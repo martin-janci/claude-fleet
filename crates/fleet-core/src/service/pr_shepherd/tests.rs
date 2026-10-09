@@ -323,6 +323,27 @@ async fn the_runner_nudges_once_per_episode_and_records_it() {
         .any(|e| e.kind == "pr_shepherd" && e.detail.as_deref() == Some("ci_red:nudged")));
 }
 
+/// Redesign 8.1: Pause all stops the shepherd before it nudges or merges.
+#[tokio::test]
+async fn pause_all_stops_the_shepherd() {
+    let (store, pid, id) = seeded(&evidence("UNSTABLE", &["clippy"]));
+    grant(&store, pid, "nudge");
+    crate::service::settings::set(
+        &store.lock().unwrap(),
+        crate::service::settings::AUTOMATION_PAUSED,
+        "true",
+    )
+    .unwrap();
+    let exec = FakeExec::new();
+    assert_eq!(run_with(&store, &exec, NOW).await, 0);
+    assert_eq!(exec.sent.load(Ordering::SeqCst), 0);
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.shepherd_episode_outcome(id, HEAD, "ci_red").unwrap(),
+        None
+    );
+}
+
 #[tokio::test]
 async fn an_attached_pane_leaves_the_episode_open() {
     let (store, pid, id) = seeded(&evidence("DIRTY", &[]));

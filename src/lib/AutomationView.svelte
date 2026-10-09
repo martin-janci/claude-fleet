@@ -209,7 +209,7 @@
       <h2>Yours</h2>
       <div class="yours" data-testid="automation-routines-yours"><RoutinesPanel /></div>
       <h2>Built in <span class="meta">{auto.loops.length}</span></h2>
-      <p class="hint">Fleet's own loops. Pause all stops the ones that act on their own; the rest only observe.</p>
+      <p class="hint">Fleet's own loops. Pause all stops every loop that acts; the rest keep running and say why.</p>
       {#if auto.loops.length === 0}
         <p class="none">This fleet does not report its loops yet.</p>
       {/if}
@@ -218,8 +218,11 @@
           <li class="row" data-testid="automation-loop" data-loop={loop.name} data-result={loop.result ?? 'none'}>
             <span class="main">
               <strong>{loop.label}</strong>
-              <span class="meta">System · {loop.pausable ? 'acts on its own' : 'observes'}</span>
+              <span class="meta">System · {loop.pausable ? 'acts on its own' : 'keeps running on Pause all'}</span>
               <span class="summary" class:failed={loop.result === 'error'}>{loopLine(loop, nowSec, paused)}</span>
+              {#if !loop.pausable && loop.keeps_running}
+                <span class="summary" data-testid="automation-loop-why">{loop.keeps_running}</span>
+              {/if}
             </span>
             <span class="num">{loopEvery(loop) ?? ''}</span>
           </li>

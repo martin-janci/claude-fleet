@@ -609,6 +609,17 @@ export async function decideWorkProposal(itemId: number, accept: boolean): Promi
   return r;
 }
 
+/** Redesign 6.9: Merge a proposal into the task it duplicates. What hangs
+ *  on the proposal (its session links, its subtasks) moves to `intoItemId`,
+ *  then the proposal closes as rejected. Only ever a person's click. */
+export async function mergeWorkProposal(itemId: number, intoItemId: number): Promise<Result<WorkItemRow>> {
+  const r = await invokeCmd<WorkItemRow>('reject_work_proposal', {
+    args: { item_id: itemId, merge_into: intoItemId },
+  });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
 // ── Past work and resume (roadmap M2) ──
 
 /** The key an ended link is past work of: its bare key. (Links to a local

@@ -293,7 +293,11 @@ Index by area (names only; see the reference for details):
   fetched, as the hub's usage poll last answered; never fetches; hub
   contract 11), `check_account_headroom` (whether starting or switching a
   session on a host under a login crosses `accounts.pause_at`, and the
-  login there with the most headroom; reads the same usage, never fetches),
+  login there with the most headroom; reads the same usage, never fetches;
+  `new_session` asks the same question itself: a Claude start on a login at
+  or past the line fails `E_ACCOUNT_LIMIT`, naming the account and the
+  login with headroom, unless `over_limit_ok: true` says the person chose
+  it; `agent: "agy"` fails `E_UNSUPPORTED` until its adapter is validated),
   `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above), `install_agent` (install `fleet-agent`
   on a host the hub reaches over SSH and move the host onto it; a job read

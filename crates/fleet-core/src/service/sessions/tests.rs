@@ -7795,6 +7795,7 @@ fn a_new_shell_session_refuses_a_profile() {
         profile: Some("work".into()),
         agent: None,
         origin: None,
+        over_limit_ok: false,
         owner_person_id: None,
         start_token: None,
     };

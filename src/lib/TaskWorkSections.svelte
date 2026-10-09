@@ -5,7 +5,7 @@
   // result, and agent steps per session — "per the agent", never a status.
   // `part` splits them around the page's Sessions list: the work above it,
   // the steps below. All text renders as text.
-  import { createWorkTask, decideWorkProposal } from './work';
+  import { createWorkTask, decideWorkProposal, mergeWorkProposal } from './work';
   import { duplicateProposal, openTask, readErrorText, type TaskDetail } from './work_view';
   import ProposedBy from './ProposedBy.svelte';
   import WorkButton from './WorkButton.svelte';
@@ -108,9 +108,10 @@
             {#if p.notes}<p class="text muted">{p.notes}</p>{/if}
             {#if p.proposed_by}<p class="muted small">Proposed by {p.proposed_by}</p>{/if}
             {#if p.duplicate}
-              <!-- Redesign 6.9 (K4): Jev's "may duplicate". Merge rejects
-                   the proposal (the existing task covers it); Keep both
-                   accepts it. A person decides either way. -->
+              <!-- Redesign 6.9 (K4): Jev's "may duplicate". Merge moves
+                   what hangs on the proposal (its sessions' links, its
+                   subtasks) to the existing task and closes the proposal;
+                   Keep both accepts it. A person decides either way. -->
               <div class="dup" data-testid="task-proposal-duplicate">
                 <span
                   >May duplicate <button
@@ -132,9 +133,14 @@
                   class="btn"
                   type="button"
                   data-testid="task-proposal-merge"
-                  title="Reject this proposal: the existing task covers it"
+                  title="Move its sessions and subtasks to the existing task, then close this proposal"
                   disabled={busy}
-                  onclick={() => void run(decideWorkProposal(p.item_id, false))}>Merge</button
+                  onclick={() =>
+                    void run(
+                      p.duplicate
+                        ? mergeWorkProposal(p.item_id, p.duplicate.item_id)
+                        : decideWorkProposal(p.item_id, false),
+                    )}>Merge</button
                 >
                 <button
                   class="btn"

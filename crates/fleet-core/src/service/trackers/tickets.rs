@@ -1468,6 +1468,7 @@ where
         // `work_link { start }` created a session owned by the HUB's owner:
         // readable by somebody who did not ask for it, and `null` in the
         // answer to the person who did (T8 drops the row they may not see).
+        over_limit_ok: false,
         owner_person_id: plan
             .owner
             .or_else(|| crate::service::sessions::hub_personal_owner(store)),

@@ -872,6 +872,9 @@ export interface NewSessionArgs {
   /** Opaque id the start reports its steps under (`start:progress`, step
    *  5.13); `newSessionAbortable` mints it. */
   start_token?: string | null;
+  /** The person was asked about `accounts.pause_at` (step 4.4) and chose to
+   *  start anyway; without it a hub refuses such a start (`E_ACCOUNT_LIMIT`). */
+  over_limit_ok?: boolean;
 }
 
 /** A ⌘N start whose create command is in flight (redesign step 5.13): the

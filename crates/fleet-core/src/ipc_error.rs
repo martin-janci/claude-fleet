@@ -217,6 +217,10 @@ pub mod codes {
     /// The call needs a desktop confirmation first (`mcp.confirm_destructive`);
     /// retry with the `confirm_nonce` from `details` once approved.
     pub const E_CONFIRM_REQUIRED: &str = "E_CONFIRM_REQUIRED";
+    /// A start on a login whose account is at or past `accounts.pause_at`
+    /// (redesign step 4.4) that nobody confirmed: retry with
+    /// `over_limit_ok: true`, or start under the login `details` names.
+    pub const E_ACCOUNT_LIMIT: &str = "E_ACCOUNT_LIMIT";
     /// Asset catalog: no catalog repo is configured, or it is configured but
     /// not loaded yet (`catalog_configure` / `catalog_load` first).
     pub const E_CATALOG_NOT_CONFIGURED: &str = "E_CATALOG_NOT_CONFIGURED";

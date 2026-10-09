@@ -12,7 +12,7 @@ const now = Math.floor(Date.now() / 1000);
 
 let paused = false;
 const LOOPS = [
-  { name: 'reconcile', label: 'Reconcile', pausable: false, last_run_at: now - 30, next_run_at: now + 30, result: 'ok', runs: 9, failures: 0 },
+  { name: 'reconcile', label: 'Reconcile', pausable: false, keeps_running: 'Only reads what each host runs; it starts and stops nothing.', last_run_at: now - 30, next_run_at: now + 30, result: 'ok', runs: 9, failures: 0 },
   { name: 'catalog_scan', label: 'Catalog sync', pausable: true, last_run_at: now - 120, result: 'error', last_error: 'git: auth', runs: 2, failures: 1 },
 ];
 const RUNS = [
@@ -46,7 +46,9 @@ describe('Automation (redesign step 8.4)', () => {
     render(AutomationView);
     const rows = await screen.findAllByTestId('automation-loop');
     expect(rows.map((r) => r.dataset.loop)).toEqual(['reconcile', 'catalog_scan']);
-    expect(rows[0].textContent).toContain('observes');
+    expect(rows[0].textContent).toContain('keeps running on Pause all');
+    expect(rows[0].querySelector('[data-testid="automation-loop-why"]')?.textContent).toContain('starts and stops nothing');
+    expect(rows[1].querySelector('[data-testid="automation-loop-why"]')).toBeNull();
     expect(rows[1].textContent).toContain('failed 2m ago: git: auth');
     expect(screen.getByTestId('automation-today').textContent).toBe('Today $0.39');
   });

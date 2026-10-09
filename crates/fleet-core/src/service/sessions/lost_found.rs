@@ -20,7 +20,7 @@ use super::*;
 use crate::ipc_error::{codes, lock};
 use crate::service::decide::lost_target::{
     self as decide_lost, pane_subject, transcript_subject, LostInput, LostKind, LostTarget,
-    MAX_CANDIDATES,
+    LostTicket, MAX_CANDIDATES,
 };
 use crate::service::decide::start_project::{fenced, Candidate};
 use crate::service::decide::DecideCtx;
@@ -106,15 +106,65 @@ pub(crate) async fn lost_target(
     shell: &dyn HostShell,
     ctx: &DecideCtx,
 ) -> Result<LostTarget, IpcError> {
-    let input = match args.session_id {
-        Some(id) => pane_input(id, store, shell).await?,
-        None => transcript_input(&args, store)?,
+    let (input, ticket) = match args.session_id {
+        Some(id) => (pane_input(id, store, shell).await?, None),
+        None => {
+            let input = transcript_input(&args, store)?;
+            (input, transcript_ticket(&args, store)?)
+        }
     };
-    let input = match input {
-        Ok(input) => input,
-        Err(known) => return Ok(known),
+    let mut target = match input {
+        Ok(input) => decide_lost::propose(ctx, input).await,
+        Err(known) => known,
     };
-    Ok(decide_lost::propose(ctx, input).await)
+    target.ticket = ticket;
+    Ok(target)
+}
+
+/// J10's "or ticket" half: the ticket a found conversation's git branch
+/// names (`pd-2412-receipt-totals` → `PD-2412`), recognised the way a live
+/// session's branch is (`work::recognize::first_key` over every tracker's
+/// key prefixes), with its title when a tracker's cache holds it. A rule,
+/// like the project's: Jev is not asked, nothing is sent anywhere, and
+/// nothing is linked until a person confirms Restore with it ticked.
+fn transcript_ticket(
+    args: &LostTargetArgs,
+    store: &Arc<Mutex<Store>>,
+) -> Result<Option<LostTicket>, IpcError> {
+    let Some(branch) = args
+        .git_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    else {
+        return Ok(None);
+    };
+    let s = lock(store)?;
+    let trackers = s.list_trackers()?;
+    let mut prefixes: Vec<String> = Vec::new();
+    for t in &trackers {
+        for p in &t.config.key_prefixes {
+            let p = p.to_ascii_uppercase();
+            if !prefixes.contains(&p) {
+                prefixes.push(p);
+            }
+        }
+    }
+    let ctx = crate::service::work::recognize::RecognizeCtx {
+        prefixes,
+        trackers: crate::service::work::detect::tracker_hosts(&trackers),
+        repo: None,
+    };
+    let Some(key) = crate::service::work::recognize::first_key(branch, &ctx) else {
+        return Ok(None);
+    };
+    let title = s.tracker_item_for_key(&key)?.map(|item| item.title);
+    Ok(Some(LostTicket {
+        key,
+        title,
+        source: "rule".into(),
+        reason: format!("its branch {branch} names it"),
+    }))
 }
 
 /// The pane's question, or (as `Err`) the answer without one: the rule's
@@ -555,15 +605,75 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(t, LostTarget::rule(w.project));
+        // The branch also names a ticket (J10's other half, tested below).
+        let project_only = |t: LostTarget| LostTarget { ticket: None, ..t };
+        assert_eq!(project_only(t), LostTarget::rule(w.project));
         let t = w
             .target(transcript_args("/home/ada/tmp"), &shell)
             .await
             .unwrap();
-        assert_eq!(t, LostTarget::default());
+        assert_eq!(project_only(t), LostTarget::default());
         assert!(
             shell.scripts().is_empty(),
             "a transcript's form reads nothing"
+        );
+    }
+
+    /// J10's ticket half: the branch's key is proposed beside the project,
+    /// by the rule, with the cached title; a branch naming none, and a
+    /// pane, carry no ticket.
+    #[tokio::test]
+    async fn a_found_conversation_gets_the_ticket_its_branch_names() {
+        let w = world();
+        {
+            let s = w.store.lock().unwrap();
+            let t = s
+                .add_tracker("jira", "Acme", "https://acme.atlassian.net")
+                .unwrap()
+                .id;
+            s.set_tracker_probe(
+                t,
+                Some("cloud"),
+                &crate::store::TrackerConfig {
+                    key_prefixes: vec!["PD".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let shell = Shell::answering("");
+        // The project's rule and the ticket's together.
+        let t = w
+            .target(
+                transcript_args("/p/acme/papaya-pos/.worktrees/pd-2412"),
+                &shell,
+            )
+            .await
+            .unwrap();
+        assert_eq!(t.project_id, Some(w.project));
+        let ticket = t.ticket.expect("the branch names PD-2412");
+        assert_eq!(ticket.key, "PD-2412");
+        assert_eq!(ticket.source, "rule");
+        assert!(
+            ticket.reason.contains("pd-2412-receipt-totals"),
+            "{ticket:?}"
+        );
+        // Outside every project: still the ticket, and no project.
+        let t = w
+            .target(transcript_args("/home/ada/tmp"), &shell)
+            .await
+            .unwrap();
+        assert_eq!(t.project_id, None);
+        assert_eq!(t.ticket.map(|t| t.key).as_deref(), Some("PD-2412"));
+        // A branch that names no ticket proposes none.
+        let mut plain = transcript_args("/home/ada/tmp");
+        plain.git_branch = Some("main".into());
+        assert_eq!(w.target(plain, &shell).await.unwrap().ticket, None);
+        // A pane carries none: Adopt keeps its project question only.
+        let pane = Shell::answering("/home/ada/scratch\n");
+        assert_eq!(
+            w.target(pane_args(w.pane), &pane).await.unwrap().ticket,
+            None
         );
     }
 

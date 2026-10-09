@@ -10,7 +10,8 @@
 --   background  the requester's `sessions.id` of a `claude --bg` agent
 --   token       the `sessions.id` whose pane the per-host token proved, if
 --               any: an agent in another session, or a script on the host
---   routine     the routine's id (redesign M8; nothing writes it yet)
+--   routine     the routine's `routines.id` (redesign 8.5, written by
+--               `service::routines::tick` when a routine starts a session)
 --
 -- NULL means fleet did not start the row: reconcile found it on a host, or
 -- it predates this migration. There is deliberately no backfill: a pre-124

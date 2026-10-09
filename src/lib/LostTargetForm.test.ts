@@ -106,7 +106,36 @@ describe('LostTargetForm (4.12)', () => {
     expect(document.body.textContent).toContain('Adopt fleet-trn-scratch into acme/papaya-pos?');
     await fireEvent.click(screen.getByTestId('lost-target-confirm'));
     await settle();
-    expect(onsubmit).toHaveBeenCalledWith(1);
+    expect(onsubmit).toHaveBeenCalledWith(1, null);
+  });
+
+  it('J10: offers the ticket the branch names, ticked, and links it only on confirm', async () => {
+    const ticket = { key: 'PD-2412', title: 'Receipt totals', source: 'rule' as const, reason: 'its branch pd-2412-x names it' };
+    const { onsubmit } = mount(
+      { project_id: 1, source: 'rule', reason: 'its directory is in this project', ticket },
+      { action: 'Restore', requireProject: true },
+    );
+    await settle();
+    const box = screen.getByTestId('lost-target-ticket') as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    expect(document.body.textContent).toContain('Link to PD-2412 · Receipt totals');
+    expect(screen.getByTestId('lost-target-ticket-proposed').textContent).toContain('Proposed by a rule');
+    expect(onsubmit).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByTestId('lost-target-submit'));
+    await fireEvent.click(screen.getByTestId('lost-target-confirm'));
+    await settle();
+    expect(onsubmit).toHaveBeenCalledWith(1, 'PD-2412');
+  });
+
+  it('J10: an unticked ticket is not linked', async () => {
+    const ticket = { key: 'PD-2412', source: 'rule' as const, reason: 'r' };
+    const { onsubmit } = mount({ project_id: 1, source: 'rule', ticket }, { action: 'Restore', requireProject: true });
+    await settle();
+    await fireEvent.click(screen.getByTestId('lost-target-ticket'));
+    await fireEvent.click(screen.getByTestId('lost-target-submit'));
+    await fireEvent.click(screen.getByTestId('lost-target-confirm'));
+    await settle();
+    expect(onsubmit).toHaveBeenCalledWith(1, null);
   });
 
   it('a late proposal never overwrites what the person picked', async () => {

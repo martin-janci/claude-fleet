@@ -106,13 +106,18 @@ pub struct NewSessionParams {
     /// Login profile (~/.claude-profiles/<name>).
     #[serde(default)]
     pub profile: Option<String>,
-    /// claude (default) or shell.
+    /// claude (default), codex or shell.
     #[serde(default)]
     pub agent: Option<String>,
     /// Opaque id (1–64 of A-Z a-z 0-9 _ -): the start's worktree, tmux and
     /// agent steps arrive as `start:progress` events carrying it.
     #[serde(default)]
     pub start_token: Option<String>,
+    /// The person chose to start on a login past `accounts.pause_at`;
+    /// without it such a start fails `E_ACCOUNT_LIMIT`, naming the login
+    /// with headroom.
+    #[serde(default)]
+    pub over_limit_ok: Option<bool>,
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,

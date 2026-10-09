@@ -429,6 +429,13 @@ the conversation's work belongs to (`p<id>`), or `unsure`.
 - **What is recorded.** Subject `lost_pane` `session:<id>`, or
   `lost_transcript` `t:<HMAC of the transcript id>`.
 
+**Or a ticket (J10).** A found conversation's form also offers the ticket
+its git branch names (`pd-2412-receipt-totals` → `PD-2412`, recognised over
+every tracker's key prefixes, with its cached title), ticked, as *Proposed
+by a rule*. Jev is not asked about tickets and nothing is sent. Restore
+links the new session to it only when it is still ticked as you confirm;
+untick it to restore without a link.
+
 Restoring a conversation into a project it did not run in copies its
 transcript under the directory Claude Code keys that project's root by
 (`place_transcript`; never moved, never overwritten), then resumes it there.
@@ -691,8 +698,12 @@ none, nothing is asked. A proposal accepted at once (a planner card with
 - **Assist.** A usable answer (at least 50%, not `none`) stays on the
   proposal as its `duplicate` proposal: the proposal's
   card on the task page shows *May duplicate KEY · Proposed by Jev · N%*
-  with **Merge** (reject the proposal; the existing task covers it) and
-  **Keep both** (accept it). Nothing is rejected or accepted by itself.
+  with **Merge** and **Keep both** (accept it). Merge moves what hangs on
+  the proposal to the existing task — its sessions' links (a session
+  already live on the task keeps that one link) and its subtasks — then
+  closes the proposal as rejected (`work_link { action: reject, item_id,
+  task_id: "item:<task>" }`, `Store::merge_proposal_into`, one
+  transaction). Nothing is merged, rejected or accepted by itself.
 - **Asked once.** A decided run about the same proposal and input is never
   asked again.
 - **Follow-up.** A person's single Reject (Merge) marks the run

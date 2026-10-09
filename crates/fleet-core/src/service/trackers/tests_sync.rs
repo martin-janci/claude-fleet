@@ -122,6 +122,21 @@ impl Fx {
     }
 }
 
+/// Redesign 8.1: Pause all stops the pass before it calls the tracker.
+#[tokio::test]
+async fn pause_all_stops_the_pass() {
+    let fx = Fx::new();
+    crate::service::settings::set(
+        &fx.store.lock().unwrap(),
+        crate::service::settings::AUTOMATION_PAUSED,
+        "true",
+    )
+    .unwrap();
+    assert!(fx.sync(|| T0).run_pass(&fx.store).await.is_none());
+    assert!(fx.fake.requests().is_empty(), "no request while paused");
+    assert_eq!(fx.watermark("mine"), None);
+}
+
 #[tokio::test]
 async fn a_first_pass_lists_views_whole_and_sets_the_watermark() {
     let fx = Fx::new();

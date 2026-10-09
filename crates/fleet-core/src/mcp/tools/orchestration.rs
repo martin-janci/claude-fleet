@@ -614,6 +614,7 @@ impl FleetTools {
                         // requester is somebody asking fleet directly, so it
                         // is theirs; a per-host token resolves to neither and
                         // the worker lands `unclaimed`.
+                        over_limit_ok: false,
                         owner_person_id: requester_owner.or_else(|| {
                             lock(self.reader())
                                 .ok()

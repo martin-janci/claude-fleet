@@ -1807,6 +1807,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 profile: None,
                 agent: None,
                 start_token: None,
+                over_limit_ok: None,
                 confirm_nonce: None,
             }),
         )
@@ -2045,6 +2046,7 @@ async fn new_session_threads_kind_start_command_and_friendly_name_through() {
                 profile: None,
                 agent: None,
                 start_token: None,
+                over_limit_ok: None,
                 confirm_nonce: None,
             }),
         )
@@ -2055,6 +2057,48 @@ async fn new_session_threads_kind_start_command_and_friendly_name_through() {
         "friendly_name must have reached validation, not a hardcoded None: {}",
         err.message
     );
+}
+
+/// Step 4.4 on the MCP / hub path: a Claude start on a login past
+/// `accounts.pause_at` is refused with `E_ACCOUNT_LIMIT` naming the login
+/// with headroom, before anything is created; `over_limit_ok` (the person
+/// chose it) lets it through to the rest of the create path.
+#[tokio::test]
+async fn new_session_asks_before_starting_past_pause_at() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hosta", None, "acct-full", 95.0, now);
+    crate::service::account_limits::seed_usage(&s, "hosta", Some("spare"), "acct-free", 10.0, now);
+    let t = test_tools(s);
+    let params = |over: Option<bool>, profile: Option<&str>| {
+        new_session_params(serde_json::json!({
+            "host_alias": "hosta",
+            "project_id": 4242,
+            "name": "x",
+            "profile": profile,
+            "over_limit_ok": over,
+        }))
+    };
+    let call = |p| {
+        let t = &t;
+        async move {
+            t.new_session(
+                Extension(host_caller("hosta", TokenMode::Full)),
+                Parameters(p),
+            )
+            .await
+            .unwrap_err()
+            .message
+        }
+    };
+    let refused = call(params(None, None)).await;
+    assert!(refused.starts_with("E_ACCOUNT_LIMIT"), "{refused}");
+    assert!(refused.contains("profile \"spare\""), "{refused}");
+    // Confirmed, or on the login with headroom: on to the project lookup.
+    for p in [params(Some(true), None), params(None, Some("spare"))] {
+        let past = call(p).await;
+        assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
+    }
 }
 
 #[tokio::test]

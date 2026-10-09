@@ -61,7 +61,8 @@ pub struct NewSessionArgs {
     /// `"claude"` (the default), `"codex"` (OpenAI's Codex CLI), `"agy"`
     /// (Google's Antigravity CLI) or `"shell"`, which is the same as
     /// `kind: "shell"`. `None` / empty = Claude Code, or a shell for
-    /// `kind: "shell"`.
+    /// `kind: "shell"`. `"agy"` is refused (`E_UNSUPPORTED`) until its
+    /// adapter is validated.
     #[serde(default)]
     pub agent: Option<String>,
     /// Who or what is starting the session (migration 124): set by the
@@ -71,6 +72,13 @@ pub struct NewSessionArgs {
     /// [`SessionOrigin::person`] with `owner_person_id`.
     #[serde(skip_deserializing)]
     pub origin: Option<crate::store::SessionOrigin>,
+    /// The person was asked about `accounts.pause_at` (redesign step 4.4)
+    /// and chose to start on that login anyway. The MCP / hub `new_session`
+    /// refuses a login at or past the line without it
+    /// (`E_CONFIRM_REQUIRED`, naming the login with headroom); the
+    /// desktop's own dialog asks first and sets it.
+    #[serde(default)]
+    pub over_limit_ok: bool,
     /// Whose session this is to be (multi-user M1, T5): the `people` row the
     /// new row is owned by, and therefore `private` to. `None` leaves it
     /// `unclaimed` — the safe holding state (spec §4.3), never "everybody's".
@@ -768,13 +776,32 @@ fn normalize_agent(args: &mut NewSessionArgs) -> Result<(), IpcError> {
                 "a shell session runs no agent; drop agent or kind",
             ))
         }
-        Some(AGENT_CLAUDE | AGENT_CODEX | AGENT_AGY) => {}
+        Some(AGENT_AGY) => refuse_unvalidated_agent(AGENT_AGY)?,
+        Some(AGENT_CLAUDE | AGENT_CODEX) => {}
         Some(_) => {
             return Err(IpcError::new(
                 codes::E_INVALID,
                 format!("agent must be one of {}", AGENTS.join(", ")),
             ))
         }
+    }
+    Ok(())
+}
+
+/// Refuse to launch an agent whose adapter is not validated yet (redesign
+/// 12.3): agy's adapter (`agent_adapter::agy`) is provisional — no captured
+/// pane fixtures, its SQLite transcripts unread — so the New session picker
+/// shows it as coming, and `new_session`, restart, recreate and repair
+/// refuse it with `E_UNSUPPORTED` rather than start a pane fleet cannot
+/// read. The adapter code stays; lifting this is one line once it is
+/// validated against real captures.
+pub(crate) fn refuse_unvalidated_agent(agent: &str) -> Result<(), IpcError> {
+    if agent == crate::store::AGENT_AGY {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            "agy sessions are not supported yet: fleet cannot read agy's state or \
+             transcripts until its adapter is validated; use claude or codex",
+        ));
     }
     Ok(())
 }
@@ -1935,6 +1962,7 @@ pub async fn restart_session(
             ),
         }
     };
+    refuse_unvalidated_agent(&agent)?;
     let pane_cmd: String =
         recreate_pane_command(&kind, &agent, claude_id.as_deref(), &args.name, &launch);
     let tmux = exec_for(&args.host_alias, ssh);
@@ -2257,6 +2285,7 @@ pub async fn recreate_session(
             &sess.tmux_name,
             "recreate_session",
         )?;
+        refuse_unvalidated_agent(&sess.agent)?;
         let host = s
             .get_host_row(&sess.host_alias)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "host not found"))?;

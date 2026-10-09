@@ -302,6 +302,10 @@ impl TrackerSync {
     /// One pass over every runnable tracker. `None` when a pass is already
     /// running (single-flight).
     pub async fn run_pass(&self, store: &Mutex<Store>) -> Option<Vec<TrackerPass>> {
+        // Pause all (redesign 8.1): no tracker read, no write back.
+        if lock(store).is_ok_and(|s| crate::service::loops::paused(&s)) {
+            return None;
+        }
         if self.running.swap(true, Ordering::AcqRel) {
             return None;
         }

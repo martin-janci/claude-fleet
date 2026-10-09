@@ -863,6 +863,7 @@ async fn rewind_conversation_with(
                     // source-inheritance is both the safe answer and the only
                     // expressible one. Forking a session you do not own is
                     // refused at the gate: it is an `own` operation.
+                    over_limit_ok: false,
                     owner_person_id: sess.owner_person_id,
                     start_token: None,
                 })

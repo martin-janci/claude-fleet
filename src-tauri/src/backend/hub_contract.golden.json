@@ -479,6 +479,7 @@
       "reason",
       "run_id",
       "source",
+      "ticket",
       "unsure"
     ],
     "MissionRow": [

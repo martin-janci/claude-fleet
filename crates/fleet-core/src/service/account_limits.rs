@@ -249,6 +249,74 @@ pub fn over_limit(
         }))
 }
 
+/// Step 4.4 on a start that did not come through the desktop's own dialog
+/// (an MCP or hub `new_session`): refuse a login at or past
+/// `accounts.pause_at` with `E_ACCOUNT_LIMIT`, naming its account and the
+/// login on the host with the most headroom, unless the caller says the
+/// person chose to start anyway (`over_limit_ok`). From the store's newest
+/// usage readings, as [`over_limit`]: a login without a reading, or not on
+/// a known account, is never refused.
+pub fn refuse_over_limit(
+    s: &Store,
+    host_alias: &str,
+    profile: Option<&str>,
+    now: i64,
+) -> Result<(), IpcError> {
+    let Some(over) = over_limit(s, host_alias, profile, now)? else {
+        return Ok(());
+    };
+    let Some(host) = s.get_host_row(host_alias)? else {
+        return Ok(());
+    };
+    let snaps = s.latest_usage_snapshots()?;
+    let pause_at = over.pause_at_pct;
+    let suggestion = logins_with(&host, |uuid| {
+        snaps
+            .iter()
+            .find(|r| r.account_uuid == uuid)
+            .and_then(|r| used_pct_of(&r.usage, Some(r.fetched_at), now))
+    })
+    .into_iter()
+    .filter(|l| l.account_uuid != over.login.account_uuid)
+    .filter_map(|l| l.used_pct.filter(|u| *u < pause_at).map(|u| (u, l)))
+    .min_by(|(a, _), (b, _)| a.total_cmp(b))
+    .map(|(_, l)| l);
+    let email = |uuid: &str| {
+        s.list_accounts()
+            .ok()
+            .and_then(|a| a.into_iter().find(|a| a.uuid == uuid))
+            .and_then(|a| a.email)
+            .unwrap_or_else(|| uuid.to_string())
+    };
+    let account = email(&over.login.account_uuid);
+    let instead = match &suggestion {
+        Some(l) => format!(
+            "; {} has headroom ({:.0}% used): start with profile {}",
+            email(&l.account_uuid),
+            l.used_pct.unwrap_or_default(),
+            match &l.profile {
+                Some(p) => format!("\"{p}\""),
+                None => "unset (the host's own login)".to_string(),
+            }
+        ),
+        None => "; no other login on this host has headroom".to_string(),
+    };
+    Err(IpcError::new(
+        codes::E_ACCOUNT_LIMIT,
+        format!(
+            "{account}: {}{instead}, or pass over_limit_ok: true once the person chose to start anyway",
+            over.reason()
+        ),
+    )
+    .with_details(serde_json::json!({
+            "account_uuid": over.login.account_uuid,
+            "used_pct": over.login.used_pct,
+            "pause_at_pct": pause_at,
+            "suggested_profile": suggestion.as_ref().map(|l| l.profile.clone().unwrap_or_default()),
+            "suggested_account_uuid": suggestion.as_ref().map(|l| l.account_uuid.clone()),
+    })))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "CheckAccountHeadroomParams")]
 pub struct CheckAccountHeadroomArgs {
@@ -388,6 +456,32 @@ mod tests {
     use crate::store::HostProfileRow;
 
     const NOW: i64 = 1_000;
+
+    /// Step 4.4 server-side: a login past the line is refused with the
+    /// account named and the login with headroom offered; under the line,
+    /// without a reading, or confirmed by the caller, a start goes ahead.
+    #[test]
+    fn a_start_past_pause_at_is_refused_and_names_the_login_with_headroom() {
+        let s = Store::open_in_memory().unwrap();
+        seed_usage(&s, "mac", None, "acct-full", 95.0, NOW);
+        seed_usage(&s, "mac", Some("work"), "acct-free", 20.0, NOW);
+        let err = refuse_over_limit(&s, "mac", None, NOW).unwrap_err();
+        assert_eq!(err.code, codes::E_ACCOUNT_LIMIT);
+        assert!(err.message.contains("acct-full"), "{}", err.message);
+        assert!(err.message.contains("profile \"work\""), "{}", err.message);
+        assert!(err.message.contains("over_limit_ok"), "{}", err.message);
+        let details = err.details.clone().unwrap();
+        assert_eq!(details["suggested_profile"], "work");
+        assert_eq!(details["suggested_account_uuid"], "acct-free");
+        // The login with headroom starts, and an unknown login is not refused.
+        assert!(refuse_over_limit(&s, "mac", Some("work"), NOW).is_ok());
+        assert!(refuse_over_limit(&s, "mac", Some("fresh"), NOW).is_ok());
+        assert!(refuse_over_limit(&s, "nowhere", None, NOW).is_ok());
+        // Nothing with headroom: still refused, and it says so.
+        seed_usage(&s, "mac", Some("work"), "acct-busy", 97.0, NOW);
+        let err = refuse_over_limit(&s, "mac", None, NOW).unwrap_err();
+        assert!(err.message.contains("no other login"), "{}", err.message);
+    }
 
     fn snap(uuid: &str, five: f64, week: f64) -> AccountUsageSnapshot {
         AccountUsageSnapshot {

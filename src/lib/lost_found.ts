@@ -20,6 +20,16 @@ export interface LostTarget {
   run_id?: number | null;
   /** Jev was asked and named no project: the form stays blank, and says so. */
   unsure?: boolean;
+  /** J10's other half (a found conversation only): the ticket its branch names. */
+  ticket?: LostTicket | null;
+}
+
+/** Mirrors `fleet_core::service::decide::lost_target::LostTicket`. */
+export interface LostTicket {
+  key: string;
+  title?: string | null;
+  source: 'rule';
+  reason: string;
 }
 
 /** Mirrors `fleet_core::service::sessions::LostTargetArgs`. */
@@ -87,6 +97,16 @@ export function proposalOf(t: LostTarget | null, projects: readonly ProjectRow[]
     reason: t.reason ?? null,
     confidence_pct: t.confidence_pct ?? null,
   };
+}
+
+/** `PD-2412 · Receipt totals`, or the bare key when no title is cached. */
+export function ticketLabel(t: LostTicket): string {
+  return t.title ? `${t.key} · ${t.title}` : t.key;
+}
+
+/** The ticket proposal as ProposedBy reads it. */
+export function ticketProposalOf(t: LostTicket): ProposalLike {
+  return { value: t.key, source: t.source, reason: t.reason, confidence_pct: null };
 }
 
 /** Whether the blank form says Jev was unsure. */

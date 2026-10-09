@@ -371,7 +371,7 @@ This is the project's own goal, so it comes straight after the shell. Accounts s
 
 | # | Step | Layer | Migration or contract | Needs | Verified by |
 | --- | --- | --- | --- | --- | --- |
-| 8.1 | Every loop reports: one registry gives each of the \~15 loops its last run, next run and result in `fleet_health`; `automation.paused` is checked by every loop | Backend | settings row | — | Test per loop; Pause all stops missions, GC writes and catalog sync |
+| 8.1 | Every loop reports: one registry gives each of the \~15 loops its last run, next run and result in `fleet_health`; `automation.paused` is checked by every loop that acts; the observers that keep running (reconcile, usage polls, update check, bookkeeping) say why in the registry and the Automation view | Backend | settings row | — | Test per pausable loop (`pause_all_stops_*`); Pause all stops missions, GC writes and catalog sync |
 | 8.2 | Planner, summary and Jev `claude -p` runs are booked as cost with their origin; the mission budget brake counts them | Backend | 131 | — | Planner run adds a cost row |
 | 8.3 | Runs read API: a union of `tasks`, `orchestration_events` and `decision_runs` with indexes; `runs { list }` | Backend | 132 · contract 13 | 8.2 | Each run links to its sessions |
 | 8.4 | Automation rail item, read-only: built-in agents (operator, orchestrator, Jev), built-in routines (the loops), Runs; the top-bar pill shows active count, today's spend and Pause all | UI | none | 8.1, 8.3, 3.2 | Matches the Automation board with real data |

@@ -2347,6 +2347,8 @@ async fn sb6_pass(
     let id_of = super::catalog_ids_by_label(&configured);
     let mut wants: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut catalogs: BTreeSet<String> = BTreeSet::new();
+    // Per (host, catalog, layer): the assets SB6 wants there, for its card.
+    let mut by_layer: BTreeMap<(String, i64, String), Vec<String>> = BTreeMap::new();
     for h in hosts.iter().filter(|h| {
         !h.hidden
             && (h.reachable || h.alias == "local")
@@ -2382,6 +2384,10 @@ async fn sb6_pass(
                     .or_default()
                     .insert(key.clone());
                 catalogs.insert(prov.catalog.clone());
+                by_layer
+                    .entry((h.alias.clone(), *cid, prov.introduced_by.clone()))
+                    .or_default()
+                    .push(key.clone());
             }
         }
     }
@@ -2403,6 +2409,12 @@ async fn sb6_pass(
             tracing::debug!(host = %host, "catalog.auto: {why}");
         }
     }
+    // Redesign 8.7: an automatic write shows as a card — an applied
+    // Rollout, `catalog.auto`'s note on it, under the Inbox's *Recently
+    // applied*. Best effort: a card not written never fails the sync.
+    if let Err(e) = record_auto_card(store, &by_layer, &outcome) {
+        tracing::warn!("catalog.auto: its card was not written: {}", e.message);
+    }
     {
         let s = lock(store)?;
         let scans = s.inventory_last_scans()?;
@@ -2420,6 +2432,68 @@ async fn sb6_pass(
         }
     }
     Ok(outcome)
+}
+
+/// The note an SB6 card carries; [`super::ChangesetSummary::auto`] reads it.
+pub const AUTO_SYNC_NOTE: &str =
+    "Synced on its own: catalog.auto is on. A host sync is not undone here; sync the host to change it.";
+
+/// Redesign 8.7: SB6's applied writes as one applied Rollout card, one
+/// `sync` item per (host, layer) with the assets it brought, decided by the
+/// rule and carrying [`AUTO_SYNC_NOTE`]. Only hosts whose sync applied
+/// something; nothing at all (no card) when none did. A Rollout card
+/// commits nothing, so it is never an undo target and never stands in the
+/// way of a catalog card's undo; its layers are ones already rolled out, so
+/// `rolled_out_layers` does not change.
+fn record_auto_card(
+    store: &Mutex<Store>,
+    by_layer: &BTreeMap<(String, i64, String), Vec<String>>,
+    outcome: &BTreeMap<String, HostOutcome>,
+) -> Result<Option<i64>, IpcError> {
+    let items: Vec<NewChangesetItem> = by_layer
+        .iter()
+        .filter(|((host, _, _), _)| outcome.get(host).is_some_and(|o| o.applied))
+        .map(|((host, cid, layer), assets)| NewChangesetItem {
+            grp: layer.clone(),
+            catalog_id: Some(*cid),
+            kind: "host".into(),
+            name: host.clone(),
+            action: ItemAction::Sync.as_str().into(),
+            params: serde_json::to_string(&ItemParams {
+                layer: Some(layer.clone()),
+                assets: assets.clone(),
+                ..Default::default()
+            })
+            .ok(),
+            decider: Decider::Rule.as_str().into(),
+        })
+        .collect();
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let layers: BTreeSet<&str> = items.iter().map(|i| i.grp.as_str()).collect();
+    let hosts: BTreeSet<&str> = items.iter().map(|i| i.name.as_str()).collect();
+    let summary = format!(
+        "Synced {} to {}",
+        layers.into_iter().collect::<Vec<_>>().join(", "),
+        hosts.into_iter().collect::<Vec<_>>().join(", ")
+    );
+    let s = lock(store)?;
+    let card = s.insert_changeset(CardKind::Rollout.as_str(), &summary, &items)?;
+    let positions: Vec<i64> = (0..items.len() as i64).collect();
+    s.record_changeset_applied(
+        card.id,
+        &crate::store::AppliedRecord {
+            applied_at: crate::store::now_unix_ms(),
+            commits: "{}",
+            layers_snapshot: "[]",
+            applied: &positions,
+            skipped: &[],
+            verdicts: &[],
+            error: Some(AUTO_SYNC_NOTE),
+        },
+    )?;
+    Ok(Some(card.id))
 }
 
 /// Final review I3: the hosts SB6 failed on, each with its newest inventory
@@ -4483,6 +4557,34 @@ mod tests {
             .unwrap();
         assert_eq!(auto_additive(&f.store, &ssh).await.unwrap(), 1);
         assert!(installed.is_file(), "SB6 put the member back");
+        // Redesign 8.7: the automatic write shows as an applied card, marked
+        // auto, naming the layer, the host and the asset; never undoable,
+        // and the rolled-out layers are as they were.
+        let cards = super::super::list(&f.store).unwrap();
+        let auto: Vec<_> = cards.iter().filter(|c| c.auto).collect();
+        assert_eq!(auto.len(), 1, "{cards:?}");
+        let c = auto[0];
+        assert_eq!(
+            (c.kind.as_str(), c.state.as_str(), c.undoable),
+            ("rollout", "applied", false)
+        );
+        assert_eq!(c.summary, "Synced core to oci");
+        assert_eq!(c.error.as_deref(), Some(AUTO_SYNC_NOTE));
+        let items = f.store.lock().unwrap().changeset_items(c.id).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            (items[0].name.as_str(), items[0].state.as_str()),
+            ("oci", "applied")
+        );
+        assert!(items[0].params.as_deref().unwrap_or("").contains("skill/w"));
+        assert_eq!(
+            f.store.lock().unwrap().rolled_out_layers().unwrap(),
+            BTreeSet::from([(p, "core".to_string())])
+        );
+        // A pass with nothing due writes no card.
+        assert_eq!(auto_additive(&f.store, &ssh).await.unwrap(), 0);
+        let again = super::super::list(&f.store).unwrap();
+        assert_eq!(again.iter().filter(|c| c.auto).count(), 1);
     }
 
     /// R15 (controller ruling): the plan under a Rollout holds a `Remove`

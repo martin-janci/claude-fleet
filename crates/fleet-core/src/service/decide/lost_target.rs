@@ -6,7 +6,9 @@
 //!   Adopt asks which project it is, prefilled.
 //! * **J10, a conversation whose pane is gone** (a transcript
 //!   `discover_lost_sessions` found): Restore asks which project to resume
-//!   it in, prefilled.
+//!   it in, prefilled, and offers the ticket its branch names
+//!   ([`LostTicket`], a rule in `sessions::lost_found`; Jev is not asked
+//!   about tickets).
 //!
 //! The rule goes first: a working directory inside a fleet project is that
 //! project, and nobody asks Jev. Only when no rule places it does this
@@ -132,6 +134,28 @@ pub struct LostTarget {
     /// says so, and stays blank.
     #[serde(default)]
     pub unsure: bool,
+    /// J10's other half, for a found conversation only: the ticket its git
+    /// branch names, proposed by the rule. The form offers to link the
+    /// restored session to it; nothing links until a person confirms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<LostTicket>,
+}
+
+/// The ticket a found conversation's branch names (J10, redesign 4.12).
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
+)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct LostTicket {
+    /// The work key: `PD-2412`.
+    pub key: String,
+    /// The ticket's title, when a tracker's cache holds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// `rule`: the branch names the key.
+    pub source: String,
+    /// What the proposal went on, in words a person reads.
+    pub reason: String,
 }
 
 impl LostTarget {
@@ -244,6 +268,7 @@ fn proposed(r: &DecisionRunRow, input: &LostInput) -> LostTarget {
         confidence_pct: pct(r.confidence),
         run_id: Some(r.id),
         unsure: false,
+        ticket: None,
     }
 }
 
@@ -367,6 +392,7 @@ pub async fn ask(ctx: &DecideCtx, input: &LostInput) -> LostTarget {
         confidence_pct: pct(answer.confidence),
         run_id: out.run_id,
         unsure: false,
+        ticket: None,
     }
 }
 

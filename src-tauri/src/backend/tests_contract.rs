@@ -979,6 +979,12 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             confidence_pct: Some(90),
             run_id: Some(1),
             unsure: false,
+            ticket: Some(fleet_core::service::decide::lost_target::LostTicket {
+                key: "PD-1".into(),
+                title: Some("t".into()),
+                source: "rule".into(),
+                reason: "r".into(),
+            }),
         }),
     );
     put(

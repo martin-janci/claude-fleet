@@ -122,7 +122,8 @@ describe('TaskWorkSections', () => {
       expect(screen.queryByTestId('task-proposal-accept')).toBeNull();
       await fireEvent.click(screen.getByTestId('task-proposal-merge'));
       await flush();
-      expect(calls('reject_work_proposal')[0][1]).toEqual({ args: { item_id: 44 } });
+      // Merge carries the task it duplicates, so the backend moves what hangs on it.
+      expect(calls('reject_work_proposal')[0][1]).toEqual({ args: { item_id: 44, merge_into: 36 } });
       await fireEvent.click(screen.getByTestId('task-proposal-keep-both'));
       await flush();
       expect(calls('accept_work_proposal')[0][1]).toEqual({ args: { item_id: 44 } });

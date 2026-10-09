@@ -50,8 +50,13 @@ Sessions can run OpenAI's Codex CLI as well as Claude Code (redesign 12.2,
 recreate and repair resume the row as Codex, and its rollout feeds the
 Conversation tab. The New session dialog offers Codex only on a host that
 has it on its PATH (12.4b, migration 134). `move_session` refuses a
-non-Claude row, because only Claude's state is carried, and `agy` stays
-refused.
+non-Claude row, because only Claude's state is carried. Agy (12.3) is not
+startable: its adapter (`agent_adapter::agy`) is provisional, with no
+captured pane fixtures and its SQLite transcripts unread, so the picker
+shows it as coming and `new_session { agent: "agy" }`, restart, recreate and
+repair refuse it with `E_UNSUPPORTED`
+(`sessions::refuse_unvalidated_agent`); `move_session` refuses it too. The
+adapter code stays, for when real captures validate it.
 
 Iterations 1–4a are landed (multi-host, accounts, cross-host sessions, prompt
 transfer, async/events rework), plus the MCP control API, background sessions,

@@ -1213,7 +1213,10 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             Box::new(|b, s, _| {
                 block_on(commands::work::routed::decide_work_proposal(
                     b,
-                    commands::work::WorkProposalArgs { item_id: 9 },
+                    commands::work::WorkProposalArgs {
+                        item_id: 9,
+                        merge_into: None,
+                    },
                     true,
                     s,
                 ))
@@ -1229,7 +1232,10 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             Box::new(|b, s, _| {
                 block_on(commands::work::routed::decide_work_proposal(
                     b,
-                    commands::work::WorkProposalArgs { item_id: 9 },
+                    commands::work::WorkProposalArgs {
+                        item_id: 9,
+                        merge_into: None,
+                    },
                     false,
                     s,
                 ))
@@ -1906,6 +1912,7 @@ fn new_session_never_sends_an_owner_over_the_wire() {
             profile: None,
             agent: None,
             origin: None,
+            over_limit_ok: false,
             owner_person_id: Some(42),
             start_token: None,
         },
@@ -3749,6 +3756,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         // an argument a client could choose (multi-user M1,
                         // T5). `new_session_never_sends_an_owner_over_the_wire`
                         // says it in one assertion as well.
+                        over_limit_ok: false,
                         owner_person_id: Some(42),
                         start_token: Some("st-demo-1".into()),
                     },

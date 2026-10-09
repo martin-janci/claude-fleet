@@ -406,6 +406,10 @@ pub async fn run_with(
         let Ok(s) = store.lock() else {
             return report;
         };
+        // Pause all (redesign 8.1): no probe, no worktree re-added.
+        if crate::service::loops::paused(&s) {
+            return report;
+        }
         let rows = s.list_all_sessions().unwrap_or_default();
         let controller = s.get_controller().ok().flatten();
         // One hidden/local rule for every host loop (hub-ops F6).
@@ -808,6 +812,19 @@ mod tests {
             .iter()
             .filter(|e| e.kind == kind)
             .count()
+    }
+
+    /// Redesign 8.1: Pause all stops the repair before it probes anything.
+    #[tokio::test]
+    async fn pause_all_makes_no_calls() {
+        let (store, ids) = seed(&[("local", "a")]);
+        settings::set(&store.lock().unwrap(), settings::AUTOMATION_PAUSED, "true").unwrap();
+        let fake = Fake::new(&store, &ids);
+        assert_eq!(
+            run_with(&store, &fake, &ON, 100).await,
+            RepairTickReport::default()
+        );
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
     }
 
     #[tokio::test]

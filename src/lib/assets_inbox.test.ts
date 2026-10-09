@@ -138,6 +138,16 @@ describe('rows beyond the brief', () => {
     expect(inbox.sections.applied.map((r) => r.key)).toEqual(['card:8']);
     expect(inbox.needCount).toBe(0);
   });
+  it('shows what catalog.auto synced on its own under applied, with its note, needing nothing (8.7)', () => {
+    const note = 'Synced on its own: catalog.auto is on.';
+    const c: ChangesetSummary[] = [
+      { id: 10, kind: 'rollout', summary: 'Synced core to oci', state: 'applied', undoable: false, created_at: 1, applied_at: 2, error: note, auto: true },
+      { id: 11, kind: 'rollout', summary: 'Roll out core to trn', state: 'applied', undoable: false, created_at: 1, applied_at: 2 },
+    ];
+    const inbox = buildInbox({ listing: { ...listing, assets: [], unmanaged: [], identities: [] }, cards: c, order, stale: new Set() });
+    expect(inbox.sections.applied.map((r) => [r.key, r.name, r.why])).toEqual([['card:10', 'Synced core to oci', note]]);
+    expect(inbox.needCount).toBe(0);
+  });
   it('gives each row the query row the shared search reads, with the layers of its asset', () => {
     const inbox = buildInbox({ listing, cards: [], order, stale: new Set(), layersOf: (a) => (a.name === 'fine' ? ['core'] : []) });
     expect(inbox.sections.insync[0].query).toMatchObject({ kind: 'skill', name: 'fine', catalog: 'personal', layers: ['core'] });

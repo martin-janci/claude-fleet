@@ -2153,6 +2153,8 @@ describe('NewSessionDialog limit handling', () => {
     await fireEvent.click(screen.getByTestId('limit-start-anyway'));
     await vi.waitFor(() => expect(created()).toHaveLength(1));
     expect((created()[0][1] as any).args.profile).toBeNull();
+    // The person's choice travels, so a hub does not refuse it (step 4.4).
+    expect((created()[0][1] as any).args.over_limit_ok).toBe(true);
   });
 
   it('under the line, or with no answer, starts straight away', async () => {
@@ -2162,6 +2164,7 @@ describe('NewSessionDialog limit handling', () => {
     await fireEvent.click(screen.getByText('Create'));
     await vi.waitFor(() => expect(created()).toHaveLength(1));
     expect(screen.queryByTestId('limit-ask')).toBeNull();
+    expect((created()[0][1] as any).args.over_limit_ok).toBeUndefined();
   });
 });
 

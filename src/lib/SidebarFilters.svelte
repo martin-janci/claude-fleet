@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { accounts, accountLabel as accountName } from './accounts';
   import Icon from './kit/Icon.svelte';
   import { tablistKeys } from './tablist_keys';
   // The sidebar's chrome, in four layers so a filter never looks like a
@@ -116,15 +117,26 @@
     onBulkCleanUp?: () => void;
     /** Archive into the work's Done, with Undo (step 1.7). */
     onBulkArchive?: () => void;
-    /** Move each selected session past the line to the login on its host
+    /** Move each selected session to the login on its host on the account
+     *  the person picked, or (`null`) each one past the line to the login
      *  with the most headroom (step 4.4). */
-    onBulkMoveAccount?: () => void;
+    onBulkMoveAccount?: (accountUuid: string | null) => void;
     bulkMoveAccountBlocked?: string | null;
     bulkArchiveBlocked?: string | null;
     bulkCleanUpBlocked?: string | null;
     clearSelected: () => void;
   } = $props();
   const sessionsList = $derived(listView !== 'work');
+  // Step 4.4's bulk Switch account: the person picks the account first.
+  let movePicking = $state(false);
+  let moveTarget = $state('');
+  $effect(() => {
+    if (selectedCount === 0) movePicking = false;
+  });
+  function confirmMove() {
+    movePicking = false;
+    onBulkMoveAccount?.(moveTarget === '' ? null : moveTarget);
+  }
   // ── Work filters (work graph M10.4) ──
   // Their group in the panel shows once there is work to filter (a tracker,
   // a linked session), in group-by-work, or while one is on.
@@ -594,13 +606,35 @@
         >Archive</button>
       {/if}
       {#if onBulkMoveAccount}
-        <button
-          class="btn btn--chip"
-          data-testid="bulk-move-account"
-          disabled={bulkMoveAccountBlocked !== null}
-          title={bulkMoveAccountBlocked ?? 'Resume each session past its account’s limit under the login on its host with the most headroom'}
-          onclick={() => onBulkMoveAccount()}
-        >Switch account</button>
+        {#if movePicking}
+          <select
+            class="bulk-move-target"
+            aria-label="Switch to account"
+            data-testid="bulk-move-account-target"
+            bind:value={moveTarget}
+          >
+            <option value="">Most headroom on each host</option>
+            {#each $accounts as a (a.uuid)}
+              <option value={a.uuid}>{accountName(a)}</option>
+            {/each}
+          </select>
+          <button class="btn btn--chip" data-testid="bulk-move-account-go" onclick={confirmMove}>Switch</button>
+          <button class="btn btn--quiet" data-testid="bulk-move-account-cancel" onclick={() => (movePicking = false)}
+            >Cancel</button
+          >
+        {:else}
+          <button
+            class="btn btn--chip"
+            data-testid="bulk-move-account"
+            disabled={bulkMoveAccountBlocked !== null}
+            title={bulkMoveAccountBlocked ??
+              'Resume the selected sessions under another account: one you pick, or the login on each host with the most headroom'}
+            onclick={() => {
+              moveTarget = '';
+              movePicking = true;
+            }}
+          >Switch account</button>
+        {/if}
       {/if}
       {#if onBulkCleanUp}
         <button

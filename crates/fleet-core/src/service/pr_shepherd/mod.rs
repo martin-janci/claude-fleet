@@ -458,6 +458,10 @@ pub async fn run_with(store: &Mutex<Store>, exec: &dyn ShepherdExec, now: i64) -
         let Ok(s) = store.lock() else {
             return 0;
         };
+        // Pause all (redesign 8.1): no nudge, no merge.
+        if crate::service::loops::paused(&s) {
+            return 0;
+        }
         let (candidates, rules, seen) = snapshot(&s, now);
         (
             plan(&candidates, &rules, &seen, now),

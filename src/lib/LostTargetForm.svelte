@@ -19,6 +19,8 @@
     pickableProjects,
     projectLabel,
     proposalOf,
+    ticketLabel,
+    ticketProposalOf,
     showsUnsure,
     type LostTarget,
     type LostTargetArgs,
@@ -39,8 +41,10 @@
     args: LostTargetArgs;
     /** Restore cannot resume without a project; Adopt can go without one. */
     requireProject?: boolean;
-    /** Do it; resolves to an error message, or null when done. */
-    onsubmit: (projectId: number | null) => Promise<string | null>;
+    /** Do it, linking the new session to `ticket` when the person kept
+     *  the proposed ticket ticked (J10, a found conversation only);
+     *  resolves to an error message, or null when done. */
+    onsubmit: (projectId: number | null, ticket: string | null) => Promise<string | null>;
     oncancel: () => void;
   } = $props();
 
@@ -49,6 +53,9 @@
   let selected = $state('');
   /** The person chose for themselves: a late proposal never overwrites it. */
   let touched = $state(false);
+  /** J10's other half: link the restored session to the ticket its branch
+   *  names. Prefilled ticked; nothing links until the person confirms. */
+  let linkTicket = $state(true);
   let confirming = $state(false);
   let busy = $state(false);
   let error = $state<string | null>(null);
@@ -58,6 +65,8 @@
   const shownProposal = $derived(proposal && proposal.value === selected ? proposal : null);
   const unsure = $derived(!touched && selected === '' && showsUnsure(target));
   const chosen = $derived(list.find((p) => String(p.id) === selected) ?? null);
+  const ticket = $derived(target?.ticket ?? null);
+  const ticketProposal = $derived(ticket ? ticketProposalOf(ticket) : null);
 
   onMount(() => {
     if ($projects.length === 0) void loadProjects();
@@ -78,7 +87,7 @@
   async function confirm() {
     busy = true;
     error = null;
-    const err = await onsubmit(chosen ? chosen.id : null);
+    const err = await onsubmit(chosen ? chosen.id : null, ticket && linkTicket ? ticket.key : null);
     busy = false;
     confirming = false;
     if (err) error = err;
@@ -104,6 +113,15 @@
   <ProposedBy proposal={shownProposal} field="project" onchange={change} testid="lost-target-proposed" />
   {#if unsure}
     <p class="muted" data-testid="lost-target-unsure">{UNSURE_NOTE}</p>
+  {/if}
+  {#if ticket}
+    <label class="row">
+      <input type="checkbox" bind:checked={linkTicket} data-testid="lost-target-ticket" />
+      <span class="label">Link to {ticketLabel(ticket)}</span>
+    </label>
+    {#if linkTicket}
+      <ProposedBy proposal={ticketProposal} field="ticket" testid="lost-target-ticket-proposed" />
+    {/if}
   {/if}
   {#if error}<p class="error" data-testid="lost-target-error">{error}</p>{/if}
   <div class="actions">

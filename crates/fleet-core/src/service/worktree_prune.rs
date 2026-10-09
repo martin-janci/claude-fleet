@@ -397,6 +397,10 @@ pub async fn run_with(store: &Mutex<Store>, ssh: &dyn SshExec) -> (usize, usize)
         let Ok(s) = store.lock() else {
             return (0, 0);
         };
+        // Pause all (redesign 8.1): no probe, no row dropped.
+        if crate::service::loops::paused(&s) {
+            return (0, 0);
+        }
         // One hidden/local rule for every host loop (hub-ops F6); the prune
         // never touches `local` even where it is enabled.
         crate::service::hosts::active_hosts(
@@ -749,6 +753,46 @@ mod tests {
     /// The race: a row written after the probe started (a hook re-created
     /// the worktree while the probe ran) survives even though the probe
     /// judged it stale; an older stale row on the same host is still pruned.
+    /// Redesign 8.1: Pause all stops the prune before it probes a host;
+    /// the same pass runs once the pause lifts.
+    #[tokio::test]
+    async fn pause_all_stops_the_prune() {
+        use crate::service::settings::{set, AUTOMATION_PAUSED};
+        use crate::store::HostReconcile;
+        let (store, _bus, [gone, _, _], _local, _session) = seeded();
+        store
+            .lock()
+            .unwrap()
+            .apply_host_reconcile(HostReconcile {
+                alias: "vps",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: 1,
+                probe_started_at: 0,
+                sessions: &[],
+                keep: &[],
+                lost_ttl_cutoff: None,
+                skip_prune: false,
+                reconciled_at: None,
+            })
+            .unwrap();
+        set(&store.lock().unwrap(), AUTOMATION_PAUSED, "true").unwrap();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u");
+        fake.on_host("vps", Match::script_contains(DONE_MARKER), probe_reply());
+        assert_eq!(run_with(&store, &fake).await, (0, 0));
+        assert!(fake.calls().is_empty(), "no probe while paused");
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_worktree_row(gone)
+            .unwrap()
+            .is_some());
+        set(&store.lock().unwrap(), AUTOMATION_PAUSED, "false").unwrap();
+        assert_eq!(run_with(&store, &fake).await, (1, 1));
+    }
+
     #[tokio::test]
     async fn a_row_rewritten_after_the_probe_started_is_kept() {
         let (store, _bus, [gone, alive, registered], _local, _session) = seeded();

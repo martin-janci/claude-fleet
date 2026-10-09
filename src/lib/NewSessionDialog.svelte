@@ -1174,6 +1174,8 @@
         effort: runsClaude && chosenEffort ? chosenEffort : null,
         profile: runsClaude && chosenProfile.trim() ? chosenProfile.trim() : null,
         agent: chosenKind === 'work' && chosenAgent !== 'claude' ? chosenAgent : null,
+        // Step 4.4: asked and confirmed here, so a hub does not refuse it.
+        ...(limitConfirmed ? { over_limit_ok: true } : {}),
       },
       createController.signal,
     );

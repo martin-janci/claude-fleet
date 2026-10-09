@@ -465,38 +465,49 @@ pub fn spawn_reprovision_stale(
 ) -> tokio::task::JoinHandle<()> {
     crate::rt::spawn(async move {
         tokio::time::sleep(delay).await;
-        if !crate::service::loops::gate("reprovision", &store, None) {
-            return;
-        }
-        let stale: Vec<String> = match store.lock() {
-            Ok(s) => crate::service::hosts::active_hosts(
-                s.list_hosts().unwrap_or_default(),
-                crate::service::hub::local_host_enabled(),
-            )
-            .into_iter()
-            .filter(|h| h.provisioned && h.reachable && h.provision_stale)
-            .map(|h| h.alias)
-            .collect(),
-            Err(_) => return,
-        };
-        for host in stale {
-            match provision_content_only(&store, &*ssh, &host, &base).await {
-                Ok(None) => tracing::info!(host, "[provision] refreshed stale content"),
-                Ok(Some(w)) => tracing::warn!(
-                    host,
-                    warning = %w,
-                    "[provision] refreshed stale content with a warning"
-                ),
-                Err(e) => tracing::warn!(
-                    host,
-                    code = %e.code,
-                    error = %e.message,
-                    "[provision] stale content not refreshed"
-                ),
-            }
-        }
-        crate::service::loops::report("reprovision", Ok::<_, String>(()), None);
+        reprovision_stale_pass(&store, &*ssh, &base).await;
     })
+}
+
+/// One refresh of every stale host; the hosts it tried, or `None` when
+/// Pause all (redesign 8.1) or an unreadable store stopped it.
+async fn reprovision_stale_pass(
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    base: &HubBase,
+) -> Option<Vec<String>> {
+    if !crate::service::loops::gate("reprovision", store, None) {
+        return None;
+    }
+    let stale: Vec<String> = match store.lock() {
+        Ok(s) => crate::service::hosts::active_hosts(
+            s.list_hosts().unwrap_or_default(),
+            crate::service::hub::local_host_enabled(),
+        )
+        .into_iter()
+        .filter(|h| h.provisioned && h.reachable && h.provision_stale)
+        .map(|h| h.alias)
+        .collect(),
+        Err(_) => return None,
+    };
+    for host in &stale {
+        match provision_content_only(store, ssh, host, base).await {
+            Ok(None) => tracing::info!(host, "[provision] refreshed stale content"),
+            Ok(Some(w)) => tracing::warn!(
+                host,
+                warning = %w,
+                "[provision] refreshed stale content with a warning"
+            ),
+            Err(e) => tracing::warn!(
+                host,
+                code = %e.code,
+                error = %e.message,
+                "[provision] stale content not refreshed"
+            ),
+        }
+    }
+    crate::service::loops::report("reprovision", Ok::<_, String>(()), None);
+    Some(stale)
 }
 
 const SETTINGS_JSON: &str = "~/.claude/settings.json";
@@ -2688,6 +2699,50 @@ mod tests {
             "{warning}"
         );
         assert!(warning.contains("exit 5"), "{warning}");
+    }
+
+    /// Redesign 8.1: Pause all stops the stale-host refresh before it
+    /// touches a host; it runs once the pause lifts.
+    #[tokio::test]
+    async fn pause_all_stops_the_stale_refresh() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("h1", Some("h1")).unwrap();
+            s.update_host_probe("h1", true, None, None, 1).unwrap();
+            s.upsert_host_token("h1", TOKEN).unwrap();
+            s.set_host_provisioned("h1", true).unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE hosts SET provision_fingerprint='old' WHERE alias='h1'",
+                    [],
+                )
+                .unwrap();
+            crate::service::settings::set(&s, crate::service::settings::AUTOMATION_PAUSED, "true")
+                .unwrap();
+        }
+        let fake = fresh_host();
+        assert_eq!(reprovision_stale_pass(&store, &fake, &base()).await, None);
+        assert!(fake.calls().is_empty(), "no host touched while paused");
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_host_row("h1")
+                .unwrap()
+                .unwrap()
+                .provision_stale
+        );
+        crate::service::settings::set(
+            &store.lock().unwrap(),
+            crate::service::settings::AUTOMATION_PAUSED,
+            "false",
+        )
+        .unwrap();
+        assert_eq!(
+            reprovision_stale_pass(&store, &fake, &base()).await,
+            Some(vec!["h1".to_string()])
+        );
     }
 
     /// hosts F1: the unattended refresh writes skills and hooks with the

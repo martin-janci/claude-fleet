@@ -52,6 +52,7 @@
   import AgentInstallAction from './AgentInstallAction.svelte';
   import LostTargetForm from './LostTargetForm.svelte';
   import { isOutsideFleet, needsRestoreInto, placeTranscript } from './lost_found';
+  import { linkSessionWork } from './work';
 
   let {
     host,
@@ -358,7 +359,7 @@
     return null;
   }
 
-  async function restoreInto(c: LostCandidate, projectId: number | null): Promise<string | null> {
+  async function restoreInto(c: LostCandidate, projectId: number | null, ticket: string | null): Promise<string | null> {
     if (projectId === null) return 'Pick a project to restore it into.';
     const refused = candidateBlocked(c);
     if (refused !== null) return refused;
@@ -378,6 +379,11 @@
     if (!r.ok) return r.error.message;
     restoringId = null;
     resumedIds = new Set(resumedIds).add(c.claude_session_id);
+    // J10: the ticket the branch names, when the person kept it ticked.
+    if (ticket !== null) {
+      const linked = await linkSessionWork(r.value.id, { key: ticket });
+      if (!linked.ok) push({ kind: 'error', message: `Restored, but not linked to ${ticket}: ${linked.error.message}` });
+    }
     return null;
   }
 
@@ -765,7 +771,7 @@
                         cwd: c.cwd,
                         git_branch: c.git_branch,
                       }}
-                      onsubmit={(pid) => restoreInto(c, pid)}
+                      onsubmit={(pid, ticket) => restoreInto(c, pid, ticket)}
                       oncancel={() => (restoringId = null)}
                     />
                   {:else}
