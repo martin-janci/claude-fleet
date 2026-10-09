@@ -11,7 +11,7 @@
   import { stepProblems, visibleSteps } from './form_model';
   import type { FieldProblem, FormField, FormProposal, FormSpec, Values } from './forms';
   import ProposedBy from '../ProposedBy.svelte';
-  import { preselect } from '../ai_proposal';
+  import { neverDecidesField, preselect } from '../ai_proposal';
   import { QUICK_ANSWER, risky } from '../quick_answer';
   import Loader from '../Loader.svelte';
 
@@ -119,7 +119,8 @@
   const proposed = $derived.by(() => {
     if (dismissed || !proposal || preselect(QUICK_ANSWER, proposal) === null) return null;
     const f = spec.steps.flatMap((s) => s.fields).find((x) => x.name === proposal.field);
-    const opt = f?.type === 'select' ? f.options?.find(([v]) => v === proposal.value) : undefined;
+    if (!f || neverDecidesField(f)) return null;
+    const opt = f.type === 'select' ? f.options?.find(([v]) => v === proposal.value) : undefined;
     return opt && !risky(opt[1]) && !risky(opt[0]) ? proposal : null;
   });
   $effect(() => {
@@ -226,6 +227,7 @@
                 role="radio"
                 class="opt"
                 class:on={values[f.name] === v}
+                class:ai-pre={proposed?.field === f.name && proposed.value === v && values[f.name] === v}
                 aria-checked={values[f.name] === v}
                 data-testid={`form-field-${f.name}-${v}`}
                 disabled={off}
@@ -248,6 +250,7 @@
             <select
               id={`${uid}-${f.name}`}
               data-testid={`form-field-${f.name}`}
+              class:ai-pre={proposed?.field === f.name && values[f.name] === proposed.value}
               value={str(f)}
               disabled={off}
               onchange={(e) => set(f.name, (e.currentTarget as HTMLSelectElement).value || undefined)}>

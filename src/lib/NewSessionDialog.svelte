@@ -981,7 +981,7 @@
   // the boxes, and the ProposedBy chip says why. Asked once per ticket,
   // project and host.
   let siblingAsk = $state<ProposalLike | null>(null);
-  let alsoTouched = false;
+  let alsoTouched = $state(false);
   $effect(() => {
     const id = ticket?.id;
     const host = chosenHost;
@@ -1358,7 +1358,7 @@
             <fieldset class="also-in" data-testid="ticket-also-in">
               <legend>Also start in <span class="muted small">(one session each, same branch)</span></legend>
               {#each siblings as c (c.id)}
-                <label>
+                <label class:ai-pre={c.id === proposedSibling && alsoIn.includes(c.id) && !alsoTouched}>
                   <input
                     type="checkbox"
                     data-testid="ticket-also-in-{c.id}"
@@ -1532,6 +1532,7 @@
       {locale}
       {timeZone}
       selectedAccount={chosenLoginAccount}
+      proposedHost={hostProposed?.value ?? null}
       onpick={(alias) => {
         pickHost(alias);
         nameOverride = null;

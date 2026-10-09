@@ -62,6 +62,7 @@ describe('LostTargetForm (4.12)', () => {
     await settle();
     expect(mockedTarget).toHaveBeenCalledWith({ session_id: 7 });
     expect(select().value).toBe('1');
+    expect(select()).toHaveClass('ai-pre');
     const chip = screen.getByTestId('lost-target-proposed');
     expect(chip.textContent).toContain('Proposed by Jev');
     expect(chip.textContent).toContain('directory and the name scratch');

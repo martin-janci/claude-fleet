@@ -280,6 +280,14 @@ function jevSays(s: SessionRow, outcome: 'asked' | 'stuck'): boolean {
   return isIdleStatus(s.claude_status) && s.turn_outcome === outcome;
 }
 
+/** The J2 reading that put a row in Needs you, if one did: the row says so
+ *  (review r15 F17), since the person, not Jev, decides what to do next. */
+export function jevOutcome(s: SessionRow): 'asked' | 'stuck' | null {
+  if (jevSays(s, 'asked')) return 'asked';
+  if (jevSays(s, 'stuck')) return 'stuck';
+  return null;
+}
+
 /** A turn ended after the session was last viewed (redesign 2.3, migration
  *  123) — or, for a session fleet started and nobody has opened yet, after
  *  it started. A row reconcile found on a host has neither stamp and is

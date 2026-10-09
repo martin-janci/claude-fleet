@@ -4,12 +4,15 @@
   // claude_status. `brief` is the read-only "Outside fleet" row's variant:
   // no activity in the tooltip, no inactive chip and no spinner.
   import { isInactiveAgent, type SessionRow } from './sessions';
-  import { claudeStatusColor, claudeStatusLabel, stuckStatus, STUCK_COLOR } from './attention';
+  import { claudeStatusColor, claudeStatusLabel, jevOutcome, stuckStatus, STUCK_COLOR } from './attention';
   import Loader from './Loader.svelte';
 
   let { sess, brief = false }: { sess: SessionRow; brief?: boolean } = $props();
 
   const activity = $derived(!brief && sess.current_activity ? ' — ' + sess.current_activity : '');
+  /** Review r15 F17: a row Jev's turn reading moved into Needs you says so. */
+  const jev = $derived(brief || sess.stuck_kind ? null : jevOutcome(sess));
+  const JEV_WORDS = { asked: 'asked you', stuck: 'stuck' } as const;
 </script>
 
 {#if sess.stuck_kind}
@@ -34,6 +37,14 @@
     title="Claude: {sess.claude_status}{activity}"
   >{#if !brief && sess.claude_status === 'working'}<Loader name="comet" size={12} class="chip-loader" />{/if}{claudeStatusLabel(sess.claude_status)}</span>
 {/if}
+{#if jev}
+  <span
+    class="claude-chip jev-chip"
+    data-testid="jev-outcome-chip"
+    title="Jev read the end of the last turn as {JEV_WORDS[jev]}. A proposal, not a decision: the next hook replaces it."
+    >✦ Jev: {JEV_WORDS[jev]}</span
+  >
+{/if}
 
 <style>
   .claude-chip {
@@ -49,6 +60,12 @@
     vertical-align: -1px;
   }
   .stuck-chip { font-weight: 600; }
+  .jev-chip {
+    margin-left: 0.25rem;
+    color: var(--fg-2);
+    background: var(--chip-bg);
+    border-color: color-mix(in srgb, var(--ai-pre) 40%, transparent);
+  }
   .inactive-chip {
     background: color-mix(in srgb, var(--fg-muted) 18%, transparent);
     color: var(--fg-muted);

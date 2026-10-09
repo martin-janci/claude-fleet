@@ -67,9 +67,11 @@ describe('the start popover', () => {
     const chip = screen.getByTestId('start-popover-suggested');
     expect(chip.querySelector('.pill')?.textContent).toBe('Proposed by Jev');
     expect(chip.textContent).toContain('88%');
+    expect(screen.getByTestId('start-popover-project')).toHaveClass('ai-pre');
     await fireEvent.click(screen.getByTestId('start-popover-suggested-change'));
     await flush();
     expect((screen.getByTestId('start-popover-project') as HTMLSelectElement).value).toBe('');
+    expect(screen.getByTestId('start-popover-project')).not.toHaveClass('ai-pre');
     expect(screen.queryByTestId('start-popover-suggested')).toBeNull();
   });
 
