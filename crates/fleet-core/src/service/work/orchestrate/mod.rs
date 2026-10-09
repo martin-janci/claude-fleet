@@ -958,6 +958,40 @@ fn loop_applies_card(kind: &str, auto_level: i64) -> bool {
     }
 }
 
+/// The missions with a planner call in flight in this process.
+static PLANNING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<i64>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Holds a mission's planner slot while its call runs (review r01): a
+/// person's `mission_plan` and the loop's own call, or two presses, do not
+/// ask the planner twice at once and card its answer twice.
+struct PlannerSlot(i64);
+
+impl PlannerSlot {
+    fn take(m: &MissionRow) -> Result<Self, IpcError> {
+        let mut running = PLANNING.lock().unwrap_or_else(|e| e.into_inner());
+        if !running.insert(m.id) {
+            return Err(IpcError::new(
+                codes::E_EXISTS,
+                format!(
+                    "the planner is already running for {}; try again when it ends",
+                    m.name
+                ),
+            ));
+        }
+        Ok(Self(m.id))
+    }
+}
+
+impl Drop for PlannerSlot {
+    fn drop(&mut self) {
+        PLANNING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
 /// Ask the planner about `m` now, and card its answer.
 pub async fn run_planner(
     deps: &Deps,
@@ -965,6 +999,7 @@ pub async fn run_planner(
     why: &str,
     actor: &Actor,
 ) -> Result<PlanOutcome, IpcError> {
+    let _slot = PlannerSlot::take(m)?;
     let now = now_unix();
     let (host, prompt, model, auto_level, accept_created) = {
         let s = lock(&deps.store)?;
@@ -1111,7 +1146,12 @@ fn card_commands(
     now: i64,
 ) -> Result<Vec<CardRow>, IpcError> {
     let s = lock(&deps.store)?;
-    let run = format!("plan:{now}");
+    // One run's cards share a prefix no other run has, even one in the
+    // same second (review r01): a repeated id would be dropped as a repeat.
+    let run = format!(
+        "plan:{now}:{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    );
     let mut out = Vec::new();
     let tree = planner::tree_of(commands);
     if !tree.is_empty() {
@@ -1510,19 +1550,7 @@ fn hold_runs_over_limit(
     let Some(why) = why else {
         return Ok(());
     };
-    let said = s
-        .mission_events(m.id, None, 1)?
-        .into_iter()
-        .next()
-        .is_some_and(|e| {
-            e.kind == "account_limit"
-                && e.payload
-                    .as_ref()
-                    .and_then(|p| p.get("why"))
-                    .and_then(|w| w.as_str())
-                    == Some(why.as_str())
-        });
-    if !said {
+    if !hold_episode_open(s, m.id)? {
         event(
             s,
             m.id,
@@ -1535,11 +1563,44 @@ fn hold_runs_over_limit(
     Ok(())
 }
 
+/// Whether the loop's runs are already in a held episode the log has said
+/// (review r01): the newest `account_limit` event comes after the last run
+/// step the loop took or had refused. Other events in between (a card, a
+/// planner note) do not end the episode; a run that goes (or is tried and
+/// refused) does, so the next hold is said again.
+fn hold_episode_open(s: &Store, mission_id: i64) -> Result<bool, IpcError> {
+    const PAGE: usize = 100;
+    let mut before = None;
+    loop {
+        let page = s.mission_events(mission_id, before, PAGE)?;
+        for e in &page {
+            if e.kind == "account_limit" {
+                return Ok(true);
+            }
+            let run = matches!(e.kind.as_str(), "step" | "refused")
+                && e.payload
+                    .as_ref()
+                    .and_then(|p| p.get("step"))
+                    .and_then(|k| k.as_str())
+                    .is_some_and(|k| RUN_STEPS.contains(&k));
+            if run {
+                return Ok(false);
+            }
+        }
+        match page.last() {
+            Some(e) if page.len() == PAGE => before = Some(e.id),
+            _ => return Ok(false),
+        }
+    }
+}
+
 /// One pass over one mission, under its lease.
 pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError> {
     let (m, a, steps, counts) = {
         let s = lock(&deps.store)?;
-        if !s.take_mission_lease(id, now)? {
+        // A fresh clock (review r06): a mission reached late in a long
+        // pass does not get a lease that is already near its end.
+        if !s.take_mission_lease(id, crate::service::tick::lease_clock(now))? {
             return Ok(());
         }
         let Some(m) = s.get_mission(id)? else {
