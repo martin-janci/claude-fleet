@@ -8820,6 +8820,7 @@ async fn add_project_refuses_a_hostile_alias_before_any_ssh() {
                 "-oProxyCommand=x",
                 AddProjectSource::Clone {
                     url: "https://github.com/o/r".into(),
+                    existing: false,
                 },
             )),
         )
@@ -9186,6 +9187,7 @@ fn add_params(host: &str, source: AddProjectSource) -> AddProjectParams {
 fn clone_src() -> AddProjectSource {
     AddProjectSource::Clone {
         url: "https://github.com/acme/widget".into(),
+        existing: false,
     }
 }
 
@@ -9641,11 +9643,13 @@ async fn an_operator_fork_needs_a_person_too() {
 fn add_projects_audit_line_never_carries_a_raw_clone_url() {
     let line = super::repo::add_project_audit_target(&AddProjectSource::Clone {
         url: "https://user:ghp_SECRET@github.com/acme/widget".into(),
+        existing: false,
     });
     assert!(!line.contains("SECRET"), "{line}");
     assert_eq!(line, "kind=clone repo=<invalid>");
     let line = super::repo::add_project_audit_target(&AddProjectSource::Clone {
         url: "https://github.com/acme/widget.git".into(),
+        existing: false,
     });
     assert_eq!(line, "kind=clone repo=acme/widget");
 }

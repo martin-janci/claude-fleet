@@ -4435,7 +4435,13 @@ fn stop_waiting_on_a_hub_client_abandons_add_project() {
     use fleet_core::cancel::CancellationRegistry;
     use fleet_core::service::add_project::{AddProjectArgs, AddProjectSource};
     for (source, github) in [
-        (AddProjectSource::Clone { url: "o/r".into() }, false),
+        (
+            AddProjectSource::Clone {
+                url: "o/r".into(),
+                existing: false,
+            },
+            false,
+        ),
         (
             AddProjectSource::New {
                 owner: "o".into(),
