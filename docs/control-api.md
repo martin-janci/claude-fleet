@@ -291,8 +291,9 @@ Index by area (names only; see the reference for details):
   `list_accounts`, `account_usage` (each account's latest plan usage: the
   5-hour and weekly windows with their reset times, status and when it was
   fetched, as the hub's usage poll last answered; never fetches; hub
-  contract 11), `check_account_headroom` (whether a host's login is past
-  its `accounts.pause_at`, from the same usage; hub contract 14),
+  contract 11), `check_account_headroom` (whether starting or switching a
+  session on a host under a login crosses `accounts.pause_at`, and the
+  login there with the most headroom; reads the same usage, never fetches),
   `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above), `install_agent` (install `fleet-agent`
   on a host the hub reaches over SSH and move the host onto it; a job read

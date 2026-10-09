@@ -25,6 +25,17 @@ impl FleetTools {
             "start_rules",
             &format!("action={} rule_id={:?}", p.action.escape_debug(), p.rule_id),
         );
+        // Where everyone's tasks start is a person's rule (transition plan,
+        // "Where AI never decides"): the operator is an unbound client, so
+        // nothing below would stop it making or accepting one.
+        if caller.is_operator() && matches!(p.action.as_str(), "save" | "accept") {
+            return Err(mcp_err(
+                codes::E_FORBIDDEN,
+                "a person makes and accepts start rules, from the desktop or the phone; \
+                 the operator may only list them",
+                None,
+            ));
+        }
         let scope = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             caller.view_scope(&s).map_err(to_mcp_err)?

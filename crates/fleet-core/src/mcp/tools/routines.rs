@@ -28,6 +28,18 @@ impl FleetTools {
                 p.routine_id
             ),
         );
+        // A routine is a saved prompt that starts a session: what the
+        // operator wrote in one would reach a session with no person in
+        // between (transition plan, "Where AI never decides"). The operator
+        // is an unbound client, so nothing below would stop it.
+        if caller.is_operator() && matches!(p.action.as_str(), "save" | "run_now") {
+            return Err(mcp_err(
+                codes::E_FORBIDDEN,
+                "a person saves and runs routines, from the desktop or the phone; \
+                 the operator may only read them",
+                None,
+            ));
+        }
         let scope = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             caller.view_scope(&s).map_err(to_mcp_err)?
