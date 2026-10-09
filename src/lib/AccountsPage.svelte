@@ -34,6 +34,7 @@
   import { selectSessionExplicitly } from './selection';
   import { pushError } from './toasts';
   import { accountsPageRequest } from './account_pill';
+  import { requestHostsView } from './app_views';
   import { untrack } from 'svelte';
 
   let {
@@ -151,6 +152,11 @@
     <span class="sub" data-testid="accounts-count">
       {list.length} {list.length === 1 ? 'account' : 'accounts'}
     </span>
+    <!-- Review r08: the rail item is "Accounts & hosts", and Classic's Hosts
+         tab was always in view; the Hosts view is one click from here. -->
+    <button type="button" class="btn-quiet hosts-link" data-testid="accounts-all-hosts" onclick={() => requestHostsView()}
+      >All hosts ›</button
+    >
   </header>
 
   {#if list.length === 0}
@@ -279,7 +285,13 @@
             <ul class="rows" data-testid="account-logins">
               {#each a.logins as l (l.host + '/' + (l.profile ?? ''))}
                 <li>
-                  <span class="mono">{l.host}</span>
+                  <button
+                    type="button"
+                    class="link mono"
+                    title="Open {l.host} in Hosts"
+                    data-testid="account-login-host"
+                    onclick={() => requestHostsView(l.host)}>{l.host}</button
+                  >
                   <span class="sub">{l.profile ? `profile ${l.profile}` : 'host login'}</span>
                 </li>
               {/each}
@@ -322,6 +334,20 @@
     gap: var(--space-2);
     padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--border);
+  }
+  .hosts-link {
+    margin-left: auto;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg);
+    border-radius: var(--radius-sm);
+    padding: 0 var(--space-2);
+    font: inherit;
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+  .hosts-link:hover {
+    border-color: var(--accent);
   }
   h2 {
     margin: 0;

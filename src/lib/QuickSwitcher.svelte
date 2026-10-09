@@ -643,7 +643,7 @@
     if (!e) return;
     if (e.kind === 'session' && e.session) {
       if (e.session.status === 'ghost') {
-        push({ kind: 'info', message: 'That session is a ghost — recreate it from the sidebar.' });
+        push({ kind: 'info', message: 'That session is lost. Recreate it from the sidebar.' });
         return;
       }
       selectSessionExplicitly(e.session);

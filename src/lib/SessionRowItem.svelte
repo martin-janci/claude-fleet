@@ -667,7 +667,7 @@
       <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
       <SessionStatusChip {sess} brief />
     {:else if sess.status === 'ghost'}
-      <span class="status-dot status-ghost" title="ghost — session lost" role="img" aria-label="Status: ghost, session lost"></span>
+      <span class="status-dot status-ghost" title="Failed · session lost" role="img" aria-label="Status: Failed, session lost"></span>
       <span class="host-badge" data-testid="host-badge" aria-label="host {sess.host_alias}">{sess.host_alias}</span>
       <span class="sess-name" title={sess.tmux_name}>{
         $showFriendlyNames && sess.friendly_name ? sess.friendly_name : sess.tmux_name
@@ -691,7 +691,7 @@
           data-testid="ghost-dismiss"
           onclick={(e) => doDismissGhost(sess, e)}
           disabled={ghostDismissBlocked !== null}
-          title={ghostDismissBlocked ?? 'Dismiss ghost session'}
+          title={ghostDismissBlocked ?? 'Dismiss lost session'}
           aria-label="Dismiss"
         >×</button>
       </div>
@@ -801,8 +801,8 @@
               data-testid="edit-label"
               onclick={(e) => beginLabelEdit(sess, e)}
               disabled={labelBlocked !== null}
-              title={labelBlocked ?? 'Edit label (double-click the row)'}
-              aria-label="Edit label"
+              title={labelBlocked ?? 'Rename (double-click the row)'}
+              aria-label="Rename"
             >🏷</button>
             <button
               class="icon-btn small"

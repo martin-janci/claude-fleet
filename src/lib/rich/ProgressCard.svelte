@@ -18,7 +18,7 @@
   const shown = $derived(board.home ? (board.blocks.at(-1) ?? block) : block);
   const updates = $derived(board.blocks.length - 1);
 
-  const STATE_LABEL = { running: 'Running', waiting: 'Needs you', done: 'Done', failed: 'Failed' } as const;
+  const STATE_LABEL = { running: 'Working', waiting: 'Needs you', done: 'Done', failed: 'Failed' } as const;
   const STEP_MARK = { pending: '○', running: '◐', done: '✓', failed: '✕', skipped: '–' } as const;
 
   const pct = $derived(

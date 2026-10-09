@@ -687,7 +687,7 @@
       {/if}
       {#if hubRestartNeeded}
         <p class="hook-desc" data-testid="hub-restart">
-          Saved. <strong>Restart claude-fleet to apply it</strong> — which
+          Saved. <strong>Restart Orbit Fleet to apply it</strong> — which
           fleet this app is a window onto is decided once, at startup, so that
           half the app can never be talking to a hub while the other half
           talks to the local database.
@@ -848,7 +848,7 @@
       {#if permission === 'unsupported'}
         <p class="hook-desc">This webview does not expose the Notification API; toasts and the live region still work.</p>
       {:else if permission === 'denied'}
-        <p class="hook-desc">Notifications were denied at the OS level; allow them for claude-fleet in your system settings.</p>
+        <p class="hook-desc">Notifications were denied at the OS level; allow them for Orbit Fleet (listed as claude-fleet) in your system settings.</p>
       {/if}
       <div class="mcp-field">
         <span class="lbl">Idle</span>

@@ -1934,6 +1934,12 @@
   @keyframes cf-cursor-blink {
     50% { opacity: 0; }
   }
+  /* Review r12: Reduced and Off motion (motion.ts sets data-motion, the OS
+     preference included) hold the caret solid instead of blinking. */
+  :global(:root[data-motion='reduced']) .cursor.blink,
+  :global(:root[data-motion='off']) .cursor.blink {
+    animation: none;
+  }
   .drop-overlay {
     position: absolute;
     inset: 0;

@@ -37,7 +37,7 @@ describe('progress', () => {
     reply(panel(), ui({ kind: 'progress', id: 'deploy', title: 'Deploying', done: 3, total: 7, unit: 'hosts', steps: [{ title: 'Build', state: 'done' }, { title: 'Push', state: 'running' }] }));
     expect(screen.getByTestId('rich-progress-count').textContent).toBe('3 of 7 hosts');
     expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('3');
-    expect(screen.getByTestId('rich-progress-state').textContent).toBe('Running');
+    expect(screen.getByTestId('rich-progress-state').textContent).toBe('Working');
     expect(screen.getAllByTestId('rich-progress-step').map((s) => s.dataset.state)).toEqual(['done', 'running']);
   });
 
