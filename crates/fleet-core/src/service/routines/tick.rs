@@ -321,6 +321,14 @@ async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<(), IpcErro
         }
         let events = s.events_of_kind_after(r.event_cursor, kind, EVENTS_PER_PASS)?;
         let Some(&(last, _)) = events.last() else {
+            // Nothing of this kind since the cursor: move it to the newest
+            // event anyway (same lock, so nothing slipped in between), or a
+            // rare kind rescans every event since the routine was made, on
+            // every 20 s pass (review r16).
+            let newest = s.latest_session_event_id()?;
+            if newest > r.event_cursor {
+                s.set_routine_event_cursor(r.id, newest)?;
+            }
             s.release_routine_lease(r.id)?;
             return Ok(());
         };

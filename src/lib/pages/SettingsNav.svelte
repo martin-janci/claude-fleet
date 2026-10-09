@@ -233,7 +233,7 @@
     border-radius: var(--radius-sm);
     padding: 0.3rem 0.45rem;
     font: inherit;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     color: var(--fg);
     cursor: pointer;
     display: flex;
@@ -256,20 +256,20 @@
   }
   .where {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .none {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     padding: 0.3rem 0.45rem;
   }
   .count {
     margin-left: 0.4rem;
     padding: 0 0.35rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--accent);
     color: var(--bg);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .nl {
     display: flex;
@@ -279,7 +279,7 @@
     padding: 0.4rem 0.45rem;
     border: 1px dashed var(--accent);
     border-radius: var(--radius-sm);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .nl-change {
     flex-basis: 100%;

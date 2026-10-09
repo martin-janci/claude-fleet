@@ -99,10 +99,15 @@ impl Store {
     /// Each account's newest snapshot (what a restart seeds the cache with).
     pub fn latest_usage_snapshots(&self) -> Result<Vec<UsageSnapshotRow>> {
         let mut st = self.conn.prepare_cached(&format!(
+            // One index seek per account, not a correlated subquery per
+            // history row: 35 days of five-minute snapshots made this a
+            // 30-50 ms scan on every over-limit check (review r16).
             "SELECT {COLS} FROM account_usage_snapshots s \
-             WHERE id = (SELECT id FROM account_usage_snapshots \
-                         WHERE account_uuid = s.account_uuid \
-                         ORDER BY fetched_at DESC, id DESC LIMIT 1) \
+             WHERE s.id IN (SELECT (SELECT id FROM account_usage_snapshots \
+                                    WHERE account_uuid = a.account_uuid \
+                                    ORDER BY fetched_at DESC, id DESC LIMIT 1) \
+                            FROM (SELECT DISTINCT account_uuid \
+                                  FROM account_usage_snapshots) a) \
              ORDER BY account_uuid"
         ))?;
         let rows = st.query_map([], row)?;

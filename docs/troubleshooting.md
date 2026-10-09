@@ -17,13 +17,13 @@ it.
 | **Provisioning failed** | Cannot write `~/.claude.json`, `~/.claude/CLAUDE.md`, `~/.tmux.conf`, or the skills directory | Read the `detail` string in the per-host result; fix the permissions or path involved. (`E_PROVISION`) |
 | Tunnel shows **"down — retrying"** | Control API is disabled, or the host `sshd` blocks remote port forwarding | Enable the Control API in Settings; check `AllowTcpForwarding` / `GatewayPorts` in the host's `sshd_config`. |
 | Tunnel shows **"flapping"** | `ssh` keeps exiting before the connection is established — most often an orphaned tunnel from an earlier app instance still holding the remote port | The supervisor terminates the orphan itself on the next attempt. If it persists, read the badge's reason (the last `ssh` stderr) and see [Tunnel shows "flapping"](#tunnel-shows-flapping). |
-| **MCP bind error** — server enabled but not listening | Port 4180 (or configured port) already in use | Change the port in **Settings → Control API (MCP)**. The `bind_error` field in `McpStatus` shows the exact OS error. |
+| **MCP bind error** — server enabled but not listening | Port 4180 (or configured port) already in use | Change the port in **Settings → Control API**. The `bind_error` field in `McpStatus` shows the exact OS error. |
 | **No projects found** | The projects base is empty, does not exist, or uses a different layout | Set this machine's projects base and layout in **Settings → Projects**, then click **Save & rescan**. With no base set, `CLAUDE_FLEET_PROJECTS_BASE` and then `~/projects/github.com` are used. (`E_FLEET_PROJECTS_BASE`) |
 | Session **won't attach** / appears as a ghost | The underlying tmux session has been destroyed | Use **Recreate** to replace the session, or **Dismiss** to remove the ghost entry. |
 | **Every** session on one host turned into a ghost | The host rebooted or its tmux server restarted | See [tmux server restarted](#a-hosts-tmux-server-restarted-all-sessions-become-ghosts). Recreate before the next pass removes the rows. |
 | Hosts **offline** right after the laptop wakes | SSH ControlMasters went stale during sleep | Wait one or two reconcile passes, or click **Re-probe**. See [after sleep / wake](#after-laptop-sleep--wake). |
 | Sidebar looks **stale** | Cache-first `list_sessions` inside the reconcile interval | Click **Refresh** (forced pass). See [reconcile tick](#the-reconcile-tick-reconcileinterval_secs-and-refresh). |
-| Need logs / reporting a bug | n/a | **Settings → Diagnostics → Copy diagnostics**; logs under `<app data>/logs/`. See [Logs](#logs-where-they-live-and-how-to-raise-verbosity). |
+| Need logs / reporting a bug | n/a | **Settings → Error reports → Copy diagnostics**; logs under `<app data>/logs/`. See [Logs](#logs-where-they-live-and-how-to-raise-verbosity). |
 | Session's **worktree directory vanished** (git errors in the pane, `cd: no such directory`, new panes fail) | The worktree was deleted, pruned, or moved on disk while the fleet row (and possibly the tmux session) survived | New session, Restart, Recreate and opening the terminal re-create only what is confirmed missing; anything more (a stale git entry, a moved checkout, a deleted branch, a pane in a removed directory) needs **Repair workspace** in the session details (or the `repair_session` tool). See [Repairing a session whose directory vanished](#repairing-a-session-whose-directory-vanished). (`E_REPAIR_REQUIRED`, `E_REPO_MISSING`, `E_BRANCH_CHECKED_OUT`, `E_WORKSPACE_LOCKED`, `E_REPAIR_FAILED`) |
 | A tracker shows **auth_failed** / **unreachable** / **rate_limited**, or chips show ◷ | The token expired or was revoked, the site or the `gh` host cannot be reached, or the tracker is throttling | Read the tracker's error in **Settings → Trackers** (or `fleet-hub tracker status`). See [Tracker sync fails](#tracker-sync-fails). |
 | **⚠ Sync skipping items — <tracker>**, or a tracker's last pass says `… skipped` | One item (or a few) cannot be stored; the rest of the tracker syncs, the item is retried every pass | Find the item in the log (the view and the external id) and the reason in `last_error`. See [Sync skips items](#sync-skips-items). |
@@ -170,6 +170,7 @@ and keeps the newest 72 files, which is three days:
 |---|---|
 | Linux | `~/.local/share/claude-fleet/logs/` |
 | macOS | `~/Library/Application Support/sk.rlt.claude-fleet/logs/` |
+| Windows | `%LOCALAPPDATA%\rlt\claude-fleet\data\logs\` |
 
 Files are named `claude-fleet.YYYY-MM-DD-HH.log`, where the hour is in UTC.
 Older builds wrote one `claude-fleet.YYYY-MM-DD.log` per day. Those files are
@@ -177,7 +178,7 @@ still read, and they are deleted first when the folder is pruned. On a
 filesystem that does not record file creation times, the pruner cannot date
 them, so these legacy files (at most five) are never deleted, which is
 harmless.
-**Settings → Diagnostics → Open log folder** opens the folder. The path is
+**Settings → Error reports → Open log folder** (the Diagnostics block) opens the folder. The path is
 also shown there, with a copy button.
 
 Rotation is hourly because the logging library has no per-file size cap. With
@@ -221,11 +222,6 @@ them in the log file instead.
 The reconcile tick's `a reconcile pass is already running; skipping tick`
 line is logged at `debug`, so the default level hides it. To see skipped
 ticks, run with `RUST_LOG=warn,claude_fleet_lib=debug`.
-
-Not every subsystem logs to the file yet. Older code in the SSH client, PTY,
-reconcile and MCP handlers still prints to stderr only, and moving it to the
-file logger is a follow-up. Until that lands, run the app from a terminal to
-see those lines.
 
 ### The reconcile tick, `reconcile.interval_secs`, and Refresh
 
@@ -344,7 +340,7 @@ pass.
 
 ### Producing a diagnostics bundle for a bug report
 
-Open **Settings → Diagnostics** and click **Copy diagnostics**. A toast
+Open **Settings → Error reports** and, under Diagnostics, click **Copy diagnostics**. A toast
 confirms when it is on the clipboard. Paste it into the issue. The bundle is
 plain text and contains:
 
@@ -544,7 +540,8 @@ not grouped the session.
   again. For an automatic link the toast's **Undo** does the same.
 - **Linked automatically from a branch you did not expect:** the project is
   trusted for branch keys. Untick **Trust branch keys in this repo** in the
-  popover, or **Trust none** in Settings → Limits → Lifecycle.
+  popover. To trust no project at all, clear the
+  `work.trusted_branch_projects` setting (`set_setting` with `[]`).
 - **The right ticket:** **Pick another…** and type or paste its key or URL.
 - **"Claude named X when asked":** that is the classification nudge
   (`work.classify_nudge`); its answer is only ever a suggestion.
@@ -553,11 +550,8 @@ See the [work guide → Linking and detection](work-graph.md#linking-and-detecti
 
 ### Releases and tags
 
-`origin` currently has no `v0.2.x` tags even though the version fields moved
-past 0.2.4, so `git describe --tags` and the changelog prefill in
-`scripts/release.sh` see a stale baseline. Going forward the owner should cut
-releases with `scripts/release.sh <version>`, which bumps the version files,
-commits, and creates the `vX.Y.Z` tag; pushing that tag
+Releases are cut with `scripts/release.sh <version>`, which bumps the version
+files, commits, and creates the `vX.Y.Z` tag; pushing that tag
 (`git push origin main --follow-tags`) is what triggers the release workflow.
 See [docs/RELEASING.md](RELEASING.md).
 

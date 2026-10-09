@@ -87,7 +87,7 @@
 {/if}
 
 <style>
-  .label { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; }
+  .label { font-size: var(--text-2xs); color: var(--fg-muted); text-transform: uppercase; }
   .host-row {
     display: flex;
     gap: 0.3rem;
@@ -104,7 +104,7 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 0.05rem;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     text-align: left;
   }
 </style>

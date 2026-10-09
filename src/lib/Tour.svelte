@@ -12,7 +12,7 @@
   import {
     TOUR_STEPS,
     endTour,
-    matchesChord,
+    matchesStep,
     nextTourStep,
     placePopover,
     prevTourStep,
@@ -52,14 +52,16 @@
   });
 
   onMount(() => {
-    // The layout moves under the tour (panes resize, the inspector opens on
-    // ⌥⌘B), so the spotlight follows it.
-    const t = setInterval(measure, 500);
     window.addEventListener('resize', measure);
-    return () => {
-      clearInterval(t);
-      window.removeEventListener('resize', measure);
-    };
+    return () => window.removeEventListener('resize', measure);
+  });
+  // The layout moves under the tour (panes resize, the inspector opens on
+  // ⌥⌘B), so the spotlight follows it, while a tour runs and not otherwise:
+  // this component is mounted for the app's life (review r16).
+  $effect(() => {
+    if ($tourStep === null) return;
+    const t = setInterval(measure, 500);
+    return () => clearInterval(t);
   });
 
   function onKeydown(e: KeyboardEvent) {
@@ -68,7 +70,7 @@
       endTour();
       return;
     }
-    if (matchesChord(e, step.chord, mac)) {
+    if (matchesStep(e, step, mac)) {
       tried[step.id] = true;
       void tick().then(measure);
     }
@@ -104,7 +106,7 @@
     <strong class="title">{step.title}</strong>
     <p class="body">{step.body}</p>
     <div class="try" data-testid="tour-try">
-      <span class="meta grow">Try it: press <Kbd chord={step.chord} {mac} /> to {step.tryLabel}</span>
+      <span class="meta grow">Try it: press <Kbd chord={step.chord} shortcut={step.shortcut} {mac} /> to {step.tryLabel}</span>
       {#if tried[step.id]}<span class="done" data-testid="tour-tried">Done</span>{/if}
     </div>
     <div class="foot">
@@ -131,8 +133,8 @@
     pointer-events: none;
   }
   .spot {
-    border-radius: 8px;
-    box-shadow: 0 0 0 4000px rgba(0, 0, 0, 0.62), 0 0 0 2px var(--accent) inset;
+    border-radius: var(--radius-lg);
+    box-shadow: 0 0 0 4000px var(--scrim-strong), 0 0 0 2px var(--accent) inset;
     transition:
       left var(--dur-base),
       top var(--dur-base),
@@ -141,7 +143,7 @@
   }
   .dim {
     inset: 0;
-    background: rgba(0, 0, 0, 0.62);
+    background: var(--scrim-strong);
   }
   .pop {
     position: fixed;
@@ -154,8 +156,8 @@
     padding: 14px 16px;
     background: var(--bg-raise);
     border: 1px solid var(--border);
-    border-radius: 10px;
-    box-shadow: 0 16px 50px rgba(0, 0, 0, 0.6);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-pop);
     color: var(--fg);
     font-size: var(--text-sm);
   }
@@ -182,7 +184,7 @@
     font-size: var(--text-xs);
   }
   .title {
-    font-size: 14px;
+    font-size: var(--text-md);
   }
   .body {
     margin: 0;
@@ -194,7 +196,7 @@
     gap: 8px;
     align-items: center;
     padding: 8px 10px;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
   }
   .grow {

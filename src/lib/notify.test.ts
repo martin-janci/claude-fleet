@@ -1,8 +1,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { get } from 'svelte/store';
+import type { SessionRow } from './sessions';
 import {
   attentionIdleMinutes,
   inQuietHours,
+  newlyNotifiable,
+  notifySnapshot,
+  notifyStateOf,
   notificationAllowed,
   parseQuietHours,
   notificationPermission,
@@ -101,5 +105,33 @@ describe('notifications matrix and quiet hours (11.9)', () => {
     expect(notificationAllowed('desktop', 'blocked', base, at(23))).toBe(false);
     expect(notificationAllowed('desktop', 'failed', base, at(23))).toBe(true);
     expect(notificationAllowed('desktop', 'blocked', { ...base, 'notify.quiet_hours': '' }, at(23))).toBe(true);
+  });
+});
+
+describe('the matrix watcher (11.9)', () => {
+  const opts = { idleSecs: 0, now: 1_000 };
+  const base = { id: 1, kind: 'work', status: 'running', claude_status: 'working', last_activity_at: 900 } as unknown as SessionRow;
+
+  it('files attention states under the matrix rows', () => {
+    expect(notifyStateOf('action_required')).toBe('needs_you');
+    expect(notifyStateOf('failed')).toBe('failed');
+    expect(notifyStateOf('done')).toBe('done');
+    expect(notifyStateOf('working')).toBeNull();
+    expect(notifyStateOf('paused')).toBeNull();
+  });
+
+  it('reports a row once, when it moves into a listed state', () => {
+    const prev = notifySnapshot([base], opts);
+    const asking = { ...base, claude_status: 'blocked' } as SessionRow;
+    expect(newlyNotifiable(prev, [asking], opts).map((n) => n.state)).toEqual(['needs_you']);
+    expect(newlyNotifiable(notifySnapshot([asking], opts), [asking], opts)).toEqual([]);
+    const failedRow = { ...base, claude_status: 'failed' } as SessionRow;
+    expect(newlyNotifiable(prev, [failedRow], opts).map((n) => n.state)).toEqual(['failed']);
+  });
+
+  it('leaves stuck and external rows to others', () => {
+    const prev = notifySnapshot([base], opts);
+    expect(newlyNotifiable(prev, [{ ...base, stuck_kind: 'oom' } as SessionRow], opts)).toEqual([]);
+    expect(newlyNotifiable(new Map(), [{ ...base, kind: 'external', claude_status: 'failed' } as SessionRow], opts)).toEqual([]);
   });
 });

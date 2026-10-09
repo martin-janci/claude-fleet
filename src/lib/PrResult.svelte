@@ -58,23 +58,23 @@
     flex-wrap: wrap;
   }
   .verdict {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     border: 1px solid;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     padding: 0 5px;
   }
   .sha {
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .muted {
     opacity: 0.65;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .reasons,
   .checks {
     margin: 0;
     padding-left: 16px;
-    font-size: 12px;
+    font-size: var(--text-xs);
   }
   .checks {
     opacity: 0.8;

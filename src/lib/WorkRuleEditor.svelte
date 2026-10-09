@@ -227,21 +227,21 @@
 </Modal>
 
 <style>
-  .form { display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.85rem; }
+  .form { display: flex; flex-direction: column; gap: 0.5rem; font-size: var(--text-xs); }
   .field { display: flex; flex-direction: column; gap: 0.2rem; }
-  .field span, legend { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .field span, legend { font-size: var(--text-2xs); color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .field input, .field select {
     font: inherit;
     padding: 0.3rem 0.45rem;
     border: 1px solid var(--border);
     background: var(--bg-pane);
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
-  .conds { border: 1px solid var(--border); border-radius: 4px; padding: 0.4rem 0.5rem; margin: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+  .conds { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.4rem 0.5rem; margin: 0; display: flex; flex-direction: column; gap: 0.35rem; }
   .check { display: flex; gap: 0.4rem; align-items: center; }
-  .note { margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
-  .preview { border: 1px solid var(--border); border-radius: 4px; padding: 0.4rem 0.5rem; max-height: 14rem; overflow: auto; }
+  .note { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); }
+  .preview { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.4rem 0.5rem; max-height: 14rem; overflow: auto; }
   .preview p { margin: 0 0 0.3rem; }
   .preview ul { margin: 0; padding-left: 1rem; }
   .preview li { display: flex; gap: 0.4rem; flex-wrap: wrap; }

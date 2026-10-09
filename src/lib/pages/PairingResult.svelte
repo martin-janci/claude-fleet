@@ -76,12 +76,12 @@
   }
   h5 {
     margin: 0;
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
   }
   .lead,
   .meta {
     margin: 0;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     line-height: 1.4;
   }
@@ -97,7 +97,7 @@
     flex-wrap: wrap;
   }
   code {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     word-break: break-all;
   }
   .meta {

@@ -101,7 +101,7 @@
     margin: auto;
     padding: 1rem;
     color: var(--fg-muted);
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
     text-align: center;
   }
 </style>

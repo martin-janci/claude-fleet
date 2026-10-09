@@ -447,11 +447,11 @@
   }
   h5 {
     margin: 0;
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
   }
   h6 {
     margin: 0 0 0.35rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -459,7 +459,7 @@
   .swatch {
     width: 0.8rem;
     height: 0.8rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     border: 1px solid var(--border);
   }
   .section {
@@ -476,7 +476,7 @@
     border-left-color: var(--accent);
   }
   .label {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     font-weight: 500;
   }
   .control {
@@ -488,7 +488,7 @@
   }
   .control input[type='text'] {
     font: inherit;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     max-width: 20rem;
   }
   .chips {
@@ -497,14 +497,14 @@
     gap: 0.25rem;
   }
   .chip {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.05rem 0.45rem;
     border-radius: var(--radius-pill);
     border: 1px solid var(--border);
   }
   .none,
   .value {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .x {
@@ -522,11 +522,11 @@
     display: flex;
     align-items: center;
     gap: 0.25rem;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
   }
   .help {
     margin: 0.2rem 0 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     line-height: 1.4;
   }
@@ -546,11 +546,11 @@
   }
   .tile-label,
   .tile-sub {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .tile-value {
-    font-size: 1.15rem;
+    font-size: var(--text-lg);
     font-weight: 600;
     font-variant-numeric: tabular-nums;
   }
@@ -570,7 +570,7 @@
     display: grid;
     grid-template-columns: 1.1rem 1fr;
     column-gap: 0.4rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .need-mark {
     grid-row: span 2;
@@ -580,7 +580,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-weight: 700;
     border: 1px solid var(--border);
     color: var(--fg-muted);
@@ -590,11 +590,11 @@
     color: var(--usage-warn);
   }
   .need-detail {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .notice {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     margin: 0.2rem 0;
     padding: 0.4rem 0.6rem;
     border-radius: var(--radius-sm);
@@ -619,7 +619,7 @@
     padding: 0.5rem 0;
     background: var(--bg);
     border-top: 1px solid var(--border);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .apply span {
     margin-right: auto;
@@ -633,12 +633,12 @@
   .by-person {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .by-person th {
     text-align: left;
     font-weight: 500;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     border-bottom: 1px solid var(--border);
     padding: 0.2rem 0.4rem;

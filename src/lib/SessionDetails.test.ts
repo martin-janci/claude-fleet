@@ -166,6 +166,25 @@ describe('SessionDetails', () => {
     ]);
   });
 
+  it('a login picked on one session does not carry over to the next one selected (review r07)', async () => {
+    hosts.set([
+      {
+        alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh',
+        claude_profiles: [{ name: 'work', account_uuid: 'u2', email: 'work@x.com' }],
+      },
+    ]);
+    const { rerender } = render(SessionDetails, { props: { session: sampleSession } });
+    await tick();
+    const pick = (await screen.findByTestId('session-login-pick')) as HTMLSelectElement;
+    await fireEvent.change(pick, { target: { value: 'work' } });
+    await tick();
+    expect(screen.getByTestId('session-login-switch')).toBeTruthy();
+    await rerender({ session: { ...sampleSession, id: 2, tmux_name: 'dev-bar' } });
+    await tick();
+    expect(screen.queryByTestId('session-login-switch')).toBeNull();
+    expect((screen.getByTestId('session-login-pick') as HTMLSelectElement).value).toBe('');
+  });
+
   it('a shell session has no login to switch', async () => {
     render(SessionDetails, { props: { session: { ...sampleSession, kind: 'shell' } } });
     await tick();

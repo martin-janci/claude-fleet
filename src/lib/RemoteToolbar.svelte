@@ -49,8 +49,8 @@
 <style>
   .remote { display: flex; gap: 0.3rem; align-items: center; }
   .remote button {
-    background: transparent; border: 1px solid var(--border); border-radius: 4px;
-    color: var(--fg-muted); cursor: pointer; font-size: 11px; padding: 0.15rem 0.5rem;
+    background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm);
+    color: var(--fg-muted); cursor: pointer; font-size: var(--text-2xs); padding: 0.15rem 0.5rem;
   }
   .remote button:hover:not(:disabled) { color: var(--fg); border-color: var(--accent); }
   .remote button:disabled { opacity: 0.5; cursor: default; }

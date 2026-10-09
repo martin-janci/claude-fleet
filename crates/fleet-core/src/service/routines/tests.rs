@@ -594,6 +594,36 @@ async fn an_event_routine_fires_on_its_owners_sessions_only() {
     assert_eq!(runs_of(&f, r.id).len(), 1);
 }
 
+/// Review r16: a pass that finds nothing of its kind still moves the cursor
+/// past the events it skipped, so a rare kind does not rescan the whole
+/// event history on every pass, and a later event of the kind still fires.
+#[tokio::test]
+async fn an_event_routine_with_nothing_to_fire_moves_its_cursor_on() {
+    let f = fx();
+    let mut i = input(&f);
+    i.trigger = "event".into();
+    i.cron = None;
+    i.event = Some("stuck".into());
+    let r = new_routine(&f, i);
+    let mine = {
+        let s = lock(&f.store).unwrap();
+        let mine = s
+            .upsert_session("mine", "mac", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.claim_if_unclaimed(mine, Some(f.ana)).unwrap();
+        mine
+    };
+    event(&f, mine, "turn_done");
+    event(&f, mine, "turn_done");
+    let newest = lock(&f.store).unwrap().latest_session_event_id().unwrap();
+    tick_once(&f.deps, OCT8).await;
+    assert!(runs_of(&f, r.id).is_empty());
+    assert_eq!(routine(&f, r.id).event_cursor, newest);
+    event(&f, mine, "stuck");
+    tick_once(&f.deps, OCT8 + 20).await;
+    assert_eq!(runs_of(&f, r.id).len(), 1);
+}
+
 #[test]
 fn bad_routines_are_refused_with_the_reason() {
     let f = fx();
@@ -912,7 +942,8 @@ async fn the_rules_read_an_open_question_and_a_pull_request() {
     assert_eq!(rule_outcome(&done, Some(&asked)), Some((NeedsPerson, Rule)));
     let mut j2 = row.clone();
     j2.turn_outcome = Some("asked".into());
-    assert_eq!(rule_outcome(&done, Some(&j2)), Some((NeedsPerson, Rule)));
+    // J2 is Jev's answer: the run is never labelled as a rule's.
+    assert_eq!(rule_outcome(&done, Some(&j2)), Some((NeedsPerson, Jev)));
     j2.turn_outcome = Some("finished".into());
     assert_eq!(
         rule_outcome(&done, Some(&j2)),

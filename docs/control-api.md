@@ -152,6 +152,12 @@ carrying `result` or `error` (as fleet-mobile does), is unaffected.
 | `GET` / `POST /pair` | **none, by design** | The pairing exchange (below). Outside the Host allowlist. |
 | `GET /events` | bearer | The row-change stream (below). |
 | `GET /agent` | bearer (per-host, `full`, agent host) | The WebSocket a `fleet-agent` dials in on (below). |
+| `POST /mcp/json` | bearer | The same tools with an unframed JSON body — see *`/mcp/json`* in [`hub.md`](hub.md). |
+| `GET /metrics` | bearer | What each caller costs the hub — see *`/metrics`* in [`hub.md`](hub.md). |
+| `POST /report`, `GET /reports` | bearer | Error reports from the hub's participants — see *Error reports* in [`hub.md`](hub.md). |
+| `GET /downloads/<id>` | bearer | A file's bytes for the downloads tools (not a tool result). |
+| `GET /voice/capture`, `GET /voice/source` | bearer | The voice relay (off by default; Settings → Limits → Voice). |
+| `POST /update/check`, `POST /update/report` | bearer | The updater wire — see [`updates.md`](updates.md). |
 
 ### `/pair` — how a client gets its first credential
 
@@ -266,7 +272,7 @@ up* of `docs/hub.md` for a host the hub already reaches over SSH.
 The authoritative per-tool documentation — description and parameter list for
 every tool, straight from the tool router — is the generated
 [`control-api-reference.md`](control-api-reference.md). It is regenerated with
-`REGEN_DOCS=1 cargo test -p fleet-core reference_is_current`
+`REGEN_DOCS=1 cargo fleet-test -- reference_is_current`
 and CI fails when it is stale. The workflows that tie the tools together
 (steering, recovery, safe-kill, self-identification) live in the
 `claude-fleet-control` skill (`skills/claude-fleet-control/SKILL.md`), which
@@ -1314,9 +1320,9 @@ mail-retention sweep and, like it, is not gated on `gc.enabled`.
 
 `tools/list` is scoped to the caller: the list is filtered by the same
 predicates that gate the call (`readonly` mode, fleet-admin access), so a
-token is never offered a tool it would be refused. The master token sees all
-73 tools (~15.0k tokens of definitions), a per-host `full` token 63 (~13.1k),
-a `readonly` token 37 (~5.8k). Definitions are also slimmed on the way out —
+token is never offered a tool it would be refused. The master token sees
+every tool; a per-host `full` token and a `readonly` token see progressively
+fewer (the budget test below prints the current counts and bytes). Definitions are also slimmed on the way out —
 `$schema`, `title`, numeric `format`s and `"default": null` carry no meaning
 for a caller — and each tool carries the MCP hints from its policy row
 (`readOnlyHint` on reads, `destructiveHint` on the confirmation-gated

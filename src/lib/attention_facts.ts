@@ -7,6 +7,7 @@
 //
 // The New layout only: Classic keeps its row-only classification, so its
 // Needs you count does not move until the layout switch.
+import { stable } from './stable_store';
 import { derived, type Readable } from 'svelte/store';
 import type { HostRow } from './hosts';
 import { hosts } from './hosts';
@@ -33,10 +34,16 @@ export function attentionFactsFrom(
     if (!u) continue;
     const atLimit = (w: { utilization: number; resets_at: number | null } | null) =>
       !!w && w.utilization >= 100 && (w.resets_at == null || w.resets_at > now);
-    if (atLimit(u.seven_day)) {
-      limited_accounts[snap.account_uuid] = { window: 'weekly', resets_at: u.seven_day!.resets_at };
-    } else if (atLimit(u.five_hour)) {
-      limited_accounts[snap.account_uuid] = { window: 'five_hour', resets_at: u.five_hour!.resets_at };
+    // Both windows at their limit: the one that frees last decides, so the
+    // row does not unblock while the other still holds it (no reset time
+    // holds longest). Weekly wins a tie. Mirrors attention.rs `from_fleet`.
+    const frees = (w: { resets_at: number | null }) => w.resets_at ?? Number.MAX_SAFE_INTEGER;
+    const weekly = atLimit(u.seven_day) ? u.seven_day! : null;
+    const five = atLimit(u.five_hour) ? u.five_hour! : null;
+    if (five && (!weekly || frees(five) > frees(weekly))) {
+      limited_accounts[snap.account_uuid] = { window: 'five_hour', resets_at: five.resets_at };
+    } else if (weekly) {
+      limited_accounts[snap.account_uuid] = { window: 'weekly', resets_at: weekly.resets_at };
     }
   }
   return { down_hosts, limited_accounts, uncredentialed_accounts };
@@ -45,10 +52,14 @@ export function attentionFactsFrom(
 /** The facts the stores hold now, or `undefined` in the Classic layout. The
  *  classifier re-checks a limit's reset against its own clock, so a limit
  *  that resets between two usage reads stops blocking on time. */
-export const attentionFacts: Readable<AttentionFacts | undefined> = derived(
-  [hosts, accountUsage, uiLayout],
-  ([$hosts, $usage, $layout]) =>
+// `stable`: every host ping rebuilt equal facts, and every row re-ranked
+// (review r16). The facts are a few short lists, so comparing their JSON is
+// cheaper than one re-rank.
+export const attentionFacts: Readable<AttentionFacts | undefined> = stable(
+  derived([hosts, accountUsage, uiLayout], ([$hosts, $usage, $layout]) =>
     $layout === 'new' ? attentionFactsFrom($hosts, $usage, Math.floor(Date.now() / 1000)) : undefined,
+  ),
+  (a, b) => JSON.stringify(a) === JSON.stringify(b),
 );
 
 /** The reason line of a Blocked row (step 2.4), as the Main board words it:

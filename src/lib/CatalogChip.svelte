@@ -149,13 +149,13 @@
 <style>
   .cchip { position: relative; display: inline-flex; }
   .chip { height: 18px; padding: 0 6px; }
-  .mono { font-family: var(--mono); font-size: 11px; color: var(--fg); }
+  .mono { font-family: var(--mono); font-size: var(--text-2xs); color: var(--fg); }
   .pop {
     position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 10; display: grid; gap: 8px; min-width: 240px;
-    padding: 10px 12px; border: 1px solid var(--control-border); border-radius: var(--radius-md); background: var(--bg); font-size: 12px;
+    padding: 10px 12px; border: 1px solid var(--control-border); border-radius: var(--radius-md); background: var(--bg); font-size: var(--text-xs);
   }
-  .status { margin: 0; font-family: var(--mono); font-size: 11.5px; }
-  .where { display: grid; gap: 2px; margin: 0; font-family: var(--mono); font-size: 11px; color: var(--fg-muted); overflow-wrap: anywhere; user-select: text; }
+  .status { margin: 0; font-family: var(--mono); font-size: var(--text-2xs); }
+  .where { display: grid; gap: 2px; margin: 0; font-family: var(--mono); font-size: var(--text-2xs); color: var(--fg-muted); overflow-wrap: anywhere; user-select: text; }
   .acts { display: flex; gap: 6px; flex-wrap: wrap; }
   .muted { margin: 0; color: var(--fg-muted); }
 </style>
