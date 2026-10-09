@@ -140,10 +140,23 @@ pub(super) async fn finalise_source(
                 None => None,
             }
         };
-        if let Err(e) = hooks
+        let killed = match hooks
             .kill_tmux_session(store, a.source_host, a.source_tmux_name)
             .await
         {
+            // The source IS gone; only the reconcile after the kill failed
+            // (review r18 M4). The participant stays on the target and the
+            // move goes on; the next reconcile pass tidies the row.
+            Err(e) if crate::service::sessions::kill_landed(&e) => {
+                warnings.push(format!(
+                    "the source {} on {} was killed, but the reconcile after the kill failed ({}: {}); the next reconcile pass tidies its row",
+                    a.source_tmux_name, a.source_host, e.code, e.message
+                ));
+                Ok(())
+            }
+            other => other,
+        };
+        if let Err(e) = killed {
             // The kill failed, so BOTH sessions are alive and the caller is
             // about to report `E_MOVE_PARTIAL` — a state that can last hours,
             // until `resolve_move` runs. The re-point above must not stand
