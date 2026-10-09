@@ -1,33 +1,27 @@
-import { writable } from "svelte/store";
-import { createRowStore } from "./row_store";
-import { invokeCmd, invokeCmdAbortable, type Result } from "./result";
-import { readPref, writePref } from "./prefs";
-import type { DecisionProposal } from "./proposals";
+import { writable } from 'svelte/store';
+import { createRowStore } from './row_store';
+import { invokeCmd, invokeCmdAbortable, type Result } from './result';
+import { readPref, writePref } from './prefs';
+import type { DecisionProposal } from './proposals';
 
 /** The `claude_status` vocabulary (pane_intel `ClaudeStatus`). Anything the
  *  backend has not classified arrives as `null`. */
 export const CLAUDE_STATUSES = [
-  "working",
-  "blocked",
-  "completed",
-  "failed",
-  "stopped",
-  "idle",
+  'working',
+  'blocked',
+  'completed',
+  'failed',
+  'stopped',
+  'idle',
 ] as const;
 export type ClaudeStatus = (typeof CLAUDE_STATUSES)[number];
 
 /** The `stuck_kind` vocabulary (pane_intel `StuckKind`). */
-export const STUCK_KINDS = [
-  "auth_menu",
-  "reconnect",
-  "trust_prompt",
-  "oom",
-  "press_enter",
-] as const;
+export const STUCK_KINDS = ['auth_menu', 'reconnect', 'trust_prompt', 'oom', 'press_enter'] as const;
 export type StuckKind = (typeof STUCK_KINDS)[number];
 
 /** Reduced PR check status populated by reconcile (migration 019). */
-export type CiStatus = "passing" | "failing" | "pending";
+export type CiStatus = 'passing' | 'failing' | 'pending';
 
 /** One failing check of a PR, by the name GitHub shows (result evidence). */
 export interface FailingCheck {
@@ -67,26 +61,18 @@ export interface PrEvidence {
 }
 
 /** `sessions.turn_outcome` (migration 129). */
-export type TurnOutcome = "finished" | "asked" | "stuck" | "working" | "unsure";
+export type TurnOutcome = 'finished' | 'asked' | 'stuck' | 'working' | 'unsure';
 
 /** `sessions.origin` (migration 124). */
-export type SessionOrigin =
-  | "person"
-  | "operator"
-  | "mission"
-  | "background"
-  | "token"
-  | "routine";
+export type SessionOrigin = 'person' | 'operator' | 'mission' | 'background' | 'token' | 'routine';
 
 /** `sessions.agent` (migration 121). */
-export type SessionAgent = "claude" | "codex" | "agy" | "shell";
+export type SessionAgent = 'claude' | 'codex' | 'agy' | 'shell';
 
 /** The agent a row runs, reading an older hub's missing field as Claude
  *  Code (a shell row there still says `kind: 'shell'`). */
-export function sessionAgent(
-  row: Pick<SessionRow, "agent" | "kind">,
-): SessionAgent {
-  return row.agent ?? (row.kind === "shell" ? "shell" : "claude");
+export function sessionAgent(row: Pick<SessionRow, 'agent' | 'kind'>): SessionAgent {
+  return row.agent ?? (row.kind === 'shell' ? 'shell' : 'claude');
 }
 
 export interface SessionRow {
@@ -179,7 +165,7 @@ export interface SessionRow {
   /** Context window of `model` (200 000 or 1 000 000). */
   context_window: number | null;
   /** Who wrote the context value last. */
-  context_source: "transcript" | "hook" | "pane" | null;
+  context_source: 'transcript' | 'hook' | 'pane' | null;
   /** Unix secs of the last context write. */
   context_at: number | null;
   /** True after a compaction or resume until the next usage line. */
@@ -198,16 +184,11 @@ export interface SessionRow {
   // pane is showing, derived alongside current_activity. Null whenever the
   // pane shows no such dialog.
   pending_input: {
-    kind: "permission" | "input";
+    kind: 'permission' | 'input';
     question: string | null;
     /** `checked`: ticked, on a multi-select (absent = false, and from a hub
      *  older than multi-select support). The label never carries the box. */
-    options: {
-      n: number;
-      label: string;
-      selected: boolean;
-      checked?: boolean;
-    }[];
+    options: { n: number; label: string; selected: boolean; checked?: boolean }[];
     /** A multi-select question: a digit TOGGLES an option, `Tab` moves on
      *  with the ticks kept (see `AnswerPrompt.svelte`). Absent = false. */
     multi?: boolean;
@@ -248,7 +229,7 @@ export interface SessionRow {
    *  tmux session reconcile found). There is deliberately **no `'org'`** in
    *  M1: team sharing needs memberships and arrives in M2, and a third value
    *  here would be a reader nobody defined. Absent from a hub older than M1. */
-  visibility?: "private" | "unclaimed";
+  visibility?: 'private' | 'unclaimed';
   /** The credential profile the session runs under (`CLAUDE_CONFIG_DIR` =
    *  `~/.claude-profiles/<name>` on its host, docs/accounts.md); absent =
    *  the host's own login. */
@@ -335,10 +316,7 @@ export interface SessionWork {
 type UsageFields = Partial<
   Pick<
     SessionRow,
-    | "usage_input_tokens"
-    | "usage_output_tokens"
-    | "usage_cache_write_tokens"
-    | "usage_cache_read_tokens"
+    'usage_input_tokens' | 'usage_output_tokens' | 'usage_cache_write_tokens' | 'usage_cache_read_tokens'
   >
 >;
 
@@ -354,7 +332,7 @@ export function sessionUsageTokens(s: UsageFields): number {
 
 /** Compact token count: 950 → "950", 1_234 → "1.2k", 123_456 → "123k", 4_560_000 → "4.56M". */
 export function formatTokens(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n) || n <= 0) return "0";
+  if (n == null || !Number.isFinite(n) || n <= 0) return '0';
   if (n < 1_000) return String(Math.round(n));
   // Each step's bound is where its ROUNDED value would reach the next
   // format, so 999_600 reads "1.00M", never "1000k" (or 9_999 "10.0k").
@@ -367,11 +345,11 @@ export function formatTokens(n: number | null | undefined): string {
 
 /** Estimated cost from micro-USD: "$0.00", "<$0.01", "$1.23", "$1,234". */
 export function formatCostMicros(micros: number | null | undefined): string {
-  if (micros == null || !Number.isFinite(micros) || micros <= 0) return "$0.00";
+  if (micros == null || !Number.isFinite(micros) || micros <= 0) return '$0.00';
   const usd = micros / 1_000_000;
-  if (usd < 0.01) return "<$0.01";
+  if (usd < 0.01) return '<$0.01';
   if (usd < 100) return `$${usd.toFixed(2)}`;
-  return `$${Math.round(usd).toLocaleString("en-US")}`;
+  return `$${Math.round(usd).toLocaleString('en-US')}`;
 }
 
 // Monotonic guard: a payload carrying a lower row_version than the row we
@@ -390,16 +368,14 @@ function sessionIsStale(incoming: SessionRow, current: SessionRow): boolean {
 
 /** Human label for a ghost row's `lost_reason`, or null when the reason has
  *  no dedicated wording (e.g. "missing", "killed", or none recorded). */
-export function lostReasonLabel(
-  reason: string | null | undefined,
-): string | null {
+export function lostReasonLabel(reason: string | null | undefined): string | null {
   switch (reason) {
-    case "host_reboot":
-      return "host rebooted";
-    case "tmux_server_gone":
-      return "tmux server stopped";
-    case "local_disabled":
-      return "local host is off on this hub";
+    case 'host_reboot':
+      return 'host rebooted';
+    case 'tmux_server_gone':
+      return 'tmux server stopped';
+    case 'local_disabled':
+      return 'local host is off on this hub';
     default:
       return null;
   }
@@ -434,55 +410,41 @@ export const sessionsAnswered = writable<boolean>(false);
 
 // Sidebar filter — when false, background (`kind === 'bg'`) sessions are
 // hidden from the tree. Defaults to true (shown). Persisted across restarts.
-const isBool = (v: unknown): v is boolean => typeof v === "boolean";
-export const showBgAgents = writable<boolean>(
-  readPref("show-bg-agents", true, isBool),
-);
-showBgAgents.subscribe((v) => writePref("show-bg-agents", v));
+const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
+export const showBgAgents = writable<boolean>(readPref('show-bg-agents', true, isBool));
+showBgAgents.subscribe((v) => writePref('show-bg-agents', v));
 
 // Sidebar display toggle — when true, sessions render their agent-set
 // `friendly_name` (falling back to `tmux_name` when unset) instead of the raw
 // tmux_name. Defaults to true so a newly populated friendly_name is visible
 // without the user having to discover the toggle. Persisted across restarts.
 export const showFriendlyNames = writable<boolean>(
-  readPref("show-friendly-names", true, isBool),
+  readPref('show-friendly-names', true, isBool),
 );
-showFriendlyNames.subscribe((v) => writePref("show-friendly-names", v));
+showFriendlyNames.subscribe((v) => writePref('show-friendly-names', v));
 
 // Sidebar density toggle — when true, session rows show their second
 // (details) line: host, tmux name / worktree, elapsed, badges, last prompt.
-export const showRowDetails = writable<boolean>(
-  readPref("rows.details", true, isBool),
-);
-showRowDetails.subscribe((v) => writePref("rows.details", v));
+export const showRowDetails = writable<boolean>(readPref('rows.details', true, isBool));
+showRowDetails.subscribe((v) => writePref('rows.details', v));
 
 // Sidebar grouping — `project` (the tree by repository) or `work` (sessions
 // that carry a work key grouped by it first, the rest still under their
 // project; see work_keys.ts). Persisted across restarts.
 /** Project and work are trees with their own headers; state, host and agent
  *  (redesign step 3.6) are flat groups, `row_groups.ts`. */
-export type SidebarGroupBy = "project" | "work" | "state" | "host" | "agent";
+export type SidebarGroupBy = 'project' | 'work' | 'state' | 'host' | 'agent';
 const isGroupBy = (v: unknown): v is SidebarGroupBy =>
-  v === "project" ||
-  v === "work" ||
-  v === "state" ||
-  v === "host" ||
-  v === "agent";
-export const sidebarGroupBy = writable<SidebarGroupBy>(
-  readPref("sidebar.group", "project", isGroupBy),
-);
-sidebarGroupBy.subscribe((v) => writePref("sidebar.group", v));
+  v === 'project' || v === 'work' || v === 'state' || v === 'host' || v === 'agent';
+export const sidebarGroupBy = writable<SidebarGroupBy>(readPref('sidebar.group', 'project', isGroupBy));
+sidebarGroupBy.subscribe((v) => writePref('sidebar.group', v));
 
 // `force: true` (the sidebar Refresh button) makes the backend run a fleet
 // reconcile pass now; the default returns stored rows while the last pass is
 // within the configured interval, so window-focus reloads stay cheap.
-export async function loadSessions(
-  opts: { force?: boolean } = {},
-): Promise<Result<SessionRow[]>> {
+export async function loadSessions(opts: { force?: boolean } = {}): Promise<Result<SessionRow[]>> {
   const token = rows.beginList();
-  const r = await invokeCmd<SessionRow[]>("list_sessions", {
-    force: opts.force ?? false,
-  });
+  const r = await invokeCmd<SessionRow[]>('list_sessions', { force: opts.force ?? false });
   sessionsAnswered.set(true);
   if (r.ok) {
     // The list owns ORDER (the backend's `ORDER BY last_activity_at DESC`);
@@ -497,11 +459,8 @@ export async function loadSessions(
   return r;
 }
 
-export async function killSession(
-  hostAlias: string,
-  name: string,
-): Promise<Result<number>> {
-  const r = await invokeCmd<number>("kill_session", {
+export async function killSession(hostAlias: string, name: string): Promise<Result<number>> {
+  const r = await invokeCmd<number>('kill_session', {
     args: { host_alias: hostAlias, name },
   });
   if (r.ok) removeSession(r.value);
@@ -516,7 +475,7 @@ export async function safeKillSession(
   hostAlias: string,
   tmuxName: string,
 ): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>("safe_kill_session", {
+  const r = await invokeCmd<SessionRow>('safe_kill_session', {
     args: { host_alias: hostAlias, tmux_name: tmuxName },
   });
   if (r.ok) acceptCommandRow(r.value);
@@ -544,7 +503,7 @@ export async function inspectSafeKill(
   hostAlias: string,
   tmuxName: string,
 ): Promise<Result<SafeKillInspection>> {
-  return invokeCmd<SafeKillInspection>("inspect_safe_kill", {
+  return invokeCmd<SafeKillInspection>('inspect_safe_kill', {
     args: { host_alias: hostAlias, tmux_name: tmuxName },
   });
 }
@@ -557,7 +516,7 @@ export async function discardKillSession(
   tmuxName: string,
   force: boolean,
 ): Promise<Result<number>> {
-  const r = await invokeCmd<number>("discard_kill_session", {
+  const r = await invokeCmd<number>('discard_kill_session', {
     args: { host_alias: hostAlias, tmux_name: tmuxName },
     force,
   });
@@ -570,7 +529,7 @@ export async function renameSession(
   oldName: string,
   newName: string,
 ): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>("rename_session", {
+  const r = await invokeCmd<SessionRow>('rename_session', {
     args: { host_alias: hostAlias, old_name: oldName, new_name: newName },
   });
   if (r.ok) acceptCommandRow(r.value);
@@ -587,12 +546,8 @@ export async function setFriendlyName(
   tmuxName: string,
   friendlyName: string,
 ): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>("set_session_friendly_name", {
-    args: {
-      host_alias: hostAlias,
-      tmux_name: tmuxName,
-      friendly_name: friendlyName,
-    },
+  const r = await invokeCmd<SessionRow>('set_session_friendly_name', {
+    args: { host_alias: hostAlias, tmux_name: tmuxName, friendly_name: friendlyName },
   });
   if (r.ok) acceptCommandRow(r.value);
   return r;
@@ -601,10 +556,8 @@ export async function setFriendlyName(
 /** Mark the session viewed now (redesign 2.3): its finished turns read as
  *  seen and it leaves the `done_unread` bucket. A watcher's call is refused
  *  by the hub (the stamp is one per row); that is not an error to show. */
-export async function touchSessionViewed(
-  sessionId: number,
-): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>("touch_session_viewed", {
+export async function touchSessionViewed(sessionId: number): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('touch_session_viewed', {
     args: { session_id: sessionId },
   });
   if (r.ok) acceptCommandRow(r.value);
@@ -619,11 +572,8 @@ export async function restartSession(
   name: string,
   profile?: string,
 ): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>("restart_session", {
-    args:
-      profile === undefined
-        ? { host_alias: hostAlias, name }
-        : { host_alias: hostAlias, name, profile },
+  const r = await invokeCmd<SessionRow>('restart_session', {
+    args: profile === undefined ? { host_alias: hostAlias, name } : { host_alias: hostAlias, name, profile },
   });
   if (r.ok) acceptCommandRow(r.value);
   return r;
@@ -638,11 +588,11 @@ export async function restartSession(
  */
 export async function rewindConversation(
   sessionId: number,
-  mode: "rewind" | "fork",
+  mode: 'rewind' | 'fork',
   anchorUuid: string | null,
   newWorktree: string | null = null,
 ): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>("rewind_conversation", {
+  const r = await invokeCmd<SessionRow>('rewind_conversation', {
     args: {
       session_id: sessionId,
       mode,
@@ -723,7 +673,7 @@ export async function repairSession(
     explicit?: boolean;
   } = {},
 ): Promise<Result<RepairReport>> {
-  return invokeCmd<RepairReport>("repair_session", {
+  return invokeCmd<RepairReport>('repair_session', {
     args: { session_id: sessionId, explicit: opts.explicit ?? false },
   });
 }
@@ -745,17 +695,12 @@ export async function captureSession(
   sessionId: number,
   opts: { scrollback_lines?: number; max_lines?: number } = {},
 ): Promise<Result<string>> {
-  const args: {
-    session_id: number;
-    scrollback_lines?: number;
-    max_lines?: number;
-  } = {
+  const args: { session_id: number; scrollback_lines?: number; max_lines?: number } = {
     session_id: sessionId,
   };
-  if (opts.scrollback_lines !== undefined)
-    args.scrollback_lines = opts.scrollback_lines;
+  if (opts.scrollback_lines !== undefined) args.scrollback_lines = opts.scrollback_lines;
   if (opts.max_lines !== undefined) args.max_lines = opts.max_lines;
-  return invokeCmd<string>("capture_session", { args });
+  return invokeCmd<string>('capture_session', { args });
 }
 
 // ── sharing a session (multi-user M1) ───────────────────────────────────────
@@ -805,10 +750,8 @@ export interface SessionGrant {
  *  administration phase D — its members and admins from now on). */
 export type ShareTo = string | { org: string };
 
-function recipientArgs(
-  to: ShareTo,
-): { person: string } | { person: string; org: string } {
-  return typeof to === "string" ? { person: to } : { person: "", org: to.org };
+function recipientArgs(to: ShareTo): { person: string } | { person: string; org: string } {
+  return typeof to === 'string' ? { person: to } : { person: '', org: to.org };
 }
 
 /**
@@ -823,9 +766,9 @@ function recipientArgs(
 export async function shareSession(
   sessionId: number,
   to: ShareTo,
-  level: "watch" | "answer" | "drive",
+  level: 'watch' | 'answer' | 'drive',
 ): Promise<Result<SessionRow | null>> {
-  const r = await invokeCmd<SessionRow | null>("session_share", {
+  const r = await invokeCmd<SessionRow | null>('session_share', {
     args: { session_id: sessionId, ...recipientArgs(to), level },
   });
   if (r.ok) acceptCommandRow(r.value);
@@ -837,7 +780,7 @@ export async function unshareSession(
   sessionId: number,
   to: ShareTo,
 ): Promise<Result<SessionRow | null>> {
-  const r = await invokeCmd<SessionRow | null>("session_unshare", {
+  const r = await invokeCmd<SessionRow | null>('session_unshare', {
     args: { session_id: sessionId, ...recipientArgs(to) },
   });
   if (r.ok) acceptCommandRow(r.value);
@@ -857,7 +800,7 @@ export async function narrowShare(
   sessionId: number,
   to: ShareTo,
 ): Promise<Result<SessionRow | null>> {
-  const r = await invokeCmd<SessionRow | null>("session_narrow", {
+  const r = await invokeCmd<SessionRow | null>('session_narrow', {
     args: { session_id: sessionId, ...recipientArgs(to) },
   });
   if (r.ok) acceptCommandRow(r.value);
@@ -876,10 +819,8 @@ export async function narrowShare(
  * Answers an array, never null: "shared with nobody" is the ordinary case and
  * an empty list is how it reads.
  */
-export async function fetchSessionAccess(
-  sessionId: number,
-): Promise<Result<SessionGrant[]>> {
-  const r = await invokeCmd<SessionGrant[] | null>("session_access", {
+export async function fetchSessionAccess(sessionId: number): Promise<Result<SessionGrant[]>> {
+  const r = await invokeCmd<SessionGrant[] | null>('session_access', {
     args: { session_id: sessionId },
   });
   if (!r.ok) return r;
@@ -895,7 +836,7 @@ export interface NewSessionArgs {
   /** Branch to fork a new worktree from; null/empty = repo default branch. */
   base_branch?: string | null;
   /** "work" (default) runs Claude Code; "shell" runs a plain login shell. */
-  kind?: "work" | "shell";
+  kind?: 'work' | 'shell';
   /** Optional command run on start for a shell session (null = bare shell). */
   start_command?: string | null;
   /**
@@ -932,7 +873,7 @@ export interface CreatingStart {
   host_alias: string;
   /** Empty when the backend mints the name. */
   name: string;
-  kind: "work" | "shell";
+  kind: 'work' | 'shell';
 }
 
 export const creatingStart = writable<CreatingStart | null>(null);
@@ -941,10 +882,8 @@ export const creatingStart = writable<CreatingStart | null>(null);
  *  follows them until it is. */
 export const startedIds = writable<ReadonlySet<number>>(new Set());
 
-function markStarting(
-  row: Pick<SessionRow, "id" | "kind" | "claude_status"> | null,
-): void {
-  if (!row || row.kind === "shell" || row.claude_status !== null) return;
+function markStarting(row: Pick<SessionRow, 'id' | 'kind' | 'claude_status'> | null): void {
+  if (!row || row.kind === 'shell' || row.claude_status !== null) return;
   startedIds.update((s) => new Set([...s, row.id]));
 }
 
@@ -956,12 +895,12 @@ export async function newSessionAbortable(
   // its worktree and tmux steps, the row it returns waits on the agent.
   creatingStart.set({
     host_alias: args.host_alias,
-    name: args.name ?? "",
-    kind: args.kind === "shell" || args.agent === "shell" ? "shell" : "work",
+    name: args.name ?? '',
+    kind: args.kind === 'shell' || args.agent === 'shell' ? 'shell' : 'work',
   });
   let r: Result<SessionRow>;
   try {
-    r = await invokeCmdAbortable<SessionRow>("new_session", { args }, signal);
+    r = await invokeCmdAbortable<SessionRow>('new_session', { args }, signal);
   } finally {
     creatingStart.set(null);
   }
@@ -992,17 +931,12 @@ export function sameSession(a: SessionIdentity, b: SessionIdentity): boolean {
 }
 
 /** Locate `ident` in `arr`: by id first, then by the host+name pair. */
-export function findSession(
-  arr: SessionRow[],
-  ident: SessionIdentity,
-): SessionRow | undefined {
+export function findSession(arr: SessionRow[], ident: SessionIdentity): SessionRow | undefined {
   if (ident.id != null) {
     const byId = arr.find((s) => s.id === ident.id);
     if (byId) return byId;
   }
-  return arr.find(
-    (s) => s.host_alias === ident.host_alias && s.tmux_name === ident.tmux_name,
-  );
+  return arr.find((s) => s.host_alias === ident.host_alias && s.tmux_name === ident.tmux_name);
 }
 
 export function mergeSession(row: SessionRow): void {
@@ -1015,8 +949,8 @@ export function removeSession(id: number): void {
 
 /** One backend row event, as delivered by `events.ts`. */
 export type SessionEvent =
-  | { type: "created" | "updated"; row: SessionRow }
-  | { type: "killed"; id: number };
+  | { type: 'created' | 'updated'; row: SessionRow }
+  | { type: 'killed'; id: number };
 
 /** Apply a burst of session events in ONE store update. The reconcile tick
  *  emits `session:updated` once per session, so without batching every tick
@@ -1028,9 +962,8 @@ export function applySessionEvents(events: readonly SessionEvent[]): void {
   sessions.update((arr) => {
     let next = arr;
     for (const ev of events) {
-      if (ev.type === "killed") next = rows.removeFrom(next, ev.id);
-      else if (ev.type === "created")
-        next = rows.mergeCreatedInto(next, ev.row);
+      if (ev.type === 'killed') next = rows.removeFrom(next, ev.id);
+      else if (ev.type === 'created') next = rows.mergeCreatedInto(next, ev.row);
       else next = rows.mergeInto(next, ev.row);
     }
     return next;
@@ -1063,13 +996,8 @@ export async function sendPrompt(
   prompt: string,
   opts: { keys?: string } = {},
 ): Promise<Result<void>> {
-  return invokeCmd<void>("send_prompt", {
-    args: {
-      host_alias: hostAlias,
-      tmux_name: tmuxName,
-      prompt,
-      keys: opts.keys ?? null,
-    },
+  return invokeCmd<void>('send_prompt', {
+    args: { host_alias: hostAlias, tmux_name: tmuxName, prompt, keys: opts.keys ?? null },
   });
 }
 
@@ -1082,13 +1010,9 @@ export async function sendPrompt(
  * key-only write to the `answer` gate and every other `send_prompt` to
  * `drive`.
  */
-export async function answerDialog(
-  hostAlias: string,
-  tmuxName: string,
-  key: string,
-): Promise<Result<void>> {
-  return invokeCmd<void>("send_prompt", {
-    args: { host_alias: hostAlias, tmux_name: tmuxName, prompt: "", keys: key },
+export async function answerDialog(hostAlias: string, tmuxName: string, key: string): Promise<Result<void>> {
+  return invokeCmd<void>('send_prompt', {
+    args: { host_alias: hostAlias, tmux_name: tmuxName, prompt: '', keys: key },
   });
 }
 
@@ -1116,31 +1040,17 @@ export interface QueuedPrompt {
 
 /** Send a prompt as a new turn: now when the session is idle, else once its
  *  turn ends (never into a dialog). */
-export function queuePrompt(
-  sessionId: number,
-  prompt: string,
-): Promise<Result<QueuePromptResult>> {
-  return invokeCmd<QueuePromptResult>("queue_prompt", {
-    args: { session_id: sessionId, prompt },
-  });
+export function queuePrompt(sessionId: number, prompt: string): Promise<Result<QueuePromptResult>> {
+  return invokeCmd<QueuePromptResult>('queue_prompt', { args: { session_id: sessionId, prompt } });
 }
 
-export function queuedPrompts(
-  sessionId: number,
-): Promise<Result<QueuedPrompt[]>> {
-  return invokeCmd<QueuedPrompt[]>("queued_prompts", {
-    args: { session_id: sessionId },
-  });
+export function queuedPrompts(sessionId: number): Promise<Result<QueuedPrompt[]>> {
+  return invokeCmd<QueuedPrompt[]>('queued_prompts', { args: { session_id: sessionId } });
 }
 
 /** Take back a waiting prompt; answers what is still waiting. */
-export function cancelQueuedPrompt(
-  sessionId: number,
-  id: number,
-): Promise<Result<QueuedPrompt[]>> {
-  return invokeCmd<QueuedPrompt[]>("cancel_queued_prompt", {
-    args: { session_id: sessionId, id },
-  });
+export function cancelQueuedPrompt(sessionId: number, id: number): Promise<Result<QueuedPrompt[]>> {
+  return invokeCmd<QueuedPrompt[]>('cancel_queued_prompt', { args: { session_id: sessionId, id } });
 }
 
 export const DEFAULT_REVIEW_PROMPT = `Review the work in this worktree. Run \`git diff\` and \`git log\` against the base branch to see what changed.
@@ -1157,7 +1067,7 @@ export async function spawnReview(
   signal?: AbortSignal,
 ): Promise<Result<SessionRow>> {
   const r = await invokeCmdAbortable<SessionRow>(
-    "spawn_review",
+    'spawn_review',
     { args: { source_session_id: sourceSessionId, prompt } },
     signal,
   );
@@ -1165,10 +1075,8 @@ export async function spawnReview(
   return r;
 }
 
-export async function recreateSession(
-  sessionId: number,
-): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>("recreate_session", {
+export async function recreateSession(sessionId: number): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('recreate_session', {
     args: { session_id: sessionId },
   });
   if (r.ok) acceptCommandRow(r.value);
@@ -1185,7 +1093,7 @@ export interface RestorePlanEntry {
   cwd: string | null;
   claude_session_id: string | null;
   friendly_name: string | null;
-  action: "restore" | "skip";
+  action: 'restore' | 'skip';
   reason: string | null;
 }
 
@@ -1216,7 +1124,7 @@ export async function restoreHostSessions(
   hostAlias: string,
   opts: { dryRun?: boolean; sessionIds?: number[] } = {},
 ): Promise<Result<RestoreReport>> {
-  return invokeCmd<RestoreReport>("restore_host_sessions", {
+  return invokeCmd<RestoreReport>('restore_host_sessions', {
     args: {
       host_alias: hostAlias,
       dry_run: opts.dryRun ?? false,
@@ -1245,7 +1153,7 @@ export interface LostCandidate {
   project_id: number | null;
   worktree_id: number | null;
   existing_session_id: number | null;
-  rank_hint: "before_boot" | "after_boot" | "stale" | "unknown";
+  rank_hint: 'before_boot' | 'after_boot' | 'stale' | 'unknown';
   resumable: boolean;
 }
 
@@ -1258,15 +1166,13 @@ export async function discoverLostSessions(
   hostAlias: string,
   limit?: number,
 ): Promise<Result<LostCandidate[]>> {
-  return invokeCmd<LostCandidate[]>("discover_lost_sessions", {
+  return invokeCmd<LostCandidate[]>('discover_lost_sessions', {
     args: { host_alias: hostAlias, limit: limit ?? null },
   });
 }
 
-export async function dismissGhostSession(
-  sessionId: number,
-): Promise<Result<void>> {
-  const r = await invokeCmd<void>("dismiss_ghost_session", {
+export async function dismissGhostSession(sessionId: number): Promise<Result<void>> {
+  const r = await invokeCmd<void>('dismiss_ghost_session', {
     args: { session_id: sessionId },
   });
   if (r.ok) removeSession(sessionId);
@@ -1277,15 +1183,9 @@ export async function dismissGhostSession(
  *  runs it from now on and the caller owns it when nobody did (Lost and
  *  found, redesign step 4.8). `projectId` adopts it into that project
  *  (Adopt into, step 4.12); omitted keeps the one reconcile found. */
-export async function adoptSession(
-  sessionId: number,
-  projectId?: number | null,
-): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>("adopt_session", {
-    args:
-      projectId == null
-        ? { session_id: sessionId }
-        : { session_id: sessionId, project_id: projectId },
+export async function adoptSession(sessionId: number, projectId?: number | null): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('adopt_session', {
+    args: projectId == null ? { session_id: sessionId } : { session_id: sessionId, project_id: projectId },
   });
   if (r.ok) acceptCommandRow(r.value);
   return r;
@@ -1310,7 +1210,7 @@ export async function newBgSession(
    *  from the desktop dialog — nobody asked for it from inside a session. */
   requesterSessionId: number | null = null,
 ): Promise<Result<NewBgSessionResult>> {
-  const r = await invokeCmd<NewBgSessionResult>("new_bg_session", {
+  const r = await invokeCmd<NewBgSessionResult>('new_bg_session', {
     args: {
       host_alias: hostAlias,
       name,
@@ -1326,28 +1226,24 @@ export async function newBgSession(
  *  (`bg`) or an interactive Claude session running outside fleet entirely
  *  (`external`, e.g. Claude Desktop). Every "no PTY" check in the app should
  *  go through this instead of comparing `kind` directly. */
-export function hasNoPane(s: Pick<SessionRow, "kind">): boolean {
-  return s.kind === "bg" || s.kind === "external";
+export function hasNoPane(s: Pick<SessionRow, 'kind'>): boolean {
+  return s.kind === 'bg' || s.kind === 'external';
 }
 
 /** True for a background agent whose CLI process is gone (backend marks it
  *  `claude_status: 'stopped'` once its transcript has been quiet past
  *  `AGENT_INACTIVE_SECS`). Never true for `external` rows — those leave the
  *  list on their own when the process ends. */
-export function isInactiveAgent(
-  s: Pick<SessionRow, "kind" | "claude_status">,
-): boolean {
-  return s.kind === "bg" && s.claude_status === "stopped";
+export function isInactiveAgent(s: Pick<SessionRow, 'kind' | 'claude_status'>): boolean {
+  return s.kind === 'bg' && s.claude_status === 'stopped';
 }
 
 /** Remove a `bg` agent row from the list without touching the underlying
  *  process (it does not use fleet). Refused by the backend for `external`
  *  rows and for a row still `working`. The row itself is removed by the
  *  `session:removed` event the backend emits, not by this call. */
-export async function dismissAgentSession(
-  sessionId: number,
-): Promise<Result<null>> {
-  return invokeCmd<null>("dismiss_agent_session", {
+export async function dismissAgentSession(sessionId: number): Promise<Result<null>> {
+  return invokeCmd<null>('dismiss_agent_session', {
     args: { session_id: sessionId },
   });
 }
@@ -1373,11 +1269,7 @@ export async function purgeProject(
   projectPath: string,
   projectId: number,
 ): Promise<Result<PurgeReport[]>> {
-  return invokeCmd<PurgeReport[]>("purge_project", {
-    args: {
-      host_aliases: hostAliases,
-      project_path: projectPath,
-      project_id: projectId,
-    },
+  return invokeCmd<PurgeReport[]>('purge_project', {
+    args: { host_aliases: hostAliases, project_path: projectPath, project_id: projectId },
   });
 }
