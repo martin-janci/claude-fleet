@@ -195,8 +195,14 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `decide.jev.sibling_repos` | `off` | `off` / `shadow` / `assist` | Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.host_placement` | `off` | `off` / `shadow` / `assist` | Pre-selecting the host of a new session when no rule, limit or offline host decides. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.quick_answer` | `off` | `off` / `shadow` / `assist` | Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.adopt_target` | `off` | `off` / `shadow` / `assist` | Prefilling the project when you adopt a pane fleet did not start. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.restore_target` | `off` | `off` / `shadow` / `assist` | Prefilling the project when you restore a conversation found on a host. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.duplicate` | `off` | `off` / `shadow` / `assist` | Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.control_route` | `off` | `off` / `shadow` / `assist` | Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.summary_check` | `off` | `off` / `shadow` / `assist` | Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support. Experimental. |
+| `decide.jev.turn_outcome` | `off` | `off` / `shadow` / `assist` | Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
+| `decide.jev.unassigned_reply` | `false` | on / off | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
 | `decide.jev.breaker_failures` | `5` | 1–100 | Failed calls in a row that open the circuit breaker. |
 | `decide.jev.breaker_open_secs` | `300` | 10–86400 seconds | How long an open breaker refuses calls. |
@@ -236,7 +242,7 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | Setting | Default | Range | What it does |
 |---|---|---|---|
 | `notify.desktop` | `needs_you,failed,blocked,routine_failed` | any of `needs_you`, `failed`, `blocked`, `done`, `routine_failed` | The session states the desktop shows a notification for. |
-| `notify.phone` | `needs_you,failed,routine_failed` | any of `needs_you`, `failed`, `blocked`, `done`, `routine_failed` | The session states the phone shows a notification for. |
+| `notify.phone` | `needs_you,failed,blocked,routine_failed` | any of `needs_you`, `failed`, `blocked`, `done`, `routine_failed` | The session states the phone shows a notification for. |
 | `notify.sound` | `needs_you` | any of `needs_you`, `failed`, `blocked`, `done`, `routine_failed` | The session states whose notification also plays a sound. |
 | `notify.quiet_hours` | `` | a daily time range `HH:MM-HH:MM`, or empty for none | A daily range, like 22:00-07:30, in which no notification is shown or sounded, on each device's own clock. Empty: none. |
 | `notify.quiet_except` | `failed` | any of `needs_you`, `failed`, `blocked`, `done`, `routine_failed` | The states that still notify during quiet hours. |

@@ -219,7 +219,10 @@ function isPrimaryTaskOf(s: SessionRow, taskId: string): boolean {
  * session the focus; `task` names the task it was opened from (an occurrence
  * under a task in the Work view), which the Work lists then light.
  */
-export function selectSession(s: SessionRow | null, opts: { follow?: boolean; task?: string } = {}): void {
+export function selectSession(
+  s: SessionRow | null,
+  opts: { follow?: boolean; task?: string; remember?: boolean } = {},
+): void {
   if (s === null) {
     selectedRef.set(null);
     return;
@@ -233,10 +236,15 @@ export function selectSession(s: SessionRow | null, opts: { follow?: boolean; ta
   if (!opts.follow) {
     taskSel.update((t) => ({ task: opts.task ?? t.task, focus: 'session', back: null }));
   }
-  writePref<SessionIdent>(LAST_SESSION_KEY, {
-    host_alias: s.host_alias,
-    tmux_name: s.tmux_name,
-  });
+  // A pop-out terminal window (step 5.4) shares this pref store with the
+  // main window; it passes `remember: false` so the next launch still
+  // reopens what the main window had.
+  if (opts.remember !== false) {
+    writePref<SessionIdent>(LAST_SESSION_KEY, {
+      host_alias: s.host_alias,
+      tmux_name: s.tmux_name,
+    });
+  }
   if (!opts.follow) for (const fn of openedListeners) fn(s);
 }
 

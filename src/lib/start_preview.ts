@@ -8,6 +8,7 @@ import type { DecisionProposal } from './proposals';
 import type { SessionRow } from './sessions';
 import type { WorkTask } from './work_view';
 import { preselect, type ProposalLike } from './ai_proposal';
+import type { StartRule } from './start_rules';
 
 /** What would stop or change a start. */
 export interface StartConflict {
@@ -28,6 +29,8 @@ export interface StartPlanView {
   worktree_id?: number | null;
   name: string;
   parallel?: boolean;
+  /** The start rule that picked the repository (redesign 8.11). */
+  rule_id?: number | null;
 }
 
 export interface StartPreview {
@@ -52,6 +55,21 @@ export interface StartPreview {
    *  before) Jev proposes the task also needs (N3, assist). A pre-tick
    *  only; the person still presses Start. */
   suggested_sibling?: { project_id: number; confidence_pct?: number | null; run_id?: number | null } | null;
+  /** The rule fleet offers after five identical starts of the key's
+   *  prefix in one repository (redesign 8.11): "Add rule PD-* → acme/pos?". */
+  rule_offer?: StartRule | null;
+  /** The brief was drafted by a model (redesign 6.10); absent for the
+   *  template. */
+  brief_draft?: BriefDraft | null;
+}
+
+/** What a drafted brief says about itself. */
+export interface BriefDraft {
+  model: string;
+  host_alias: string;
+  /** Notes from earlier sessions the model read besides the ticket. */
+  notes: number;
+  truncated?: boolean;
 }
 
 /** Jev's K1 answer as the shared chip reads it (redesign 3.12), when the
@@ -80,6 +98,30 @@ export function suggestedProjectId(p: StartPreview): number | null {
 /** Preview a start: the same arguments `startWork` takes. */
 export function previewStartWork(args: StartWorkArgs): Promise<Result<StartPreview>> {
   return invokeCmd<StartPreview>('preview_start_work', { args });
+}
+
+/** Draft the brief from the ticket and the task's earlier work (redesign
+ *  6.10): one model call on the host the start would land on. The draft is
+ *  only text for the person to edit; nothing starts. A hub older than this
+ *  ignores the ask and answers the template, which is said, not shown as a
+ *  draft. */
+export async function draftBrief(args: StartWorkArgs): Promise<Result<{ brief: string; draft: BriefDraft }>> {
+  const r = await previewStartWork({ ...args, with_brief: true, brief: undefined, draft_brief: true });
+  if (!r.ok) return r;
+  const { brief, brief_draft } = r.value;
+  if (!brief || !brief_draft) {
+    const message = r.value.missing
+      ? `Pick a ${r.value.missing} first.`
+      : 'This hub cannot draft a brief yet; the ticket brief stays.';
+    return { ok: false, error: { code: 'E_UNSUPPORTED', message } };
+  }
+  return { ok: true, value: { brief, draft: brief_draft } };
+}
+
+/** What a draft read: "from the ticket and 3 earlier notes". */
+export function draftSource(d: BriefDraft): string {
+  const notes = d.notes === 1 ? '1 earlier note' : `${d.notes} earlier notes`;
+  return d.notes > 0 ? `from the ticket and ${notes}` : 'from the ticket';
 }
 
 /** A hub older than the preview has no `preview_start` action: it answers

@@ -27,6 +27,7 @@
   import { captureSession, type SessionRow } from './sessions';
   import { noAttachReason, type SessionAccess } from './access';
   import { hubStatus } from './hub';
+  import WatchSummary from './WatchSummary.svelte';
 
   let {
     session,
@@ -168,6 +169,11 @@
 
   {#if why}
     <p class="why" data-testid="watch-reason">{why}</p>
+  {/if}
+
+  {#if pollable}
+    <!-- Orbit Fleet 11.11: what happened since the watcher last looked. -->
+    <WatchSummary {session} />
   {/if}
 
   {#if !pollable}

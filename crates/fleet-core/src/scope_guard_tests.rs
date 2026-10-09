@@ -182,6 +182,20 @@ struct Guard {
 ///
 /// Ordered by file, as the scan finds them.
 const SCOPE_GUARDS: &[Guard] = &[
+    // ---- service/runs.rs ------------------------------------------------
+    Guard {
+        file: "crates/fleet-core/src/service/runs.rs",
+        func: "reach",
+        nth: 0,
+        code: "let spend = scope.org.is_all() && sessions.len() == all.len();",
+        verdict: Verdict::OrgBoundary,
+        why: "whether the runs that belong to no session or mission (Jev, a \
+              summary of a conversation no session holds) are listed: never \
+              to a reader narrowed to an org. The PERSON half is the \
+              conjunct beside it — every session there is passed \
+              `sees_session_row` — so a person's own device that sees every \
+              session is served them, and one that does not is not",
+    },
     // ---- service/messages.rs -------------------------------------------
     Guard {
         file: "crates/fleet-core/src/service/messages.rs",
@@ -1917,6 +1931,22 @@ const ORG_HALF_SITES: &[OrgHalf] = &[
                       created by the session's owner or by its own Claude \
                       and never by a grantee, which is why a person column \
                       on `downloads` would change no answer here",
+    },    OrgHalf {
+        file: "crates/fleet-core/src/service/library.rs",
+        func: "visible",
+        nth: 0,
+        code: "None => scope.org.sees_session_org_only(&row.host_alias, row.org_id),",
+        person_half: "`may_own` in the OTHER arm of the same match, on the \
+                      session row the file was put beside: the downloads' \
+                      `own` tier, because a Library row names a path on the \
+                      owner's host. This arm is the session-is-GONE case, the \
+                      same as `downloads::visible`'s: no person is left to \
+                      ask and `LibraryItemRow.org_id`, recorded for exactly \
+                      this, is the whole of the fence. The residue is BOUNDED \
+                      the same way: `library::add` takes the session only \
+                      when `may_own` holds, so every row that could reach \
+                      this arm was recorded by the session's owner and never \
+                      by a grantee",
     },
 ];
 

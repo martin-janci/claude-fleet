@@ -1225,6 +1225,7 @@ pub fn admin(
         OrgAction::AddOrg => {
             let auto = parse_auto_tidy(args.auto_tidy.as_deref())?;
             let jev = parse_jev(args.jev.as_deref())?;
+            let jev_reply = parse_jev(args.jev_reply.as_deref())?;
             let mut org = s.add_org(
                 &need(&args.name, name, "name")?,
                 args.color.as_deref(),
@@ -1236,6 +1237,9 @@ pub fn admin(
             if let Some(j) = jev {
                 org = s.set_org_jev_allowed(org.id, j)?;
             }
+            if let Some(j) = jev_reply {
+                org = s.set_org_jev_reply_allowed(org.id, j)?;
+            }
             if let Some(on) = args.bound_sees_unassigned {
                 org = s.set_org_bound_sees_unassigned(org.id, on)?;
             }
@@ -1244,6 +1248,7 @@ pub fn admin(
         OrgAction::UpdateOrg => {
             let auto = parse_auto_tidy(args.auto_tidy.as_deref())?;
             let jev = parse_jev(args.jev.as_deref())?;
+            let jev_reply = parse_jev(args.jev_reply.as_deref())?;
             let id = need(&args.org_id, name, "org_id")?;
             let mut org = s.update_org(
                 id,
@@ -1257,6 +1262,15 @@ pub fn admin(
             if let Some(j) = jev {
                 org = s.set_org_jev_allowed(id, j)?;
                 tracing::info!(org_id = id, jev = j, "[decide] org consent changed");
+            }
+            // D48: the second consent, to reply text (J2).
+            if let Some(j) = jev_reply {
+                org = s.set_org_jev_reply_allowed(id, j)?;
+                tracing::info!(
+                    org_id = id,
+                    jev_reply = j,
+                    "[decide] org reply consent changed"
+                );
             }
             // D31 (work graph M14.1b): what the org's bound clients see of
             // unassigned work and sessions.

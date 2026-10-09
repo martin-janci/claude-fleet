@@ -14,6 +14,8 @@
 //!   (`fleet-hub decide bench work-link`).
 //! - [`status_map`]: card J3, an Asana section's status category
 //!   (`fleet-hub decide bench status-map`).
+//! - [`turn_outcome`]: card J2, what a silent turn's end came to, from
+//!   labeled pane tails (`fleet-hub decide bench turn-outcome`).
 //!
 //! - [`perturb`]: perturbed variants (dataset C) and the paired comparison
 //!   datasets B and C are judged by; [`status_map_robust`] applies them to
@@ -30,6 +32,7 @@ pub mod status_map_robust;
 mod status_map_robust_tests;
 #[cfg(test)]
 mod status_map_tests;
+pub mod turn_outcome;
 pub mod work_link;
 pub mod work_link_robust;
 #[cfg(test)]

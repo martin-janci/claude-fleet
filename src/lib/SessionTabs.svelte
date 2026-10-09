@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  export type SessionTab = 'conversation' | 'agent' | 'files' | 'details';
+  export type SessionTab = 'conversation' | 'agent' | 'terminals' | 'files' | 'details';
 </script>
 
 <script lang="ts">
@@ -7,7 +7,7 @@
   // redesign step 3.5, Main board): the session's name, state and where it
   // runs, then Conversation · the agent tab · Files · Details. The agent tab
   // is the terminal, named after the agent in it ("Claude Code", "Codex").
-  // Terminals 0..N join the bar in 5.3. Assets stays on the right until
+  // Terminals (5.3) is the session's shells, with their count. Assets stays on the right until
   // Toolkit (3.16) takes it; Accounts & hosts is on the rail and ⌘I.
   //
   // App owns what each tab does;
@@ -32,6 +32,8 @@
     name: string;
     /** Which tab is current, or null while a fleet page owns the column. */
     current: SessionTab | null;
+    /** How many shell terminals the session has open (5.3). */
+    terminalCount?: number;
     /** Per-tab reason it cannot open now; absent means it can. */
     disabled: Partial<Record<SessionTab, string>>;
     assetsActive: boolean;
@@ -47,6 +49,7 @@
     session,
     name,
     current,
+    terminalCount = 0,
     disabled,
     assetsActive,
     inspectorOpen,
@@ -66,9 +69,10 @@
   const agentLabel = $derived(session ? (AGENT_LABELS[sessionAgent(session)] ?? 'Terminal') : 'Terminal');
   const prNumber = $derived(session?.pr_url?.match(/\/pull\/(\d+)/)?.[1] ?? null);
 
-  const tabs = $derived<{ id: SessionTab; label: string; chord: string | null }[]>([
+  const tabs = $derived<{ id: SessionTab; label: string; chord: string | null; count?: number }[]>([
     { id: 'conversation', label: 'Conversation', chord: null },
     { id: 'agent', label: agentLabel, chord: shortcutLabel('session-view', isMac) },
+    { id: 'terminals', label: 'Terminals', chord: shortcutLabel('new-terminal', isMac), count: terminalCount },
     { id: 'files', label: 'Files', chord: null },
     { id: 'details', label: 'Details', chord: null },
   ]);
@@ -158,7 +162,10 @@
           title={!session ? 'No session selected' : (disabled[t.id] ?? (t.chord ? `${t.label} (${t.chord})` : t.label))}
           data-testid="stab-{t.id}"
           onclick={() => onselect(t.id)}
-          >{#if t.id === 'agent' && agent}<AgentMark {agent} />{/if}{t.label}{#if t.chord}<span
+          >{#if t.id === 'agent' && agent}<AgentMark {agent} />{/if}{t.label}{#if t.count}<span
+              class="count"
+              data-testid="stab-{t.id}-count">{t.count}</span
+            >{/if}{#if t.chord}<span
               class="of-kbd"
               aria-hidden="true">{t.chord}</span
             >{/if}</button
@@ -229,6 +236,14 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
+  }
+  .count {
+    font-size: var(--text-xs);
+    font-weight: 500;
+    padding: 0 5px;
+    border-radius: 4px;
+    background: var(--bg-sunk);
+    color: var(--fg-2);
   }
   .tab-strip__tab.fleet[aria-pressed='true'] {
     color: var(--fg);

@@ -28,6 +28,7 @@
   import { timeAgo } from './session_status';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import PromptComposer from './PromptComposer.svelte';
+  import WatchSummary from './WatchSummary.svelte';
   import ReviewDialog from './ReviewDialog.svelte';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -648,6 +649,9 @@
       {/if}
     </div>
   </header>
+
+  <!-- Orbit Fleet 11.11: the watcher's summary tops the facts too. -->
+  <WatchSummary {session} />
 
   <dl class="meta">
     <dt>Host</dt>

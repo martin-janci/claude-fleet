@@ -59,6 +59,7 @@ import type { HubConnection } from './hub_connection';
 import { hubStatus, STANDALONE } from './hub';
 import { UNKNOWN_SESSION_REASON } from './share';
 import { resetAccessForTests, setMyGrants } from './access';
+import { expectAccessible } from './a11y_check';
 import {
   requestPreflight,
   resetPreflightsForTest,
@@ -1391,5 +1392,22 @@ describe('TransferSheet access gate (multi-user M1)', () => {
       await fireEvent.click(screen.getByTestId('transfer-cancel-wait'));
       expect(cancelWait).toHaveBeenCalledWith(source.id);
     });
+  });
+});
+
+describe('TransferSheet: accessibility', () => {
+
+  it('the Move sheet, set up and in progress, is accessible', async () => {
+    pendingMove();
+    transferSheetFor.set(5);
+    render(TransferSheet);
+    await tick();
+    await expectAccessible(await screen.findByTestId('move-dialog'));
+    await fireEvent.click(screen.getByTestId('confirm-move'));
+    applyMoveProgress(ev('git', 'done', '2 commits'));
+    applyMoveProgress(ev('replay', 'started'));
+    await tick();
+    await screen.findByTestId('transfer-steps');
+    await expectAccessible(screen.getByTestId('move-dialog'));
   });
 });

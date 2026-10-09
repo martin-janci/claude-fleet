@@ -25,9 +25,9 @@ Parameters: `confirm_nonce`, `host_alias`, `source`
 
 ### `adopt_session`
 
-Adopt a live tmux session fleet did not start (started_at null: someone ran tmux by hand on the host). Fleet runs it from now on: started_at is set and the caller becomes its owner when it has none. The pane is untouched. Errors with E_INVALID_STATE for a row fleet already runs, a lost one (use restore_host_sessions) or one with no pane (bg, external).
+Adopt a live tmux session fleet did not start (started_at null: someone ran tmux by hand on the host). Fleet runs it from now on: started_at is set and the caller becomes its owner when it has none. project_id puts it in that project (lost_target proposes one). The pane is untouched. Errors with E_INVALID_STATE for a row fleet already runs, a lost one (use restore_host_sessions) or one with no pane (bg, external).
 
-Parameters: `session_id`
+Parameters: `project_id`, `session_id`
 
 ### `agent_installs`
 
@@ -86,6 +86,18 @@ Parameters: `action`, `args`, `catalog`, `confirm_nonce`
 Changeset cards that adopt, sync and fix assets: list (one in full with id), propose (rebuild from the last scan), propose_layer (a layer change as a card), apply (positions picks items; a drift card takes one), undo (the latest applied card per catalog), dismiss, reject_item. Mutating actions need a grant on every catalog the card names.
 
 Parameters: `action`, `change`, `confirm_nonce`, `id`, `positions`
+
+### `control_handoffs`
+
+What the agent handed on, newest first: prompts and tasks sent to sessions, new sessions, missions, tasks and proposed trees, each with its target's state now.
+
+Parameters: `limit`
+
+### `control_route`
+
+Where a message just sent in Control goes (propose {text}), or record the person's pick (follow {run_id, chosen}).
+
+Parameters: `action`, `chosen`, `run_id`, `text`
 
 ### `debug_devices`
 
@@ -189,6 +201,12 @@ Kill a session: a tmux session, or a background agent row (`bg:<uuid>`, kind `bg
 
 Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
 
+### `library`
+
+Library: files a person put on a host (Upload or a prompt's attachment). list {session_id?, host_alias?, limit?}: {items}; add {kind: upload|attachment, session_id, files: [{path, name?, size?}]} records files already on the session's host; remove {id} drops a row, never the file. Downloads: list_downloads. E_NOTFOUND, E_INVALID.
+
+Parameters: `action`, `files`, `host_alias`, `id`, `kind`, `limit`, `session_id`
+
 ### `link_peer`
 
 Link this hub to another fleet's hub: redeem a peer code minted there (fleet-hub pair --mode peer) against its https URL. Answers the new link; it connects within seconds. The master, or the hub owner's trusted full device.
@@ -269,6 +287,12 @@ Git worktrees fleet knows about, with their alive-session occupants (0 = free to
 
 Parameters: `host_alias`, `limit`, `project_id`, `summary`
 
+### `lost_target`
+
+Read-only: the project a Lost and found entry would go into, to prefill Adopt or Restore. Pass session_id (a pane fleet did not start) or host_alias, claude_session_id, cwd and git_branch (a conversation discover_lost_sessions found). A directory inside a fleet project answers source rule; otherwise, with decide.jev.adopt_target / restore_target at assist, Jev may answer source jev with a confidence, or unsure (leave the form blank). Never adopts or restores anything.
+
+Parameters: `claude_session_id`, `cwd`, `git_branch`, `host_alias`, `session_id`
+
 ### `mcp_confirms`
 
 Calls waiting for your OK (the agent's starts and kills), oldest first.
@@ -315,7 +339,7 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 Administer the company: orgs (work_admin's org actions), devices (list, pair_device → code + QR, revoke, trust, bind, hand over, grant a catalog), people and members (roles, a member's grants). Hub owner's device: all; an org admin's: their org. Changes need a trusted full device, never locking out the one in use.
 
-Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `host_alias`, `isolate_sessions`, `jev`, `keep_grants`, `key`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path_prefix`, `person`, `person_id`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
+Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `host_alias`, `isolate_sessions`, `jev`, `jev_reply`, `keep_grants`, `key`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path_prefix`, `person`, `person_id`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
 
 ### `pair_client`
 
@@ -334,6 +358,12 @@ Parameters: `after`, `fleet_id`, `proto`, `results`, `send`, `wait_ms`
 What is a peer session doing: claude_status, current_activity, stuck_kind, context_pct (plus host/name/status). Cheap check before send_message or broadcast_prompt.
 
 Parameters: `session_id`
+
+### `place_transcript`
+
+Restore into a project: copy a conversation discover_lost_sessions found (not resumable where it ran) under the directory Claude Code keys that project's root by, on the same host, so claude --resume finds it there. Never moves or overwrites a transcript. Then resume with new_session { host_alias, project_id, name: tmux_name, resume_claude_session_id }.
+
+Parameters: `claude_session_id`, `host_alias`, `project_id`
 
 ### `plan_sync`
 
@@ -535,7 +565,7 @@ Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 
 ### `routines`
 
-Routines: a saved prompt that starts a session on a cron schedule, a session event or Run now. list; get {routine_id}: with its last runs; runs {routine_id, limit?}; save {routine, routine_id?}: the whole routine; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
+Routines: a saved prompt that starts a session on a cron schedule, a session event or Run now. list; get {routine_id}: with its last runs; runs {routine_id, limit?}; failing: each routine whose newest run failed, for the Inbox; save {routine, routine_id?}: the whole routine; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
 
 Parameters: `action`, `enabled`, `limit`, `routine`, `routine_id`, `skip`
 
@@ -544,6 +574,12 @@ Parameters: `action`, `enabled`, `limit`, `routine`, `routine_id`, `skip`
 send_prompt + wait_for_session(turn_gt) + session_transcript in one call. Returns { turn_seq, status: satisfied | timeout, transcript } (the reply as plain text; null with transcript_error when unreadable). Marked untrusted unless raw=true (master token only).
 
 Parameters: `max_chars`, `prompt`, `raw`, `session_id`, `timeout_s`
+
+### `runs`
+
+Runs, newest first: tasks, mission steps, Jev decisions, planner and summary runs, routine fires. list: {runs, total}; each run has kind, owner, outcome (ok | failed | needs_person | nothing_to_do | running), duration_ms, cost_micros and session_ids.
+
+Parameters: `action`, `kind`, `limit`, `mission_id`, `offset`, `org_id`, `outcome`, `routine_id`, `session_id`, `since`, `until`
 
 ### `safe_kill_session`
 
@@ -613,7 +649,7 @@ Parameters: `fresh_for`, `limit`, `session_id`
 
 ### `session_narrow`
 
-Lower a person's or org's grant on your session from drive to watch (owner only). Nothing raises one: revoke and share again. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
+Lower a person's or org's grant on your session to watch (owner only). Nothing raises one: revoke and share again. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
 
 Parameters: `org`, `person`, `session_id`
 
@@ -625,9 +661,15 @@ Parameters: `leaving`, `session_id`
 
 ### `session_share`
 
-Share a session you OWN with a person, or an org you are in (its members from now), at watch (read) or drive (also prompt). Owner only; never 'own' or a terminal. Returns the row. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.
+Share a session you OWN with a person, or an org you are in (its members from now), at watch (read), answer (also a dialog's keys) or drive (also prompt). Owner only; never 'own' or a terminal. Returns the row. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.
 
 Parameters: `level`, `org`, `person`, `session_id`
+
+### `session_summary_since`
+
+A short Claude-written summary of what a session did since a time (unix seconds), for whoever may read it: { text | null, check: off | shadow | passed | failed | unchecked, since, turns, model, host_alias, at }. Runs one claude -p on the session's host under its account (booked as watch_summary); only with the session org's consent; text is null when nothing happened since or when the Jev check hid it. Errors: E_FORBIDDEN (no consent), E_CLAUDE_CLI, E_TIMEOUT, as session_conversation.
+
+Parameters: `session_id`, `since`
 
 ### `session_tool_detail`
 
@@ -723,6 +765,12 @@ Spawn a review session: a new Claude session in the source session's worktree, s
 
 Parameters: `confirm_nonce`, `prompt`, `source_session_id`
 
+### `start_rules`
+
+Start rules: a task key pattern (PD-*) that names the project, and optionally the host, a start lands in, before the key's history and Jev. Fleet offers one after five identical starts. list: offers, active and dismissed rules; save {rule, rule_id?}: the whole rule, active; accept {rule_id}: an offer, replacing the pattern's other rule; dismiss {rule_id}: never offered again; delete {rule_id}. E_NOTFOUND, E_INVALID, E_EXISTS.
+
+Parameters: `action`, `rule`, `rule_id`
+
 ### `touch_session_viewed`
 
 Mark a session viewed now: the turns it has finished read as seen. Returns the row.
@@ -787,13 +835,13 @@ Parameters: `action`, `before_event`, `bucket_id`, `cursor`, `filters`, `host_al
 
 Trackers, orgs, retention, usage counts, sprints and releases; see action. Never returns a secret.
 
-Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket_id`, `carry`, `carry_to`, `color`, `confirm_nonce`, `credential_ref`, `days`, `ends_at`, `expected_version`, `external_id`, `goal`, `host_alias`, `isolate_sessions`, `jev`, `kind`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `shipped_ref`, `site_url`, `starts_at`, `state`, `tracker_id`, `transport`, `username`
+Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket_id`, `carry`, `carry_to`, `color`, `confirm_nonce`, `credential_ref`, `days`, `ends_at`, `expected_version`, `external_id`, `goal`, `host_alias`, `isolate_sessions`, `jev`, `jev_reply`, `kind`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `shipped_ref`, `site_url`, `starts_at`, `state`, `tracker_id`, `transport`, `username`
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. edit {item_id, title?, notes?, assignees?}: a person edits work with no ticket. create {title, parent?, notes?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status}; mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check. mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours?, budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; missions_pause_all. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. edit {item_id, title?, notes?, assignees?}: a person edits work with no ticket. create {title, parent?, notes?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status}; mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check. mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours?, budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; missions_pause_all. mission_release_note {mission_id}: a drafted release note of a completed mission; today_brief {refresh?, org_id?, since?}: Today's morning brief, drafted only on refresh. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
 
-Parameters: `ack_live`, `action`, `assignees`, `brief`, `bucket_id`, `budget_cents`, `card_id`, `confirm_nonce`, `days`, `decisions`, `depends_on`, `done_when`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `item_id`, `item_ids`, `items`, `key`, `level`, `line`, `link_id`, `max_parallel`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `primary`, `profile`, `project_id`, `project_ids`, `role`, `rule`, `rule_id`, `session_id`, `source`, `status`, `step`, `task_id`, `title`, `tree`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
+Parameters: `ack_live`, `action`, `assignees`, `brief`, `bucket_id`, `budget_cents`, `card_id`, `confirm_nonce`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `item_id`, `item_ids`, `items`, `key`, `level`, `line`, `link_id`, `max_parallel`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `primary`, `profile`, `project_id`, `project_ids`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `step`, `task_id`, `title`, `tree`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -904,6 +952,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::missions::grant_mission`
 - `commands::missions::revoke_mission_grant`
 - `commands::missions::pause_all_missions`
+- `commands::missions::mission_release_note`
+- `commands::missions::today_brief`
 - `commands::trackers::add_tracker`
 - `commands::trackers::update_tracker`
 - `commands::trackers::set_tracker_credential`
@@ -951,6 +1001,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_tool_detail`
 - `commands::sessions::session_activity`
 - `commands::sessions::capture_session`
+- `commands::sessions::session_summary_since`
 - `commands::sessions::session_share`
 - `commands::sessions::session_unshare`
 - `commands::sessions::session_narrow`
@@ -970,12 +1021,17 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::resolve_move::resolve_move`
 - `commands::sessions::dismiss_ghost_session`
 - `commands::sessions::adopt_session`
+- `commands::sessions::lost_target`
+- `commands::sessions::place_transcript`
 - `commands::sessions::dismiss_agent_session`
 - `commands::sessions::new_bg_session`
 - `commands::sessions::purge_project`
 - `commands::quick_replies::quick_replies`
 - `commands::quick_replies::set_quick_replies`
 - `commands::downloads::list_downloads`
+- `commands::library::list_library`
+- `commands::library::add_library_items`
+- `commands::library::remove_library_item`
 - `commands::downloads::send_file`
 - `commands::downloads::remove_download`
 - `commands::downloads::save_download`
@@ -999,6 +1055,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::federation::list_peer_links`
 - `commands::federation::link_peer_hub`
 - `commands::federation::unlink_peer_hub`
+- `commands::updates::list_update_targets`
 - `commands::debug_devices::list_debug_devices`
 - `commands::debug_devices::scan_debug_devices`
 - `commands::debug_devices::update_debug_device`
@@ -1011,9 +1068,12 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::debug_device_logs`
 - `commands::debug_devices::debug_device_screenshot`
 - `commands::prs::list_pull_requests`
+- `commands::start_rules::start_rules`
 - `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
+- `commands::runs::list_runs`
+- `commands::routines::routines`
 - `commands::tasks::list_tasks`
 - `commands::tasks::cancel_task`
 - `commands::files::repo_changes`
@@ -1075,8 +1135,11 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::rotate_host_token`
 - `commands::mcp::mcp_confirm`
 - `commands::mcp::mcp_pending_confirms`
+- `commands::mcp::control_handoffs`
 - `commands::operator::ensure_operator`
 - `commands::operator::operator_status`
+- `commands::operator::control_route_propose`
+- `commands::operator::control_route_follow`
 - `commands::hub::hub_status`
 - `commands::hub::hub_pair`
 - `commands::hub::hub_disconnect`
@@ -1144,6 +1207,7 @@ Frontend commands registered in `src/lib.rs`:
 - `pty::pty_close`
 - `pty::pty_drain`
 - `commands::editor::open_session_in_editor`
+- `commands::windows::open_terminal_window`
 - `commands::voice::voice_claim`
 - `commands::voice::voice_release`
 - `cancel_command`

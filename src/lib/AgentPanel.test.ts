@@ -11,6 +11,7 @@ import AgentPanel from './AgentPanel.svelte';
 import { operatorError, operatorState, operatorSession } from './operator';
 import { sessions } from './sessions';
 import { hostsViewRequest, settingsOpen, settingsSection } from './app_views';
+import { expectAccessible } from './a11y_check';
 
 const row = (over = {}) =>
   ({
@@ -136,5 +137,16 @@ describe('AgentPanel: a next step for every blocked state (step 9.1)', () => {
     expect(screen.getByRole('button', { name: 'Restart the agent' })).toBeTruthy();
     // Opening Control makes sure there is an agent.
     expect(invoke).toHaveBeenCalledWith('operator_status', undefined);
+  });
+});
+
+describe('AgentPanel: accessibility', () => {
+
+  it('a blocked agent, with its next step, is accessible', async () => {
+    operatorState.set('lost');
+    operatorError.set('Restart failed: no tmux');
+    invoke.mockResolvedValue({ ready: false, session: row(), blocked: 'lost' });
+    const { container } = render(AgentPanel);
+    await expectAccessible(container);
   });
 });

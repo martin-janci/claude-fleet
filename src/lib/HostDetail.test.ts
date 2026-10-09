@@ -10,7 +10,13 @@ vi.mock('./sessions', async () => {
     restoreHostSessions: vi.fn(),
     discoverLostSessions: vi.fn(),
     newSessionAbortable: vi.fn(),
+    adoptSession: vi.fn(),
   };
+});
+
+vi.mock('./lost_found', async () => {
+  const actual = await vi.importActual<typeof import('./lost_found')>('./lost_found');
+  return { ...actual, lostTarget: vi.fn(), placeTranscript: vi.fn() };
 });
 
 vi.mock('./hosts', async () => {
@@ -28,7 +34,10 @@ import { ADMIN, GMAIL, NOW, fleetHosts, fleetSessions, fleetUsage, host, session
 import { viewHostSessions } from './host_actions';
 import { hostFilter, setHostHarnesses } from './hosts';
 import { onHostsCloseRequested } from './app_views';
+import { lostTarget, placeTranscript } from './lost_found';
+import { projects } from './projects';
 import {
+  adoptSession,
   restoreHostSessions,
   discoverLostSessions,
   newSessionAbortable,
@@ -40,6 +49,9 @@ const mockedRestore = restoreHostSessions as unknown as ReturnType<typeof vi.fn>
 const mockedDiscover = discoverLostSessions as unknown as ReturnType<typeof vi.fn>;
 const mockedNewSession = newSessionAbortable as unknown as ReturnType<typeof vi.fn>;
 const mockedSetHarnesses = setHostHarnesses as unknown as ReturnType<typeof vi.fn>;
+const mockedAdopt = adoptSession as unknown as ReturnType<typeof vi.fn>;
+const mockedTarget = lostTarget as unknown as ReturnType<typeof vi.fn>;
+const mockedPlace = placeTranscript as unknown as ReturnType<typeof vi.fn>;
 
 function mount(alias: string, over: Record<string, unknown> = {}) {
   const hosts = fleetHosts();
@@ -570,11 +582,12 @@ describe('HostDetail find lost conversations', () => {
     expect(list.textContent).toContain('before reboot');
     expect(list.textContent).toContain('proj-a');
     expect(list.textContent).toContain('already in fleet');
-    expect(list.textContent).toContain('no fleet project for this path');
+    // The one with no project is restored into one (4.12).
+    expect(screen.getAllByTestId('discover-restore-into')).toHaveLength(1);
     expect(screen.getAllByTestId('discover-resume')).toHaveLength(1);
   });
 
-  it('a candidate in a project but not at a resumable path has no Resume and says why', async () => {
+  it('a candidate in a project but not at a resumable path has no Resume, only Restore into', async () => {
     const subdir = candidate({
       cwd: '/work/a/src',
       claude_session_id: 'cs-sub',
@@ -587,9 +600,7 @@ describe('HostDetail find lost conversations', () => {
     await fireEvent.click(screen.getByTestId('discover-lost'));
     await tick();
 
-    const list = screen.getByTestId('discover-list');
-    expect(list.textContent).toContain('path is not a fleet worktree');
-    expect(list.textContent).not.toContain('no fleet project for this path');
+    expect(screen.getByTestId('discover-restore-into')).toBeTruthy();
     expect(screen.queryByTestId('discover-resume')).toBeNull();
   });
 
@@ -604,7 +615,7 @@ describe('HostDetail find lost conversations', () => {
     await tick();
 
     expect(screen.queryByTestId('discover-resume')).toBeNull();
-    expect(screen.getByTestId('discover-list').textContent).toContain('path is not a fleet worktree');
+    expect(screen.getByTestId('discover-restore-into')).toBeTruthy();
   });
 
   it('Resume calls newSessionAbortable with the exact args, including resume_claude_session_id', async () => {
@@ -733,4 +744,98 @@ describe('an offline host (states kit, step 10.6)', () => {
     mount('mercury', { host: host('mercury', { reachable: true }) });
     expect(screen.queryByTestId('host-offline-state')).toBeNull();
   });
+});
+
+describe('HostDetail Lost and found with proposals (4.12)', () => {
+  const papaya = {
+    id: 3,
+    owner: 'acme',
+    repo: 'papaya-pos',
+    base_path: '/p/acme/papaya-pos',
+    last_session_at: 5,
+    adopted: false,
+    system: false,
+  };
+  const settle = async () => {
+    for (let i = 0; i < 6; i++) await tick();
+  };
+
+  beforeEach(() => {
+    mockedAdopt.mockReset();
+    mockedTarget.mockReset();
+    mockedPlace.mockReset();
+    mockedDiscover.mockReset();
+    mockedNewSession.mockReset();
+    projects.set([{ project: papaya, worktrees: [] }]);
+  });
+
+  function withScratch() {
+    const scratch = session('mefistos', 'fleet-trn-scratch', { started_at: null, created_at: NOW - 7200 });
+    const ours = session('mefistos', 'dev-acme-papaya-pos', { started_at: NOW - 60 });
+    return { scratch, hostSessions: [scratch, ours] };
+  }
+
+  it('lists a pane fleet did not start, and Adopt asks to confirm the prefilled project', async () => {
+    const { scratch, hostSessions } = withScratch();
+    mockedTarget.mockResolvedValueOnce({
+      ok: true,
+      value: { project_id: 3, source: 'jev', reason: 'directory and the name fleet-trn-scratch', confidence_pct: 81 },
+    });
+    mockedAdopt.mockResolvedValueOnce({ ok: true, value: { ...scratch, started_at: NOW } });
+    mount('mefistos', { hostSessions });
+    const list = screen.getByTestId('outside-panes');
+    expect(list.textContent).toContain('fleet-trn-scratch');
+    expect(list.textContent).toContain('outside fleet');
+    expect(list.textContent).not.toContain('dev-acme-papaya-pos');
+
+    await fireEvent.click(screen.getByTestId('outside-adopt'));
+    await settle();
+    expect(mockedTarget).toHaveBeenCalledWith({ session_id: scratch.id });
+    expect((screen.getByTestId('lost-target-project') as HTMLSelectElement).value).toBe('3');
+    expect(screen.getByTestId('lost-target-proposed').textContent).toContain('Proposed by Jev');
+
+    await fireEvent.click(screen.getByTestId('lost-target-submit'));
+    await tick();
+    expect(mockedAdopt).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByTestId('lost-target-confirm'));
+    await settle();
+    expect(mockedAdopt).toHaveBeenCalledWith(scratch.id, 3);
+  });
+
+  it('Restore into copies the conversation, then resumes it in the chosen project', async () => {
+    mockedDiscover.mockResolvedValueOnce({
+      ok: true,
+      value: [candidate({ cwd: '/home/ada/tmp', project_id: null, resumable: false, derived_tmux_name: null })],
+    });
+    mockedTarget.mockResolvedValueOnce({ ok: true, value: { unsure: true } });
+    mockedPlace.mockResolvedValueOnce({
+      ok: true,
+      value: { project_id: 3, tmux_name: 'dev-acme-papaya-pos', copied: true },
+    });
+    mockedNewSession.mockResolvedValueOnce({ ok: true, value: session('mefistos', 'dev-acme-papaya-pos') });
+    mount('mefistos');
+    await fireEvent.click(screen.getByTestId('discover-lost'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('discover-restore-into'));
+    await settle();
+    expect(screen.getByTestId('lost-target-unsure').textContent).toContain('Jev was unsure');
+    const sel = screen.getByTestId('lost-target-project') as HTMLSelectElement;
+    expect(sel.value).toBe('');
+    sel.value = '3';
+    await fireEvent.change(sel);
+    await fireEvent.click(screen.getByTestId('lost-target-submit'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('lost-target-confirm'));
+    await settle();
+    expect(mockedPlace).toHaveBeenCalledWith({ host_alias: 'mefistos', claude_session_id: 'cs-a', project_id: 3 });
+    expect(mockedNewSession).toHaveBeenCalledWith({
+      host_alias: 'mefistos',
+      project_id: 3,
+      worktree_id: null,
+      name: 'dev-acme-papaya-pos',
+      resume_claude_session_id: 'cs-a',
+    });
+    expect(screen.getByTestId('discover-list').textContent).toContain('resumed');
+  });
+
 });

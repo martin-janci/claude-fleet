@@ -45,8 +45,10 @@
   import { creatingStart } from './session_starting';
   import { preselect, type ProposalLike } from './ai_proposal';
   import { HOST_PLACEMENT_FLOOR, hostProposal, proposeHostPlacement, recordHostPlacement } from './host_placement';
-  import { previewStartWork, siblingProposal } from './start_preview';
+  import DraftField from './DraftField.svelte';
+  import { draftBrief, draftSource, previewStartWork, siblingProposal, type BriefDraft } from './start_preview';
   import { openNewSessionPicker } from './switcher_request';
+  import { agentChoices, keepAgent, type PickerAgent } from './agent_picker';
 
   let {
     project,
@@ -191,6 +193,29 @@
 
   // "work" runs Claude Code in the pane; "shell" runs a plain login shell.
   let chosenKind = $state<'work' | 'shell'>(untrack(() => memory?.kind ?? 'work'));
+  // Which agent a "work" session runs (redesign 12.4): Claude Code, or an
+  // agent the chosen host has on its PATH. A ticket's start and a
+  // background run are Claude Code's own paths, so they keep it.
+  let chosenAgent = $state<PickerAgent>('claude');
+  const agentOptions = $derived(
+    agentChoices(
+      chosenHost,
+      $hosts.find((h) => h.alias === chosenHost),
+    ).map((c) =>
+      c.agent !== 'claude' && c.enabled && ticket
+        ? { ...c, enabled: false, reason: `A ticket starts with Claude Code`, tag: null }
+        : c,
+    ),
+  );
+  $effect(() => {
+    const next = keepAgent(untrack(() => chosenAgent), agentOptions);
+    untrack(() => {
+      if (next !== chosenAgent) chosenAgent = next;
+    });
+  });
+  /** The session runs Claude Code: its model, effort, profile, limit check,
+   *  background run and ticket brief apply. */
+  const runsClaude = $derived(chosenKind === 'work' && chosenAgent === 'claude');
   // Optional command run on start for a shell session (empty = bare shell).
   let startCommand = $state<string>('');
   // `claude --model` / `--effort` for a Claude session; '' = the host's
@@ -276,7 +301,7 @@
   let runBackground = $state(false);
   let bgPrompt = $state('');
   const bgSessionBlocked = $derived(hubActionBlocked('new_bg_session', $hubStatus, $hubConnection));
-  const asBackground = $derived(runBackground && chosenKind === 'work' && !ticket);
+  const asBackground = $derived(runBackground && runsClaude && !ticket);
   async function submitBackground() {
     if (bgSessionBlocked !== null) return;
     if (!bgPrompt.trim()) {
@@ -735,6 +760,13 @@
 
   function onPickKind(kind: 'work' | 'shell') {
     chosenKind = kind;
+    chosenAgent = 'claude';
+    nameOverride = null;
+  }
+
+  function onPickAgent(agent: PickerAgent) {
+    chosenKind = 'work';
+    chosenAgent = agent;
     nameOverride = null;
   }
 
@@ -845,6 +877,56 @@
     briefEdited = true;
   }
   const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
+
+  // Redesign 6.10: "Draft with Claude" asks the chosen host for a brief
+  // written from the ticket and the task's earlier work. The draft is the
+  // field's text, the person's to edit; only Start sends it. Clear goes back
+  // to the ticket brief.
+  let draftMeta = $state<BriefDraft | null>(null);
+  let drafting = $state(false);
+  let draftError = $state<string | null>(null);
+  let draftSeq = 0;
+  $effect(() => {
+    void ticketKey;
+    draftSeq++;
+    draftMeta = null;
+    drafting = false;
+    draftError = null;
+  });
+  async function draftTicketBrief(t: TicketRow) {
+    const mine = ++draftSeq;
+    const before = { text: briefDraft, edited: briefEdited };
+    briefDraft = briefText;
+    briefEdited = true;
+    drafting = true;
+    draftError = null;
+    const r = await draftBrief({
+      ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
+      project_id: project.project.id,
+      host_alias: chosenHost,
+      worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
+    });
+    if (mine !== draftSeq) return;
+    drafting = false;
+    if (!r.ok) {
+      // No draft: the field is as it was, the person's edit or the template.
+      if (!draftMeta) {
+        briefDraft = before.text;
+        briefEdited = before.edited;
+      }
+      draftError = r.error.message;
+      return;
+    }
+    briefDraft = r.value.brief;
+    draftMeta = r.value.draft;
+  }
+  function clearDraft() {
+    draftSeq++;
+    draftMeta = null;
+    drafting = false;
+    briefEdited = false;
+    briefDraft = '';
+  }
 
   // ── Multi-repo start (work graph M9.6) ──
   // One ticket, one sibling session per repository, all on the same branch
@@ -1032,7 +1114,7 @@
     // current when the response lands.
     const submittedHost = chosenHost;
     const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
-    if (chosenKind === 'work' && !limitConfirmed) {
+    if (runsClaude && !limitConfirmed) {
       busy = true;
       const h = await checkAccountHeadroom(submittedHost, chosenProfile.trim() || null);
       busy = false;
@@ -1060,9 +1142,10 @@
         start_command:
           chosenKind === 'shell' ? startCommand.trim() || null : null,
         friendly_name: friendlyName.trim() || null,
-        model: chosenKind === 'work' && chosenModel ? chosenModel : null,
-        effort: chosenKind === 'work' && chosenEffort ? chosenEffort : null,
-        profile: chosenKind === 'work' && chosenProfile.trim() ? chosenProfile.trim() : null,
+        model: runsClaude && chosenModel ? chosenModel : null,
+        effort: runsClaude && chosenEffort ? chosenEffort : null,
+        profile: runsClaude && chosenProfile.trim() ? chosenProfile.trim() : null,
+        agent: chosenKind === 'work' && chosenAgent !== 'claude' ? chosenAgent : null,
       },
       createController.signal,
     );
@@ -1211,14 +1294,40 @@
             Brief Claude with the ticket
           </label>
           {#if briefOn}
-            <textarea
-              class="brief"
-              aria-label="Brief for Claude"
-              data-testid="ticket-brief"
-              rows="6"
-              value={briefText}
-              oninput={(e) => onBriefInput((e.target as HTMLTextAreaElement).value)}
-            ></textarea>
+            {#if draftMeta || drafting}
+              <DraftField
+                label="Brief for Claude"
+                bind:value={briefDraft}
+                model={draftMeta?.model}
+                host={draftMeta?.host_alias}
+                from={draftMeta ? draftSource(draftMeta) : null}
+                busy={drafting}
+                rows={8}
+                onregenerate={() => void draftTicketBrief(ticket)}
+                onclear={clearDraft}
+                testid="ticket-brief-draft"
+              />
+            {:else}
+              <textarea
+                class="brief"
+                aria-label="Brief for Claude"
+                data-testid="ticket-brief"
+                rows="6"
+                value={briefText}
+                oninput={(e) => onBriefInput((e.target as HTMLTextAreaElement).value)}
+              ></textarea>
+              <button
+                type="button"
+                class="btn btn--quiet draft-ask"
+                data-testid="ticket-brief-draft-ask"
+                disabled={startBlocked != null || !chosenHost}
+                title="Write the brief from the ticket and earlier sessions on it, with a model call on {chosenHost || 'the host'}"
+                onclick={() => void draftTicketBrief(ticket)}>Draft with Claude</button
+              >
+            {/if}
+            {#if draftError}
+              <p class="draft-error small" role="alert" data-testid="ticket-brief-draft-error">{draftError}</p>
+            {/if}
             <p class="muted small">
               Delivered with the first prompt (never typed into the pane). The description is
               the ticket author's text and stays fenced as untrusted.
@@ -1261,8 +1370,8 @@
       <div class="kind-row" id="kind-picker" role="group" aria-labelledby="kind-picker-label" data-testid="agent-picker">
         <button
           class="kind-pick"
-          class:active={chosenKind === 'work'}
-          aria-pressed={chosenKind === 'work'}
+          class:active={runsClaude}
+          aria-pressed={runsClaude}
           data-testid="kind-work"
           onclick={() => onPickKind('work')}
         >
@@ -1277,15 +1386,23 @@
         >
           Shell
         </button>
-        <button class="kind-pick" aria-pressed="false" data-testid="agent-codex" disabled title="Codex sessions are coming">
-          Codex <span class="soon">coming</span>
-        </button>
-        <button class="kind-pick" aria-pressed="false" data-testid="agent-agy" disabled title="Agy sessions are coming">
-          Agy <span class="soon">coming</span>
-        </button>
+        {#each agentOptions.filter((c) => c.agent !== 'claude') as c (c.agent)}
+          {@const on = chosenKind === 'work' && chosenAgent === c.agent}
+          <button
+            class="kind-pick"
+            class:active={on}
+            aria-pressed={on}
+            data-testid={`agent-${c.agent}`}
+            disabled={!c.enabled}
+            title={c.reason ?? undefined}
+            onclick={() => onPickAgent(c.agent)}
+          >
+            {c.label}{#if c.tag}{" "}<span class="soon">{c.tag}</span>{/if}
+          </button>
+        {/each}
       </div>
 
-    {#if chosenKind === 'work' && !ticket && !asBackground}
+    {#if runsClaude && !ticket && !asBackground}
       <div class="launch-row">
         <div class="launch-field">
           <label for="launch-model">Model</label>
@@ -1343,7 +1460,7 @@
       </div>
     {/if}
 
-    {#if chosenKind === 'work' && !ticket}
+    {#if runsClaude && !ticket}
       <span class="field-label" id="run-picker-label">Run</span>
       <div class="kind-row" id="run-picker" role="group" aria-labelledby="run-picker-label">
         <button
@@ -1667,5 +1784,12 @@
   }
   .small {
     font-size: 11px;
+  }
+  .draft-ask {
+    align-self: flex-start;
+  }
+  .draft-error {
+    margin: 0;
+    color: var(--danger);
   }
 </style>

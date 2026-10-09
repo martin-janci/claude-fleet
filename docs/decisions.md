@@ -30,7 +30,11 @@ and nothing is sent:
 4. **The org consented** (`org_off`). Each organisation opts in on its own
    (Settings → Organisations → *send to Jev*, or `fleet-hub org set <id>
    --jev on`); off by default. A session or item with no org follows
-   `decide.jev.unassigned` (off by default).
+   `decide.jev.unassigned` (off by default). A feature that sends Claude's
+   **reply text** (`turn_outcome`, J2) needs a second consent on top
+   (decision D48): the org's *Also allow Claude's reply text* (`fleet-hub
+   org set <id> --jev-reply on`), or `decide.jev.unassigned_reply` for a
+   session with no org. Both off by default; either missing is `org_off`.
 5. **A key is configured** (`no_key`): `fleet-hub decide set-key` (on a
    standalone desktop, pointed at the app's data folder — see
    [the key on a standalone desktop](#the-key-on-a-standalone-desktop)).
@@ -397,6 +401,89 @@ empty. *Keep the order* (question) or *Change* (form) puts the options back.
 
 Code: `service/decide/quick_answer.rs` (`QuickAnswerTrigger` on the
 reconcile tick, `spawn_for_form` after `ask { form }`).
+## `adopt_target` and `restore_target` — the project of a Lost and found entry (N4, J10)
+
+Host detail's Lost and found offers *Adopt into* for a live tmux pane fleet
+did not start (N4) and *Restore into* for a conversation whose pane is gone
+(J10). Each form is prefilled with a project. A rule goes first: a working
+directory inside a fleet project is that project, and nobody is asked. Only
+when no rule places it, and `decide.jev.adopt_target` (a pane) or
+`decide.jev.restore_target` (a conversation) is on, Jev is asked one Choice:
+which ONE of the person's projects (most recently used first, at most 20)
+the conversation's work belongs to (`p<id>`), or `unsure`.
+
+- **What is sent.** The working directory, the git branch the transcript
+  names, the tmux session's name for a pane, and each candidate's
+  `owner/repo`, redacted. Nothing from the conversation.
+- **Shadow.** Asked off the form's path and only recorded, with `unsure`
+  (today's blank form) as the baseline.
+- **Assist.** The form waits for the one call (`decide.jev.timeout_ms`); an
+  answer of 50% or more prefills the project with *Proposed by Jev*. An
+  `unsure` or weaker answer leaves the form blank and says Jev was unsure.
+  You still press Adopt or Restore, and confirm.
+- **Asked once per input.** The same entry and candidates reuse the decided
+  run for 14 days.
+- **Follow-up.** Your Adopt or Restore marks the proposal you were shown
+  `confirmed` (same project), `corrected` (to yours) or `rejected` (no
+  project). An agent's call, and a shadow answer nobody saw, mark nothing.
+- **What is recorded.** Subject `lost_pane` `session:<id>`, or
+  `lost_transcript` `t:<HMAC of the transcript id>`.
+
+Restoring a conversation into a project it did not run in copies its
+transcript under the directory Claude Code keys that project's root by
+(`place_transcript`; never moved, never overwritten), then resumes it there.
+
+Code: `service/decide/lost_target.rs`, `service/sessions/lost_found.rs`;
+step 4.12 of the redesign's transition plan.
+
+## `turn_outcome` — what a silent turn's end came to (J2)
+
+The Stop hook says a turn ended, not how: a finished task and a prose
+question ("Should I also update the docs?") both leave an idle pane. With
+`decide.jev.turn_outcome` on, after a Stop that left the session idle (no
+dialog, no stuck state, no form), fleet captures the visible pane and asks
+Jev one Choice: `finished`, `asked`, `stuck`, `working` or `unsure`.
+
+- **What is sent.** Claude's reply text: the end of the screen, ANSI
+  stripped, the REPL's chrome (rules, input line, footer) left out, every
+  fenced code block replaced by `[code: <lang>, N lines]`, at most 40 lines
+  and 2,000 characters, redacted. Only where the org gave BOTH consents
+  (D31 and D48, below).
+- **Shadow.** Recorded only, with the pane rules' reading as the baseline
+  (`finished` for an idle REPL, `asked` for a dialog, `stuck`, `working`;
+  `none` when they read nothing).
+- **Assist.** A usable answer (confidence 50% or more, not `unsure`) is
+  written to `sessions.turn_outcome`, and the Inbox follows: `asked` reads
+  as *waiting*, `stuck` as *stuck*.
+- **Hooks always win.** Every hook (Notification, the next prompt, Stop,
+  StopFailure, SessionEnd) clears `turn_outcome`, and an answer lands only
+  while no hook has spoken since the turn's Stop. A hook before the answer
+  keeps it out; a hook after it takes it back.
+- **One decision per turn.** Subject `session_turn` `<session>:<turn_seq>`.
+- **Follow-up.** A Notification about the same turn marks the assist answer
+  `confirmed` (a dialog and `asked`, a stuck screen and `stuck`) or
+  `corrected` to what it said; your prompt within 30 minutes of an `asked`
+  answer confirms it. A shadow answer is never marked.
+- **J8, the drift alarm.** When the pane rules read nothing on the screen
+  (Claude Code's UI may have changed), the run's baseline is `none` and the
+  session's timeline gets a `pane_unreadable` entry. Local; nothing is sent
+  for it.
+- **Benchmark.** `fleet-hub decide bench turn-outcome --labels FILE` (JSON
+  lines `{pane_tail, label}`) or `--fixture` (24 synthetic tails), providers
+  `rule`, `qmark` ("ends with ?") and `jev`; it reports `asked` precision and
+  recall against card J2's acceptance (≥ 0.9 and ≥ 0.8, judged from 50
+  labeled `asked` cases).
+
+Code: `service/decide/turn_outcome.rs`, `spawn_after_stop` from the Stop
+hook in `service/hooks.rs`, `Store::set_jev_turn_outcome`;
+`service/decide/bench/turn_outcome.rs`; step 5.11 of the redesign's
+transition plan.
+
+### Decision D48 — reply text (owner, 2026-10-08)
+
+| # | Question | Decision |
+|---|---|---|
+| D48 | May Claude's reply text (J2's pane tail / last reply) go to Jev? | **Yes, per org, only where the org consents to reply text: a consent of its own, separate from D31 and required on top of it, off by default.** Decided by the owner on 2026-10-08. Built as the org's `decide.jev.reply_consent` row in `org_settings` (never inherited from a fleet value; *Also allow Claude's reply text* in Organisations, `fleet-hub org set <id> --jev-reply on`) and `decide.jev.unassigned_reply` for sessions with no org |
 
 ## `work_link` — the work item of a session no rule could link (J1)
 
@@ -507,8 +594,14 @@ Code: `service/decide/duplicate.rs`, `duplicate_hint` in
 | `decide.jev.sibling_repos` | `off` | `off` / `shadow` / `assist` | Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.host_placement` | `off` | `off` / `shadow` / `assist` | Pre-selecting the host of a new session when no rule, limit or offline host decides. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.quick_answer` | `off` | `off` / `shadow` / `assist` | Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.adopt_target` | `off` | `off` / `shadow` / `assist` | Prefilling the project when you adopt a pane fleet did not start. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.restore_target` | `off` | `off` / `shadow` / `assist` | Prefilling the project when you restore a conversation found on a host. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.duplicate` | `off` | `off` / `shadow` / `assist` | Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.control_route` | `off` | `off` / `shadow` / `assist` | Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.summary_check` | `off` | `off` / `shadow` / `assist` | Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support. Experimental. |
+| `decide.jev.turn_outcome` | `off` | `off` / `shadow` / `assist` | Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
+| `decide.jev.unassigned_reply` | `false` | on / off | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
 | `decide.jev.breaker_failures` | `5` | 1–100 | Failed calls in a row that open the circuit breaker. |
 | `decide.jev.breaker_open_secs` | `300` | 10–86400 seconds | How long an open breaker refuses calls. |

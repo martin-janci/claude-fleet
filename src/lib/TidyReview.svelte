@@ -402,9 +402,8 @@
   <div
     class="tidy-sheet"
     data-testid="tidy-sheet"
-    role="listbox"
+    role="dialog"
     aria-label="Tidy up"
-    aria-multiselectable="true"
     tabindex="-1"
     bind:this={sheet}
     onkeydown={onSheetKey}
@@ -441,7 +440,12 @@
         <span>Checking {tickedCount} worktree{tickedCount === 1 ? '' : 's'}…</span>
       </div>
     {/if}
+    <!-- The rows as a tree (redesign step 7.2): one group per reason, so a
+         row's checkbox, buttons and select are its own controls, not the
+         hidden children of an option. -->
+    <div role="tree" aria-label="Sessions to tidy" aria-multiselectable="true">
     {#each groups as g (g.reason)}
+      <div role="group" aria-label={tidyReasonLabel(g.reason)}>
       <div class="group-head" data-testid="tidy-group">{tidyReasonLabel(g.reason)} · {g.items.length}</div>
       {#each g.items as c (c.session_id)}
         {@const i = ordered.indexOf(c)}
@@ -456,7 +460,7 @@
           class:cursor={i === cursor}
           data-testid="tidy-row"
           data-session-id={c.session_id}
-          role="option"
+          role="treeitem"
           aria-selected={ticked.has(c.session_id)}
           tabindex="-1"
           title="Show only this session in the sidebar"
@@ -524,7 +528,9 @@
           {/if}
         </div>
       {/each}
+      </div>
     {/each}
+    </div>
     <div class="sheet-foot">
       <button
         class="btn btn--primary"

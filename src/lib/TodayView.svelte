@@ -15,6 +15,7 @@
   import { timeAgo } from './session_status';
   import { statusDotClass } from './trackers';
   import { candidatesFor, inScope, refreshTidy, requestTidy, tidyReport } from './tidy';
+  import MorningBrief from './MorningBrief.svelte';
   import {
     loadToday,
     localMidnight,
@@ -187,6 +188,9 @@
   {#if error}
     <p class="error" role="alert" data-testid="today-error">{error}</p>
   {/if}
+
+  <!-- Redesign 9.11: the brief drafted last; a new one only on Refresh. -->
+  <MorningBrief />
 
   {#if view}
     {#if isEmptyView(view)}

@@ -703,6 +703,15 @@ pub struct SessionConversationParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionSummarySinceParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// The start of the window, unix seconds: the turns that ended at or
+    /// after it are summarised.
+    pub since: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SessionToolDetailParams {
     /// Fleet session id.
     pub session_id: i64,
@@ -1022,6 +1031,28 @@ pub struct SettingHistoryParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ControlHandoffsParams {
+    /// How many, newest first (default 50, at most 500).
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ControlRouteParams {
+    /// propose | follow
+    pub action: String,
+    /// propose: the message just sent in Control.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// follow: the run the receipt came from.
+    #[serde(default)]
+    pub run_id: Option<i64>,
+    /// follow: the option kept or picked (m<id>, s<id>, control).
+    #[serde(default)]
+    pub chosen: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct AnswerMcpConfirmParams {
     /// The confirm_nonce the waiting call was handed.
     pub nonce: String,
@@ -1230,7 +1261,7 @@ pub struct UpdateAdminParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RoutinesParams {
-    /// list | get | runs | save | delete | set_enabled | skip_next | run_now.
+    /// list | get | runs | failing | save | delete | set_enabled | skip_next | run_now.
     pub action: String,
     /// Every action but list, and save of a change.
     #[serde(default)]
@@ -1247,6 +1278,30 @@ pub struct RoutinesParams {
     /// runs: how many, newest first (default 20, at most 200).
     #[serde(default)]
     pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct LibraryParams {
+    /// list | add | remove.
+    pub action: String,
+    /// list: only this session's files; add: the session they were put beside.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// list: only this host's files.
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// list: at most this many, newest first (default and cap 200).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// add: upload | attachment.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// add: the files, already on the session's host.
+    #[serde(default)]
+    pub files: Option<Vec<crate::service::library::LibraryFile>>,
+    /// remove: the row's id.
+    #[serde(default)]
+    pub id: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -1274,8 +1329,8 @@ pub struct SessionShareParams {
     /// Or an org.
     #[serde(default)]
     pub org: Option<String>,
-    /// watch (read it) or drive (also prompt it). Nothing else — "own" is
-    /// not a grantable level.
+    /// watch (read it), answer (also answer its dialogs) or drive (also
+    /// prompt it). Nothing else — "own" is not a grantable level.
     pub level: String,
 }
 
@@ -1361,4 +1416,42 @@ pub struct DebugDevicesParams {
     /// configure: other hosts of its org may use it.
     #[serde(default)]
     pub shared: Option<bool>,
+}
+
+/// `runs`: one tool, by `action` (only `list` today), so the Automation
+/// screen's later actions stay one entry.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RunsParams {
+    /// list.
+    pub action: String,
+    /// Started at or after (unix s).
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// Started before (unix s).
+    #[serde(default)]
+    pub until: Option<i64>,
+    /// operator | task | mission | jev | planner | summary | routine.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// ok | failed | needs_person | nothing_to_do | running.
+    #[serde(default)]
+    pub outcome: Option<String>,
+    /// Only this org's.
+    #[serde(default)]
+    pub org_id: Option<i64>,
+    /// Only this mission's.
+    #[serde(default)]
+    pub mission_id: Option<i64>,
+    /// Runs that ran in or acted on it.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// One routine's fires.
+    #[serde(default)]
+    pub routine_id: Option<i64>,
+    /// ≤ 200 (50).
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// Rows to skip.
+    #[serde(default)]
+    pub offset: Option<i64>,
 }

@@ -479,6 +479,8 @@ pub fn run() {
             commands::missions::grant_mission,
             commands::missions::revoke_mission_grant,
             commands::missions::pause_all_missions,
+            commands::missions::mission_release_note,
+            commands::missions::today_brief,
             commands::trackers::add_tracker,
             commands::trackers::update_tracker,
             commands::trackers::set_tracker_credential,
@@ -526,6 +528,7 @@ pub fn run() {
             commands::sessions::session_tool_detail,
             commands::sessions::session_activity,
             commands::sessions::capture_session,
+            commands::sessions::session_summary_since,
             commands::sessions::session_share,
             commands::sessions::session_unshare,
             commands::sessions::session_narrow,
@@ -545,12 +548,17 @@ pub fn run() {
             commands::resolve_move::resolve_move,
             commands::sessions::dismiss_ghost_session,
             commands::sessions::adopt_session,
+            commands::sessions::lost_target,
+            commands::sessions::place_transcript,
             commands::sessions::dismiss_agent_session,
             commands::sessions::new_bg_session,
             commands::sessions::purge_project,
             commands::quick_replies::quick_replies,
             commands::quick_replies::set_quick_replies,
             commands::downloads::list_downloads,
+            commands::library::list_library,
+            commands::library::add_library_items,
+            commands::library::remove_library_item,
             commands::downloads::send_file,
             commands::downloads::remove_download,
             commands::downloads::save_download,
@@ -587,9 +595,12 @@ pub fn run() {
             commands::debug_devices::debug_device_logs,
             commands::debug_devices::debug_device_screenshot,
             commands::prs::list_pull_requests,
+            commands::start_rules::start_rules,
             commands::presence::session_presence,
             commands::pages::setting_history,
             commands::pages::set_fleet_setting,
+            commands::runs::list_runs,
+            commands::routines::routines,
             commands::tasks::list_tasks,
             commands::tasks::cancel_task,
             commands::files::repo_changes,
@@ -651,8 +662,11 @@ pub fn run() {
             commands::mcp::rotate_host_token,
             commands::mcp::mcp_confirm,
             commands::mcp::mcp_pending_confirms,
+            commands::mcp::control_handoffs,
             commands::operator::ensure_operator,
             commands::operator::operator_status,
+            commands::operator::control_route_propose,
+            commands::operator::control_route_follow,
             commands::hub::hub_status,
             commands::hub::hub_pair,
             commands::hub::hub_disconnect,
@@ -720,6 +734,7 @@ pub fn run() {
             pty::pty_close,
             pty::pty_drain,
             commands::editor::open_session_in_editor,
+            commands::windows::open_terminal_window,
             commands::voice::voice_claim,
             commands::voice::voice_release,
             cancel_command,
@@ -731,6 +746,18 @@ pub fn run() {
             // On exit: close ssh masters AND any open PTY, so we don't leak
             // background ssh processes or an orphaned `tmux attach` / `ssh
             // -tt` child after quit.
+            // A pop-out terminal (step 5.4) going away closes its own PTY and
+            // nothing else: the app, its ssh masters and the main window's
+            // terminals carry on.
+            if let tauri::WindowEvent::Destroyed = event {
+                if commands::windows::is_popout_label(window.label()) {
+                    use tauri::Manager;
+                    if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
+                        pty::close_pty(pty.inner(), window.label());
+                    }
+                    return;
+                }
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 use tauri::Manager;
                 ssh_client_for_exit.shutdown_all();

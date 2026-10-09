@@ -32,6 +32,7 @@
   import { facetSentence, workFacets } from './filter_facets';
   import WorkReview from './WorkReview.svelte';
   import WorkMissions from './WorkMissions.svelte';
+  import { missionOpenRequest } from './missions';
   import WorkPrs from './WorkPrs.svelte';
   import WorkRules from './WorkRules.svelte';
   import TaskList from './TaskList.svelte';
@@ -90,6 +91,11 @@
   const chord = workViewChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator));
 
   let tab = $state<'tasks' | 'review' | 'missions' | 'prs'>('tasks');
+  // A "Sent to a mission" chip in Control (redesign 9.3): the Missions tab,
+  // where WorkMissions opens the mission.
+  $effect(() => {
+    if ($missionOpenRequest) tab = 'missions';
+  });
   let page = $state.raw<WorkTreePage | null>(null);
   const archivedHidden = $derived(page?.archived_hidden ?? 0);
   function setArchived(on: boolean) {
@@ -566,10 +572,11 @@
 <div class="work-tree" data-testid="work-tree" aria-busy={loading} bind:this={root}>
   <header class="work-header">
     <div class="row">
-        <!-- The fixed Work tabs (redesign step 3.10): Tasks, with
-             the links waiting for review as a count beside it, Missions and
-             Board. Review is part of Tasks; the board is a Work view of its
-             own, not an overlay toggled from the layout chips. -->
+        <!-- The fixed Work tabs (redesign step 3.10): Tasks, Missions, Board
+             and Pull requests, with the links waiting for review as a count
+             after them (a tablist holds only tabs). Review is part of Tasks;
+             the board is a Work view of its own, not an overlay toggled from
+             the layout chips. -->
         <div class="tabs" role="tablist" aria-label="Work view">
           <button
             class="btn btn--chip btn--toggle"
@@ -579,17 +586,6 @@
             data-testid="work-tab-tasks"
             onclick={() => pickTab('tasks')}>Tasks</button
           >
-          {#if reviewTotal}
-            <button
-              class="review-count"
-              type="button"
-              class:is-active={shownTab === 'tasks' && tab === 'review'}
-              title="{reviewTotal} {reviewTotal === 1 ? 'link waits' : 'links wait'} for review"
-              aria-label="Review: {reviewTotal} waiting"
-              data-testid="work-review-count"
-              onclick={() => pickTab('review')}>{reviewTotal}</button
-            >
-          {/if}
           <button
             class="btn btn--chip btn--toggle"
             role="tab"
@@ -616,6 +612,18 @@
             onclick={() => pickTab('prs')}>Pull requests</button
           >
         </div>
+        {#if reviewTotal}
+          <button
+            class="review-count"
+            type="button"
+            aria-pressed={shownTab === 'tasks' && tab === 'review'}
+            class:is-active={shownTab === 'tasks' && tab === 'review'}
+            title="{reviewTotal} {reviewTotal === 1 ? 'link waits' : 'links wait'} for review"
+            aria-label="Review: {reviewTotal} waiting"
+            data-testid="work-review-count"
+            onclick={() => pickTab('review')}>{reviewTotal}</button
+          >
+        {/if}
       <button
         class="btn btn--quiet btn--icon"
         type="button"
@@ -839,7 +847,7 @@
 
 <style>
   .review-count {
-    min-width: 1.25rem;
+    min-width: var(--control-h);
     height: 1.1rem;
     padding: 0 0.35rem;
     border: none;
@@ -851,6 +859,7 @@
     font-weight: 600;
     cursor: pointer;
     align-self: center;
+    margin-right: auto;
   }
   .review-count.is-active {
     outline: 1px solid var(--accent);
@@ -891,6 +900,10 @@
     display: flex;
     gap: 0.25rem;
     flex: 1 1 auto;
+  }
+  /* The review count follows the tabs and takes the free space after it. */
+  .tabs:has(+ .review-count) {
+    flex: 0 1 auto;
   }
   .layout {
     display: flex;

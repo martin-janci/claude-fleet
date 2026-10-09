@@ -40,6 +40,10 @@
   import { OPERATOR_COMMANDS } from './operator';
   import { insertIntoComposer } from './conversation';
   import ConfirmCards from './ConfirmCards.svelte';
+  import HandoffCards from './HandoffCards.svelte';
+  import { controlThinking } from './control_loaders';
+  import ControlRouteReceipts from './ControlRouteReceipts.svelte';
+
   let { contextInput = null }: { contextInput?: AgentContextInput | null } = $props();
 
   // Control shows the agent whenever it is open, so it makes sure there is
@@ -126,7 +130,12 @@
   <!-- Step 9.2: the agent's starts and kills wait here as cards, in the
        transcript. Mounted only while this row renders, so
        a request is never parked on a card nobody can see (confirms.ts). -->
-    <ConfirmCards />
+  <ConfirmCards />
+  <!-- Steps 9.3 and 9.6: what the agent handed on, as chips and cards
+       that follow their target's state. -->
+  <HandoffCards />
+  <!-- Step 9.9 (Jev K2): where each message just sent here goes. -->
+  {#if session}<ControlRouteReceipts sessionId={session.id} />{/if}
   {#if ctx}
     <button
       class="chip"
@@ -180,6 +189,7 @@
       promptPrefix={ctx?.prefix ?? null}
       blockWhileBusy={true}
       composerAbove={chip}
+      thinkingAs={controlThinking}
     />
   {/if}
 </div>

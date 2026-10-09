@@ -10,8 +10,7 @@ import { get } from 'svelte/store';
 import { assetsViewRequest, requestAssetsView } from './lib/app_views';
 
 beforeEach(() => {
-  // Suppress the OnboardingCard so tests don't need stubs for its IPC calls
-  // (check_local_prereqs, tunnel_status, mcp_status).
+  // Keep Get started (FirstRun) out of the way of these tests.
   onboardingDismissed.set(true);
   clearToasts();
 });

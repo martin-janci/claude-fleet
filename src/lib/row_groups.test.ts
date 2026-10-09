@@ -56,3 +56,15 @@ describe('groupRows (redesign step 3.6)', () => {
     expect(isFlatGroupBy('work')).toBe(false);
   });
 });
+
+describe('a session ⌘N just started (step 5.14)', () => {
+  it('lands under Working until its agent reports, then goes where its state says', () => {
+    const fresh = session('mac', 'new', { id: 77, claude_status: null, last_activity_at: NOW - 5 });
+    const starting = new Set([77]);
+    let groups = groupRows([working, fresh], 'state', opts, starting);
+    expect(groups.map((g) => g.label)).toEqual(['Working']);
+    expect(ids(groups[0])).toEqual(['a', 'new']);
+    groups = groupRows([working, fresh], 'state', opts, new Set());
+    expect(groups.map((g) => g.label)).toEqual(['Working', 'Idle']);
+  });
+});

@@ -12,6 +12,7 @@
   import { hubConnection } from './hub_connection';
   import { projects } from './projects';
   import { readPref, writePref } from './prefs';
+  import ReleaseNote from './ReleaseNote.svelte';
   import MissionGraph from './MissionGraph.svelte';
   import Loader from './Loader.svelte';
   import { defaultLaneBy, type LaneBy } from './mission_graph';
@@ -69,6 +70,7 @@
     autonomyWords,
     policyWith,
     wakeLabel,
+    missionOpenRequest,
     POLICY_DEFAULT_PARALLEL,
     POLICY_MAX_PARALLEL,
     POLICY_MIN_WAKE_SECS,
@@ -521,6 +523,14 @@
     if (!mission) return;
     if (await act(deleteMission(mission.id))) back();
   }
+
+  // A "Sent to a mission" chip in Control asked for this one (redesign 9.3).
+  $effect(() => {
+    const r = $missionOpenRequest;
+    if (!r) return;
+    missionOpenRequest.set(null);
+    void open(r.id);
+  });
 
   let stopWatching: (() => void) | null = null;
   onMount(() => {
@@ -1063,6 +1073,12 @@
             >Add</button
           >
         </div>
+      {/if}
+
+      {#if detail.may_change && mission.state === 'completed'}
+        <!-- Redesign 9.11: Finish's release note, drafted on demand. -->
+        <h4>Release note</h4>
+        <ReleaseNote missionId={mission.id} />
       {/if}
 
       <h4>Log</h4>

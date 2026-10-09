@@ -15,6 +15,7 @@ mod bench_work_link;
 mod catalog;
 mod changesets;
 mod clients;
+mod control_handoffs;
 mod conversations;
 mod debug_devices;
 mod decisions;
@@ -27,6 +28,7 @@ mod hosts_accounts;
 mod item_deps;
 mod item_verify;
 mod layers;
+mod library;
 mod local_workspaces;
 mod mission_loop;
 mod nl_census;
@@ -47,12 +49,14 @@ mod reconcile;
 mod reports;
 mod routines;
 mod rows;
+mod runs;
 #[cfg(test)]
 pub(crate) mod scale_fixture;
 mod schema;
 mod session_grants;
 mod sessions;
 mod setting_review;
+mod start_rules;
 mod task_report;
 mod tasks;
 #[cfg(test)]
@@ -80,7 +84,9 @@ mod work_view;
 
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
 pub use aux_usage::{
-    AuxUsageRow, NewAuxUsage, AUX_ORIGIN_COMMIT_MESSAGE, AUX_ORIGIN_PLANNER, AUX_ORIGIN_SUMMARY,
+    AuxUsageRow, NewAuxUsage, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE,
+    AUX_ORIGIN_MORNING_BRIEF, AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE, AUX_ORIGIN_SUMMARY,
+    AUX_ORIGIN_WATCH_SUMMARY,
 };
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use changesets::{
@@ -89,6 +95,9 @@ pub use changesets::{
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, ClientBinding, CLIENT_MODES,
     LINE_SEPARATORS,
+};
+pub use control_handoffs::{
+    handoff_preview, ControlHandoffRow, HandoffItem, NewHandoff, HANDOFFS_KEEP, HANDOFF_PREVIEW_MAX,
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, SeenDevice};
@@ -109,6 +118,7 @@ pub use item_verify::{
     VERIFY_NOTE_MAX_CHARS,
 };
 pub use layers::HostLayerRow;
+pub use library::{LibraryItemRow, NewLibraryItem, KEEP as LIBRARY_KEEP};
 pub(crate) use local_workspaces::paths_overlap;
 pub use local_workspaces::{
     BaseEntry, FileStat, LocalActivityRow, LocalConflictRow, LocalPassWrite, LocalWorkspaceRow,
@@ -134,7 +144,7 @@ pub use org_members::{
 };
 pub use orgs::{
     normalize_rule, org_of_session, validate_org_color, validate_org_name, OrgRow, OrgRuleRow,
-    SessionOrgFacts, ORG_NAME_MAX_CHARS,
+    SessionOrgFacts, ORG_JEV_REPLY_KEY, ORG_NAME_MAX_CHARS,
 };
 pub use participants::{ParticipantRow, PARTICIPANT_REMOTE, RETIRED_RETENTION_SECS};
 pub use peer_links::{
@@ -146,7 +156,8 @@ pub use people::{
     machine_token_kind, validate_person_name, PersonRow, MAX_PERSON_NAME_LEN, PERSONAL_OWNER_NAME,
 };
 pub use pr_shepherd::{
-    ShepherdEpisodeRow, ShepherdRuleRow, SHEPHERD_LEVELS, SHEPHERD_RECIPES_MAX_CHARS,
+    ShepherdEpisodeRow, ShepherdMergeRow, ShepherdRuleRow, SHEPHERD_LEVELS,
+    SHEPHERD_RECIPES_MAX_CHARS,
 };
 pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
 pub use pull_requests::{repo_and_number, PrSeenBy, PullRequestRow};
@@ -158,19 +169,24 @@ pub use routines::{
     ROUTINE_RUN_OUTCOMES, ROUTINE_RUN_OUTCOME_SOURCES, ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
 };
 pub use rows::*;
+pub use runs::{
+    RunRow, RunsFilter, RunsReach, MISSION_RUN_EVENTS, RUNS_DEFAULT_LIMIT, RUNS_MAX_LIMIT,
+    RUN_KINDS, RUN_OUTCOMES, RUN_SOURCES,
+};
 pub use schema::known_schema_version;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use schema::{is_newer_schema_error, open_failure_advice};
 pub use session_grants::{
-    grant_generation, validate_grant_level, GrantRecipient, SessionGrantRow, GRANT_DRIVE,
-    GRANT_LEVELS, GRANT_WATCH,
+    grant_generation, validate_grant_level, GrantRecipient, SessionGrantRow, GRANT_ANSWER,
+    GRANT_DRIVE, GRANT_LEVELS, GRANT_WATCH,
 };
 pub use sessions::PromptAckState;
 pub use setting_review::{
     NewSettingProposal, SettingAuditRow, SettingProposalRow, DECIDED_PROPOSAL_KEEP_SECS,
     SETTING_AUDIT_KEEP,
 };
+pub use start_rules::{StartRuleRow, START_RULE_STATES};
 pub use task_report::{
     EvidenceCommit, EvidenceFile, TaskEvidence, TaskReport, EVIDENCE_COMMITS_MAX,
     EVIDENCE_FILES_MAX, REPORT_ENTRY_MAX_CHARS, REPORT_LIST_MAX, REPORT_OUTCOMES,

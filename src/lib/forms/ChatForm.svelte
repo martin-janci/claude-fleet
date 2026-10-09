@@ -183,7 +183,7 @@
   .foot { display: flex; gap: 0.5rem; align-items: center; }
   .decline { display: flex; gap: 0.4rem; flex: 1; }
   .decline input { flex: 1; font: inherit; font-size: 0.8rem; }
-  .link { align-self: flex-start; background: none; border: none; padding: 0; color: var(--fg-muted); text-decoration: underline; cursor: pointer; font-size: 11px; }
+  .link { align-self: flex-start; min-block-size: var(--control-h); background: none; border: none; padding: 0; color: var(--fg-muted); text-decoration: underline; cursor: pointer; font-size: 11px; }
   .err { margin: 0; font-size: 11px; color: var(--usage-crit); }
   .receipt { display: flex; flex-direction: column; gap: 0.25rem; padding: 0.55rem 0.8rem; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem; }
   .receipt .line { display: flex; gap: 0.5rem; align-items: baseline; }

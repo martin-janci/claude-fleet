@@ -842,6 +842,62 @@ impl FleetTools {
         ok_json_compact(&answered)
     }
 
+    #[tool(description = "What the agent handed on, newest first: \
+        prompts and tasks sent to sessions, new sessions, missions, tasks \
+        and proposed trees, each with its target's state now.")]
+    pub(super) async fn control_handoffs(
+        &self,
+        Parameters(p): Parameters<ControlHandoffsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("control_handoffs", "");
+        ok_json_compact(
+            &crate::service::control_handoffs::list(&self.store, p.limit).map_err(to_mcp_err)?,
+        )
+    }
+
+    // ---- Control routing (redesign step 9.9, Jev K2) ----
+
+    #[tool(description = "Where a message just sent in Control goes \
+        (propose {text}), or record the person's pick (follow {run_id, \
+        chosen}).")]
+    pub(super) async fn control_route(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ControlRouteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::service::decide::{control_route, DecideCtx};
+        audit(
+            "control_route",
+            &format!("action={}", p.action.escape_debug()),
+        );
+        refuse_operator_answer(&caller)?;
+        match p.action.as_str() {
+            "propose" => {
+                let text = p.text.unwrap_or_default();
+                let scope = {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    caller.view_scope(&s).map_err(to_mcp_err)?
+                };
+                let ctx = DecideCtx::jev(std::sync::Arc::clone(&self.store));
+                ok_json_compact(&control_route::propose(&ctx, &scope, &text).await)
+            }
+            "follow" => {
+                let (Some(run_id), Some(chosen)) = (p.run_id, p.chosen) else {
+                    return Err(mcp_err("E_INVALID", "follow needs run_id and chosen", None));
+                };
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                let marked = control_route::follow(&s, run_id, &chosen, crate::store::now_unix())
+                    .map_err(to_mcp_err)?;
+                ok_json_compact(&marked)
+            }
+            other => Err(mcp_err(
+                "E_INVALID",
+                format!("control_route's action is propose or follow, not {other:?}"),
+                None,
+            )),
+        }
+    }
+
     #[tool(description = "The settings page specs, data source shapes, \
         resources and page actions a device renders.")]
     pub(super) async fn list_pages(&self) -> Result<CallToolResult, McpError> {

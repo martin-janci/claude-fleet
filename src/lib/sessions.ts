@@ -758,8 +758,8 @@ function recipientArgs(to: ShareTo): { person: string } | { person: string; org:
 }
 
 /**
- * Share this session with one person, or an org you are in, at `watch` or
- * `drive`.
+ * Share this session with one person, or an org you are in, at `watch`,
+ * `answer` (Orbit Fleet 11.7: also answer its questions) or `drive`.
  *
  * Owner only, enforced on the hub (and in the store, against the row's own
  * `owner_person_id`); the Share sheet's own gate is the UI half of the same
@@ -769,7 +769,7 @@ function recipientArgs(to: ShareTo): { person: string } | { person: string; org:
 export async function shareSession(
   sessionId: number,
   to: ShareTo,
-  level: 'watch' | 'drive',
+  level: 'watch' | 'answer' | 'drive',
 ): Promise<Result<SessionRow | null>> {
   const r = await invokeCmd<SessionRow | null>('session_share', {
     args: { session_id: sessionId, ...recipientArgs(to), level },
@@ -791,7 +791,7 @@ export async function unshareSession(
 }
 
 /**
- * Lower one person's grant from `drive` to `watch`.
+ * Lower one person's grant to `watch`, from `drive` or `answer`.
  *
  * There is deliberately no wrapper that raises one, because there is no tool
  * that raises one: a grant only ever moves downward (spec §4.3 invariant 3),
@@ -1002,6 +1002,21 @@ export async function sendPrompt(
   });
 }
 
+/**
+ * Press one of a dialog's own keys (a numbered option, Enter, Escape, Tab) —
+ * the `answer` tier's one write (Orbit Fleet 11.7). It is `send_prompt` with
+ * an empty prompt and a key, which is the shape the hub admits at `answer`
+ * (after a fresh read of the pane shows a dialog); any prompt text would make
+ * it `drive`. Kept apart from {@link sendPrompt} so the share sweep can hold a
+ * key-only write to the `answer` gate and every other `send_prompt` to
+ * `drive`.
+ */
+export async function answerDialog(hostAlias: string, tmuxName: string, key: string): Promise<Result<void>> {
+  return invokeCmd<void>('send_prompt', {
+    args: { host_alias: hostAlias, tmux_name: tmuxName, prompt: '', keys: key },
+  });
+}
+
 /** What `queue_prompt` did with one prompt (step 5.10). */
 export interface QueuePromptResult {
   session_id: number;
@@ -1167,10 +1182,11 @@ export async function dismissGhostSession(sessionId: number): Promise<Result<voi
 
 /** Adopt a live tmux session fleet did not start (`started_at` null): fleet
  *  runs it from now on and the caller owns it when nobody did (Lost and
- *  found, redesign step 4.8). */
-export async function adoptSession(sessionId: number): Promise<Result<SessionRow>> {
+ *  found, redesign step 4.8). `projectId` adopts it into that project
+ *  (Adopt into, step 4.12); omitted keeps the one reconcile found. */
+export async function adoptSession(sessionId: number, projectId?: number | null): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>('adopt_session', {
-    args: { session_id: sessionId },
+    args: projectId == null ? { session_id: sessionId } : { session_id: sessionId, project_id: projectId },
   });
   if (r.ok) acceptCommandRow(r.value);
   return r;

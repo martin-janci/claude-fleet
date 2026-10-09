@@ -336,6 +336,45 @@ impl FleetTools {
         ok_json_compact(&detail)
     }
 
+    #[tool(description = "A short Claude-written summary of what a session \
+        did since a time (unix seconds), for whoever may read it: { text | \
+        null, check: off | shadow | passed | failed | unchecked, since, turns, \
+        model, host_alias, at }. Runs one claude -p on the session's host \
+        under its account (booked as watch_summary); only with the session \
+        org's consent; text is null when nothing happened since or when the \
+        Jev check hid it. Errors: E_FORBIDDEN (no consent), E_CLAUDE_CLI, \
+        E_TIMEOUT, as session_conversation.")]
+    pub(super) async fn session_summary_since(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionSummarySinceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "session_summary_since",
+            &format!("session_id={} since={}", p.session_id, p.since),
+        );
+        // `watch`: a retelling of the same transcript (redesign 11.11).
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Read,
+            "the session",
+        )?;
+        let decide = crate::service::decide::DecideCtx::jev(std::sync::Arc::clone(&self.store));
+        let summary = crate::service::watch_summary::summarize_since(
+            &self.store,
+            &self.ssh,
+            &decide,
+            &row,
+            p.since,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json_compact(&summary)
+    }
+
     #[tool(description = "send_prompt + wait_for_session(turn_gt) + \
         session_transcript in one call. Returns { turn_seq, status: \
         satisfied | timeout, transcript } (the reply as plain text; null \
@@ -1074,7 +1113,9 @@ impl FleetTools {
         {item_id, note?}; mission_plan: ask the planner; card_decide \
         {card_id, ok, note?}; mission_grant {mission_id, level, hours?, \
         budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; \
-        missions_pause_all. \
+        missions_pause_all. mission_release_note {mission_id}: a drafted \
+        release note of a completed mission; today_brief {refresh?, org_id?, \
+        since?}: Today's morning brief, drafted only on refresh. \
         Work view: \
         primary:false links a secondary; expected_* guard (E_CONFLICT).")]
     pub(super) async fn work_link(
@@ -1628,6 +1669,12 @@ impl FleetTools {
                 "mission_revoke" => {
                     ok_json(&orch::revoke(&args, &self.store, &view_scope).map_err(to_mcp_err)?)
                 }
+                // Redesign 9.11: an LLM draft, on demand.
+                "mission_release_note" => ok_json(
+                    &orch::drafts::release_note(&args, &self.mission_deps(), &view_scope)
+                        .await
+                        .map_err(to_mcp_err)?,
+                ),
                 other => Err(mcp_err(
                     "E_INVALID",
                     format!("unknown work_link action {other:?}"),
@@ -1652,6 +1699,21 @@ impl FleetTools {
             let view_scope = self.view_scope(&caller)?;
             return ok_json(
                 &crate::service::work::orchestrate::decide_card(
+                    &args,
+                    &self.mission_deps(),
+                    &view_scope,
+                )
+                .await
+                .map_err(to_mcp_err)?,
+            );
+        }
+        // Redesign 9.11: Today's morning brief, a person's, on their own
+        // view of today; drafted only when they ask for a refresh.
+        if args.action == "today_brief" {
+            mission_caller(&caller)?;
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::orchestrate::drafts::brief(
                     &args,
                     &self.mission_deps(),
                     &view_scope,
@@ -1827,7 +1889,20 @@ impl FleetTools {
             let view_scope = self.view_scope(&caller)?;
             // Jev K1 asks only when its gate opens (off by default).
             let decide = crate::service::decide::DecideCtx::jev(std::sync::Arc::clone(&self.store));
-            let preview = crate::service::trackers::tickets::preview_start_decided(
+            let draft = args.draft_brief == Some(true);
+            if draft && caller.is_operator() {
+                // A draft spends a model call, like a summary: confirmed.
+                self.confirm_gate(
+                    "work_link",
+                    args.confirm_nonce.as_deref(),
+                    &format!(
+                        "Draft the brief for {} with a model call on its host",
+                        bound_text(args.key.as_deref())
+                    ),
+                    &caller,
+                )?;
+            }
+            let mut preview = crate::service::trackers::tickets::preview_start_decided(
                 &self.store,
                 &crate::service::work::start_args_owned(
                     &args,
@@ -1841,6 +1916,18 @@ impl FleetTools {
             )
             .await
             .map_err(to_mcp_err)?;
+            if draft {
+                // Redesign 6.10: on the planned host, under the same scope
+                // the preview was planned with.
+                crate::service::work::brief_draft::draft_into(
+                    &self.store,
+                    self.ssh.as_ref(),
+                    &mut preview,
+                    &view_scope,
+                )
+                .await
+                .map_err(to_mcp_err)?;
+            }
             return ok_json(&preview);
         }
         if args.action == "start" {

@@ -4,6 +4,8 @@ import { approvable, commandRows, keepsKind, paletteCommands, runCommand, settin
 import { applyTheme, theme } from './theme';
 import { allDescriptors } from './pages/testing';
 import { session } from './hosts_fixture';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
+import { destination } from './destination';
 import type { PendingInput } from './pending_input';
 import type { SessionRow } from './sessions';
 
@@ -104,5 +106,24 @@ describe('settings in plain words', () => {
     expect(row?.label).toMatch(/^Set .* to /);
     expect(settingRow('recent work', allDescriptors, true)).toBeNull();
     expect(settingRow('set recent work to 3 days', allDescriptors, false)).toBeNull();
+  });
+});
+
+describe('Automation commands (8.4)', () => {
+  afterEach(() => {
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    destination.set('session');
+  });
+
+  it('Open Automation goes there; the pause command names what it will do', async () => {
+    const ctx = { selected: null, sessionView: 'conversation' as const };
+    await runCommand('app.automation', ctx);
+    expect(get(destination)).toBe('automation');
+    const label = () => paletteCommands(ctx).find((c) => c.id === 'app.automation-pause')?.label;
+    expect(label()).toBe('Pause all automation');
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'automation.paused': 'true' });
+    expect(label()).toBe('Resume automation');
+    // Pause all missions stays as it was.
+    expect(paletteCommands(ctx).find((c) => c.id === 'app.pause-all')?.label).toBe('Pause all missions');
   });
 });

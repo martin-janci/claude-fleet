@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, type Snippet } from 'svelte';
   import {
     recreateSession,
     dismissGhostSession,
@@ -55,6 +55,9 @@
   import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
   import { projectById } from './projects';
   import SessionRowMenu from './SessionRowMenu.svelte';
+  import PulseSteps from './PulseSteps.svelte';
+  import { sessionPulse } from './session_loaders';
+  import { startingSessions } from './session_starting';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -83,6 +86,7 @@
     askRestart,
     askKill,
     orgColor = null,
+    trailing = undefined,
   }: {
     sess: SessionRow;
     selectMode: boolean;
@@ -125,9 +129,22 @@
     /** Work graph M5: the org's colour, drawn as a thin bar at the row's
      *  left edge — only when two or more orgs exist (the caller decides). */
     orgColor?: string | null;
+    /** Drawn last inside the row: a control that belongs to it (the
+     *  archived chip), so a tree row owns its own controls. */
+    trailing?: Snippet;
   } = $props();
 
   const sessSelected = $derived($selectedSession?.id === sess.id);
+  // Step 5.14: a session this window just started, until its agent is up
+  // (`session_starting.ts`).
+  const starting = $derived($startingSessions.has(sess.id));
+  const startPulse = $derived(sessionPulse(sess));
+  /** "Worktree ✓ · tmux ✓ · Claude Code starting", as the board words it. */
+  const startText = $derived(
+    startPulse.steps
+      .map((s) => (s.state === 'done' ? `${s.label} ✓` : s.state === 'active' ? `${s.label} starting` : s.label))
+      .join(' · '),
+  );
   // Selection is a bar as well as a tint, so it does not rest on colour
   // alone; with an org colour the bar sits just inside the org stripe.
   const rowShadow = $derived(
@@ -598,7 +615,8 @@
   aria-current={sessSelected ? 'true' : undefined}
   data-stuck={sess.stuck_kind ?? undefined}
   data-bucket={triage.bucket}
-  role="button"
+  role="treeitem"
+  aria-selected={sessSelected}
   tabindex="0"
   ondblclick={(e) => sess.status !== 'ghost' && !readOnly && beginLabelEdit(sess, e)}
   onclick={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onSelectSession(sess, e)}
@@ -609,11 +627,10 @@
   use:wash={bucketState(triage.bucket)}
 >
   {#if selectMode && !readOnly}
-    <!-- a11y smell, known: an <input> nested in a role="button" row. The
-         row is the click target for open/toggle; the box is a visible
-         affordance for the same toggle and stops propagation so the two
-         never double-fire. Splitting the row into a real <button> plus a
-         sibling checkbox is the proper fix (F5 sidebar split). -->
+    <!-- The row is a treeitem (redesign step 7.2), so the box is a control
+         of its own inside it, not a child a button would hide. It is a
+         visible affordance for the row's toggle and stops propagation so
+         the two never double-fire. -->
     <input
       type="checkbox"
       class="select-box"
@@ -962,7 +979,16 @@
                `blocked` status chip above still says the session is waiting. -->
           <AnswerPrompt session={sess} view={answerView} compact />
         {/if}
-        {#if compact}
+        {#if starting}
+          <!-- Step 5.14: ⌘N closes into the Pulse sequence on the new row;
+               its worktree and tmux steps are done once the row is here, and
+               the agent step lights when the agent reports a status. The
+               only loader on the row: nothing else waits on it. -->
+          <div class="starting-line" data-testid="row-starting">
+            <PulseSteps pulse={startPulse} size={14} markOnly testid="row-pulse" />
+            <span class="starting-text" role="status">{startText}</span>
+          </div>
+        {:else if compact}
           <SessionRowMeta
             {sess}
             state={bucketState(triage.bucket)}
@@ -982,6 +1008,7 @@
       </div>
     {/if}
   {/if}
+  {@render trailing?.()}
 </div>
 {#if nameDialog}
   <!-- `rename` mode is handed an item id and no session, so the dialog cannot
@@ -1077,7 +1104,7 @@
   .sess-row.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
   .sess-row.renaming { background: var(--bg-pane); }
   /* The row is the app's primary navigation surface and is a tabbable
-     role="button". Without this a keyboard user tabbing the session list
+     treeitem. Without this a keyboard user tabbing the session list
      sees nothing move at all (WCAG 2.4.7). Drawn inward: the row is inside
      a scrolling list that clips an outset ring. */
   .sess-row:focus-visible {
@@ -1256,6 +1283,16 @@
   .sess-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
   .sess-line1 { position: relative; display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
   .sess-line1 .sess-name { flex: 1; }
+  .starting-line {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+    padding-left: 0.85rem;
+    font-size: 11px;
+    color: var(--fg-muted);
+  }
+  .starting-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Redesign step 3.6: the chip strip and the Compact row. */
   .chips { display: contents; }

@@ -544,9 +544,24 @@ pub const DECIDE_JEV_HOST_PLACEMENT: &str = "decide.jev.host_placement";
 /// `quick_answer`'s mode (J5: the likely option first in an agent's
 /// question or a chat form, redesign step 10.9).
 pub const DECIDE_JEV_QUICK_ANSWER: &str = "decide.jev.quick_answer";
+/// `adopt_target`'s mode (prefilling the project of a pane fleet did not
+/// start, N4).
+pub const DECIDE_JEV_ADOPT_TARGET: &str = "decide.jev.adopt_target";
+/// `restore_target`'s mode (prefilling the project of a found
+/// conversation, J10).
+pub const DECIDE_JEV_RESTORE_TARGET: &str = "decide.jev.restore_target";
 /// `duplicate`'s mode (flagging a proposed task that may duplicate an
 /// existing one, K4).
 pub const DECIDE_JEV_DUPLICATE: &str = "decide.jev.duplicate";
+/// `control_route`'s mode (K2: where a message typed in Control goes,
+/// redesign step 9.9).
+pub const DECIDE_JEV_CONTROL_ROUTE: &str = "decide.jev.control_route";
+/// `summary_check`'s mode (checking a watcher's summary against the
+/// transcript before it shows, J9).
+pub const DECIDE_JEV_SUMMARY_CHECK: &str = "decide.jev.summary_check";
+/// `turn_outcome`'s mode (J2: what a turn came to when hooks said nothing,
+/// read from the pane tail). Needs the reply-text consent (D48) on top.
+pub const DECIDE_JEV_TURN_OUTCOME: &str = "decide.jev.turn_outcome";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -593,6 +608,9 @@ pub const UPDATE_CHECK_INTERVAL_SECS: &str = "update.check_interval_secs";
 pub const UPDATE_CHECK_INTERVAL_MIN_SECS: u64 = 900;
 /// Sessions and items with no org may be sent too (D31). Off by default.
 pub const DECIDE_JEV_UNASSIGNED: &str = "decide.jev.unassigned";
+/// D48: sessions with no org may send reply text (J2) too, on top of
+/// [`DECIDE_JEV_UNASSIGNED`]. Off by default.
+pub const DECIDE_JEV_UNASSIGNED_REPLY: &str = "decide.jev.unassigned_reply";
 /// One call's whole budget, in milliseconds.
 pub const DECIDE_JEV_TIMEOUT_MS: &str = "decide.jev.timeout_ms";
 /// Consecutive failed calls that open the circuit breaker.
@@ -1332,6 +1350,24 @@ pub const SPECS: &[Spec] = &[
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
     Spec::new(
+        DECIDE_JEV_ADOPT_TARGET,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: adopt into",
+        "Prefilling the project when you adopt a pane fleet did not start. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_RESTORE_TARGET,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: restore into",
+        "Prefilling the project when you restore a conversation found on a host. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
         DECIDE_JEV_DUPLICATE,
         "off",
         Kind::Choice(DECIDE_MODES),
@@ -1341,6 +1377,33 @@ pub const SPECS: &[Spec] = &[
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
     Spec::new(
+        DECIDE_JEV_CONTROL_ROUTE,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: Control routing",
+        "Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_SUMMARY_CHECK,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: summary check",
+        "Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: check first")]),
+    Spec::new(
+        DECIDE_JEV_TURN_OUTCOME,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: turn outcome",
+        "Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: set the state")]),
+    Spec::new(
         DECIDE_JEV_UNASSIGNED,
         "false",
         Kind::Bool,
@@ -1349,6 +1412,15 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Experimental, Tag::Network])
     .danger("Sessions and tickets outside every organisation will be sent to TypeSafe too."),
+    Spec::new(
+        DECIDE_JEV_UNASSIGNED_REPLY,
+        "false",
+        Kind::Bool,
+        "Jev: send unassigned replies",
+        "Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all.",
+    )
+    .tags(&[Tag::Experimental, Tag::Network])
+    .danger("Claude's reply text from sessions outside every organisation will be sent to TypeSafe too."),
     Spec::new(
         DECIDE_JEV_TIMEOUT_MS,
         "1500",
@@ -1541,7 +1613,10 @@ pub const SPECS: &[Spec] = &[
     .labels(NOTIFY_STATE_LABELS),
     Spec::new(
         NOTIFY_PHONE,
-        "needs_you,failed,routine_failed",
+        // Blocked too: before the matrix a phone announced a stuck session,
+        // a host down and an account at its limit, and still does unless
+        // someone unticks it (Martin, 2026-10-09).
+        "needs_you,failed,blocked,routine_failed",
         Kind::ChoiceSet(NOTIFY_STATES),
         "Phone",
         "The session states the phone shows a notification for.",
@@ -2581,10 +2656,18 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_START_PROJECT, None), "off");
         assert_eq!(resolve(DECIDE_JEV_SIBLING_REPOS, None), "off");
         assert_eq!(resolve(DECIDE_JEV_DUPLICATE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_CONTROL_ROUTE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_SUMMARY_CHECK, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_TURN_OUTCOME, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_UNASSIGNED_REPLY, None), "false");
+        assert!(validate(DECIDE_JEV_TURN_OUTCOME, "auto").is_err());
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "assist").is_ok());
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_HOST_PLACEMENT, None), "off");
         assert_eq!(resolve(DECIDE_JEV_QUICK_ANSWER, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_ADOPT_TARGET, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_RESTORE_TARGET, None), "off");
+        assert!(validate(DECIDE_JEV_RESTORE_TARGET, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_MODEL, None), "jev-1.13.0");
         assert_eq!(resolve(DECIDE_RETENTION_DAYS, None), "90");
         // `auto` is not offered yet (D36), nor is a free-text model.

@@ -28,6 +28,7 @@
   import { composerInsert } from './lib/conversation';
   import { tidyRequest } from './lib/tidy';
   import TerminalView from './lib/TerminalView.svelte';
+  import { terminalPane, requestTerminalTab } from './lib/terminals';
   import WatchView from './lib/WatchView.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
   import HostsView from './lib/HostsView.svelte';
@@ -37,6 +38,7 @@
   import AccountsPage from './lib/AccountsPage.svelte';
   import AppRail from './lib/AppRail.svelte';
   import ControlView from './lib/ControlView.svelte';
+  import AutomationView from './lib/AutomationView.svelte';
   import { toggleControl, toggleToday } from './lib/control';
   import type { RailId } from './lib/rail';
   import WorkBoard from './lib/WorkBoard.svelte';
@@ -63,7 +65,7 @@
   import { newSessionRequest, clearNewSessionRequest } from './lib/new_session_request';
   import { push, pushError } from './lib/toasts';
   import DownloadsSheet from './lib/DownloadsSheet.svelte';
-  import { downloads, unseen, loadDownloads, noteDownloadsChanged } from './lib/downloads';
+  import { downloads, downloadsOpen, unseen, loadDownloads, noteDownloadsChanged } from './lib/downloads';
   import { loadLocalWorkspaces, noteLocalWorkspacesChanged } from './lib/local_workspaces';
   import type { Result } from './lib/result';
   import type { UnlistenFn } from '@tauri-apps/api/event';
@@ -150,7 +152,6 @@
   let stopActivity: (() => void) | null = null;
   let stopCatchUp: (() => void) | null = null;
   // File downloads: the footer button and its sheet.
-  let showDownloads = $state(false);
   const unseenDownloads = $derived(unseen($downloads));
 
   function reportBootstrap(what: string, r: Result<unknown>): string | null {
@@ -563,12 +564,17 @@
       $destination === 'hosts' ||
       $destination === 'assets' ||
       $destination === 'accounts' ||
-      $destination === 'control',
+      $destination === 'control' ||
+      $destination === 'automation',
   );
   // What covers the session's own view (the terminal or the conversation):
   // a fleet page, which needs no selected session.
   const fleetPageShown = $derived(
-    $destination === 'hosts' || $destination === 'assets' || $destination === 'accounts' || $destination === 'control',
+    $destination === 'hosts' ||
+      $destination === 'assets' ||
+      $destination === 'accounts' ||
+      $destination === 'control' ||
+      $destination === 'automation',
   );
   const effectiveView = $derived(
     resolveSessionView($sessionView, selNoPane, selHasClaudeId, selOwned),
@@ -682,6 +688,9 @@
     } else if (id === 'control') {
       closeHosts();
       goTo('control');
+    } else if (id === 'automation') {
+      closeHosts();
+      goTo('automation');
     } else if (id === 'accounts') showAccounts();
     else if (id === 'toolkit') showToolkit();
     else if (id === 'settings') settingsOpen.set(true);
@@ -742,6 +751,12 @@
   );
   const inspectorRoom = $derived(!!$selectedSession && !wideMode && !boardShown && !detailsMain);
   const inspectorShown = $derived(inspectorRoom && inspectorOpen);
+  // Step 5.3: the pane's shells, for the Terminals tab. It is current while
+  // the pane shows one of them (alone or split beside the agent).
+  const selTerminals = $derived(
+    $terminalPane.sessionId != null && $terminalPane.sessionId === $selectedSession?.id ? $terminalPane : null,
+  );
+  const terminalsShown = $derived(selTerminals?.active != null);
   const currentTab: SessionTab | null = $derived(
     $destination === 'details'
       ? 'details'
@@ -750,12 +765,15 @@
         : $destination === 'session'
           ? effectiveView === 'conversation'
             ? 'conversation'
-            : 'agent'
+            : terminalsShown
+              ? 'terminals'
+              : 'agent'
           : null,
   );
   const tabDisabled = $derived<Partial<Record<SessionTab, string>>>({
     ...(!selHasClaudeId && !selNoPane ? { conversation: 'No Claude session id yet' } : {}),
-    ...(selNoPane ? { agent: NO_PANE_TITLE, files: NO_PANE_TITLE } : {}),
+    ...(selNoPane ? { agent: NO_PANE_TITLE, files: NO_PANE_TITLE, terminals: NO_PANE_TITLE } : {}),
+    ...(!selNoPane && !selTerminals ? { terminals: 'Terminals open only on a session that is yours' } : {}),
   });
   const selName = $derived(
     $selectedSession
@@ -764,8 +782,13 @@
   );
   function onSessionTab(tab: SessionTab) {
     if (tab === 'conversation') setSessionView('conversation');
-    else if (tab === 'agent') setSessionView('terminal');
-    else if (tab === 'files') showFiles();
+    else if (tab === 'agent') {
+      setSessionView('terminal');
+      requestTerminalTab('agent');
+    } else if (tab === 'terminals') {
+      setSessionView('terminal');
+      requestTerminalTab('shells');
+    } else if (tab === 'files') showFiles();
     else {
       closeHosts();
       goTo('details');
@@ -885,6 +908,11 @@
       leave('control');
       return;
     }
+    if ($destination === 'automation') {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      leave('automation');
+      return;
+    }
     // Inside the Hosts view, HostsView owns Esc (back to the list, clear the
     // filter, close from the list). This catches only an Esc with focus lost
     // to the page or left on the right column's chrome; a dialog, an input
@@ -997,6 +1025,7 @@
       session={$selectedSession}
       name={selName}
       current={currentTab}
+      terminalCount={selTerminals?.shells.length ?? 0}
       disabled={tabDisabled}
       assetsActive={$destination === 'assets'}
       {inspectorOpen}
@@ -1095,6 +1124,11 @@
           <ControlView {isMac} contextInput={agentContextInput} />
         </div>
       {/if}
+      {#if $destination === 'automation'}
+        <div class="view-slot overlay" data-testid="automation-overlay">
+          <AutomationView />
+        </div>
+      {/if}
       {#if boardShown}
         <!-- The board is a Work view (step 3.10): its Work tab opens it, the
              other tabs leave it, and it has no close of its own. It still
@@ -1122,8 +1156,8 @@
   {/if}
 </main>
 
-{#if showDownloads}
-  <DownloadsSheet onclose={() => (showDownloads = false)} />
+{#if $downloadsOpen}
+  <DownloadsSheet onclose={() => downloadsOpen.set(false)} />
 {/if}
 
 <footer class="status">
@@ -1144,7 +1178,7 @@
       class="hub-badge"
       data-testid="footer-downloads"
       title="Files sessions sent to your devices"
-      onclick={() => (showDownloads = true)}
+      onclick={() => downloadsOpen.set(true)}
       >⤓ Downloads…{unseenDownloads > 0 ? ` (${unseenDownloads})` : ''}</button
     >
     {#if trackersLine}

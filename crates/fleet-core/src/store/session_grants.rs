@@ -105,6 +105,13 @@ pub(crate) fn bump_grant_generation() {
 
 /// Watch: read the session and its content, drive nothing.
 pub const GRANT_WATCH: &str = "watch";
+/// Answer (Orbit Fleet 11.7, migration 142): watch, plus answer the dialog
+/// on the pane — a numbered option, Enter, Escape or Tab, and only while a
+/// fresh read of the pane shows a dialog. Nothing typed, no prompt, no `C-c`:
+/// the person can say yes or no to what the session asks and cannot steer it.
+/// The gate is `mcp::tools::messaging::send_prompt`'s keys path
+/// ([`crate::service::view_scope::ViewScope::may_answer`]).
+pub const GRANT_ANSWER: &str = "answer";
 /// Drive: watch, plus make the machine do work (`send_prompt`, and
 /// `send_message { deliver, submit }`, which is the same pane write by another
 /// route). **Not** kill, restart, rename, move, fork or re-share — those are
@@ -112,10 +119,16 @@ pub const GRANT_WATCH: &str = "watch";
 /// invariant 5, and no grant reaches it.
 pub const GRANT_DRIVE: &str = "drive";
 
-/// The two grantable levels, widest last — the order
+/// The grantable levels, widest last — the order
 /// [`Store::narrow_session_grant`] moves against. There is deliberately no
-/// third entry: `own` is a tier nobody can be granted, not a level.
-pub const GRANT_LEVELS: [&str; 2] = [GRANT_WATCH, GRANT_DRIVE];
+/// `own` entry: it is a tier nobody can be granted, not a level.
+pub const GRANT_LEVELS: [&str; 3] = [GRANT_WATCH, GRANT_ANSWER, GRANT_DRIVE];
+
+/// A level's place in [`GRANT_LEVELS`] (wider is larger); `None` for a
+/// string that is not a level.
+fn grant_rank(level: &str) -> Option<usize> {
+    GRANT_LEVELS.iter().position(|l| *l == level)
+}
 
 /// Check a level before it becomes a row, and return it as it should be
 /// STORED. `E_VALIDATE` for anything else — including `"own"`, which gets its
@@ -123,6 +136,7 @@ pub const GRANT_LEVELS: [&str; 2] = [GRANT_WATCH, GRANT_DRIVE];
 pub fn validate_grant_level(level: &str) -> Result<&'static str, IpcError> {
     match level {
         GRANT_WATCH => Ok(GRANT_WATCH),
+        GRANT_ANSWER => Ok(GRANT_ANSWER),
         GRANT_DRIVE => Ok(GRANT_DRIVE),
         "own" => Err(IpcError::new(
             codes::E_VALIDATE,
@@ -166,7 +180,7 @@ pub struct SessionGrantRow {
     /// The recipient of an org grant (phase D).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
-    /// [`GRANT_WATCH`] or [`GRANT_DRIVE`].
+    /// [`GRANT_WATCH`], [`GRANT_ANSWER`] or [`GRANT_DRIVE`].
     pub level: String,
     /// The person who granted it — the owner at the time.
     pub granted_by: i64,
@@ -455,44 +469,71 @@ impl Store {
         self.narrow_session_grant_to(session_id, GrantRecipient::Person(person), owner)
     }
 
-    /// Narrow the live grant of `session_id` to `to` from `drive` to
-    /// `watch`, as the owner. **The only level change an owner has**, and it
-    /// has no twin: there is no function that raises one, which is why
-    /// "downward only" is a property of the module's surface rather than of a
-    /// check inside it.
-    ///
-    /// Idempotent: narrowing a grant that is already `watch` writes nothing
-    /// and returns it, because the caller asked for a state the row is in and
-    /// reporting that as a failure would only invite a retry loop.
-    ///
-    /// `E_FORBIDDEN` when the caller does not own the session (`owner` is an
-    /// `i64` and the `UPDATE` carries the owner comparison, as in
-    /// [`Store::grant_session`]); `E_NOTFOUND` when there is no live grant to
-    /// narrow.
+    /// [`Store::narrow_session_grant_to_level`] to `watch`, the narrowing
+    /// every caller had before the Answer level existed.
     pub fn narrow_session_grant_to(
         &self,
         session_id: i64,
         to: GrantRecipient,
         owner: i64,
     ) -> Result<SessionGrantRow, IpcError> {
+        self.narrow_session_grant_to_level(session_id, to, owner, GRANT_WATCH)
+    }
+
+    /// Narrow the live grant of `session_id` to `to` down to `level`
+    /// (`drive` → `answer` → `watch`), as the owner. **The only level change
+    /// an owner has**, and it has no twin: there is no function that raises
+    /// one, which is why "downward only" is a property of the module's
+    /// surface rather than of a check inside it. The `UPDATE` only matches a
+    /// grant WIDER than `level`, so asking for `drive` matches nothing.
+    ///
+    /// Idempotent: narrowing a grant that is already at or below `level`
+    /// writes nothing and returns it, because the caller asked for a state the
+    /// row is in and reporting that as a failure would only invite a retry
+    /// loop. `E_VALIDATE` for a string that is not a level.
+    ///
+    /// `E_FORBIDDEN` when the caller does not own the session (`owner` is an
+    /// `i64` and the `UPDATE` carries the owner comparison, as in
+    /// [`Store::grant_session`]); `E_NOTFOUND` when there is no live grant to
+    /// narrow.
+    fn narrow_session_grant_to_level(
+        &self,
+        session_id: i64,
+        to: GrantRecipient,
+        owner: i64,
+        level: &str,
+    ) -> Result<SessionGrantRow, IpcError> {
+        let level = validate_grant_level(level)?;
         let (person, org) = recipient_columns(to);
-        let narrowed = self.conn.execute(
-            "UPDATE session_grants SET level = 'watch' \
-              WHERE session_id = ?1 AND person_id IS ?2 AND org_id IS ?3 \
-                AND revoked_at IS NULL AND level = 'drive' \
-                AND EXISTS (SELECT 1 FROM sessions \
-                             WHERE sessions.id = session_grants.session_id \
-                               AND sessions.owner_person_id = ?4)",
-            rusqlite::params![session_id, person, org, owner],
-        )?;
+        // The wider levels, as SQL: `level` comes from `GRANT_LEVELS`, never
+        // from the caller's string, so the list is three constants at most.
+        let wider = GRANT_LEVELS[grant_rank(level).map_or(GRANT_LEVELS.len(), |r| r + 1)..]
+            .iter()
+            .map(|l| format!("'{l}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let narrowed = if wider.is_empty() {
+            0
+        } else {
+            self.conn.execute(
+                &format!(
+                    "UPDATE session_grants SET level = ?5 \
+                      WHERE session_id = ?1 AND person_id IS ?2 AND org_id IS ?3 \
+                        AND revoked_at IS NULL AND level IN ({wider}) \
+                        AND EXISTS (SELECT 1 FROM sessions \
+                                     WHERE sessions.id = session_grants.session_id \
+                                       AND sessions.owner_person_id = ?4)"
+                ),
+                rusqlite::params![session_id, person, org, owner, level],
+            )?
+        };
         if narrowed > 0 {
             bump_grant_generation();
-            // Only on a real narrowing: the idempotent path (already
-            // `watch`) changed nothing, and announcing it would move every
-            // affected stream's generation for nothing.
+            // Only on a real narrowing: the idempotent path (already at or
+            // below `level`) changed nothing, and announcing it would move
+            // every affected stream's generation for nothing.
             if let Some(g) = self.live_grant(session_id, to)? {
-                let changes =
-                    self.grant_changes(session_id, to, Some(GRANT_WATCH), g.granted_at)?;
+                let changes = self.grant_changes(session_id, to, Some(level), g.granted_at)?;
                 self.announce_grant_change(&changes)?;
             }
         } else if !self.session_is_owned_by(session_id, owner)? {
@@ -747,7 +788,9 @@ impl Store {
         let mut out: BTreeMap<i64, String> = BTreeMap::new();
         for row in rows {
             let (session, level) = row?;
-            let wider = out.get(&session).is_none_or(|have| have != GRANT_DRIVE);
+            let wider = out
+                .get(&session)
+                .is_none_or(|have| grant_rank(&level) > grant_rank(have));
             if wider {
                 out.insert(session, level);
             }
@@ -756,24 +799,28 @@ impl Store {
     }
 
     /// How many live grants TO `person` stand on sessions of `org`, as
-    /// `(watch, drive)` — what an org admin sees of a member's grants (org
+    /// `(watch, answer, drive)` — what an org admin sees of a member's grants (org
     /// administration phase D, owner's answer 2). Counts only: a list would
     /// name sessions, and a session's metadata is content.
-    pub fn person_grants_in_org(&self, person: i64, org: i64) -> Result<(usize, usize), IpcError> {
+    pub fn person_grants_in_org(
+        &self,
+        person: i64,
+        org: i64,
+    ) -> Result<(usize, usize, usize), IpcError> {
         let mut st = self.conn.prepare(concat!(
             "SELECT g.level, COUNT(*) FROM session_grants g JOIN sessions s ON s.id = g.session_id               WHERE g.person_id = ?1 AND g.revoked_at IS NULL AND ",
             crate::session_org_sql!("s"),
             " = ?2 GROUP BY g.level"
         ))?;
-        let mut out = (0, 0);
+        let mut out = (0, 0, 0);
         for row in st.query_map(rusqlite::params![person, org], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })? {
             let (level, n) = row?;
-            if level == GRANT_DRIVE {
-                out.1 = n as usize;
-            } else {
-                out.0 = n as usize;
+            match level.as_str() {
+                GRANT_DRIVE => out.2 = n as usize,
+                GRANT_ANSWER => out.1 = n as usize,
+                _ => out.0 = n as usize,
             }
         }
         Ok(out)
@@ -822,7 +869,7 @@ impl Store {
         Ok(n)
     }
 
-    /// The same authority, narrowing instead: every live `drive` grant TO
+    /// The same authority, narrowing instead: every live `drive` or `answer` grant TO
     /// `person` on the sessions of `org` becomes `watch`. Returns how many
     /// it narrowed.
     pub fn narrow_person_grants_in_org(&self, person: i64, org: i64) -> Result<usize, IpcError> {
@@ -831,7 +878,7 @@ impl Store {
         let mut narrowed = Vec::new();
         for id in &sessions {
             if tx.execute(
-                "UPDATE session_grants SET level = 'watch'                   WHERE session_id = ?1 AND person_id = ?2 AND revoked_at IS NULL                     AND level = 'drive'",
+                "UPDATE session_grants SET level = 'watch'                   WHERE session_id = ?1 AND person_id = ?2 AND revoked_at IS NULL                     AND level IN ('answer', 'drive')",
                 rusqlite::params![id, person],
             )? > 0
             {
@@ -1146,6 +1193,69 @@ mod tests {
         }
     }
 
+    /// The Answer level (Orbit Fleet 11.7, migration 142) sits between the
+    /// two: it is granted like either, narrows to `watch`, and a `drive`
+    /// grant narrows to it — never the other way.
+    #[test]
+    fn answer_sits_between_watch_and_drive_and_only_narrows() {
+        let (s, a, b, session) = shared_fixture();
+        let g = s
+            .grant_session(session, GrantRecipient::Person(b), GRANT_ANSWER, a)
+            .expect("answer is a grantable level");
+        assert_eq!(g.level, GRANT_ANSWER);
+        assert_eq!(granted_level(&s, session, b).as_deref(), Some(GRANT_ANSWER));
+        // Narrowing to `drive` matches nothing: there is no wider level to
+        // come from, so the grant stays `answer`.
+        let same = s
+            .narrow_session_grant_to_level(session, GrantRecipient::Person(b), a, GRANT_DRIVE)
+            .expect("idempotent");
+        assert_eq!(same.level, GRANT_ANSWER);
+        // The owner's narrow takes it to `watch`.
+        let n = s.narrow_session_grant(session, b, a).expect("narrow");
+        assert_eq!(n.level, GRANT_WATCH);
+        assert_eq!(n.id, g.id, "the same row, narrowed");
+        // And back up only by revoking and sharing again.
+        let n = s
+            .narrow_session_grant_to_level(session, GrantRecipient::Person(b), a, GRANT_ANSWER)
+            .expect("idempotent");
+        assert_eq!(n.level, GRANT_WATCH, "watch never becomes answer");
+        s.revoke_session_grant(session, b, a).unwrap();
+        s.grant_session(session, GrantRecipient::Person(b), GRANT_DRIVE, a)
+            .unwrap();
+        let n = s
+            .narrow_session_grant_to_level(session, GrantRecipient::Person(b), a, GRANT_ANSWER)
+            .expect("drive narrows to answer");
+        assert_eq!(n.level, GRANT_ANSWER);
+        assert_eq!(
+            s.narrow_session_grant_to_level(session, GrantRecipient::Person(b), a, "own")
+                .expect_err("not a level")
+                .code,
+            codes::E_VALIDATE
+        );
+    }
+
+    /// Where a person's own grant and an org grant both reach a session, the
+    /// wider level holds — with three levels, by rank, not by "is it drive".
+    #[test]
+    fn the_wider_of_a_person_and_an_org_grant_holds_with_answer_between() {
+        let (s, a, b, session) = shared_fixture();
+        let org = s.add_org("platform", None, false).expect("org").id;
+        s.set_org_member(org, a, crate::store::ROLE_MEMBER, None)
+            .unwrap();
+        s.set_org_member(org, b, crate::store::ROLE_MEMBER, None)
+            .unwrap();
+        s.grant_session(session, GrantRecipient::Person(b), GRANT_ANSWER, a)
+            .unwrap();
+        s.grant_session(session, GrantRecipient::Org(org), GRANT_WATCH, a)
+            .unwrap();
+        assert_eq!(granted_level(&s, session, b).as_deref(), Some(GRANT_ANSWER));
+        s.revoke_session_grant_to(session, GrantRecipient::Org(org), a)
+            .unwrap();
+        s.grant_session(session, GrantRecipient::Org(org), GRANT_DRIVE, a)
+            .unwrap();
+        assert_eq!(granted_level(&s, session, b).as_deref(), Some(GRANT_DRIVE));
+    }
+
     /// Invariant 3, the behavioural half: there is no sequence of calls that
     /// turns a `watch` grant into a `drive` one.
     #[test]
@@ -1279,18 +1389,32 @@ mod tests {
              this list is where that is argued"
         );
 
-        // (b) Every statement that writes a level writes the narrow one: the
-        //     owner's, and the org admin's sweep. A `widen` would have to add
-        //     another shape.
+        // (b) Every statement that writes a level writes a narrower one: the
+        //     org admin's sweep writes `watch`, and the owner's narrow writes
+        //     the level it was asked for (Orbit Fleet 11.7) only over a grant
+        //     whose level is in the list of levels WIDER than it. A `widen`
+        //     would have to add another shape.
         assert_eq!(
             code.matches("SET level").count(),
-            code.matches("SET level = 'watch'").count(),
-            "only a narrowing writes a level"
+            2,
+            "the owner's narrow and the org admin's sweep"
         );
         assert_eq!(
             code.matches("SET level = 'watch'").count(),
-            2,
-            "the owner's narrow and the org admin's sweep"
+            1,
+            "the org admin's sweep"
+        );
+        assert_eq!(
+            code.matches("SET level = ?5").count(),
+            1,
+            "the owner's narrow"
+        );
+        assert!(
+            code.contains("AND revoked_at IS NULL AND level IN ({wider})")
+                && code.contains(
+                    "GRANT_LEVELS[grant_rank(level).map_or(GRANT_LEVELS.len(), |r| r + 1)..]"
+                ),
+            "the owner's narrow matches only a grant wider than the level it writes"
         );
 
         // (c) Nothing re-homes a grant. A redirect — "share this with me
@@ -1520,13 +1644,13 @@ mod tests {
             .unwrap();
         s.grant_session(other, GrantRecipient::Person(b), GRANT_DRIVE, a)
             .unwrap();
-        assert_eq!(s.person_grants_in_org(b, org).unwrap(), (0, 1));
+        assert_eq!(s.person_grants_in_org(b, org).unwrap(), (0, 0, 1));
         assert_eq!(s.narrow_person_grants_in_org(b, org).unwrap(), 1);
         assert_eq!(s.narrow_person_grants_in_org(b, org).unwrap(), 0);
-        assert_eq!(s.person_grants_in_org(b, org).unwrap(), (1, 0));
+        assert_eq!(s.person_grants_in_org(b, org).unwrap(), (1, 0, 0));
         assert_eq!(granted_level(&s, other, b).as_deref(), Some(GRANT_DRIVE));
         assert_eq!(s.revoke_person_grants_in_org(b, org).unwrap(), 1);
-        assert_eq!(s.person_grants_in_org(b, org).unwrap(), (0, 0));
+        assert_eq!(s.person_grants_in_org(b, org).unwrap(), (0, 0, 0));
         assert_eq!(granted_level(&s, session, b), None);
         assert_eq!(granted_level(&s, other, b).as_deref(), Some(GRANT_DRIVE));
     }

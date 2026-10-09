@@ -465,16 +465,6 @@ describe('App: the Hosts view', () => {
     expect(screen.queryByTestId('quick-switcher')).toBeNull();
   });
 
-  it('the onboarding card’s Add a host opens the Hosts view, not Settings', async () => {
-    onboardingDismissed.set(false);
-    await mountApp();
-    const card = await screen.findByTestId('onboarding-card');
-    const step = within(card).getAllByRole('button').find((b) => b.textContent?.includes('Add a host'))!;
-    await fireEvent.click(step);
-    await waitFor(() => expect(hostsView()).not.toBeNull());
-    expect(get(settingsOpen)).toBe(false);
-    expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
-  });
 });
 
 describe('App: the footer usage segment', () => {

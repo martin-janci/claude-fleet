@@ -801,6 +801,20 @@
         },
         {
           "badge": {
+            "text": "sends replies to Jev",
+            "when": "true"
+          },
+          "confirm": "The end of this org's sessions' screens (Claude's reply text, redacted) will be sent to TypeSafe when Decisions (Jev) and its turn outcome use case are on.",
+          "default": false,
+          "edit": "jev_reply",
+          "help": "On top of Jev above: let the end of this org's sessions' screens — Claude's last reply, redacted, code replaced by placeholders, a few lines — go to TypeSafe's decision model, so Jev can tell a finished turn from a question when hooks say nothing. Off by default (D48).",
+          "id": "jev_reply_allowed",
+          "label": "Also allow Claude's reply text (turn outcome)",
+          "on_off": true,
+          "type": "bool"
+        },
+        {
+          "badge": {
             "text": "bound devices: own only",
             "when": "false"
           },
@@ -3568,6 +3582,42 @@
     },
     {
       "default_widget": "select",
+      "key": "decide.jev.adopt_target",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: adopt into",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.restore_target",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: restore into",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
       "key": "decide.jev.duplicate",
       "kind": {
         "options": [
@@ -3585,12 +3635,78 @@
       ]
     },
     {
+      "default_widget": "select",
+      "key": "decide.jev.control_route",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: Control routing",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.summary_check",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: summary check",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.turn_outcome",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: turn outcome",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "switch",
       "key": "decide.jev.unassigned",
       "kind": {
         "type": "bool"
       },
       "label": "Jev: send unassigned",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "decide.jev.unassigned_reply",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Jev: send unassigned replies",
       "widgets": [
         "switch",
         "readonly"

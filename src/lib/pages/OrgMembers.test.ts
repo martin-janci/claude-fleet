@@ -7,7 +7,9 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import OrgMembers from './OrgMembers.svelte';
 import { memberSessionsWord, type OrgMember } from '../orgs';
-import type { ResourceRecord } from './resources';
+import type { FieldSpec, ResourceRecord } from './resources';
+import { bundle } from './testing';
+import { expectAccessible } from '../a11y_check';
 
 const members: OrgMember[] = [
   { person_id: 2, name: 'martin', role: 'admin', live_sessions: 6 },
@@ -46,5 +48,30 @@ describe('OrgMembers: sessions (11.7c)', () => {
   it('an older hub that sends no counts shows no column', () => {
     mount(members.map(({ person_id, name, role }) => ({ person_id, name, role })));
     expect(screen.queryByTestId('member-sessions')).toBeNull();
+  });
+
+  it('the member list, editable, in the New layout, is accessible', async () => {
+    const field = bundle.resources
+      .flatMap((r) => r.fields)
+      .find((f) => f.type === 'items' && f.item_label.type === 'member') as Extract<
+      FieldSpec,
+      { type: 'items' }
+    >;
+    const { container } = render(OrgMembers, {
+      props: {
+        record: { id: 1, name: 'Acme' } as unknown as ResourceRecord,
+        members: members.map((m) => ({ ...m, devices: ['laptop'] })),
+        addAction: field.add[0],
+        removeAction: field.remove,
+        readonly: false,
+        options: () => [
+          { value: 'member', label: 'Member' },
+          { value: 'admin', label: 'Admin' },
+        ],
+        run: async () => true,
+      },
+    });
+    expect(screen.getAllByTestId('item-remove-members')).toHaveLength(3);
+    await expectAccessible(container);
   });
 });

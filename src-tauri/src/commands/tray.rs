@@ -40,9 +40,10 @@ impl TrayState {
     fn tooltip(self) -> &'static str {
         match self {
             Self::Idle => "Orbit Fleet",
-            Self::Working => "Orbit Fleet: working",
-            Self::NeedsYou => "Orbit Fleet: needs you",
-            Self::Lost => "Orbit Fleet: signal lost",
+            // The manual's status words, as the status bar says them.
+            Self::Working => "Orbit Fleet · Working",
+            Self::NeedsYou => "Orbit Fleet · Needs you",
+            Self::Lost => "Orbit Fleet · Hub unavailable",
         }
     }
 
@@ -52,7 +53,9 @@ impl TrayState {
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(w) = app.webview_windows().values().next() {
+    // The main window by name: a pop-out terminal (step 5.4) is a window
+    // too, and "Open Orbit Fleet" means the app.
+    if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();

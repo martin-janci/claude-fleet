@@ -11,6 +11,7 @@ import {
   sameConversation,
   isPinned,
   emptyStateText,
+  agentLabel,
   emptyStateHint,
   relativeTime,
   blockTypeLabel,
@@ -631,6 +632,12 @@ describe('switcherEntries / conversationTitle', () => {
   it('labels the switcher button without a turn count', () => {
     expect(switcherLabel(c({ current: true, turns: 1 }))).toEqual({ when: 'Current', source: '/clear' });
   });
+  it('reads a Codex conversation’s unknown start as started, not as something wrong', () => {
+    const codex = c({ current: true, turns: 2, start_source: 'unknown' });
+    expect(switcherLabel(codex, 'codex').source).toBe('started');
+    expect(conversationTitle(codex, 'codex')).toBe('Current · started · 2 turns');
+    expect(switcherLabel(codex).source).toBe('new conversation');
+  });
 });
 
 describe('inlineEventFor', () => {
@@ -1143,5 +1150,33 @@ describe('fleetBackground', () => {
     expect(of('done')).toBe('done');
     expect(of('failed')).toBe('failed');
     expect(of('cancelled')).toBe('stopped');
+  });
+});
+
+describe('conversation copy names the row’s agent (Codex Conversation tab)', () => {
+  it('Codex says it starts a conversation on its first prompt', () => {
+    expect(emptyStateText(null, false, 'codex')).toBe('No conversation yet');
+    expect(emptyStateHint(null, false, true, 'codex')).toBe('Codex starts a conversation on its first prompt. Send one below.');
+    expect(emptyStateHint(null, false, false, 'codex')).toBe('Codex starts a conversation on its first prompt.');
+  });
+
+  it('Agy says its conversations cannot be shown yet, whatever the transcript read said', () => {
+    for (const [code, hasId] of [[null, false], [null, true], ['E_NO_TRANSCRIPT', true]] as const) {
+      expect(emptyStateText(code, hasId, 'agy')).toBe('Agy conversations can’t be shown yet');
+      expect(emptyStateHint(code, hasId, true, 'agy')).toBeTruthy();
+    }
+  });
+
+  it('Claude Code keeps its own wording', () => {
+    expect(emptyStateText(null, false, 'claude')).toBe('No Claude session id yet');
+    expect(emptyStateHint(null, false, true, 'claude')).toContain('as soon as Claude Code runs');
+  });
+
+  it('the composer note names the agent that is working', () => {
+    expect(composerStatus({ claude_status: 'working', stuck_kind: null }, 'codex')).toBe(
+      'Codex is working. The prompt is queued until the current turn ends.',
+    );
+    expect(agentLabel('agy')).toBe('Agy');
+    expect(agentLabel('claude')).toBe('Claude Code');
   });
 });

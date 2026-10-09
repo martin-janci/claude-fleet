@@ -16,7 +16,7 @@
   // they stay read-only.
   import { untrack, tick, setContext, type Snippet } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
-  import { sendPrompt, hasNoPane, sessions, type SessionRow } from './sessions';
+  import { sendPrompt, hasNoPane, sessions, sessionAgent, type SessionRow } from './sessions';
   import AnswerPrompt from './AnswerPrompt.svelte';
   import FormCard from './forms/FormCard.svelte';
   import { pendingInputFor } from './pending_input';
@@ -59,6 +59,7 @@
     sameConversation,
     isPinned,
     emptyStateText,
+    agentLabel,
     emptyStateHint,
     relativeTime,
     groupItems,
@@ -114,6 +115,7 @@
   import RichText from './RichText.svelte';
   import BackgroundDetail from './BackgroundDetail.svelte';
   import Loader from './Loader.svelte';
+  import type { LoaderName } from './loader-kit.generated';
   import PulseSteps from './PulseSteps.svelte';
   import { startingSessions } from './session_starting';
   import { sessionPulse, thinkingLabel } from './session_loaders';
@@ -168,6 +170,10 @@
     // (AgentPanel's removable context chip). Only shown when there IS a
     // composer to sit above.
     composerAbove,
+    // The working indicator in another voice (redesign step
+    // 9.13): Control's chat reads the running turn itself and answers the
+    // loader and the line to show instead of the Atom's "Thinking · …".
+    thinkingAs,
   }: {
     session: SessionRow;
     visible: boolean;
@@ -177,6 +183,7 @@
     promptPrefix?: string | null;
     blockWhileBusy?: boolean;
     composerAbove?: Snippet;
+    thinkingAs?: (conv: Conversation | null) => { loader: LoaderName; label: string } | null;
   } = $props();
 
   let conv = $state<Conversation | null>(null);
@@ -708,6 +715,7 @@
       ? thinkingLabel(doing ? { label: doing.label, since: doing.sinceMs !== null ? formatDuration(doing.sinceMs) : null } : null)
       : null,
   );
+  const thinkingOwn = $derived(thinking && thinkingAs ? thinkingAs(viewing === null ? conv : null) : null);
   // In the template, `turnLive` marks the last turn of the current
   // conversation while the indicator shows anything (working, blocked on a
   // prompt in the terminal, or just sent): an unfinished tool call there is
@@ -1101,8 +1109,11 @@
     return () => clearInterval(t);
   });
 
+  // The row's agent, named in the panel's copy ("Codex is working").
+  const agent = $derived(sessionAgent(session));
+  const agentName = $derived(agentLabel(agent));
   const gone = $derived(viewing !== null && errorCode === 'E_NO_TRANSCRIPT');
-  const empty = $derived(gone ? 'Transcript no longer on host' : emptyStateText(errorCode, !!session.claude_session_id));
+  const empty = $derived(gone ? 'Transcript no longer on host' : emptyStateText(errorCode, !!session.claude_session_id, agent));
   const canPrompt = $derived(!hasNoPane(session));
   // A reply's cards (rich_blocks.ts) act by filling this composer, so they
   // act only where it is drawn and holds the conversation on screen.
@@ -1110,7 +1121,7 @@
   const emptyHint = $derived(
     gone
       ? 'The host no longer keeps this conversation’s transcript file.'
-      : emptyStateHint(errorCode, !!session.claude_session_id, canPrompt),
+      : emptyStateHint(errorCode, !!session.claude_session_id, canPrompt, agent),
   );
   // The scroller (and so the thread) is on screen: find has something to search.
   const threadShown = $derived(!(empty && !(outgoing.length > 0 && viewing === null)) && !loading);
@@ -1152,7 +1163,7 @@
   // (The pre-refactor code claimed exactly that in a comment while the two
   // composers shared only the note; that is how the gate was lost. The
   // comment is true now because there is one expression, not two.)
-  const busyNote = $derived(composerStatus({ claude_status: liveStatus, stuck_kind: liveStuck }));
+  const busyNote = $derived(composerStatus({ claude_status: liveStatus, stuck_kind: liveStuck }, agent));
   // A gated composer also waits for its own last message to be taken: the
   // sheet is one-shot, and a second paste behind a first that Claude has not
   // read yet is the mangled line the gate exists to prevent.
@@ -2313,7 +2324,7 @@
         {:else if indicator?.kind === 'blocked'}
           <div class="blocked" data-testid="conv-blocked" role="status">
             <div class="blocked-text">
-              <strong>Claude is waiting for you in the terminal{indicator.waiting === 'permission' ? ' (permission)' : indicator.waiting === 'input' ? ' (input)' : ''}.</strong>
+              <strong>{agentName} is waiting for you in the terminal{indicator.waiting === 'permission' ? ' (permission)' : indicator.waiting === 'input' ? ' (input)' : ''}.</strong>
               {#if indicator.detail}<div class="blocked-detail">{indicator.detail}</div>{/if}
             </div>
             {#if onOpenTerminal}
@@ -2331,7 +2342,9 @@
             role={indicator ? 'status' : undefined}
             aria-hidden={indicator ? undefined : 'true'}
           >
-            {#if thinking}
+            {#if thinkingOwn}
+              <Loader name={thinkingOwn.loader} size={20} stage={false} class="indicator-loader" testid="conv-{thinkingOwn.loader}" />
+            {:else if thinking}
               <Loader name="atom" size={20} stage={false} class="indicator-loader" testid="conv-atom" />
             {:else}
               <Loader size={16} paused={!indicator} class="indicator-loader" />
@@ -2339,7 +2352,7 @@
             <!-- With nothing running in the transcript, "Thinking" keeps the
                  pane's own spinner line ("Cooking… 3s") as its tooltip. -->
             <span class="indicator-label" title={thinking && !doing && indicator?.kind === 'working' ? indicator.label : undefined}
-              >{!indicator ? '\u00a0' : indicator.kind === 'sent' ? 'Waiting for Claude…' : (thinking ?? indicatorLabel)}</span
+              >{!indicator ? '\u00a0' : indicator.kind === 'sent' ? `Waiting for ${agentName}…` : (thinkingOwn?.label ?? thinking ?? indicatorLabel)}</span
             >
           </div>
         {/if}
@@ -2409,7 +2422,7 @@
       }}
     >
       {#if slashOpen}
-        <ul class="slash-menu" role="listbox" id={SLASH_LIST_ID} aria-label="Claude Code commands" data-testid="conv-slash-menu">
+        <ul class="slash-menu" role="listbox" id={SLASH_LIST_ID} aria-label="{agentName} commands" data-testid="conv-slash-menu">
           {#each slashMatches as c, i (c.name)}
             <li role="presentation" class:active={i === slashIndex} data-testid="conv-slash-item">
               <!-- The button IS the option: role="option" must not wrap an

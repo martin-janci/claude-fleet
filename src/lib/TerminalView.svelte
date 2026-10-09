@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import { invoke } from '@tauri-apps/api/core';
   import { unarchiveSession } from './tidy';
@@ -34,19 +34,27 @@
     shellTerminalName,
     terminalPtyId,
     nextTerminalTab,
+    terminalPane,
+    terminalRequest,
     type ShellTerminalsResult,
   } from './terminals';
   import TerminalStrip from './TerminalStrip.svelte';
   import { AGENT_LABELS } from './row_groups';
   import Self from './TerminalView.svelte';
+  import { openTerminalWindow, popoutTitle } from './terminal_popout';
 
   /** Shell terminals (step 5.3). App mounts this pane with no `shell`: it is
    *  the session's terminal area, with the Agent | Shell N strip in the new
    *  layout, and its grid shows the tab picked there. Split mounts a second
    *  copy beside it with `shell` set, which shows that one terminal and
-   *  nothing else (no strip, no microphone). */
-  let { shell = undefined }: { shell?: number } = $props();
-  const isRoot = $derived(shell === undefined);
+   *  nothing else (no strip, no microphone).
+   *
+   *  A pop-out window (step 5.4) mounts it with `popout` set to the window's
+   *  label: the same single terminal (the agent's when `shell` is absent),
+   *  attached under that label as its pty id, so it is a second attach
+   *  beside the main window's and never replaces it. */
+  let { shell = undefined, popout = undefined }: { shell?: number; popout?: string } = $props();
+  const isRoot = $derived(shell === undefined && popout === undefined);
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -155,11 +163,24 @@
   /** Opening or closing a terminal is `own`, as the attach itself is. */
   const stripBlocked = $derived($sessionBlocked($selectedSession, 'shell_terminals'));
 
+  /** The list for this selection has come back: until then an empty
+   *  `shells` means "not known yet", not "none". */
+  let listed = false;
+  /** The terminal last picked, which the bar's Terminals tab goes back to. */
+  let lastShell: number | null = null;
+  /** The Terminals tab was pressed before the list came back. */
+  let wantShells = false;
+
   function takeTerminals(r: ShellTerminalsResult | null) {
     if (!r || r.session_id !== stripFor) return;
     shells = r.terminals.map((t) => t.n);
+    listed = true;
     if (activeShell != null && !shells.includes(activeShell)) activeShell = null;
     if (activeShell == null) split = false;
+    if (wantShells) {
+      wantShells = false;
+      showShells();
+    }
   }
 
   $effect(() => {
@@ -169,6 +190,9 @@
     shells = [];
     activeShell = null;
     split = false;
+    listed = false;
+    lastShell = null;
+    wantShells = false;
     if (id == null) return;
     void shellTerminals(id).then((r) => {
       if (r.ok && r.value) takeTerminals(r.value);
@@ -186,7 +210,7 @@
         return;
       }
       takeTerminals(r.value);
-      if (r.value?.session_id === stripFor && r.value.opened != null) activeShell = r.value.opened;
+      if (r.value?.session_id === stripFor && r.value.opened != null) selectTab(r.value.opened);
     } finally {
       stripBusy = false;
     }
@@ -218,7 +242,44 @@
   function selectTab(n: number | null) {
     activeShell = n;
     if (n == null) split = false;
+    else lastShell = n;
   }
+
+  /** The session bar's Terminals tab: the terminal last picked, else the
+   *  first one, else a new one. */
+  function showShells() {
+    if (stripFor == null || activeShell != null) return;
+    if (!listed) {
+      wantShells = true;
+      return;
+    }
+    const pick = lastShell != null && shells.includes(lastShell) ? lastShell : ([...shells].sort((a, b) => a - b)[0] ?? null);
+    if (pick != null) selectTab(pick);
+    else void newTerminal();
+  }
+
+  // The bar publishes its clicks, the pane carries them out. A request made
+  // before this pane mounted is not replayed.
+  let seenRequest = get(terminalRequest)?.seq ?? 0;
+  $effect(() => {
+    const req = $terminalRequest;
+    if (!isRoot || !req || req.seq <= seenRequest) return;
+    seenRequest = req.seq;
+    untrack(() => (req.to === 'agent' ? selectTab(null) : showShells()));
+  });
+
+  // What the bar's Terminals tab reads: the count, and whether it is current.
+  $effect(() => {
+    if (!isRoot) return;
+    terminalPane.set({
+      sessionId: showStrip ? ($selectedSession?.id ?? null) : null,
+      shells: [...shells],
+      active: showStrip ? activeShell : null,
+    });
+  });
+  onDestroy(() => {
+    if (isRoot) terminalPane.set({ sessionId: null, shells: [], active: null });
+  });
 
   /** Clear the picked terminal's screen: Ctrl+L to its shell. */
   function clearTerminal() {
@@ -226,6 +287,16 @@
     void invoke('pty_write', { args: { id: terminalPtyId(activeShell), data: '\x0c' } }).catch((e) => {
       pushError(toIpcError(e), 'Clear failed');
     });
+  }
+
+  /** Pop the picked tab out into its own window (step 5.4), or bring its
+   *  window forward. The tab stays here too: the window is a second view. */
+  async function popOutTerminal() {
+    const sel = $selectedSession;
+    if (!sel) return;
+    const n = activeShell;
+    const r = await openTerminalWindow(sel.id, n, popoutTitle(displayName(sel, $showFriendlyNames), n));
+    if (!r.ok) pushError(r.error, 'Pop out failed');
   }
 
   /** ⌥⌘T (Ctrl+Alt+T) opens a terminal, ⌘` (Ctrl+`) goes to the next tab.
@@ -655,7 +726,7 @@
       gen = ++openGeneration;
       if (standDown()) return;
       // From here on every pty call names this open's terminal.
-      PTY_ID = terminalPtyId(shellN);
+      PTY_ID = popout ?? terminalPtyId(shellN);
       openError = null;
       disconnected = false;
       await tick();
@@ -778,8 +849,11 @@
       if (shellN == null) {
         // The microphone claim follows the attached session (closeTerm runs
         // on every switch, so release lives on the deselect / destroy
-        // paths). A shell terminal never takes it: the voice is the agent's.
-        followSession(sess.id, get(hostByAlias).get(sess.host_alias)?.transport ?? 'ssh');
+        // paths). A shell terminal never takes it: the voice is the agent's,
+        // and the main window's, not a pop-out's.
+        if (popout === undefined) {
+          followSession(sess.id, get(hostByAlias).get(sess.host_alias)?.transport ?? 'ssh');
+        }
         // Work graph M7: a person attaching is a touch — it un-archives the
         // session and keeps tidy-up off it for an hour. Not an automatic
         // reconnect. Best-effort: an older hub without the action refuses it.
@@ -1387,6 +1461,7 @@
       onclose={(n) => void closeTerminal(n)}
       onsplit={() => (split = !split)}
       onclear={clearTerminal}
+      onpopout={() => void popOutTerminal()}
     />
   {/if}
   <div class="term-panes">

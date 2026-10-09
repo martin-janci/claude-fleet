@@ -28,11 +28,14 @@ describe('AppRail', () => {
   it('marks the current item and hands a click to its owner', async () => {
     const onselect = vi.fn();
     const { getByTestId, queryByTestId } = render(AppRail, { isMac: true, onselect });
-    expect(queryByTestId('rail-automation')).toBeNull();
+    expect(queryByTestId('rail-automation')).not.toBeNull();
     expect(getByTestId('rail-sessions').getAttribute('aria-current')).toBe('page');
     destination.set('control');
     await Promise.resolve();
     expect(getByTestId('rail-control').getAttribute('aria-current')).toBe('page');
+    destination.set('automation');
+    await Promise.resolve();
+    expect(getByTestId('rail-automation').getAttribute('aria-current')).toBe('page');
     destination.set('hosts');
     await Promise.resolve();
     expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');

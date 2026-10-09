@@ -1,7 +1,7 @@
 import { writable } from 'svelte/store';
 import { timeAgo } from './session_status';
 import { invokeCmd, type Result } from './result';
-import type { ClaudeStatus, StuckKind, SessionRow } from './sessions';
+import type { ClaudeStatus, StuckKind, SessionAgent, SessionRow } from './sessions';
 import { stuckKindLabel, contextLevel, type ContextLevel } from './attention';
 import type { SessionEvent } from './timeline';
 import { promptFirstLine, type TaskRow } from './tasks';
@@ -189,20 +189,41 @@ export function isPinned(scrollTop: number, clientHeight: number, scrollHeight: 
  * rendered instead. Missing Claude session id takes priority over any error
  * code (there was nothing to fetch in the first place).
  */
-export function emptyStateText(code: string | null, hasId: boolean): string | null {
-  if (!hasId) return 'No Claude session id yet';
+export function emptyStateText(code: string | null, hasId: boolean, agent: SessionAgent = 'claude'): string | null {
+  // Agy keeps its conversations in its own database, which nothing reads yet:
+  // say so rather than wait on a transcript that never comes.
+  if (agent === 'agy') return 'Agy conversations can’t be shown yet';
+  if (!hasId) return agent === 'claude' ? 'No Claude session id yet' : 'No conversation yet';
   if (code === 'E_NO_TRANSCRIPT') return 'No conversation yet';
   return null;
 }
 
 /** The second line of an empty state: what the user can do about it. Null
  *  wherever `emptyStateText` is null, so the two stay in step. */
-export function emptyStateHint(code: string | null, hasId: boolean, canPrompt: boolean): string | null {
-  if (!hasId) return 'It starts one as soon as Claude runs in this session.';
+export function emptyStateHint(
+  code: string | null,
+  hasId: boolean,
+  canPrompt: boolean,
+  agent: SessionAgent = 'claude',
+): string | null {
+  if (agent === 'agy') return 'Its terminal tab shows the session live.';
+  // Codex picks its conversation's id itself and writes it on the first prompt.
+  if (!hasId && agent === 'codex') {
+    return canPrompt
+      ? 'Codex starts a conversation on its first prompt. Send one below.'
+      : 'Codex starts a conversation on its first prompt.';
+  }
+  if (!hasId) return `It starts one as soon as ${agentLabel(agent)} runs in this session.`;
   if (code !== 'E_NO_TRANSCRIPT') return null;
   return canPrompt
     ? 'Send a prompt below to start it.'
     : 'This agent runs outside tmux, so it can only be prompted where it was started.';
+}
+
+/** The agent's name in conversation copy ("Codex is working"), as the agent
+ *  tab spells it (`row_groups.ts` AGENT_LABELS). */
+export function agentLabel(agent: SessionAgent): string {
+  return agent === 'codex' ? 'Codex' : agent === 'agy' ? 'Agy' : agent === 'shell' ? 'The shell' : 'Claude Code';
 }
 
 /** Pure relative-time formatter for an ISO timestamp against a reference clock. */
@@ -765,9 +786,12 @@ export function carriedCount(conv: Conversation | null, text: string): number {
 /** The note under the composer's Send button, or null when the session is
  *  ready to take a prompt. A stuck session may never read what is typed; a
  *  working one queues it until the turn ends. */
-export function composerStatus(s: { claude_status: string | null; stuck_kind: string | null }): string | null {
+export function composerStatus(
+  s: { claude_status: string | null; stuck_kind: string | null },
+  agent: SessionAgent = 'claude',
+): string | null {
   if (s.stuck_kind) return `Session is stuck (${stuckKindLabel(s.stuck_kind as StuckKind) || s.stuck_kind}). The prompt may not be read until that is cleared.`;
-  if (s.claude_status === 'working') return 'Claude is working. The prompt is queued until the current turn ends.';
+  if (s.claude_status === 'working') return `${agentLabel(agent)} is working. The prompt is queued until the current turn ends.`;
   return null;
 }
 
@@ -1139,14 +1163,22 @@ function clock(unixSecs: number): string {
  *  (dropped first on a narrow header). No turn count — the header's turn
  *  index already states it, and two counts side by side read as a
  *  contradiction whenever they disagree. The menu keeps the full title. */
-export function switcherLabel(c: ConversationSummary): { when: string; source: string } {
-  return { when: c.current ? 'Current' : clock(c.started_at), source: SOURCE_LABELS[c.start_source] };
+export function switcherLabel(c: ConversationSummary, agent: SessionAgent = 'claude'): { when: string; source: string } {
+  return { when: c.current ? 'Current' : clock(c.started_at), source: sourceLabel(c, agent) };
 }
 
-export function conversationTitle(c: ConversationSummary): string {
+export function conversationTitle(c: ConversationSummary, agent: SessionAgent = 'claude'): string {
   const when = c.current ? 'Current' : clock(c.started_at);
   const turns = `${c.turns} turn${c.turns === 1 ? '' : 's'}`;
-  return `${when} · ${SOURCE_LABELS[c.start_source]} · ${turns}`;
+  return `${when} · ${sourceLabel(c, agent)} · ${turns}`;
+}
+
+/** How a conversation started. Codex has no hooks to say so: fleet finds
+ *  its conversation from the rollout, so every one reads `unknown`, which
+ *  is simply "started" there, not something gone wrong. */
+export function sourceLabel(c: Pick<ConversationSummary, 'start_source'>, agent: SessionAgent = 'claude'): string {
+  if (c.start_source === 'unknown' && agent === 'codex') return SOURCE_LABELS.startup;
+  return SOURCE_LABELS[c.start_source];
 }
 
 export function statusChip(s: Pick<SessionRow, 'claude_status' | 'current_activity'>): string | null {
@@ -1254,6 +1286,8 @@ const LAST_EVENT_KINDS: Record<string, (d: string | null) => string | null> = {
   compact_done: () => '/compact',
   compact_started: () => 'compacting',
   stop_failure: (d) => humanError(d).head,
+  // J8 (step 5.11): the pane rules read nothing at a turn's end.
+  pane_unreadable: () => 'screen not read',
   notification: (d) => (d && PERMISSION_KINDS.has(d) ? 'permission asked' : null),
   conversation_started: (d) => (d === 'resume' ? '/resume' : d === 'clear' ? '/clear' : null),
 };

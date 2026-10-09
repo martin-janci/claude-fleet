@@ -759,6 +759,43 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// J2 (step 5.11): set what turn `turn_seq` came to, as Jev read it —
+    /// only while NO hook has spoken since that turn's Stop. The write
+    /// lands when the row is still on that turn (`turn_seq`), still `idle`
+    /// (a Notification would have made it `blocked`, a prompt `working`, a
+    /// StopFailure `failed`, a SessionEnd `stopped`), no hook stamped
+    /// `last_hook_at` after the Stop's own stamp, and nothing answered the
+    /// turn yet. Every hook write clears `turn_outcome`, so a hook that
+    /// arrives after this wins too: hooks always win. Answers whether the
+    /// row changed (a change emits `session_updated`).
+    pub fn set_jev_turn_outcome(
+        &self,
+        id: i64,
+        turn_seq: i64,
+        outcome: &str,
+    ) -> Result<bool, crate::ipc_error::IpcError> {
+        if !super::TURN_OUTCOMES.contains(&outcome) {
+            return Err(crate::ipc_error::IpcError::new(
+                crate::ipc_error::codes::E_INVALID,
+                format!(
+                    "turn_outcome is one of {}, not {outcome:?}",
+                    super::TURN_OUTCOMES.join(", ")
+                ),
+            ));
+        }
+        let n = self.conn.execute(
+            "UPDATE sessions SET turn_outcome = ?1 \
+             WHERE id = ?2 AND turn_seq = ?3 AND claude_status = 'idle' \
+               AND turn_outcome IS NULL AND last_stop_at IS NOT NULL \
+               AND last_hook_at IS last_stop_at",
+            rusqlite::params![outcome, id, turn_seq],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(n > 0)
+    }
+
     /// Record who or what started a session (migration 124). Every start
     /// path writes it once the row exists; a restart, recreate or repair
     /// keeps the row and so keeps its origin. On the row, so this emits
@@ -791,6 +828,23 @@ impl Store {
         )?;
         self.emit_session(id)?;
         Ok(())
+    }
+
+    /// The tmux names of `host_alias`'s rows running `agent` (shell rows
+    /// aside). Reconcile asks the host where those of them that are live
+    /// keep their Codex conversations.
+    pub fn pane_names_running(
+        &self,
+        host_alias: &str,
+        agent: &str,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT tmux_name FROM sessions \
+             WHERE host_alias = ?1 AND agent = ?2 AND kind != 'shell' \
+             ORDER BY tmux_name",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![host_alias, agent], |r| r.get(0))?;
+        rows.collect()
     }
 
     /// Mark a session as a review of `reviews_session_id` (or back to 'work' with
@@ -1350,6 +1404,17 @@ impl Store {
     /// value once — a re-create keeps the original start. Emits
     /// `session_updated` so the sidebar's elapsed label does not wait for a
     /// re-list.
+    /// Put session `id` in project `project_id` (Adopt into, step 4.12).
+    /// The worktree it named belonged to its old project, so it is cleared.
+    pub fn set_session_project(&self, id: i64, project_id: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET project_id=?1, worktree_id=NULL WHERE id=?2",
+            rusqlite::params![project_id, id],
+        )?;
+        self.emit_session(id)?;
+        Ok(())
+    }
+
     pub fn set_started_at(&self, id: i64, at: i64) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE sessions SET started_at=COALESCE(started_at, ?1) WHERE id=?2",
@@ -1624,7 +1689,8 @@ impl Store {
                 "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
                      idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
-                     stale_working_at = NULL, stale_demoted_at = NULL{END_COMPACTING} \
+                     stale_working_at = NULL, stale_demoted_at = NULL, \
+                     turn_outcome = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -1666,7 +1732,8 @@ impl Store {
             &format!(
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
                      last_hook_at = ?2, prompt_submit_seq = prompt_submit_seq + 1, \
-                     pending_input = NULL, stale_working_at = NULL, stale_demoted_at = NULL{END_COMPACTING} WHERE id = ?1"
+                     pending_input = NULL, stale_working_at = NULL, stale_demoted_at = NULL, \
+                     turn_outcome = NULL{END_COMPACTING} WHERE id = ?1"
             ),
             rusqlite::params![row_id, now_unix()],
         )?;
@@ -1718,7 +1785,7 @@ impl Store {
             "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
                  last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
                  stuck_kind = NULL, stuck_since = NULL, pending_input = NULL, \
-                 stale_working_at = NULL, stale_demoted_at = NULL \
+                 stale_working_at = NULL, stale_demoted_at = NULL, turn_outcome = NULL \
                  WHERE id = ?1",
             rusqlite::params![row_id, now],
         )?;
@@ -1749,7 +1816,8 @@ impl Store {
                 "UPDATE sessions SET claude_status = 'failed', turn_seq = turn_seq + 1, \
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
                      idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
-                     stale_working_at = NULL, stale_demoted_at = NULL{END_COMPACTING} \
+                     stale_working_at = NULL, stale_demoted_at = NULL, \
+                     turn_outcome = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -1912,7 +1980,7 @@ impl Store {
         };
         let sql = format!(
             "UPDATE sessions SET claude_status = ?4, last_hook_at = ?2, \
-             stale_working_at = NULL, stale_demoted_at = NULL, \
+             stale_working_at = NULL, stale_demoted_at = NULL, turn_outcome = NULL, \
              idle_since = {idle}{stuck_sql} WHERE id = ?1",
             idle = idle_since_sql("?4", "?2"),
         );
@@ -2226,6 +2294,12 @@ impl Store {
     /// moved (redesign step 9.2).
     pub fn bus_confirm_changed(&self) {
         self.bus.confirm_changed();
+    }
+
+    /// Emit `handoff:changed` (redesign step 9.3): Control's agent handed
+    /// work on and a receipt was written.
+    pub fn bus_handoff_changed(&self) {
+        self.bus.handoff_changed();
     }
 }
 

@@ -361,9 +361,16 @@ pub fn needs_attention_in(
         .claude_status
         .as_deref()
         .is_some_and(|s| crate::store::IDLE_STATUSES.contains(&s));
-    let reason = if row.claude_status.as_deref() == Some("blocked") || row.pending_form.is_some() {
+    // J2 (step 5.11): what Jev read a silent turn's end as, on a row that
+    // is still idle after it. Every hook clears it, so it never outvotes
+    // one.
+    let jev = |o: &str| idle && row.turn_outcome.as_deref() == Some(o);
+    let reason = if row.claude_status.as_deref() == Some("blocked")
+        || row.pending_form.is_some()
+        || jev("asked")
+    {
         Reason::Waiting
-    } else if row.stuck_kind.is_some() {
+    } else if row.stuck_kind.is_some() || jev("stuck") {
         Reason::Stuck
     } else if live && facts.down_hosts.contains(&row.host_alias) {
         Reason::HostDown
