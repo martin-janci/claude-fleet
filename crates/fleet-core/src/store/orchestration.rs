@@ -242,6 +242,14 @@ pub struct MissionRow {
     /// When the loop looks at it next (O4); `None`: when something wakes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_wake_at: Option<i64>,
+    /// What it has spent, in micro-USD (`Store::mission_cost_micros`). Filled
+    /// by `work { action: missions }` and the detail; absent elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_micros: Option<i64>,
+    /// The live grant's budget, in micro-USD, when it sets one: the list's
+    /// "spent of budget" meter. Filled where `cost_micros` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_micros: Option<i64>,
 }
 
 /// A repo a mission may run in.
@@ -361,6 +369,8 @@ fn map_mission(r: &rusqlite::Row<'_>) -> rusqlite::Result<MissionRow> {
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default(),
         next_wake_at: r.get(20)?,
+        cost_micros: None,
+        budget_micros: None,
     })
 }
 
