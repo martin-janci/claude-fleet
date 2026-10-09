@@ -2551,3 +2551,103 @@ fn an_unknown_grouping_is_refused_not_ignored() {
         page(&w, &OrgScope::All, WorkTreeFilters::default()).tasks
     );
 }
+
+/// The Work panel's chips (redesign board "Work · tasks with filters
+/// open"): each task's stage, several stages and several orgs at once, and
+/// how many tasks the filters hide.
+#[test]
+fn stages_and_orgs_filter_several_at_once_and_say_what_they_hide() {
+    let w = world();
+    done_item(&w, "9", "TK-9");
+    let p = page(&w, &OrgScope::All, hiding());
+    // In progress in the tracker; done is archived out of this view.
+    assert_eq!(task_of(&p, "TK-1").stage, "in_progress");
+    assert_eq!(p.hidden_by_filters, 0, "no filter hides nothing");
+    let all = p.total;
+
+    let in_review = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            stages: vec!["in_review".into(), "blocked".into()],
+            ..hiding()
+        },
+    );
+    assert_eq!(in_review.total, 0);
+    // The archived TK-9 is the archived row's, not this one's.
+    assert_eq!(in_review.hidden_by_filters, all);
+    assert_eq!(in_review.archived_hidden, 0);
+
+    let both = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            stages: vec!["in_progress".into(), "done".into()],
+            orgs: vec![IdOrWord::Id(w.org_b), IdOrWord::Id(w.org_a)],
+            ..hiding()
+        },
+    );
+    // A Done chip shows the archived done task, as `status: done` does.
+    assert_eq!(both.total, all + 1);
+    assert!(keys(&both).contains(&"TK-9".to_string()));
+    assert_eq!(both.hidden_by_filters, 0);
+
+    let other_org = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            orgs: vec![IdOrWord::Id(w.org_b)],
+            ..hiding()
+        },
+    );
+    assert_eq!(other_org.total, 0);
+    assert_eq!(other_org.hidden_by_filters, all);
+
+    let done = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            stages: vec!["done".into()],
+            archived: Some(true),
+            ..Default::default()
+        },
+    );
+    assert_eq!(keys(&done), vec!["TK-9".to_string()]);
+    assert_eq!(task_of(&done, "TK-9").stage, "done");
+}
+
+#[test]
+fn a_stage_or_an_org_word_it_does_not_know_is_refused() {
+    let bad_stage = WorkTreeFilters {
+        stages: vec!["doing".into()],
+        ..Default::default()
+    };
+    assert!(check_filters(&bad_stage).is_err());
+    let bad_org = WorkTreeFilters {
+        orgs: vec![IdOrWord::Word("all".into())],
+        ..Default::default()
+    };
+    assert!(check_filters(&bad_org).is_err());
+    let ok = WorkTreeFilters {
+        orgs: vec![IdOrWord::Word("none".into()), IdOrWord::Id(3)],
+        stages: vec!["backlog".into()],
+        ..Default::default()
+    };
+    assert!(check_filters(&ok).is_ok());
+}
+
+#[test]
+fn a_stage_is_the_first_of_done_blocked_review_progress() {
+    assert_eq!(
+        stage_of(Some("done"), Some("In review"), true, true, 1),
+        "done"
+    );
+    assert_eq!(stage_of(Some("todo"), None, true, true, 1), "blocked");
+    assert_eq!(
+        stage_of(Some("in_progress"), Some("QA Review"), false, false, 0),
+        "in_review"
+    );
+    assert_eq!(stage_of(Some("todo"), None, false, true, 1), "in_review");
+    assert_eq!(stage_of(Some("todo"), None, false, false, 1), "in_progress");
+    assert_eq!(stage_of(None, None, false, false, 0), "backlog");
+}

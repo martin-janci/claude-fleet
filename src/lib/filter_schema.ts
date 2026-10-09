@@ -14,14 +14,20 @@ import type { SessionFacetId, WorkFacetId } from './filter_facets';
 import type { SidebarGroupBy } from './sessions';
 import type { WorkGroupBy } from './work_view';
 
-/** The panel's headings, in order. */
+/** The Sessions panel's headings, in order. */
 export const FILTER_SECTIONS = ['Saved view', 'Quick', 'Scope', 'Time', 'Work', 'Include'] as const;
 export type FilterSection = (typeof FILTER_SECTIONS)[number];
 
-export interface FilterControl {
+/** The Work panel's headings, in order (board "Work · tasks with filters
+ *  open"; Sessions sits under the live-session switch, More holds what
+ *  the board leaves out). */
+export const WORK_FILTER_SECTIONS = ['Organisation', 'Status', 'Tracker', 'Assignee', 'Sessions', 'More'] as const;
+export type WorkFilterSection = (typeof WORK_FILTER_SECTIONS)[number];
+
+export interface FilterControl<S extends string = FilterSection> {
   label: string;
   /** Where it sits: the closed row, or a heading in the panel. */
-  place: 'row' | FilterSection;
+  place: 'row' | S;
   /** The control's test id, so the schema can be checked against the DOM. */
   testid: string;
   /** When it is drawn, if not always. */
@@ -47,25 +53,28 @@ export const SESSION_FILTER_SCHEMA: Record<SessionControlId, FilterControl> = {
 };
 
 /** Work: every facet `workFacets` can name, plus Archived and the saved
- *  view. */
+ *  view. A saved view's single `org` or `status` is cleared from the strip
+ *  and edited with the chips that replaced it. */
 export type WorkControlId = WorkFacetId | 'archived' | 'view';
 
-export const WORK_FILTER_SCHEMA: Record<WorkControlId, FilterControl> = {
+export const WORK_FILTER_SCHEMA: Record<WorkControlId, FilterControl<WorkFilterSection>> = {
   query: { label: 'Search', place: 'row', testid: 'work-search' },
-  view: { label: 'Saved view', place: 'Saved view', testid: 'work-view-select' },
-  mine: { label: 'Assigned to me', place: 'Quick', testid: 'work-filter-mine' },
-  review: { label: 'To review', place: 'Quick', testid: 'work-filter-review' },
-  org: { label: 'Organisation', place: 'Scope', testid: 'work-filter-org' },
-  tracker: { label: 'Tracker', place: 'Work', testid: 'work-filter-tracker' },
-  status: { label: 'Status', place: 'Work', testid: 'work-filter-status' },
-  status_name: { label: 'Tracker column', place: 'Work', testid: 'work-filter-column', when: 'a tracker names its columns' },
-  assignee: { label: 'Assignee', place: 'Work', testid: 'work-filter-assignee', when: 'a task has an assignee' },
-  has: { label: 'Sessions', place: 'Work', testid: 'work-filter-has' },
-  archived: { label: 'Archived tasks', place: 'Include', testid: 'work-filter-archived' },
+  org: { label: 'Organisation', place: 'Organisation', testid: 'work-filter-org' },
+  orgs: { label: 'Organisation', place: 'Organisation', testid: 'work-filter-org' },
+  status: { label: 'Status', place: 'Status', testid: 'work-filter-status' },
+  stages: { label: 'Status', place: 'Status', testid: 'work-filter-status' },
+  tracker: { label: 'Tracker', place: 'Tracker', testid: 'work-filter-tracker' },
+  mine: { label: 'Me', place: 'Assignee', testid: 'work-filter-assignee' },
+  assignee: { label: 'Assignee', place: 'Assignee', testid: 'work-filter-assignee' },
+  has: { label: 'Only tasks with a live session', place: 'Sessions', testid: 'work-filter-live' },
+  view: { label: 'Saved view', place: 'More', testid: 'work-view-select' },
+  review: { label: 'To review', place: 'More', testid: 'work-filter-review' },
+  status_name: { label: 'Tracker column', place: 'More', testid: 'work-filter-column', when: 'a tracker names its columns' },
+  archived: { label: 'Archived tasks', place: 'More', testid: 'work-filter-archived' },
 };
 
 /** The controls under one heading, in schema order. */
-export function controlsIn<Id extends string>(schema: Record<Id, FilterControl>, place: FilterControl['place']): Id[] {
+export function controlsIn<Id extends string, S extends string>(schema: Record<Id, FilterControl<S>>, place: 'row' | S): Id[] {
   return (Object.keys(schema) as Id[]).filter((id) => schema[id].place === place);
 }
 

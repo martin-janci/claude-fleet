@@ -22,6 +22,7 @@ import {
   SESSION_FILTER_SCHEMA,
   SESSION_GROUPS,
   WORK_FILTER_SCHEMA,
+  WORK_FILTER_SECTIONS,
   WORK_GROUPS,
   controlsIn,
 } from './filter_schema';
@@ -109,21 +110,20 @@ describe('the filter schema', () => {
     expect(all.length).toBe(10);
     for (const f of all) expect(SESSION_FILTER_SCHEMA[f.id], f.id).toBeTruthy();
     const work = workFacets({
-      org: 1, tracker: 1, status: 'open', status_name: 'QA Review', mine: true, assignee: 'Ana', has: 'active',
-      review: true, query: 'x',
+      org: 1, orgs: [1, 'none'], tracker: 1, status: 'open', stages: ['blocked'], status_name: 'QA Review', mine: true,
+      assignee: 'Ana', has: 'active', review: true, query: 'x',
     });
-    expect(work.length).toBe(9);
+    expect(work.length).toBe(11);
     for (const f of work) expect(WORK_FILTER_SCHEMA[f.id], f.id).toBeTruthy();
   });
 
-  it('places every control on the row or under a heading both lists share', () => {
-    const schemas: Record<string, (typeof SESSION_FILTER_SCHEMA)[keyof typeof SESSION_FILTER_SCHEMA]>[] = [
-      SESSION_FILTER_SCHEMA,
-      WORK_FILTER_SCHEMA,
-    ];
-    for (const schema of schemas) {
+  it('places every control on the row or under one of its list’s headings', () => {
+    for (const [schema, headings] of [
+      [SESSION_FILTER_SCHEMA, FILTER_SECTIONS],
+      [WORK_FILTER_SCHEMA, WORK_FILTER_SECTIONS],
+    ] as [Record<string, { label: string; place: string; testid: string }>, readonly string[]][]) {
       for (const c of Object.values(schema)) {
-        expect(c.place === 'row' || (FILTER_SECTIONS as readonly string[]).includes(c.place)).toBe(true);
+        expect(c.place === 'row' || headings.includes(c.place)).toBe(true);
       }
       expect(controlsIn(schema, 'row')).toHaveLength(1);
     }
@@ -210,52 +210,93 @@ describe('Sessions: the Filters section (New layout)', () => {
   });
 });
 
-describe('Work: the Filters section (New layout)', () => {
-  const wOrgs = [{ id: 1, name: 'Acme', color: null }];
+describe('Work: the Filters section (board “Work · tasks with filters open”)', () => {
+  const wOrgs = [
+    { id: 1, name: 'Acme', color: null },
+    { id: 2, name: 'Beta', color: null },
+  ];
   const wTrackers = [{ id: 1, name: 'Jira (acme)', provider: 'jira', state: 'ok', org_id: 1 }];
+  const props = { orgs: wOrgs, trackers: wTrackers, people: ['Ana Novak', 'Ben'], columns: ['QA Review'] };
 
-  it('is one row while closed, with the same shape as the Sessions list', async () => {
-    render(WorkFiltersBar, { orgs: wOrgs, trackers: wTrackers, people: ['Ana Novak', 'Ben'], columns: ['QA Review'] });
+  it('is search, then Filters and Group, while closed', async () => {
+    render(WorkFiltersBar, props);
     await flush();
-    expect(screen.getByTestId('filters-section').children).toHaveLength(1);
-    const rowEl = screen.getByTestId('filters-row');
-    for (const id of ['work-search', 'work-filters-open', 'work-group-select']) {
-      expect(within(rowEl).getByTestId(id)).toBeTruthy();
-    }
-    expect(screen.queryByTestId('work-view-select')).toBeNull();
-    expect(screen.queryByTestId('work-filter-mine')).toBeNull();
+    for (const id of ['work-search', 'work-filters-open', 'work-group-select']) expect(screen.getByTestId(id)).toBeTruthy();
+    expect(screen.queryByTestId('work-filter-panel')).toBeNull();
+    expect(screen.getByTestId('work-filters-open').getAttribute('aria-expanded')).toBe('false');
   });
 
-  it('holds every 0.5.4 facet and the saved views under the schema’s headings', async () => {
-    render(WorkFiltersBar, { orgs: wOrgs, trackers: wTrackers, people: ['Ana Novak', 'Ben'], columns: ['QA Review'] });
+  it('holds every facet and the saved views under the schema’s headings', async () => {
+    render(WorkFiltersBar, props);
     await flush();
     await fireEvent.click(screen.getByTestId('work-filters-open'));
     const panel = screen.getByTestId('work-filter-panel');
     for (const [id, c] of Object.entries(WORK_FILTER_SCHEMA)) {
-      if (c.place === 'row') expect(within(screen.getByTestId('filters-row')).getByTestId(c.testid), id).toBeTruthy();
+      if (c.place === 'row') expect(screen.getByTestId(c.testid), id).toBeTruthy();
       else expectUnderHeading(panel, c.testid, c.place);
     }
-    await fireEvent.click(screen.getByTestId('work-filter-mine'));
-    expect(get(workViewFilters).mine).toBe(true);
-    expect(screen.getByTestId('work-active-filters').textContent).toContain('Assigned to me');
   });
 
-  it('a named assignee and a tracker column (step 6.2) are chips that join the strip', async () => {
-    render(WorkFiltersBar, { orgs: wOrgs, trackers: wTrackers, people: ['Ana Novak', 'Ben'], columns: ['QA Review'] });
+  it('picks several organisations and statuses at once, and Clear drops them', async () => {
+    render(WorkFiltersBar, props);
     await flush();
     await fireEvent.click(screen.getByTestId('work-filters-open'));
-    await fireEvent.click(screen.getByTestId('work-filter-assignee-ana novak'));
-    await fireEvent.click(screen.getByTestId('work-filter-column-qa review'));
-    expect(get(workViewFilters)).toMatchObject({ assignee: 'Ana Novak', status_name: 'QA Review' });
+    await fireEvent.click(screen.getByTestId('work-filter-org-2'));
+    await fireEvent.click(screen.getByTestId('work-filter-org-1'));
+    await fireEvent.click(screen.getByTestId('work-filter-stage-in_progress'));
+    await fireEvent.click(screen.getByTestId('work-filter-stage-blocked'));
+    expect(get(workViewFilters)).toMatchObject({ orgs: [1, 2], stages: ['in_progress', 'blocked'] });
+    expect(screen.getByTestId('work-filter-org-1').getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByTestId('work-filters-open').getAttribute('aria-label')).toBe('Filters, 2 active');
+    await fireEvent.click(screen.getByTestId('work-filter-stage-blocked'));
+    expect(get(workViewFilters).stages).toEqual(['in_progress']);
+    await fireEvent.click(screen.getByTestId('work-filter-panel-clear'));
+    expect(get(workViewFilters)).toEqual({});
+  });
+
+  it('a saved view’s single org reads as a picked chip and folds into the set', async () => {
+    workViewFilters.set({ org: 2 });
+    render(WorkFiltersBar, props);
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-filters-open'));
+    expect(screen.getByTestId('work-filter-org-2').getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(screen.getByTestId('work-filter-org-1'));
+    expect(get(workViewFilters)).toEqual({ orgs: [1, 2] });
+  });
+
+  it('Assignee is anyone, me or one person; the live-session switch is “has: active”', async () => {
+    render(WorkFiltersBar, props);
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-filters-open'));
+    const who = screen.getByTestId('work-filter-assignee') as HTMLSelectElement;
+    await fireEvent.change(who, { target: { value: 'me' } });
+    expect(get(workViewFilters)).toMatchObject({ mine: true });
+    await fireEvent.change(who, { target: { value: '@ana novak' } });
+    expect(get(workViewFilters)).toMatchObject({ assignee: 'Ana Novak' });
+    expect(get(workViewFilters).mine).toBeUndefined();
+    await fireEvent.click(screen.getByTestId('work-filter-live'));
+    expect(get(workViewFilters).has).toBe('active');
+    await fireEvent.change(screen.getByTestId('work-filter-tracker'), { target: { value: 'local' } });
+    expect(get(workViewFilters).tracker).toBe('local');
+    // Closed, the strip names what is on.
+    await fireEvent.click(screen.getByTestId('work-filters-open'));
     const strip = screen.getByTestId('work-active-filters').textContent ?? '';
     expect(strip).toContain('Assignee: Ana Novak');
-    expect(strip).toContain('Column: QA Review');
-    await fireEvent.click(screen.getByTestId('work-filter-assignee-any'));
-    expect(get(workViewFilters).assignee).toBeUndefined();
+    expect(strip).toContain('Tracker: Local work');
+  });
+
+  it('More keeps the tracker column, To review and the saved views', async () => {
+    render(WorkFiltersBar, props);
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-filters-open'));
+    await fireEvent.click(screen.getByTestId('work-filter-column-qa review'));
+    await fireEvent.click(screen.getByTestId('work-filter-review'));
+    expect(get(workViewFilters)).toMatchObject({ status_name: 'QA Review', review: true });
+    expect(screen.getByTestId('work-filter-more').textContent).toContain('2');
   });
 
   it('Group picks List, or Grouped with each org by group, org, person, mission, account or repo', async () => {
-    render(WorkFiltersBar, { orgs: wOrgs, trackers: wTrackers, people: ['Ana Novak', 'Ben'], columns: ['QA Review'] });
+    render(WorkFiltersBar, props);
     await flush();
     const sel = screen.getByTestId('work-group-select') as HTMLSelectElement;
     expect(Array.from(sel.options).map((o) => o.value)).toEqual(WORK_GROUPS.map((g) => g.id));

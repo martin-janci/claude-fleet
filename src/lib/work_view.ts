@@ -60,7 +60,24 @@ export interface WorkTreeFilters {
   status_name?: string;
   /** What a section under each org is; absent is `group`. */
   group_by?: WorkGroupBy;
+  /** Any of these orgs (ids, or `none`): the panel's organisation chips,
+   *  several at once. An older hub ignores it. */
+  orgs?: (number | 'none')[];
+  /** Any of these stages (`WorkTask.stage`): the panel's status chips,
+   *  several at once. An older hub ignores it. */
+  stages?: WorkStage[];
 }
+
+/** `WorkTask.stage`, in board order (the Work board's status chips). */
+export const WORK_STAGES = ['backlog', 'in_progress', 'in_review', 'blocked', 'done'] as const;
+export type WorkStage = (typeof WORK_STAGES)[number];
+export const WORK_STAGE_LABELS: Record<WorkStage, string> = {
+  backlog: 'Backlog',
+  in_progress: 'In progress',
+  in_review: 'In review',
+  blocked: 'Blocked',
+  done: 'Done',
+};
 
 /** `filters.group_by` (redesign step 6.2): the task's own group (a person,
  *  rule, tracker container, repo or key), one section per org, or its
@@ -199,6 +216,8 @@ export interface WorkTask {
   blocked_by?: string[];
   /** Spend of its sessions in micro-USD, each session once. Absent when 0. */
   cost_micros?: number;
+  /** Where it stands (`WORK_STAGES`); absent from an older hub. */
+  stage?: WorkStage | string;
   /** What a rule, Jev or an LLM proposes about the task (redesign 2.8).
    *  Absent when nothing proposes anything. */
   proposals?: DecisionProposal[];
@@ -244,6 +263,9 @@ export interface WorkTreePage {
   /** Tasks that passed every other filter but were hidden as archived
    *  (absent from an older hub, which hides none). */
   archived_hidden?: number;
+  /** Tasks the filters hide that would show with none set (the archived
+   *  switch kept): the "Hidden by filters" row (absent from an older hub). */
+  hidden_by_filters?: number;
   next_cursor?: string | null;
   generated_at?: number;
   /** The sections `WorkTreeQuery.sections` asked for, paged from the same
@@ -902,13 +924,26 @@ export function normalizeFilters(v: unknown): WorkTreeFilters {
   if (typeof v.group_by === 'string' && (WORK_GROUP_BY as readonly string[]).includes(v.group_by) && v.group_by !== 'group') {
     out.group_by = v.group_by as WorkGroupBy;
   }
+  // Sets, kept in a stable order so equal choices compare equal.
+  if (Array.isArray(v.orgs)) {
+    const ids = v.orgs.filter((o): o is number => typeof o === 'number' && Number.isInteger(o) && o > 0);
+    const orgs: (number | 'none')[] = [...new Set(ids)].sort((a, b) => a - b);
+    if (v.orgs.includes('none')) orgs.push('none');
+    if (orgs.length > 0) out.orgs = orgs;
+  }
+  if (Array.isArray(v.stages)) {
+    const stages = WORK_STAGES.filter((st) => (v.stages as unknown[]).includes(st));
+    if (stages.length > 0) out.stages = stages;
+  }
   return out;
 }
 
 const FILTER_ORDER: (keyof WorkTreeFilters)[] = [
   'org',
+  'orgs',
   'tracker',
   'status',
+  'stages',
   'status_name',
   'mine',
   'assignee',

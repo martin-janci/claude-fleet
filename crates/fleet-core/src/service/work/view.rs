@@ -117,7 +117,20 @@ pub struct WorkTreeFilters {
     /// mission, account or repo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_by: Option<String>,
+    /// Any of these orgs (ids, or "none" for unassigned): the Work panel's
+    /// organisation chips, several at once. Applies with `org` when both
+    /// are set. An older hub ignores it and shows every org.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orgs: Vec<IdOrWord>,
+    /// Any of these stages ([`STAGE_VALUES`], what [`WorkTask::stage`]
+    /// says): the Work panel's status chips, several at once. Applies with
+    /// `status` when both are set. An older hub ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<String>,
 }
+
+/// [`WorkTask::stage`]'s values, in board order.
+pub const STAGE_VALUES: [&str; 5] = ["backlog", "in_progress", "in_review", "blocked", "done"];
 
 /// [`WorkTreeFilters::group_by`]'s values.
 pub const GROUP_BY_VALUES: [&str; 6] = ["group", "org", "person", "mission", "account", "repo"];
@@ -296,6 +309,13 @@ pub struct WorkTask {
     /// session that worked on two tasks counts in both.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cost_micros: i64,
+    /// Where the task stands, one word of [`STAGE_VALUES`]: `done`, then
+    /// `blocked` (it waits for another task), `in_review` (its tracker
+    /// column says review, or a live session has a pull request),
+    /// `in_progress` (its tracker says so, or a session works on it), else
+    /// `backlog`. Derived on every read; empty from an older hub.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stage: String,
     /// What a rule, Jev or an LLM proposes about this task, one per
     /// feature (step 2.8): the same shape as `SessionRow::proposals`. Empty,
     /// and absent on the wire, when nothing proposes anything.
@@ -477,6 +497,11 @@ pub struct TreePage {
     /// (over the whole result, not the page).
     #[serde(default)]
     pub archived_hidden: u32,
+    /// Tasks the view's filters hide that would show with none set (the
+    /// archived switch kept): the "Hidden by filters" row. 0 for a
+    /// section's read (`filters.group`).
+    #[serde(default)]
+    pub hidden_by_filters: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     pub generated_at: i64,
@@ -1883,6 +1908,7 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
     let mut suggested_sessions = BTreeSet::new();
     let mut needs_you = false;
     let mut review = false;
+    let mut live_pr = false;
     let mut last: Option<i64> = None;
     let mut repos: Vec<String> = Vec::new();
     let mut link_orgs: BTreeSet<Option<i64>> = BTreeSet::new();
@@ -1913,6 +1939,14 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         }
         if st == "active" && link_needs_you {
             needs_you = true;
+        }
+        if st == "active"
+            && row
+                .and_then(|r| r.pr_url.as_deref())
+                .or(l.link.snap_pr_url.as_deref())
+                .is_some_and(|u| !u.trim().is_empty())
+        {
+            live_pr = true;
         }
         if needs_review(g, l, st) {
             review = true;
@@ -1953,6 +1987,14 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         _ => (false, Vec::new()),
     };
     let cost_micros = spent.values().sum();
+    let status_name = item.and_then(|i| i.item.status_name.clone());
+    let stage = stage_of(
+        status_category.as_deref(),
+        status_name.as_deref(),
+        blocked,
+        live_pr,
+        counts.active,
+    );
     if let Some(i) = item {
         let ext = i.item.updated_ext.unwrap_or(i.item.updated_at);
         last = Some(last.map_or(ext, |x| x.max(ext)));
@@ -2016,7 +2058,7 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         provider: tracker.map(|t| t.provider.clone()),
         tracker_state: tracker.map(|t| t.state.clone()),
         status_category,
-        status_name: item.and_then(|i| i.item.status_name.clone()),
+        status_name,
         resolution: item.and_then(|i| i.item.resolution.clone()),
         unavailable: item.is_some_and(|i| i.item.unavailable_at.is_some()),
         unavailable_reason: item.and_then(|i| i.item.unavailable_reason.clone()),
@@ -2046,11 +2088,34 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         blocked,
         blocked_by,
         cost_micros,
+        stage: stage.into(),
         proposals,
     };
     TaskSummary {
         task,
         links: listed,
+    }
+}
+
+/// [`WorkTask::stage`]: the first of done, blocked, in review, in progress
+/// that holds, else backlog.
+fn stage_of(
+    status_category: Option<&str>,
+    status_name: Option<&str>,
+    blocked: bool,
+    live_pr: bool,
+    active: u32,
+) -> &'static str {
+    if status_category == Some("done") {
+        "done"
+    } else if blocked {
+        "blocked"
+    } else if live_pr || status_name.is_some_and(|n| n.to_lowercase().contains("review")) {
+        "in_review"
+    } else if status_category == Some("in_progress") || active > 0 {
+        "in_progress"
+    } else {
+        "backlog"
     }
 }
 
@@ -2168,6 +2233,25 @@ pub fn check_filters(f: &WorkTreeFilters) -> Result<(), IpcError> {
             )));
         }
     }
+    for o in &f.orgs {
+        if let IdOrWord::Word(w) = o {
+            if w != "none" {
+                return Err(bad(format!(
+                    "filters.orgs holds org ids or \"none\", not {w:?}"
+                )));
+            }
+        }
+    }
+    if f.orgs.len() > 100 {
+        return Err(bad("filters.orgs names more than 100 orgs"));
+    }
+    for s in &f.stages {
+        if !STAGE_VALUES.contains(&s.as_str()) {
+            return Err(bad(format!(
+                "filters.stages holds backlog, in_progress, in_review, blocked or done, not {s:?}"
+            )));
+        }
+    }
     if let Some(h) = f.has.as_deref() {
         if !matches!(h, "any" | "active" | "past_only" | "none" | "suggested") {
             return Err(bad(format!(
@@ -2210,6 +2294,17 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
         Some(IdOrWord::Id(id)) if t.tracker_id != Some(*id) => return false,
         Some(IdOrWord::Word(w)) if w != &t.kind => return false,
         _ => {}
+    }
+    if !f.orgs.is_empty()
+        && !f.orgs.iter().any(|o| match o {
+            IdOrWord::Id(id) => t.org_id == Some(*id),
+            IdOrWord::Word(_) => t.org_id.is_none(),
+        })
+    {
+        return false;
+    }
+    if !f.stages.is_empty() && !f.stages.contains(&t.stage) {
+        return false;
     }
     let status = t.status_category.as_deref();
     let ok = match f.status.as_deref() {
@@ -2287,12 +2382,13 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
 /// (`archived: false`): a client from before the archive (a fleet-mobile
 /// that never sends it and has no "N hidden" row) keeps seeing every task.
 /// An explicit Done filter, or "past only" (past work is archived work),
-/// shows them anyway. Only the tree hides: a direct read (`task`,
+/// shows them anyway (a Done stage chip too). Only the tree hides: a direct read (`task`,
 /// `session_tasks`, `review`) answers archived tasks as any other.
 fn hidden_as_archived(t: &WorkTask, f: &WorkTreeFilters) -> bool {
     t.archived
         && f.archived == Some(false)
         && f.status.as_deref() != Some("done")
+        && !f.stages.iter().any(|s| s == "done")
         && f.has.as_deref() != Some("past_only")
 }
 
@@ -2510,6 +2606,15 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
         ..args.filters.clone()
     };
     let mut archived_hidden = 0u32;
+    // The view with no filter but the archived switch (and the grouping):
+    // a task it shows that this read's filters hide is "hidden by filters".
+    let unfiltered = WorkTreeFilters {
+        archived: args.filters.archived,
+        group_by: args.filters.group_by.clone(),
+        ..WorkTreeFilters::default()
+    };
+    let count_hidden = args.filters.group.is_none() && unfiltered != args.filters;
+    let mut hidden_by_filters = 0u32;
     // Section headers count every task under the filters but the group
     // one, so every section of the view has its header and count.
     let mut groups: BTreeMap<(Option<i64>, String), GroupAcc> = BTreeMap::new();
@@ -2527,6 +2632,9 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
     for (i, summary) in summaries.iter().enumerate() {
         let t = &summary.task;
         if !matches_filters(t, &with_archived, false) {
+            if count_hidden && matches_filters(t, &unfiltered, false) {
+                hidden_by_filters += 1;
+            }
             continue;
         }
         if hidden_as_archived(t, &args.filters) {
@@ -2614,6 +2722,7 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
         trackers,
         total,
         archived_hidden,
+        hidden_by_filters,
         next_cursor,
         generated_at: g.now,
         sections,
