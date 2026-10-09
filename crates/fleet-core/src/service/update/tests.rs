@@ -1595,6 +1595,7 @@ async fn an_orgs_policy_overrides_the_fleets_for_its_targets_only() {
             mode: Some("manual".into()),
             ..Default::default()
         },
+        "operator",
         NOW,
     )
     .unwrap();
@@ -1610,6 +1611,7 @@ async fn an_orgs_policy_overrides_the_fleets_for_its_targets_only() {
             minimum: Some("0.3.4".into()),
             ..Default::default()
         },
+        "operator",
         NOW,
     )
     .unwrap();
@@ -1633,6 +1635,7 @@ async fn an_orgs_policy_overrides_the_fleets_for_its_targets_only() {
             pin_version: Some("0.3.3".into()),
             ..Default::default()
         },
+        "operator",
         NOW,
     )
     .unwrap();
@@ -1692,6 +1695,7 @@ async fn an_orgs_window_and_an_agent_host_in_it() {
             window: Some("02:00-05:00".into()),
             ..Default::default()
         },
+        "operator",
         NOW,
     )
     .unwrap();
@@ -1718,8 +1722,11 @@ async fn an_org_policy_is_validated() {
         .add_org("acme", None, false)
         .unwrap()
         .id;
-    let bad =
-        |c: &str, i: OrgPolicyInput| set_org_policy(&store, acme, c, i, NOW).unwrap_err().code;
+    let bad = |c: &str, i: OrgPolicyInput| {
+        set_org_policy(&store, acme, c, i, "operator", NOW)
+            .unwrap_err()
+            .code
+    };
     assert_eq!(bad("desktop", OrgPolicyInput::default()), codes::E_INVALID);
     assert_eq!(
         bad(
@@ -1779,6 +1786,7 @@ async fn an_org_policy_is_validated() {
             mode: Some("manual".into()),
             ..Default::default()
         },
+        "operator",
         NOW,
     )
     .unwrap_err();
@@ -1792,6 +1800,7 @@ async fn an_org_policy_is_validated() {
             window: Some(String::new()),
             ..Default::default()
         },
+        "operator",
         NOW,
     )
     .unwrap();

@@ -801,6 +801,12 @@ Update admin, master only: pin a version (below installed = rollback), unpin, up
 
 Parameters: `action`, `component`, `halt_failure_ratio`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `target`, `version`, `waves`, `window`
 
+### `update_policy`
+
+An org's update policy from a person's device: list, set or clear its mode, floor, window and pin per component. The hub owner's device for any org, an org admin's for theirs. E_FORBIDDEN, E_INVALID.
+
+Parameters: `action`, `component`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `version`, `window`
+
 ### `update_status`
 
 Fleet updates: the verified release channel, each target's version, phase and what the hub would tell it now, per-component counts, pins; with target, why. A per-host or org-bound token sees itself only.

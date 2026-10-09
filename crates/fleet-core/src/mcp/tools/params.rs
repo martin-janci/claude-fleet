@@ -1247,6 +1247,36 @@ pub struct UpdateStatusParams {
     pub target: Option<String>,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema, Clone)]
+pub struct UpdatePolicyParams {
+    /// list | set | clear.
+    pub action: String,
+    /// Defaults to this device's org.
+    #[serde(default)]
+    pub org_id: Option<i64>,
+    /// set, clear: hub | agent | desktop | android | ios.
+    #[serde(default)]
+    pub component: Option<String>,
+    /// set: manual | notify | automatic.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// set: the org's floor version.
+    #[serde(default)]
+    pub minimum: Option<String>,
+    /// set: HH:MM-HH:MM UTC, "" = any time.
+    #[serde(default)]
+    pub window: Option<String>,
+    /// set: pin the org to this release.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// set: the pin is required.
+    #[serde(default)]
+    pub mandatory: Option<bool>,
+    /// set: why, for the dashboard.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct UpdateAdminParams {
     /// pin | unpin | update_now | refresh | rollout_start | rollout_pause | rollout_resume |

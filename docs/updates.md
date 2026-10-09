@@ -134,8 +134,10 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   target asks, checked against the sha256 and size in the signed manifest
   (a mismatch is `E_UPDATE_UNVERIFIED` and nothing is kept), kept under
   `<data_dir>/update-mirror/`, and dropped once no kept manifest lists it.
-  The agent's and the bare hub's own updaters try the mirror first and
-  GitHub after it; the desktop and the phone still fetch from GitHub. A
+  The agent's and the bare hub's own updaters, and a paired desktop, try the
+  mirror first and GitHub after it (the desktop checks the bundle's sha256
+  and size, then hands it to the updater plugin from loopback, which checks
+  its signature as ever); the phone does too. A
   container image is never mirrored: it is pulled by digest.
 - **One org's own policy.** `update_admin { action: set_policy, org_id,
   component, mode?, minimum?, window?, version?, mandatory? }` overrides the
@@ -146,8 +148,12 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   a target's own pin still wins over it, and it wins over the
   component-wide pin. Fields left out keep the fleet's value; a new
   `set_policy` replaces the row whole. `clear_policy { org_id, component }`
-  removes it. `update_status.policies` lists the rows. Only the master sets
-  them.
+  removes it. `update_status.policies` lists the rows. The master sets
+  them with `update_admin`; from a person's device, `update_policy {
+  action: list | set | clear, org_id?, component, … }` does the same for
+  the org that device administers (an org admin's device, its own org; the
+  hub owner's own device, any org named), from a trusted `full` device for
+  `set` and `clear`. Such a row records `set_by: device:<name>`.
 - **The transition log.** Every phase a target reports is also kept in
   `update_events` (90 days, the newest 200 per target) for the rollout
   view of slice S4b. Nothing reads it out yet: no tool or route exposes it.

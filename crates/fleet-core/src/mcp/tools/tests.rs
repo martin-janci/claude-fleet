@@ -19008,3 +19008,97 @@ fn a_starts_origin_follows_the_connection() {
         SessionOrigin::operator(Some(operator_row))
     );
 }
+
+fn update_policy_args(action: &str) -> UpdatePolicyParams {
+    UpdatePolicyParams {
+        action: action.into(),
+        org_id: None,
+        component: None,
+        mode: None,
+        minimum: None,
+        window: None,
+        version: None,
+        mandatory: None,
+        reason: None,
+    }
+}
+
+/// S9: an org's admin sets their org's update policy from their device; the
+/// hub owner's device sets any org's; anybody else, or another org, is
+/// refused. The master keeps `update_admin set_policy` and is not served this.
+#[tokio::test]
+async fn update_policy_is_an_org_admins_for_their_own_org() {
+    let (tools, _guards, store) = client_tools();
+    let (acme, beta, jane) = {
+        let s = store.lock().unwrap();
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        let beta = s.add_org("Beta", None, false).unwrap().id;
+        let jane = s.create_person("jane", None).unwrap().id;
+        s.set_org_member(acme, jane, "admin", None).unwrap();
+        (acme, beta, jane)
+    };
+    let can_see = |c: &Caller| present::visible_to(c, "update_policy");
+    assert!(!can_see(&Caller::master()), "not served to the master");
+    let call = |c: Caller, a: UpdatePolicyParams| tools.update_policy(Extension(c), Parameters(a));
+    let mut admin = trusted(client_caller("jane-phone", TokenMode::Full));
+    if let Some(c) = admin.client.as_mut() {
+        c.person_id = Some(jane);
+        c.org_id = Some(acme);
+    }
+    admin.is_personal_owner = false;
+
+    // Her org, by default: manual for the desktops.
+    let mut set = update_policy_args("set");
+    set.component = Some("desktop".into());
+    set.mode = Some("manual".into());
+    let v = result_json(&call(admin.clone(), set).await.expect("her org"));
+    assert_eq!(
+        (v["org_id"].as_i64(), v["set_by"].as_str()),
+        (Some(acme), Some("device:jane-phone"))
+    );
+    // Not another org.
+    let mut other = update_policy_args("set");
+    other.org_id = Some(beta);
+    other.component = Some("desktop".into());
+    other.mode = Some("manual".into());
+    let e = call(admin.clone(), other).await.expect_err("another org");
+    assert!(format!("{e:?}").contains("E_FORBIDDEN"), "{e:?}");
+    // A colleague with no org to administer, not even a list.
+    let colleague = another_person(trusted(client_caller("ada", TokenMode::Full)));
+    let e = call(colleague, update_policy_args("list"))
+        .await
+        .expect_err("nothing");
+    assert!(format!("{e:?}").contains("E_FORBIDDEN"), "{e:?}");
+    // An untrusted device of the admin lists but does not write.
+    let mut untrusted = client_caller("jane-laptop", TokenMode::Full);
+    if let Some(c) = untrusted.client.as_mut() {
+        c.person_id = Some(jane);
+        c.org_id = Some(acme);
+    }
+    untrusted.is_personal_owner = false;
+    let v = result_json(
+        &call(untrusted.clone(), update_policy_args("list"))
+            .await
+            .expect("lists"),
+    );
+    assert_eq!(v["policies"].as_array().unwrap().len(), 1);
+    let mut clear = update_policy_args("clear");
+    clear.component = Some("desktop".into());
+    assert!(
+        call(untrusted, clear.clone()).await.is_err(),
+        "untrusted writes nothing"
+    );
+    // The hub owner's own device: any org, named.
+    let owner = trusted(client_caller("laptop", TokenMode::Full));
+    let mut beta_set = update_policy_args("set");
+    beta_set.org_id = Some(beta);
+    beta_set.component = Some("agent".into());
+    beta_set.window = Some("02:00-04:00".into());
+    call(owner.clone(), beta_set)
+        .await
+        .expect("the owner's device");
+    let v = result_json(&call(owner, update_policy_args("list")).await.unwrap());
+    assert_eq!(v["policies"].as_array().unwrap().len(), 2);
+    let v = result_json(&call(admin.clone(), clear).await.expect("her own"));
+    assert_eq!(v["removed"], true);
+}

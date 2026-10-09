@@ -1192,6 +1192,7 @@ pub fn set_org_policy(
     org_id: i64,
     component: &str,
     input: OrgPolicyInput,
+    set_by: &str,
     now: i64,
 ) -> Result<UpdateOrgPolicyRow, IpcError> {
     let c = parse_component(component)?;
@@ -1250,7 +1251,7 @@ pub fn set_org_policy(
         pin_version,
         pin_mandatory: input.pin_mandatory,
         reason: input.reason,
-        set_by: "operator".into(),
+        set_by: set_by.into(),
         set_at: now,
     };
     s.set_update_org_policy(&row)?;

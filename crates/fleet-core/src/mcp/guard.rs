@@ -294,6 +294,17 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // An org's own update policy (S9), from a person's device: the hub
+    // owner's unbound device for every org, an org admin's for theirs. The
+    // handler checks that authority (`org_admin::authority_for`); the master
+    // keeps `update_admin set_policy`.
+    ToolPolicy {
+        name: "update_policy",
+        access: Access::Device,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "update_admin",
         access: Access::Master,
