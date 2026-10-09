@@ -30,6 +30,12 @@ impl ReportState {
     pub(crate) fn store(&self) -> &Mutex<Store> {
         &self.store
     }
+
+    /// The store, shared: for a `/voice/source` socket that re-checks its
+    /// caller for as long as it stays open.
+    pub(crate) fn store_arc(&self) -> Arc<Mutex<Store>> {
+        Arc::clone(&self.store)
+    }
 }
 
 /// `POST /report`: any authenticated caller — `readonly` included, since

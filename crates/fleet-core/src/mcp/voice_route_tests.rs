@@ -758,3 +758,30 @@ fn the_production_ping_is_inside_common_proxy_idle_timeouts() {
     let every = super::SOURCE_PING_EVERY;
     assert!(every >= Duration::from_secs(15) && every <= Duration::from_secs(30));
 }
+
+/// Review r04 K3: the upgrade checks the device once, and the socket then
+/// outlives that check. Revoking the device ends its claim at the next ping,
+/// with its own close code, rather than at the claim's idle TTL.
+#[tokio::test]
+async fn a_revoked_devices_source_socket_loses_its_claim_at_the_next_ping() {
+    let h = hub(true).await;
+    let mut ws = dial(&h, PHONE).await.expect("the upgrade");
+    let sid = h.session_id;
+    eventually(PATIENCE, "the socket never claimed the session", || {
+        registry().owner(sid).as_deref() == Some("client:phone")
+    })
+    .await;
+    // Keep reading, so the device answers pings and only the revoke can end it.
+    let closed = crate::rt::spawn(async move { close_frame(&mut ws).await });
+    h.store
+        .lock()
+        .unwrap()
+        .revoke_client_token("phone")
+        .unwrap();
+    let frame = closed.await.unwrap();
+    assert_eq!(u16::from(frame.code), 4003);
+    eventually(PATIENCE, "a revoked device kept the microphone", || {
+        registry().owner(sid).is_none()
+    })
+    .await;
+}

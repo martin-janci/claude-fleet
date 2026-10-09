@@ -159,6 +159,26 @@ fn a_device_resolves_by_id_label_serial_and_host_prefix() {
     assert_eq!(resolve(&s, &p, "nope").unwrap_err().code, codes::E_NOTFOUND);
 }
 
+/// A bare number that is one device's id and another's serial names
+/// neither for sure; `#id` still picks the id.
+#[test]
+fn a_number_that_is_an_id_and_another_serial_is_ambiguous() {
+    let st = fleet();
+    let a1 = id_of(&st, "A1");
+    let s = st.lock().unwrap();
+    s.debug_devices_apply_scan(
+        "b",
+        &[seen("B1", "online"), seen(&a1.to_string(), "online")],
+        2,
+    )
+    .unwrap();
+    let p = person();
+    let e = resolve(&s, &p, &a1.to_string()).unwrap_err();
+    assert_eq!(e.code, codes::E_AMBIGUOUS, "{}", e.message);
+    assert_eq!(resolve(&s, &p, &format!("#{a1}")).unwrap().key, "A1");
+    assert_eq!(resolve(&s, &p, &format!("b/{a1}")).unwrap().host, "b");
+}
+
 #[test]
 fn a_claim_holds_off_others_until_released() {
     let st = fleet();

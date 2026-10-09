@@ -851,6 +851,11 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             Ok(dir) => tracing::info!(dir = %dir.display(), "downloads ready"),
             Err(e) => tracing::warn!(error = %e, "downloads unavailable"),
         }
+        // Likewise an agent install the last run left `running`: its job
+        // died with that process, and it would refuse a new one for 30 min.
+        if let Err(e) = fleet_core::service::agent_install::fail_interrupted(&s) {
+            tracing::warn!(error = %e.message, "agent installs: could not fail interrupted jobs");
+        }
     }
     // `/events` stamps `needs_attention` without a store, so it is handed
     // the `context_full` threshold `list_sessions` reads; later writes
