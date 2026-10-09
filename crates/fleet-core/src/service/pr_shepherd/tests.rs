@@ -35,6 +35,7 @@ fn cand(id: i64, ev: PrEvidence) -> Candidate {
         host_alias: "local".into(),
         tmux_name: format!("s{id}"),
         project_id: 1,
+        org_id: None,
         pr_url: Some(format!("https://github.com/o/r/pull/{id}")),
         evidence: ev,
         live: true,
@@ -200,6 +201,7 @@ struct FakeExec {
     merged: AtomicUsize,
     refuse: Option<&'static str>,
     merge_fails: bool,
+    triaged: Mutex<Vec<(i64, Condition)>>,
 }
 
 impl FakeExec {
@@ -212,6 +214,7 @@ impl FakeExec {
             merged: AtomicUsize::new(0),
             refuse: None,
             merge_fails: false,
+            triaged: Mutex::new(Vec::new()),
         }
     }
 }
@@ -248,6 +251,10 @@ impl ShepherdExec for FakeExec {
         }
         self.merged.fetch_add(1, Ordering::SeqCst);
         Ok(MergeOutcome::Merged)
+    }
+
+    async fn triage(&self, id: i64, _org: Option<i64>, c: Condition, _ev: &PrEvidence) {
+        self.triaged.lock().unwrap().push((id, c));
     }
 }
 
@@ -299,6 +306,11 @@ async fn the_runner_nudges_once_per_episode_and_records_it() {
     assert_eq!(run_with(&store, &exec, NOW + 20).await, 0);
     assert_eq!(exec.sent.load(Ordering::SeqCst), 1);
     assert!(exec.last.lock().unwrap().contains("clippy"));
+    assert_eq!(
+        *exec.triaged.lock().unwrap(),
+        vec![(id, Condition::CiRed)],
+        "Jev's triage is asked once per recorded episode"
+    );
     let s = store.lock().unwrap();
     assert_eq!(
         s.shepherd_episode_outcome(id, HEAD, "ci_red").unwrap(),

@@ -1832,7 +1832,7 @@
   /* Keyboard focus only: the proxy is a text control, and a UA matches
      :focus-visible on those even for a plain mouse click. */
   .grid.kb-focus {
-    box-shadow: inset 0 0 0 1px var(--accent, #4f8fff);
+    box-shadow: inset 0 0 0 var(--ring-w) var(--ring);
   }
   /* Invisible, but NOT display:none / visibility:hidden and not off-screen —
      WebKit only opens an input-method session on an element it considers

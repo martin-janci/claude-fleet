@@ -127,11 +127,13 @@
       </span>
       <span class="actions">
         <button
+          aria-label="Create branch from here"
           disabled={writeBlocked !== null}
           title={writeBlocked ?? 'Create branch from here'}
           onclick={(e) => { e.stopPropagation(); onCreateBranch(r.hash); }}>⎇</button
         >
         <button
+          aria-label="Checkout this commit (detached)"
           disabled={writeBlocked !== null}
           title={writeBlocked ?? 'Checkout this commit (detached)'}
           onclick={(e) => { e.stopPropagation(); onCheckoutCommit(r.hash); }}>⤓</button

@@ -1,6 +1,7 @@
 # PR shepherd: design
 
-Status: steps 1 and 3 built, off until a person grants a rule (2026-10-08).
+Status: steps 1, 2 (the `pr_shepherd` tool), 3 and 4 built, off until a person grants a
+rule (2026-10-09).
 Asked for by the owner in the Claude Fleet project ("a Jev-like optimizer
 … Dev can babysit … conflict solving and resolving issues faster").
 
@@ -120,7 +121,9 @@ write, and `fleet_health.loops` shows its last run.
    green apart and broken together, since CI is not re-run on the merged
    result; a strict mode that requires each head to contain the current
    base is a possible follow-up.
-4. **Jev `pr_triage`, shadow.** A closed-set question per red check:
+4. **Jev `pr_triage`, shadow** (built: `service/decide/pr_triage.rs`,
+   `decide.jev.pr_triage`, off by default; `docs/decisions.md`). A
+   closed-set question per new episode:
    `fix_in_pr | regenerate | merge_base | flaky_rerun | not_this_pr |
    needs_person`, recorded through the decision envelope
    (`service::decide`) and compared with what the fix turned out to be.

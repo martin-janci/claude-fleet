@@ -526,6 +526,9 @@
     leave('board');
     leave('accounts');
     leave('control');
+    // Automation is a fleet page like Control: an opened session replaces
+    // it (review r07).
+    leave('automation');
   });
   // "View sessions" (host_actions.ts, called from anywhere: the `s` key,
   // HostDetail's header button) can't reach `closeHosts` directly — it asks
@@ -839,8 +842,13 @@
   const detailsMain = $derived(
     newLayout && !wideMode && !boardMode && (detailsMode || $todayOpen || taskShowing || !$selectedSession),
   );
-  const inspectorRoom = $derived(newLayout && !!$selectedSession && !wideMode && !boardMode && !detailsMain);
-  const inspectorShown = $derived(inspectorRoom && inspectorOpen);
+  // Review r08: a board card's task opens in the inspector column beside the
+  // board (Classic shows it in the centre pane), whatever the inspector pref.
+  const boardTask = $derived(newLayout && boardMode && taskShowing);
+  const inspectorRoom = $derived(
+    boardTask || (newLayout && !!$selectedSession && !wideMode && !boardMode && !detailsMain),
+  );
+  const inspectorShown = $derived(boardTask || (inspectorRoom && inspectorOpen));
   // Step 5.3: the pane's shells, for the Terminals tab. It is current while
   // the pane shows one of them (alone or split beside the agent).
   const selTerminals = $derived(
@@ -934,6 +942,12 @@
   // back, and the mounted Sidebar then consumes the request.
   $effect(() => {
     if ($addProjectRequest) sidebarCollapsed = false;
+  });
+
+  // Review r08: Settings (and Get started) are mounted by the Sidebar too, and
+  // the rail's Settings and ⌘, must open them while it is collapsed.
+  $effect(() => {
+    if ($settingsOpen) sidebarCollapsed = false;
   });
 
   // "Insert into composer" (work graph M9.2) shows where the text went: the

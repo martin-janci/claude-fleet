@@ -135,7 +135,9 @@
     border: none; background: transparent; color: var(--fg);
     font: inherit; font-size: var(--text-2xs); text-align: left; border-radius: var(--radius-sm); cursor: pointer;
   }
-  .mi:hover, .mi:focus-visible { background: var(--accent-soft); outline: none; }
+  .mi:hover, .mi:focus-visible { background: var(--accent-soft); }
+  /* Keyboard focus keeps the ring; the tint alone is ~1.1:1 (review r11). */
+  .mi:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: calc(-1 * var(--ring-w)); }
   .mi[aria-checked='true'] { font-weight: 600; }
   kbd { margin-left: auto; font: inherit; font-size: var(--text-2xs); color: var(--fg-muted); }
   .gi { width: 100%; box-sizing: border-box; margin-bottom: 0.3rem; padding: 0.3rem 0.5rem; font: inherit; font-size: var(--text-2xs); }

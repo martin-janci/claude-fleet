@@ -169,7 +169,7 @@
   }
   .row:not(.head):hover { background: color-mix(in srgb, var(--fg) 5%, transparent); }
   .row.selected { background: color-mix(in srgb, var(--accent) 18%, transparent); }
-  .hosts-table:focus-visible .row.selected { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .hosts-table:focus-visible .row.selected { outline: var(--ring-w) solid var(--ring); outline-offset: calc(-1 * var(--ring-w)); }
   .row.off .alias { color: var(--fg-muted); }
   .host { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
   .name { display: flex; align-items: baseline; gap: 0.4rem; min-width: 0; }

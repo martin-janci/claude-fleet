@@ -406,7 +406,7 @@ desktop). Not yet: a filesystem watcher, a three-way merge editor.
 
 Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
 
-PR shepherd, steps 1 and 3 of 5, are built and do nothing until a person
+PR shepherd, steps 1 to 4 of 5 (step 2 without its Inbox card), are built and do nothing until a person
 grants a rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
 migrations 136 (`pr_shepherd_rules`, `pr_shepherd_episodes`) and 145
 (`pr_shepherd_merges`),
@@ -416,9 +416,12 @@ reads each session's `pr_evidence` and, once per conflict / behind / red CI
 on a pushed commit, records a `pr_shepherd` timeline event (`watch`) or also
 asks the session's own Claude to fix it (`nudge`). At `merge` it also merges
 a PR GitHub confirms green right before the merge, one per project every
-180 s, with `--match-head-commit`. Rules are granted only with `fleet-hub
-shepherd grant | revoke | pause-all | status`. Not built: the control API and
-Inbox card (step 2), Jev `pr_triage`, the UI.
+180 s, with `--match-head-commit`. Rules are granted with `fleet-hub
+shepherd grant | revoke | pause-all | status` or the control API's
+`pr_shepherd` tool, which is served only to the owner's own paired device.
+Jev's `pr_triage` (`decide.jev.pr_triage`, off by default) records in
+shadow what each new episode most likely needs. Not built: the Inbox
+card, the UI.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

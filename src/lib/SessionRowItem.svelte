@@ -162,6 +162,10 @@
   // Redesign step 3.6: Compact is the two-line row (sans title, one meta
   // line, chips on hover); Comfortable is 0.5.4's row unchanged.
   const compact = $derived($uiDensity === 'compact');
+  // A Blocked row's reason (step 2.4), in either density.
+  const blockedReason = $derived(
+    blockedLine(triage.bucket, sess, $attentionFacts, (u) => accountLabel($accountByUuid.get(u))),
+  );
   const promptText = $derived(rowPrompt(sess));
   // The dialog this row is blocked on, straight from the row: the sidebar
   // does not probe (that would be one `capture-pane` per visible row, every
@@ -992,13 +996,15 @@
             <PulseSteps pulse={startPulse} size={14} markOnly testid="row-pulse" />
             <span class="starting-text" role="status">{startText}</span>
           </div>
-        {:else if compact}
-          <SessionRowMeta
-            {sess}
-            state={bucketState(triage.bucket)}
-            {promptText}
-            reason={blockedLine(triage.bucket, sess, $attentionFacts, (u) => accountLabel($accountByUuid.get(u)))}
-          />
+        {:else}
+          {#if compact}
+            <SessionRowMeta {sess} state={bucketState(triage.bucket)} {promptText} reason={blockedReason} />
+          {:else if blockedReason}
+            <!-- Comfortable has no meta line, but a Blocked row still says why
+                 (the SessionRow component's line two: "Paused · weekly limit
+                 on …") and offers its answers, in either density. -->
+            <div class="blocked-line" data-testid="row-blocked-reason">{blockedReason}</div>
+          {/if}
           {#if triage.bucket === 'account_limit'}
             <LimitActions
               {sess}
@@ -1006,8 +1012,9 @@
               accountName={(u) => accountLabel($accountByUuid.get(u))}
             />
           {/if}
-        {:else if $showRowDetails}
-          <SessionRowDetails {sess} {nowSec} {secondaryName} />
+          {#if !compact && $showRowDetails}
+            <SessionRowDetails {sess} {nowSec} {secondaryName} />
+          {/if}
         {/if}
       </div>
     {/if}
@@ -1296,6 +1303,15 @@
     font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
+  .blocked-line {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding-left: 0.85rem;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
   .starting-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Redesign step 3.6: the chip strip and the Compact row. */
@@ -1336,5 +1352,6 @@
     outline: none;
     min-width: 0;
   }
+  .rename-input:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
 
 </style>
