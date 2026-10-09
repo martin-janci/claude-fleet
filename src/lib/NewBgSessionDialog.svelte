@@ -55,7 +55,7 @@
   }
 </script>
 
-<Modal title="New Background Session" onclose={() => onClose()} width="420px" testid="bg-session-modal">
+<Modal title="New background session" onclose={() => onClose()} width="420px" testid="bg-session-modal">
   <div class="modal">
     <label class="modal-field">
       <span>Host</span>

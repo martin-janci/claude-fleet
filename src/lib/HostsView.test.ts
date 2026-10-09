@@ -916,6 +916,26 @@ describe('HostsView: the Hosts table (Layout: New)', () => {
     expect(v.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('review r08: / and e work on the table, opening the list and detail first', async () => {
+    uiLayout.set('new');
+    mount({ preselect: null });
+    await tick();
+    await key(table(), '/');
+    await tick();
+    await tick();
+    const filter = screen.getByTestId('hosts-filter') as HTMLInputElement;
+    expect(document.activeElement).toBe(filter);
+    await key(filter, 'Escape');
+    await key(list(), 'Escape');
+    await tick();
+    expect(table()).toBeTruthy();
+    await key(table(), 'j');
+    await key(table(), 'e');
+    await tick();
+    await tick();
+    expect(within(detail()).getByTestId('detail-nickname-input')).toBeInTheDocument();
+  });
+
   it('New layout: Restore on a lost session works from the detail Open shows', async () => {
     uiLayout.set('new');
     const lost = [

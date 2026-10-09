@@ -370,15 +370,26 @@
         if (alias) onNewSession(alias);
         break;
       case 'e':
+        // Review r08: on the New table the legend's `e` and `/` open the
+        // list and detail first, then do what they do there.
         if (showTable) {
-          handled = false;
+          if (!alias) {
+            handled = false;
+            break;
+          }
+          const uuid = selectedHost?.account_uuid;
+          detailOpen = true;
+          void tick().then(() => startEdit('detail', uuid));
           break;
         }
         startEdit(inDetail ? 'detail' : 'list', selectedHost?.account_uuid);
         break;
       case '/':
-        if (inDetail || showTable) handled = false;
-        else filterEl?.focus();
+        if (inDetail) handled = false;
+        else if (showTable) {
+          detailOpen = true;
+          void tick().then(() => filterEl?.focus());
+        } else filterEl?.focus();
         break;
       case '?':
         legendOpen = !legendOpen;
