@@ -553,7 +553,7 @@ Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 
 ### `routines`
 
-Routines: a saved prompt that starts a session on a cron schedule, a session event or Run now. list; get {routine_id}: with its last runs; runs {routine_id, limit?}; save {routine, routine_id?}: the whole routine; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
+Routines: a saved prompt that starts a session on a cron schedule, a session event or Run now. list; get {routine_id}: with its last runs; runs {routine_id, limit?}; failing: each routine whose newest run failed, for the Inbox; save {routine, routine_id?}: the whole routine; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
 
 Parameters: `action`, `enabled`, `limit`, `routine`, `routine_id`, `skip`
 
@@ -1042,6 +1042,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::runs::list_runs`
+- `commands::routines::routines`
 - `commands::tasks::list_tasks`
 - `commands::tasks::cancel_task`
 - `commands::files::repo_changes`
