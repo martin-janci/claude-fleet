@@ -1806,6 +1806,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                     name: "x".into(),
                     prompt: "p".into(),
                     requester_session_id: None,
+                    ..Default::default()
                 },
                 confirm_nonce: None,
             }),
@@ -1944,6 +1945,7 @@ async fn a_background_session_cannot_name_a_requester_on_another_host() {
                     name: "x".into(),
                     prompt: "p".into(),
                     requester_session_id: Some(on_b),
+                    ..Default::default()
                 },
                 confirm_nonce: None,
             }),
@@ -1968,6 +1970,7 @@ async fn a_background_session_cannot_name_a_requester_that_does_not_exist() {
                     name: "x".into(),
                     prompt: "p".into(),
                     requester_session_id: Some(9_999),
+                    ..Default::default()
                 },
                 confirm_nonce: None,
             }),
@@ -4074,10 +4077,11 @@ fn list_host_worktrees_is_open_to_a_paired_client_in_either_mode() {
 #[test]
 fn the_served_definition_budget_stays_bounded() {
     /// Definition bytes per tool served to the master token (the widest
-    /// surface). Measured at 87,031 bytes for 113 tools (770 a tool) on
-    /// 2026-10-08. Raise it only from a measurement the failure prints,
-    /// and say in the commit message what was measured and when.
-    const BYTES_PER_TOOL: usize = 790;
+    /// surface). Measured at 105,130 bytes for 133 tools (790 a tool) on
+    /// 2026-10-09, when `new_bg_session` took its launch options. Raise it
+    /// only from a measurement the failure prints, and say in the commit
+    /// message what was measured and when.
+    const BYTES_PER_TOOL: usize = 800;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

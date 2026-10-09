@@ -597,6 +597,51 @@ pub(super) enum CwdSource {
     },
 }
 
+/// Where a background agent launched into `project_id` on `host` starts:
+/// the project's main checkout there (a system project's `base_path`
+/// verbatim, the project's own `base_path` on `local`, else the host's
+/// projects root + `owner/repo`, expanded against the remote `$HOME`). The
+/// lookup holds the store lock; the `$HOME` round trip runs after it is
+/// released.
+pub(crate) async fn project_cwd_on_host(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    host: &str,
+    project_id: i64,
+) -> Result<String, IpcError> {
+    let src = {
+        let s = crate::ipc_error::lock(store)?;
+        project_cwd_source(&s, host, project_id)?
+    };
+    resolve_cwd_source(src, host, ssh).await
+}
+
+fn project_cwd_source(s: &Store, host: &str, project_id: i64) -> Result<CwdSource, IpcError> {
+    crate::service::hub::ensure_local_allowed(host)?;
+    if let Some(fixed) = fetch_system_base_path(s, project_id)? {
+        return Ok(CwdSource::Fixed(fixed));
+    }
+    let (owner, repo) = fetch_owner_repo(s, project_id)?;
+    if host == "local" {
+        return s
+            .project_base_path(project_id)?
+            .map(CwdSource::Local)
+            .ok_or_else(|| {
+                IpcError::new(
+                    codes::E_NOREPO,
+                    format!("project {project_id} has no checkout on this machine"),
+                )
+            });
+    }
+    Ok(CwdSource::Remote {
+        root: crate::service::projects::project_base_for(s, host),
+        layout: crate::service::projects::layout(s),
+        owner,
+        repo,
+        wt_name: None,
+    })
+}
+
 /// Pick the cwd-resolution strategy for `row` while holding the store lock.
 /// Falls back from worktree → project root (matching the local resolver) when
 /// the worktree row is missing.
