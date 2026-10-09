@@ -152,7 +152,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
   }
   .filters,
   .head,
@@ -173,12 +173,12 @@
   }
   .sub {
     margin-left: 0.2rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .state {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     padding: 0 0.35rem;
     color: var(--fg-muted);
   }

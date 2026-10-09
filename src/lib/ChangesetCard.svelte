@@ -154,19 +154,19 @@
 </section>
 
 <style>
-  .card { display: grid; gap: 8px; margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md, 8px); background: var(--bg-pane); }
+  .card { display: grid; gap: 8px; margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md, var(--radius-lg)); background: var(--bg-pane); }
   .card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .card:focus-visible { outline: var(--ring-w, 2px) solid var(--ring, var(--accent)); outline-offset: var(--ring-offset, 2px); }
   .card.banner { padding: 6px 12px; }
   .line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
   .table { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
-  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; min-height: 22px; }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--text-xs); min-height: 22px; }
   .num { font-variant-numeric: tabular-nums; color: var(--fg-muted); }
   .looks { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
-  .lbl { font-size: 12px; font-weight: 600; }
-  .held { font-size: 12px; color: var(--usage-warn); }
-  .err { margin: 0; color: var(--usage-crit); font-size: 12.5px; }
-  .note { font-size: 12px; color: var(--fg-muted); }
+  .lbl { font-size: var(--text-xs); font-weight: 600; }
+  .held { font-size: var(--text-xs); color: var(--usage-warn); }
+  .err { margin: 0; color: var(--usage-crit); font-size: var(--text-xs); }
+  .note { font-size: var(--text-xs); color: var(--fg-muted); }
   .tick { color: var(--usage-ok); }
   .commits { display: inline-flex; gap: 4px; }
 </style>

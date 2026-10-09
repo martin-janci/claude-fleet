@@ -115,12 +115,12 @@
     align-items: baseline;
     gap: 0.5rem;
     margin: 0 0 0.6rem;
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
     min-width: 0;
   }
   .bg-kind {
     flex: 0 0 auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .bg-label {
@@ -129,7 +129,7 @@
   }
   .bg-status {
     flex: 0 0 auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .bg-status[data-status='running'] {
@@ -143,12 +143,12 @@
   }
   .bg-dur {
     flex: 0 0 auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .bg-worker {
     margin: 0 0 0.6rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .bg-summary {
     margin: 0 0 0.4rem;
@@ -160,7 +160,7 @@
   }
   .bg-sub {
     margin: 1rem 0 0.4rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .bg-report {
@@ -171,7 +171,7 @@
   .bg-report-head {
     display: flex;
     gap: 0.4rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .bg-output {
@@ -180,7 +180,7 @@
     gap: 0.4rem;
     flex-wrap: wrap;
     margin-top: 1rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .bg-output code {

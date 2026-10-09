@@ -1576,11 +1576,16 @@ pub(super) async fn probe_pr_info(
         return PrInfoMap::new();
     }
     due.truncate(PR_PROBE_BATCH);
+    // Stamped BEFORE the script runs: a transport failure, or the caller's
+    // PR_PROBE_TIMEOUT dropping this future, must not retry the same batch on
+    // every 20 s pass, nor keep the sessions past the first PR_PROBE_BATCH
+    // from ever being due (review r16).
+    cache.mark_probed(host, due.iter().map(|(n, _)| n.as_str()));
     let script = build_pr_probe_script(&due);
     let stdout = match shell.run_script(host, &script).await {
         Ok(out) => out,
         Err(e) => {
-            // Best-effort and retried every pass: debug, not warn.
+            // Best-effort and retried after the cache's TTL: debug, not warn.
             tracing::debug!(host = %host, error = %e, "[reconcile] pr probe failed");
             return PrInfoMap::new();
         }
@@ -1590,12 +1595,8 @@ pub(super) async fn probe_pr_info(
             cache.mark_no_gh(host);
             PrInfoMap::new()
         }
-        ProbeOutput::Results(map) => {
-            // Every target the script ran for is throttled, observed or not:
-            // a transport failure must not be retried on every 20 s pass.
-            cache.mark_probed(host, due.iter().map(|(n, _)| n.as_str()));
-            map
-        }
+        // Every target the script ran for was throttled above, observed or not.
+        ProbeOutput::Results(map) => map,
     }
 }
 

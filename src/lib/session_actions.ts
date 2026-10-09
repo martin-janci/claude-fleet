@@ -42,7 +42,7 @@ export interface SessionActionDef {
 
 /** In Details' order: destructive actions last. */
 export const ROW_ACTIONS: readonly SessionActionDef[] = [
-  { id: 'label', label: 'Edit label', detailsTestId: 'label-from-details' },
+  { id: 'label', label: 'Rename', detailsTestId: 'label-from-details' },
   { id: 'rename', label: 'Rename tmux session', detailsTestId: 'rename-from-details' },
   { id: 'restart', label: 'Restart…', detailsTestId: 'restart-from-details' },
   { id: 'repair', label: 'Repair workspace…', detailsTestId: 'repair-from-details' },

@@ -508,29 +508,29 @@
 {/if}
 
 <style>
-  .editor { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+  .editor { display: flex; flex-direction: column; gap: 10px; font-size: var(--text-sm); }
   .row { display: flex; gap: 10px; }
   .row label { flex: 1; }
-  label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--fg-muted); }
-  input, select, textarea { font: inherit; padding: 4px 6px; border: 1px solid var(--border); background: var(--bg-pane); color: var(--fg); border-radius: 4px; }
-  textarea.body { font-family: ui-monospace, monospace; }
-  .kind-fields { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+  label { display: flex; flex-direction: column; gap: 3px; font-size: var(--text-xs); color: var(--fg-muted); }
+  input, select, textarea { font: inherit; padding: 4px 6px; border: 1px solid var(--border); background: var(--bg-pane); color: var(--fg); border-radius: var(--radius-sm); }
+  textarea.body { font-family: var(--font-mono); }
+  .kind-fields { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 8px; }
   .field { display: flex; flex-direction: column; gap: 4px; }
-  .field-label { font-size: 11px; text-transform: uppercase; color: var(--fg-muted); }
+  .field-label { font-size: var(--text-2xs); text-transform: uppercase; color: var(--fg-muted); }
   .tool-list { display: flex; flex-wrap: wrap; gap: 6px; }
-  .tool { flex-direction: row; align-items: center; gap: 4px; font-size: 12px; }
+  .tool { flex-direction: row; align-items: center; gap: 4px; font-size: var(--text-xs); }
   .resources { border-top: 1px solid var(--border); padding-top: 8px; }
-  .resources h4 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; color: var(--fg-muted); }
-  .resource-row { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 2px 0; }
-  .resource-row .rel { font-family: ui-monospace, monospace; }
+  .resources h4 { margin: 0 0 6px; font-size: var(--text-2xs); text-transform: uppercase; color: var(--fg-muted); }
+  .resource-row { display: flex; align-items: center; gap: 8px; font-size: var(--text-xs); padding: 2px 0; }
+  .resource-row .rel { font-family: var(--font-mono); }
   .resource-row .size { color: var(--fg-muted); }
   .lint { display: flex; flex-direction: column; gap: 2px; }
-  .lint-error { color: var(--usage-crit); margin: 0; font-size: 12px; }
-  .lint-warn { color: var(--usage-warn); margin: 0; font-size: 12px; }
+  .lint-error { color: var(--usage-crit); margin: 0; font-size: var(--text-xs); }
+  .lint-warn { color: var(--usage-warn); margin: 0; font-size: var(--text-xs); }
   .error { color: var(--usage-crit); margin: 0; }
-  .muted { color: var(--fg-muted); font-size: 12px; }
+  .muted { color: var(--fg-muted); font-size: var(--text-xs); }
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
-  .actions button { font-size: 0.85rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: 4px; cursor: pointer; }
+  .actions button { font-size: var(--text-xs); padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: var(--radius-sm); cursor: pointer; }
   .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
   .actions button.primary { border-color: var(--accent); }
 </style>

@@ -122,6 +122,33 @@ describe('the copy lint', () => {
     expect(lintSvelte('src/Y.svelte', src, ix).map((f) => f.text)).toEqual(['Settings', 'Open foo']);
   });
 
+  it("flags a glyph before a label, but keeps the manual's markers (review r14)", () => {
+    const src = `<button>🔍 Review</button><button>♻ Recreate</button><button>✎ What changed</button><button>✦ Proposed</button><button>🎤</button>`;
+    expect(lintSvelte('src/X.svelte', src, index({})).map((f) => `${f.rule} ${f.text}`)).toEqual([
+      'glyph-prefix 🔍 Review',
+      'glyph-prefix ♻ Recreate',
+    ]);
+  });
+
+  it('flags the old name in copy, not in a link or a tool name (review r14)', () => {
+    const src = `<h2>Welcome to claude-fleet</h2>
+<p>Allow them for Orbit Fleet (listed as claude-fleet) in system settings.</p>
+<a href="https://github.com/martin-janci/claude-fleet">Source</a>
+<p>{'mcp__claude-fleet__ask'}</p>`;
+    expect(lintSvelte('src/X.svelte', src, index({})).map((f) => `${f.rule} ${f.line}`)).toEqual(['old-name 1']);
+  });
+
+  it('wants dialog titles and headings in sentence case, names aside (review r14)', () => {
+    const src = `<Modal title="New Background Session">x</Modal>
+<Modal title="Connect GitHub">x</Modal>
+<h3>Control API (MCP)</h3>
+<h4>Hub Health</h4>`;
+    expect(lintSvelte('src/X.svelte', src, index({})).map((f) => `${f.rule} ${f.text}`)).toEqual([
+      'sentence-case New Background Session',
+      'sentence-case Hub Health',
+    ]);
+  });
+
   it('leaves a button that only sometimes asks (a confirm for one value) alone', () => {
     const src = `<script>
   let pending = $state(null);

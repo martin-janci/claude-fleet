@@ -22,6 +22,6 @@
     gap: var(--space-2);
     padding: var(--space-4) var(--space-2);
     color: var(--fg-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
 </style>

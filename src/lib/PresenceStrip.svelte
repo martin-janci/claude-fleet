@@ -48,7 +48,7 @@
     background: var(--accent-soft);
     color: var(--fg);
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     box-shadow: 0 0 0 2px var(--bg-pane);
   }
   .face + .face {

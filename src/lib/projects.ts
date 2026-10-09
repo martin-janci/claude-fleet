@@ -1,5 +1,6 @@
 import { writable, derived } from 'svelte/store';
 import { invokeCmd, invokeCmdAbortable, type IpcError, type Result } from './result';
+import { createListRace, type ListToken } from './row_store';
 
 export interface ProjectRow {
   id: number;
@@ -43,19 +44,32 @@ export const projects = writable<ProjectTreeRow[]>([]);
 /** O(1) project-id -> tree-row lookup, derived once per `projects` change. */
 export const projectById = derived(projects, ($p) => new Map($p.map((p) => [p.project.id, p])));
 
+// A project or worktree frame that lands while a list is in flight is newer
+// than that list: the project it touched keeps the store's entry, and an
+// older list never lands over a newer one (review r07).
+const race = createListRace<number>();
+
+function applyProjectList(listed: ProjectTreeRow[], token: ListToken): void {
+  if (!Array.isArray(listed)) return;
+  projects.update((cur) => race.mergeList(cur, listed, token, (p) => p.project.id) ?? cur);
+}
+
 export async function loadProjects(): Promise<Result<ProjectTreeRow[]>> {
+  const token = race.begin();
   const r = await invokeCmd<ProjectTreeRow[]>('list_projects');
-  if (r.ok) projects.set(r.value);
+  if (r.ok) applyProjectList(r.value, token);
   return r;
 }
 
 export async function refreshProjects(): Promise<Result<ProjectTreeRow[]>> {
+  const token = race.begin();
   const r = await invokeCmd<ProjectTreeRow[]>('refresh_projects');
-  if (r.ok) projects.set(r.value);
+  if (r.ok) applyProjectList(r.value, token);
   return r;
 }
 
 export function mergeProject(row: ProjectTreeRow): void {
+  race.touch(row.project.id);
   projects.update((arr) => {
     const i = arr.findIndex((p) => p.project.id === row.project.id);
     if (i === -1) return [...arr, row];
@@ -72,6 +86,7 @@ export function mergeProject(row: ProjectTreeRow): void {
  * the existing `worktrees` array. If it's new, seed an empty `worktrees: []`.
  */
 function mergeProjectRow(arr: ProjectTreeRow[], row: ProjectRow): ProjectTreeRow[] {
+  race.touch(row.id);
   const i = arr.findIndex((p) => p.project.id === row.id);
   if (i === -1) return [...arr, { project: row, worktrees: [] }];
   const next = arr.slice();
@@ -82,6 +97,7 @@ function mergeProjectRow(arr: ProjectTreeRow[], row: ProjectRow): ProjectTreeRow
 function mergeWorktreeRow(arr: ProjectTreeRow[], row: WorktreeRow): ProjectTreeRow[] {
   const idx = arr.findIndex((p) => p.project.id === row.project_id);
   if (idx === -1) return arr;
+  race.touch(row.project_id);
   const entry = arr[idx];
   const wts = entry.worktrees ?? [];
   const wIdx = wts.findIndex((w) => w.id === row.id);
@@ -96,6 +112,7 @@ function removeWorktreeRow(arr: ProjectTreeRow[], id: number): ProjectTreeRow[] 
   if (!arr.some((entry) => entry.worktrees?.some((w) => w.id === id))) return arr;
   return arr.map((entry) => {
     if (!entry.worktrees?.some((w) => w.id === id)) return entry;
+    race.touch(entry.project.id);
     return { ...entry, worktrees: entry.worktrees.filter((w) => w.id !== id) };
   });
 }

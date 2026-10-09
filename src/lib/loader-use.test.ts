@@ -72,4 +72,18 @@ describe('loader use', () => {
     const bad = uses.filter((u) => u.inline && !allowedInline(u.tag)).map((u) => `${u.file}: ${u.tag}`);
     expect(bad).toEqual([]);
   });
+
+  // Review r12: a hand-rolled spinner (a ⟳ glyph or a 360° spin keyframe)
+  // shows at once and ignores the app's Motion setting; waits use the kit.
+  it('no component draws its own spinner', () => {
+    const files = readdirSync('src', { recursive: true })
+      .filter((n) => n.endsWith('.svelte'))
+      .map((n) => `src/${n.replaceAll('\\', '/')}`);
+    const bad = files.filter((f) => {
+      const src = readFileSync(f, 'utf8');
+      return /rotate\(\s*360deg\s*\)/.test(src) || /⟳/.test(src.replace(/<!--[\s\S]*?-->/g, ''));
+    });
+    expect(bad).toEqual([]);
+  });
 });
+

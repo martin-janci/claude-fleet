@@ -46,6 +46,26 @@ fn only_an_active_mission_wakes_and_one_tick_holds_it() {
 }
 
 #[test]
+fn a_repeated_decision_at_the_cap_is_still_one_card_not_an_error() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    let card = |d: String| NewCard {
+        decision_id: Box::leak(d.into_boxed_str()),
+        source: "loop",
+        kind: "ask",
+        ..Default::default()
+    };
+    for i in 0..CARDS_OPEN_CAP {
+        s.add_card(m, &card(format!("d{i}"))).unwrap().unwrap();
+    }
+    assert_eq!(s.add_card(m, &card("d0".into())).unwrap(), None);
+    assert_eq!(
+        s.add_card(m, &card("new".into())).unwrap_err().code,
+        codes::E_LIMIT
+    );
+}
+
+#[test]
 fn a_decision_is_one_card_and_a_card_closes_once() {
     let s = Store::open_in_memory().unwrap();
     let m = mission(&s);
@@ -164,6 +184,19 @@ fn sleeping(s: &Store) -> i64 {
         .unwrap();
     assert!(s.missions_due(now).unwrap().is_empty());
     m
+}
+
+#[test]
+fn resuming_a_paused_mission_wakes_it() {
+    let s = Store::open_in_memory().unwrap();
+    let m = sleeping(&s);
+    s.set_mission_state(m, None, "paused", "fleet").unwrap();
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    assert_eq!(
+        s.missions_due(now_unix()).unwrap(),
+        vec![m],
+        "a resumed mission does not sleep out the wake its brake set"
+    );
 }
 
 #[test]

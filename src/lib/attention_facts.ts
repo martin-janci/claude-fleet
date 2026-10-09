@@ -33,10 +33,16 @@ export function attentionFactsFrom(
     if (!u) continue;
     const atLimit = (w: { utilization: number; resets_at: number | null } | null) =>
       !!w && w.utilization >= 100 && (w.resets_at == null || w.resets_at > now);
-    if (atLimit(u.seven_day)) {
-      limited_accounts[snap.account_uuid] = { window: 'weekly', resets_at: u.seven_day!.resets_at };
-    } else if (atLimit(u.five_hour)) {
-      limited_accounts[snap.account_uuid] = { window: 'five_hour', resets_at: u.five_hour!.resets_at };
+    // Both windows at their limit: the one that frees last decides, so the
+    // row does not unblock while the other still holds it (no reset time
+    // holds longest). Weekly wins a tie. Mirrors attention.rs `from_fleet`.
+    const frees = (w: { resets_at: number | null }) => w.resets_at ?? Number.MAX_SAFE_INTEGER;
+    const weekly = atLimit(u.seven_day) ? u.seven_day! : null;
+    const five = atLimit(u.five_hour) ? u.five_hour! : null;
+    if (five && (!weekly || frees(five) > frees(weekly))) {
+      limited_accounts[snap.account_uuid] = { window: 'five_hour', resets_at: five.resets_at };
+    } else if (weekly) {
+      limited_accounts[snap.account_uuid] = { window: 'weekly', resets_at: weekly.resets_at };
     }
   }
   return { down_hosts, limited_accounts, uncredentialed_accounts };

@@ -7,6 +7,7 @@
   import { accountByUuid } from './accounts';
   import { accountUsage } from './account_usage_store';
   import { accountPill, openAccount } from './account_pill';
+  import { nowTick } from './now_tick';
 
   let {
     uuid,
@@ -21,7 +22,12 @@
     onopen?: () => void;
   } = $props();
 
-  const pill = $derived(accountPill(uuid, $accountByUuid.get(uuid), $accountUsage[uuid], clock()));
+  // `$nowTick` makes the pill re-derive on time: a LIMIT goes once its
+  // window resets, with or without a new usage reading.
+  const pill = $derived.by(() => {
+    void $nowTick;
+    return accountPill(uuid, $accountByUuid.get(uuid), $accountUsage[uuid], clock());
+  });
 </script>
 
 <button
@@ -47,10 +53,10 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font: inherit;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 14px;
     padding: 0 6px;
-    border-radius: 7px;
+    border-radius: var(--radius-md);
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg-muted);

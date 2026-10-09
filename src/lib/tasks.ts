@@ -34,9 +34,10 @@ export function isTerminal(state: TaskState): boolean {
 
 /** Fetch every task (newest-first) into the store. */
 export async function loadTasks(): Promise<Result<TaskRow[]>> {
+  const token = rows.beginList();
   const r = await invokeCmd<TaskRow[]>('list_tasks', {});
   // Defensive: a mocked / older backend may answer with nothing.
-  if (r.ok && Array.isArray(r.value)) tasks.set(r.value);
+  if (r.ok && Array.isArray(r.value)) rows.applyList(r.value, token);
   return r;
 }
 

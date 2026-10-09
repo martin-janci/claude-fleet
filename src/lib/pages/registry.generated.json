@@ -2241,6 +2241,46 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Guessing what a stuck pull request needs (a fix, a regenerate, a base merge, a re-run, or a person) when the PR shepherd finds it conflicting or red. Sends the PR's check names and states, no code. Shadow only records; assist is recorded the same way for now.",
+      "key": "decide.jev.pr_triage",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: PR triage",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: record only"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -3658,6 +3698,11 @@
             {
               "hint": "Keeps runs with nothing to do out of the Inbox. Sends the run's last reply only for organisations that allow reply text.",
               "key": "decide.jev.routine_run_outcome",
+              "type": "field"
+            },
+            {
+              "hint": "Asked once per PR shepherd episode. Sends check names and states, never code.",
+              "key": "decide.jev.pr_triage",
               "type": "field"
             },
             {

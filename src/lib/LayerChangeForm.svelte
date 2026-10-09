@@ -102,12 +102,12 @@
 </form>
 
 <style>
-  .lf { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md, 6px); background: var(--bg-pane); }
-  .f { display: grid; gap: 3px; font-size: 12px; }
+  .lf { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md, var(--radius-md)); background: var(--bg-pane); }
+  .f { display: grid; gap: 3px; font-size: var(--text-xs); }
   .f > span { color: var(--fg-muted); }
-  .what { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
-  .what code { font-family: var(--mono); font-size: 11.5px; }
-  .err { margin: 0; font-size: 12px; color: var(--usage-crit); }
+  .what { margin: 0; font-size: var(--text-xs); overflow-wrap: anywhere; }
+  .what code { font-family: var(--mono); font-size: var(--text-2xs); }
+  .err { margin: 0; font-size: var(--text-xs); color: var(--usage-crit); }
   .act { display: flex; gap: 8px; }
   input[aria-invalid='true'] { outline: 2px solid var(--usage-crit); outline-offset: -1px; }
 </style>
