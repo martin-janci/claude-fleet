@@ -208,6 +208,17 @@ reach, then adds it. `pair_device` (`pair_device_wizard.ts`) offers the
 hub's orgs and calls `pair_device`; on the Devices page its code and QR are
 PairingResult's, with its Halo.
 
+`new_session` is ⌘N's start as a form: project, host and agent, then the
+worktree (a new one with its branch and base, or one the opener offers),
+then the label and, for Claude Code, model, effort and login profile (a
+shell asks what to run instead). Its run (`new_session_wizard.ts`) makes
+the same `new_session` call the dialog makes, so the answered card carries
+the Pulse while the agent comes up. In the New layout, Get started's
+*Create first session* opens it as a dialog and selects the session it
+started; ⌘N keeps its dialog, which holds what a form cannot
+hold: the duplicate check, the account headroom ask, a ticket start and
+Cancel creation.
+
 ## When to use it instead of AskUserQuestion
 
 When the person may not be at the terminal, or the input is several
