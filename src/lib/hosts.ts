@@ -80,6 +80,14 @@ export interface HostRow {
   /** Which agent CLIs the host has on its PATH (Orbit Fleet 12.4), in the
    *  health checklist's order; null when never sampled. Absent from an older hub. */
   agents_on_path?: string[] | null;
+  /** When the host last answered a probe (review r13). Unlike `last_pinged_at`,
+   *  which a failed probe stamps too, it stays put while the host is offline.
+   *  null = never answered; absent from an older hub. */
+  last_reachable_at?: number | null;
+  /** Why the last probe failed: its IpcError code and a short message. Cleared
+   *  by the next probe the host answers; absent from an older hub. */
+  last_probe_error_code?: string | null;
+  last_probe_error?: string | null;
 }
 
 /** One login profile on a host. */
@@ -281,6 +289,9 @@ export function applyHostEvents(events: readonly HostEvent[]): void {
           next = rows.mergeInto(next, {
             ...have,
             last_pinged_at: ev.last_pinged_at,
+            // A ping is a probe that changed nothing else: answered, it moved
+            // `last_reachable_at` with the stamp (store/reconcile.rs).
+            last_reachable_at: ev.reachable ? ev.last_pinged_at : have.last_reachable_at,
             claude_version_at: ev.claude_version_at ?? have.claude_version_at,
             reachable: ev.reachable,
             // The health sample rides the ping (it moves every pass).

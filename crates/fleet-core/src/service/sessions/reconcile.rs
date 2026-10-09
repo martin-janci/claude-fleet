@@ -712,19 +712,22 @@ pub(super) fn reconcile_write_one_host(
             // Mark host unreachable; surface last-known sessions so the UI
             // can render them dimmed/red. We KEEP them (no delete).
             tracing::warn!(host = %host.alias, code = %e.code, error = %e.message, "[reconcile] host unreachable");
-            s.apply_host_reconcile(HostReconcile {
-                alias: &host.alias,
-                reachable: false,
-                claude_version: host.claude_version.as_deref(),
-                tmux_version: host.tmux_version.as_deref(),
-                last_pinged_at: now_unix(),
-                probe_started_at: probe.started_at,
-                sessions: &[],
-                keep: &[],
-                lost_ttl_cutoff: None,
-                skip_prune: false,
-                reconciled_at: None,
-            })?;
+            s.apply_host_reconcile_failed(
+                HostReconcile {
+                    alias: &host.alias,
+                    reachable: false,
+                    claude_version: host.claude_version.as_deref(),
+                    tmux_version: host.tmux_version.as_deref(),
+                    last_pinged_at: now_unix(),
+                    probe_started_at: probe.started_at,
+                    sessions: &[],
+                    keep: &[],
+                    lost_ttl_cutoff: None,
+                    skip_prune: false,
+                    reconciled_at: None,
+                },
+                (&e.code, &e.message),
+            )?;
         }
     }
     Ok(())

@@ -748,6 +748,23 @@ describe('an offline host (states kit, step 10.6)', () => {
     expect(onreprobe).toHaveBeenCalledOnce();
   });
 
+  it('says why the last probe failed and when the host last answered', () => {
+    mount('mercury', {
+      host: host('mercury', {
+        reachable: false,
+        last_pinged_at: NOW - 5,
+        last_reachable_at: NOW - 600,
+        last_probe_error: 'SSH timed out after 10 s',
+        last_probe_error_code: 'E_SSH_TIMEOUT',
+      }),
+      now: NOW,
+    });
+    const off = screen.getByTestId('host-offline-state');
+    expect(off.textContent).toContain('last answered 10 m ago');
+    expect(off.textContent).toContain('SSH timed out after 10 s');
+    expect(screen.getByTestId('host-offline-code').textContent).toBe('E_SSH_TIMEOUT');
+  });
+
   it('a reachable host shows no offline state', () => {
     mount('mercury', { host: host('mercury', { reachable: true }) });
     expect(screen.queryByTestId('host-offline-state')).toBeNull();

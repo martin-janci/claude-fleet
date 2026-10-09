@@ -1251,6 +1251,19 @@ pub struct HostRow {
     /// Per-field default: an older hub omits it.
     #[serde(default)]
     pub agents_on_path: Option<Vec<String>>,
+    /// When the host last answered a probe (migration 150). Unlike
+    /// `last_pinged_at`, which a failed probe stamps too, this stays put
+    /// while the host is unreachable. `None`: never answered. Per-field
+    /// default: an older hub omits it.
+    #[serde(default)]
+    pub last_reachable_at: Option<i64>,
+    /// Why the last probe failed: its `IpcError` code and a short message
+    /// (migration 150). Cleared by the next probe the host answers.
+    /// Per-field default: an older hub omits them.
+    #[serde(default)]
+    pub last_probe_error_code: Option<String>,
+    #[serde(default)]
+    pub last_probe_error: Option<String>,
 }
 
 /// One login profile on a host, as `hosts.claude_profiles` stores it.
@@ -1344,7 +1357,8 @@ pub(super) const HOST_COLUMNS: &str =
      disk_home_free_kb, disk_home_total_kb, disk_tmp_free_kb, load_1m, mem_avail_kb, \
      uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint, \
      harnesses, provision_warning, auth_overrides, claude_profiles, cpu_count, mem_total_kb, \
-     boot_at, latency_ms, worktree_kb, worktree_at, agents_on_path";
+     boot_at, latency_ms, worktree_kb, worktree_at, agents_on_path, \
+     last_reachable_at, last_probe_error_code, last_probe_error";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -1408,6 +1422,10 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         agents_on_path: row
             .get::<_, Option<String>>(33)?
             .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()),
+        // Migration 150 (review r13).
+        last_reachable_at: row.get(34)?,
+        last_probe_error_code: row.get(35)?,
+        last_probe_error: row.get(36)?,
     })
 }
 

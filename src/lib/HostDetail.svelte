@@ -507,12 +507,14 @@
     </div>
     {#if !host.reachable && !isLocal}
       <!-- The states kit: an offline host is said here, in its own pane.
-           "Last answered" is the last health sample, written only when the
-           host answered: `last_pinged_at` moves on a failed probe too
-           (review r13). -->
+           "Last answered" is `last_reachable_at` (or, from an older hub, the
+           last health sample): `last_pinged_at` moves on a failed probe too
+           (review r13). The reason is the last probe's error. -->
       <HostOffline
         alias={host.alias}
-        lastSeen={host.health_at ?? null}
+        lastSeen={host.last_reachable_at ?? host.health_at ?? null}
+        reason={host.last_probe_error ?? null}
+        code={host.last_probe_error_code ?? null}
         {now}
         sessions={hostSessions.length}
         ontry={onreprobe}

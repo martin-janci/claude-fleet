@@ -235,6 +235,21 @@ pub async fn add_host(
     // arrives from the agent registry — through the router, which needs the
     // row to exist — on the first `probe_host` or reconcile pass after the
     // agent connects.
+    //
+    // Re-adding a host that is ALREADY an agent host changes nothing the
+    // agent registry has not already said (review r18 A6): its reachable,
+    // versions and account stay as the last probe left them, rather than
+    // reading offline until the next one.
+    if args.transport.as_deref() == Some("agent") {
+        let s = lock(store)?;
+        if s.get_host_row(&args.alias)?
+            .is_some_and(|h| h.transport == "agent")
+        {
+            s.insert_host(&args.alias, Some(&args.ssh_alias))?;
+            drop(s);
+            return list_one(store, &args.alias);
+        }
+    }
     let (reachable, claude_ver, tmux_ver, account) = if args.transport.as_deref() == Some("agent") {
         (false, None, None, None)
     } else {
@@ -982,6 +997,9 @@ mod tests {
             worktree_kb: None,
             worktree_at: None,
             agents_on_path: None,
+            last_reachable_at: None,
+            last_probe_error_code: None,
+            last_probe_error: None,
             harnesses: None,
         }
     }
@@ -1648,6 +1666,45 @@ mod tests {
             fake.calls()
         );
         assert!(host_row(&store, "gamma").is_some(), "the row is persisted");
+    }
+
+    /// Review r18 A6: re-adding a connected agent host as an agent host
+    /// keeps what its agent last reported, rather than reading offline (and
+    /// with no account) until the next probe.
+    #[tokio::test]
+    async fn re_adding_a_connected_agent_host_keeps_its_reachability_and_account() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let fake = fake_fleet();
+        let args = || AddHostArgs {
+            alias: "gamma".into(),
+            ssh_alias: "gamma.example".into(),
+            transport: Some("agent".into()),
+        };
+        add_host(args(), &store, &fake).await.unwrap();
+        {
+            let s = store.lock().unwrap();
+            s.update_host_probe("gamma", true, Some("2.1.0"), Some("3.4"), 7)
+                .unwrap();
+            s.upsert_account(&crate::store::AccountRow {
+                uuid: "acct-1".into(),
+                email: None,
+                display_name: None,
+                organization_name: None,
+                organization_uuid: None,
+                seat_tier: None,
+                last_seen_at: Some(7),
+                nickname: None,
+                has_extra_usage: false,
+            })
+            .unwrap();
+            s.set_host_account("gamma", Some("acct-1")).unwrap();
+        }
+        let row = add_host(args(), &store, &fake).await.unwrap();
+        assert!(row.reachable, "still connected");
+        assert_eq!(row.claude_version.as_deref(), Some("2.1.0"));
+        assert_eq!(row.account_uuid.as_deref(), Some("acct-1"));
+        assert_eq!(row.last_pinged_at, Some(7));
+        assert!(fake.calls().is_empty(), "never SSH-probed");
     }
 
     #[tokio::test]

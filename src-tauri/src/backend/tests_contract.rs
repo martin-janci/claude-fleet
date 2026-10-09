@@ -220,6 +220,10 @@ pub(crate) fn sample_host() -> HostRow {
         worktree_at: Some(1_700_000_000),
         // Some, so the golden pins the name the New session picker reads.
         agents_on_path: Some(vec!["claude".into(), "codex".into()]),
+        // Some, so the golden pins the names HostOffline reads (review r13).
+        last_reachable_at: Some(1_700_000_000),
+        last_probe_error_code: Some("E_SSH_TIMEOUT".into()),
+        last_probe_error: Some("ssh timed out".into()),
     }
 }
 
