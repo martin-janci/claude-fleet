@@ -94,9 +94,11 @@ use serde_json::Value;
 ///   (`MyAccess.owns`, redesign 11.10) and its Shared-with-me split. Projected
 ///   away, every re-list hid Share from the owner until a `session:updated`
 ///   frame carried the whole row back (review round 3, R3-1).
-/// * `lost_at` — half of the work view's change signature
-///   (`workSignature`): without it the first full frame for a lost row read
-///   as a work change and re-read the task tree (R3-2).
+/// * `work_rev`, `lost_at` — the work view's change signature
+///   (`workSignature`), which every `session:updated` frame carries in full.
+///   Without them a re-list read as a work change on the next frame, and a
+///   secondary link's change (`work_rev` alone moves) went unseen until then
+///   (review round 3, R3-2 and R3-4).
 /// * `created_at` — the Details sheet's "started" fallback for a session
 ///   with no `started_at` (R3-3).
 ///
@@ -140,6 +142,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "usage_cost_micros",
     "usage_model",
     "work",
+    "work_rev",
     "work_suggested",
 ];
 
