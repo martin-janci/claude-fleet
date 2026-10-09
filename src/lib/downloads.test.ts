@@ -3,7 +3,7 @@ import { get } from 'svelte/store';
 
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
-const push = vi.fn((_o: { message: string; kind?: string; action?: { label: string }; [k: string]: unknown }) => 0);
+const push = vi.fn((_o: { message: string; kind?: string; action?: { label: string; run?: () => void }; [k: string]: unknown }) => 0);
 const dismiss = vi.fn();
 const setToastProgress = vi.fn((..._a: unknown[]) => true);
 vi.mock('./toasts', () => ({
@@ -16,6 +16,7 @@ vi.mock('@tauri-apps/plugin-opener', () => ({ revealItemInDir: (p: string) => re
 
 import {
   downloads,
+  downloadsOpen,
   finished,
   loadDownloads,
   retryDownload,
@@ -93,6 +94,9 @@ describe('downloads', () => {
     invoke.mockResolvedValueOnce({ ...row(9, 'fetching'), fetched_bytes: 0 });
     await sendFile(4, 'out/a.pdf');
     expect(push).toHaveBeenCalledWith(expect.objectContaining({ sticky: true, progress: 0 }));
+    // Its action opens the job: the Downloads sheet.
+    push.mock.calls[0][0].action?.run?.();
+    expect(get(downloadsOpen)).toBe(true);
     invoke.mockResolvedValueOnce(list([{ ...row(9, 'fetching'), fetched_bytes: 5 }]));
     await loadDownloads();
     expect(setToastProgress).toHaveBeenCalledWith(42, 0.5);

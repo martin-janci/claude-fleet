@@ -66,7 +66,7 @@
   import { newSessionRequest, clearNewSessionRequest } from './lib/new_session_request';
   import { push, pushError } from './lib/toasts';
   import DownloadsSheet from './lib/DownloadsSheet.svelte';
-  import { downloads, unseen, loadDownloads, noteDownloadsChanged } from './lib/downloads';
+  import { downloads, downloadsOpen, unseen, loadDownloads, noteDownloadsChanged } from './lib/downloads';
   import { loadLocalWorkspaces, noteLocalWorkspacesChanged } from './lib/local_workspaces';
   import type { Result } from './lib/result';
   import type { UnlistenFn } from '@tauri-apps/api/event';
@@ -213,7 +213,6 @@
   let stopActivity: (() => void) | null = null;
   let stopCatchUp: (() => void) | null = null;
   // File downloads: the footer button and its sheet.
-  let showDownloads = $state(false);
   const unseenDownloads = $derived(unseen($downloads));
 
   function reportBootstrap(what: string, r: Result<unknown>): string | null {
@@ -1412,8 +1411,8 @@
   {/if}
 </main>
 
-{#if showDownloads}
-  <DownloadsSheet onclose={() => (showDownloads = false)} />
+{#if $downloadsOpen}
+  <DownloadsSheet onclose={() => downloadsOpen.set(false)} />
 {/if}
 
 <footer class="status">
@@ -1434,7 +1433,7 @@
       class="hub-badge"
       data-testid="footer-downloads"
       title="Files sessions sent to your devices"
-      onclick={() => (showDownloads = true)}
+      onclick={() => downloadsOpen.set(true)}
       >⤓ Downloads…{unseenDownloads > 0 ? ` (${unseenDownloads})` : ''}</button
     >
     {#if trackersLine}

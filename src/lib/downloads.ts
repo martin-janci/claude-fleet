@@ -44,6 +44,8 @@ export const downloads = writable<Download[]>([]);
 /** Where this window saved each file (id → path), for Show in Finder. Per
  *  window: the hub records that a file was saved, not where. */
 export const savedTo = writable<Map<number, string>>(new Map());
+/** Whether the Downloads sheet is open (App mounts it): a copy's toast opens it. */
+export const downloadsOpen = writable(false);
 export const downloadBudget = writable<{ total: number; max: number } | null>(null);
 
 /** Ready files nobody has saved yet: the footer's count. */
@@ -64,7 +66,10 @@ function announceCopy(row: Download, message: string): void {
     push({ kind: 'info', message });
     return;
   }
-  jobToasts.set(row.id, push({ kind: 'info', message, sticky: true, progress: f }));
+  jobToasts.set(
+    row.id,
+    push({ kind: 'info', message, sticky: true, progress: f, action: { label: 'Open', run: () => downloadsOpen.set(true) } }),
+  );
 }
 
 /** Move each copy's ring; a copy that finished, failed or went drops its toast. */
@@ -245,6 +250,7 @@ export function fmtSize(n: number): string {
 export function _resetDownloadsForTests(): void {
   announced.clear();
   jobToasts.clear();
+  downloadsOpen.set(false);
   firstSeen.clear();
   primed = false;
   savedTo.set(new Map());
