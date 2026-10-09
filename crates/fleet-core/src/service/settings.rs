@@ -568,6 +568,9 @@ pub const DECIDE_JEV_SUMMARY_CHECK: &str = "decide.jev.summary_check";
 /// `turn_outcome`'s mode (J2: what a turn came to when hooks said nothing,
 /// read from the pane tail). Needs the reply-text consent (D48) on top.
 pub const DECIDE_JEV_TURN_OUTCOME: &str = "decide.jev.turn_outcome";
+/// `mission_triage`'s mode (K3: a stuck mission's outcome and next step,
+/// redesign step 9.10).
+pub const DECIDE_JEV_MISSION_TRIAGE: &str = "decide.jev.mission_triage";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -1427,6 +1430,15 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: set the state")]),
+    Spec::new(
+        DECIDE_JEV_MISSION_TRIAGE,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: mission triage",
+        "Proposing a stuck mission's outcome and next step. Never completes a mission or sets Verified. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
     Spec::new(
         DECIDE_JEV_UNASSIGNED,
         "false",
@@ -2687,6 +2699,7 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_TURN_OUTCOME, None), "off");
         assert_eq!(resolve(DECIDE_JEV_UNASSIGNED_REPLY, None), "false");
         assert!(validate(DECIDE_JEV_TURN_OUTCOME, "auto").is_err());
+        assert_eq!(resolve(DECIDE_JEV_MISSION_TRIAGE, None), "off");
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "assist").is_ok());
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_HOST_PLACEMENT, None), "off");

@@ -23,6 +23,9 @@ pub const AUX_ORIGIN_BRIEF: &str = "brief";
 /// [`NewAuxUsage::origin`] of a watcher's "Since 13:20" summary of a
 /// session (Orbit Fleet 11.11).
 pub const AUX_ORIGIN_WATCH_SUMMARY: &str = "watch_summary";
+/// [`NewAuxUsage::origin`] of a stuck mission's triage card (redesign
+/// 9.10).
+pub const AUX_ORIGIN_TRIAGE: &str = "triage";
 
 /// One run to book.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

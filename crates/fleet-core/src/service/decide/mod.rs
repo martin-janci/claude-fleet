@@ -49,6 +49,9 @@ pub mod jev;
 pub mod lost_target;
 #[cfg(test)]
 mod lost_target_tests;
+pub mod mission_triage;
+#[cfg(test)]
+mod mission_triage_tests;
 pub mod quick_answer;
 #[cfg(test)]
 mod quick_answer_tests;
@@ -138,6 +141,8 @@ pub enum Feature {
     SummaryCheck,
     /// What a turn came to when hooks said nothing, from the pane tail (J2).
     TurnOutcome,
+    /// A stuck mission's outcome and next step (K3, redesign 9.10).
+    MissionTriage,
 }
 
 impl Feature {
@@ -156,6 +161,7 @@ impl Feature {
         Feature::ControlRoute,
         Feature::SummaryCheck,
         Feature::TurnOutcome,
+        Feature::MissionTriage,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -174,6 +180,7 @@ impl Feature {
             Feature::ControlRoute => "control_route",
             Feature::SummaryCheck => "summary_check",
             Feature::TurnOutcome => "turn_outcome",
+            Feature::MissionTriage => "mission_triage",
         }
     }
 
@@ -198,6 +205,7 @@ impl Feature {
             Feature::ControlRoute => settings::DECIDE_JEV_CONTROL_ROUTE,
             Feature::SummaryCheck => settings::DECIDE_JEV_SUMMARY_CHECK,
             Feature::TurnOutcome => settings::DECIDE_JEV_TURN_OUTCOME,
+            Feature::MissionTriage => settings::DECIDE_JEV_MISSION_TRIAGE,
         }
     }
 
