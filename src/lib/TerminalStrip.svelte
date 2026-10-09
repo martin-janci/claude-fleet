@@ -19,6 +19,7 @@
     onclose,
     onsplit,
     onclear,
+    onpopout = undefined,
   }: {
     /** The agent tab's name, as the session bar names it. */
     agentLabel?: string;
@@ -32,6 +33,8 @@
     onclose: (n: number) => void;
     onsplit: () => void;
     onclear: () => void;
+    /** Pop the picked tab out into its own window (step 5.4). */
+    onpopout?: () => void;
   } = $props();
 
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
@@ -83,6 +86,15 @@
     data-testid="terminal-new">+ New <kbd>{newChord}</kbd></button
   >
   <span class="spacer"></span>
+  {#if onpopout}
+    <button
+      type="button"
+      class="act"
+      title="Open this terminal in a window of its own. It stays here too."
+      onclick={onpopout}
+      data-testid="terminal-popout">Pop out</button
+    >
+  {/if}
   {#if active !== null}
     <button
       type="button"
