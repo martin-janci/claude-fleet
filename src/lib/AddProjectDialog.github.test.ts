@@ -19,6 +19,10 @@ import { hosts } from './hosts';
 import { hubStatus, STANDALONE } from './hub';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { projects, type ProjectTreeRow } from './projects';
+import { orgs, type OrgDetail } from './orgs';
+import { trackers, type TrackerRow } from './trackers';
+import { toasts } from './toasts';
+import { get } from 'svelte/store';
 
 const mockedInvoke = invoke as ReturnType<typeof vi.fn>;
 
@@ -78,6 +82,9 @@ beforeEach(() => {
   ]);
   fleetSettings.set({ ...SETTING_DEFAULTS });
   projects.set([]);
+  orgs.set([]);
+  trackers.set([]);
+  toasts.set([]);
   localStorage.clear();
 });
 
@@ -224,5 +231,119 @@ describe('Add project, as on the AddProject board', () => {
     await flush();
     expect(screen.queryByTestId('add-mode-folder')).toBeNull();
     expect(screen.getByTestId('add-mode-github').getAttribute('aria-pressed')).toBe('true');
+  });
+});
+
+describe('Add project: Also clone on, Organisation and Tracker (6.11 follow-ups)', () => {
+  const papaya = {
+    id: 3,
+    name: 'Papaya',
+    created_at: 0,
+    rules: [{ id: 1, org_id: 3, owner: 'papaya-pos' }],
+    hosts: [],
+    trackers: [],
+  } as OrgDetail;
+  const acmeOrg = { id: 4, name: 'Acme', created_at: 0, rules: [], hosts: [], trackers: [] } as OrgDetail;
+  const issues: TrackerRow = {
+    id: 9,
+    provider: 'github',
+    name: 'Acme issues',
+    site_url: 'https://github.com',
+    state: 'ok',
+    created_at: 0,
+    settings: { repos: ['acme/web'] },
+  };
+
+  beforeEach(() => {
+    hosts.update((h) => [
+      ...h,
+      { alias: 'trn', ssh_alias: 'trn', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
+    ]);
+  });
+
+  it('clones on the chosen host, then onto each other host the person ticked', async () => {
+    const row = treeRow(11, 'acme', 'api');
+    route({ list_github_repos: () => [repo('acme/api')], add_project: () => row });
+    const { onCreated } = mount();
+    await flush();
+    await fireEvent.click(
+      Array.from(document.querySelectorAll<HTMLButtonElement>('.host-pick')).find((b) => b.dataset.alias === 'mefistos')!,
+    );
+    await flush();
+    // `local` and the chosen host are not offered again.
+    const also = screen.getAllByTestId('add-also-host').map((b) => b.dataset.alias);
+    expect(also).toEqual(['trn']);
+    await fireEvent.click(screen.getAllByTestId('add-also-host')[0]);
+    await tickRow('acme/api');
+    await tick();
+    expect(screen.getByTestId('add-summary').textContent).toBe('1 repo · on mefistos, trn');
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await flush();
+    expect(calls('add_project').map((c) => [c.args.host_alias, c.args.source])).toEqual([
+      ['mefistos', { kind: 'clone', url: 'acme/api' }],
+      ['trn', { kind: 'clone', url: 'acme/api', existing: true }],
+    ]);
+    expect(onCreated).toHaveBeenCalledWith(row, 'mefistos');
+  });
+
+  it("an older hub that can't add a second host still adds the project, and says so", async () => {
+    const row = treeRow(11, 'acme', 'api');
+    route({
+      add_project: (a) => {
+        if (a.args.source.existing) throw { code: 'E_EXISTS', message: 'acme/api is already a fleet project' };
+        return row;
+      },
+    });
+    const onCreated = vi.fn();
+    render(AddProjectDialog, { props: { onCreated, onCancel: vi.fn(), initialCloneUrl: 'acme/api' } });
+    await flush();
+    await fireEvent.click(screen.getAllByTestId('add-also-host').find((b) => b.dataset.alias === 'trn')!);
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await flush();
+    expect(onCreated).toHaveBeenCalledWith(row, 'local');
+    expect(get(toasts).map((t) => t.message)).toEqual([
+      "acme/api was not cloned on trn: this hub can't add a second host yet. It is cloned there when a session starts.",
+    ]);
+  });
+
+  it('shows the organisation a repository already belongs to and writes no rule for it', async () => {
+    orgs.set([papaya, acmeOrg]);
+    route({ list_github_repos: () => [repo('papaya-pos/receipts')], add_project: () => treeRow(12, 'papaya-pos', 'receipts') });
+    mount();
+    await flush();
+    await tickRow('papaya-pos/receipts');
+    await tick();
+    expect((screen.getByTestId('add-org') as HTMLSelectElement).value).toBe('3');
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await flush();
+    expect(calls('add_org_rule')).toHaveLength(0);
+  });
+
+  it('puts the new project in the organisation picked, by its repository', async () => {
+    orgs.set([papaya, acmeOrg]);
+    route({ add_project: () => treeRow(13, 'acme', 'api'), add_org_rule: () => ({ id: 2, org_id: 4, owner: 'acme', repo: 'api' }) });
+    render(AddProjectDialog, { props: { onCreated: vi.fn(), onCancel: vi.fn(), initialCloneUrl: 'acme/api' } });
+    await flush();
+    expect((screen.getByTestId('add-org') as HTMLSelectElement).value).toBe('');
+    await fireEvent.change(screen.getByTestId('add-org'), { target: { value: '4' } });
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await flush();
+    expect(calls('add_org_rule')).toEqual([{ args: { org_id: 4, owner: 'acme', repo: 'api' } }]);
+  });
+
+  it('points a GitHub tracker at the new repository', async () => {
+    trackers.set([issues, { ...issues, id: 10, provider: 'jira', name: 'PD board' }]);
+    route({ add_project: () => treeRow(13, 'acme', 'api'), update_tracker: () => issues });
+    render(AddProjectDialog, { props: { onCreated: vi.fn(), onCancel: vi.fn(), initialCloneUrl: 'acme/api' } });
+    await flush();
+    // Only GitHub trackers can be pointed at a repository today.
+    const options = Array.from((screen.getByTestId('add-tracker') as HTMLSelectElement).options).map((o) => o.textContent);
+    expect(options).toEqual(['None', 'Acme issues']);
+    await fireEvent.change(screen.getByTestId('add-tracker'), { target: { value: '9' } });
+    await tick();
+    expect(screen.getByTestId('add-tracker-note').textContent).toBe('Its issues will sync from Acme issues.');
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await flush();
+    expect(calls('update_tracker')).toEqual([{ args: { tracker_id: 9, settings: { repos: ['acme/web', 'acme/api'] } } }]);
   });
 });
