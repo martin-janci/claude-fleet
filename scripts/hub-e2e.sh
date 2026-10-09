@@ -145,6 +145,15 @@ start_hub() { # name port extra-args...
   return 1
 }
 stop_hub() { local pid; pid=$(cat "$ROOT/$1.pid"); kill -TERM "$pid"; wait "$pid"; STOP_RC=$?; rm -f "$ROOT/$1.pid"; }
+# with_timeout SECS CMD...: CMD, killed after SECS. macOS has no timeout(1)
+# (coreutils), so without it or Homebrew's gtimeout, perl's alarm stands in:
+# it survives the exec, and the SIGALRM ends CMD (exit 142).
+with_timeout() {
+  if command -v timeout >/dev/null; then timeout "$@"
+  elif command -v gtimeout >/dev/null; then gtimeout "$@"
+  else perl -e 'alarm shift; exec @ARGV or die "exec $ARGV[0]: $!\n"' "$@"
+  fi
+}
 # until TRIES CONDITION: poll every 0.2 s, at most TRIES times.
 until_ok() { local n=$1 _; for _ in $(seq "$n"); do eval "$2" && return 0; sleep 0.2; done; return 1; }
 
@@ -1186,7 +1195,7 @@ echo "== Work graph (hub W: a fake Jira Cloud, a fake Claude, real tmux and git)
 #     is born (that needs a real Claude on the operator host).
 # Hub W runs with its own HOME and its own tmux server under $ROOT, like the
 # agent leg, so nothing here touches this account's ~/.claude or its tmux.
-out=$(FLEET_E2E_TRACKER_PORT=1 timeout 20 "$BIN" serve --data-dir "$ROOT/refuse" --port "$(free_port)" 2>&1); rc=$?
+out=$(FLEET_E2E_TRACKER_PORT=1 with_timeout 20 "$BIN" serve --data-dir "$ROOT/refuse" --port "$(free_port)" 2>&1); rc=$?
 check "a hub built without the e2e feature refuses the fake-tracker override" '[ $rc -ne 0 ] && echo "$out" | grep -q "FLEET_E2E_TRACKER_PORT is set" && [ ! -e "$ROOT/refuse/state.db" ]' "rc=$rc $out"
 if [ -z "$WBIN" ] && [ "${CI:-}" = true ]; then
   # CI builds the e2e hub and passes it (ci.yml, hub-headless). A missing WBIN
