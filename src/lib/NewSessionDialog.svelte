@@ -273,6 +273,7 @@
   let hostLogins = $state<HostLogin[] | null>(null);
   let pickedLogin = false;
   let otherProfile = $state(false);
+  let loginsHost: string | null = null;
   $effect(() => {
     const host = chosenHost;
     if (!newLayout) return;
@@ -280,6 +281,11 @@
       hostLogins = null;
       pickedLogin = false;
       otherProfile = false;
+      // A login belongs to its host: a host change drops the last one, so
+      // Create never sends a profile the select no longer shows (review r05
+      // A4). The first host keeps a prefilled profile.
+      if (loginsHost !== null && loginsHost !== host) chosenProfile = '';
+      loginsHost = host;
     });
     void checkAccountHeadroom(host, null).then((h) => {
       if (chosenHost !== host) return;
