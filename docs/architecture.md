@@ -428,7 +428,11 @@ bullet for the area you are about to change.
   `src/lib/RichText.svelte`, `src/lib/rich/`): frontend only. An assistant
   text block is split into Markdown and cards: a `FLEET_TASK_DONE_<nonce>`
   line and its JSON (normalised as `service/work/report.rs`
-  `report_from_value` does), or a ```` ```fleet-ui ```` `fleet.ui/1` block.
+  `report_from_value` does), a ```` ```fleet-ui ```` `fleet.ui/1` block, or
+  a work handover between `WORK_HANDOVER_BEGIN_<nonce>` /
+  `WORK_HANDOVER_END_<nonce>` lines (`service/work/agent_handover.rs`
+  asks for it; `src/lib/handover.ts` reads it into sections by the headings
+  that prompt names, and a hand-off with none it knows stays one body).
   A card acts only by `insertIntoComposer`, never by sending. A reply form
   refuses secret fields; `ask` is the path for those. Two cards act through
   the store, each only after a person's press: `setting` applies one

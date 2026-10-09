@@ -177,3 +177,28 @@ describe('the new kinds', () => {
     expect(segs.map((s) => s.t)).toEqual(['ui']);
   });
 });
+
+describe('splitRich: work handovers (agent_handover.rs)', () => {
+  const N = '7c86f9ed8943';
+  const block = (body: string, nonce = N) => `WORK_HANDOVER_BEGIN_${nonce}\n${body}\nWORK_HANDOVER_END_${nonce}`;
+
+  it('draws the text between the markers as a handover, prose around it as Markdown', () => {
+    const s = splitRich(`Sure.\n${block('Done: the parser.\nLeft: tests.')}\nAnything else?`);
+    expect(s.map((x) => x.t)).toEqual(['md', 'handover', 'md']);
+    const h = s[1];
+    if (h.t !== 'handover') throw new Error('not a handover');
+    expect(h.nonce).toBe(N);
+    expect(h.raw).toBe('Done: the parser.\nLeft: tests.');
+    expect(h.handover.sections.map((x) => x.kind)).toEqual(['done', 'left']);
+  });
+
+  it('stays Markdown while the END marker has not arrived, or names another nonce', () => {
+    expect(splitRich(`WORK_HANDOVER_BEGIN_${N}\nDone: half`).map((x) => x.t)).toEqual(['md']);
+    expect(splitRich(`WORK_HANDOVER_BEGIN_${N}\nDone: x\nWORK_HANDOVER_END_other`).map((x) => x.t)).toEqual(['md']);
+  });
+
+  it('is no card when empty, and stays code inside a fence', () => {
+    expect(splitRich(block('')).map((x) => x.t)).toEqual(['md']);
+    expect(splitRich('```\n' + block('Done: x') + '\n```').map((x) => x.t)).toEqual(['md']);
+  });
+});
