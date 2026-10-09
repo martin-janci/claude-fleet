@@ -342,6 +342,13 @@ fn rollout_lookup_lines_carry_the_id_from_the_file_name() {
     assert!(super::rollouts_script(&[]).is_none());
 }
 
+#[test]
+fn two_panes_on_one_rollout_learn_nothing() {
+    let path = format!("/h/.codex/sessions/2026/10/08/rollout-2026-10-08T22-40-02-{ID}.jsonl");
+    let out = format!("cdx\tdev-a\t{path}\ncdx\tdev-b\t{path}\n");
+    assert!(super::parse_rollouts(&out).is_empty());
+}
+
 /// The lookup run as the host runs it: a stand-in `tmux` answers each
 /// pane's cwd, and the newest rollout naming that cwd wins.
 #[cfg(unix)]

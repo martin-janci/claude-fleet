@@ -402,8 +402,14 @@
     if (selectedId != null) await loadDetail(selectedId);
   }
 
+  // Bumped per request and by Back: a late answer for a mission no longer
+  // open (Back pressed, another opened, a newer load) is dropped (review r07).
+  let detailSeq = 0;
+
   async function loadDetail(id: number) {
+    const mine = ++detailSeq;
     const r = await getMission(id);
+    if (mine !== detailSeq || selectedId !== id) return;
     if (r.ok) {
       detail = r.value;
     } else {
@@ -430,6 +436,7 @@
   }
 
   function back() {
+    detailSeq++;
     selectedId = null;
     detail = null;
     editing = false;
@@ -598,7 +605,7 @@
             >Autonomy
             <select bind:value={editLevel} data-testid="mission-edit-level">
               <option value={0}>L0 · asks for everything</option>
-              <option value={1}>L1 · I press Start</option>
+              <option value={1}>L1 · You press Start</option>
               <option value={2}>L2 · runs within a grant</option>
               <option value={3}>L3 · reviews and integrates</option>
             </select></label
@@ -757,7 +764,7 @@
                 <label class="field inline"
                   >Level
                   <select bind:value={grantLevel}>
-                    <option value={1}>L1 · I press every step</option>
+                    <option value={1}>L1 · You press every step</option>
                     <option value={2}>L2 · runs, retries, reviews</option>
                     <option value={3}>L3 · also creates tasks</option>
                   </select></label

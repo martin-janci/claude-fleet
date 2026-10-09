@@ -296,8 +296,11 @@ pub const ORCH_BRANCH: &str = "SELECT 'orchestration' AS src, e.id AS rid, 'miss
 ///   sent); ended_at: `at` plus it.
 /// - outcome: a call that failed (`timeout`, `http_error`,
 ///   `rate_limited`, `invalid_answer`) → failed, error = the fallback; any
-///   other fallback after the call (low confidence) → nothing_to_do; an `unsure` answer → nothing_to_do;
-///   an `assist` answer nobody has followed up yet → needs_person; else ok.
+///   other fallback after the call (low confidence) → nothing_to_do; an
+///   `unsure` answer, or one that proposes nothing (`none`, control_route's
+///   `control`) → nothing_to_do; an applied answer (turn_outcome,
+///   routine_run_outcome) → ok; an `assist` proposal nobody has followed up
+///   yet → needs_person; else ok.
 /// - kind `jev`; owner: the use case (`feature`); model: `model_version`,
 ///   else the provider; cost: `cost_microusd`; org: `org_id`.
 /// - sessions: the subject, when the run was about a session
@@ -310,7 +313,10 @@ pub const JEV_BRANCH: &str = "SELECT 'jev' AS src, d.id AS rid, 'jev' AS kind, \
        CASE WHEN d.fallback IN ('timeout', 'http_error', 'rate_limited', 'invalid_answer') \
               THEN 'failed' \
             WHEN d.fallback IS NOT NULL THEN 'nothing_to_do' \
-            WHEN d.answer IS NULL OR d.answer = 'unsure' THEN 'nothing_to_do' \
+            WHEN d.answer IS NULL OR d.answer IN ('unsure', 'none') \
+              OR (d.feature = 'control_route' AND d.answer = 'control') \
+              THEN 'nothing_to_do' \
+            WHEN d.feature IN ('turn_outcome', 'routine_run_outcome') THEN 'ok' \
             WHEN d.mode = 'assist' AND d.followup IS NULL THEN 'needs_person' \
             ELSE 'ok' END AS outcome, \
        CASE WHEN d.fallback IN ('timeout', 'http_error', 'rate_limited', 'invalid_answer') \

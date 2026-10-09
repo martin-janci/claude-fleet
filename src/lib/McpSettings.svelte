@@ -110,7 +110,7 @@
     <h4>Control API (MCP)</h4>
   </div>
   <p class="mcp-blurb">
-    Lets an AI assistant drive claude-fleet over a localhost-only MCP
+    Lets an AI assistant drive Orbit Fleet over a localhost-only MCP
     server. Off by default. Every request needs the bearer token.
   </p>
   {#if mcp}

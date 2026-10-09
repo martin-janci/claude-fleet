@@ -167,6 +167,19 @@ fn sleeping(s: &Store) -> i64 {
 }
 
 #[test]
+fn resuming_a_paused_mission_wakes_it() {
+    let s = Store::open_in_memory().unwrap();
+    let m = sleeping(&s);
+    s.set_mission_state(m, None, "paused", "fleet").unwrap();
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    assert_eq!(
+        s.missions_due(now_unix()).unwrap(),
+        vec![m],
+        "a resumed mission does not sleep out the wake its brake set"
+    );
+}
+
+#[test]
 fn a_members_session_wakes_its_mission_and_another_does_not() {
     let s = Store::open_in_memory().unwrap();
     let m = sleeping(&s);

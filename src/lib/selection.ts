@@ -51,6 +51,15 @@ sessions.subscribe(($sessions) => {
     // Matched via the host+name fallback (id churned) or the row was renamed
     // under the same id — re-sync the ref so the primary key stays accurate.
     selectedRef.set({ id: match.id, host_alias: match.host_alias, tmux_name: match.tmux_name });
+    // A rename made elsewhere (the agent's `rename_session`, another client)
+    // arrives only as this event: the remembered session follows it, or the
+    // next launch looks for the old name, finds nothing and forgets the
+    // pref (review r07). Only when the pref named the old identity, so a
+    // pop-out window's selection never takes over the main window's.
+    const last = readPref<SessionIdent | null>(LAST_SESSION_KEY, null, isSessionIdentOrNull);
+    if (last && last.host_alias === ref.host_alias && last.tmux_name === ref.tmux_name) {
+      writePref<SessionIdent>(LAST_SESSION_KEY, { host_alias: match.host_alias, tmux_name: match.tmux_name });
+    }
   }
 });
 
