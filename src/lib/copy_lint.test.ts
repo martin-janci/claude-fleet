@@ -27,6 +27,7 @@ const SELF_GATED: Record<string, string | null> = {
   TransferSheet: 'transferSheetFor',
   QuickSwitcher: 'switcherRequest',
   ShortcutSheet: 'shortcutSheetOpen',
+  RoutinesDialog: 'routinesDialogOpen',
   // Opened by an agent's MCP call, never by a button.
   McpConfirmDialog: null,
 };
@@ -45,6 +46,9 @@ const WAITING: { file: string; text: string; why: string }[] = [
   // The live transfer chip is the move's state ("⇄ moving to x · 2/5"); it
   // opens the Transfer sheet the way a status badge opens its detail.
   { file: 'src/lib/TransferChip.svelte', text: '⇄ move failed', why: 'a live status chip, not a label' },
+  // A failed routine's name opens its runs, the way a session row's name
+  // opens the session: a row title, not a label.
+  { file: 'src/lib/automation/RoutineFailures.svelte', text: 'routine', why: "a row's name, not a label" },
 ];
 
 function sources() {
