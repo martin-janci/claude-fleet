@@ -254,6 +254,25 @@ impl FleetTools {
         )
     }
 
+    #[tool(description = "Whether starting or switching a session on \
+        host_alias under login `profile` (a profile name; omitted or \"\" for \
+        the host's own) crosses accounts.pause_at, and the login on that host \
+        with the most headroom: {pause_at_pct, chosen?, over, suggestion?, \
+        logins:[{profile?, account_uuid, used_pct?}]}. From the usage \
+        account_usage serves; never fetches. Errors: E_NOTFOUND (no such \
+        host), E_INVALID.")]
+    pub(super) async fn check_account_headroom(
+        &self,
+        Parameters(p): Parameters<crate::service::account_limits::CheckAccountHeadroomArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("check_account_headroom", &p.host_alias);
+        let now = crate::store::now_unix();
+        ok_json_compact(
+            &crate::service::account_limits::served_check_account_headroom(&p, self.reader(), now)
+                .map_err(to_mcp_err)?,
+        )
+    }
+
     #[tool(description = "Read or replace the fleet's quick replies: the \
         chip row the desktop and phone composers draw above the prompt box, \
         as [{label, text, auto_send}] in order. No arguments reads; `set` \

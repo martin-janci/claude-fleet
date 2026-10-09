@@ -264,6 +264,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Contract 14: which login on a host has headroom, from the same answers
+    // `account_usage` serves. Same reach as it and `list_hosts`.
+    ToolPolicy {
+        name: "check_account_headroom",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // The composer's shared chip row. One tool both reads and replaces the
     // list, so it is classified as a write and a `readonly` client cannot
     // call it at all — not even to read. That is deliberate: a readonly
