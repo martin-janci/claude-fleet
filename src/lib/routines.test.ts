@@ -16,6 +16,7 @@ import {
   retryRoutine,
   routineStateWords,
   routinesRequest,
+  runSourceHint,
   runWords,
   trackFailingRoutines,
   type FailingRoutine,
@@ -72,6 +73,9 @@ describe('words', () => {
     expect(runWords({ state: 'done', outcome: 'needs_person' })).toBe('Needs you');
     expect(runWords({ state: 'done', outcome: 'nothing' })).toBe('Nothing to do');
     expect(runWords({ state: 'running' })).toBe('Working');
+    expect(runSourceHint({ outcome: 'nothing', outcome_source: 'jev' })).toMatch(/^Jev read this/);
+    expect(runSourceHint({ outcome: 'did_work', outcome_source: 'rule' })).toBeUndefined();
+    expect(runSourceHint({ outcome_source: 'jev' })).toBeUndefined();
     expect(routineStateWords({ enabled: false, paused_reason: 'over its budget' })).toBe('Paused by fleet');
     expect(routineStateWords({ enabled: false })).toBe('Paused');
   });

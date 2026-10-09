@@ -23,8 +23,11 @@
 //! * **Asked once per input.** A decided run about the same session on the
 //!   same input and question version is reused; a new candidate (another
 //!   session starts) is a new input.
-//! * **Follow-up.** None yet: no person's act answers it until Tidy-up's
-//!   Duplicates (a later slice) offers one. A shadow answer is never marked.
+//! * **Tidy › Duplicates.** The planner (`service::gc::tidy`) turns a
+//!   running pair into a `same_work` candidate for the idler of the two:
+//!   never ticked, never automatic.
+//! * **Follow-up.** None yet: tidying that candidate is not recorded
+//!   against the run. A shadow answer is never marked.
 
 use super::{
     decide, fingerprint, gate_at, DecideCtx, DecideRequest, Feature, JevRequest, Mode, Question,

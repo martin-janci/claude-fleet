@@ -11360,6 +11360,13 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
     ),
     (
         "work_link",
+        "mission_triage",
+        "a stuck mission's card: its facts and Jev's proposals, read under \
+         the caller's view; a drafted card is its owner's or an org admin's, \
+         and nothing about the mission or a session changes",
+    ),
+    (
+        "work_link",
         "mission_grant",
         "a person's signature on what a mission's loop may do; refused \
          outright to every scoped caller, as `accept` is",

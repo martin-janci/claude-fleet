@@ -31,7 +31,7 @@ and nothing is sent:
    (Settings → Organisations → *send to Jev*, or `fleet-hub org set <id>
    --jev on`); off by default. A session or item with no org follows
    `decide.jev.unassigned` (off by default). A feature that sends Claude's
-   **reply text** (`turn_outcome`, J2) needs a second consent on top
+   **reply text** (`turn_outcome`, J2; `routine_run_outcome`, N6) needs a second consent on top
    (decision D48): the org's *Also allow Claude's reply text* (`fleet-hub
    org set <id> --jev-reply on`), or `decide.jev.unassigned_reply` for a
    session with no org. Both off by default; either missing is `org_off`.
@@ -479,11 +479,69 @@ hook in `service/hooks.rs`, `Store::set_jev_turn_outcome`;
 `service/decide/bench/turn_outcome.rs`; step 5.11 of the redesign's
 transition plan.
 
+## `routine_run_outcome` — what a routine run came to (N6)
+
+A routine run that found nothing to do ends its turn like one that opened
+three pull requests, so every run lands in the Inbox. The run's own facts
+answer first (`service/routines/outcome.rs`): a failed exit is `failed`; an
+open question, a wedged REPL or J2's `asked`/`stuck` is `needs_person`; a
+pull request is `did_work`. With `decide.jev.routine_run_outcome` on, the
+routine scheduler reads the screen of each run that finished in the last
+hour with no answer yet (at most 5 a pass) and asks Jev one Choice:
+`did_work`, `nothing`, `needs_person` or `unsure`.
+
+- **What is sent.** The same screen J2 sends (its `prepare_tail`): Claude's
+  reply text, chrome left out, fenced code replaced by placeholders,
+  redacted. Only where the run's org gave BOTH consents (D31 and D48).
+- **Shadow.** Recorded only, with today's reading, `did_work` (every run is
+  work to look at), as the baseline.
+- **Assist.** A usable answer (confidence 50% or more, not `unsure`) is the
+  run's outcome, source `jev`. `nothing` also marks the run's session seen,
+  so its finished turn is not unread in the Inbox. The session is not
+  stopped or changed; you can still open it.
+- **Exit and rules always win.** `jev` is the weakest source: it never
+  replaces a failed exit or a rule's answer, and a rule that answers later
+  replaces it.
+- **One decision per run.** Subject `routine_run` `<run id>`.
+- **Follow-up.** A rule that answers after Jev marks the assist answer
+  `confirmed` (it said the same) or `corrected` to what it said. A shadow
+  answer is never marked.
+
+Code: `service/decide/routine_run_outcome.rs` (`spawn_pass` from the
+routine scheduler's tick), `service/routines/outcome.rs`; step 8.10 of the
+redesign's transition plan.
+
 ### Decision D48 — reply text (owner, 2026-10-08)
 
 | # | Question | Decision |
 |---|---|---|
 | D48 | May Claude's reply text (J2's pane tail / last reply) go to Jev? | **Yes, per org, only where the org consents to reply text: a consent of its own, separate from D31 and required on top of it, off by default.** Decided by the owner on 2026-10-08. Built as the org's `decide.jev.reply_consent` row in `org_settings` (never inherited from a fleet value; *Also allow Claude's reply text* in Organisations, `fleet-hub org set <id> --jev-reply on`) and `decide.jev.unassigned_reply` for sessions with no org |
+
+## `mission_triage` — a stuck mission's outcome and next step (K3)
+
+When a mission is stuck (its loop braked on budget or no progress, an item
+failed, or nothing is ready while something is blocked), Missions and
+Today's Nudge ask Jev two closed questions about it: the outcome so far
+(`done`, `partial`, `blocked`, `failed`) and the next step (`retry`,
+`split`, `give_up`, `ask`), each with `unsure`. The Nudge shows both as
+*Proposed by Jev · why · Change*, and a person picks the step.
+
+- **Never decides completion.** An outcome of `done` is a reading, not an
+  act: triage never completes a mission, never sets Verified and never
+  changes a mission's state. Each step goes through the action a person
+  already has (Retry, the planner, Cancel, the mission's question card).
+- **What is sent.** Fleet's own stuck reason, the mission's goal and
+  done-when lines, the counts of done, failed and blocked items, and the
+  last failure text (600 characters), redacted by the envelope.
+- **The card's words** are an LLM draft written on demand (*Draft* /
+  *Regenerate*), on the mission's planner host, and booked in `aux_usage`
+  with origin `triage`.
+- **What is recorded.** Subject `mission` `<id>:outcome` and
+  `<id>:next`; a run on the same input is reused for 7 days.
+
+Code: `service/decide/mission_triage.rs`,
+`service/work/orchestrate/triage.rs`; step 9.10 of the redesign's
+transition plan.
 
 ## `pr_triage` — what a stuck pull request needs (PR shepherd step 4)
 
@@ -654,10 +712,17 @@ is asked.
   its `related_session` proposal: in the New layout, its Details list the
   other session under Related sessions as *Same work? · Proposed by Jev ·
   N%*. Nothing is stopped, merged or moved.
+- **Tidy › Duplicates** (New layout). Of a running pair the proposal ties
+  together, the less recently used session, once idle for
+  `work.tidy_idle_hours`, is a Tidy-up candidate with the reason
+  `same_work`: *Same work as another session*, naming the one kept, marked
+  *Proposed by Jev*. It is never ticked for the person and auto-tidy never
+  acts on it, whatever `work.auto_tidy_reasons` says; with no work linked,
+  its kill is held to the clean-and-pushed rule of `idle_unlinked`.
 - **Asked once per input.** A new candidate (another session starts) is a
   new input; the same input reuses the decided run.
-- **Follow-up.** None yet: no person's act answers it until Tidy-up's
-  Duplicates offers one. A shadow answer is never marked.
+- **Follow-up.** None yet: tidying a `same_work` candidate is not recorded
+  against the run. A shadow answer is never marked.
 
 Code: `service/decide/related_session.rs`, called beside `work_link` in the
 prompt hook (`mcp/hooks.rs`); card N1 in the redesign plan.
@@ -683,6 +748,8 @@ prompt hook (`mcp/hooks.rs`); card N1 in the redesign plan.
 | `decide.jev.control_route` | `off` | `off` / `shadow` / `assist` | Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.summary_check` | `off` | `off` / `shadow` / `assist` | Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support. Experimental. |
 | `decide.jev.turn_outcome` | `off` | `off` / `shadow` / `assist` | Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it. Experimental. |
+| `decide.jev.mission_triage` | `off` | `off` / `shadow` / `assist` | Proposing a stuck mission's outcome and next step. Never completes a mission or sets Verified. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.routine_run_outcome` | `off` | `off` / `shadow` / `assist` | Reading whether a routine run did work, found nothing to do or needs you, from the end of its screen. Shadow only records; assist sets the outcome, so a run with nothing to do stays out of the Inbox. A failed exit or a rule wins. Sends reply text only for organisations that allow it. Experimental. |
 | `decide.jev.pr_triage` | `off` | `off` / `shadow` / `assist` | Guessing what a stuck pull request needs (a fix, a regenerate, a base merge, a re-run, or a person) when the PR shepherd finds it conflicting or red. Sends the PR's check names and states, no code. Shadow only records; assist is recorded the same way for now. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.unassigned_reply` | `false` | on / off | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |

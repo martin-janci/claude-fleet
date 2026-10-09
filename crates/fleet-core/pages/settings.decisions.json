@@ -104,6 +104,16 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.mission_triage",
+          "hint": "Proposes a stuck mission's outcome and next step; you still choose. It never completes a mission or sets Verified."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.routine_run_outcome",
+          "hint": "Keeps runs with nothing to do out of the Inbox. Sends the run's last reply only for organisations that allow reply text."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.pr_triage",
           "hint": "Asked once per PR shepherd episode. Sends check names and states, never code."
         },

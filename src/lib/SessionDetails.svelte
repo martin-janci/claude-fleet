@@ -42,7 +42,6 @@
   import SessionTasks from './SessionTasks.svelte';
   import ProposedBy from './ProposedBy.svelte';
   import { proposalFor } from './proposals';
-  import { uiLayout } from './prefs';
   import Timeline from './Timeline.svelte';
   import { push, pushError } from './toasts';
   import { copyText } from './clipboard';

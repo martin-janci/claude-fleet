@@ -25,6 +25,7 @@
     routineStateWords,
     routinesRequest,
     runRoutineNow,
+    runSourceHint,
     runWords,
     saveRoutine,
     setRoutineEnabled,
@@ -401,7 +402,11 @@
           {#each detail.runs as run (run.id)}
             <li class:failed={failed(run)} data-testid="routine-run" data-state={run.state}>
               <span class="when">{clock(run.started_at)}</span>
-              <span class="what">{runWords(run)}</span>
+              <span class="what"
+                >{runWords(run)}{#if runSourceHint(run)}<span class="by-jev" data-testid="routine-run-jev" title={runSourceHint(run)}
+                    >· Jev</span
+                  >{/if}</span
+              >
               <span class="muted">{took(run)}</span>
               <span class="muted">{dollars(run.cost_micros)}</span>
               {#if failed(run) && detail.may_change}
@@ -509,6 +514,7 @@
   .facts dd { margin: 0; }
   .runs li { display: grid; grid-template-columns: 90px 1fr auto auto; gap: 4px 12px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: var(--text-sm, 12.5px); }
   .runs li.failed .what { color: var(--status-failed); }
+  .by-jev { margin-left: var(--space-1, 4px); color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
   .fix { grid-column: 2 / -1; display: flex; gap: var(--space-2, 8px); }
   .prompt { white-space: pre-wrap; margin: 0; padding: 8px; background: var(--bg-sunk); border-radius: 6px; font-size: var(--text-sm, 12.5px); }
   .confirm { display: flex; align-items: center; gap: var(--space-2, 8px); margin: 0; font-size: var(--text-sm, 12.5px); }
