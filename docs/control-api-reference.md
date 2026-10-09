@@ -339,7 +339,7 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 Administer the company: orgs (work_admin's org actions), devices (list, pair_device → code + QR, revoke, trust, bind, hand over, grant a catalog), people and members (roles, a member's grants). Hub owner's device: all; an org admin's: their org. Changes need a trusted full device, never locking out the one in use.
 
-Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `host_alias`, `isolate_sessions`, `jev`, `keep_grants`, `key`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path_prefix`, `person`, `person_id`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
+Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `host_alias`, `isolate_sessions`, `jev`, `jev_reply`, `keep_grants`, `key`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path_prefix`, `person`, `person_id`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
 
 ### `pair_client`
 
@@ -665,6 +665,12 @@ Share a session you OWN with a person, or an org you are in (its members from no
 
 Parameters: `level`, `org`, `person`, `session_id`
 
+### `session_summary_since`
+
+A short Claude-written summary of what a session did since a time (unix seconds), for whoever may read it: { text | null, check: off | shadow | passed | failed | unchecked, since, turns, model, host_alias, at }. Runs one claude -p on the session's host under its account (booked as watch_summary); only with the session org's consent; text is null when nothing happened since or when the Jev check hid it. Errors: E_FORBIDDEN (no consent), E_CLAUDE_CLI, E_TIMEOUT, as session_conversation.
+
+Parameters: `session_id`, `since`
+
 ### `session_tool_detail`
 
 One tool call's input and result (omitted by session_conversation): { id, name, input, edit {file_path, old, new} | null, command | null, result | null, is_error }; texts capped at 8000 chars. Read-only. Errors: as session_conversation, E_NOTFOUND.
@@ -759,6 +765,12 @@ Spawn a review session: a new Claude session in the source session's worktree, s
 
 Parameters: `confirm_nonce`, `prompt`, `source_session_id`
 
+### `start_rules`
+
+Start rules: a task key pattern (PD-*) that names the project, and optionally the host, a start lands in, before the key's history and Jev. Fleet offers one after five identical starts. list: offers, active and dismissed rules; save {rule, rule_id?}: the whole rule, active; accept {rule_id}: an offer, replacing the pattern's other rule; dismiss {rule_id}: never offered again; delete {rule_id}. E_NOTFOUND, E_INVALID, E_EXISTS.
+
+Parameters: `action`, `rule`, `rule_id`
+
 ### `touch_session_viewed`
 
 Mark a session viewed now: the turns it has finished read as seen. Returns the row.
@@ -823,7 +835,7 @@ Parameters: `action`, `before_event`, `bucket_id`, `cursor`, `filters`, `host_al
 
 Trackers, orgs, retention, usage counts, sprints and releases; see action. Never returns a secret.
 
-Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket_id`, `carry`, `carry_to`, `color`, `confirm_nonce`, `credential_ref`, `days`, `ends_at`, `expected_version`, `external_id`, `goal`, `host_alias`, `isolate_sessions`, `jev`, `kind`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `shipped_ref`, `site_url`, `starts_at`, `state`, `tracker_id`, `transport`, `username`
+Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket_id`, `carry`, `carry_to`, `color`, `confirm_nonce`, `credential_ref`, `days`, `ends_at`, `expected_version`, `external_id`, `goal`, `host_alias`, `isolate_sessions`, `jev`, `jev_reply`, `kind`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `shipped_ref`, `site_url`, `starts_at`, `state`, `tracker_id`, `transport`, `username`
 
 ### `work_link`
 
@@ -989,6 +1001,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_tool_detail`
 - `commands::sessions::session_activity`
 - `commands::sessions::capture_session`
+- `commands::sessions::session_summary_since`
 - `commands::sessions::session_share`
 - `commands::sessions::session_unshare`
 - `commands::sessions::session_narrow`
@@ -1055,6 +1068,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::debug_device_logs`
 - `commands::debug_devices::debug_device_screenshot`
 - `commands::prs::list_pull_requests`
+- `commands::start_rules::start_rules`
 - `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`

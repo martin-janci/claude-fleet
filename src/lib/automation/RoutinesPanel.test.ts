@@ -8,7 +8,10 @@ import RoutinesPanel from './RoutinesPanel.svelte';
 import RoutineFailures from './RoutineFailures.svelte';
 import { hosts } from '../hosts';
 import { projects } from '../projects';
-import { failing, routinesDialogOpen, type RoutineRow, type RoutineRunRow } from '../routines';
+import { get } from 'svelte/store';
+import { destination } from '../destination';
+import { automationTab } from '../automation';
+import { failing, type RoutineRow, type RoutineRunRow } from '../routines';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -57,7 +60,6 @@ beforeEach(() => {
   hosts.set([{ alias: 'mac', hidden: false } as never]);
   projects.set([{ project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', system: false }, worktrees: [] } as never]);
   failing.set([]);
-  routinesDialogOpen.set(false);
   route();
 });
 
@@ -123,9 +125,12 @@ describe('the Inbox block', () => {
     expect(screen.getByTestId('routine-failure-pause')).toBeInTheDocument();
     await fireEvent.click(screen.getByTestId('routine-failure-retry'));
     await waitFor(() => expect(argsOf('run_now')).toEqual({ action: 'run_now', routine_id: 3 }));
-    // Fix on a run with no session opens the routine's definition.
+    // Fix on a run with no session opens the routine's definition, in
+    // Automation's Routines tab (8.4).
     await fireEvent.click(screen.getByTestId('routine-failure-fix'));
-    expect(await screen.findByTestId('routines-dialog')).toBeInTheDocument();
+    expect(get(destination)).toBe('automation');
+    expect(get(automationTab)).toBe('routines');
+    render(RoutinesPanel);
     expect(await screen.findByTestId('routine-definition')).toBeInTheDocument();
   });
 

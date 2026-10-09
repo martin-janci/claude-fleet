@@ -544,6 +544,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
+    // Start rules (Orbit Fleet 8.11): which project a task key starts in,
+    // before history and Jev. A person's; a host's token is not served it.
+    ToolPolicy {
+        name: "start_rules",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Presence (redesign 11.7b): reports into the hub's in-memory board and
     // reads it back; touches no row. A person's tool, not a host token's.
     ToolPolicy {
@@ -930,6 +939,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         name: "session_conversation",
         access: Access::Client,
         readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    // A summary of the same transcript, drafted on the session's host
+    // (redesign 11.11). Not read-only: it runs claude and books its cost.
+    ToolPolicy {
+        name: "session_summary_since",
+        access: Access::Client,
+        readonly: false,
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
@@ -1526,7 +1544,8 @@ pub fn is_client_tool(name: &str) -> bool {
 /// person's: a host's Claude only sends files.
 /// `routines` (Orbit Fleet 8.5) is a person's too: a session does not
 /// schedule sessions. `library` (9.7) is the index beside the downloads, a
-/// person's for the same reason.
+/// person's for the same reason. So is `start_rules` (8.11): a session does
+/// not decide where everyone's tasks start.
 ///
 /// The five sharing surfaces joined them in multi-user M1 (T12) for a
 /// different reason: a per-host token proves no PERSON
@@ -1542,6 +1561,7 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "list_downloads",
     "remove_download",
     "routines",
+    "start_rules",
     "session_share",
     "session_unshare",
     "session_narrow",

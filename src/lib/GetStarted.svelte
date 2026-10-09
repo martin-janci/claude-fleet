@@ -23,7 +23,6 @@
   import type { FieldProblem, Values } from './forms/forms';
   import { onboardingDismissed } from './onboarding';
   import { openRoutines } from './routines';
-  import { sidebarView } from './work_view';
   import {
     buildingFirstFleet,
     doneCount,
@@ -100,9 +99,7 @@
       case 'phone':
         return openSettingsAt('devices');
       case 'routine':
-        // The Routines open from the Inbox, on the first template (8.6).
-        sidebarView.set('inbox');
-        goTo('session');
+        // The Routines open in Automation, on the first template (8.6).
         return openRoutines({ template: 'morning-pr-sweep' });
     }
   }

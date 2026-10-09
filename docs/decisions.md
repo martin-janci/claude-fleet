@@ -30,7 +30,11 @@ and nothing is sent:
 4. **The org consented** (`org_off`). Each organisation opts in on its own
    (Settings → Organisations → *send to Jev*, or `fleet-hub org set <id>
    --jev on`); off by default. A session or item with no org follows
-   `decide.jev.unassigned` (off by default).
+   `decide.jev.unassigned` (off by default). A feature that sends Claude's
+   **reply text** (`turn_outcome`, J2) needs a second consent on top
+   (decision D48): the org's *Also allow Claude's reply text* (`fleet-hub
+   org set <id> --jev-reply on`), or `decide.jev.unassigned_reply` for a
+   session with no org. Both off by default; either missing is `org_off`.
 5. **A key is configured** (`no_key`): `fleet-hub decide set-key` (on a
    standalone desktop, pointed at the app's data folder — see
    [the key on a standalone desktop](#the-key-on-a-standalone-desktop)).
@@ -432,6 +436,55 @@ transcript under the directory Claude Code keys that project's root by
 Code: `service/decide/lost_target.rs`, `service/sessions/lost_found.rs`;
 step 4.12 of the redesign's transition plan.
 
+## `turn_outcome` — what a silent turn's end came to (J2)
+
+The Stop hook says a turn ended, not how: a finished task and a prose
+question ("Should I also update the docs?") both leave an idle pane. With
+`decide.jev.turn_outcome` on, after a Stop that left the session idle (no
+dialog, no stuck state, no form), fleet captures the visible pane and asks
+Jev one Choice: `finished`, `asked`, `stuck`, `working` or `unsure`.
+
+- **What is sent.** Claude's reply text: the end of the screen, ANSI
+  stripped, the REPL's chrome (rules, input line, footer) left out, every
+  fenced code block replaced by `[code: <lang>, N lines]`, at most 40 lines
+  and 2,000 characters, redacted. Only where the org gave BOTH consents
+  (D31 and D48, below).
+- **Shadow.** Recorded only, with the pane rules' reading as the baseline
+  (`finished` for an idle REPL, `asked` for a dialog, `stuck`, `working`;
+  `none` when they read nothing).
+- **Assist.** A usable answer (confidence 50% or more, not `unsure`) is
+  written to `sessions.turn_outcome`, and the Inbox follows: `asked` reads
+  as *waiting*, `stuck` as *stuck*.
+- **Hooks always win.** Every hook (Notification, the next prompt, Stop,
+  StopFailure, SessionEnd) clears `turn_outcome`, and an answer lands only
+  while no hook has spoken since the turn's Stop. A hook before the answer
+  keeps it out; a hook after it takes it back.
+- **One decision per turn.** Subject `session_turn` `<session>:<turn_seq>`.
+- **Follow-up.** A Notification about the same turn marks the assist answer
+  `confirmed` (a dialog and `asked`, a stuck screen and `stuck`) or
+  `corrected` to what it said; your prompt within 30 minutes of an `asked`
+  answer confirms it. A shadow answer is never marked.
+- **J8, the drift alarm.** When the pane rules read nothing on the screen
+  (Claude Code's UI may have changed), the run's baseline is `none` and the
+  session's timeline gets a `pane_unreadable` entry. Local; nothing is sent
+  for it.
+- **Benchmark.** `fleet-hub decide bench turn-outcome --labels FILE` (JSON
+  lines `{pane_tail, label}`) or `--fixture` (24 synthetic tails), providers
+  `rule`, `qmark` ("ends with ?") and `jev`; it reports `asked` precision and
+  recall against card J2's acceptance (≥ 0.9 and ≥ 0.8, judged from 50
+  labeled `asked` cases).
+
+Code: `service/decide/turn_outcome.rs`, `spawn_after_stop` from the Stop
+hook in `service/hooks.rs`, `Store::set_jev_turn_outcome`;
+`service/decide/bench/turn_outcome.rs`; step 5.11 of the redesign's
+transition plan.
+
+### Decision D48 — reply text (owner, 2026-10-08)
+
+| # | Question | Decision |
+|---|---|---|
+| D48 | May Claude's reply text (J2's pane tail / last reply) go to Jev? | **Yes, per org, only where the org consents to reply text: a consent of its own, separate from D31 and required on top of it, off by default.** Decided by the owner on 2026-10-08. Built as the org's `decide.jev.reply_consent` row in `org_settings` (never inherited from a fleet value; *Also allow Claude's reply text* in Organisations, `fleet-hub org set <id> --jev-reply on`) and `decide.jev.unassigned_reply` for sessions with no org |
+
 ## `work_link` — the work item of a session no rule could link (J1)
 
 When three turns of a conversation have gone by and nothing linked the
@@ -606,7 +659,10 @@ prompt hook (`mcp/hooks.rs`); card N1 in the redesign plan.
 | `decide.jev.work_placement` | `off` | `off` / `shadow` / `assist` | Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.related_session` | `off` | `off` / `shadow` / `assist` | Noticing another of your sessions working on the same thing. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.control_route` | `off` | `off` / `shadow` / `assist` | Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.summary_check` | `off` | `off` / `shadow` / `assist` | Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support. Experimental. |
+| `decide.jev.turn_outcome` | `off` | `off` / `shadow` / `assist` | Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
+| `decide.jev.unassigned_reply` | `false` | on / off | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
 | `decide.jev.breaker_failures` | `5` | 1–100 | Failed calls in a row that open the circuit breaker. |
 | `decide.jev.breaker_open_secs` | `300` | 10–86400 seconds | How long an open breaker refuses calls. |
