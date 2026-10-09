@@ -67,7 +67,11 @@
     return get(showFriendlyNames) && r.friendly_name ? r.friendly_name : r.tmux_name;
   }
 
+  // Whatever had focus when the sheet opened: closing hands focus back to it.
+  let opener: HTMLElement | null = null;
+
   async function openSheet() {
+    if (!open) opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     open = true;
     cursor = 0;
     await tick();
@@ -75,9 +79,12 @@
   }
 
   function closeSheet() {
+    const hadFocus = !!sheet && sheet.contains(document.activeElement);
     open = false;
     if (focused) clearSessionFocus();
     focused = false;
+    if (hadFocus && opener?.isConnected) opener.focus();
+    opener = null;
   }
 
   function focusAt(i: number) {
@@ -272,7 +279,7 @@
     background: none;
     padding: 0.1rem 0.15rem;
     font: inherit;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     cursor: pointer;
     border-radius: var(--radius-sm);
@@ -290,12 +297,12 @@
     box-sizing: border-box;
     margin: 0.25rem 0;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     padding: 0.3rem;
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     outline: none;
   }
   .review-sheet:focus-visible {
@@ -308,7 +315,7 @@
   }
   .hint {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     flex: 1;
   }
   .review-row {
@@ -317,7 +324,7 @@
     gap: 0.4rem;
     align-items: center;
     padding: 0.15rem 0.3rem;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .review-row.cursor {
     background: var(--bg-hover);

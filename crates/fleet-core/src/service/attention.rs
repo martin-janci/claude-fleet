@@ -275,17 +275,25 @@ impl Facts {
             let at_limit = |w: &crate::service::account_usage::Window, len: i64| {
                 w.utilization >= 100.0 && w.live_at(snap.fetched_at, len, now)
             };
-            let limit = u
+            // Both windows at their limit: the one that frees last decides,
+            // so the row does not unblock while the other still holds it
+            // (no reset time holds longest). Weekly wins a tie.
+            let weekly = u
                 .seven_day
                 .as_ref()
                 .filter(|w| at_limit(w, WEEK_SECS))
-                .map(|w| (LimitWindow::Weekly, w))
-                .or_else(|| {
-                    u.five_hour
-                        .as_ref()
-                        .filter(|w| at_limit(w, FIVE_HOUR_SECS))
-                        .map(|w| (LimitWindow::FiveHour, w))
-                });
+                .map(|w| (LimitWindow::Weekly, w));
+            let five = u
+                .five_hour
+                .as_ref()
+                .filter(|w| at_limit(w, FIVE_HOUR_SECS))
+                .map(|w| (LimitWindow::FiveHour, w));
+            let frees = |w: &crate::service::account_usage::Window| w.resets_at.unwrap_or(i64::MAX);
+            let limit = match (weekly, five) {
+                (Some(wk), Some(fh)) if frees(fh.1) > frees(wk.1) => Some(fh),
+                (Some(wk), _) => Some(wk),
+                (None, fh) => fh,
+            };
             if let Some((window, w)) = limit {
                 limited_accounts.insert(
                     snap.account_uuid.clone(),
@@ -1030,6 +1038,24 @@ mod tests {
                 .unwrap()
                 .reason,
             Reason::NoCredentials
+        );
+        // Both at their limit, the week freeing first: the 5-hour window
+        // still holds the account after the weekly reset.
+        let mut late = snap("late", UsageOutcomeKind::Ok, 100.0, 100.0, 3_000);
+        late.usage
+            .as_mut()
+            .unwrap()
+            .seven_day
+            .as_mut()
+            .unwrap()
+            .resets_at = Some(1_500);
+        let f = Facts::from_fleet(&[], &[late], 1_000);
+        assert_eq!(
+            f.limited_accounts.get("late"),
+            Some(&Limit {
+                window: LimitWindow::FiveHour,
+                resets_at: Some(3_000)
+            })
         );
     }
 }

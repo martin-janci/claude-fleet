@@ -149,14 +149,14 @@
     /* Reset the UA dialog box; the visible chrome lives on .body. */
     padding: 0;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg);
     color: var(--fg);
     max-width: min(90vw, 720px);
     /* No overflow here: a scrollbar on the <dialog> would be part of the
        element, and grabbing it would read as a backdrop click. */
     overflow: hidden;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-pop);
   }
   .modal::backdrop {
     background: rgba(0, 0, 0, 0.4);
@@ -180,6 +180,6 @@
   }
   .title {
     margin: 0;
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
   }
 </style>

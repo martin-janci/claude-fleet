@@ -74,7 +74,7 @@
     padding: 0.65rem 0.8rem;
     border: 1px solid var(--border);
     border-left: 3px solid var(--accent);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
   }
   .stats {
@@ -85,18 +85,18 @@
   }
   .stat dt {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .stat dd { margin: 0; }
   .value {
-    font-size: 1.25rem;
+    font-size: var(--text-lg);
     font-weight: 600;
     font-variant-numeric: tabular-nums;
   }
   .hint {
     margin-left: 0.3rem;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .table-wrap { overflow-x: auto; }
   .table-title {

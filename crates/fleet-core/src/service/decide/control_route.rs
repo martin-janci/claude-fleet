@@ -82,6 +82,10 @@ pub struct Target {
     /// session's project. Never sent to a device.
     #[serde(skip)]
     pub detail: String,
+    /// The target's org, whose consent (D31) its name and detail need
+    /// before they go to the model. Never sent to a device.
+    #[serde(skip)]
+    pub org_id: Option<i64>,
 }
 
 impl Target {
@@ -231,6 +235,7 @@ pub fn targets(s: &Store, scope: &ViewScope) -> Result<Vec<Target>, IpcError> {
             id: m.id,
             name: m.name,
             detail: m.goal.chars().take(GOAL_CHARS).collect(),
+            org_id: m.org_id,
         });
     }
     let operator = crate::service::operator::operator_ref(s);
@@ -258,10 +263,23 @@ pub fn targets(s: &Store, scope: &ViewScope) -> Result<Vec<Target>, IpcError> {
                 .clone()
                 .unwrap_or_else(|| r.tmux_name.clone()),
             detail: project,
+            org_id: r.org_id,
         });
     }
     out.truncate(MAX_TARGETS);
     Ok(out)
+}
+
+/// The targets whose org consented to the decision model (D31; a target
+/// with no org needs `decide.jev.unassigned`, which the message's own gate
+/// already asked): only their names and details go out. The person is
+/// still offered every target.
+pub fn consenting(s: &Store, targets: &[Target]) -> Vec<Target> {
+    targets
+        .iter()
+        .filter(|t| super::consents(s, Feature::ControlRoute, t.org_id))
+        .cloned()
+        .collect()
 }
 
 /// PURE: the run's subject id: 16 hex digits of an HMAC of the message and
@@ -283,7 +301,7 @@ pub async fn propose(ctx: &DecideCtx, scope: &ViewScope, text: &str) -> ControlR
         return ControlRoute::none();
     }
     let now = ctx.now();
-    let (mode, targets, subject) = {
+    let (mode, targets, asked, subject) = {
         let Ok(s) = lock(&ctx.store) else {
             return ControlRoute::none();
         };
@@ -301,10 +319,20 @@ pub async fn propose(ctx: &DecideCtx, scope: &ViewScope, text: &str) -> ControlR
         let Ok(fp_key) = s.decision_fp_key() else {
             return ControlRoute::none();
         };
-        (mode, targets, subject_id(&fp_key, text, now))
+        let asked = consenting(&s, &targets);
+        (mode, targets, asked, subject_id(&fp_key, text, now))
     };
     if unclear(text) {
         // The rule answered: nothing to ask the model, nothing recorded.
+        return if mode == Mode::Assist {
+            ControlRoute::ask(targets, None)
+        } else {
+            ControlRoute::none()
+        };
+    }
+    if asked.is_empty() {
+        // No target's org consented: nothing of theirs goes out, and the
+        // person picks, as with the feature off.
         return if mode == Mode::Assist {
             ControlRoute::ask(targets, None)
         } else {
@@ -318,7 +346,7 @@ pub async fn propose(ctx: &DecideCtx, scope: &ViewScope, text: &str) -> ControlR
             subject_kind: SUBJECT_KIND.into(),
             subject_id: subject,
             org_id: None,
-            request: question_for(text, &targets),
+            request: question_for(text, &asked),
             // Today nothing routes a message: it stays with Control.
             baseline: Some(CONTROL.into()),
             question_version: QUESTION_VERSION.into(),
@@ -336,7 +364,7 @@ pub async fn propose(ctx: &DecideCtx, scope: &ViewScope, text: &str) -> ControlR
     if answer.value == CONTROL {
         return ControlRoute::none();
     }
-    if answer.value == UNSURE || !targets.iter().any(|t| t.option() == answer.value) {
+    if answer.value == UNSURE || !asked.iter().any(|t| t.option() == answer.value) {
         return ControlRoute::ask(targets, out.run_id);
     }
     let proposal = DecisionProposal {
@@ -387,6 +415,7 @@ pub fn follow(s: &Store, run_id: i64, chosen: &str, now: i64) -> Result<bool, Ip
                 id: id.parse().ok()?,
                 name: String::new(),
                 detail: String::new(),
+                org_id: None,
             })
         })
         .collect();

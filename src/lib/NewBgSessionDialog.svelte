@@ -55,7 +55,7 @@
   }
 </script>
 
-<Modal title="New Background Session" onclose={() => onClose()} width="420px" testid="bg-session-modal">
+<Modal title="New background session" onclose={() => onClose()} width="420px" testid="bg-session-modal">
   <div class="modal">
     <label class="modal-field">
       <span>Host</span>
@@ -102,7 +102,7 @@
 </Modal>
 
 <style>
-  .err { color: var(--danger); font-size: 0.8rem; padding: 0.2rem 0; margin: 0; }
+  .err { color: var(--danger); font-size: var(--text-2xs); padding: 0.2rem 0; margin: 0; }
 
   .modal {
     display: flex;
@@ -113,18 +113,18 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 12px;
+    font-size: var(--text-xs);
   }
   .modal-field input,
   .modal-field select,
   .modal-field textarea {
     padding: 6px 8px;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg-pane);
     color: var(--fg);
     font-family: inherit;
-    font-size: 12px;
+    font-size: var(--text-xs);
   }
   .modal-actions {
     display: flex;
@@ -139,12 +139,12 @@
      background, color). Cancel stays plain; Launch carries the primitives
      instead. */
   .modal-actions button:not(.btn) {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.8rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
 </style>

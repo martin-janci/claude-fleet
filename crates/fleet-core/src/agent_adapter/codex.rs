@@ -823,8 +823,20 @@ fi
 }
 
 /// [`rollouts_script`]'s answer by tmux session. A line whose file name
-/// carries no valid id is skipped.
+/// carries no valid id is skipped, and so is a rollout found for more than
+/// one pane: two Codex panes in one worktree share a cwd, so the cwd match
+/// cannot tell whose conversation it is, and each pane keeps the id it had.
 pub(crate) fn parse_rollouts(out: &str) -> std::collections::HashMap<String, PaneRollout> {
+    let mut found: std::collections::HashMap<String, PaneRollout> = parse_rollout_lines(out);
+    let mut claims: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for r in found.values() {
+        *claims.entry(r.id.clone()).or_default() += 1;
+    }
+    found.retain(|_, r| claims[&r.id] == 1);
+    found
+}
+
+fn parse_rollout_lines(out: &str) -> std::collections::HashMap<String, PaneRollout> {
     out.lines()
         .filter_map(|line| {
             let mut parts = line.splitn(3, '\t');

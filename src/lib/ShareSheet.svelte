@@ -385,7 +385,7 @@
   }
   .block h4 {
     margin: 0 0 0.35rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
@@ -431,10 +431,10 @@
   .level {
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.1rem 0.35rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .confirm {
     display: flex;
@@ -470,12 +470,12 @@
     margin-top: 0.6rem;
   }
   button {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.25rem 0.7rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   button.primary {
@@ -491,11 +491,11 @@
   }
   input,
   select {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.25rem 0.4rem;
     border: 1px solid var(--border);
     background: var(--bg-raise, transparent);
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
 </style>

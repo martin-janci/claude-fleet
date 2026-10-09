@@ -5391,6 +5391,57 @@ async fn reconcile_turns_pr_signals_into_link_suggestions() {
     assert_eq!(a.work_suggested.unwrap().suggestions, 2);
 }
 
+/// A shell whose PR probe always fails, counting the attempts.
+struct FailingShell {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl HostShell for FailingShell {
+    async fn run_script(&self, _host: &str, script: &str) -> Result<String, IpcError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(script.contains("gh pr view"), "probe script runs gh");
+        Err(IpcError::new(codes::E_SSH, "unreachable"))
+    }
+}
+
+/// Review r16: a failed PR probe is throttled like a successful one, so the
+/// next 20 s pass does not run the same `gh` batch over SSH again.
+#[tokio::test]
+async fn a_failed_pr_probe_is_not_retried_on_the_next_pass() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let shell = Arc::new(FailingShell {
+        calls: Arc::clone(&calls),
+    });
+    let live = vec![repo_session("dev-a", "/home/u/projects/github.com/o/r")];
+    let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let deps = ReconcileDeps::fake_with_shell(
+        move |_alias| {
+            Box::new(ScriptedTmux {
+                sessions: live.clone(),
+                delay: std::time::Duration::from_millis(0),
+                hang: false,
+                probes: Arc::clone(&probes),
+            })
+        },
+        std::time::Duration::from_secs(5),
+        shell,
+    );
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+    }
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the failed batch waits out the TTL"
+    );
+}
+
 #[tokio::test]
 async fn reconcile_survives_a_failing_pr_probe_shell() {
     let store = Mutex::new(Store::open_in_memory().unwrap());

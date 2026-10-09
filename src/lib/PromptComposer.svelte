@@ -222,15 +222,15 @@
     flex-direction: column;
     gap: 0.8rem;
   }
-  .dialog h3 { margin: 0; font-size: 1rem; }
+  .dialog h3 { margin: 0; font-size: var(--text-md); }
   .dialog h4 {
     margin: 0 0 0.3rem 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
-  .muted { color: var(--fg-muted); font-size: 0.85rem; margin: 0; }
+  .muted { color: var(--fg-muted); font-size: var(--text-xs); margin: 0; }
 
   .targets ul {
     list-style: none;
@@ -246,48 +246,48 @@
     gap: 0.4rem;
     padding: 0.3rem;
     border: 1px solid transparent;
-    border-radius: 4px;
-    font-size: 0.85rem;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
     cursor: pointer;
   }
   .target-row label:hover { border-color: var(--border); background: var(--bg-pane); }
   .target-row.not-mine label { opacity: 0.55; cursor: not-allowed; }
   .host-badge {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     border: 1px solid var(--border);
     padding: 0.05rem 0.3rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
   }
-  .account { color: var(--fg-muted); font-size: 11px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sess-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+  .account { color: var(--fg-muted); font-size: var(--text-2xs); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess-name { font-family: var(--font-mono); font-size: var(--text-2xs); }
   /* The severity tokens, not hand-picked hexes: #50c86e is the exact green
      this branch removed from attention.ts for failing its contrast floor
      (2.05:1 on --bg-pane), and its twin lived on here. */
   .warn { color: var(--usage-warn); }
   .ok { color: var(--usage-ok); }
-  .err { color: var(--usage-crit); font-size: 11px; }
+  .err { color: var(--usage-crit); font-size: var(--text-2xs); }
 
   .show-all {
     display: flex;
     gap: 0.4rem;
     align-items: center;
     margin-top: 0.4rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     cursor: pointer;
   }
 
   .prompt-section textarea {
     width: 100%;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.85rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
     padding: 0.5rem;
     border: 1px solid var(--border);
     background: var(--bg-pane);
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     resize: vertical;
     min-height: 6rem;
   }

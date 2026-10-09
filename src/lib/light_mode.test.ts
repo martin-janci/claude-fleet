@@ -34,9 +34,7 @@ const EXEMPT: Record<string, string> = {
  * next PR that edits one of these files moves its lines to tokens and
  * deletes its entry here.
  */
-const PENDING: Record<string, { literals: string[]; undeclared: string[] }> = {
-  'App.svelte': { literals: ['.status .err { color: #e64a4a; }'], undeclared: [] },
-};
+const PENDING: Record<string, { literals: string[]; undeclared: string[] }> = {};
 
 /** Black and white used as shade, never as a surface or text colour. */
 const SHADE = /^(?:#000(?:0{3})?|rgba?\(0,\s*0,\s*0[,\s/][^)]*\)|rgb\(0 0 0 \/ [^)]*\))$/;

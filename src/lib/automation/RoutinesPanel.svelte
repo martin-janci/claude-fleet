@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from '../tablist_keys';
   // The Automation screen's Routines tab (Orbit Fleet redesign 8.6, the
   // Automation board): the routines on the left, one routine on the right
   // with its switch, Run now, Skip next and Edit, then Runs, Definition and
@@ -383,7 +384,7 @@
         {#if r.paused_reason}<p class="err" data-testid="routine-paused-reason">{r.paused_reason}</p>{/if}
       </header>
 
-      <div class="tabs" role="tablist">
+      <div class="tabs" role="tablist" aria-label="Routine" use:tablistKeys>
         {#each [['runs', 'Runs'], ['definition', 'Definition'], ['limits', 'Limits']] as [id, label] (id)}
           <button
             type="button"
@@ -491,11 +492,11 @@
   .title { font-weight: 600; }
   .count { color: var(--fg-muted); font-weight: 400; }
   .new { position: relative; }
-  .menu { position: absolute; right: 0; top: 100%; z-index: 5; min-width: 260px; display: flex; flex-direction: column; background: var(--bg-pane); border: 1px solid var(--border); border-radius: var(--radius-md, 8px); padding: 4px; }
-  .menu button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 6px 8px; border: 0; background: none; color: var(--fg); border-radius: 6px; cursor: pointer; }
+  .menu { position: absolute; right: 0; top: 100%; z-index: 5; min-width: 260px; display: flex; flex-direction: column; background: var(--bg-pane); border: 1px solid var(--border); border-radius: var(--radius-md, var(--radius-lg)); padding: 4px; }
+  .menu button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 6px 8px; border: 0; background: none; color: var(--fg); border-radius: var(--radius-md); cursor: pointer; }
   .menu button:hover { background: var(--bg-hover); }
   ul { list-style: none; margin: 0; padding: 0; }
-  .row { width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 6px 8px; border: 0; border-radius: 6px; background: none; color: var(--fg); text-align: left; cursor: pointer; }
+  .row { width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 6px 8px; border: 0; border-radius: var(--radius-md); background: none; color: var(--fg); text-align: left; cursor: pointer; }
   .row[aria-selected='true'] { background: var(--accent-soft); }
   .row:hover { background: var(--bg-hover); }
   .name { font-weight: 500; }
@@ -506,7 +507,7 @@
   .kicker { margin: 0; color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
   h3 { margin: 0; font-size: var(--text-lg, 15px); }
   .bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2, 8px); margin-top: var(--space-2, 8px); }
-  .state { font-size: var(--text-xs, 11.5px); padding: 2px 8px; border-radius: 999px; background: var(--done-soft); color: var(--status-done); }
+  .state { font-size: var(--text-xs, 11.5px); padding: 2px 8px; border-radius: var(--radius-pill); background: var(--done-soft); color: var(--status-done); }
   .state.off { background: var(--bg-raise); color: var(--fg-muted); }
   .tabs { display: flex; gap: var(--space-2, 8px); border-bottom: 1px solid var(--border); }
   .tabs button { border: 0; background: none; padding: 6px 2px; color: var(--fg-muted); cursor: pointer; border-bottom: 2px solid transparent; }
@@ -518,7 +519,7 @@
   .runs li.failed .what { color: var(--status-failed); }
   .by-jev { margin-left: var(--space-1, 4px); color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
   .fix { grid-column: 2 / -1; display: flex; gap: var(--space-2, 8px); }
-  .prompt { white-space: pre-wrap; margin: 0; padding: 8px; background: var(--bg-sunk); border-radius: 6px; font-size: var(--text-sm, 12.5px); }
+  .prompt { white-space: pre-wrap; margin: 0; padding: 8px; background: var(--bg-sunk); border-radius: var(--radius-md); font-size: var(--text-sm, 12.5px); }
   .confirm { display: flex; align-items: center; gap: var(--space-2, 8px); margin: 0; font-size: var(--text-sm, 12.5px); }
   .editor { display: flex; flex-direction: column; gap: var(--space-2, 8px); }
   .editor label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-sm, 12.5px); }

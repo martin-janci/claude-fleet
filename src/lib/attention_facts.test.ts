@@ -70,6 +70,13 @@ describe('attentionFactsFrom (mirrors attention::Facts::from_fleet)', () => {
     expect(attentionFactsFrom([], { acc: full(now - 8 * 86_400) }, now).limited_accounts).toEqual({});
   });
 
+  it('holds an account at its limit until the window that frees last resets', () => {
+    const late = usage('late', 'ok', 100, 100, 3000);
+    late.usage!.seven_day!.resets_at = 1500;
+    const f = attentionFactsFrom([], { late }, 1000);
+    expect(f.limited_accounts).toEqual({ late: { window: 'five_hour', resets_at: 3000 } });
+  });
+
   it('is the New layout only', () => {
     hosts.set([host('down', { reachable: false, last_pinged_at: 1 })]);
     expect(get(attentionFacts)).toBeUndefined();

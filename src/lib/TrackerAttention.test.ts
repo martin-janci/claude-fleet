@@ -77,7 +77,7 @@ describe('tracker attention items (pure)', () => {
     expect(jira.detail).not.toContain('[claude-fleet');
     expect(jira.detail).toContain('last sync failed 3×');
     expect(jira.detail).toContain('org: Acme');
-    expect(jira.detail).toContain('Settings → Work');
+    expect(jira.detail).toContain('Settings → Trackers');
   });
 
   it('raises nothing for no roll-up, an older hub, or healthy trackers', () => {
@@ -173,7 +173,7 @@ describe('TrackerAttention', () => {
     vi.useRealTimers();
   });
 
-  it('renders one item per failing tracker and opens Settings → Work', async () => {
+  it('renders one item per failing tracker and opens Settings → Trackers', async () => {
     trackersHealth.set(rollup());
     render(TrackerAttention);
     await tick();
@@ -188,7 +188,7 @@ describe('TrackerAttention', () => {
     expect(get(settingsSection)).toBe('settings.trackers');
   });
 
-  it('renders a skipping tracker with its own wording and opens Settings → Work', async () => {
+  it('renders a skipping tracker with its own wording and opens Settings → Trackers', async () => {
     trackersHealth.set({
       trackers: [
         { tracker_id: 5, provider: 'jira', name: 'acme', health: 'failing', reason: 'items_skipped', items_failed: 1 },

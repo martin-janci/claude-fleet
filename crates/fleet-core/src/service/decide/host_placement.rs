@@ -35,7 +35,8 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use super::{
-    decide, fingerprint, gate_at, DecideCtx, DecideRequest, Feature, JevRequest, Mode, Question,
+    consents, decide, fingerprint, gate_at, DecideCtx, DecideRequest, Feature, JevRequest, Mode,
+    Question,
 };
 use crate::ipc_error::{lock, IpcError};
 use crate::service::account_limits;
@@ -210,6 +211,14 @@ pub fn candidates(
             .then(a.alias.cmp(&b.alias))
     });
     out
+}
+
+/// PURE: whether `c`'s home disk is at or past `health.disk_low_pct` used,
+/// the rule that raises `disk_low`: such a host is the numbers' answer
+/// (not here), never Jev's to weigh (review r15).
+pub fn past_disk_rule(c: &Candidate, disk_low_pct: u8) -> bool {
+    c.disk_free_pct
+        .is_some_and(|free| 100u16.saturating_sub(u16::from(free)) >= u16::from(disk_low_pct))
 }
 
 /// PURE: the question over `candidates`.
@@ -427,7 +436,7 @@ pub fn input_for(
     project_id: i64,
     now: i64,
 ) -> Result<Option<PlacementInput>, IpcError> {
-    let (project, hosts, pause_at, accounts, counts, org, host_orgs) = {
+    let (project, hosts, pause_at, accounts, counts, org, host_orgs, disk_low_pct, fenced) = {
         let s = lock(store)?;
         let Some(project) = s.get_project(project_id)? else {
             return Ok(None);
@@ -435,12 +444,20 @@ pub fn input_for(
         let hosts = s.list_hosts()?;
         let org = project_org(&s, &project.owner, &project.repo, &project.base_path)?;
         let mut host_orgs = BTreeMap::new();
-        if org.is_some() {
-            for h in &hosts {
-                host_orgs.insert(
-                    h.alias.clone(),
-                    s.org_for_new_session(&h.alias, project_id)?,
-                );
+        // Review r15: with no project org every host is a candidate, but a
+        // host bound to an org that did not consent (D31) is never named
+        // to the model; the person can still pick it.
+        let mut fenced = std::collections::BTreeSet::new();
+        for h in &hosts {
+            let host_org = s.org_for_new_session(&h.alias, project_id)?;
+            if org.is_none()
+                && host_org.is_some()
+                && !consents(&s, Feature::HostPlacement, host_org)
+            {
+                fenced.insert(h.alias.clone());
+            }
+            if org.is_some() {
+                host_orgs.insert(h.alias.clone(), host_org);
             }
         }
         (
@@ -451,23 +468,27 @@ pub fn input_for(
             s.host_placement_counts(project_id, now - RECENT_DAYS * 86_400)?,
             org,
             host_orgs,
+            crate::service::health::host_thresholds(&s).disk_low_pct,
+            fenced,
         )
     };
     let usage: Vec<AccountUsageSnapshot> = {
         let c = cache.lock().unwrap_or_else(|e| e.into_inner());
         accounts.iter().map(|a| c.snapshot(&a.uuid)).collect()
     };
+    let mut candidates = candidates(
+        &hosts,
+        &usage,
+        pause_at,
+        &counts,
+        org,
+        |alias| host_orgs.get(alias).copied().flatten(),
+        now,
+    );
+    candidates.retain(|c| !fenced.contains(&c.alias) && !past_disk_rule(c, disk_low_pct));
     Ok(Some(PlacementInput {
         project_id,
-        candidates: candidates(
-            &hosts,
-            &usage,
-            pause_at,
-            &counts,
-            org,
-            |alias| host_orgs.get(alias).copied().flatten(),
-            now,
-        ),
+        candidates,
         owner: project.owner,
         repo: project.repo,
         org_id: org,

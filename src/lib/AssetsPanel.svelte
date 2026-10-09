@@ -547,9 +547,9 @@
   }
   .assets-panel { display: flex; flex-direction: column; height: 100%; }
   .setup { max-width: 480px; margin: 40px auto; display: flex; flex-direction: column; gap: 10px; }
-  .setup label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
-  .cmd { margin: 0; padding: 6px 8px; font-family: ui-monospace, monospace; font-size: 12px; background: var(--bg-pane); border-radius: 4px; white-space: pre-wrap; word-break: break-all; user-select: text; }
+  .setup label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-xs); }
+  .cmd { margin: 0; padding: 6px 8px; font-family: var(--font-mono); font-size: var(--text-xs); background: var(--bg-pane); border-radius: var(--radius-sm); white-space: pre-wrap; word-break: break-all; user-select: text; }
   .muted { color: var(--fg-muted); } .error { color: var(--usage-crit); padding: 4px 10px; margin: 0; }
   .pad { padding: 14px; }
-  .primary { background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 4px; padding: 6px 10px; }
+  .primary { background: var(--accent); color: var(--accent-fg); border: 0; border-radius: var(--radius-sm); padding: 6px 10px; }
 </style>

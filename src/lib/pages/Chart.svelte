@@ -161,7 +161,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg);
     margin-bottom: 0.25rem;
   }
@@ -181,7 +181,7 @@
   }
   .tick {
     fill: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .bar {
     fill: var(--accent);
@@ -213,7 +213,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     padding: 0.2rem 0.4rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     display: flex;
     gap: 0.4rem;
     pointer-events: none;
@@ -238,12 +238,12 @@
     margin: 0.25rem 0 0;
   }
   .empty {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   table.data {
     width: 100%;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     border-collapse: collapse;
   }
   table.data th,

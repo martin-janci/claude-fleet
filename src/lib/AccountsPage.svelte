@@ -13,6 +13,7 @@
     checkedAgo,
     formatReset,
     formatResetShort,
+    freshness,
     leftPct,
     severity,
     severityBadge,
@@ -34,6 +35,7 @@
   import { selectSessionExplicitly } from './selection';
   import { pushError } from './toasts';
   import { accountsPageRequest } from './account_pill';
+  import { requestHostsView } from './app_views';
   import { untrack } from 'svelte';
 
   let {
@@ -108,13 +110,20 @@
     badge: string | null;
     reset: string;
     resetShort: string;
+    /** The reading no longer holds (too old, or past its reset): `? left`. */
+    unknown: boolean;
   }
 
   function windowView(a: AccountSummary, kind: UsageWindowKind): WindowView {
     const w = windowOf(a.usage?.usage ?? null, kind);
     const title = kind === '5h' ? '5-hour window' : 'Week';
     if (!w) {
-      return { kind, title, left: null, level: 'none', badge: null, reset: 'no reading yet', resetShort: '' };
+      return { kind, title, left: null, level: 'none', badge: null, reset: 'no reading yet', resetShort: '', unknown: false };
+    }
+    // As `compactWindow`: a number past its reset or freshness limit is
+    // withheld, never shown as `0% left` with a LIMIT badge.
+    if (freshness(kind, a.usage?.fetched_at ?? null, w.resets_at, now) === 'expired') {
+      return { kind, title, left: null, level: 'none', badge: null, reset: '', resetShort: '', unknown: true };
     }
     const left = leftPct(w);
     const level = severity(kind, left, w.resets_at, now, a.account.has_extra_usage);
@@ -127,6 +136,7 @@
       badge: b ? `${b.glyph} ${b.word}` : null,
       reset: formatReset(kind, w.resets_at, now, locale, timeZone),
       resetShort: formatResetShort(kind, w.resets_at, now, locale, timeZone),
+      unknown: false,
     };
   }
 
@@ -151,6 +161,11 @@
     <span class="sub" data-testid="accounts-count">
       {list.length} {list.length === 1 ? 'account' : 'accounts'}
     </span>
+    <!-- Review r08: the rail item is "Accounts & hosts", and Classic's Hosts
+         tab was always in view; the Hosts view is one click from here. -->
+    <button type="button" class="btn-quiet hosts-link" data-testid="accounts-all-hosts" onclick={() => requestHostsView()}
+      >All hosts ›</button
+    >
   </header>
 
   {#if list.length === 0}
@@ -187,7 +202,7 @@
               <div class="line" data-level={w.level}>
                 <span class="w-title">{w.title}</span>
                 <span class="w-val">
-                  {#if w.left === null}—{:else}{w.left}% left{#if w.resetShort} · {w.resetShort}{/if}{/if}
+                  {#if w.unknown}? left{:else if w.left === null}—{:else}{w.left}% left{#if w.resetShort} · {w.resetShort}{/if}{/if}
                 </span>
               </div>
             {/each}
@@ -233,7 +248,7 @@
               <div class="w-row">
                 <span class="w-title">{w.title}</span>
                 <span class="w-val">
-                  {#if w.left === null}no reading yet{:else}{w.left}% left{/if}
+                  {#if w.unknown}? left{:else if w.left === null}no reading yet{:else}{w.left}% left{/if}
                   {#if w.badge}<span class="badge">{w.badge}</span>{/if}
                 </span>
               </div>
@@ -279,7 +294,13 @@
             <ul class="rows" data-testid="account-logins">
               {#each a.logins as l (l.host + '/' + (l.profile ?? ''))}
                 <li>
-                  <span class="mono">{l.host}</span>
+                  <button
+                    type="button"
+                    class="link mono"
+                    title="Open {l.host} in Hosts"
+                    data-testid="account-login-host"
+                    onclick={() => requestHostsView(l.host)}>{l.host}</button
+                  >
                   <span class="sub">{l.profile ? `profile ${l.profile}` : 'host login'}</span>
                 </li>
               {/each}
@@ -322,6 +343,20 @@
     gap: var(--space-2);
     padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--border);
+  }
+  .hosts-link {
+    margin-left: auto;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg);
+    border-radius: var(--radius-sm);
+    padding: 0 var(--space-2);
+    font: inherit;
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+  .hosts-link:hover {
+    border-color: var(--accent);
   }
   h2 {
     margin: 0;

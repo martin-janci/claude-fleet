@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   // Missions (orchestration O1, design 2026-10-07 §9): the Work view's third
   // tab. A mission is a goal over a root task: its member tasks, the repos
   // it may run in, its lifecycle and its log, and its loop (O4–O8): the
@@ -402,8 +403,14 @@
     if (selectedId != null) await loadDetail(selectedId);
   }
 
+  // Bumped per request and by Back: a late answer for a mission no longer
+  // open (Back pressed, another opened, a newer load) is dropped (review r07).
+  let detailSeq = 0;
+
   async function loadDetail(id: number) {
+    const mine = ++detailSeq;
     const r = await getMission(id);
+    if (mine !== detailSeq || selectedId !== id) return;
     if (r.ok) {
       detail = r.value;
     } else {
@@ -430,6 +437,7 @@
   }
 
   function back() {
+    detailSeq++;
     selectedId = null;
     detail = null;
     editing = false;
@@ -598,7 +606,7 @@
             >Autonomy
             <select bind:value={editLevel} data-testid="mission-edit-level">
               <option value={0}>L0 · asks for everything</option>
-              <option value={1}>L1 · I press Start</option>
+              <option value={1}>L1 · You press Start</option>
               <option value={2}>L2 · runs within a grant</option>
               <option value={3}>L3 · reviews and integrates</option>
             </select></label
@@ -757,7 +765,7 @@
                 <label class="field inline"
                   >Level
                   <select bind:value={grantLevel}>
-                    <option value={1}>L1 · I press every step</option>
+                    <option value={1}>L1 · You press every step</option>
                     <option value={2}>L2 · runs, retries, reviews</option>
                     <option value={3}>L3 · also creates tasks</option>
                   </select></label
@@ -899,7 +907,7 @@
         </div>
       {/if}
       {#if $uiLayout === 'new'}
-        <div class="view-switch" role="tablist" aria-label="Show tasks as">
+        <div class="view-switch" role="tablist" aria-label="Show tasks as" use:tablistKeys>
           <button
             type="button"
             role="tab"
@@ -1196,27 +1204,27 @@
   .steps, .cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }
   .steps li, .cards li { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
   .cards input { flex: 1 1 8rem; min-width: 0; }
-  .missions { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.5rem; font-size: 0.85rem; }
+  .missions { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.5rem; font-size: var(--text-xs); }
   .more { position: relative; display: inline-flex; }
   .more-menu {
     position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; min-width: 11rem; padding: 0.25rem;
     display: flex; flex-direction: column; background: var(--bg); border: 1px solid var(--border);
-    border-radius: var(--radius-md); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+    border-radius: var(--radius-md); box-shadow: var(--shadow-pop);
   }
   .mi {
     text-align: left; border: none; background: transparent; color: var(--fg); cursor: pointer;
-    font: inherit; font-size: 0.85rem; padding: 0.35rem 0.5rem; border-radius: var(--radius-sm, 4px);
+    font: inherit; font-size: var(--text-xs); padding: 0.35rem 0.5rem; border-radius: var(--radius-sm, var(--radius-sm));
   }
   .mi:hover, .mi:focus-visible { background: var(--bg-hover); }
   .mi.danger { color: var(--danger); }
-  .confirm-move { margin-top: 0.3rem; font-size: 0.85rem; }
+  .confirm-move { margin-top: 0.3rem; font-size: var(--text-xs); }
   .bar, .row { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
   .create { display: flex; flex-direction: column; gap: 0.4rem; width: 100%; }
   input, textarea, select {
     font: inherit;
     padding: 0.25rem 0.4rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg);
     color: var(--fg);
   }
@@ -1245,8 +1253,8 @@
   .name { margin: 0.25rem 0 0; overflow-wrap: anywhere; }
   .goal { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
   .head { display: flex; justify-content: space-between; align-items: center; }
-  .badge { font-size: 11px; padding: 0.05rem 0.4rem; border: 1px solid var(--border); border-radius: 999px; white-space: nowrap; }
-  h4 { margin: 0.5rem 0 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
+  .badge { font-size: var(--text-2xs); padding: 0.05rem 0.4rem; border: 1px solid var(--border); border-radius: var(--radius-pill); white-space: nowrap; }
+  h4 { margin: 0.5rem 0 0; font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
   .done-when li { padding: 0.1rem 0; }
   .events li { padding: 0.1rem 0; }
   .glyph { width: 1.1rem; text-align: center; flex: 0 0 auto; color: var(--fg-muted); }
@@ -1255,32 +1263,32 @@
   .glyph.s-failed, .glyph.s-blocked { color: var(--danger); }
   .main { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
   .deps { display: flex; flex-wrap: wrap; gap: 0.2rem; margin-top: 0.15rem; }
-  .dep { font-size: 11px; }
-  .dep-pick { max-width: 7rem; font-size: 11px; }
+  .dep { font-size: var(--text-2xs); }
+  .dep-pick { max-width: 7rem; font-size: var(--text-2xs); }
   .import { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.4rem; }
-  .import textarea { font-family: var(--font-mono); font-size: 12px; }
+  .import textarea { font-family: var(--font-mono); font-size: var(--text-xs); }
   /* The design system's Tabs (of-tabs). */
   .view-switch { display: flex; gap: 20px; border-bottom: 1px solid var(--border); margin-bottom: 0.4rem; }
   .view-switch button {
-    font: inherit; font-size: 13px; color: var(--fg-muted); background: none; border: 0; cursor: pointer;
+    font: inherit; font-size: var(--text-sm); color: var(--fg-muted); background: none; border: 0; cursor: pointer;
     padding: 6px 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
   }
   .view-switch button:hover { color: var(--fg); }
   .view-switch button[aria-selected='true'] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 500; }
   .wave { display: flex; flex-direction: column; gap: 0.1rem; }
-  .wave-head { font-size: 11px; color: var(--fg-muted); margin-top: 0.3rem; }
-  .vbadge { font-size: 11px; align-self: flex-start; padding: 0 0.35rem; border: 1px solid var(--border); border-radius: 999px; }
+  .wave-head { font-size: var(--text-2xs); color: var(--fg-muted); margin-top: 0.3rem; }
+  .vbadge { font-size: var(--text-2xs); align-self: flex-start; padding: 0 0.35rem; border: 1px solid var(--border); border-radius: var(--radius-pill); }
   .vbadge.v-verified { color: var(--status-done); border-color: var(--status-done); }
   .vbadge.v-failed { color: var(--danger); border-color: var(--danger); }
-  .checks li { display: flex; gap: 0.3rem; align-items: baseline; border: none; padding: 0; font-size: 11px; }
+  .checks li { display: flex; gap: 0.3rem; align-items: baseline; border: none; padding: 0; font-size: var(--text-2xs); }
   .checks .line { font-family: var(--font-mono, monospace); }
   .checks .c-pass .glyph { color: var(--status-done); }
   .checks .c-fail .glyph { color: var(--danger); }
   .conds { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.2rem; }
-  .proposals { padding: 0.3rem 0.4rem; border: 1px dashed var(--border); border-radius: 4px; }
+  .proposals { padding: 0.3rem 0.4rem; border: 1px dashed var(--border); border-radius: var(--radius-sm); }
   .muted { color: var(--fg-muted); margin: 0; }
-  .small { font-size: 11px; }
-  .meta { font-size: 11px; }
+  .small { font-size: var(--text-2xs); }
+  .meta { font-size: var(--text-2xs); }
   .notice { margin: 0; color: var(--danger); }
   .state.error p { color: var(--danger); margin: 0 0 0.3rem; }
   .hosts { border: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }

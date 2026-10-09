@@ -27,7 +27,7 @@
 
 <header class="of of-header" data-testid={testid}>
   <span class="brand"><OrbitMark size={22} label={null} /><span>{name}</span></span>
-  <button class="of-btn command" onclick={oncommand}><span>{commandPlaceholder}</span><Kbd chord="⌘K" {mac} /></button>
+  <button class="of-btn command" onclick={oncommand}><span>{commandPlaceholder}</span><Kbd chord="⌘K" shortcut="switcher" {mac} /></button>
   <span class="sp"></span>
   {@render children?.()}
 </header>

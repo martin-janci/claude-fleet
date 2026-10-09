@@ -18,7 +18,7 @@
   const shown = $derived(board.home ? (board.blocks.at(-1) ?? block) : block);
   const updates = $derived(board.blocks.length - 1);
 
-  const STATE_LABEL = { running: 'Running', waiting: 'Needs you', done: 'Done', failed: 'Failed' } as const;
+  const STATE_LABEL = { running: 'Working', waiting: 'Needs you', done: 'Done', failed: 'Failed' } as const;
   const STEP_MARK = { pending: '○', running: '◐', done: '✓', failed: '✕', skipped: '–' } as const;
 
   const pct = $derived(
@@ -84,7 +84,7 @@
     padding: 0.65rem 0.8rem;
     border: 1px solid var(--border);
     border-left: 3px solid var(--tone);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
   }
   .card.waiting { --tone: var(--usage-warn); }
@@ -98,10 +98,10 @@
   }
   .chip {
     padding: 0 0.45rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     border: 1px solid var(--tone);
     color: var(--tone);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     white-space: nowrap;
   }
   .count {
@@ -112,7 +112,7 @@
   .meter {
     flex: 1;
     height: 6px;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     background: var(--border);
     overflow: hidden;
   }
@@ -123,7 +123,7 @@
   .muted,
   .moved {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     margin: 0;
   }
   .moved { margin: 0.2em 0 0.5em; }

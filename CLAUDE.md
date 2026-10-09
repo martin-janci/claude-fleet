@@ -6,14 +6,17 @@ Orientation for Claude Code working in this repository.
 
 `claude-fleet` — a Tauri 2 desktop app (Rust backend + Svelte 5 frontend) for
 managing long-lived Claude Code sessions running in tmux across multiple
-machines over SSH. ~143,000 LOC Rust, ~55,000 LOC frontend.
+machines over SSH.
 
 The Rust side is a workspace: `crates/fleet-core` (Tauri-free service/store/SSH/MCP),
 `crates/fleet-hub` (headless daemon, see `docs/hub.md`), `crates/fleet-proto` (the
 hub/agent frame types, shared by both ends), `crates/fleet-agent` (the agent binary
 for hosts the hub cannot reach — depends on `fleet-proto` only, never `fleet-core`),
 `crates/fleet-agent-e2e` (tests only: the hub against the real agent over a socket,
-through fleet-core's `testkit` feature), `src-tauri` (the desktop app).
+through fleet-core's `testkit` feature), `crates/fleet-update` (the Tauri-free update
+engine shared by every component — manifests, signatures, the update state machine —
+with no `fleet-core` dependency; also the `fleet-release` binary), `src-tauri` (the
+desktop app).
 
 ## Build & test
 

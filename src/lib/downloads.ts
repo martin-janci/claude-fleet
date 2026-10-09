@@ -6,6 +6,7 @@
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import { createListRace } from './row_store';
 import { detectMac } from './terminal_keys';
 import { dismiss, push, setToastProgress } from './toasts';
 
@@ -90,13 +91,21 @@ function followJobs(rows: Download[]): void {
 const announced = new Set<number>();
 let primed = false;
 
+// A row this window added, changed or removed while a list was in flight
+// (a copy just requested, a save, a remove) is newer than that list, and an
+// older list never lands over a newer one (review r07).
+const race = createListRace<number>();
+
 export async function loadDownloads(): Promise<Result<DownloadList>> {
+  const token = race.begin();
   const r = await invokeCmd<DownloadList>('list_downloads', { args: {} });
   if (!r.ok) return r;
   // An answer without the list (a mocked or unexpected reply) reads as empty
   // rather than throwing inside an event handler.
   const value = r.value ?? ({} as Partial<DownloadList>);
   const rows = Array.isArray(value.downloads) ? value.downloads : [];
+  const merged = race.mergeList(get(downloads), rows, token, (d) => d.id);
+  if (merged === null) return r;
   if (primed) {
     for (const d of rows) {
       if (d.state === 'ready' && d.downloaded_at == null && !announced.has(d.id)) {
@@ -111,7 +120,7 @@ export async function loadDownloads(): Promise<Result<DownloadList>> {
   for (const d of rows) if (d.state === 'ready') announced.add(d.id);
   primed = true;
   followJobs(rows);
-  downloads.set(rows);
+  downloads.set(merged);
   downloadBudget.set({ total: value.total_bytes ?? 0, max: value.max_total_bytes ?? 0 });
   return r;
 }
@@ -135,6 +144,7 @@ async function requestCopy(sessionId: number, path: string, note: string | undef
     push({ kind: 'error', code: r.error.code, message: `${context}: ${r.error.message}` });
     return null;
   }
+  race.touch(r.value.id);
   downloads.update((rows) => [r.value, ...rows.filter((d) => d.id !== r.value.id)]);
   return r.value;
 }
@@ -221,6 +231,7 @@ export async function saveDownload(id: number): Promise<string | null> {
   if (r.value) {
     const path = r.value;
     savedTo.update((m) => new Map(m).set(id, path));
+    race.touch(id);
     push({ kind: 'success', message: `Saved to ${path}`, action: { label: revealLabel(), run: () => void revealSaved(id) } });
     downloads.update((rows) =>
       rows.map((d) => (d.id === id ? { ...d, downloaded_at: Math.floor(Date.now() / 1000) } : d)),
@@ -235,6 +246,7 @@ export async function removeDownload(id: number): Promise<void> {
     push({ kind: 'error', code: r.error.code, message: `Remove: ${r.error.message}` });
     return;
   }
+  race.touch(id);
   downloads.set(get(downloads).filter((d) => d.id !== id));
 }
 

@@ -147,13 +147,13 @@
   .tokens {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .tokens th {
     text-align: left;
     font-weight: 500;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.25rem 0.5rem 0.25rem 0;
     border-bottom: 1px solid var(--border);
   }
@@ -172,7 +172,7 @@
   }
   .rotated {
     display: block;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .act {
     text-align: right;

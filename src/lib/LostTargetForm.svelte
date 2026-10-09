@@ -146,17 +146,17 @@
     gap: 8px;
   }
   .label {
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--fg-muted);
   }
   .muted {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--fg-muted);
   }
   .error {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--danger);
   }
   .actions {
