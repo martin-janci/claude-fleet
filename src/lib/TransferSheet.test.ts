@@ -58,6 +58,7 @@ import { hubConnection } from './hub_connection';
 import type { HubConnection } from './hub_connection';
 import { hubStatus, STANDALONE } from './hub';
 import { UNKNOWN_SESSION_REASON } from './share';
+import { accountUsage } from './account_usage_store';
 import { resetAccessForTests, setMyGrants } from './access';
 import { expectAccessible } from './a11y_check';
 import {
@@ -134,8 +135,16 @@ describe('TransferSheet', () => {
     transferSheetFor.set(5);
     render(TransferSheet);
     await tick();
-    const select = (await screen.findByTestId('move-target')) as HTMLSelectElement;
-    expect(Array.from(select.options, (o) => o.value)).toEqual(['turanga']);
+    // Dialogs board: every host as a radio; the current one and an offline
+    // one are listed but cannot be picked, and say why.
+    await screen.findByTestId('move-target');
+    const radio = (a: string) => screen.getByTestId(`move-target-${a}`) as HTMLInputElement;
+    expect(radio('mefistos').disabled).toBe(true);
+    expect(screen.getByTestId('move-choice-mefistos').textContent).toContain('current');
+    expect(radio('down').disabled).toBe(true);
+    expect(screen.getByTestId('move-choice-down').textContent).toContain('offline');
+    expect(radio('turanga').disabled).toBe(false);
+    expect(radio('turanga').checked).toBe(true);
     await fireEvent.click(screen.getByTestId('move-keep-source'));
     await fireEvent.click(screen.getByTestId('confirm-move'));
     expect(mockInvoke).toHaveBeenCalledWith('move_session', {
@@ -145,6 +154,20 @@ describe('TransferSheet', () => {
       },
     });
     expect(await screen.findByTestId('transfer-steps')).toBeTruthy();
+  });
+
+  it('setup: a host whose login is at its limit is listed but cannot be picked', async () => {
+    hosts.set([host('mefistos'), host('turanga', { account_uuid: 'acc-1', latency_ms: 18, disk_home_free_kb: 1288490188 }), host('full', { account_uuid: 'acc-2' })]);
+    accountUsage.set({
+      'acc-2': { account_uuid: 'acc-2', usage: { five_hour: { utilization: 100, resets_at: null }, seven_day: null, seven_day_opus: null, seven_day_sonnet: null }, subscription: null, fetched_at: 1, source_host: null, status: 'ok', detail: null, next_try_at: 0 },
+    });
+    transferSheetFor.set(5);
+    render(TransferSheet);
+    await screen.findByTestId('move-target');
+    expect((screen.getByTestId('move-target-full') as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByTestId('move-choice-full').textContent).toContain('account at limit');
+    expect(screen.getByTestId('move-choice-turanga').textContent).toContain('18 ms · 1.2 TB free');
+    accountUsage.set({});
   });
 
   it('setup: with no eligible target the button is disabled and says why', async () => {
@@ -977,7 +1000,7 @@ describe('TransferSheet: preflight', () => {
 
   it('asks again when the target changes', async () => {
     const { getByTestId } = renderSetup({ targets: ['beta', 'gamma'] });
-    await fireEvent.change(getByTestId('move-target'), { target: { value: 'gamma' } });
+    await fireEvent.click(getByTestId('move-target-gamma'));
     expect(requestPreflight).toHaveBeenLastCalledWith(7, 'gamma');
   });
 

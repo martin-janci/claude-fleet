@@ -1,11 +1,13 @@
 <script lang="ts">
   import { fmtBytes } from './attachments';
   import Modal from './Modal.svelte';
+  import DialogSheet from './DialogSheet.svelte';
   import HostStream from './HostStream.svelte';
   import { hosts } from './hosts';
   import { hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
-  import { moveBlockedReason, moveTargetsFor } from './moveEligibility';
+  import { moveBlockedReason, moveChoicesFor } from './moveEligibility';
+  import { accountUsage } from './account_usage_store';
   import { describeMoveError } from './moveErrors';
   import { orgs } from './orgs';
   import { preflightAge, preflightFor, preflights, PREFLIGHT_STALE_MS, requestPreflight } from './preflight';
@@ -34,7 +36,10 @@
   const id = $derived($transferSheetFor);
   const run = $derived(id === null ? undefined : $moves.get(id));
   const session = $derived(id === null ? undefined : $sessions.find((s) => s.id === id));
-  const targets = $derived(session ? moveTargetsFor(session, $hosts) : []);
+  // Dialogs board, Move to host: every host as a radio, the current one and
+  // the ones it cannot go to shown disabled with the reason.
+  const choices = $derived(session ? moveChoicesFor(session, $hosts, $accountUsage) : []);
+  const targets = $derived(choices.filter((c) => c.disabled === null));
   // Both halves, in the order `share.ts` documents: the hub's own refusal (or
   // a link that is down), then who this client is on THIS row — the move
   // lifecycle is spec §4.3's `own` tier (multi-user M1), so a `watch` or
@@ -277,7 +282,7 @@
     transferSheetFor.set(null);
   }
   function transfer() {
-    if (!session || !target || blocked !== null) return;
+    if (!session || !target || blocked !== null || !targets.some((h) => h.alias === target)) return;
     startMove(session, target, { keepSource });
   }
   function done() {
@@ -360,22 +365,39 @@
   {/if}
 {/snippet}
 
-{#if id !== null && (run || session)}
-  <Modal {title} onclose={close} width="480px" testid="move-dialog">
-    {#if !run && session}
-      <div class="field"><span class="key">From</span> {session.host_alias}</div>
+{#if id !== null && !run && session}
+  <DialogSheet
+    title="Move to host"
+    lead="Moves the worktree and the conversation; the agent resumes there."
+    verb="Move"
+    onconfirm={transfer}
+    onclose={close}
+    canConfirm={!!target && targets.some((h) => h.alias === target) && blocked === null}
+    confirmTitle={blocked}
+    testid="move-dialog"
+    confirmTestid="confirm-move"
+  >
       {#if targets.length === 0}
-        <p class="note" data-testid="move-no-targets">No other reachable, provisioned host.</p>
-      {:else}
-        <label class="field">
-          <span class="key">To</span>
-          <select bind:value={target} data-testid="move-target">
-            {#each targets as h (h.alias)}
-              <option value={h.alias}>{h.alias}</option>
-            {/each}
-          </select>
-        </label>
-        <label class="field">
+        <p class="field-note" data-testid="move-no-targets">No other reachable, provisioned host.</p>
+      {/if}
+      <div class="hosts" role="radiogroup" aria-label="Host" data-testid="move-target">
+        {#each choices as c (c.alias)}
+          <label class="host-choice" class:on={target === c.alias} class:off={c.disabled !== null} data-testid="move-choice-{c.alias}">
+            <input
+              type="radio"
+              name="move-target"
+              value={c.alias}
+              bind:group={target}
+              disabled={c.disabled !== null}
+              data-testid="move-target-{c.alias}"
+            />
+            <span class="host-name">{c.alias}</span>
+            <span class="host-why">{c.disabled ?? c.health ?? ''}</span>
+          </label>
+        {/each}
+      </div>
+      {#if targets.length > 0}
+        <label class="keep">
           <input type="checkbox" bind:checked={keepSource} data-testid="move-keep-source" />
           Keep this session running
         </label>
@@ -474,18 +496,10 @@
         Uncommitted and unpushed work, small ignored files, subagents and project memory travel
         too. Nothing is pushed or committed.
       </p>
-      <div class="buttons">
-        <button onclick={close}>Cancel</button>
-        <button
-          onclick={transfer}
-          disabled={!target || blocked !== null}
-          title={blocked ?? ''}
-          data-testid="confirm-move"
-        >
-          Transfer
-        </button>
-      </div>
-    {:else if run && run.status === 'running'}
+  </DialogSheet>
+{:else if id !== null && run}
+  <Modal {title} onclose={close} width="480px" testid="move-dialog">
+    {#if run.status === 'running'}
       {#if run.error}
         <p class="note">Lost contact with the hub — the move may still be running there.</p>
         <!-- The same code covers a refused connection and a 404, which are
@@ -744,9 +758,21 @@
 {/if}
 
 <style>
-  .field { display: flex; align-items: center; gap: 0.5rem; margin: 0.35rem 0; font-size: var(--text-xs); }
-  .key { width: 3rem; color: var(--fg-muted); }
-  .field select { flex: 1; }
+  .hosts { display: flex; flex-direction: column; gap: 2px; }
+  .host-choice {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+  .host-choice.on { background: var(--accent-soft); }
+  .host-choice.off { cursor: default; color: var(--fg-muted); }
+  .host-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  .host-why { color: var(--fg-muted); font-size: var(--text-xs); white-space: nowrap; }
+  .keep { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); }
   .note, .muted { color: var(--fg-muted); font-size: var(--text-2xs); }
   .what { font-size: var(--text-sm); margin: 0 0 0.35rem; }
   .steps, .summary { list-style: none; margin: 0.5rem 0; padding: 0; font-size: var(--text-xs); }
