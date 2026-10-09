@@ -597,7 +597,7 @@ if [ -n "${SIDM:-}" ] && [ ${#TKBO} -eq 64 ]; then
   na1=$(tool "$PA" "$PUB" "$TKADA" session_narrow "{\"session_id\":$SIDM,\"person\":\"$MU_B\"}")
   gb4=$(tool "$PA" "$PUB" "$TKBO" my_grants '{}')
   spw=$(tool "$PA" "$PUB" "$TKBO" send_prompt "{\"session_id\":$SIDM,\"prompt\":\"\",\"keys\":\"Escape\"}")
-  check "session_narrow lowers drive to watch, and the pane write is refused again" 'echo "$na1" | grep -q "\"isError\":false" && echo "$gb4" | grep -qE "\\\\\"session_id\\\\\": ?$SIDM,[^}]*\\\\\"level\\\\\": ?\\\\\"watch\\\\\"" && echo "$spw" | grep -q E_FORBIDDEN && echo "$spw" | grep -q "needs drive"' "${na1:0:200} | ${gb4:0:300} | ${spw:0:300}"
+  check "session_narrow lowers drive to watch, and the key press is refused again: a key needs answer" 'echo "$na1" | grep -q "\"isError\":false" && echo "$gb4" | grep -qE "\\\\\"session_id\\\\\": ?$SIDM,[^}]*\\\\\"level\\\\\": ?\\\\\"watch\\\\\"" && echo "$spw" | grep -q E_FORBIDDEN && echo "$spw" | grep -q "needs answer"' "${na1:0:200} | ${gb4:0:300} | ${spw:0:300}"
   up1=$(tool "$PA" "$PUB" "$TKADA" session_share "{\"session_id\":$SIDM,\"person\":\"$MU_B\",\"level\":\"drive\"}")
   na2=$(tool "$PA" "$PUB" "$TKADA" session_narrow "{\"session_id\":$SIDM,\"person\":\"$MU_B\"}")
   gb5=$(tool "$PA" "$PUB" "$TKBO" my_grants '{}')
@@ -662,7 +662,7 @@ else
     "the watcher's my_grants names that session at watch and nothing else" \
     "a watcher's restore_host_sessions dry run answers as an id that names nothing, while the owner's names the session" \
     "after the revoke the watcher's my_grants names that session no longer" \
-    "session_narrow lowers drive to watch, and the pane write is refused again" \
+    "session_narrow lowers drive to watch, and the key press is refused again: a key needs answer" \
     "a long poll the watcher started before the revoke returns E_NOTFOUND after it, not the session" \
     "and the watcher's open /events stream ends when the grant is revoked" \
     "the revoked watcher's resumed reconnect is answered resumed:false and never carries the session"; do
@@ -1384,14 +1384,15 @@ else
   check "and not the session still on open work" '[ "$(jt "$td" "[.. | objects | select(.session_id? == ${SST:-0})] | length")" = 0 ]' "${td:0:800}"
   ITEMS="[{\"session_id\":${SCL:-0},\"action\":\"safe_kill\"},{\"session_id\":${SDI:-0},\"action\":\"safe_kill\"},{\"session_id\":${SST:-0},\"action\":\"safe_kill\"}]"
   # The documented hub behaviour (docs/hub.md): with mcp.confirm_destructive
-  # on, a kill needs a confirmation this hub has no approver for.
+  # on, a kill waits in the hub's queue for the owner's paired device
+  # (redesign 9.2: mcp_confirms / answer_mcp_confirm). Nobody answers it here.
   wdb "INSERT OR REPLACE INTO settings (key, value) VALUES ('mcp.confirm_destructive', 'true');"
   g1=$(wcall "$TOKW" work_link "{\"action\":\"tidy_apply\",\"items\":$ITEMS}")
   NONCE=$(printf '%s' "$g1" | grep -oE 'confirm_nonce[^0-9a-zA-Z]+[0-9a-zA-Z-]+' | head -1 | sed -E 's/.*[^0-9a-zA-Z-]//')
   check "with confirm_destructive on, tidy_apply asks for a confirmation (a nonce)" 'echo "$g1" | grep -q E_CONFIRM_REQUIRED && [ -n "$NONCE" ]' "${g1:0:600}"
   g2=$(wcall "$TOKW" work_link "{\"action\":\"tidy_apply\",\"items\":$ITEMS,\"confirm_nonce\":\"$NONCE\"}")
-  check "the nonce is never approved on a hub: still refused, nothing killed" 'echo "$g2" | grep -q E_CONFIRM_REQUIRED && wtmux has-session -t "=$TCL" 2>/dev/null' "${g2:0:600}"
-  check "and the hub logs that it has no approver" 'grep -q "no approver" "$ROOT/w.log"' "$(grep -i approv "$ROOT/w.log" | tail -3)"
+  check "an unanswered nonce is not approved: still refused, nothing killed" 'echo "$g2" | grep -q E_CONFIRM_REQUIRED && wtmux has-session -t "=$TCL" 2>/dev/null' "${g2:0:600}"
+  check "and the hub logs that it waits for the owner's device" 'grep -q "waiting for the owner'"'"'s device" "$ROOT/w.log"' "$(grep -i confirm "$ROOT/w.log" | tail -3)"
   wdb "UPDATE settings SET value = 'false' WHERE key = 'mcp.confirm_destructive';"
   ap=$(wcall "$TOKW" work_link "{\"action\":\"tidy_apply\",\"items\":$ITEMS}")
   check "tidy_apply kills the clean session outright" '[ "$(jt "$ap" "[.results[] | select(.session_id == ${SCL:-0})][0].outcome")" = killed ]' "${ap:0:800}"
@@ -1529,17 +1530,17 @@ else
   rw=$(wcall "$TOKRO" work_link "{\"action\":\"place\",\"task_id\":\"item:${LID:-0}\",\"group\":\"RO\",\"expected_version\":1}")
   check "a readonly client reads the tree and may not place" '[ -n "$(jt "$ro" .total)" ] && echo "$rw" | grep -qE "E_FORBIDDEN|readonly|read-only"' "${ro:0:300} | ${rw:0:300}"
 
-  # --- operator confirm (M9.7): no approver on a hub -------------------------
+  # --- operator confirm (M9.7): waits for the owner on a hub (9.2) ----------
   echo "-- operator"
   opc=$(wcall "$TOKW" pair_client '{"name":"ux-agent","mode":"full"}')
   OPCODE=$(jt "$opc" .code)
   OPTOK=$(curl -s -m 10 -X POST "http://127.0.0.1:$PW/pair" -H "Host: $PUB" -H 'Content-Type: application/json' -d "{\"code\":\"$OPCODE\"}" | jq -r .token 2>/dev/null)
   n_before=$(wtmux ls 2>/dev/null | wc -l | tr -d ' ')
   op=$(wcall "$OPTOK" work_link "{\"action\":\"start\",\"key\":\"E2E-2\",\"project_id\":${PWEB:-0},\"host_alias\":\"local\"}")
-  check "the operator's start is refused on a hub: no approver" 'echo "$op" | grep -q E_FORBIDDEN && echo "$op" | grep -q "no approver"' "${op:0:400}"
+  check "the operator's start waits for the owner's approval on a hub" 'echo "$op" | grep -q E_CONFIRM_REQUIRED' "${op:0:400}"
   check "and no session was started" '[ "$(wtmux ls 2>/dev/null | wc -l | tr -d " ")" = "$n_before" ]' "$(wtmux ls 2>&1)"
   opt=$(wcall "$OPTOK" work_link "{\"action\":\"tidy_apply\",\"items\":[{\"session_id\":${SDI:-0},\"action\":\"safe_kill\"}]}")
-  check "nor may the operator's tidy kill anything" 'echo "$opt" | grep -q E_FORBIDDEN && wtmux has-session -t "=$TDI" 2>/dev/null' "${opt:0:400}"
+  check "and the operator's tidy kill waits too: nothing is killed" 'echo "$opt" | grep -q E_CONFIRM_REQUIRED && wtmux has-session -t "=$TDI" 2>/dev/null' "${opt:0:400}"
   stop_hub w
   check "hub W SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
 fi

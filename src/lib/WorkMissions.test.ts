@@ -244,6 +244,61 @@ describe('WorkMissions', () => {
     expect(calls('set_work_dep')[0]).toEqual({ item_id: 12, depends_on: 11, on: false });
   });
 
+  // Redesign 9.10: a stuck mission's card, New layout only. A step goes
+  // through the action a person already has; nothing is completed.
+  describe('stuck mission triage', () => {
+    const stuckCard = {
+      stuck: { reason: 'failed', why: '1 task failed', done: 0, failed: 1, blocked: 0, total: 2 },
+      next: { feature: 'mission_triage', value: 'retry', source: 'jev', confidence_pct: 80 },
+      may_change: true,
+    };
+    async function openStuck() {
+      current = mission({ state: 'active' });
+      handlers.mission_triage = () => stuckCard;
+      handlers.retry_work_item = () => ({ ok: true, detail: 'queued' });
+      handlers.work_mission = () => ({
+        mission: current,
+        items: [item(10, 'Payments v2'), item(11, 'Refunds')],
+        graph: {
+          nodes: [
+            { item_id: 10, state: 'ready', wave: 1 },
+            { item_id: 11, state: 'failed', wave: 1, attempt: { task_id: 5, state: 'failed', error: 'boom' } },
+          ],
+          waves: 1,
+        },
+        events: [],
+        may_change: true,
+      });
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+    }
+
+    it('stays out of the Classic layout', async () => {
+      uiLayout.set('classic');
+      await openStuck();
+      expect(screen.queryByTestId('mission-triage')).toBeNull();
+      expect(calls('mission_triage')).toHaveLength(0);
+    });
+
+    it('retries the failed task and gives up only through the confirm', async () => {
+      uiLayout.set('new');
+      try {
+        await openStuck();
+        expect(screen.getByTestId('mission-triage-why').textContent).toBe('1 task failed');
+        await fireEvent.click(screen.getByTestId('mission-triage-step-retry'));
+        await flush();
+        expect(calls('retry_work_item')[0]).toEqual(expect.objectContaining({ item_id: 11 }));
+        await fireEvent.click(screen.getByTestId('mission-triage-step-give_up'));
+        await flush();
+        expect(calls('set_mission_state')).toHaveLength(0);
+      } finally {
+        uiLayout.set('classic');
+      }
+    });
+  });
+
   describe('task graph', () => {
     const graphDetail = () => ({
       mission: current,

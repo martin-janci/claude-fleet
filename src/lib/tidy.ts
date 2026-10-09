@@ -17,6 +17,7 @@ export type TidyReason =
   | 'pr_merged_idle'
   | 'not_planned'
   | 'duplicate_worktree'
+  | 'same_work'
   | 'ghost_expiring'
   | 'idle_unlinked'
   | (string & {});
@@ -33,13 +34,18 @@ export const TIDY_REASONS = [
   'pr_merged_idle',
   'not_planned',
   'duplicate_worktree',
+  'same_work',
   'ghost_expiring',
   'idle_unlinked',
 ] as const;
 
 /** Reasons auto-tidy never acts on, whatever the settings say (work graph
  *  M11.3, decision D19). */
-export const NEVER_AUTO_REASONS: ReadonlySet<string> = new Set(['idle_unlinked']);
+export const NEVER_AUTO_REASONS: ReadonlySet<string> = new Set(['idle_unlinked', 'same_work']);
+
+/** Reasons that rest on Jev's answer (redesign 6.9, Tidy › Duplicates): New
+ *  layout only, and never ticked for the person. */
+export const JEV_REASONS: ReadonlySet<string> = new Set(['same_work']);
 
 /** Days a "Keep" holds a session out of the sheet. */
 export const KEEP_DAYS = 7;
@@ -49,6 +55,7 @@ export const TIDY_REASON_LABELS: Record<string, string> = {
   pr_merged_idle: 'PR merged, idle',
   not_planned: "Won't do / duplicate",
   duplicate_worktree: 'Duplicate on one worktree',
+  same_work: 'Same work as another session',
   ghost_expiring: 'Lost session about to expire',
   idle_unlinked: 'Idle, no work linked',
 };
@@ -87,6 +94,8 @@ export interface TidyCandidate {
   archived?: boolean;
   /** Auto-tidy (when on) would act on it. */
   auto?: boolean;
+  /** `same_work`: the session Jev says does the same work (the one kept). */
+  same_as?: number | null;
 }
 
 /** `work { action: tidy }`. */
@@ -194,9 +203,15 @@ export function defaultChoice(c: TidyCandidate): TidyChoice | null {
 /** Whether a row starts ticked: every row whose default is an action,
  *  except a lost session (Resume is its own button) and a session with no
  *  work linked (M11.3: fleet cannot know what it was for, so a person ticks
- *  it, or uses its own Keep / Safe kill buttons). */
+ *  it, or uses its own Keep / Safe kill buttons), and Jev's `same_work`
+ *  (6.9: a model's answer is a suggestion, a person ticks it). */
 export function preselected(c: TidyCandidate): boolean {
-  return c.action !== 'resume_or_expire' && c.reason !== 'idle_unlinked' && defaultChoice(c) !== null;
+  return (
+    c.action !== 'resume_or_expire' &&
+    c.reason !== 'idle_unlinked' &&
+    !JEV_REASONS.has(c.reason) &&
+    defaultChoice(c) !== null
+  );
 }
 
 /** The evidence line of a candidate: "idle 9 d · no work linked" for an
@@ -367,7 +382,10 @@ export function requestedTicks(cands: readonly TidyCandidate[], r: TidyRequest):
   const want = new Set(r.sessionIds);
   return new Set(
     cands
-      .filter((c) => want.has(c.session_id) && choicesFor(c).length > 0 && c.reason !== 'idle_unlinked')
+      .filter(
+        (c) =>
+          want.has(c.session_id) && choicesFor(c).length > 0 && c.reason !== 'idle_unlinked' && !JEV_REASONS.has(c.reason),
+      )
       .map((c) => c.session_id),
   );
 }

@@ -471,12 +471,17 @@ async fn apply_one(
             // A session with no work linked, and no other reason: the
             // `idle_unlinked` kill (work graph M11.3). Only while the fresh
             // plan still names it, never automatically (D19), clean only.
+            // Jev's `same_work` (6.9) on an unlinked session is held to the
+            // same rule: nothing says what its uncommitted work is for.
             let planned = plan
                 .iter()
                 .find(|c| c.session_id == s.row.id)
                 .map(|c| c.reason);
-            let unlinked_kill =
-                s.unlinked() && matches!(planned, None | Some(TidyReason::IdleUnlinked));
+            let unlinked_kill = s.unlinked()
+                && matches!(
+                    planned,
+                    None | Some(TidyReason::IdleUnlinked) | Some(TidyReason::SameWork)
+                );
             if unlinked_kill {
                 if source.starts_with("auto") {
                     return Err(IpcError::new(

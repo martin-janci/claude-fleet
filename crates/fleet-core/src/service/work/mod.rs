@@ -331,7 +331,8 @@ pub struct WorkLinkArgs {
     /// run's host; omitted, the host's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    /// today_brief: draft a new brief (true) or answer the last one.
+    /// today_brief: draft a new brief (true) or answer the last one;
+    /// mission_triage: also draft the card's words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<bool>,
     /// today_brief: the start of the viewer's day, unix seconds.
@@ -551,6 +552,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "missions_pause_all",
     "mission_release_note",
     "today_brief",
+    "mission_triage",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -638,6 +640,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     // Redesign 9.11: LLM drafts in Control.
     ("mission_release_note", "work_link", "mission_release_note"),
     ("today_brief", "work_link", "today_brief"),
+    ("mission_triage", "work_link", "mission_triage"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph

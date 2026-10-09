@@ -13,6 +13,8 @@
   import { projects } from './projects';
   import { readPref, uiLayout, writePref } from './prefs';
   import ReleaseNote from './ReleaseNote.svelte';
+  import MissionTriage from './MissionTriage.svelte';
+  import type { NextStep } from './mission_triage';
   import MissionGraph from './MissionGraph.svelte';
   import Loader from './Loader.svelte';
   import { defaultLaneBy, type LaneBy } from './mission_graph';
@@ -263,6 +265,24 @@
   async function retry(itemId: number) {
     const out = await act(retryWorkItem(itemId));
     if (out && !out.ok) notice = out.detail;
+  }
+
+  /** Redesign 9.10: a step picked on the stuck card, through the action a
+   *  person already has. Nothing is completed, cancelled or verified here. */
+  function triageStep(step: NextStep) {
+    if (step === 'retry') {
+      const failed = (detail?.graph?.nodes ?? [])
+        .filter((n) => n.state === 'failed')
+        .sort((a, b) => (b.attempt?.task_id ?? 0) - (a.attempt?.task_id ?? 0))[0];
+      if (failed) void retry(failed.item_id);
+      else void askPlanner();
+    } else if (step === 'split') {
+      void askPlanner();
+    } else if (step === 'give_up') {
+      pickFinal('cancelled');
+    } else {
+      document.querySelector('[data-testid="mission-loop"]')?.scrollIntoView({ block: 'nearest' });
+    }
   }
 
   async function askPlanner() {
@@ -560,6 +580,11 @@
         {#if progressLabel(mission)} · {progressLabel(mission)}{/if}
         · updated {timeAgo(mission.updated_at)}
       </p>
+
+      {#if $uiLayout === 'new' && !isFinal(mission.state) && mission.state !== 'draft'}
+        <!-- Redesign 9.10: a stuck mission's card; Jev proposes, a person picks. -->
+        <MissionTriage missionId={mission.id} reload={detail.events?.[0]?.id ?? 0} onstep={triageStep} />
+      {/if}
 
       {#if editing}
         <label class="field">Goal<textarea rows="3" bind:value={editGoal} data-testid="mission-edit-goal"></textarea></label>

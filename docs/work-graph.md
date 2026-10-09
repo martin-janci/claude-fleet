@@ -806,6 +806,7 @@ counts toward *Needs you*. The sheet groups candidates by reason:
 | `pr_merged_idle` | its PR is merged and it is idle | Safe kill |
 | `not_planned` | the ticket was closed as won't-do or duplicate | Safe kill |
 | `duplicate_worktree` | two sessions work in one worktree | Kill (the worktree stays) |
+| `same_work` | Jev proposed (`decide.jev.related_session`, assist) that two running sessions do the same work; the idler is suggested. New layout only | not ticked; never automatic |
 | `ghost_expiring` | a lost session is a day from being reaped | Resume or let it expire |
 | `idle_unlinked` | no work linked, idle and unprompted `work.tidy_idle_unlinked_days` | not ticked |
 
