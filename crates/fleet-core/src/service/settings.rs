@@ -621,6 +621,12 @@ pub const NOTIFY_STATE_LABELS: &[(&str, &str)] = &[
 /// How often the hub re-reads the channel, and clients re-check.
 pub const UPDATE_CHECK_INTERVAL_SECS: &str = "update.check_interval_secs";
 pub const UPDATE_CHECK_INTERVAL_MIN_SECS: u64 = 900;
+/// A daily `HH:MM-HH:MM` range in UTC inside which an `automatic` component
+/// installs (decide rule 6); `""` = any time. An offer to a person is not held.
+pub const UPDATE_WINDOW: &str = "update.window";
+/// How long a rollout wave soaks before the next one opens (S9).
+pub const UPDATE_ROLLOUT_WAVE_SECS: &str = "update.rollout_wave_secs";
+pub const UPDATE_ROLLOUT_WAVE_MIN_SECS: u64 = 300;
 /// Sessions and items with no org may be sent too (D31). Off by default.
 pub const DECIDE_JEV_UNASSIGNED: &str = "decide.jev.unassigned";
 /// D48: sessions with no org may send reply text (J2) too, on top of
@@ -1299,6 +1305,21 @@ pub const SPECS: &[Spec] = &[
         Kind::SecsMin(UPDATE_CHECK_INTERVAL_MIN_SECS),
         "Update check interval",
         "How often the hub re-reads the release channel, and clients check again.",
+    )
+    .unit(Unit::Hours),
+    Spec::new(
+        UPDATE_WINDOW,
+        "",
+        Kind::TimeRange,
+        "Maintenance window",
+        "A daily range in UTC, like 02:00-05:00, in which automatic updates install. Outside it they wait; an offer to a person is not held. Empty: any time.",
+    ),
+    Spec::new(
+        UPDATE_ROLLOUT_WAVE_SECS,
+        "3600",
+        Kind::SecsMin(UPDATE_ROLLOUT_WAVE_MIN_SECS),
+        "Rollout wave soak",
+        "How long each wave of a staged rollout runs before the next opens, if its failure ratio stays under the rollout's halt ratio.",
     )
     .unit(Unit::Hours),
     Spec::new(

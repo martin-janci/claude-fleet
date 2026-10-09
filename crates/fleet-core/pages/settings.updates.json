@@ -18,6 +18,14 @@
           "key": "update.check_interval_secs"
         },
         {
+          "type": "field",
+          "key": "update.window"
+        },
+        {
+          "type": "field",
+          "key": "update.rollout_wave_secs"
+        },
+        {
           "type": "notice",
           "tone": "info",
           "text": "This desktop updates itself (paired, its hub decides; standalone, these rows do), only to a release the release key signed. The Docker hub updates itself through fleet-updater (opt-in). nightly: the hub on each green main push, the desktop once a day."

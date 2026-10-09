@@ -1249,7 +1249,7 @@ pub struct UpdateStatusParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct UpdateAdminParams {
-    /// pin | unpin | refresh.
+    /// pin | unpin | refresh | rollout_start | rollout_pause | rollout_resume | rollout_abort.
     pub action: String,
     /// hub | agent | desktop | android | ios.
     #[serde(default)]
@@ -1263,9 +1263,15 @@ pub struct UpdateAdminParams {
     /// pin: required, not merely offered.
     #[serde(default)]
     pub mandatory: Option<bool>,
-    /// pin: why, for the dashboard.
+    /// pin, rollout_pause: why, for the dashboard.
     #[serde(default)]
     pub reason: Option<String>,
+    /// rollout_start: cumulative percents ending at 100 (default [10,50,100]).
+    #[serde(default)]
+    pub waves: Option<Vec<u8>>,
+    /// rollout_start: the wave failure ratio that pauses it (default 0.2).
+    #[serde(default)]
+    pub halt_failure_ratio: Option<f64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

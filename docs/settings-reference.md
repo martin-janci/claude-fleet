@@ -183,6 +183,8 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `update.desktop.mode` | `notify` | `manual` / `notify` / `automatic` | The same choice for the desktop app. |
 | `update.mobile.mode` | `notify` | `manual` / `notify` | manual or notify: a phone never installs an update silently. |
 | `update.check_interval_secs` | `21600` | ≥ 900 seconds | How often the hub re-reads the release channel, and clients check again. |
+| `update.window` | `` | a daily time range `HH:MM-HH:MM`, or empty for none | A daily range in UTC, like 02:00-05:00, in which automatic updates install. Outside it they wait; an offer to a person is not held. Empty: any time. |
+| `update.rollout_wave_secs` | `3600` | ≥ 300 seconds | How long each wave of a staged rollout runs before the next opens, if its failure ratio stays under the rollout's halt ratio. |
 
 ## Decisions (Jev)
 

@@ -1579,6 +1579,44 @@
       "value": "21600"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "",
+      "help": "A daily range in UTC, like 02:00-05:00, in which automatic updates install. Outside it they wait; an offer to a person is not held. Empty: any time.",
+      "key": "update.window",
+      "kind": {
+        "type": "time_range"
+      },
+      "label": "Maintenance window",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": ""
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "3600",
+      "help": "How long each wave of a staged rollout runs before the next opens, if its failure ratio stays under the rollout's halt ratio.",
+      "key": "update.rollout_wave_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 300,
+        "type": "secs"
+      },
+      "label": "Rollout wave soak",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "hours",
+      "value": "3600"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -4461,6 +4499,14 @@
             },
             {
               "key": "update.check_interval_secs",
+              "type": "field"
+            },
+            {
+              "key": "update.window",
+              "type": "field"
+            },
+            {
+              "key": "update.rollout_wave_secs",
               "type": "field"
             },
             {

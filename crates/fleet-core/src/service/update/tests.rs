@@ -1254,3 +1254,304 @@ async fn the_phones_apk_arrives_as_a_signed_amendment() {
         }
     ));
 }
+
+// ── rollouts and the maintenance window (S9) ──
+
+fn desktops(store: &Mutex<Store>, k: &TrustedKeys, n: i64) -> Vec<(String, Status)> {
+    (1..=n)
+        .map(|id| {
+            let d = check(
+                store,
+                &client(id, TokenMode::Full, None),
+                &desktop_req("0.3.3"),
+                k,
+                NOW,
+            )
+            .unwrap();
+            (format!("client:{id}"), d.status)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_rollout_opens_wave_by_wave_and_completes() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    assert!(desktops(&store, &k, 40)
+        .iter()
+        .all(|(_, s)| *s == Status::UpdateAvailable));
+
+    let r = rollout_start(
+        &store,
+        "desktop",
+        "0.3.4",
+        Some(vec![10, 100]),
+        None,
+        &k,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        (r.wave, r.waves.clone(), r.halt_failure_ratio),
+        (0, vec![10, 100], 0.2)
+    );
+    let v = Version::new(0, 3, 4);
+    let first = desktops(&store, &k, 40);
+    for (t, s) in &first {
+        let in_wave = fleet_update::decide::in_cohort(t, &v, 10);
+        assert_eq!(
+            *s,
+            if in_wave {
+                Status::UpdateAvailable
+            } else {
+                Status::Hold
+            },
+            "{t}"
+        );
+    }
+    assert!(first.iter().any(|(_, s)| *s == Status::Hold));
+    let why = check_for(
+        &store,
+        &Caller::master(),
+        &first.iter().find(|(_, s)| *s == Status::Hold).unwrap().0,
+        &k,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(why.reason.code, fleet_update::wire::ReasonCode::NotInWave);
+
+    // One active rollout per component.
+    let again = rollout_start(&store, "desktop", "0.3.4", None, None, &k, NOW).unwrap_err();
+    assert_eq!(again.code, codes::E_CONFLICT);
+
+    // The wave soaks for update.rollout_wave_secs (an hour) first.
+    assert!(rollout::advance(&store, NOW + 60).unwrap().is_empty());
+    let moved = rollout::advance(&store, NOW + 3600).unwrap();
+    assert_eq!((moved[0].what, moved[0].wave), ("advanced", 1));
+    assert!(desktops(&store, &k, 40)
+        .iter()
+        .all(|(_, s)| *s == Status::UpdateAvailable));
+
+    let moved = rollout::advance(&store, NOW + 7200).unwrap();
+    assert_eq!(moved[0].what, "completed");
+    let s = lock(&store).unwrap();
+    assert!(s.update_rollout_active("desktop").unwrap().is_none());
+    let st = s.update_rollouts(5).unwrap();
+    assert_eq!(st[0].outcome.as_deref(), Some("completed"));
+}
+
+#[tokio::test]
+async fn a_failing_wave_halts_the_rollout_and_says_so() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    desktops(&store, &k, 40);
+    rollout_start(
+        &store,
+        "desktop",
+        "0.3.4",
+        Some(vec![50, 100]),
+        Some(0.2),
+        &k,
+        NOW,
+    )
+    .unwrap();
+    let v = Version::new(0, 3, 4);
+    let in_wave: Vec<i64> = (1..=40)
+        .filter(|id| fleet_update::decide::in_cohort(&format!("client:{id}"), &v, 50))
+        .collect();
+    assert!(in_wave.len() >= 3);
+    // One installed it, one failed: 50% of the attempts failed.
+    report(
+        &store,
+        &client(in_wave[0], TokenMode::Full, None),
+        &desktop_report("a", UpdatePhase::Success, "0.3.4"),
+        NOW,
+    )
+    .unwrap();
+    report(
+        &store,
+        &client(in_wave[1], TokenMode::Full, None),
+        &desktop_report("b", UpdatePhase::Failed, "0.3.3"),
+        NOW,
+    )
+    .unwrap();
+    {
+        let s = lock(&store).unwrap();
+        let r = s.update_rollout_active("desktop").unwrap().unwrap();
+        let t = rollout::tally(&s, &r).unwrap();
+        assert_eq!(
+            (t.in_wave as usize, t.installed, t.failed),
+            (in_wave.len(), 1, 1)
+        );
+    }
+
+    let moved = rollout::advance(&store, NOW + 3600).unwrap();
+    assert_eq!(moved[0].what, "halted");
+    // Paused: nobody new is offered it, and fleet_health names the rollout.
+    let d = check(
+        &store,
+        &client(in_wave[2], TokenMode::Full, None),
+        &desktop_req("0.3.3"),
+        &k,
+        NOW + 3600,
+    )
+    .unwrap();
+    assert_eq!(
+        (d.status, d.reason.code),
+        (Status::Hold, fleet_update::wire::ReasonCode::RolloutPaused)
+    );
+    {
+        let s = lock(&store).unwrap();
+        let h = health(&s, &Caller::master(), &k, NOW + 3600).unwrap();
+        let a = h
+            .attention
+            .iter()
+            .find(|a| a.reason == ATTENTION_ROLLOUT_PAUSED)
+            .unwrap();
+        assert_eq!(
+            (a.component.as_str(), a.version.as_str()),
+            ("desktop", "0.3.4")
+        );
+        assert!(
+            a.detail.as_deref().unwrap().starts_with("halted: 1 of 2"),
+            "{:?}",
+            a.detail
+        );
+        // A scoped caller does not see the fleet's rollouts.
+        let own = health(
+            &s,
+            &client(in_wave[2], TokenMode::Full, Some(3)),
+            &k,
+            NOW + 3600,
+        )
+        .unwrap();
+        assert!(own
+            .attention
+            .iter()
+            .all(|a| a.reason != ATTENTION_ROLLOUT_PAUSED));
+    }
+    let st = status(&store, &Caller::master(), &k, NOW + 3600).unwrap();
+    assert_eq!(st.rollouts[0].tally.failed, 1);
+    assert!(st.rollouts[0].rollout.paused_at.is_some());
+    let own = status(
+        &store,
+        &client(in_wave[2], TokenMode::Full, Some(3)),
+        &k,
+        NOW + 3600,
+    )
+    .unwrap();
+    assert!(own.rollouts.is_empty());
+    // A paused rollout does not move by itself.
+    assert!(rollout::advance(&store, NOW + 99_999).unwrap().is_empty());
+
+    let r = rollout_resume(&store, "desktop", NOW + 4000).unwrap();
+    assert_eq!((r.paused_at, r.wave_started_at), (None, NOW + 4000));
+    let r = rollout_pause(&store, "desktop", Some("looking"), NOW + 4100).unwrap();
+    assert_eq!(r.paused_reason.as_deref(), Some("looking"));
+    let r = rollout_abort(&store, "desktop", NOW + 4200).unwrap();
+    assert_eq!(r.outcome.as_deref(), Some("aborted"));
+    // Back to the channel's recommendation for everyone.
+    let d = check(
+        &store,
+        &client(in_wave[2], TokenMode::Full, None),
+        &desktop_req("0.3.3"),
+        &k,
+        NOW + 4300,
+    )
+    .unwrap();
+    assert_eq!(d.status, Status::UpdateAvailable);
+    assert_eq!(
+        rollout_abort(&store, "desktop", NOW).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+}
+
+#[tokio::test]
+async fn a_rollout_needs_a_release_the_channel_offers_and_sane_waves() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    let e = rollout_start(&store, "desktop", "0.9.9", None, None, &k, NOW).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    for waves in [
+        vec![],
+        vec![50],
+        vec![50, 10, 100],
+        vec![0, 100],
+        vec![10, 101],
+        vec![10, 10, 100],
+    ] {
+        let e = rollout_start(
+            &store,
+            "desktop",
+            "0.3.4",
+            Some(waves.clone()),
+            None,
+            &k,
+            NOW,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{waves:?}");
+    }
+    let e = rollout_start(&store, "desktop", "0.3.4", None, Some(1.5), &k, NOW).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    let r = rollout_start(&store, "desktop", "0.3.4", None, None, &k, NOW).unwrap();
+    assert_eq!(r.waves, rollout::DEFAULT_WAVES);
+    // Another component's rollout is its own.
+    rollout_start(&store, "hub", "0.3.4", None, None, &k, NOW).unwrap();
+}
+
+#[test]
+fn the_window_runs_in_utc_and_may_cross_midnight() {
+    let at = |h: i64, m: i64| 1_790_726_400 + h * 3600 + m * 60; // 2026-09-30T00:00Z
+    assert!(rollout::in_window(120, 300, at(2, 0)));
+    assert!(!rollout::in_window(120, 300, at(5, 0)));
+    assert!(!rollout::in_window(120, 300, at(1, 59)));
+    assert!(rollout::in_window(22 * 60, 6 * 60, at(23, 30)));
+    assert!(rollout::in_window(22 * 60, 6 * 60, at(3, 0)));
+    assert!(!rollout::in_window(22 * 60, 6 * 60, at(12, 0)));
+}
+
+#[tokio::test]
+async fn automatic_installs_wait_for_the_window_and_offers_do_not() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    {
+        let s = lock(&store).unwrap();
+        // NOW is 10:12 UTC.
+        settings::set(&s, settings::UPDATE_WINDOW, "02:00-05:00").unwrap();
+    }
+    let ask = |at| {
+        check(
+            &store,
+            &client(1, TokenMode::Full, None),
+            &desktop_req("0.3.3"),
+            &k,
+            at,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        ask(NOW).status,
+        Status::UpdateAvailable,
+        "notify is not held"
+    );
+    settings::set(
+        &lock(&store).unwrap(),
+        settings::UPDATE_DESKTOP_MODE,
+        "automatic",
+    )
+    .unwrap();
+    let d = ask(NOW);
+    assert_eq!(
+        (d.status, d.reason.code),
+        (Status::Hold, fleet_update::wire::ReasonCode::OutsideWindow)
+    );
+    let three_am = NOW - (10 * 3600 + 12 * 60) + 3 * 3600;
+    assert_eq!(ask(three_am).status, Status::UpdateAvailable);
+    settings::set(&lock(&store).unwrap(), settings::UPDATE_WINDOW, "").unwrap();
+    assert_eq!(ask(NOW).status, Status::UpdateAvailable);
+}

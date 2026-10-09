@@ -42,8 +42,9 @@ impl FleetTools {
     }
 
     #[tool(description = "Update admin, master only: pin a version for a \
-        component or target (below installed = rollback), unpin, or \
-        refresh the signed channel. E_INVALID, E_UPDATE_UNVERIFIED.")]
+        component or target (below installed = rollback), unpin, refresh \
+        the signed channel, or stage a rollout in waves (rollout_start / \
+        pause / resume / abort). E_INVALID, E_CONFLICT, E_UPDATE_UNVERIFIED.")]
     pub(super) async fn update_admin(
         &self,
         Parameters(p): Parameters<UpdateAdminParams>,
@@ -99,9 +100,39 @@ impl FleetTools {
                     .map_err(to_mcp_err)?;
                 ok_json_compact(&o)
             }
+            "rollout_start" => {
+                let version = p.version.as_deref().ok_or_else(|| {
+                    mcp_err(codes::E_INVALID, "rollout_start needs a version", None)
+                })?;
+                let row = update::rollout_start(
+                    &self.store,
+                    component()?,
+                    version,
+                    p.waves.clone(),
+                    p.halt_failure_ratio,
+                    &update::trusted_keys(),
+                    now,
+                )
+                .map_err(to_mcp_err)?;
+                tracing::info!(component = %row.component, version = %row.version, waves = ?row.waves, "[mcp] started an update rollout");
+                ok_json_compact(&row)
+            }
+            "rollout_pause" => ok_json_compact(
+                &update::rollout_pause(&self.store, component()?, p.reason.as_deref(), now)
+                    .map_err(to_mcp_err)?,
+            ),
+            "rollout_resume" => ok_json_compact(
+                &update::rollout_resume(&self.store, component()?, now).map_err(to_mcp_err)?,
+            ),
+            "rollout_abort" => ok_json_compact(
+                &update::rollout_abort(&self.store, component()?, now).map_err(to_mcp_err)?,
+            ),
             other => Err(mcp_err(
                 codes::E_INVALID,
-                format!("action must be pin | unpin | refresh, got {other:?}"),
+                format!(
+                    "action must be pin | unpin | refresh | rollout_start | rollout_pause | \
+                     rollout_resume | rollout_abort, got {other:?}"
+                ),
                 None,
             )),
         }

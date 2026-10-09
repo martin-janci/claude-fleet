@@ -12,6 +12,7 @@
 //! by anything but `refresh` is simply not a channel.
 
 mod fetch;
+pub mod rollout;
 #[cfg(test)]
 mod tests;
 
@@ -34,7 +35,7 @@ use serde::Serialize;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::mcp::auth::{Caller, TokenMode};
 use crate::service::settings;
-use crate::store::{Store, UpdateDesiredRow, UpdateDocRow, UpdateObservedRow};
+use crate::store::{Store, UpdateDesiredRow, UpdateDocRow, UpdateObservedRow, UpdateRolloutRow};
 
 /// Where CI publishes the channel documents (design U10).
 pub const CHANNEL_BASE_URL: &str =
@@ -128,6 +129,10 @@ pub fn settings_changed(key: &str) {
     decisions_may_have_changed();
 }
 
+/// The decision pusher's beat without a wake: rollout waves and the
+/// maintenance window move decisions by the clock alone.
+const DECIDE_BEAT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Wakes the decision pusher ([`push_decisions`]) in `fleet-hub serve`.
 static DECIDE_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
@@ -174,20 +179,22 @@ pub fn push_decisions(store: &Mutex<Store>, keys: &TrustedKeys, now: i64) -> Vec
     pushed
 }
 
-/// The policy for one target: the fleet's mode for its component, and the
-/// operator's pin (its own, else the component's).
-fn policy(store: &Store, c: Component, target: &str) -> Result<Policy, IpcError> {
+/// The policy for one target: the fleet's mode for its component, the
+/// operator's pin (its own, else the component's), and whether `now` is
+/// outside the maintenance window for it.
+fn policy(store: &Store, c: Component, target: &str, now: i64) -> Result<Policy, IpcError> {
     let pin = store.update_desired_for(c.as_str(), target)?.and_then(|d| {
         Version::parse(&d.version).ok().map(|version| Pin {
             version,
             mandatory: d.mandatory,
         })
     });
+    let mode = mode(store, c);
     Ok(Policy {
-        mode: mode(store, c),
+        mode,
         minimum: None,
         pin,
-        outside_window: false,
+        outside_window: rollout::outside_window(store, mode, now),
         check_interval_secs: check_interval_secs(store),
     })
 }
@@ -353,7 +360,8 @@ fn decide_for(
     speaks: &Speaks,
     now: i64,
 ) -> Result<Decision, IpcError> {
-    let policy = policy(store, component, target)?;
+    let policy = policy(store, component, target, now)?;
+    let rollout = rollout::for_decide(store, component)?;
     let empty = BTreeMap::new();
     let mut d = decide(&DecideInput {
         component,
@@ -364,7 +372,7 @@ fn decide_for(
         channel: cached.map(|c| &c.channel),
         manifests: cached.map(|c| &c.manifests.verified).unwrap_or(&empty),
         policy: &policy,
-        rollout: None,
+        rollout: rollout.as_ref(),
         target_id: target,
         source: Source::Hub,
         track: track(store),
@@ -658,6 +666,18 @@ pub struct UpdateStatus {
     pub components: Vec<ComponentSummary>,
     pub targets: Vec<TargetStatus>,
     pub pins: Vec<UpdateDesiredRow>,
+    /// Active rollouts, then the five that ended last (S9); empty for a
+    /// scoped caller.
+    #[serde(default)]
+    pub rollouts: Vec<RolloutStatus>,
+}
+
+/// One rollout and its open wave's tally so far.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RolloutStatus {
+    #[serde(flatten)]
+    pub rollout: UpdateRolloutRow,
+    pub tally: rollout::WaveTally,
 }
 
 /// Every observed target (or only `own`), with what the hub would tell it
@@ -788,6 +808,17 @@ pub fn status(
         } else {
             s.update_desired_all()?
         },
+        rollouts: if own.is_some() {
+            Vec::new()
+        } else {
+            s.update_rollouts(5)?
+                .into_iter()
+                .map(|r| {
+                    let tally = rollout::tally(&s, &r)?;
+                    Ok(RolloutStatus { rollout: r, tally })
+                })
+                .collect::<Result<_, IpcError>>()?
+        },
     })
 }
 
@@ -872,6 +903,9 @@ pub const ATTENTION_ROLLBACK_FAILED: &str = "rollback_failed";
 /// The verified channel is past its signed `expires_at`: nothing new is
 /// offered until the publisher re-signs or the hub can fetch it again.
 pub const ATTENTION_CHANNEL_STALE: &str = "channel_stale";
+/// A rollout paused itself (its wave's failure ratio reached the halt ratio)
+/// or an operator paused it: the rest of the fleet waits (S9).
+pub const ATTENTION_ROLLOUT_PAUSED: &str = "rollout_paused";
 
 /// One thing about the fleet's updates a person should look at.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -892,7 +926,7 @@ pub struct UpdateAttention {
 }
 
 /// `fleet_health.updates` (update design §9): the channel's state and what
-/// needs a person. `rollout_paused` joins it with rollouts (S9).
+/// needs a person.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct UpdatesHealth {
     /// `fresh`, `stale`, or `none` (no channel verifies yet).
@@ -934,6 +968,19 @@ pub fn health(
             "stale"
         }
     };
+    if own.is_none() {
+        for r in s.update_rollouts(0)? {
+            if let Some(why) = r.paused_reason.clone().filter(|_| r.paused_at.is_some()) {
+                attention.push(UpdateAttention {
+                    reason: ATTENTION_ROLLOUT_PAUSED.into(),
+                    target: format!("rollout:{}", r.id),
+                    component: r.component,
+                    version: r.version,
+                    detail: Some(why),
+                });
+            }
+        }
+    }
     for t in target_rows(s, cached.as_ref(), own.as_deref(), now)? {
         let (reason, detail) = match t.phase.as_str() {
             "rollback_failed" => (ATTENTION_ROLLBACK_FAILED, t.last_error.clone()),
@@ -1057,6 +1104,54 @@ pub fn unpin(store: &Mutex<Store>, component: &str, target: &str) -> Result<bool
     Ok(removed)
 }
 
+/// `update_admin { action: rollout_start }`: `version` must be a release the
+/// verified channel lists, permits for the component, and has a manifest for.
+pub fn rollout_start(
+    store: &Mutex<Store>,
+    component: &str,
+    version: &str,
+    waves: Option<Vec<u8>>,
+    halt_failure_ratio: Option<f64>,
+    keys: &TrustedKeys,
+    now: i64,
+) -> Result<UpdateRolloutRow, IpcError> {
+    let c = parse_component(component)?;
+    let v = Version::parse(version)
+        .map_err(|e| IpcError::new(codes::E_INVALID, format!("version {version:?}: {e}")))?;
+    let listed = {
+        let s = lock(store)?;
+        load_cached(&s, track(&s), keys, now).is_some_and(|cached| {
+            cached.channel.doc.permits(c, &v) && cached.manifests.verified.contains_key(&v)
+        })
+    };
+    rollout::start(store, c, &v, listed, waves, halt_failure_ratio, now)
+}
+
+pub fn rollout_pause(
+    store: &Mutex<Store>,
+    component: &str,
+    reason: Option<&str>,
+    now: i64,
+) -> Result<UpdateRolloutRow, IpcError> {
+    rollout::pause(store, parse_component(component)?, reason, now)
+}
+
+pub fn rollout_resume(
+    store: &Mutex<Store>,
+    component: &str,
+    now: i64,
+) -> Result<UpdateRolloutRow, IpcError> {
+    rollout::resume(store, parse_component(component)?, now)
+}
+
+pub fn rollout_abort(
+    store: &Mutex<Store>,
+    component: &str,
+    now: i64,
+) -> Result<UpdateRolloutRow, IpcError> {
+    rollout::abort(store, parse_component(component)?, now)
+}
+
 // ── Git mode: a standalone check ──
 
 /// A standalone check (Git mode, design §7 F1): no hub above, so the
@@ -1085,7 +1180,7 @@ impl GitCheck {
         let track = track_override.unwrap_or_else(|| store.map_or(Track::Stable, track));
         let (policy, seen) = match store {
             Some(s) => (
-                policy(s, component, target)?,
+                policy(s, component, target, crate::store::now_unix())?,
                 s.update_doc("channel", track.as_str())?
                     .and_then(|d| d.sequence)
                     .map_or(0, |q| q.max(0) as u64),
@@ -1386,7 +1481,9 @@ pub fn spawn_refresh_tick(
             }
         }
         let keys = trusted_keys();
-        // The decision pusher: woken by a pin, a setting or a new channel.
+        // The decision pusher: woken by a pin, a setting or a new channel,
+        // and every few minutes for the rollouts' waves and the maintenance
+        // window's edges, which move decisions with nothing else changing.
         {
             let (store, keys, cancel) = (store.clone(), keys.clone(), cancel.clone());
             crate::rt::spawn(async move {
@@ -1396,6 +1493,17 @@ pub fn spawn_refresh_tick(
                         biased;
                         _ = cancel.cancelled() => break,
                         _ = DECIDE_WAKE.notified() => {}
+                        _ = tokio::time::sleep(DECIDE_BEAT) => {}
+                    }
+                    match rollout::advance(&store, crate::store::now_unix()) {
+                        Ok(moved) => {
+                            for m in moved {
+                                tracing::info!(component = %m.component, version = %m.version, what = m.what, wave = m.wave + 1, "update rollout moved");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e.message, "could not advance the update rollouts")
+                        }
                     }
                     let pushed = push_decisions(&store, &keys, crate::store::now_unix());
                     if !pushed.is_empty() {

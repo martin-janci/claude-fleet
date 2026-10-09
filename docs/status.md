@@ -645,7 +645,7 @@ against `keys.rs` before it leaves the runner
 (`scripts/release-update-scripts-test.sh`, CI hub-headless). See
 `docs/RELEASING.md` → *Update manifest and channels*.
 
-**S4b is landed** (rollouts aside, which are S9): `X-Fleet-Client` (`fleet_update::client_header`)
+**S4b is landed** (its rollouts landed with S9): `X-Fleet-Client` (`fleet_update::client_header`)
 recorded into `update_observed` on `last_seen_at`'s once-a-minute beat in
 `authorize`; the `update:changed` row event (kind `update`, ids only, in
 `HOST_BOUND_HIDDEN_KINDS`); `fleet_health.updates` (`service::update::health`:
@@ -714,9 +714,27 @@ hours `X.Y.Z-dev.N.g<sha>` (hub and tarballs; `release-assets.sh
 has-desktop` is false), once a day `X.Y.Z-dev.N.desktop.g<sha>` with the
 desktop bundles (owner's §13.3 answer). `update.track` offers `nightly`;
 Git mode scans past releases without the caller's artifact, and the hub
-keeps 20 manifests. Pruned to the newest 12 + 3. S8 and S9
-are not built; §13 question 7 waits on the owner (2 is answered: a signed
-amendment).
+keeps 20 manifests. Pruned to the newest 12 + 3. §13 question 7 waits on
+the owner (2 is answered: a signed amendment).
+
+**S8 is landed:** fleet-mobile's release sends `repository_dispatch`
+`android-release` (secret `FLEET_DISPATCH_TOKEN` there; without it the step
+stands down with a notice) and `android-amendment.yml` signs the APK into the
+release's manifest as an amendment, listed on every track that carries the
+release. A phone asks its hub (`/update/check`, `X-Fleet-Client` on every hub
+request), falls back to GitHub releases only against a hub with no
+`/update/check`, and checks the APK's sha256 and its signer against both the
+decision's `signer_sha256` and the installed app before Android's installer.
+
+**S9 is partly landed.** Built: staged rollouts (migration 151
+`update_rollouts`, `service::update::rollout`; `update_admin` `rollout_start`
+/ `rollout_pause` / `rollout_resume` / `rollout_abort`; waves advance on the
+decision pusher's five-minute beat after `update.rollout_wave_secs` and pause
+themselves at the halt ratio, `fleet_health` `rollout_paused`;
+`update_status.rollouts`) and the maintenance window (`update.window`, UTC,
+holds only `automatic` components). **Not built:** per-org policy rows, the
+fleet-agent binary adapter, the bare-binary hub, the hub-served artifact
+mirror.
 
 Debug devices' first slice is landed (`docs/debug-devices.md`): per-host
 inventory of Android phones, emulators and AVDs, iOS simulators and paired

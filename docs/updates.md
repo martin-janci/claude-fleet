@@ -89,6 +89,22 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   `update_status.last_refresh` says why it failed.
   `FLEET_UPDATE_CHANNEL_URL` points the hub at a mirror. It changes only
   where the documents come from: what is trusted is still the signature.
+- **Stage a rollout.** `update_admin { action: rollout_start, component,
+  version, waves?, halt_failure_ratio? }` opens `version` (a release the
+  verified channel lists and permits) to growing waves of the component's
+  targets — by default `[10, 50, 100]` percent, each a stable cohort per
+  release (`sha256(target ‖ version)`). Everyone outside the open wave is
+  told `hold` (`not_in_wave`). Every `update.rollout_wave_secs` the hub
+  looks at the open wave: when fewer than `halt_failure_ratio` (default
+  0.2) of the installs that were tried failed, the next wave opens, and
+  after the last the rollout completes; otherwise the rollout **pauses
+  itself** and `fleet_health.updates` names it (`rollout_paused`, with how
+  many failed). `rollout_pause` / `rollout_resume` (the wave's clock
+  restarts) / `rollout_abort` (targets that installed it keep it, the rest
+  go back to the channel's recommendation) do the same by hand. One active
+  rollout per component (`E_CONFLICT` otherwise). `update_status.rollouts`
+  lists the active ones and the five that ended last, each with its open
+  wave's tally. A pin still wins over a rollout.
 - **The transition log.** Every phase a target reports is also kept in
   `update_events` (90 days, the newest 200 per target) for the rollout
   view of slice S4b. Nothing reads it out yet: no tool or route exposes it.
@@ -345,7 +361,8 @@ crashes on start and one that migrates and never gets ready.
   person: `update_required` (the hub would refuse it until it updates),
   `update_failed`, `update_rolled_back` and `rollback_failed` (from its
   reported phase), plus `channel_stale` when the verified channel is past
-  its signed expiry.
+  its signed expiry, and `rollout_paused` (target `rollout:<id>`) for a
+  rollout that halted itself or an operator paused.
 - **Why.** `update_status { target: "client:3" }` is one target's whole
   decision: what it would be offered, why, and whether it is mandatory.
 - **Changes.** `/events` carries `update:changed` (ids only) when a
@@ -377,3 +394,5 @@ crashes on start and one that migrates and never gets ready.
 | `update.desktop.mode` | `notify` | the desktops: `manual`, `notify` or `automatic` |
 | `update.mobile.mode` | `notify` | the phones: `manual` or `notify` (a phone never installs silently) |
 | `update.check_interval_secs` | `21600` | seconds between reading the release channel, at least 900 |
+| `update.window` | `` | a daily `HH:MM-HH:MM` in UTC (it may cross midnight) in which an `automatic` component installs; outside it the decision is `hold` (`outside_window`). An offer to a person is never held. Empty: any time |
+| `update.rollout_wave_secs` | `3600` | how long each rollout wave runs before the next opens, at least 300 |
