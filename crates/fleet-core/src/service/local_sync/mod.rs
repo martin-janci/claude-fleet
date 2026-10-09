@@ -1073,7 +1073,7 @@ async fn bind(engine: &Arc<LocalSync>, l: NewLink) -> Result<LocalWorkspaceRow, 
 /// An absolute local directory, without a trailing separator.
 fn normalize_local_path(p: &str) -> Result<String, IpcError> {
     let p = p.trim();
-    let expanded = match p.strip_prefix("~/") {
+    let expanded = match home_relative(p, cfg!(windows)) {
         Some(rest) => crate::home::home_dir()
             .map(|h| h.join(rest).to_string_lossy().into_owned())
             .unwrap_or_else(|| p.to_string()),
@@ -1099,6 +1099,13 @@ fn normalize_local_path(p: &str) -> Result<String, IpcError> {
     } else {
         trimmed.to_string()
     })
+}
+
+/// What follows the home folder's `~` in `p`: `~/rest`, and on Windows
+/// `~\rest` too (review r18), the separator Explorer and a typed path use.
+fn home_relative(p: &str, windows: bool) -> Option<&str> {
+    p.strip_prefix("~/")
+        .or_else(|| if windows { p.strip_prefix("~\\") } else { None })
 }
 
 /// Refuse a folder that is the filesystem root, the home folder, or any
