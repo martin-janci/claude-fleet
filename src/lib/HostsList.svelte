@@ -185,6 +185,7 @@
     color: var(--fg);
   }
   .filter:focus { outline: none; border-color: var(--accent); }
+  .filter:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
   .list {
     flex: 1;
     min-height: 0;
@@ -192,7 +193,7 @@
     outline: none;
     padding-bottom: 0.5rem;
   }
-  .list:focus-visible .host-row.selected { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .list:focus-visible .host-row.selected { outline: var(--ring-w) solid var(--ring); outline-offset: calc(-1 * var(--ring-w)); }
   .group + .group { margin-top: 0.4rem; }
   .group-header {
     display: flex;

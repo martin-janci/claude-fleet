@@ -1280,6 +1280,7 @@
     border-radius: 4px;
     outline: none;
   }
+  .title-input:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
   .sub { display: flex; gap: 0.5rem; align-items: center; font-size: 11px; flex-wrap: wrap; }
   .friendly { margin: 0; font-size: 0.85rem; color: var(--fg-muted); }
   .chip {

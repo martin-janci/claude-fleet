@@ -1336,5 +1336,6 @@
     outline: none;
     min-width: 0;
   }
+  .rename-input:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
 
 </style>

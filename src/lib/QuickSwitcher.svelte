@@ -1053,6 +1053,10 @@
     outline: none;
     border-color: var(--accent);
   }
+  .query:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: var(--ring-offset);
+  }
   .qrow {
     display: flex;
     align-items: center;
