@@ -1510,6 +1510,10 @@ pub fn needs_confirmation(name: &str) -> bool {
 /// for `new` with `create_remote` (publishing a GitHub repository) once the
 /// service's own confirm token is presented — and that one needs a person
 /// for every caller but a paired, non-operator client, not just the operator.
+/// `send_prompt`, `run_prompt` and `queue_prompt` type the operator's own
+/// text into another session, so a person confirms each one (review round
+/// 15, F21: nothing an LLM writes reaches a session without a person), and
+/// `dispatch_task` to an existing worker is gated for the same reason.
 pub const OPERATOR_CONFIRMS: &[&str] = &[
     "add_project",
     "new_session",
@@ -1523,6 +1527,9 @@ pub const OPERATOR_CONFIRMS: &[&str] = &[
     "rewind_conversation",
     "safe_kill_session",
     "work_link",
+    "send_prompt",
+    "run_prompt",
+    "queue_prompt",
 ];
 
 /// Whether a call by this caller must be approved on the desktop even with

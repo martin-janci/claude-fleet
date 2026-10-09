@@ -2212,8 +2212,8 @@ pub async fn list_sessions_reading(
 }
 
 /// `list_sessions` for an explicit user refresh: ignores the freshness window
-/// (a pass already in flight is still not duplicated — the stored rows it is
-/// about to write are returned instead).
+/// and runs a pass of its own, after waiting for one already in flight (whose
+/// probes may predate a session just started). Never overlaps that pass.
 pub async fn refresh_sessions(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,

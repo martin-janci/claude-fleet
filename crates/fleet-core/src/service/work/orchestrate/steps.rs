@@ -19,6 +19,16 @@ use crate::store::{MissionRow, MissionTaskCounts, TaskRow, WorkItemRow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// The steps the loop never takes itself, at any level. An `ask` needs a
+/// person's answer. `complete` declares the mission done, and what makes it
+/// due (items closed, `done_when` lines passed) rests partly on what agents
+/// report: a worker's own `done` closes an item without lines, a reviewer's
+/// or tester's report passes a `review` or `test` line. Mission completion
+/// is never an agent's call (transition plan, "Where AI never decides"), so
+/// a person presses it, and Fleet still checks it is due (review round 15,
+/// F19).
+pub const PERSON_ONLY_STEPS: [&str; 2] = ["ask", "complete"];
+
 /// The kinds a step takes.
 pub const STEP_KINDS: [&str; 8] = [
     "run",
@@ -51,7 +61,7 @@ pub struct Step {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
     /// `true`: the loop may take it itself at [`AUTO_LEVEL`]; `false`
-    /// (an ask): only a person.
+    /// (an ask, or completing the mission): only a person.
     pub auto: bool,
 }
 
@@ -63,7 +73,7 @@ impl Step {
             role: role.map(str::to_string),
             reason,
             context: None,
-            auto: kind != "ask",
+            auto: !PERSON_ONLY_STEPS.contains(&kind),
         }
     }
 

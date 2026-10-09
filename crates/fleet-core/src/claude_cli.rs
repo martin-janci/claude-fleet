@@ -67,13 +67,49 @@ pub fn parse_session_id_from_bg_output(output: &str) -> Option<String> {
 /// prompt sits after `--` and may legitimately start with `-` (a markdown
 /// list, say), so it is only checked for being non-blank.
 pub fn bg_script(name: &str, prompt: &str) -> Result<String, IpcError> {
+    bg_script_with(name, prompt, &BgOptions::default())
+}
+
+/// What a background agent is launched with beyond its name and prompt
+/// (redesign: the phone's "Background agent" sheet).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct BgOptions {
+    /// Absolute directory the agent starts in (a project's checkout).
+    pub cwd: Option<String>,
+    /// Withhold the editing tools and `git commit` / `git push`
+    /// ([`READ_ONLY_DISALLOWED`]): the agent may read and run tests.
+    pub read_only: bool,
+}
+
+/// The tools a read-only background agent is refused, as one
+/// `--disallowedTools` value. A guard on Claude's own tools, not a sandbox:
+/// it keeps an agent asked to "only look" from editing or pushing.
+pub const READ_ONLY_DISALLOWED: &str =
+    "Edit Write MultiEdit NotebookEdit Bash(git commit:*) Bash(git push:*)";
+
+/// [`bg_script`] with [`BgOptions`]: `cd -- <cwd> &&` in front when a
+/// directory is given (a missing checkout fails with a line naming it), and
+/// `--disallowedTools` before the `--` when read-only.
+pub fn bg_script_with(name: &str, prompt: &str, opts: &BgOptions) -> Result<String, IpcError> {
     validate::not_option_like("session name", name)?;
     validate::not_blank("prompt", prompt)?;
-    Ok(format!(
-        "claude --bg --name {} -- {}",
-        quote(name),
-        quote(prompt)
-    ))
+    let mut script = String::new();
+    if let Some(cwd) = opts.cwd.as_deref() {
+        validate::remote_abs_path("project directory", cwd)?;
+        let q = quote(cwd);
+        script.push_str(&format!(
+            "cd -- {q} 2>/dev/null || {{ echo \"no checkout of the project at \"{q} >&2; exit 3; }}; "
+        ));
+    }
+    script.push_str(&format!("claude --bg --name {}", quote(name)));
+    if opts.read_only {
+        script.push_str(&format!(
+            " --disallowedTools {}",
+            quote(READ_ONLY_DISALLOWED)
+        ));
+    }
+    script.push_str(&format!(" -- {}", quote(prompt)));
+    Ok(script)
 }
 
 /// `claude stop <job_id>` — the short background job id (`44366faf`) that
@@ -212,8 +248,9 @@ pub async fn claude_bg(
     host_alias: &str,
     name: &str,
     prompt: &str,
+    opts: &BgOptions,
 ) -> Result<Option<String>, IpcError> {
-    let script = bg_script(name, prompt)?;
+    let script = bg_script_with(name, prompt, opts)?;
     let output = run_claude_script(ssh, host_alias, &script, CLAUDE_BG_TIMEOUT).await?;
     Ok(parse_session_id_from_bg_output(&output))
 }
@@ -387,6 +424,39 @@ mod tests {
         assert!(bg_script("", "x").is_err());
         assert!(bg_script("x", "").is_err());
         assert!(bg_script("x", "   ").is_err());
+    }
+
+    #[test]
+    fn a_project_and_read_only_land_before_the_prompt_separator() {
+        let opts = BgOptions {
+            cwd: Some("/home/m/projects/acme/app".into()),
+            read_only: true,
+        };
+        let s = bg_script_with("n", "look", &opts).unwrap();
+        assert!(
+            s.starts_with("cd -- '/home/m/projects/acme/app' 2>/dev/null || "),
+            "{s}"
+        );
+        assert!(
+            s.ends_with(
+                "claude --bg --name 'n' --disallowedTools \
+             'Edit Write MultiEdit NotebookEdit Bash(git commit:*) Bash(git push:*)' -- 'look'"
+            ),
+            "{s}"
+        );
+        // A relative or option-like directory never reaches the shell.
+        for bad in ["relative/dir", "-x", "/a/../b"] {
+            let opts = BgOptions {
+                cwd: Some(bad.into()),
+                read_only: false,
+            };
+            assert!(bg_script_with("n", "p", &opts).is_err(), "{bad}");
+        }
+        // No options: exactly the old script.
+        assert_eq!(
+            bg_script_with("n", "p", &BgOptions::default()).unwrap(),
+            bg_script("n", "p").unwrap()
+        );
     }
 
     #[test]

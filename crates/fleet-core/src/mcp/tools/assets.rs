@@ -20,7 +20,9 @@ impl FleetTools {
             "list_assets",
             &format!("all_catalogs={} caller={}", p.all_catalogs, caller.label()),
         );
-        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+        catalog::ensure_fresh_blocking(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
         // Fix round 1: personal-only unless asked — an older desktop keys
         // its list by name and must never get a second catalog's asset.
         let scope = if p.all_catalogs {
@@ -43,7 +45,9 @@ impl FleetTools {
             "scan_assets",
             &format!("host_alias={}", p.host_alias.as_deref().unwrap_or("*")),
         );
-        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+        catalog::ensure_fresh_blocking(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
         let res = catalog::inventory::scan_hosts(&self.store, &self.ssh, p.host_alias.as_deref())
             .await
             .map_err(to_mcp_err)?;
@@ -136,7 +140,9 @@ impl FleetTools {
             name: p.name,
             allow_unlayered: p.allow_unlayered.unwrap_or(false),
         };
-        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+        catalog::ensure_fresh_blocking(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
         let plan = catalog::sync::plan_sync(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -350,7 +356,9 @@ impl FleetTools {
                 if !may_admin_catalog(&caller, &self.store, personal)? {
                     return Err(changesets_forbidden("propose", Some(personal), &caller));
                 }
-                catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+                catalog::ensure_fresh_blocking(&self.store)
+                    .await
+                    .map_err(to_mcp_err)?;
                 ok_json_compact(&cs::propose(&self.store).await.map_err(to_mcp_err)?)
             }
             "propose_layer" => {
@@ -430,7 +438,9 @@ impl FleetTools {
                         // and never takes it, so this cannot deadlock; a
                         // slow reload only delays other card actions (the
                         // tick `try_lock`s and skips).
-                        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+                        catalog::ensure_fresh_blocking(&self.store)
+                            .await
+                            .map_err(to_mcp_err)?;
                         let args = cs::apply::ApplyArgs {
                             id,
                             positions: p.positions,
@@ -507,7 +517,9 @@ impl FleetTools {
         catalog_configure + catalog_load in the app.")]
     pub(super) async fn list_layers(&self) -> Result<CallToolResult, McpError> {
         audit("list_layers", "");
-        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+        catalog::ensure_fresh_blocking(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
         let out = catalog::list_layers(&self.store).map_err(to_mcp_err)?;
         ok_json_compact(&out)
     }
@@ -523,7 +535,9 @@ impl FleetTools {
         Parameters(p): Parameters<ResolvePreviewParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("resolve_preview", &format!("host_alias={}", p.host_alias));
-        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+        catalog::ensure_fresh_blocking(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
         let res = catalog::resolve_preview(&p.host_alias, &self.store).map_err(to_mcp_err)?;
         // `Resolution` is a full `Catalog` (every asset body and resource's
         // base64 bytes), which blows past MCP token caps on a fleet-sized
@@ -538,7 +552,9 @@ impl FleetTools {
         Read-only.")]
     pub(super) async fn propose_layers(&self) -> Result<CallToolResult, McpError> {
         audit("propose_layers", "");
-        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+        catalog::ensure_fresh_blocking(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
         let out = catalog::propose::propose_layers(&self.store).map_err(to_mcp_err)?;
         ok_json_compact(&out)
     }
@@ -570,7 +586,9 @@ impl FleetTools {
         // PF7: a host's layers wait for an apply in flight (a failed apply
         // restores its snapshot over them).
         let _busy = catalog::changesets::authoring_lock().await;
-        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+        catalog::ensure_fresh_blocking(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
         let out = catalog::set_host_layers(
             &p.host_alias,
             p.role.as_deref(),

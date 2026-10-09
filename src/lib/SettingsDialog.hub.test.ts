@@ -339,8 +339,13 @@ describe('the Hub section, configured but unavailable', () => {
     route();
     render(SettingsDialog, { props: { onClose: () => {} } });
     const why = await screen.findByTestId('hub-unavailable-reason');
-    expect(why.textContent).toContain('no client token is stored');
+    expect(why.textContent).toContain('no saved pairing for that hub');
+    expect(why.textContent).not.toContain('client token');
     expect(why.textContent).toContain('fleet.example.com');
+    // The backend's raw reason stays one click away.
+    expect(screen.getByTestId('hub-unavailable-detail').textContent).toContain(
+      'no client token is stored',
+    );
     expect(screen.queryByTestId('hub-empty')).toBeNull();
     expect(screen.queryByTestId('hub-connected')).toBeNull();
   });

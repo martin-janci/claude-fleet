@@ -1321,7 +1321,7 @@ describe('AssetsWorkspace hosts (R18)', () => {
     render(AssetsWorkspace, handlers());
     await fireEvent.click(screen.getByTestId('assets-rail-hosts'));
     await fireEvent.click(screen.getByTestId('host-accept-oci-papayapos'));
-    await waitFor(() => expect(get(toasts).some((t) => t.kind === 'error' && t.message.startsWith('Reload catalogs: hub did not answer'))).toBe(true));
+    await waitFor(() => expect(get(toasts).some((t) => t.kind === 'error' && t.message.startsWith("Reload catalogs: Couldn't reach the hub"))).toBe(true));
     expect(get(toasts).some((t) => t.message === 'oci now receives papayapos')).toBe(true);
   });
 });

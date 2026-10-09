@@ -8,6 +8,7 @@
 -->
 <script lang="ts">
   import { draftedBy } from './ai_proposal';
+  import DraftedLabel from './DraftedLabel.svelte';
 
   let {
     value = $bindable(''),
@@ -66,7 +67,7 @@
 </label>
 {#if busy || value.trim() !== ''}
   <div class="why" data-testid="{testid}-meta">
-    <span class="pill">Drafted</span>
+    <DraftedLabel testid="{testid}-drafted" />
     {#if busy}
       <span data-testid="{testid}-busy">Drafting…</span>
     {:else if source}
@@ -118,23 +119,6 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 6px;
-  }
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--text-2xs);
-    line-height: 16px;
-    font-weight: 500;
-    color: var(--fg-2);
-    padding: 0 6px;
-    border-radius: var(--radius-sm);
-    background: var(--chip-bg);
-    white-space: nowrap;
-  }
-  .pill::before {
-    content: '\270E';
-    font-size: var(--text-2xs);
   }
   .link {
     font: inherit;

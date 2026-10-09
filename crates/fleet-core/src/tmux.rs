@@ -1697,10 +1697,15 @@ pub fn pane_command_with(
     );
     let profile = launch.profile_prefix();
     match claude_session_id {
-        Some(id) => format!(
-            "{VOICE_PATH_PREFIX}{profile}{CL_FALLBACK} cl --resume '{id}' {name} 2>/dev/null || cl --session-id '{id}' {name} || cl {name}; {tail}"
+        Some(id) => {
+            let id = crate::shell::quote(id);
+            format!(
+                "{VOICE_PATH_PREFIX}{profile}{CL_FALLBACK} cl --resume {id} {name} 2>/dev/null || cl --session-id {id} {name} || cl {name}; {tail}"
+            )
+        }
+        None => format!(
+            "{VOICE_PATH_PREFIX}{profile}{CL_FALLBACK} cl --continue {name} || cl {name}; {tail}"
         ),
-        None => format!("{VOICE_PATH_PREFIX}{profile}{CL_FALLBACK} cl --continue {name} || cl {name}; {tail}"),
     }
 }
 
@@ -2276,6 +2281,23 @@ mod tests {
         assert!(rename_session("a", "has space").await.is_err());
         assert!(rename_session("a", "has.dot").await.is_err());
         assert!(rename_session("a", "has:colon").await.is_err());
+    }
+
+    #[test]
+    fn pane_command_quotes_a_session_id_through_shq() {
+        // An id is a UUID in practice, but the command must not depend on
+        // that: a quote in it stays inside one shell word.
+        let cmd = pane_command_for(Some("a'b"), "dev-x");
+        let q = crate::shell::quote("a'b");
+        assert!(
+            cmd.contains(&format!("cl --resume {q} --name 'dev-x'")),
+            "got: {cmd}"
+        );
+        assert!(
+            cmd.contains(&format!("cl --session-id {q} --name 'dev-x'")),
+            "got: {cmd}"
+        );
+        assert!(!cmd.contains("'a'b'"), "hand-quoted id: {cmd}");
     }
 
     #[test]

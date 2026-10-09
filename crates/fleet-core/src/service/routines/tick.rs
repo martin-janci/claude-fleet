@@ -340,15 +340,26 @@ async fn tick_cron(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError> {
 
 /// One event routine, under its lease: fire once per new event of its
 /// kind that it may see, then move its cursor past what it read.
-async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<(), IpcError> {
-    let Some(kind) = r.event.as_deref().filter(|k| EVENTS.contains(k)) else {
-        return Ok(());
-    };
-    let fires = {
+pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<(), IpcError> {
+    let (r, fires) = {
         let s = lock(&deps.store)?;
         if !s.take_routine_lease(r.id, now)? {
             return Ok(());
         }
+        // The row as it is now, under the lease: the pass read it before
+        // earlier fires ran, and meanwhile it may have been turned off or
+        // back on (a new cursor), or changed.
+        let fresh = s
+            .get_routine(r.id)?
+            .filter(|f| f.enabled && f.trigger == "event");
+        let Some((r, kind)) = fresh.and_then(|f| {
+            let k = f.event.clone().filter(|k| EVENTS.contains(&k.as_str()))?;
+            Some((f, k))
+        }) else {
+            s.release_routine_lease(r.id)?;
+            return Ok(());
+        };
+        let kind = kind.as_str();
         let events = s.events_of_kind_after(r.event_cursor, kind, EVENTS_PER_PASS)?;
         let Some(&(last, _)) = events.last() else {
             // Nothing of this kind since the cursor: move it to the newest
@@ -365,12 +376,13 @@ async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<(), IpcErro
         s.set_routine_event_cursor(r.id, last)?;
         let mut fires = Vec::new();
         for (eid, sid) in events {
-            if event_fires(&s, r, sid)? {
+            if event_fires(&s, &r, sid)? {
                 fires.push(format!("session:{sid}:{eid}"));
             }
         }
-        fires
+        (r, fires)
     };
+    let r = &r;
     let mut res = Ok(());
     for reference in fires {
         // An error here ends the pass, not the lease: it is released below,

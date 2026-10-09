@@ -57,16 +57,23 @@ function quietFade(node: Element, motion: Motion): TransitionConfig {
  * list snapshots positions just before it re-renders (`snapshotRows`, from a
  * `$effect.pre`) and the new element slides from the old place (`slideIn`).
  * A row that stays in its block keeps its element and never looks here.
+ *
+ * Only Full reads a rect: Reduced needs to know the row moved, not from
+ * where, and Off needs nothing, so neither forces a layout on every list
+ * change (review r16 D2). A null entry is "was on screen, place not read".
  */
-let lastRects = new Map<string, DOMRect>();
+let lastRects = new Map<string, DOMRect | null>();
 
 /** Record every row's place under `root` before the list re-renders. */
 export function snapshotRows(root: ParentNode | null | undefined): void {
-  const next = new Map<string, DOMRect>();
-  root?.querySelectorAll<HTMLElement>('[data-session-id]').forEach((el) => {
-    const id = el.dataset.sessionId;
-    if (id) next.set(id, el.getBoundingClientRect());
-  });
+  const motion = level();
+  const next = new Map<string, DOMRect | null>();
+  if (motion !== 'off') {
+    root?.querySelectorAll<HTMLElement>('[data-session-id]').forEach((el) => {
+      const id = el.dataset.sessionId;
+      if (id) next.set(id, motion === 'full' ? el.getBoundingClientRect() : null);
+    });
+  }
   lastRects = next;
 }
 
@@ -76,14 +83,18 @@ export function snapshotRows(root: ParentNode | null | undefined): void {
  * not move. Reduced fades it in over 80 ms; Off does nothing.
  */
 export function slideIn(node: HTMLElement, key: string | number) {
-  const from = lastRects.get(String(key));
-  lastRects.delete(String(key));
+  const k = String(key);
+  const known = lastRects.has(k);
+  const from = lastRects.get(k) ?? null;
+  lastRects.delete(k);
   const motion = level();
-  if (!from || motion === 'off' || typeof node.animate !== 'function') return;
+  if (!known || motion === 'off' || typeof node.animate !== 'function') return;
   if (motion === 'reduced') {
     node.animate([{ opacity: 0 }, { opacity: 1 }], { duration: DURATIONS.reduced.fast });
     return;
   }
+  // Snapshotted under Reduced, played under Full: no place to slide from.
+  if (!from) return;
   const to = node.getBoundingClientRect();
   const dx = from.left - to.left;
   const dy = from.top - to.top;

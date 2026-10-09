@@ -26,9 +26,9 @@ account usage history (122), the Hosts page's probe facts (123), token use
 (126), the cost of fleet's own `claude -p` runs (127), every PR a session's
 branch has had (`pull_requests`, 128), cost per account (130), prompts
 queued for a busy session (133), the agent CLIs a host has (134) and the
-add-host wizard's state (135). The hub contract is revision 13
+add-host wizard's state (135). The hub contract is revision 14
 (`CONTRACT_REVISION`, `crates/fleet-core/src/wire_contract.rs`):
-revisions 11 to 13 add tools a revision-10 hub does not serve, so the
+revisions 11 to 14 add tools a revision-10 hub does not serve, so the
 desktop and its hub are upgraded together.
 
 Sessions can run OpenAI's Codex CLI as well as Claude Code (redesign 12.2,

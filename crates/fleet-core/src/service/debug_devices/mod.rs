@@ -471,10 +471,15 @@ pub async fn list(
 pub fn resolve(s: &Store, asker: &Asker, reference: &str) -> Result<DebugDevice, IpcError> {
     let all = visible(s, asker)?;
     let r = reference.trim();
-    if let Ok(id) = r.trim_start_matches('#').parse::<i64>() {
-        if let Some(d) = all.iter().find(|d| d.id == id) {
-            return Ok(d.clone());
-        }
+    // `#12` is an id and only that; a bare `12` is an id unless it is also
+    // another device's serial or name, which is then ambiguous.
+    let by_id = r
+        .trim_start_matches('#')
+        .parse::<i64>()
+        .ok()
+        .and_then(|id| all.iter().find(|d| d.id == id));
+    if let Some(d) = by_id.filter(|_| r.starts_with('#')) {
+        return Ok(d.clone());
     }
     let (host, what) = match r.split_once('/') {
         Some((h, w)) if all.iter().any(|d| d.host == h) => (Some(h), w),
@@ -491,6 +496,23 @@ pub fn resolve(s: &Store, asker: &Asker, reference: &str) -> Result<DebugDevice,
                 || eq(&d.key)
         })
         .collect();
+    if let Some(d) = by_id {
+        if hits.iter().all(|h| h.id == d.id) {
+            return Ok(d.clone());
+        }
+        return Err(IpcError::new(
+            codes::E_AMBIGUOUS,
+            format!(
+                "{r:?} is the id of {} and names {}; say #{} for the id",
+                d.display(),
+                hits.iter()
+                    .map(|h| h.display())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                d.id
+            ),
+        ));
+    }
     match hits.as_slice() {
         [one] => Ok((*one).clone()),
         [] => Err(IpcError::new(
@@ -647,7 +669,7 @@ pub fn configure(
 ) -> Result<DebugDevice, IpcError> {
     person_only(asker, "a device's label and sharing")?;
     let s = lock(store)?;
-    let d = resolve(&s, asker, &id.to_string())?;
+    let d = resolve(&s, asker, &format!("#{id}"))?;
     let label = label.map(|l| {
         let l = l.trim();
         if l.is_empty() {
@@ -673,7 +695,7 @@ pub fn configure(
 pub fn forget(store: &Mutex<Store>, asker: &Asker, id: i64) -> Result<bool, IpcError> {
     person_only(asker, "forgetting a device")?;
     let s = lock(store)?;
-    let d = resolve(&s, asker, &id.to_string())?;
+    let d = resolve(&s, asker, &format!("#{id}"))?;
     Ok(s.debug_device_forget(d.id)? > 0)
 }
 

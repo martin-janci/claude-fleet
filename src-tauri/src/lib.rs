@@ -744,33 +744,37 @@ pub fn run() {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 upload_allow_for_window.allow(paths);
             }
-            // On exit: close ssh masters AND any open PTY, so we don't leak
-            // background ssh processes or an orphaned `tmux attach` / `ssh
-            // -tt` child after quit.
-            // A pop-out terminal (step 5.4) going away closes its own PTY and
-            // nothing else: the app, its ssh masters and the main window's
-            // terminals carry on.
+            // The main window going away is the app's exit: close ssh
+            // masters AND any open PTY, so we don't leak background ssh
+            // processes or an orphaned `tmux attach` / `ssh -tt` child after
+            // quit. A pop-out terminal (step 5.4) going away closes its own
+            // PTY and nothing else: the app, its ssh masters and the main
+            // window's terminals carry on. Any other window does neither.
             if let tauri::WindowEvent::Destroyed = event {
-                if commands::windows::is_popout_label(window.label()) {
-                    use tauri::Manager;
-                    if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
-                        pty::close_pty(pty.inner(), window.label());
-                    }
-                    return;
-                }
-            }
-            if let tauri::WindowEvent::Destroyed = event {
+                use commands::windows::OnDestroyed;
                 use tauri::Manager;
-                ssh_client_for_exit.shutdown_all();
-                tunnels_for_exit.stop_all();
-                shutdown_for_exit.cancel();
-                if let Some(runtime) = window.try_state::<Mutex<fleet_core::mcp::McpRuntime>>() {
-                    if let Ok(mut rt) = runtime.lock() {
-                        rt.stop();
+                match commands::windows::on_destroyed(window.label()) {
+                    OnDestroyed::ClosePty => {
+                        if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
+                            pty::close_pty(pty.inner(), window.label());
+                        }
                     }
-                }
-                if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
-                    pty::close_all_ptys(pty.inner());
+                    OnDestroyed::ShutDown => {
+                        ssh_client_for_exit.shutdown_all();
+                        tunnels_for_exit.stop_all();
+                        shutdown_for_exit.cancel();
+                        if let Some(runtime) =
+                            window.try_state::<Mutex<fleet_core::mcp::McpRuntime>>()
+                        {
+                            if let Ok(mut rt) = runtime.lock() {
+                                rt.stop();
+                            }
+                        }
+                        if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
+                            pty::close_all_ptys(pty.inner());
+                        }
+                    }
+                    OnDestroyed::Nothing => {}
                 }
             }
         })

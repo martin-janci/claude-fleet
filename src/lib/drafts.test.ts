@@ -78,6 +78,18 @@ describe('MorningBrief', () => {
     expect(screen.queryByTestId('morning-brief')).toBeNull();
   });
 
+  it('says a refusal in its own words, never hiding as an older hub would', async () => {
+    vi.mocked(invoke).mockImplementation(async (c) => {
+      if (c === 'today_brief') throw { code: 'E_FORBIDDEN', message: 'your org has not consented to LLM drafts' };
+      return null;
+    });
+    render(MorningBrief);
+    await flush();
+    expect(screen.getByTestId('morning-brief')).toBeTruthy();
+    expect(screen.getByTestId('morning-brief-refused').textContent).toBe('your org has not consented to LLM drafts');
+    expect(screen.queryByTestId('morning-brief-draft-btn')).toBeNull();
+  });
+
   it('says why a refresh failed', async () => {
     vi.mocked(invoke).mockImplementation(async (c, a) => {
       if (refreshOf(c, a)) {

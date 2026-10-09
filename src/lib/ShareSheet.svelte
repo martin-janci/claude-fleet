@@ -43,6 +43,7 @@
   import { hubConnection } from './hub_connection';
   import { devices, loadDevices } from './devices';
   import { readOnlyRecipient } from './share_devices';
+  import { errorSentence } from './error_copy';
 
   const id = $derived($shareSheetFor);
   const session = $derived(id === null ? undefined : $sessions.find((s) => s.id === id));
@@ -104,7 +105,7 @@
       return;
     }
     grants = null;
-    listError = `${r.error.code}: ${r.error.message}`;
+    listError = `Couldn't read who this is shared with: ${errorSentence(r.error)}`;
   }
 
   // A fresh sheet each time it opens on a session: the draft recipient, the
@@ -168,7 +169,7 @@
     busy = false;
     confirming = null;
     if (!r.ok) {
-      error = `${r.error.code}: ${r.error.message}`;
+      error = errorSentence(r.error);
       return;
     }
     await load(forId);
@@ -283,7 +284,10 @@
       <section class="block">
         <h4>Shared with</h4>
         {#if listError}
-          <p class="err" data-testid="share-list-error">{listError}</p>
+          <p class="err" data-testid="share-list-error">
+            {listError}
+            {#if $shareSheetFor !== null}<button type="button" class="btn btn--quiet" data-testid="share-list-retry" onclick={() => void load($shareSheetFor!)}>Retry</button>{/if}
+          </p>
         {:else if grants === null}
           <p class="note" data-testid="share-list-loading">Reading the grants…</p>
         {:else if grants.length === 0}

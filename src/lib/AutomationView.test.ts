@@ -90,3 +90,39 @@ describe('Automation (redesign step 8.4)', () => {
     expect(invoke).toHaveBeenCalledWith('set_fleet_setting', { key: 'automation.paused', value: 'false' });
   });
 });
+
+// Review round 13: a failed read says so with Retry, and a later good read of
+// the routines never leaves the Runs tab blank.
+describe('Automation when a read fails (review r13)', () => {
+  it('a failed runs read shows an error with Retry, which reads the runs again', async () => {
+    let runsFail = true;
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'health_check') return { version: 'x', db_ready: true, schema_version: 1, loops: LOOPS, automation_paused: false };
+      if (cmd === 'list_runs') {
+        if (runsFail) throw { code: 'E_HUB_TIMEOUT', message: 'deadline' };
+        return { runs: RUNS, total: RUNS.length };
+      }
+      return null;
+    });
+    render(AutomationView);
+    automationTab.set('runs');
+    const err = await screen.findByTestId('automation-runs-error');
+    expect(err.textContent).toContain('The hub took too long to answer');
+    runsFail = false;
+    await fireEvent.click(screen.getByTestId('automation-runs-error-retry'));
+    expect(await screen.findAllByTestId('automation-run')).toHaveLength(2);
+  });
+
+  it('a failed first read of the routines is said, not left blank', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'health_check') throw { code: 'E_HUB_UNREACHABLE', message: 'refused' };
+      if (cmd === 'list_runs') return { runs: [], total: 0 };
+      return null;
+    });
+    render(AutomationView);
+    const err = await screen.findByTestId('automation-load-error');
+    expect(err.textContent).toContain("Couldn't load automation");
+    expect(err.textContent).not.toMatch(/^E_/);
+    expect(screen.getByTestId('automation-load-error-retry')).toBeInTheDocument();
+  });
+});

@@ -149,7 +149,10 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 /// Raised to 13 for revision 13: Control's routing, the Library, the lost
 /// session's target and placement, and start rules route to tools a
 /// revision-12 hub lacks.
-pub const MIN_HUB_CONTRACT: u32 = 13;
+///
+/// Raised to 14 for revision 14: account headroom and mission triage route
+/// to tools a revision-13 hub lacks.
+pub const MIN_HUB_CONTRACT: u32 = 14;
 
 /// The highest hub wire-contract revision this build understands. A hub
 /// ahead of this is running row shapes compiled after this build was —
@@ -172,7 +175,9 @@ pub const MIN_HUB_CONTRACT: u32 = 13;
 /// Raised to 12 with revision 12 (the redesign tools after M2).
 ///
 /// Raised to 13 with revision 13.
-pub const MAX_HUB_CONTRACT: u32 = 13;
+///
+/// Raised to 14 with revision 14.
+pub const MAX_HUB_CONTRACT: u32 = 14;
 
 /// Where a hub's wire-contract revision stands against what this build
 /// accepts. A pure function of the three numbers on purpose: the real bounds

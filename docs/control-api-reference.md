@@ -323,7 +323,7 @@ Who you are on this fleet and every live grant TO you: { person_id, grants: [{ s
 
 Launch a supervised headless (background) Claude session on a host with an initial prompt, which becomes its default friendly name. Returns the claude_session_id AND the fleet row (`session`; absent until reconcile matches it, on the next tick) for session_transcript { session_id }.
 
-Parameters: `confirm_nonce`, `host_alias`, `name`, `prompt`, `requester_session_id`
+Parameters: `agent`, `confirm_nonce`, `host_alias`, `name`, `project_id`, `prompt`, `read_only`, `requester_session_id`, `stop_after_secs`, `stop_after_usd`
 
 ### `new_session`
 
@@ -413,7 +413,7 @@ Parameters: `action`, `limit`, `project_id`, `state`
 
 Send a prompt as a new turn when the session is idle: typed now if it is, else kept and typed once its turn ends (never into a dialog). Marked untrusted unless raw=true (master only). Returns { session_id, delivered, queued_id }.
 
-Parameters: `prompt`, `raw`, `session_id`
+Parameters: `confirm_nonce`, `prompt`, `raw`, `session_id`
 
 ### `queued_prompts`
 
@@ -585,7 +585,7 @@ Parameters: `action`, `enabled`, `limit`, `routine`, `routine_id`, `skip`
 
 send_prompt + wait_for_session(turn_gt) + session_transcript in one call. Returns { turn_seq, status: satisfied | timeout, transcript } (the reply as plain text; null with transcript_error when unreadable). Marked untrusted unless raw=true (master token only).
 
-Parameters: `max_chars`, `prompt`, `raw`, `session_id`, `timeout_s`
+Parameters: `confirm_nonce`, `max_chars`, `prompt`, `raw`, `session_id`, `timeout_s`
 
 ### `runs`
 
@@ -621,7 +621,7 @@ Parameters: `body`, `client_msg_id`, `deliver`, `from_session_id`, `kind`, `raw`
 
 Send and SUBMIT a prompt to a running Claude session's REPL (pasted, then one Enter); the first prompt to an unnamed session also names it. Marked untrusted unless raw=true (master only) or a trusted client. keys presses a key instead. Returns { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } for the reply (run_prompt does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working one queues it. acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable.
 
-Parameters: `client_msg_id`, `force`, `host_alias`, `keys`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
+Parameters: `client_msg_id`, `confirm_nonce`, `force`, `host_alias`, `keys`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
 ### `session_access`
 

@@ -58,6 +58,7 @@
     formatTokens,
     SOURCE_LABELS,
     sameConversation,
+    reuseTurns,
     isPinned,
     emptyStateText,
     agentLabel,
@@ -116,6 +117,7 @@
   import RichText from './RichText.svelte';
   import BackgroundDetail from './BackgroundDetail.svelte';
   import Loader from './Loader.svelte';
+  import Skeleton from './states/Skeleton.svelte';
   import type { LoaderName } from './loader-kit.generated';
   import PulseSteps from './PulseSteps.svelte';
   import { startingSessions } from './session_starting';
@@ -188,7 +190,9 @@
     thinkingAs?: (conv: Conversation | null) => { loader: LoaderName; label: string } | null;
   } = $props();
 
-  let conv = $state<Conversation | null>(null);
+  // Raw: replaced whole on each read and never mutated, so a deep proxy only
+  // costs every read of a turn a trap (review r16 D3).
+  let conv = $state.raw<Conversation | null>(null);
   // The conversation `conv` was read from (the id the fetch named). Tool
   // details are read from it, not from the row's id at click time: the row
   // can move on (/clear, /resume) before a reload replaces the view.
@@ -368,7 +372,7 @@
       if (!sameConversation(conv, r.value)) {
         // Older turns prepended by Load older are history, not news.
         if (!pinned && !opts.older) unseen += newItemCount(conv, r.value);
-        conv = r.value;
+        conv = reuseTurns(conv, r.value);
         // Pushed events the read now carries are the backend's to keep (or
         // age out); holding copies would grow `pushed` without bound.
         const carried = new Set((conv.events ?? []).map((e) => e.id));
@@ -2026,9 +2030,12 @@
       {#if emptyHint}<p class="empty-hint">{emptyHint}</p>{/if}
     </div>
   {:else if loading}
-    <p class="muted conv-loading" data-testid="conv-loading" role="status">
-      <Loader size={16} />Loading conversation…
-    </p>
+    <!-- Review r13 (step 10.6, MobileStates' conversation skeleton): nothing
+         for the first 400 ms, then a skeleton; the text no longer flashes on
+         every session switch. -->
+    <div class="conv-loading" data-testid="conv-loading">
+      <Skeleton rows={4} label="Loading conversation" />
+    </div>
   {:else}
     <!-- A scrollable region has to be in the tab order, or the transcript
          can only be scrolled with a pointer; being focusable is also what
@@ -3029,16 +3036,11 @@
     font-size: inherit;
   }
     .conv-loading {
-    /* Fills the thread area and sits in its middle, where the transcript
-       (and the empty state) will be — not pinned to the top-left corner. */
+    /* Fills the thread area where the transcript will be; the skeleton's
+       bars take the thread's width (review r13). */
     flex: 1 1 auto;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
     margin: 0;
     padding: 1.5rem 1.1rem;
-    color: var(--fg-muted);
   }
   .linkish :global(.inline-loader) {
     margin-right: 0.3em;

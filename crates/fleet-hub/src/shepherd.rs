@@ -95,8 +95,11 @@ fn run_on(store: &Store, cmd: ShepherdCmd, now: i64) -> Result<ExitCode, String>
                     SHEPHERD_LEVELS.join(", ")
                 ));
             }
-            if hours.is_some_and(|h| h <= 0) {
-                return Err("--hours must be positive".into());
+            // The same bound the control API keeps; past it `h * 3600`
+            // would also overflow into an already expired rule.
+            let max = fleet_core::service::pr_shepherd::admin::MAX_RULE_HOURS;
+            if hours.is_some_and(|h| !(1..=max).contains(&h)) {
+                return Err(format!("--hours must be 1-{max}"));
             }
             let id = project_id(store, &project)?;
             let expires_at = hours.map(|h| now + h * 3600);
@@ -230,6 +233,9 @@ mod tests {
         let (_dir, s) = store();
         assert!(run_on(&s, grant("auto", None), 0).is_err());
         assert!(run_on(&s, grant("watch", Some(0)), 0).is_err());
+        let max = fleet_core::service::pr_shepherd::admin::MAX_RULE_HOURS;
+        assert!(run_on(&s, grant("watch", Some(max + 1)), 0).is_err());
+        assert!(run_on(&s, grant("watch", Some(i64::MAX)), 0).is_err());
         let missing = ShepherdCmd::Grant {
             project: "o/nope".into(),
             level: "watch".into(),

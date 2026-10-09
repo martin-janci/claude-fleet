@@ -69,18 +69,22 @@ pub struct AgentInstallsArgs {
     pub alias: Option<String>,
 }
 
-/// The release tarball's target triple for `uname -s`/`uname -m`.
+/// The release tarball's target triple for `uname -s`/`uname -m`: the
+/// first line that reads as one, since `bash -lc` prints whatever a chatty
+/// login profile says around the answer.
 pub fn target_for(uname: &str) -> Option<&'static str> {
-    let mut it = uname.split_whitespace();
-    let (os, arch) = (it.next()?, it.next()?);
-    if os != "Linux" {
-        return None;
-    }
-    match arch {
-        "x86_64" | "amd64" => Some("x86_64-unknown-linux-gnu"),
-        "aarch64" | "arm64" => Some("aarch64-unknown-linux-gnu"),
-        _ => None,
-    }
+    uname.lines().find_map(|line| {
+        let mut it = line.split_whitespace();
+        let (os, arch) = (it.next()?, it.next()?);
+        if os != "Linux" || it.next().is_some() {
+            return None;
+        }
+        match arch {
+            "x86_64" | "amd64" => Some("x86_64-unknown-linux-gnu"),
+            "aarch64" | "arm64" => Some("aarch64-unknown-linux-gnu"),
+            _ => None,
+        }
+    })
 }
 
 /// The release base URL for `version`.
@@ -190,9 +194,26 @@ struct Plan {
     insecure: bool,
 }
 
+#[cfg(test)]
 fn plan(store: &Mutex<Store>, args: &InstallAgentArgs) -> Result<Plan, IpcError> {
-    crate::validate::host_alias(&args.alias)?;
+    plan_in(&*lock(store)?, args)
+}
+
+/// Plan the job and write its `running` row under ONE store guard, so the
+/// "already running" check and the insert are atomic: two concurrent
+/// installs on a host cannot both pass the check (r18).
+fn plan_and_claim(
+    store: &Mutex<Store>,
+    args: &InstallAgentArgs,
+) -> Result<(Plan, AgentInstallRow), IpcError> {
     let s = lock(store)?;
+    let plan = plan_in(&s, args)?;
+    let row = s.insert_agent_install(&plan.alias, &plan.version)?;
+    Ok((plan, row))
+}
+
+fn plan_in(s: &Store, args: &InstallAgentArgs) -> Result<Plan, IpcError> {
+    crate::validate::host_alias(&args.alias)?;
     let host = s
         .list_hosts()?
         .into_iter()
@@ -210,7 +231,7 @@ fn plan(store: &Mutex<Store>, args: &InstallAgentArgs) -> Result<Plan, IpcError>
             format!("{} is already an agent host", host.alias),
         ));
     }
-    crate::service::trackers::admin::refuse_agent_transport_on_tracker_host(&s, &host.alias)?;
+    crate::service::trackers::admin::refuse_agent_transport_on_tracker_host(s, &host.alias)?;
     if let Some(running) = s
         .agent_installs(Some(&host.alias), 1)?
         .into_iter()
@@ -235,7 +256,7 @@ fn plan(store: &Mutex<Store>, args: &InstallAgentArgs) -> Result<Plan, IpcError>
             // A loopback default would point the agent at its own machine:
             // it reaches the hub only through a provisioning tunnel, which
             // the hub stops keeping once the host is an agent host (r18-A1).
-            let base = crate::service::hub::HubBase::read(&s)?;
+            let base = crate::service::hub::HubBase::read(s)?;
             if !base.public {
                 return Err(IpcError::new(
                     codes::E_INVALID,
@@ -298,8 +319,7 @@ pub fn start(
             "only a hub accepts fleet-agent connections; this app reaches its hosts over SSH",
         ));
     };
-    let plan = plan(&store, &args)?;
-    let row = lock(&store)?.insert_agent_install(&plan.alias, &plan.version)?;
+    let (plan, row) = plan_and_claim(&store, &args)?;
     let id = row.id;
     tokio::spawn(async move {
         let outcome = run(&store, &*ssh, &registry, id, &plan, CONNECT_WAIT).await;
@@ -311,6 +331,16 @@ pub fn start(
         }
     });
     Ok(row)
+}
+
+/// At process start: every job still `running` was run by a process that is
+/// gone (a job lives in the process that started it), so none of them may
+/// hold off a new install for [`STALE_AFTER_SECS`].
+pub fn fail_interrupted(store: &Store) -> Result<usize, IpcError> {
+    Ok(store.fail_stale_agent_installs(
+        crate::store::now_unix() + 1,
+        "interrupted: the hub stopped while it ran; start it again",
+    )?)
 }
 
 /// The jobs, newest first; one left running by a process that is gone is
@@ -483,6 +513,80 @@ mod tests {
         assert_eq!(target_for("Darwin arm64"), None);
         assert_eq!(target_for("Linux riscv64"), None);
         assert_eq!(target_for(""), None);
+        // A login profile that prints before the answer.
+        assert_eq!(
+            target_for("Welcome to mercury\nLast login: today\nLinux x86_64\n"),
+            Some("x86_64-unknown-linux-gnu")
+        );
+    }
+
+    /// A job a previous hub process left `running` no longer blocks a new
+    /// install once the hub starts again (not only after 30 min and a list).
+    #[tokio::test]
+    async fn a_job_left_running_by_a_stopped_hub_does_not_block_a_new_one() {
+        let store = store_with_ssh_host();
+        let old = {
+            let s = store.lock().unwrap();
+            s.set_setting(crate::mcp::SETTING_TOKEN, "tok").unwrap();
+            s.insert_agent_install("mercury", "0.5.4").unwrap().id
+        };
+        let args = InstallAgentArgs {
+            alias: "mercury".into(),
+            hub_url: Some("https://fleet.example.com".into()),
+            version: Some("0.5.4".into()),
+        };
+        assert_eq!(
+            plan(&store, &args).err().map(|e| e.code).as_deref(),
+            Some(codes::E_CONFLICT)
+        );
+        assert_eq!(fail_interrupted(&store.lock().unwrap()).unwrap(), 1);
+        assert!(plan(&store, &args).is_ok());
+        let s = store.lock().unwrap();
+        assert_eq!(s.agent_install(old).unwrap().unwrap().state, "failed");
+    }
+
+    /// r18: the "already running" check and the insert share one store
+    /// guard, so of several installs started at once on one host exactly
+    /// one claims it and the rest are refused with a conflict.
+    #[test]
+    fn concurrent_installs_on_one_host_claim_it_once() {
+        let store = store_with_ssh_host();
+        store
+            .lock()
+            .unwrap()
+            .set_setting(crate::mcp::SETTING_TOKEN, "tok")
+            .unwrap();
+        let args = InstallAgentArgs {
+            alias: "mercury".into(),
+            hub_url: Some("https://fleet.example.com".into()),
+            version: Some("0.5.4".into()),
+        };
+        const N: usize = 8;
+        let barrier = Arc::new(std::sync::Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let (store, args, barrier) = (store.clone(), args.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    plan_and_claim(&store, &args).map(|(_, row)| row.id)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let won = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(won, 1, "{results:?}");
+        assert!(results
+            .iter()
+            .filter_map(|r| r.as_ref().err())
+            .all(|e| e.code == codes::E_CONFLICT));
+        let s = store.lock().unwrap();
+        let running = s
+            .agent_installs(Some("mercury"), 99)
+            .unwrap()
+            .into_iter()
+            .filter(|j| j.state == "running")
+            .count();
+        assert_eq!(running, 1);
     }
 
     #[test]

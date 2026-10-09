@@ -1689,6 +1689,10 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/148_file_owner.sql"),
         already_applied: Some(downloads_has_owner),
     },
+    // Redesign: a background agent's "stop after" limits, enforced by the
+    // reconcile tick (`service::bg_sessions::spawn_enforce_stop_limits`).
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(149, include_str!("../../migrations/149_bg_stop_limits.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

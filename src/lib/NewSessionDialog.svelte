@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { listHostWorktrees, projects, type ProjectTreeRow, type WorktreeRow } from './projects';
   import { extractWorkKey, keyFromTicketUrl, workKeyFor, worktreeBranchById } from './work_keys';
@@ -301,6 +302,11 @@
     pickedLogin = true;
     if (newLayout) otherProfile = true;
   }
+  // The picked login's account, so the host line and warning describe the
+  // account the session will run on (review r05 A8); null keeps the host's.
+  const chosenLoginAccount = $derived(
+    newLayout ? (hostLogins?.find((l) => (l.profile ?? '') === chosenProfile)?.account_uuid ?? null) : null,
+  );
   function onPickLogin(v: string) {
     pickedLogin = true;
     if (v === OTHER_PROFILE) {
@@ -695,6 +701,11 @@
       const uuids = new Set(
         $hosts.filter((h) => !h.hidden && h.account_uuid).map((h) => h.account_uuid as string),
       );
+      // The profiles' accounts too: the Account select shows their usage.
+      for (const h of $hosts) {
+        if (h.hidden) continue;
+        for (const p of h.claude_profiles ?? []) if (p.account_uuid) uuids.add(p.account_uuid);
+      }
       for (const uuid of uuids) void refreshAccountUsage(uuid);
     }
   });
@@ -1272,7 +1283,7 @@
         onclick={reroll}
         title="Roll a new name (Ctrl/⌘+R)"
         aria-label="Roll a new name"
-      >🎲</button>
+      ><Icon name="dice" size={14} /></button>
     </div>
     {#if plannedKey}
       <p class="work-note" data-testid="work-note">
@@ -1550,6 +1561,7 @@
       {now}
       {locale}
       {timeZone}
+      selectedAccount={chosenLoginAccount}
       onpick={(alias) => {
         pickHost(alias);
         nameOverride = null;

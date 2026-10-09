@@ -138,9 +138,9 @@ pub fn headroom(
         logins
             .iter()
             .filter(|l| Some(l.account_uuid.as_str()) != current)
-            .filter(|l| l.used_pct.is_some_and(|u| u < pause_at_pct))
-            .min_by(|a, b| a.used_pct.unwrap().total_cmp(&b.used_pct.unwrap()))
-            .cloned()
+            .filter_map(|l| l.used_pct.filter(|u| *u < pause_at_pct).map(|u| (u, l)))
+            .min_by(|(a, _), (b, _)| a.total_cmp(b))
+            .map(|(_, l)| l.clone())
     } else {
         None
     };

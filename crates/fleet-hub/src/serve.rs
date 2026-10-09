@@ -753,7 +753,7 @@ pub fn ssh_key() -> Result<ExitCode, String> {
             ));
         }
         KeyAction::Derive => {
-            let o = std::process::Command::new("ssh-keygen")
+            let o = fleet_core::proc::std_command("ssh-keygen")
                 .arg("-y")
                 .arg("-f")
                 .arg(&key)
@@ -777,7 +777,7 @@ pub fn ssh_key() -> Result<ExitCode, String> {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700));
             }
-            let st = std::process::Command::new("ssh-keygen")
+            let st = fleet_core::proc::std_command("ssh-keygen")
                 .args(["-q", "-t", "ed25519", "-N", "", "-C", "fleet-hub", "-f"])
                 .arg(&key)
                 .status()
@@ -850,6 +850,11 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         match fleet_core::service::downloads::init(&r.data_dir, &s) {
             Ok(dir) => tracing::info!(dir = %dir.display(), "downloads ready"),
             Err(e) => tracing::warn!(error = %e, "downloads unavailable"),
+        }
+        // Likewise an agent install the last run left `running`: its job
+        // died with that process, and it would refuse a new one for 30 min.
+        if let Err(e) = fleet_core::service::agent_install::fail_interrupted(&s) {
+            tracing::warn!(error = %e.message, "agent installs: could not fail interrupted jobs");
         }
     }
     // `/events` stamps `needs_attention` without a store, so it is handed

@@ -1,5 +1,5 @@
 import { render, screen, waitFor, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, beforeAll, expect, beforeEach, vi } from 'vitest';
 import App from './App.svelte';
 import { onboardingDismissed } from './lib/onboarding';
 import { clearToasts, toasts } from './lib/toasts';
@@ -7,6 +7,12 @@ import { get } from 'svelte/store';
 import { catalog } from './lib/assets';
 import { hubStatus, STANDALONE, type HubStatus } from './lib/hub';
 import { hubConnection } from './lib/hub_connection';
+import { sessionsAnswered } from './lib/sessions';
+import { preloadLazyViews } from './lib/lazy_views';
+
+// The off-screen views load lazily in the app; here they are in place
+// before the first render, so a test sees them on the frame they open.
+beforeAll(() => preloadLazyViews());
 
 const remote: HubStatus = {
   remote: true,
@@ -433,6 +439,21 @@ describe('the asset catalog at startup (the quick switcher)', () => {
       await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'catalog_config')).toBe(true));
       await new Promise((r) => setTimeout(r, 0));
       expect(inv.mock.calls.some((c) => c[0] === 'catalog_load' || c[0] === 'catalog_list_assets')).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  // r13 D22: ⌘K and the status bar wait on sessionsAnswered; a window that
+  // will never list sessions must not say "still arriving" for ever.
+  it('a window whose hub is unusable counts its sessions as answered', async () => {
+    const unusable: HubStatus = { ...STANDALONE, configured_url: 'https://fleet.example.com', unavailable: 'no token' };
+    const { restore } = await routeInvoke((cmd) => (cmd === 'hub_status' ? unusable : undefined));
+    sessionsAnswered.set(false);
+    try {
+      render(App);
+      await screen.findByTestId('hub-unavailable');
+      await waitFor(() => expect(get(sessionsAnswered)).toBe(true));
     } finally {
       restore();
     }

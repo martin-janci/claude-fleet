@@ -93,6 +93,7 @@ pub const RISKY_WORDS: &[&str] = &[
     "permission",
     "permissions",
     "sudo",
+    "approve",
 ];
 
 static RISKY: LazyLock<Regex> = LazyLock::new(|| {
@@ -103,6 +104,14 @@ static RISKY: LazyLock<Regex> = LazyLock::new(|| {
 /// PURE: an option AI never proposes (see [`RISKY_WORDS`]).
 pub fn risky(label: &str) -> bool {
     RISKY.is_match(label)
+}
+
+/// PURE: a question that names a risky action ("Push the 3 commits to
+/// origin/main now?"), whose options AI never orders: its "Yes, go ahead"
+/// is a push even though its own words name none. The same words as
+/// [`risky`]; `src/lib/quick_answer.ts`'s `riskyQuestion` checks them too.
+pub fn risky_question(question: &str) -> bool {
+    RISKY.is_match(question)
 }
 
 /// PURE: the free-text entry Claude Code adds to a question ("Type
@@ -172,13 +181,17 @@ pub fn safe_choices<'a>(labels: impl IntoIterator<Item = &'a str>) -> Vec<Choice
 
 /// PURE: the input for an agent's question on session `session_id`, or
 /// `None` when it may not be asked: a permission dialog, a multi-select
-/// question (a digit only ticks a box there), or too few safe choices.
+/// question (a digit only ticks a box there), a question that names a risky
+/// action ([`risky_question`]), or too few safe choices.
 pub fn session_input(
     session_id: i64,
     org_id: Option<i64>,
     pending: &PendingInput,
 ) -> Option<QuickInput> {
     if pending.kind != "input" || pending.multi {
+        return None;
+    }
+    if pending.question.as_deref().is_some_and(risky_question) {
         return None;
     }
     let mut labels: Vec<(u8, &str)> = pending

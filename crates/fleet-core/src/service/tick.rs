@@ -274,6 +274,10 @@ pub fn spawn_reconcile_tick(
                 // session is idle; the Stop hook delivers it first, this catches
                 // a hook that never came. Detached and single-flight.
                 service::sessions::deferred::spawn_deliver_all_due(store, ssh);
+                // A background agent's "stop after" limits (migration 149):
+                // stopped once past its deadline or spend cap. Detached and
+                // single-flight; one indexed read when none are live.
+                service::bg_sessions::spawn_enforce_stop_limits(store, ssh);
                 // Wave 5 G-hub-latency Task 1: single-flight, off the tick
                 // body — a slow sweep (it does SSH work) must not stretch
                 // the tick past its period. Mirrors `service::usage::spawn_collect`.

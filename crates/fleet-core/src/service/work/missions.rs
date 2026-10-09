@@ -170,9 +170,11 @@ pub(super) fn mission_id(args: &WorkLinkArgs) -> Result<i64, IpcError> {
 /// `work { action: missions }`.
 pub fn missions(store: &Mutex<Store>, scope: &ViewScope) -> Result<Vec<MissionRow>, IpcError> {
     let s = lock(store)?;
+    let now = crate::store::now_unix();
     let mut out = Vec::new();
-    for m in s.list_missions()? {
+    for mut m in s.list_missions()? {
         if sees_mission(&s, scope, &m)? {
+            super::orchestrate::fill_spend(&s, &mut m, now)?;
             out.push(m);
         }
     }
@@ -187,7 +189,8 @@ pub fn mission(
     before_event: Option<i64>,
 ) -> Result<MissionDetail, IpcError> {
     let s = lock(store)?;
-    let mission = visible(&s, scope, id)?;
+    let mut mission = visible(&s, scope, id)?;
+    super::orchestrate::fill_spend(&s, &mut mission, crate::store::now_unix())?;
     let mut items = Vec::new();
     for i in s.mission_items(id)? {
         if crate::service::trackers::tickets::item_visible(&scope.org, &s, &i)? {

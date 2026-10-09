@@ -992,6 +992,56 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             at: 3,
         }),
     );
+    // Revision 14.
+    let login = fleet_core::service::account_limits::HostLogin {
+        profile: Some("work".into()),
+        account_uuid: "u".into(),
+        used_pct: Some(40.0),
+    };
+    put("HostLogin", wire_keys(&login));
+    put(
+        "Headroom",
+        wire_keys(&fleet_core::service::account_limits::Headroom {
+            pause_at_pct: 90.0,
+            chosen: Some(login.clone()),
+            over: false,
+            suggestion: Some(login.clone()),
+            logins: vec![login],
+        }),
+    );
+    put(
+        "ShepherdRuleView",
+        wire_keys(&fleet_core::service::pr_shepherd::admin::RuleView {
+            rule: fleet_core::store::ShepherdRuleRow {
+                project_id: 1,
+                level: "nudge".into(),
+                granted_by: "person:1".into(),
+                granted_at: 1,
+                expires_at: Some(2),
+                recipes: Some("r".into()),
+            },
+            project: "acme/app".into(),
+            active: true,
+        }),
+    );
+    let mut mission: fleet_core::store::MissionRow = serde_json::from_value(serde_json::json!({
+        "id": 1, "org_id": 1, "owner_person_id": 1, "root_item_id": 1, "name": "m",
+        "goal": "g", "non_goals": "n", "mode": "finite", "state": "active", "level": 2,
+        "plan_version": 1, "created_at": 1, "updated_at": 1, "started_at": 1,
+        "finished_at": 1, "version": 1, "next_wake_at": 1
+    }))
+    .unwrap();
+    mission.cost_micros = Some(31_800_000);
+    mission.budget_micros = Some(40_000_000);
+    put("MissionRow", wire_keys(&mission));
+    put(
+        "RunEstimate",
+        wire_keys(&fleet_core::service::work::orchestrate::RunEstimate {
+            micros: 3_000_000,
+            runs: 2,
+            basis: "mission".into(),
+        }),
+    );
     let mut usage = fleet_core::service::account_usage::AccountUsageSnapshot::never_fetched("a");
     usage.usage = Some(Default::default());
     usage.subscription = Some("max".into());

@@ -458,6 +458,96 @@ describe('AnswerPrompt quick answer (redesign step 10.9)', () => {
       uiLayout.set('classic');
     }
   });
+
+  // F10: a question that names a push (or a merge, a deploy…) is a risky
+  // step, whatever its options say: "Yes, go ahead" is the push.
+  const PUSH: PendingInput = {
+    kind: 'input',
+    question: 'Push the 3 commits to origin/main now?',
+    options: [
+      { n: 1, label: 'Not yet', selected: true },
+      { n: 2, label: 'Yes, go ahead', selected: false },
+    ],
+  };
+
+  it('never reorders a question that names a risky action, nor draws Jev’s pick primary', () => {
+    for (const layout of ['classic', 'new'] as const) {
+      uiLayout.set(layout);
+      try {
+        const { unmount } = render(AnswerPrompt, { session: session({ pending_input: PUSH, ...jev('o2', 95) }), view: view(PUSH) });
+        const opts = screen.getAllByTestId('answer-option');
+        expect(opts.map((b) => b.textContent?.replace(/\s+/g, '')), layout).toEqual(['1Notyet', '2Yes,goahead']);
+        expect(opts.some((b) => b.classList.contains('primary')), layout).toBe(false);
+        expect(screen.queryByTestId('answer-proposed'), layout).toBeNull();
+        unmount();
+      } finally {
+        uiLayout.set('classic');
+      }
+    }
+  });
+
+  it('may move an affirmative option first on a safe question, but never draws it primary', () => {
+    const SAFE: PendingInput = {
+      kind: 'input',
+      question: 'Shall I add tests for the parser?',
+      options: [
+        { n: 1, label: 'Not now', selected: true },
+        { n: 2, label: 'Yes, go ahead', selected: false },
+      ],
+    };
+    uiLayout.set('new');
+    try {
+      render(AnswerPrompt, { session: session({ pending_input: SAFE, ...jev('o2') }), view: view(SAFE) });
+      const opts = screen.getAllByTestId('answer-option');
+      expect(opts[0].textContent).toContain('Yes, go ahead');
+      expect(opts.some((b) => b.classList.contains('primary'))).toBe(false);
+      expect(screen.getByTestId('answer-proposed')).toHaveTextContent('Proposed by Jev');
+    } finally {
+      uiLayout.set('classic');
+    }
+  });
+
+  // F11: the sidebar's compact card has no room to say who moved what.
+  it('never reorders in compact mode, where no "Proposed by Jev" or "Keep the order" shows', async () => {
+    for (const layout of ['classic', 'new'] as const) {
+      uiLayout.set(layout);
+      try {
+        const { unmount } = render(AnswerPrompt, {
+          session: session({ pending_input: QUESTION, ...jev('o2') }),
+          view: view(QUESTION),
+          compact: true,
+        });
+        const opts = screen.getAllByTestId('answer-option');
+        expect(opts.map((b) => b.textContent?.replace(/\s+/g, '')), layout).toEqual(['1Jest', '2Vitest', '3Pushthebranchfirst']);
+        expect(opts.some((b) => b.classList.contains('primary')), layout).toBe(false);
+        unmount();
+      } finally {
+        uiLayout.set('classic');
+      }
+    }
+  });
+
+  // F12: a proposal that arrives after the card is drawn must not change
+  // what a digit means.
+  it('a proposal that arrives after the card was drawn does not reorder it', async () => {
+    const { rerender } = render(AnswerPrompt, { session: session({ pending_input: QUESTION }), view: view(QUESTION) });
+    expect(shown()).toEqual(['1Jest', '2Vitest', '3Push the branch first']);
+    await rerender({ session: session({ pending_input: QUESTION, ...jev('o2') }), view: view(QUESTION) });
+    expect(shown()).toEqual(['1Jest', '2Vitest', '3Push the branch first']);
+    await fireEvent.keyDown(document.body, { key: '1' });
+    await settle();
+    expect(mockedSend.mock.calls[0][2]).toBe('1');
+  });
+
+  it('a new question with its proposal already there is reordered as usual', async () => {
+    const OTHER: PendingInput = { ...QUESTION, question: 'Which formatter?', options: [
+      { n: 1, label: 'Prettier', selected: true },
+      { n: 2, label: 'Biome', selected: false },
+    ] };
+    const { rerender } = render(AnswerPrompt, { session: session({ pending_input: QUESTION }), view: view(QUESTION) });
+    await rerender({ session: session({ pending_input: OTHER, ...jev('o2') }), view: view(OTHER) });
+    expect(shown()).toEqual(['1Biome', '2Prettier']);
+  });
 });
 
 describe('AnswerPrompt in the New layout (redesign 5.9)', () => {

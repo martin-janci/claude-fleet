@@ -193,4 +193,17 @@
 //!   offers them from this revision on. The desktop also routes
 //!   `session_summary_since` (11.11) to its tool. The golden file pins
 //!   `ControlRoute`, `LostTarget`, `PlacedTranscript` and `WatchSummary`.
-pub const CONTRACT_REVISION: u32 = 13;
+//! - **14** — *new tools and new arguments*. The desktop routes
+//!   `check_account_headroom` (8.7) to its new tool and `mission_triage`
+//!   (9.10) to `work_link`; a revision-13 hub serves neither. The hub
+//!   serves `pr_shepherd` (status, grant, revoke, pause_all) to a person's
+//!   device, and `routines` gains the `failing` action (8.6).
+//!   `new_bg_session` takes `project_id`, `agent`, `read_only`,
+//!   `stop_after_secs` and `stop_after_usd` (the phone's background agent
+//!   sheet), which a revision-13 hub would silently drop: the agent would
+//!   start in `$HOME`, writable and without its stop. Additive: `HostRow`
+//!   carries `agents_on_path` (12.4), `PendingInput` its `detail` (5.9), a
+//!   listed mission its `cost_micros` / `budget_micros`, and a mission's
+//!   plan a `run_estimate`. The golden file pins `HostLogin`, `Headroom`,
+//!   `ShepherdRuleView`, `MissionRow` and `RunEstimate`.
+pub const CONTRACT_REVISION: u32 = 14;

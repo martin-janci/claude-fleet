@@ -18,7 +18,7 @@ pub use crate::claude_cli::PurgeReport;
 // `-` would be read as a flag). `claude_cli` re-checks the same rules when it
 // builds the script, so DevTools / MCP callers cannot bypass them.
 
-#[derive(Debug, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "NewBgSessionParams")]
 pub struct NewBgSessionArgs {
     /// Host to launch on.
@@ -30,7 +30,32 @@ pub struct NewBgSessionArgs {
     /// Your session id: becomes the row's parent.
     #[serde(default)]
     pub requester_session_id: Option<i64>,
+    /// Start in this project's checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
+    /// "claude" only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// No edit, commit or push.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
+    /// Stop after this many seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_after_secs: Option<i64>,
+    /// Stop at this estimated spend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_after_usd: Option<f64>,
 }
+
+/// Bounds on [`NewBgSessionArgs::stop_after_secs`]: a minute to a week.
+pub const STOP_AFTER_SECS_RANGE: std::ops::RangeInclusive<i64> = 60..=7 * 24 * 3600;
+/// Upper bound on [`NewBgSessionArgs::stop_after_usd`].
+pub const STOP_AFTER_USD_MAX: f64 = 1000.0;
+
+/// Why a Codex background agent is refused: `claude --bg` is the only
+/// tracked background mode, and a Codex pane takes no initial prompt.
+pub const CODEX_BG_REFUSED: &str =
+    "a background agent runs Claude Code; start Codex as a session (new_session agent \"codex\")";
 
 impl NewBgSessionArgs {
     pub fn validate(&self) -> Result<(), IpcError> {
@@ -45,8 +70,56 @@ impl NewBgSessionArgs {
         // The prompt lands after `--` (see `claude_cli::bg_script`), so a
         // leading `-` is fine — only blank prompts are rejected.
         validate::not_blank("prompt", &self.prompt)?;
+        match self.agent.as_deref() {
+            None | Some("claude") => {}
+            Some("codex") => return Err(IpcError::new(codes::E_INVALID, CODEX_BG_REFUSED)),
+            Some(other) => {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!(
+                        "unknown agent {:?}: a background agent runs \"claude\"",
+                        other
+                    ),
+                ))
+            }
+        }
+        if let Some(secs) = self.stop_after_secs {
+            if !STOP_AFTER_SECS_RANGE.contains(&secs) {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "stop_after_secs must be between 60 and 604800",
+                ));
+            }
+        }
+        if let Some(usd) = self.stop_after_usd {
+            if !(usd.is_finite() && usd > 0.0 && usd <= STOP_AFTER_USD_MAX) {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "stop_after_usd must be more than 0 and at most 1000",
+                ));
+            }
+        }
         Ok(())
     }
+
+    /// The limits to record for this launch, or `None` when it has none.
+    fn stop_limits(&self, launched_at: i64) -> Option<StopLimits> {
+        let stop_at = self.stop_after_secs.map(|s| launched_at + s);
+        let stop_cost_micros = self
+            .stop_after_usd
+            .map(|u| (u * 1_000_000.0).round() as i64);
+        (stop_at.is_some() || stop_cost_micros.is_some()).then_some(StopLimits {
+            stop_at,
+            stop_cost_micros,
+        })
+    }
+}
+
+/// A background agent's "stop after" limits (migration 149).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StopLimits {
+    pub stop_at: Option<i64>,
+    pub stop_cost_micros: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -109,13 +182,20 @@ impl PurgeProjectArgs {
 
 // ─── service functions ───────────────────────────────────────────────────────
 
+/// Launch `claude --bg` for `args` in `cwd` (resolved by the caller from
+/// `args.project_id`; see [`new_bg_session_tracked`]).
 pub async fn new_bg_session(
     args: NewBgSessionArgs,
+    cwd: Option<String>,
     ssh: &Arc<SshClient>,
 ) -> Result<NewBgSessionResult, IpcError> {
     args.validate()?;
+    let opts = claude_cli::BgOptions {
+        cwd,
+        read_only: args.read_only,
+    };
     let claude_session_id =
-        claude_cli::claude_bg(ssh, &args.host_alias, &args.name, &args.prompt).await?;
+        claude_cli::claude_bg(ssh, &args.host_alias, &args.name, &args.prompt, &opts).await?;
     Ok(bg_session_result(claude_session_id))
 }
 
@@ -170,13 +250,39 @@ pub async fn new_bg_session_tracked(
         let s = lock(store)?;
         crate::service::account_limits::over_limit(&s, &host_alias, None, launch_started)?
     };
-    let mut res = new_bg_session(args, ssh).await?;
+    args.validate()?;
+    let limits = args.stop_limits(launch_started);
+    let cwd = match args.project_id {
+        Some(pid) => {
+            Some(crate::service::sessions::project_cwd_on_host(store, ssh, &host_alias, pid).await?)
+        }
+        None => None,
+    };
+    let mut res = new_bg_session(args, cwd, ssh).await?;
     if res.claude_session_id.is_none() {
         // `claude --bg` output did not carry the id; the agent is listed
         // under the `--name` we launched it with once it registers.
         res.claude_session_id = find_launched_id(ssh, &host_alias, &name, launch_started).await;
         if res.claude_session_id.is_some() {
             res.warning = None;
+        }
+    }
+    if let Some(limits) = limits {
+        // Recorded before reconcile so a limit holds even when the row only
+        // appears on a later tick. Without an id there is nothing to key it
+        // on: say so rather than launch an agent that silently runs on.
+        let recorded = match res.claude_session_id.as_deref() {
+            Some(id) => lock(store)
+                .and_then(|s| record_stop_limits(&s, &host_alias, id, launch_started, limits))
+                .map_err(|e| e.message),
+            None => Err("the agent's session id is not known yet".to_string()),
+        };
+        if let Err(why) = recorded {
+            let line = format!("stop limits not set ({why}); stop the agent by hand");
+            res.warning = Some(match res.warning.take() {
+                Some(w) => format!("{w}; {line}"),
+                None => line,
+            });
         }
     }
     if let Some(over) = over {
@@ -432,6 +538,204 @@ where
     Ok(reports)
 }
 
+// ─── stop limits (migration 149) ─────────────────────────────────────────────
+
+/// Record a just-launched agent's stop limits. Re-recording (a reused id)
+/// replaces the old limits and re-arms them.
+pub fn record_stop_limits(
+    s: &Store,
+    host_alias: &str,
+    claude_session_id: &str,
+    created_at: i64,
+    limits: StopLimits,
+) -> Result<(), IpcError> {
+    s.conn_ref().execute(
+        "INSERT INTO bg_stop_limits \
+             (host_alias, claude_session_id, created_at, stop_at, stop_cost_micros) \
+         VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT (host_alias, claude_session_id) DO UPDATE SET \
+             created_at = excluded.created_at, stop_at = excluded.stop_at, \
+             stop_cost_micros = excluded.stop_cost_micros, stopped_at = NULL, reason = NULL",
+        rusqlite::params![
+            host_alias,
+            claude_session_id,
+            created_at,
+            limits.stop_at,
+            limits.stop_cost_micros
+        ],
+    )?;
+    Ok(())
+}
+
+/// How long a limit waits for its agent's row before it is dropped as gone
+/// (the row was reaped, or reconcile never matched the agent).
+const STOP_LIMIT_ORPHAN_SECS: i64 = 3600;
+
+/// What the enforcement pass does with one live limit.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StopDecision {
+    /// Stop the agent's `bg:` row; `reason` is `"time"` or `"cost"`.
+    Stop {
+        host_alias: String,
+        claude_session_id: String,
+        tmux_name: String,
+        reason: &'static str,
+    },
+    /// The agent already stopped, or its row is long gone: close the limit.
+    Gone {
+        host_alias: String,
+        claude_session_id: String,
+    },
+}
+
+/// Every live limit that needs action at `now`. A limit whose row has not
+/// appeared yet waits (its time limit still fires once the row exists).
+pub fn due_stops(s: &Store, now: i64) -> Result<Vec<StopDecision>, IpcError> {
+    let mut stmt = s.conn_ref().prepare(
+        "SELECT l.host_alias, l.claude_session_id, l.created_at, l.stop_at, \
+                l.stop_cost_micros, x.tmux_name, x.usage_cost_micros, x.claude_status \
+           FROM bg_stop_limits l \
+           LEFT JOIN sessions x \
+             ON x.host_alias = l.host_alias AND x.tmux_name = 'bg:' || l.claude_session_id \
+          WHERE l.stopped_at IS NULL",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, Option<i64>>(3)?,
+            r.get::<_, Option<i64>>(4)?,
+            r.get::<_, Option<String>>(5)?,
+            r.get::<_, Option<i64>>(6)?,
+            r.get::<_, Option<String>>(7)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (host_alias, claude_session_id, created_at, stop_at, cap, tmux, cost, status) = row?;
+        let Some(tmux_name) = tmux else {
+            if now - created_at > STOP_LIMIT_ORPHAN_SECS {
+                out.push(StopDecision::Gone {
+                    host_alias,
+                    claude_session_id,
+                });
+            }
+            continue;
+        };
+        if status.as_deref() == Some("stopped") {
+            out.push(StopDecision::Gone {
+                host_alias,
+                claude_session_id,
+            });
+            continue;
+        }
+        let reason = if stop_at.is_some_and(|t| t <= now) {
+            "time"
+        } else if cap.is_some_and(|c| cost.unwrap_or(0) >= c) {
+            "cost"
+        } else {
+            continue;
+        };
+        out.push(StopDecision::Stop {
+            host_alias,
+            claude_session_id,
+            tmux_name,
+            reason,
+        });
+    }
+    Ok(out)
+}
+
+/// Close a limit: the agent was stopped for `reason`, or is gone.
+pub fn mark_stopped(
+    s: &Store,
+    host_alias: &str,
+    claude_session_id: &str,
+    now: i64,
+    reason: &str,
+) -> Result<(), IpcError> {
+    s.conn_ref().execute(
+        "UPDATE bg_stop_limits SET stopped_at = ?3, reason = ?4 \
+          WHERE host_alias = ?1 AND claude_session_id = ?2 AND stopped_at IS NULL",
+        rusqlite::params![host_alias, claude_session_id, now, reason],
+    )?;
+    Ok(())
+}
+
+/// The reconcile tick's stop-limit pass: stop every background agent past
+/// its deadline or spend cap. Single-flight and off the tick body, since a
+/// stop is an SSH round trip. Spend is the row's estimated cost as the
+/// usage collector last summed it, so a cap can overshoot by one collection
+/// interval's worth of work.
+pub fn spawn_enforce_stop_limits(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    let now = now_unix();
+    let due = match lock(store).and_then(|s| due_stops(&s, now)) {
+        Ok(due) if !due.is_empty() => due,
+        Ok(_) => return,
+        Err(e) => {
+            tracing::debug!(error = %e.message, "[bg] stop limits not read");
+            return;
+        }
+    };
+    if RUNNING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let store = Arc::clone(store);
+    let ssh = Arc::clone(ssh);
+    crate::rt::spawn(async move {
+        let _flight = crate::rt::ClearOnDrop::of_static(&RUNNING);
+        for d in due {
+            let (host, id, reason) = match d {
+                StopDecision::Gone {
+                    host_alias,
+                    claude_session_id,
+                } => (host_alias, claude_session_id, "gone"),
+                StopDecision::Stop {
+                    host_alias,
+                    claude_session_id,
+                    tmux_name,
+                    reason,
+                } => {
+                    let args = crate::service::sessions::KillSessionArgs {
+                        host_alias: host_alias.clone(),
+                        name: tmux_name,
+                        force: false,
+                    };
+                    match crate::service::sessions::kill_session(args, &store, &ssh).await {
+                        Ok(_) => {
+                            tracing::info!(
+                                host = %host_alias,
+                                claude_session_id = %claude_session_id,
+                                reason,
+                                "[bg] stopped a background agent at its limit"
+                            );
+                            (host_alias, claude_session_id, reason)
+                        }
+                        Err(e) if e.code == codes::E_NOTFOUND => {
+                            (host_alias, claude_session_id, "gone")
+                        }
+                        Err(e) => {
+                            // Retried on the next tick.
+                            tracing::warn!(
+                                host = %host_alias,
+                                error = %e.message,
+                                "[bg] stopping a background agent at its limit failed"
+                            );
+                            continue;
+                        }
+                    }
+                }
+            };
+            if let Err(e) = lock(&store).and_then(|s| mark_stopped(&s, &host, &id, now, reason)) {
+                tracing::warn!(error = %e.message, "[bg] stop limit not closed");
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,6 +754,7 @@ mod tests {
             name: "test-session".into(),
             prompt: "".into(),
             requester_session_id: None,
+            ..Default::default()
         };
         assert!(args.validate().is_err());
     }
@@ -461,6 +766,7 @@ mod tests {
             name: "".into(),
             prompt: "Do the thing".into(),
             requester_session_id: None,
+            ..Default::default()
         };
         assert!(args.validate().is_err());
     }
@@ -720,6 +1026,7 @@ mod tests {
             name: "review-1".into(),
             prompt: "Summarise the diff".into(),
             requester_session_id: None,
+            ..Default::default()
         };
         assert!(ok.validate().is_ok());
 
@@ -958,5 +1265,181 @@ mod tests {
         }
         let projects = store.lock().unwrap().list_projects().unwrap();
         assert!(projects.iter().any(|p| p.id == pid), "row must survive");
+    }
+
+    fn bg_args() -> NewBgSessionArgs {
+        NewBgSessionArgs {
+            host_alias: "mac".into(),
+            name: "look".into(),
+            prompt: "read the code".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_codex_background_agent_is_refused_with_the_way_to_start_one() {
+        let codex = NewBgSessionArgs {
+            agent: Some("codex".into()),
+            ..bg_args()
+        };
+        let err = codex.validate().unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+        assert_eq!(err.message, CODEX_BG_REFUSED);
+        let other = NewBgSessionArgs {
+            agent: Some("gpt".into()),
+            ..bg_args()
+        };
+        assert_eq!(other.validate().unwrap_err().code, "E_INVALID");
+        let claude = NewBgSessionArgs {
+            agent: Some("claude".into()),
+            ..bg_args()
+        };
+        claude.validate().unwrap();
+    }
+
+    #[test]
+    fn stop_limits_are_bounded_and_land_as_a_deadline_and_micros() {
+        for secs in [0, 59, 7 * 24 * 3600 + 1, -5] {
+            let a = NewBgSessionArgs {
+                stop_after_secs: Some(secs),
+                ..bg_args()
+            };
+            assert!(a.validate().is_err(), "{secs}");
+        }
+        for usd in [0.0, -1.0, f64::NAN, f64::INFINITY, 1000.01] {
+            let a = NewBgSessionArgs {
+                stop_after_usd: Some(usd),
+                ..bg_args()
+            };
+            assert!(a.validate().is_err(), "{usd}");
+        }
+        let a = NewBgSessionArgs {
+            stop_after_secs: Some(900),
+            stop_after_usd: Some(5.0),
+            ..bg_args()
+        };
+        a.validate().unwrap();
+        assert_eq!(
+            a.stop_limits(1_000),
+            Some(StopLimits {
+                stop_at: Some(1_900),
+                stop_cost_micros: Some(5_000_000),
+            })
+        );
+        assert_eq!(bg_args().stop_limits(1_000), None);
+    }
+
+    /// The wire shape the phone sends: every new field optional, and an
+    /// old caller's args read back unchanged.
+    #[test]
+    fn the_new_args_are_optional_on_the_wire() {
+        let old: NewBgSessionArgs =
+            serde_json::from_str(r#"{"host_alias":"mac","name":"n","prompt":"p"}"#).unwrap();
+        assert_eq!(old.project_id, None);
+        assert!(!old.read_only);
+        let json = serde_json::to_value(&old).unwrap();
+        assert!(json.get("read_only").is_none(), "{json}");
+        let new: NewBgSessionArgs = serde_json::from_str(
+            r#"{"host_alias":"mac","name":"n","prompt":"p","project_id":3,"agent":"claude",
+                "read_only":true,"stop_after_secs":3600,"stop_after_usd":5}"#,
+        )
+        .unwrap();
+        assert_eq!(new.project_id, Some(3));
+        assert!(new.read_only);
+        assert_eq!(new.stop_after_usd, Some(5.0));
+    }
+
+    #[test]
+    fn the_enforcement_pass_stops_at_the_deadline_or_the_cap_and_closes_gone_agents() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        let limits = |stop_at, cap| StopLimits {
+            stop_at,
+            stop_cost_micros: cap,
+        };
+        // a: deadline at 200. b: $1 cap. c: stopped by itself. d: no row yet.
+        // e: no row for over an hour.
+        for (id, l) in [
+            ("a", limits(Some(200), None)),
+            ("b", limits(None, Some(1_000_000))),
+            ("c", limits(Some(10_000), None)),
+            ("d", limits(Some(50), None)),
+        ] {
+            record_stop_limits(&s, "mac", id, 100, l).unwrap();
+        }
+        record_stop_limits(
+            &s,
+            "mac",
+            "e",
+            100 - STOP_LIMIT_ORPHAN_SECS - 1,
+            limits(None, Some(1)),
+        )
+        .unwrap();
+        for id in ["a", "b", "c"] {
+            let st = if id == "c" { "stopped" } else { "working" };
+            s.upsert_bg_session("mac", &format!("bg:{id}"), None, id, Some(st), 1, "bg", 1)
+                .unwrap();
+        }
+        let b_row = s.get_session("bg:b", "mac").unwrap().unwrap().id;
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET usage_cost_micros = 999999 WHERE id = ?1",
+                [b_row],
+            )
+            .unwrap();
+
+        let mut due = due_stops(&s, 150).unwrap();
+        due.sort_by(|x, y| format!("{x:?}").cmp(&format!("{y:?}")));
+        assert_eq!(
+            due,
+            vec![
+                StopDecision::Gone {
+                    host_alias: "mac".into(),
+                    claude_session_id: "c".into()
+                },
+                StopDecision::Gone {
+                    host_alias: "mac".into(),
+                    claude_session_id: "e".into()
+                },
+            ],
+            "nothing has reached a limit at 150; d waits for its row"
+        );
+
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET usage_cost_micros = 1000000 WHERE id = ?1",
+                [b_row],
+            )
+            .unwrap();
+        let stops: Vec<_> = due_stops(&s, 200)
+            .unwrap()
+            .into_iter()
+            .filter_map(|d| match d {
+                StopDecision::Stop {
+                    claude_session_id,
+                    tmux_name,
+                    reason,
+                    ..
+                } => Some((claude_session_id, tmux_name, reason)),
+                StopDecision::Gone { .. } => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            stops,
+            vec![
+                ("a".to_string(), "bg:a".to_string(), "time"),
+                ("b".to_string(), "bg:b".to_string(), "cost"),
+            ]
+        );
+
+        // Closed limits drop out; re-recording re-arms one.
+        for id in ["a", "b", "c", "e"] {
+            mark_stopped(&s, "mac", id, 200, "time").unwrap();
+        }
+        assert!(due_stops(&s, 200).unwrap().is_empty());
+        record_stop_limits(&s, "mac", "a", 300, limits(Some(300), None)).unwrap();
+        assert_eq!(due_stops(&s, 300).unwrap().len(), 1);
     }
 }

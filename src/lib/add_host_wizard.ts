@@ -1,7 +1,7 @@
 // The add-host wizard (Orbit Fleet redesign step 4.9, board Wizard): five
 // steps — Connection, Check the host, Agents, Accounts, Done — with live
 // checks that land one by one, and a draft the backend keeps so the wizard
-// resumes after the app restarts. Nothing is installed without asking: the
+// resumes after the app restarts. Nothing is installed: the
 // checks only read. Pure but for the invoke wrappers; AddHostWizard.svelte
 // renders.
 import { invokeCmd, type Result } from "./result";
