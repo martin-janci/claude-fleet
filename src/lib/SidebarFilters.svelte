@@ -1,6 +1,4 @@
 <script lang="ts">
-  import Icon from './kit/Icon.svelte';
-  import { tablistKeys } from './tablist_keys';
   // The sidebar's chrome, in four layers so a filter never looks like a
   // setting and a setting never looks like an action:
   //
@@ -46,7 +44,7 @@
   import { hubConnection } from './hub_connection';
   import { trackers } from './trackers';
   import { bumpWorkChanged } from './work';
-  import { sidebarView, type SidebarView } from './work_view';
+  import type { SidebarView } from './work_view';
   import {
     activeWorkFilterCount,
     effectiveWorkFilters,
@@ -76,8 +74,6 @@
     loadError,
     onRefresh,
     onCollapse,
-    showSettings,
-    onOpenSettings,
     needsYouCount,
     selectMode,
     toggleSelectMode,
@@ -104,8 +100,6 @@
     loadError: string | null;
     onRefresh: () => void;
     onCollapse?: () => void;
-    showSettings: boolean;
-    onOpenSettings: () => void;
     needsYouCount: number;
     selectMode: boolean;
     toggleSelectMode: () => void;
@@ -453,55 +447,29 @@
 
 
 <header class="sidebar-header" data-testid="sidebar-chrome-top">
-  <!-- R0 — Work graph M14: two projections of one graph, Sessions (host /
-       project → session → its tasks) and Work (org → group → task → its
-       sessions). ⌘⇧W / Ctrl+Shift+W flips them. Global actions on the
-       right: they are not filters. -->
+  <!-- R0: the list's name. The rail picks Inbox, Sessions or Work (redesign
+       3.2); ⌘⇧W / Ctrl+Shift+W still flips Sessions and Work, so the
+       0.5.x "All sessions | Work" switch that sat here is gone. Global
+       actions on the right: they are not filters. -->
   <div class="row r0">
     {#if listView === 'inbox'}
       <!-- The Inbox (redesign step 3.3). Today was its second tab until
            Control (9.1) took it; ⌘⇧T opens it there. -->
-      <span class="inbox-title" data-testid="inbox-title"
+      <h2 class="list-title" data-testid="inbox-title"
         >Inbox{#if needsYouCount > 0}<span class="tab-badge hot" title="{needsYouCount} waiting on you"
             >{needsYouCount}</span
-          >{/if}</span
+          >{/if}</h2
       >
+    {:else if listView === 'work'}
+      <h2
+        class="list-title"
+        data-testid="list-title"
+        title={`Work: organisation → group → task → its sessions (${workViewChord} for Sessions)`}
+      >Work</h2>
     {:else}
-      <div class="btn-group view-switch" role="tablist" aria-label="Sidebar view" data-testid="sidebar-view-switch" use:tablistKeys>
-        <button
-          class="btn btn--chip btn--toggle"
-          role="tab"
-          aria-selected={$sidebarView === 'sessions'}
-          class:is-active={$sidebarView === 'sessions'}
-          data-testid="sidebar-view-sessions"
-          title={`Sessions (${workViewChord})`}
-          onclick={() => sidebarView.set('sessions')}
-          >All sessions{#if !sessionsList && needsYouCount > 0}<span
-              class="tab-badge hot"
-              data-testid="sessions-tab-needs-you"
-              title="{needsYouCount} waiting on you">{needsYouCount}</span
-            >{/if}</button
-        >
-        <button
-          class="btn btn--chip btn--toggle"
-          role="tab"
-          aria-selected={$sidebarView === 'work'}
-          class:is-active={$sidebarView === 'work'}
-          data-testid="sidebar-view-work"
-          title={`Work: organisation → group → task → its sessions (${workViewChord})`}
-          onclick={() => sidebarView.set('work')}>Work</button
-        >
-      </div>
+      <h2 class="list-title" data-testid="list-title" title={`All sessions (${workViewChord} for Work)`}>All sessions</h2>
     {/if}
     <span class="spacer"></span>
-    <button
-      class="btn btn--quiet btn--icon"
-      onclick={() => onOpenSettings()}
-      title="Settings"
-      aria-label="Settings"
-      aria-expanded={showSettings}
-      data-testid="settings-open"
-    ><Icon name="settings" size={14} /></button>
     <button
       class="btn btn--quiet btn--icon"
       onclick={refresh}
@@ -661,24 +629,14 @@
   .spacer {
     flex: 1;
   }
-  .view-switch {
-    display: flex;
-  }
-  .view-switch .btn {
-    border-radius: 0;
-  }
-  .view-switch .btn:first-child {
-    border-radius: var(--radius-pill) 0 0 var(--radius-pill);
-  }
-  .view-switch .btn:last-child {
-    border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
-    margin-left: -1px;
-  }
-  .inbox-title {
+  .list-title {
     display: inline-flex;
     align-items: center;
-    font-size: var(--control-font);
+    margin: 0;
+    font-size: var(--text-lg);
+    line-height: 22px;
     font-weight: 600;
+    color: var(--fg);
   }
   .tab-badge {
     margin-left: 4px;

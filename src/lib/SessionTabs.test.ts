@@ -14,12 +14,10 @@ function mount(row: SessionRow | null, isMac = true) {
       name: row?.tmux_name ?? '',
       current: row ? 'agent' : null,
       disabled: {},
-      assetsActive: false,
       inspectorOpen: false,
       inspectorAvailable: true,
       isMac,
       onselect: () => {},
-      onassets: () => {},
       oninspector: () => {},
     },
   });
@@ -87,12 +85,10 @@ describe('SessionTabs: the Terminals tab (step 5.3)', () => {
         current: 'terminals',
         terminalCount: 2,
         disabled: {},
-        assetsActive: false,
         inspectorOpen: false,
         inspectorAvailable: true,
         isMac: true,
         onselect: () => {},
-        onassets: () => {},
         oninspector: () => {},
       },
     });
@@ -111,12 +107,10 @@ describe('SessionTabs: the Terminals tab (step 5.3)', () => {
         name: 'dev-a',
         current: 'agent',
         disabled: { terminals: 'Terminals open only on a session that is yours' },
-        assetsActive: false,
         inspectorOpen: false,
         inspectorAvailable: true,
         isMac: false,
         onselect: () => {},
-        onassets: () => {},
         oninspector: () => {},
       },
     });
@@ -124,5 +118,24 @@ describe('SessionTabs: the Terminals tab (step 5.3)', () => {
     expect(screen.queryByTestId('stab-terminals-count')).toBeNull();
     expect(tab.disabled).toBe(true);
     expect(tab.title).toBe('Terminals open only on a session that is yours');
+  });
+});
+
+describe('SessionTabs: the header per the Main board (UX audit 2026-10-09, H1–H3)', () => {
+  it('names its buttons and carries the context meter and the worktree in the meta line', () => {
+    const row = { ...session('mercury', 'dev-h'), context_pct: 55, context_tokens: 110_000, context_window: 200_000, worktree_key: 'fix-flake' };
+    mount(row);
+    expect(screen.getByTestId('open-in-editor').textContent).toContain('Open in VS Code');
+    expect(screen.getByTestId('share-from-header').textContent).toContain('Share…');
+    const ctx = screen.getByTestId('session-head-context');
+    expect(ctx.textContent).toContain('55%');
+    expect(ctx.textContent).toContain('of 200k');
+    expect(ctx.querySelector('[role="meter"]')).not.toBeNull();
+    expect(screen.getByTestId('session-head-worktree').textContent).toBe('fix-flake');
+  });
+
+  it('shows no meter when the context is unknown', () => {
+    mount({ ...session('mercury', 'dev-n'), context_pct: null });
+    expect(screen.queryByTestId('session-head-context')).toBeNull();
   });
 });

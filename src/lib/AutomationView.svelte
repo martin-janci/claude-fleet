@@ -117,8 +117,11 @@
   }
 </script>
 
-<section class="automation" aria-label="Automation" data-testid="automation-view">
-  <header class="head">
+<!-- Automation's own left column (UX audit 2026-10-09; board Automation):
+     its title, the tabs, Routines' list (yours, then built in), and today's
+     spend with Pause all at its foot. The detail fills the rest. -->
+{#snippet sideHead()}
+  <div class="side-head">
     <h1>Automation</h1>
     <Tabs
       label="Automation"
@@ -132,15 +135,47 @@
         { id: 'agents', label: 'Agents', count: 3 },
       ]}
     />
-    <span class="grow"></span>
+  </div>
+{/snippet}
+
+{#snippet sideFoot()}
+  <footer class="side-foot">
     {#if spend !== null}
       <span class="today" data-testid="automation-today">Today {money(spend)}{#if running > 0}{' '}· {running} running{/if}</span>
     {/if}
+    <span class="grow"></span>
     <Button testid="automation-pause" disabled={busy || !auto} onclick={togglePause}>
       {paused ? 'Resume' : 'Pause all'}
     </Button>
-  </header>
+  </footer>
+{/snippet}
 
+{#snippet builtIn()}
+  {#if auto}
+    <div class="built-in" data-testid="automation-routines">
+      <h2>Built in <span class="meta">{auto.loops.length}</span></h2>
+      <p class="hint">Fleet's own loops. Pause all stops the ones that act on their own; the rest only observe.</p>
+      {#if auto.loops.length === 0}
+        <p class="none">This fleet does not report its loops yet.</p>
+      {/if}
+    <ul class="list">
+      {#each auto.loops as loop (loop.name)}
+        <li class="row" data-testid="automation-loop" data-loop={loop.name} data-result={loop.result ?? 'none'}>
+          <span class="main">
+            <strong>{loop.label}</strong>
+            <span class="meta">System · {loop.pausable ? 'acts on its own' : 'observes'}</span>
+            <span class="summary" class:failed={loop.result === 'error'}>{loopLine(loop, nowSec, paused)}</span>
+          </span>
+          <span class="num">{loopEvery(loop) ?? ''}</span>
+        </li>
+      {/each}
+    </ul>
+    </div>
+  {/if}
+  {@render sideFoot()}
+{/snippet}
+
+<section class="automation" aria-label="Automation" data-testid="automation-view">
   {#if paused}
     <p class="banner" role="status" data-testid="automation-paused">
       Paused: missions, garbage collection, syncs, playbooks and repairs stand still until you resume. Reconcile, usage and
@@ -155,85 +190,85 @@
     </p>
   {/if}
 
-  {#if !auto && !error}
-    <div class="loading"><Loader name="orbit" size={32} label="Loading automation" /></div>
-  {:else if $automationTab === 'rules'}
+  {#if $automationTab === 'routines' && auto}
+    <div class="fill" role="tabpanel" aria-label="Routines" data-testid="automation-routines-yours">
+      <RoutinesPanel fill listHead={sideHead} listFoot={builtIn} />
+    </div>
+  {:else}
+    <div class="split">
+      <aside class="side">
+        {@render sideHead()}
+        <span class="grow"></span>
+        {@render sideFoot()}
+      </aside>
+      <div class="main">
+        {#if !auto && !error}
+          <div class="loading"><Loader name="orbit" size={32} label="Loading automation" /></div>
+        {:else if $automationTab === 'rules'}
     <div class="body" role="tabpanel" aria-label="Rules" data-testid="automation-rules">
-      <StartRules />
-    </div>
-  {:else if $automationTab === 'runs'}
+          <StartRules />
+        </div>
+        {:else if $automationTab === 'runs'}
     <div class="body" role="tabpanel" aria-label="Runs" data-testid="automation-runs">
-      {#if runsError && !runs}
-        <LoadError title="Couldn't load the runs" error={runsError} onretry={() => retry(loadRuns)} {retrying} testid="automation-runs-error" />
-      {:else if runs && runs.length === 0}
-        <p class="none">Nothing has run on the fleet's behalf yet.</p>
-      {:else if runs}
-        <ul class="list">
-          {#each runs as run (run.id)}
-            <li class="row" data-testid="automation-run" data-outcome={run.outcome}>
-              <span class="when">{timeAgo(run.started_at, nowSec * 1000)}</span>
-              <span class="main">
-                <strong>{run.owner}</strong>
-                <span class="meta">{run.kind}{run.host ? ` · ${run.host}` : ''}</span>
-                <span class={`outcome ${run.outcome}`}>{outcomeLabel(run)}</span>
-                {#if run.summary}<span class="summary">{run.summary}</span>{/if}
-              </span>
-              <span class="num">{duration(run)}</span>
-              <span class="num">{run.cost_micros !== undefined ? money(run.cost_micros) : ''}</span>
-              {#if run.session_ids.length > 0}
-                <Button variant="quiet" size="sm" testid="automation-run-session" onclick={() => openRun(run)}>Session</Button>
-              {/if}
-            </li>
-          {/each}
-        </ul>
-        {#if runsTotal > runs.length}<p class="none">Showing the latest {runs.length} of {runsTotal}.</p>{/if}
-      {/if}
-    </div>
-  {:else if $automationTab === 'agents'}
+          {#if runsError && !runs}
+            <LoadError title="Couldn't load the runs" error={runsError} onretry={() => retry(loadRuns)} {retrying} testid="automation-runs-error" />
+          {:else if runs && runs.length === 0}
+            <p class="none">Nothing has run on the fleet's behalf yet.</p>
+          {:else if runs}
+            <ul class="list">
+              {#each runs as run (run.id)}
+                <li class="row" data-testid="automation-run" data-outcome={run.outcome}>
+                  <span class="when">{timeAgo(run.started_at, nowSec * 1000)}</span>
+                  <span class="main">
+                    <strong>{run.owner}</strong>
+                    <span class="meta">{run.kind}{run.host ? ` · ${run.host}` : ''}</span>
+                    <span class={`outcome ${run.outcome}`}>{outcomeLabel(run)}</span>
+                    {#if run.summary}<span class="summary">{run.summary}</span>{/if}
+                  </span>
+                  <span class="num">{duration(run)}</span>
+                  <span class="num">{run.cost_micros !== undefined ? money(run.cost_micros) : ''}</span>
+                  {#if run.session_ids.length > 0}
+                    <Button variant="quiet" size="sm" testid="automation-run-session" onclick={() => openRun(run)}>Session</Button>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+            {#if runsTotal > runs.length}<p class="none">Showing the latest {runs.length} of {runsTotal}.</p>{/if}
+          {/if}
+        </div>
+        {:else if $automationTab === 'agents'}
     <div class="body" role="tabpanel" aria-label="Agents" data-testid="automation-agents">
-      <p class="hint">Built in: the agents fleet runs itself.</p>
-      <ul class="list">
-        {#each agents as a (a.id)}
-          <li class="row" data-testid="automation-agent-{a.id}">
-            <span class="main">
-              <strong>{a.name}</strong>
-              <span class="summary">{a.does}</span>
-            </span>
-            <span class="meta state">{a.state}</span>
-          </li>
-        {/each}
-      </ul>
+          <p class="hint">Built in: the agents fleet runs itself.</p>
+          <ul class="list">
+            {#each agents as a (a.id)}
+              <li class="row" data-testid="automation-agent-{a.id}">
+                <span class="main">
+                  <strong>{a.name}</strong>
+                  <span class="summary">{a.does}</span>
+                </span>
+                <span class="meta state">{a.state}</span>
+              </li>
+            {/each}
+          </ul>
+        </div>
+        {:else if error}
+          <LoadError title="Couldn't load automation" {error} onretry={() => retry(load)} {retrying} testid="automation-load-error" />
+        {/if}
+      </div>
     </div>
-  {:else if auto}
-    <div class="body" role="tabpanel" aria-label="Routines" data-testid="automation-routines">
-      <h2>Yours</h2>
-      <div class="yours" data-testid="automation-routines-yours"><RoutinesPanel /></div>
-      <h2>Built in <span class="meta">{auto.loops.length}</span></h2>
-      <p class="hint">Fleet's own loops. Pause all stops the ones that act on their own; the rest only observe.</p>
-      {#if auto.loops.length === 0}
-        <p class="none">This fleet does not report its loops yet.</p>
-      {/if}
-      <ul class="list">
-        {#each auto.loops as loop (loop.name)}
-          <li class="row" data-testid="automation-loop" data-loop={loop.name} data-result={loop.result ?? 'none'}>
-            <span class="main">
-              <strong>{loop.label}</strong>
-              <span class="meta">System · {loop.pausable ? 'acts on its own' : 'observes'}</span>
-              <span class="summary" class:failed={loop.result === 'error'}>{loopLine(loop, nowSec, paused)}</span>
-            </span>
-            <span class="num">{loopEvery(loop) ?? ''}</span>
-          </li>
-        {/each}
-      </ul>
-    </div>
-  {:else if error}
-    <LoadError title="Couldn't load automation" {error} onretry={() => retry(load)} {retrying} testid="automation-load-error" />
   {/if}
 </section>
 
 <style>
   .automation { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-  .head { display: flex; align-items: center; gap: var(--space-3, 12px); padding: var(--space-3, 12px) var(--space-4, 16px) 0; border-bottom: 1px solid var(--border); }
+  .fill { flex: 1; min-height: 0; }
+  .split { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--list-w) minmax(0, 1fr); }
+  .side { display: flex; flex-direction: column; gap: var(--space-2); min-height: 0; overflow: auto; padding: var(--space-3) var(--space-3) 0; border-right: 1px solid var(--border); background: var(--bg-pane); }
+  .main { min-height: 0; display: flex; flex-direction: column; }
+  .side-head { display: flex; flex-direction: column; gap: var(--space-2); }
+  .side-head :global(.of-tabs) { gap: var(--space-3); }
+  .built-in { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-4); }
+  .side-foot { position: sticky; bottom: 0; margin-top: auto; display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3) 0; border-top: 1px solid var(--border); background: var(--bg-pane); }
   h1 { margin: 0; font-size: var(--text-lg, 15px); }
   h2 { margin: 0; font-size: var(--text-md, 13px); }
   .grow { flex: 1; }

@@ -8,8 +8,8 @@
   // redesign step 3.5, Main board): the session's name, state and where it
   // runs, then Conversation · the agent tab · Files · Details. The agent tab
   // is the terminal, named after the agent in it ("Claude Code", "Codex").
-  // Terminals (5.3) is the session's shells, with their count. Assets stays on the right until
-  // Toolkit (3.16) takes it; Accounts & hosts is on the rail and ⌘I.
+  // Terminals (5.3) is the session's shells, with their count. Assets are not
+  // the session's: they live in Toolkit (rail, ⌘K); Accounts & hosts is on the rail and ⌘I.
   //
   // App owns what each tab does;
   // this file only draws them and says which is current.
@@ -26,6 +26,11 @@
   import { sessionBlocked, shareSheetFor } from './share';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
+  import { contextColor, contextLevel } from './attention';
+  import { formatTokens } from './sessions';
+  import { hostByAlias } from './hosts';
+  import { accountByUuid } from './accounts';
+  import Meter from './kit/Meter.svelte';
 
   interface Props {
     session: SessionRow | null;
@@ -37,13 +42,11 @@
     terminalCount?: number;
     /** Per-tab reason it cannot open now; absent means it can. */
     disabled: Partial<Record<SessionTab, string>>;
-    assetsActive: boolean;
     inspectorOpen: boolean;
     /** Whether this layout has room for the inspector now. */
     inspectorAvailable: boolean;
     isMac: boolean;
     onselect: (tab: SessionTab) => void;
-    onassets: () => void;
     oninspector: () => void;
   }
   let {
@@ -52,12 +55,10 @@
     current,
     terminalCount = 0,
     disabled,
-    assetsActive,
     inspectorOpen,
     inspectorAvailable,
     isMac,
     onselect,
-    onassets,
     oninspector,
   }: Props = $props();
 
@@ -69,6 +70,17 @@
   const agent = $derived(session ? sessionAgent(session) : null);
   const agentLabel = $derived(session ? (AGENT_LABELS[sessionAgent(session)] ?? 'Terminal') : 'Terminal');
   const prNumber = $derived(session?.pr_url?.match(/\/pull\/(\d+)/)?.[1] ?? null);
+  // The header's meta line and context meter (UX audit 2026-10-09, H2 and
+  // H3): host · account · worktree · PR, and how full the context window is.
+  const accountEmail = $derived.by(() => {
+    if (!session) return null;
+    const uuid = session.claude_profile
+      ? session.account_uuid
+      : (session.account_uuid ?? $hostByAlias.get(session.host_alias)?.account_uuid ?? null);
+    return uuid ? ($accountByUuid.get(uuid)?.email ?? null) : null;
+  });
+  const ctxPct = $derived(session?.context_pct ?? null);
+  const ctxLevel = $derived(contextLevel(ctxPct));
 
   const tabs = $derived<{ id: SessionTab; label: string; chord: string | null; count?: number }[]>([
     { id: 'conversation', label: 'Conversation', chord: null },
@@ -98,10 +110,21 @@
       <span class="name" data-testid="session-head-name">{name}</span>
       <span class="state state-{state}" data-testid="session-head-state">{STATE_LABELS[state]}</span>
       <span class="grow"></span>
+      {#if ctxPct !== null && ctxLevel !== null}
+        <span class="ctx" data-testid="session-head-context" data-level={ctxLevel} title="Context window used">
+          <span class="ctx-text"
+            >Context <span style="color: {contextColor(ctxLevel)};">{Math.round(ctxPct)}%</span
+            >{#if session.context_tokens}<span class="ctx-of"
+                >{' · '}{formatTokens(session.context_tokens)}{#if session.context_window}{' of '}{formatTokens(session.context_window)}{/if}</span
+              >{/if}</span
+          >
+          <Meter value={ctxPct / 100} level={ctxLevel} label="{Math.round(ctxPct)}% of the context window used" />
+        </span>
+      {/if}
       <PresenceStrip sessionId={session.id} />
       <button
         type="button"
-        class="btn btn--quiet btn--icon editor-open"
+        class="btn btn--quiet head-btn editor-open"
         disabled={editorBlocked !== null}
         title={editorBlocked ?? `Open in VS Code (${editorChord})`}
         aria-label="Open in VS Code"
@@ -110,11 +133,11 @@
       >
         <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"
           ><path d="M6 4L2 8l4 4M10 4l4 4-4 4" /></svg
-        >
+        ><span class="lbl">Open in VS Code</span><span class="of-kbd lbl" aria-hidden="true">{editorChord}</span>
       </button>
       <button
         type="button"
-        class="btn btn--quiet btn--icon share-open"
+        class="btn btn--quiet head-btn share-open"
         disabled={shareBlocked !== null}
         title={shareBlocked ?? 'Share this session — watch or drive, revocable, and never a terminal'}
         aria-label="Share"
@@ -125,11 +148,11 @@
           ><circle cx="6" cy="5.5" r="2.2" /><path d="M2 13c.4-2.3 2-3.6 4-3.6s3.6 1.3 4 3.6" /><path
             d="M11 4.2a2 2 0 010 3.6M12.2 9.6c1 .5 1.6 1.7 1.8 3.4"
           /></svg
-        >
+        ><span class="lbl">Share…</span>
       </button>
       <button
         type="button"
-        class="btn btn--quiet btn--icon inspector-toggle"
+        class="btn btn--quiet head-btn inspector-toggle"
         aria-pressed={inspectorOpen}
         disabled={!inspectorAvailable}
         title={`Inspector (${inspectorChord})`}
@@ -144,6 +167,8 @@
     </div>
     <div class="meta" data-testid="session-head-meta">
       <span>{session.host_alias}</span>
+      {#if accountEmail}<span class="sep" aria-hidden="true">·</span><span data-testid="session-head-account">{accountEmail}</span>{/if}
+      {#if session.worktree_key}<span class="sep" aria-hidden="true">·</span><span class="mono" data-testid="session-head-worktree">{session.worktree_key}</span>{/if}
       {#if session.work?.key}<span class="sep" aria-hidden="true">·</span><span>{session.work.key}</span>{/if}
       {#if session.pr_url}
         <span class="sep" aria-hidden="true">·</span>
@@ -173,15 +198,6 @@
         >
       {/each}
     </div>
-    <span class="grow"></span>
-    <button
-      type="button"
-      class="tab-strip__tab fleet"
-      aria-pressed={assetsActive}
-      title="The asset catalog and its per-host drift state"
-      data-testid="stab-assets"
-      onclick={onassets}>Assets</button
-    >
   </div>
 </div>
 
@@ -246,10 +262,30 @@
     background: var(--bg-sunk);
     color: var(--fg-2);
   }
-  .tab-strip__tab.fleet[aria-pressed='true'] {
-    color: var(--fg);
-    font-weight: 500;
-    border-bottom-color: var(--accent);
+  .session-head { container-type: inline-size; }
+  .head-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .ctx {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 7rem;
+    flex-shrink: 0;
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+  }
+  .ctx-of { color: var(--fg-muted); white-space: nowrap; }
+  .ctx-text { white-space: nowrap; }
+  .mono { font-family: var(--font-mono); }
+  /* A narrow column keeps the icons and drops the words (the title and
+     aria-label still name each one). */
+  @container (max-width: 600px) {
+    .lbl { display: none; }
+    .ctx-of { display: none; }
   }
   .editor-open svg,
   .share-open svg,

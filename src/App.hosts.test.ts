@@ -152,7 +152,8 @@ describe('App: the Hosts view', () => {
     expect(hostsView()).not.toBeNull();
     expect(get(hostsViewOpen)).toBe(true);
     expect(screen.getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
-    expect(screen.getByTestId('stab-conversation').getAttribute('aria-selected')).toBe('false');
+    // Hosts is Accounts' page: the session tabs are not over it (UX audit N1).
+    expect(screen.queryByTestId('session-tabs')).toBeNull();
     // ⌘I again, from inside the view.
     await cmdI(screen.getByTestId('hosts-list'));
     await tick();
@@ -281,7 +282,7 @@ describe('App: the Hosts view', () => {
 
   it('Hosts opens with no session selected; the Sessions rail item leaves the view', async () => {
     await mountApp();
-    expect((screen.getByTestId('stab-files') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByTestId('stab-files')).toBeNull();
     await cmdI(window);
     await tick();
     expect(hostsView()).not.toBeNull();
@@ -300,11 +301,15 @@ describe('App: the Hosts view', () => {
     await cmdI(grid);
     await tick();
     expect(hostsView()).not.toBeNull();
-    expect(selected('stab-files')).toBe('false');
+    expect(get(destination)).toBe('hosts');
+    expect(screen.queryByTestId('stab-files')).toBeNull();
     expect(screen.getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
-    await fireEvent.click(screen.getByTestId('stab-files'));
+    // Leaving Hosts brings the session back, and Files is one click away again.
+    await fireEvent.click(screen.getByTestId('rail-sessions'));
     await tick();
     expect(hostsView()).toBeNull();
+    await fireEvent.click(screen.getByTestId('stab-files'));
+    await tick();
     expect(selected('stab-files')).toBe('true');
     expect(screen.getByTestId('rail-accounts').getAttribute('aria-current')).toBeNull();
   });
@@ -386,14 +391,14 @@ describe('App: the Hosts view', () => {
     await mountApp();
     await fireEvent.keyDown(window, { key: ',', ctrlKey: true });
     await tick();
-    expect(await screen.findByRole('dialog', { name: 'Settings' })).toBeTruthy();
+    expect(await screen.findByRole('region', { name: 'Settings' })).toBeTruthy();
   });
 
   it('⌘, opens Settings, which no longer holds the hosts table', async () => {
     await mountApp();
     await fireEvent.keyDown(window, { key: ',', metaKey: true });
     await tick();
-    const dialog = await screen.findByRole('dialog', { name: 'Settings' });
+    const dialog = await screen.findByRole('region', { name: 'Settings' });
     expect(within(dialog).queryByTestId('hosts-table')).toBeNull();
     expect(within(dialog).getByTestId('settings-hosts-summary').textContent).toBe('5 configured · 1 offline');
   });
@@ -408,7 +413,7 @@ describe('App: the Hosts view', () => {
     await fireEvent.keyDown(window, { key: 'e', metaKey: true });
     await tick();
     expect(get(settingsOpen)).toBe(false);
-    expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Settings' })).toBeNull();
   });
 
   it('⌘E toggles Control\'s agent chat, so it never stays pinned over a view', async () => {
@@ -450,10 +455,10 @@ describe('App: the Hosts view', () => {
   it('Settings → Open Hosts closes Settings and opens the view', async () => {
     await mountApp();
     settingsOpen.set(true);
-    const dialog = await screen.findByRole('dialog', { name: 'Settings' });
+    const dialog = await screen.findByRole('region', { name: 'Settings' });
     await fireEvent.click(within(dialog).getByTestId('settings-open-hosts'));
     await waitFor(() => expect(hostsView()).not.toBeNull());
-    expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Settings' })).toBeNull();
   });
 
   it('a quick-switcher host entry opens Hosts with that host preselected', async () => {

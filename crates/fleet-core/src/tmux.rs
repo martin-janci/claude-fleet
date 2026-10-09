@@ -2935,7 +2935,10 @@ mod tests {
     }
 
     /// Review r18: a host whose Claude keeps its state under
-    /// `CLAUDE_CONFIG_DIR` has its transcripts found there.
+    /// `CLAUDE_CONFIG_DIR` has its transcripts found there. Unix only, as
+    /// the other script tests here: the script runs on a host's bash, and
+    /// Windows runners' `bash` is the WSL stub.
+    #[cfg(unix)]
     #[test]
     fn discover_transcripts_script_honours_claude_config_dir() {
         let home = tempfile::tempdir().unwrap();

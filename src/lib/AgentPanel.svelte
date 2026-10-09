@@ -160,6 +160,8 @@
 
 <div class="agent-panel" role="region" aria-label="Agent" data-testid="control-agent">
   {#if blocked}
+   <!-- One empty state with one primary step (UX audit 2026-10-09, C4). -->
+   <div class="blocked-state" data-testid="agent-blocked">
     <p class="blocked">{blocked.title}</p>
     {#if confirmingReplace}
       <p class="confirm" data-testid="agent-replace-confirm">
@@ -167,17 +169,18 @@
         transcript.
       </p>
       <div class="confirm-row">
-        <button onclick={() => void replace()} data-testid="agent-replace-yes">Kill and start a new agent</button>
-        <button onclick={() => (confirmingReplace = false)}>Cancel</button>
+        <button class="btn btn--crit" onclick={() => void replace()} data-testid="agent-replace-yes">Kill and start a new agent</button>
+        <button class="btn btn--quiet" onclick={() => (confirmingReplace = false)}>Cancel</button>
       </div>
     {:else}
-      <button onclick={runNext} disabled={restarting} data-testid="agent-next-step"
+      <button class="btn btn--primary" onclick={runNext} disabled={restarting} data-testid="agent-next-step"
         >{restarting ? (blocked.next === 'replace' ? 'Replacing…' : 'Restarting…') : blocked.action}</button
       >
     {/if}
     {#if $operatorError}
       <p class="error" role="alert" data-testid="agent-panel-error">{$operatorError}</p>
     {/if}
+   </div>
   {:else if session}
     <!-- `blockWhileBusy` is the gate the sheet's own composer had before it
          was deleted (`busy = statusNote !== null` at v0.2.35) and lost in
@@ -208,9 +211,24 @@
     background: var(--bg-pane);
     color: var(--fg);
   }
+  .blocked-state {
+    margin: auto;
+    max-width: 440px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-6);
+    text-align: center;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg);
+  }
   .blocked {
     margin: 0;
-    color: var(--fg-muted);
+    color: var(--fg);
+    font-size: var(--text-sm);
+    line-height: 1.5;
   }
   .confirm {
     margin: 0;
