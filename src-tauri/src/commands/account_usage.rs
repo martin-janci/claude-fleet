@@ -5,7 +5,8 @@
 //! The cache they read is filled by `spawn_account_usage_tick`, which a hub
 //! client does not start. So paired, `list_account_usage` routes to the
 //! hub's `account_usage` tool (hub contract 11), which serves the hub's own
-//! answers; `refresh_account_usage` and the rest refuse, since a refresh
+//! answers, and `check_account_headroom` to the hub's tool of that name
+//! (contract 14); `refresh_account_usage` and the rest refuse, since a refresh
 //! SSHes to the host from here and this app keeps no history while a hub
 //! owns the fleet.
 
@@ -58,21 +59,6 @@ pub async fn list_account_usage(
     routed::list_account_usage(&backend, &store, &cache).await
 }
 
-pub(crate) mod routed {
-    use super::*;
-
-    pub async fn list_account_usage(
-        backend: &FleetBackend,
-        store: &Mutex<Store>,
-        cache: &Mutex<UsageCache>,
-    ) -> Result<Vec<AccountUsageSnapshot>, IpcError> {
-        match backend.hub() {
-            Some(hub) => hub.list_account_usage().await,
-            None => account_usage_poll::list_account_usage(store, cache),
-        }
-    }
-}
-
 /// Fetch `account_uuid`'s usage now if the floor allows, else return the
 /// current snapshot unchanged. `E_NOTFOUND` for an unknown account.
 #[tauri::command]
@@ -105,20 +91,16 @@ pub fn account_usage_history(
 
 /// Whether starting under a login on a host crosses `accounts.pause_at`, and
 /// the login on that host with the most headroom (redesign step 4.4). Reads
-/// the cache only. Refused in remote mode like the commands above.
+/// the cache only. Paired, the hub's `check_account_headroom` (contract 14),
+/// which answers from the usage its bus followed.
 #[tauri::command]
-pub fn check_account_headroom(
+pub async fn check_account_headroom(
     args: CheckAccountHeadroomArgs,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     cache: State<'_, Arc<Mutex<UsageCache>>>,
 ) -> Result<Headroom, IpcError> {
-    backend.refuse_local_only("check_account_headroom")?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    account_limits::check_account_headroom(&args, &store, &cache, now)
+    routed::check_account_headroom(&backend, args, &store, &cache).await
 }
 
 /// Live spend per account and per model since `since`, from the
@@ -167,4 +149,37 @@ pub fn record_host_placement(
         &args.host_alias,
         fleet_core::store::now_unix(),
     )
+}
+
+pub(crate) mod routed {
+    use super::*;
+
+    pub async fn list_account_usage(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        cache: &Mutex<UsageCache>,
+    ) -> Result<Vec<AccountUsageSnapshot>, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.list_account_usage().await,
+            None => account_usage_poll::list_account_usage(store, cache),
+        }
+    }
+
+    pub async fn check_account_headroom(
+        backend: &FleetBackend,
+        args: CheckAccountHeadroomArgs,
+        store: &Mutex<Store>,
+        cache: &Mutex<UsageCache>,
+    ) -> Result<Headroom, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.check_account_headroom(&args).await,
+            None => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                account_limits::check_account_headroom(&args, store, cache, now)
+            }
+        }
+    }
 }

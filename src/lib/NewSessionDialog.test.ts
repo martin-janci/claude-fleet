@@ -2206,6 +2206,26 @@ describe('NewSessionDialog in the New layout', () => {
     expect((calls('new_session')[0][1] as any).args.profile).toBeNull();
   });
 
+  // Review r05: a profile typed while the headroom check is still out is
+  // not overwritten by the login with the most headroom when it answers.
+  it('a profile typed before the logins arrive is kept', async () => {
+    let answer: (v: unknown) => void = () => {};
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'check_account_headroom') return new Promise((r) => (answer = r));
+      if (cmd === 'new_session') return { id: 1 };
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(calls('check_account_headroom')).toHaveLength(1));
+    await fireEvent.input(screen.getByTestId('launch-profile'), { target: { value: 'work' } });
+    answer(logins);
+    await tick();
+    await tick();
+    expect(screen.queryByTestId('launch-account')).toBeNull();
+    expect((screen.getByTestId('launch-profile') as HTMLInputElement).value).toBe('work');
+  });
+
   it('a pick sticks, and Other profile brings back the name field', async () => {
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());

@@ -833,10 +833,20 @@ pub fn health_for(
     view: &HealthView,
     tunnels: std::collections::HashMap<String, crate::service::tunnel::TunnelHealth>,
 ) -> Health {
+    health_at(s, view, tunnels, now_unix())
+}
+
+/// [`health_for`] at a given clock, so two roll-ups compared in a test read
+/// the same `now` (a second boundary between them changed ages and windows).
+fn health_at(
+    s: &Store,
+    view: &HealthView,
+    tunnels: std::collections::HashMap<String, crate::service::tunnel::TunnelHealth>,
+    now: i64,
+) -> Health {
     // TODO(T3): once IpcError exists, surface the failure reason here
     // instead of silently falling back to schema_version=0 / db_ready=false.
     let schema_version = s.schema_version().unwrap_or(0);
-    let now = now_unix();
     // Cached reconcile state only — no network / reconcile here. On a read
     // error, fall back to empty slices so health still reports core fields.
     let (sessions, hosts) = if matches!(view, HealthView::Blank) {
@@ -1357,10 +1367,10 @@ mod tests {
         s: &Store,
         view: &HealthView,
         tunnels: HashMap<String, TunnelHealth>,
+        now: i64,
     ) -> Health {
-        let now = now_unix();
         let metrics = &tracker_sync::metrics_for;
-        let mut h = health_for(s, &HealthView::Fleet, Default::default());
+        let mut h = health_at(s, &HealthView::Fleet, Default::default(), now);
         h.set_tunnels(tunnels);
         match view {
             HealthView::Fleet => {}
@@ -1631,8 +1641,11 @@ mod tests {
             HealthView::Person(crate::service::view_scope::ViewScope::internal()),
         ];
         for view in &views {
-            let one = health_for(&s, view, tunnels());
-            let two = two_pass_reference(&s, view, tunnels());
+            // One clock for both: a second ticking between them is not a
+            // difference between the two codes.
+            let at = now_unix();
+            let one = health_at(&s, view, tunnels(), at);
+            let two = two_pass_reference(&s, view, tunnels(), at);
             assert_eq!(comparable(&one), comparable(&two), "{view:?}");
         }
 

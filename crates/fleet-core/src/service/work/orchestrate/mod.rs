@@ -342,6 +342,24 @@ async fn apply_step_inner(
                 let s = lock(&deps.store)?;
                 let a = autonomy(&s, m, now_unix())?;
                 if *actor == Actor::Loop {
+                    // The pass planned its steps once and each start is SSH:
+                    // Pause all, a paused mission, the loop switched off or a
+                    // lowered level stops the rest of the pass, not the next
+                    // one (review r06 F5).
+                    let current = s.get_mission(m.id)?;
+                    let live = match &current {
+                        Some(cur) => autonomy(&s, cur, now_unix())?.effective >= AUTO_LEVEL,
+                        None => false,
+                    };
+                    if crate::service::loops::paused(&s)
+                        || current.is_none_or(|cur| cur.state != "active")
+                        || !live
+                    {
+                        return Err(IpcError::new(
+                            codes::E_INVALID_STATE,
+                            "the mission loop stood down during its pass",
+                        ));
+                    }
                     if let Some(budget) = a.grant.as_ref().and_then(|g| g.budget_micros) {
                         if s.mission_cost_micros(m.id)? >= budget {
                             return Err(IpcError::new(
@@ -1553,12 +1571,9 @@ pub fn spawn_mission_tick(
     crate::rt::spawn(async move {
         let mut every = tokio::time::interval(TICK_EVERY);
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                _ = token.cancelled() => return,
-                _ = every.tick() => tick_once(&deps, now_unix()).await,
-            }
-        }
+        // A pass that panics is logged and the next tick runs (review r06 F7).
+        crate::service::tick::run_cancellable_tick(every, token, || tick_once(&deps, now_unix()))
+            .await;
     })
 }
 

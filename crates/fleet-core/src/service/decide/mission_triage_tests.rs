@@ -19,6 +19,8 @@ const KEY: &str = "tsk_test_0123456789abcdefghijklmnopqrstuv";
 struct Fake {
     script: Mutex<VecDeque<Result<JevResponse, BackendError>>>,
     calls: AtomicUsize,
+    /// Each request's `last_failure`, in the order asked.
+    sent: Mutex<Vec<String>>,
 }
 
 impl Fake {
@@ -42,10 +44,16 @@ impl DecisionBackend for Fake {
         &self,
         _key: &Secret,
         _model: &str,
-        _req: &JevRequest,
+        req: &JevRequest,
         _timeout: Duration,
     ) -> Result<JevResponse, BackendError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sent.lock().unwrap().push(
+            req.state["last_failure"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        );
         self.script
             .lock()
             .unwrap()
@@ -140,6 +148,7 @@ fn failing() -> Stuck {
         blocked: 0,
         total: 3,
         last_failure: Some("tests fail on token expiry".into()),
+        last_failure_is_reply: false,
     }
 }
 
@@ -373,4 +382,64 @@ async fn a_decided_run_is_reused_for_a_week() {
     let p = ask(&ctx, &w.mission, &worse).await;
     assert_eq!(fake.calls(), 6, "a week later it asks again");
     assert_eq!(p.outcome.unwrap().value, "failed");
+}
+
+/// Martin's rule of 2026-10-08 22:51 (D48): Claude's text reaches Jev only
+/// behind the org's reply-text consent, off by default. A failed worker's
+/// own summary is Claude's text; fleet's error for the attempt is not.
+#[tokio::test]
+async fn a_workers_summary_reaches_jev_only_with_reply_consent() {
+    let w = world();
+    w.on("shadow");
+    let said = Stuck {
+        last_failure: Some("I could not reach the staging API".into()),
+        last_failure_is_reply: true,
+        ..failing()
+    };
+    let fake = Fake::answering(vec![says("partial", 0.9), says("retry", 0.9)]);
+    ask(&w.ctx(&fake), &w.mission, &said).await;
+    assert_eq!(
+        *fake.sent.lock().unwrap(),
+        vec![String::new(), String::new()]
+    );
+
+    // Fleet's own error goes either way.
+    w.now.fetch_add(REUSE_SECS + 1, Ordering::SeqCst);
+    let fake = Fake::answering(vec![says("partial", 0.9), says("retry", 0.9)]);
+    ask(&w.ctx(&fake), &w.mission, &failing()).await;
+    assert_eq!(
+        *fake.sent.lock().unwrap(),
+        vec!["tests fail on token expiry".to_string(); 2]
+    );
+
+    // With the consent, the summary goes too.
+    settings::set(
+        &w.store.lock().unwrap(),
+        settings::DECIDE_JEV_UNASSIGNED_REPLY,
+        "true",
+    )
+    .unwrap();
+    w.now.fetch_add(REUSE_SECS + 1, Ordering::SeqCst);
+    let fake = Fake::answering(vec![says("partial", 0.9), says("retry", 0.9)]);
+    ask(&w.ctx(&fake), &w.mission, &said).await;
+    assert_eq!(
+        *fake.sent.lock().unwrap(),
+        vec!["I could not reach the staging API".to_string(); 2]
+    );
+}
+
+#[test]
+fn stuck_marks_a_summary_without_an_error_as_the_workers_text() {
+    let w = world();
+    let mut d = w.detail();
+    let mut a = attempt(4, "x");
+    a.error = None;
+    d.graph.nodes = vec![node(1, "failed", Some(a))];
+    let s = stuck(&d).expect("a failed item");
+    assert_eq!(s.last_failure.as_deref(), Some("a summary"));
+    assert!(s.last_failure_is_reply);
+    d.graph.nodes = vec![node(1, "failed", Some(attempt(4, "exit 1")))];
+    let s = stuck(&d).expect("a failed item");
+    assert_eq!(s.last_failure.as_deref(), Some("exit 1"));
+    assert!(!s.last_failure_is_reply);
 }

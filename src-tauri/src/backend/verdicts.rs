@@ -1217,9 +1217,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "check_account_headroom",
-        Verdict::LocalOnly {
-            instead: "this app does not poll account usage while a hub owns the fleet, so \
-                      it cannot tell which account has headroom; start the session as usual",
+        Verdict::Routed {
+            tool: "check_account_headroom",
         },
     ),
     (
