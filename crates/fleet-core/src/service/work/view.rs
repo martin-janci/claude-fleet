@@ -2303,7 +2303,7 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
     {
         return false;
     }
-    if !f.stages.is_empty() && !f.stages.iter().any(|s| *s == t.stage) {
+    if !f.stages.is_empty() && !f.stages.contains(&t.stage) {
         return false;
     }
     let status = t.status_category.as_deref();
