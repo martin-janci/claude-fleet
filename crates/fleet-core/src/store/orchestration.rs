@@ -781,6 +781,8 @@ impl Store {
 
     /// Move a mission along its lifecycle ([`MISSION_TRANSITIONS`]). The
     /// first `active` stamps `started_at`, a final state `finished_at`.
+    /// Becoming `active` clears `next_wake_at`, so a resumed mission is due
+    /// at once rather than after the wake its last tick (or brake) set.
     pub fn set_mission_state(
         &self,
         id: i64,
@@ -813,7 +815,8 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE orchestration_projects SET state = ?1, started_at = ?2, finished_at = ?3, \
-               updated_at = ?4, version = version + 1 \
+               updated_at = ?4, version = version + 1, \
+               next_wake_at = CASE WHEN ?1 = 'active' THEN NULL ELSE next_wake_at END \
              WHERE id = ?5",
             rusqlite::params![to, started_at, finished_at, now, id],
         )?;

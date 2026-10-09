@@ -719,6 +719,18 @@ impl Store {
             "DELETE FROM worktrees WHERE project_id = ?1",
             rusqlite::params![project_id],
         )?;
+        // A routine starts its sessions in this project: it can no longer
+        // fire, so it stops with the reason, rather than failing each time
+        // its schedule comes round (review r02).
+        tx.execute(
+            "UPDATE routines SET enabled = 0, paused_reason = ?2, next_run_at = NULL, \
+               updated_at = ?3 WHERE project_id = ?1 AND enabled = 1",
+            rusqlite::params![
+                project_id,
+                super::routines::PAUSED_PROJECT_REMOVED,
+                now_unix()
+            ],
+        )?;
         tx.execute(
             "DELETE FROM projects WHERE id = ?1",
             rusqlite::params![project_id],

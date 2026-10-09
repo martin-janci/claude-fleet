@@ -67,7 +67,11 @@
     return get(showFriendlyNames) && r.friendly_name ? r.friendly_name : r.tmux_name;
   }
 
+  // Whatever had focus when the sheet opened: closing hands focus back to it.
+  let opener: HTMLElement | null = null;
+
   async function openSheet() {
+    if (!open) opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     open = true;
     cursor = 0;
     await tick();
@@ -75,9 +79,12 @@
   }
 
   function closeSheet() {
+    const hadFocus = !!sheet && sheet.contains(document.activeElement);
     open = false;
     if (focused) clearSessionFocus();
     focused = false;
+    if (hadFocus && opener?.isConnected) opener.focus();
+    opener = null;
   }
 
   function focusAt(i: number) {

@@ -142,7 +142,12 @@
     return row ? row.friendly_name || row.tmux_name : `session ${id}`;
   }
 
+  // Whatever had focus when the sheet opened (the pill, a row): closing
+  // the sheet hands focus back to it instead of dropping it on <body>.
+  let opener: HTMLElement | null = null;
+
   async function openSheet(requested: number[] = []) {
+    if (!open) opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     only = requestedOnly(candidates, requested);
     // Preselection never ticks a row this client may not tidy: a tick that
     // the footer then silently drops would read as a tidy that did nothing.
@@ -163,10 +168,15 @@
   }
 
   function closeSheet() {
+    // Only a sheet that holds focus gives it back: one that empties itself
+    // while the person works elsewhere must not pull focus to the pill.
+    const hadFocus = !!sheet && sheet.contains(document.activeElement);
     open = false;
     only = null;
     if (focused) clearSessionFocus();
     focused = false;
+    if (hadFocus && opener?.isConnected) opener.focus();
+    opener = null;
   }
 
   function focusAt(i: number, e: MouseEvent) {

@@ -1832,7 +1832,7 @@
   /* Keyboard focus only: the proxy is a text control, and a UA matches
      :focus-visible on those even for a plain mouse click. */
   .grid.kb-focus {
-    box-shadow: inset 0 0 0 1px var(--accent, #4f8fff);
+    box-shadow: inset 0 0 0 var(--ring-w) var(--ring);
   }
   /* Invisible, but NOT display:none / visibility:hidden and not off-screen —
      WebKit only opens an input-method session on an element it considers
@@ -1927,6 +1927,12 @@
   }
   @keyframes cf-cursor-blink {
     50% { opacity: 0; }
+  }
+  /* Review r12: Reduced and Off motion (motion.ts sets data-motion, the OS
+     preference included) hold the caret solid instead of blinking. */
+  :global(:root[data-motion='reduced']) .cursor.blink,
+  :global(:root[data-motion='off']) .cursor.blink {
+    animation: none;
   }
   .drop-overlay {
     position: absolute;

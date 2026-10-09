@@ -5,6 +5,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AccountsPage from './AccountsPage.svelte';
+import { get } from 'svelte/store';
+import { hostsViewRequest } from './app_views';
 import { hosts } from './hosts';
 import { accounts } from './accounts';
 import { sessions } from './sessions';
@@ -17,7 +19,9 @@ import {
   fleetAccounts,
   fleetHosts,
   fleetUsage,
+  RESET_WEEK,
   session,
+  snapshot,
 } from './hosts_fixture';
 import type { UsageSnapshotRow } from './accounts_page';
 
@@ -93,6 +97,20 @@ describe('AccountsPage', () => {
     expect(s.textContent).toContain('admin-2');
   });
 
+  it('review r08: a login host and All hosts open the Hosts view', async () => {
+    render(AccountsPage, props);
+    const admin = screen.getAllByTestId('account-card').find((c) => c.getAttribute('data-account') === ADMIN.uuid)!;
+    await fireEvent.click(admin);
+    const host = within(screen.getByTestId('account-logins'))
+      .getAllByTestId('account-login-host')
+      .find((b) => b.textContent === 'mefistos')!;
+    await fireEvent.click(host);
+    expect(get(hostsViewRequest)).toEqual({ host: 'mefistos' });
+    await fireEvent.click(screen.getByTestId('accounts-all-hosts'));
+    expect(get(hostsViewRequest)).toEqual({ host: null });
+    hostsViewRequest.set(null);
+  });
+
   it('says so when an account has no reading and no history', async () => {
     render(AccountsPage, props);
     const spare = screen
@@ -103,6 +121,34 @@ describe('AccountsPage', () => {
     expect(within(detail).getByTestId('account-window-5h').textContent).toContain('no reading yet');
     await waitFor(() => expect(within(detail).getByTestId('account-history-empty-5h')).toBeTruthy());
     expect(detail.textContent).toContain('No host is logged in to this account right now.');
+  });
+
+  it('withholds a window past its reset: ? left, no LIMIT badge', async () => {
+    accountUsage.set({
+      ...fleetUsage(),
+      [ADMIN.uuid]: snapshot(ADMIN.uuid, {
+        usage: {
+          five_hour: { utilization: 100, resets_at: NOW - 60 },
+          seven_day: { utilization: 42, resets_at: RESET_WEEK },
+          seven_day_opus: null,
+          seven_day_sonnet: null,
+        },
+      }),
+    });
+    render(AccountsPage, props);
+    const admin = screen
+      .getAllByTestId('account-card')
+      .find((c) => c.getAttribute('data-account') === ADMIN.uuid)!;
+    expect(admin.textContent).toContain('? left');
+    expect(admin.textContent).not.toContain('0% left');
+    await fireEvent.click(admin);
+    const five = within(screen.getByTestId('account-detail')).getByTestId('account-window-5h');
+    expect(five.textContent).toContain('? left');
+    expect(five.textContent).not.toContain('LIMIT');
+    expect(five.getAttribute('data-level')).toBe('none');
+    expect(within(screen.getByTestId('account-detail')).getByTestId('account-window-weekly').textContent).toContain(
+      '58% left',
+    );
   });
 
   it('Refresh asks for the picked account only', async () => {

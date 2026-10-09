@@ -135,7 +135,8 @@ impl Store {
             .conn
             .query_row(
                 &format!(
-                    "SELECT {} FROM tasks WHERE work_item_id = ?1 AND role = ?2 \
+                    "SELECT {} FROM tasks WHERE work_item_id = ?1 \
+                       AND (role = ?2 OR (?2 = 'implement' AND role IS NULL)) \
                      ORDER BY created_at DESC, id DESC LIMIT 1",
                     super::rows::TASK_COLUMNS
                 ),

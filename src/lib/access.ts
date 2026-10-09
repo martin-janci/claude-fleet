@@ -229,10 +229,36 @@ export function setMyGrants(personId: number | null, grants: readonly MyGrant[])
  * command simply has none to give.
  */
 export async function loadMyGrants(): Promise<Result<MyGrantsAnswer>> {
+  const seq = ++grantsLoadSeq;
+  const since = grantFrameSeq;
   const r = await invokeCmd<MyGrantsAnswer>('my_grants');
-  if (r.ok && r.value) setMyGrants(r.value.person_id ?? null, r.value.grants ?? []);
+  if (seq !== grantsLoadSeq || !r.ok || !r.value) return r;
+  // A `grant:changed` applied while this was in flight is newer than the
+  // answer: a revoke stays revoked, a new grant stays (review r07).
+  const before = get(myGrants);
+  const personId = r.value.person_id ?? null;
+  setMyGrants(personId, r.value.grants ?? []);
+  if (grantFrameSeq !== since && personId === grantFramesFor) {
+    myGrants.update((cur) => {
+      const next = new Map(cur);
+      for (const [sid, at] of grantTouchedAt) {
+        if (at <= since) continue;
+        const level = before.get(sid);
+        if (level === undefined) next.delete(sid);
+        else next.set(sid, level);
+      }
+      return next;
+    });
+  }
   return r;
 }
+
+let grantsLoadSeq = 0;
+// Every applied grant frame bumps `grantFrameSeq` and notes it per session,
+// so a `my_grants` answer can tell which entries a frame overtook.
+let grantFrameSeq = 0;
+let grantFramesFor: number | null = null;
+const grantTouchedAt = new Map<number, number>();
 
 /** The `grant:changed` frame: ids only, `level: null` for a revoke. */
 export interface GrantChanged {
@@ -274,6 +300,9 @@ export function applyGrantChanges(changes: readonly GrantChanged[]): void {
   if (me === null) return;
   const mine = changes.filter((c) => c.person_id === me);
   if (mine.length === 0) return;
+  if (grantFramesFor !== me) grantTouchedAt.clear();
+  grantFramesFor = me;
+  for (const c of mine) grantTouchedAt.set(c.session_id, ++grantFrameSeq);
   myGrants.update((cur) => {
     const next = new Map(cur);
     for (const c of mine) {

@@ -1045,7 +1045,8 @@
     cursor: pointer;
   }
   .session:hover,
-  .session:focus-visible { border-color: var(--border); outline: none; background: color-mix(in srgb, var(--fg) 5%, transparent); }
+  .session:focus-visible { border-color: var(--border); background: color-mix(in srgb, var(--fg) 5%, transparent); }
+  .session:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: calc(-1 * var(--ring-w)); }
   .s-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .kv { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.3rem; }
   select {
