@@ -14,7 +14,7 @@
 //! Shared by the Tauri commands (`commands/files.rs`, `commands/history.rs`)
 //! and the MCP `repo_*` tools.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::service::repo::{
     diff_from_bytes, repo_err, repo_script, run_git, run_in_repo, session_target, SessionIdArgs,
     MAX_FILE_BYTES, MAX_TREE_ENTRIES,
@@ -464,6 +464,62 @@ pub struct RepoFileArgs {
     pub path: String,
 }
 
+/// Emitted on stderr when a path leaves the worktree through a symlink.
+const OUTSIDE_SENTINEL: &str = "cf-outside";
+
+/// Refuse `$f` when its directory resolves outside `$root` (a symlinked
+/// directory on the way), or, with `final_link`, when `$f` itself is a
+/// symlink. `repo_rel_path` only checks the text, and `head` and
+/// `git diff --no-index` follow links, so without this a watch-tier caller
+/// reads `~/.ssh` through a committed `docs -> ../.ssh` (review r04 T1/T2).
+fn confine(final_link: bool) -> String {
+    format!(
+        "rr=$(cd \"$root\" && pwd -P)\n\
+         d=$(cd \"$(dirname -- \"$f\")\" 2>/dev/null && pwd -P) || d=\"$rr\"\n\
+         case \"$d/\" in \"$rr\"/*) ;; *) echo {OUTSIDE_SENTINEL} >&2; exit 8;; esac\n{}",
+        if final_link {
+            format!("if [ -L \"$f\" ]; then echo {OUTSIDE_SENTINEL} >&2; exit 8; fi\n")
+        } else {
+            String::new()
+        }
+    )
+}
+
+fn outside_err(out: &std::process::Output) -> Option<IpcError> {
+    String::from_utf8_lossy(&out.stderr)
+        .contains(OUTSIDE_SENTINEL)
+        .then(|| {
+            IpcError::new(
+                codes::E_INVALID,
+                "that path leads out of the session's worktree through a symlink",
+            )
+        })
+}
+
+/// `repo_file`'s shell body for a validated worktree-relative `path`.
+fn file_body(path: &str) -> String {
+    format!(
+        "f=\"$root\"/{path}\n{confine}\
+         if [ -d \"$f\" ]; then echo cf-is-dir >&2; exit 9; fi\n\
+         head -c {cap} -- \"$f\"",
+        path = quote(path),
+        confine = confine(true),
+        cap = MAX_FILE_BYTES + 1,
+    )
+}
+
+/// `repo_diff`'s untracked fallback: the file as all-added. A symlinked
+/// final file shows only its target's name, so only the directory is
+/// confined.
+fn untracked_diff_body(path: &str) -> String {
+    format!(
+        "f=\"$root\"/{quoted}\n{confine}\
+         git -C \"$root\" diff --no-index -- /dev/null {quoted} || true",
+        quoted = quote(path),
+        confine = confine(false),
+    )
+}
+
 /// Read one worktree file's content (capped at `MAX_FILE_BYTES`).
 /// Keeps its own exit check: the `cf-is-dir` sentinel is a success path.
 pub async fn repo_file(
@@ -478,13 +534,7 @@ pub async fn repo_file(
     // a raw "Is a directory" error. Detect that first and flag it as a
     // directory so the viewer can show a calm message.
     // Read one byte past the cap so we can tell "exactly cap" from "truncated".
-    let body = format!(
-        "f=\"$root\"/{path}\n\
-         if [ -d \"$f\" ]; then echo cf-is-dir >&2; exit 9; fi\n\
-         head -c {cap} -- \"$f\"",
-        path = quote(&args.path),
-        cap = MAX_FILE_BYTES + 1,
-    );
+    let body = file_body(&args.path);
     let script = repo_script(&name, &body);
     let out = run_in_repo(ssh, &host, &script).await?;
     if !out.status.success() {
@@ -497,6 +547,9 @@ pub async fn repo_file(
                 is_dir: true,
                 size: None,
             });
+        }
+        if let Some(e) = outside_err(&out) {
+            return Err(e);
         }
         return Err(repo_err(&out));
     }
@@ -552,9 +605,12 @@ pub async fn repo_diff(
 
     // Empty diff + an untracked file → show it as all-added via --no-index.
     if raw.iter().all(|b| b.is_ascii_whitespace()) {
-        let body = format!("git -C \"$root\" diff --no-index -- /dev/null {quoted} || true");
+        let body = untracked_diff_body(&args.path);
         let script = repo_script(&name, &body);
         let fallback = run_in_repo(ssh, &host, &script).await?;
+        if let Some(e) = outside_err(&fallback) {
+            return Err(e);
+        }
         if fallback.status.success() {
             raw = fallback.stdout;
         }
@@ -1395,6 +1451,50 @@ mod tests {
         let (capped, truncated) = parse_blame_porcelain(&out.stdout, 2);
         assert!(truncated);
         assert_eq!(capped.iter().map(|h| h.lines).sum::<u32>(), 2);
+    }
+
+    /// Review r04 T1/T2: a symlinked directory (or, for a file read, a
+    /// symlinked file) never reads past the worktree; real files still read.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_never_reads_past_the_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("id_ed25519"), "SECRET-R04\n").unwrap();
+        let dir = tmp.path().join("repo");
+        std::fs::create_dir(&dir).unwrap();
+        git_fixture::git(&dir, &["init", "-q"]);
+        git_fixture::commit_file(&dir, "a.txt", "a\n", "first");
+        std::os::unix::fs::symlink("../outside", dir.join("docs")).unwrap();
+        std::os::unix::fs::symlink("../outside/id_ed25519", dir.join("leak")).unwrap();
+        std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
+        let run = |body: String| {
+            let script = format!("set -e\nroot={}\n{body}", quote(&dir.to_string_lossy()));
+            crate::proc::std_command("bash")
+                .arg("-c")
+                .arg(script)
+                .output()
+                .unwrap()
+        };
+        for body in [
+            file_body("docs/id_ed25519"),
+            file_body("leak"),
+            untracked_diff_body("docs/id_ed25519"),
+        ] {
+            let out = run(body);
+            assert!(!out.status.success());
+            assert!(outside_err(&out).is_some(), "{out:?}");
+            assert!(!String::from_utf8_lossy(&out.stdout).contains("SECRET-R04"));
+        }
+        let ok = run(file_body("a.txt"));
+        assert!(ok.status.success(), "{ok:?}");
+        assert_eq!(ok.stdout, b"a\n");
+        let diff = run(untracked_diff_body("new.txt"));
+        assert!(
+            String::from_utf8_lossy(&diff.stdout).contains("+fresh"),
+            "{diff:?}"
+        );
     }
 
     #[cfg(unix)]
