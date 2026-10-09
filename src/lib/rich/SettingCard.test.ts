@@ -96,7 +96,7 @@ describe('setting card', () => {
     pending = [proposal({ id: 14 })];
     show({ proposal: 14 });
     await fireEvent.click(await screen.findByTestId('rich-setting-later-btn'));
-    expect(screen.getByTestId('rich-setting-later').textContent).toContain('Settings › Review');
+    expect(screen.getByTestId('rich-setting-later').textContent).toContain('Settings › Proposed changes');
     expect(decided).toEqual([]);
     expect(inv.mock.calls.map((c) => c[0])).not.toContain('decide_setting_proposals');
     expect(inv.mock.calls.map((c) => c[0])).not.toContain('set_fleet_setting');

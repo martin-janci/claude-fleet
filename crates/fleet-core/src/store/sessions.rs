@@ -1102,6 +1102,25 @@ impl Store {
         Ok(())
     }
 
+    /// Drop the account link of a session on the HOST's own login
+    /// (`claude_profile IS NULL`), after its `claude` was relaunched. A
+    /// relaunched `claude` reads whatever login the host holds now (a `/login`
+    /// as another account since the pane started moves it), while reconcile
+    /// keeps an existing link forever; an empty one it fills from the host's
+    /// current account on the next pass. A profile session is left alone: its
+    /// link follows the profile's login. Emits `session_updated` on a change.
+    pub fn clear_host_login_account(&self, id: i64) -> Result<(), rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET account_uuid = NULL \
+             WHERE id = ?1 AND claude_profile IS NULL AND account_uuid IS NOT NULL",
+            [id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(())
+    }
+
     /// Record the model a session launches with (`None` = the host's
     /// default). Not client-visible, so no event.
     pub fn set_session_launch_model(
@@ -1358,6 +1377,29 @@ impl Store {
 
     pub fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
         fetch_session_by_id(&self.conn, id)
+    }
+
+    /// Announce every live session on `account_uuid` again, unchanged, so
+    /// the hub re-stamps their derived `needs_attention` after the account
+    /// moved into or out of a limit or a lost login (review r05 F9). A dead
+    /// row (ghost or lost) and a shell or external one never carry an
+    /// account `Blocked` reason, so they are left out. Returns how many.
+    pub fn reemit_live_sessions_on_account(
+        &self,
+        account_uuid: &str,
+    ) -> Result<usize, rusqlite::Error> {
+        let ids: Vec<i64> = self
+            .conn
+            .prepare_cached(
+                "SELECT id FROM sessions WHERE account_uuid = ?1 AND status != 'ghost' \
+                 AND lost_at IS NULL AND kind NOT IN ('shell', 'external') ORDER BY id",
+            )?
+            .query_map([account_uuid], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for &id in &ids {
+            self.emit_session(id)?;
+        }
+        Ok(ids.len())
     }
 
     /// Re-read `id` after a write and announce it: `session_updated` when

@@ -73,9 +73,9 @@ generated from it.
 
 5. Wait for the `release` workflow to finish (it starts on the tag push).
    `verify-release` goes red if anything is missing; when it passes, the
-   `publish` job publishes the release — all 11 assets, a `SHA256SUMS`
-   covering every one of them, and this version's CHANGELOG section as the
-   notes. A green run means the release is live.
+   `publish` job publishes the release — all 14 assets, including a
+   `SHA256SUMS` covering every other one, and this version's CHANGELOG
+   section as the notes. A green run means the release is live.
 
    **If the run is red**, the release is still a draft with whatever it
    managed to build. Nothing was published; fix the failing leg and re-run
@@ -174,7 +174,7 @@ rows, one per session that had none. The rest are DDL, whose cost does not
 grow with the data. Re-run the numbers with:
 
 ```bash
-cargo test -p fleet-core --lib store::schema::tests_upgrade -- --nocapture --test-threads=1
+cargo fleet-test -- store::schema::tests_upgrade --nocapture --test-threads=1
 ```
 
 ## GitHub release job
@@ -192,7 +192,7 @@ The jobs, in order:
 | `version-consistency` | `scripts/check-version-consistency.sh --expect-tag` — the six carriers, the four `Cargo.lock` entries, the hub image pin and this tag must all agree | **no** — everything else `needs:` it |
 | `plan` | turns `scripts/release-assets.sh` into the two build matrices | **no** |
 | `create-release` | creates (or reuses) the one release, as a draft, with this version's CHANGELOG section as its notes and the build commit recorded | **no** |
-| `build` | three `tauri-action` legs; then renames the macOS updater bundle to carry the version | **no** |
+| `build` | four `tauri-action` legs (two macOS, Linux, Windows); then renames the macOS updater bundle to carry the version | **no** |
 | `agent-hub-binaries` | two native Linux legs → four tarballs | yes (`continue-on-error`) |
 | `manifest` | writes, signs and uploads the update manifest (`release-manifest.json` + `.minisig`, from 0.4.1) — see *Update manifest and channels* | yes (`continue-on-error`; `verify-release` requires its two assets) |
 | `checksums` | downloads every asset on the release, hashes it, uploads `SHA256SUMS` | yes (`continue-on-error`) |
@@ -243,7 +243,7 @@ before you do it:
 
 ### The assets
 
-12 per release from 0.3.4 (11 before it), every one version-bearing:
+14 per release from 0.4.1 (12 from 0.3.4, 11 before it), every one version-bearing:
 
 | asset | built by |
 |-------|----------|
@@ -253,6 +253,7 @@ before you do it:
 | `claude-fleet_<v>_x64-setup.exe` (from 0.3.4; bundles Microsoft's ConPTY, fetched and SHA-256-checked by `scripts/fetch-conpty.sh`) | `build`, `windows-latest` |
 | `fleet-agent-<v>-x86_64-unknown-linux-gnu.tar.gz`, `fleet-hub-<v>-…` | `agent-hub-binaries`, `ubuntu-22.04` |
 | `fleet-agent-<v>-aarch64-unknown-linux-gnu.tar.gz`, `fleet-hub-<v>-…` | `agent-hub-binaries`, `ubuntu-22.04-arm` |
+| `release-manifest.json`, `release-manifest.json.minisig` (from 0.4.1) | `manifest` |
 | `SHA256SUMS` | `checksums` |
 
 The two `.app.tar.gz` bundles are the exception that needed fixing:
@@ -342,7 +343,7 @@ tarball can always be traced back to a tree, even if the tag later moves.
 ### The RC channel
 
 A version with a pre-release suffix — `0.3.0-rc.1` — is a first-class
-release here, not a special case: same eleven assets, same checksums, same
+release here, not a special case: same assets, same checksums, same
 gate, same automatic publication. What differs is decided by the `-` in the
 tag and nothing else:
 
@@ -708,7 +709,7 @@ do not edit it by hand. After changing any `#[tool(...)]` description or the
 `generate_handler!` command list, regenerate and commit it, or CI fails:
 
 ```bash
-REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
+REGEN_DOCS=1 cargo fleet-test -- reference_is_current
 ```
 
 ## Conventional Commits

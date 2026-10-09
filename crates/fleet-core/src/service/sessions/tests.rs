@@ -2585,6 +2585,148 @@ async fn reconcile_never_gives_a_profile_session_the_hosts_account() {
     );
 }
 
+/// An `accounts` row for `uuid` (the sessions' link is a foreign key).
+fn seed_account(s: &Store, uuid: &str) {
+    s.upsert_account(&crate::store::AccountRow {
+        uuid: uuid.into(),
+        email: None,
+        display_name: None,
+        organization_name: None,
+        organization_uuid: None,
+        seat_tier: None,
+        last_seen_at: None,
+        nickname: None,
+        has_extra_usage: false,
+    })
+    .unwrap();
+}
+
+/// Review r05 F1: reconcile keeps a running session's account (the host's
+/// `/login` as someone else does not move a `claude` already running), but a
+/// relaunch reads the host's login afresh, so after a restart the row bills
+/// the account the host holds NOW, not the one it was first seen under.
+#[tokio::test]
+async fn a_relaunched_host_login_session_takes_the_hosts_current_account() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("h").unwrap();
+    let first = remote_account_deps(
+        vec![tmux_session("dev"), tmux_session("prof")],
+        Some(oauth_account("u1", "one@x.com")),
+    );
+    reconcile_sessions_with(&store, &first).await.unwrap();
+    let (dev, prof) = {
+        let s = store.lock().unwrap();
+        let dev = s.get_session("dev", "h").unwrap().unwrap().id;
+        let prof = s.get_session("prof", "h").unwrap().unwrap().id;
+        s.set_session_profile(prof, Some("work")).unwrap();
+        seed_account(&s, "u-work");
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET account_uuid = 'u-work' WHERE id = ?1",
+                [prof],
+            )
+            .unwrap();
+        (dev, prof)
+    };
+    // The host is relinked to u2; the running session keeps u1.
+    let second = remote_account_deps(
+        vec![tmux_session("dev"), tmux_session("prof")],
+        Some(oauth_account("u2", "two@x.com")),
+    );
+    reconcile_sessions_with(&store, &second).await.unwrap();
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .get_session_account("h", "dev")
+            .unwrap()
+            .as_deref(),
+        Some("u1")
+    );
+    // Restarted: the next reconcile attributes it to the host's u2. The
+    // profile session's link follows its profile, not the host.
+    {
+        let s = store.lock().unwrap();
+        super::lifecycle::record_relaunched_login(&s, dev, None).unwrap();
+        super::lifecycle::record_relaunched_login(&s, prof, None).unwrap();
+    }
+    reconcile_sessions_with(&store, &second).await.unwrap();
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.get_session_account("h", "dev").unwrap().as_deref(),
+        Some("u2")
+    );
+    assert_eq!(
+        s.get_session_account("h", "prof").unwrap().as_deref(),
+        Some("u-work")
+    );
+}
+
+/// Review r05 F2: a restart that switches the profile stores it only once
+/// the relaunch succeeded. A refused repair or a failed respawn leaves the
+/// row's (profile, account) as they were, since the pane still runs the old
+/// login; a successful one stores the profile and drops the old link.
+#[tokio::test]
+async fn a_failed_relaunch_keeps_the_rows_profile_and_account() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        s.upsert_session("dev", "h", None, None, 1, 100, "running", None)
+            .unwrap();
+        let id = s.get_session("dev", "h").unwrap().unwrap().id;
+        s.set_session_profile(id, Some("old")).unwrap();
+        seed_account(&s, "u-old");
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET account_uuid = 'u-old' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        id
+    };
+    let row = |store: &Mutex<Store>| {
+        let s = store.lock().unwrap();
+        let r = s.get_session_by_id(id).unwrap().unwrap();
+        (r.claude_profile, r.account_uuid)
+    };
+    for code in [codes::E_REPAIR_REQUIRED, codes::E_SSH] {
+        let e = super::lifecycle::relaunch_recording_login(
+            &store,
+            Some((id, Some(Some("new".to_string())))),
+            async move { Err(IpcError::new(code, "respawn-pane failed")) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.code, code);
+        assert_eq!(
+            row(&store),
+            (Some("old".to_string()), Some("u-old".to_string())),
+            "{code}"
+        );
+    }
+    super::lifecycle::relaunch_recording_login(
+        &store,
+        Some((id, Some(Some("new".to_string())))),
+        async { Ok(()) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(row(&store), (Some("new".to_string()), None));
+}
+
+/// `restart_session` itself never writes the profile before its relaunch:
+/// the write lives in [`super::lifecycle::relaunch_recording_login`] alone.
+#[test]
+fn restart_session_writes_no_profile_before_the_relaunch() {
+    let src = crate::repo_files::read("crates/fleet-core/src/service/sessions/lifecycle.rs");
+    let start = src.find("pub async fn restart_session(").unwrap();
+    let end = start + src[start..].find("\n}\n").unwrap();
+    let body = &src[start..end];
+    assert!(!body.contains("set_session_profile"), "{body}");
+    assert!(body.contains("relaunch_recording_login("), "{body}");
+}
+
 /// Once the host reports its profiles, a profile session is attributed to
 /// its profile's login, the account row exists for the usage poll, and the
 /// host row lists the profiles; a pass that cannot read them keeps both.
@@ -3065,6 +3207,36 @@ async fn concurrent_list_sessions_share_one_reconcile_pass() {
     let rows = list_sessions_with(&store, &deps, &gate, window, false)
         .await
         .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tmux_name, "s1");
+}
+
+/// Review r06 (r17 F4): a forced listing while another pass holds the gate
+/// waits for it and then runs its own, so a session started after that pass
+/// probed its host is in the answer.
+#[tokio::test]
+async fn a_forced_listing_during_a_pass_runs_its_own_after_it() {
+    use std::time::Duration;
+    let store = Arc::new(Mutex::new(Store::open_in_memory().expect("store")));
+    let gate = Arc::new(ReconcileGate::new());
+    let (deps, probes) = scripted_deps(
+        vec![tmux_session("s1")],
+        Duration::from_millis(0),
+        Duration::from_secs(5),
+    );
+    let window = Duration::from_secs(60);
+    // Another caller's pass is running.
+    let held = gate.try_begin().expect("free");
+    let forced = {
+        let (store, deps, gate) = (Arc::clone(&store), Arc::clone(&deps), Arc::clone(&gate));
+        tokio::spawn(async move { list_sessions_with(&store, &deps, &gate, window, true).await })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!forced.is_finished(), "it waits for the running pass");
+    assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(held);
+    let rows = forced.await.unwrap().expect("forced listing");
+    assert_eq!(gate.passes(), 1, "its own pass ran");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].tmux_name, "s1");
 }
@@ -7736,4 +7908,35 @@ fn reconcile_learns_a_codex_panes_conversation_from_its_rollout() {
         s.session_transcript_path(cx.id).unwrap().as_deref(),
         Some(path.as_str())
     );
+}
+
+/// Review r05 F8: a credential profile that could not be saved at start
+/// fails the start, since a later restart would run under the host's own
+/// login; a failed model / effort write stays soft.
+#[test]
+fn a_failed_profile_write_at_start_is_an_error_and_a_model_write_is_not() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("dev-f8", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER boom BEFORE UPDATE ON sessions \
+             BEGIN SELECT RAISE(ABORT, 'injected store fault'); END;",
+        )
+        .unwrap();
+    let model_only = crate::tmux::ClaudeLaunch {
+        model: Some("opus".into()),
+        ..Default::default()
+    };
+    assert!(store_start_launch(&s, id, "dev-f8", &model_only).is_ok());
+    let with_profile = crate::tmux::ClaudeLaunch {
+        profile: Some("work".into()),
+        ..Default::default()
+    };
+    let e = store_start_launch(&s, id, "dev-f8", &with_profile).unwrap_err();
+    assert_eq!(e.code, "E_INTERNAL");
+    assert!(e.message.contains("profile"), "{}", e.message);
+    assert!(!e.message.contains("injected"), "{}", e.message);
 }

@@ -1,7 +1,7 @@
 // The manual's icon set (design-system README, Iconography): 16-unit inline
 // SVG strokes at 1.5 px in currentColor, drawn at 12 to 18 px. The Rail's
 // icons are the reference set; search, filter and clock come from
-// ListFilters and AppHeader. Each entry is the SVG's inner shapes as data.
+// ListFilters and AppHeader; the action icons after them replaced emoji. Each entry is the SVG's inner shapes as data.
 
 export type OfIconShape =
   | { kind: 'path'; d: string }
@@ -31,6 +31,14 @@ export const OF_ICONS = {
   search: [c(7, 7, 4.5), p('m10.5 10.5 3 3')],
   filter: [p('M2 3.5h12L9.5 9v4l-3-1.5V9z')],
   clock: [c(8, 8, 6), p('M8 4.5V8l2.5 1.5')],
+  // Row and toolbar actions that used to be emoji (review r14 backlog).
+  mic: [r(6, 2, 4, 7.5, 2), p('M3.8 7.5a4.2 4.2 0 0 0 8.4 0M8 11.7V14M5.5 14h5')],
+  tag: [p('M2.5 2.5h5.2l5.8 5.8-5.2 5.2-5.8-5.8z'), c(5.5, 5.5, 1)],
+  edit: [p('M10.5 2.5l3 3L6 13H3v-3z'), p('M9 4l3 3')],
+  recreate: [p('M2.5 7a5.5 5.5 0 0 1 10-2'), p('M12.5 2.5V5H10'), p('M13.5 9a5.5 5.5 0 0 1-10 2'), p('M3.5 13.5V11H6')],
+  checklist: [p('m2.5 4.5 1.2 1.2L6 3.5'), p('M8 4.5h5.5'), p('m2.5 10.5 1.2 1.2L6 9.5'), p('M8 10.5h5.5')],
+  warning: [p('M8 2.5 14 13H2z'), p('M8 6.5v3'), p('M8 11.2v.3')],
+  dice: [r(2.5, 2.5, 11, 11, 2), c(5.5, 5.5, 0.4), c(10.5, 5.5, 0.4), c(8, 8, 0.4), c(5.5, 10.5, 0.4), c(10.5, 10.5, 0.4)],
 } satisfies Record<string, OfIconShape[]>;
 
 export type OfIconName = keyof typeof OF_ICONS;

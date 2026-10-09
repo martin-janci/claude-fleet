@@ -1408,6 +1408,7 @@ async fn a_hub_that_refuses_is_offline_with_a_growing_attempt_and_its_reason() {
                 attempt,
                 retry_in_secs,
                 reason,
+                ..
             } => Some((*attempt, *retry_in_secs, reason.clone())),
             _ => None,
         })
@@ -2146,4 +2147,34 @@ async fn a_bridge_without_a_wake_waits_its_backoff() {
     .run()
     .await;
     assert_eq!(delay.waits().len(), 1, "it waited the backoff as before");
+}
+
+/// Review r01 F13: the call breaker (`remote.rs` `offline_error`) arms from
+/// the second failed connect in a row. A stream that ended is not a refused
+/// connect, so the first failed reconnect after it still reports
+/// `refused: 1` — even though the banner's `attempt`, which counts the
+/// reconnect too, already reads 2 — and the breaker stays open.
+#[tokio::test]
+async fn one_failed_connect_after_a_stream_ended_does_not_arm_the_breaker() {
+    use crate::backend::connection::HubConnection as C;
+    let states = drive_reporting(vec![
+        Connection::Delivers(vec![
+            ready(),
+            frame_for(&RowChange::SessionKilled(1.into())),
+        ]),
+        Connection::Fails("connect hub.example.com:443: connection refused"),
+        Connection::Fails("connect hub.example.com:443: connection refused"),
+    ])
+    .await;
+    let offline: Vec<(u32, u32)> = states
+        .iter()
+        .filter_map(|s| match s {
+            C::Offline {
+                attempt, refused, ..
+            } => Some((*attempt, *refused)),
+            _ => None,
+        })
+        .take(2)
+        .collect();
+    assert_eq!(offline, [(2, 1), (3, 2)], "{states:?}");
 }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   import { tablistKeys } from './tablist_keys';
   // Missions (orchestration O1, design 2026-10-07 §9): the Work view's third
   // tab. A mission is a goal over a root task: its member tasks, the repos
@@ -1016,7 +1017,7 @@
                       title="Done when: the conditions that verify this task"
                       disabled={busy}
                       data-testid="mission-conds"
-                      onclick={() => editConds(n.item_id)}>☑</button
+                      onclick={() => editConds(n.item_id)}><Icon name="checklist" size={14} /></button
                     >
                   {/if}
                   {#if it.id === mission.root_item_id}

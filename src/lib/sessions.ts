@@ -388,6 +388,10 @@ const rows = createRowStore<SessionRow, number>({
   // otherwise re-insert the dead row ("ghost session").
   tombstoneMs: 5000,
   isStale: sessionIsStale,
+  // `sessions.id` is an INTEGER PRIMARY KEY without AUTOINCREMENT, so a killed
+  // highest id is handed to the next insert. A `session:created` whose row is
+  // not the killed one gets past that id's tombstone (`mergeCreatedInto`).
+  identity: (s) => `${s.host_alias}\u0000${s.tmux_name}\u0000${s.created_at}`,
 });
 export const sessions = rows.store;
 export const resetTombstonesForTests = rows.resetTombstonesForTests;
@@ -958,7 +962,9 @@ export function applySessionEvents(events: readonly SessionEvent[]): void {
   sessions.update((arr) => {
     let next = arr;
     for (const ev of events) {
-      next = ev.type === 'killed' ? rows.removeFrom(next, ev.id) : rows.mergeInto(next, ev.row);
+      if (ev.type === 'killed') next = rows.removeFrom(next, ev.id);
+      else if (ev.type === 'created') next = rows.mergeCreatedInto(next, ev.row);
+      else next = rows.mergeInto(next, ev.row);
     }
     return next;
   });

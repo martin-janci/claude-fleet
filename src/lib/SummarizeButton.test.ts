@@ -66,6 +66,9 @@ describe('SummarizeButton', () => {
     expect(pre.textContent).toBe('Goal: fix login.\n<b>Left</b>: tests.');
     expect(container.querySelector('b')).toBeNull();
     expect(pre.textContent).not.toContain('claude-fleet');
+    // An LLM draft says so, and who wrote it where (design-system/ai.md).
+    expect(screen.getByTestId('past-summary-drafted').textContent).toBe('Drafted');
+    expect(screen.getByTestId('past-summary-meta').textContent).toBe('by haiku on hetzner · from the transcript');
     await fireEvent.click(screen.getByTestId('past-summary-close'));
     await flush();
     expect(screen.queryByTestId('past-summary')).toBeNull();

@@ -135,7 +135,10 @@ pub fn visible(s: &Store, scope: &ViewScope, row: &DownloadRow) -> bool {
         // is left that names a person. `not a privacy fence` — the person
         // half is `may_own` in the arm above, and a reaped session leaves
         // none to ask.
-        None => scope.org.sees_session_org_only(&row.host_alias, row.org_id),
+        None => {
+            scope.org.sees_session_org_only(&row.host_alias, row.org_id)
+                && scope.may_own_person_row(row.org_id, row.owner_person_id)
+        }
     }
 }
 

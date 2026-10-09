@@ -396,6 +396,33 @@ async fn pause_all_stops_the_mission_tick() {
     assert_eq!(s.missions_due(now).unwrap(), vec![fx.m.id], "still due");
 }
 
+/// Review r06 F5: a step the loop planned before Pause all was pressed is
+/// refused when its turn comes, before any run starts.
+#[tokio::test]
+async fn a_loop_step_planned_before_pause_all_does_not_start() {
+    let fx = fixture();
+    let item = member(&fx, "one");
+    settings::set(
+        &lock(&fx.deps.store).unwrap(),
+        settings::AUTOMATION_PAUSED,
+        "true",
+    )
+    .unwrap();
+    let step = Step {
+        kind: "run".into(),
+        item_id: Some(item),
+        role: Some("implement".into()),
+        reason: "ready".into(),
+        context: None,
+        auto: true,
+    };
+    let r = apply_step(&fx.deps, &fx.m, &step, &Actor::Loop, &ViewScope::internal()).await;
+    assert!(!r.ok);
+    assert!(r.detail.contains("stood down"), "{}", r.detail);
+    let s = lock(&fx.deps.store).unwrap();
+    assert_eq!(s.mission_task_counts(fx.m.id).unwrap().open, 0);
+}
+
 #[test]
 fn a_continuous_mission_wakes_on_its_timer() {
     let mut m = fixture().m;
@@ -505,4 +532,37 @@ fn the_loop_holds_runs_on_an_account_over_the_line() {
     let mut steps = vec![run.clone()];
     hold_runs_over_limit(&s, &fx.m, Some(&g), &mut steps, now).unwrap();
     assert_eq!(steps, vec![run]);
+}
+
+/// Review r05 F5: the over-limit hold checks the host the start will land
+/// on. A mission with no repos and an item with no project starts where a
+/// start rule says (`tickets::seen_place`), not where nothing is known: the
+/// rule's host at 95% holds the run.
+#[test]
+fn the_hold_checks_the_host_a_start_rule_picks() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    let s = lock(&fx.deps.store).unwrap();
+    let key = s.get_work_item(item).unwrap().unwrap().key.unwrap();
+    let pid = s.upsert_project("o", "r", "/repo").unwrap();
+    let now = 5_000;
+    s.insert_start_rule(None, None, &key, pid, Some("mac"), "active", 0, now)
+        .unwrap();
+    crate::service::account_limits::seed_usage(&s, "mac", None, "acc-mac", 95.0, now);
+    let start = start_for(&s, &fx.m, item, &Actor::Loop, None).unwrap();
+    assert_eq!((start.project_id, start.host_alias), (None, None));
+    let run = Step {
+        kind: "run".into(),
+        item_id: Some(item),
+        role: Some("implement".into()),
+        reason: String::new(),
+        context: None,
+        auto: true,
+    };
+    let mut steps = vec![run];
+    hold_runs_over_limit(&s, &fx.m, None, &mut steps, now).unwrap();
+    assert!(steps.is_empty(), "held: {steps:?}");
+    let e = &s.mission_events(fx.m.id, None, 1).unwrap()[0];
+    let why = e.payload.as_ref().unwrap()["why"].as_str().unwrap();
+    assert!(why.contains("mac's own login"), "{why}");
 }

@@ -215,6 +215,24 @@ pub struct Window {
     pub resets_at: Option<i64>,
 }
 
+/// The 5-hour window's length, seconds.
+pub const FIVE_HOUR_SECS: i64 = 5 * 3_600;
+/// The weekly window's length, seconds.
+pub const WEEK_SECS: i64 = 7 * 86_400;
+
+impl Window {
+    /// Whether this window, of `len_secs`, read at `fetched_at`, has not
+    /// reset by `now`: before its `resets_at`; without one, only while the
+    /// reading is younger than the window itself (the window has rolled
+    /// over since an older one, so it says nothing about now).
+    pub fn live_at(&self, fetched_at: Option<i64>, len_secs: i64, now: i64) -> bool {
+        match self.resets_at {
+            Some(at) => at > now,
+            None => fetched_at.is_some_and(|f| now - f < len_secs),
+        }
+    }
+}
+
 /// The endpoint's buckets. Any may be absent.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct AccountUsage {

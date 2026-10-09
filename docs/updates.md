@@ -12,8 +12,8 @@ and the phones. Design and rationale:
 > carries a signed `release-manifest.json`, and the `stable` and `beta`
 > channels live on the `update-channels` branch (`docs/RELEASING.md` →
 > *Update manifest and channels*). The release key exists and every build
-> from 0.4.1 trusts it; until 0.4.1 is released there is no channel to
-> read, so nothing is offered yet. `fleet-hub update check` asks the
+> from 0.4.1 trusts it. The first channel was published with v0.4.1, and
+> `stable` and `beta` list every release since. `fleet-hub update check` asks the
 > channel directly (slice S3). `fleet-updater`, the desktop and the phone
 > install nothing yet (slices S6–S8): on a standalone desktop the Settings
 > → Updates rows have no effect. A hub that cannot verify a channel still

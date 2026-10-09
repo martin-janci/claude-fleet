@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   import { tablistKeys } from './tablist_keys';
   // The sidebar's chrome, in four layers so a filter never looks like a
   // setting and a setting never looks like an action:
@@ -541,7 +542,7 @@
       aria-label="Settings"
       aria-expanded={showSettings}
       data-testid="settings-open"
-    >⚙</button>
+    ><Icon name="settings" size={14} /></button>
     <button
       class="btn btn--quiet btn--icon"
       onclick={refresh}
@@ -650,7 +651,7 @@
         <!-- At zero there is nothing to warn about: the ⚠ and the count were
              permanent chrome that read as an alert. The pill stays so the
              filter remains reachable. -->
-        {#if needsYouCount > 0}<span aria-hidden="true">⚠</span> Needs you <span class="count">{needsYouCount}</span>{:else}Needs you{/if}
+        {#if needsYouCount > 0}<Icon name="warning" size={12} /> Needs you <span class="count">{needsYouCount}</span>{:else}Needs you{/if}
       </button>
       <button
         class="btn btn--chip btn--toggle"

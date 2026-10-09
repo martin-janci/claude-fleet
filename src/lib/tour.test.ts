@@ -4,6 +4,7 @@ import {
   TOUR_STEPS,
   endTour,
   matchesChord,
+  matchesStep,
   nextTourStep,
   placePopover,
   prevTourStep,
@@ -79,6 +80,23 @@ describe('matchesChord', () => {
     expect(matchesChord(key('j', 'KeyJ'), 'j', true)).toBe(true);
     expect(matchesChord(key('j', 'KeyJ', { metaKey: true }), 'j', true)).toBe(false);
     expect(matchesChord(key('?', 'Slash', { shiftKey: true }), '?', false)).toBe(true);
+  });
+});
+
+describe('matchesStep', () => {
+  const step = (id: string) => TOUR_STEPS.find((s) => s.id === id)!;
+  it('takes the global chords from the registry, so off the Mac they are the ones the app answers', () => {
+    expect(matchesStep(key('K', 'KeyK', { ctrlKey: true, shiftKey: true }), step('command'), false)).toBe(true);
+    expect(matchesStep(key('k', 'KeyK', { ctrlKey: true }), step('command'), false)).toBe(false);
+    expect(matchesStep(key('k', 'KeyK', { metaKey: true }), step('command'), true)).toBe(true);
+    expect(matchesStep(key('J', 'KeyJ', { ctrlKey: true, shiftKey: true }), step('session'), false)).toBe(true);
+    expect(matchesStep(key('E', 'KeyE', { ctrlKey: true, shiftKey: true }), step('control'), false)).toBe(true);
+    expect(matchesStep(key('b', 'KeyB', { ctrlKey: true, altKey: true }), step('inspector'), false)).toBe(true);
+  });
+
+  it('keeps the bare keys on their chord', () => {
+    expect(matchesStep(key('j', 'KeyJ'), step('inbox'), false)).toBe(true);
+    expect(matchesStep(key('?', 'Slash', { shiftKey: true }), step('status'), false)).toBe(true);
   });
 });
 

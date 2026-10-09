@@ -116,7 +116,9 @@ where
             format!("session {} has no agent to prompt", row.id),
         ));
     }
-    if matches!(row.status.as_str(), "dead" | "stopped") {
+    // A row is `running` or `ghost` (lost or killed): a prompt queued for a
+    // ghost would wait forever, neither typed nor failed.
+    if row.status != "running" {
         return Err(IpcError::new(
             codes::E_INVALID_STATE,
             format!("session {} is not running", row.id),
@@ -249,12 +251,12 @@ pub fn spawn_deliver_all_due(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
     let store = Arc::clone(store);
     let ssh = Arc::clone(ssh);
     crate::rt::spawn(async move {
+        let _flight = crate::rt::ClearOnDrop::of_static(&RUNNING);
         for id in ids {
             if let Err(e) = deliver_due(&store, &ssh, id).await {
                 tracing::debug!(session_id = id, error = %e.message, "[deferred] delivery failed");
             }
         }
-        RUNNING.store(false, Ordering::Release);
     });
 }
 
@@ -496,6 +498,27 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_prompt_for_a_lost_or_killed_session_is_refused_not_queued() {
+        let (store, id) = store_with("working");
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute("UPDATE sessions SET status = 'ghost' WHERE id = ?1", [id])
+            .unwrap();
+        let e = queue_prompt_with(args(id, "later"), &store, |_, _| async { Ok(()) })
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID_STATE);
+        assert!(store
+            .lock()
+            .unwrap()
+            .next_deferred_prompt(id)
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

@@ -227,13 +227,14 @@ impl HubBackend {
     fn offline_error(&self, what: &str) -> Option<IpcError> {
         match self.link.as_ref()?.current() {
             HubConnection::Offline {
-                attempt,
+                refused,
                 retry_in_secs,
                 reason,
-            } if attempt >= 2 && is_connect_failure(&reason) => Some(IpcError::new(
+                ..
+            } if refused >= 2 && is_connect_failure(&reason) => Some(IpcError::new(
                 codes::E_HUB_UNREACHABLE,
                 format!(
-                    "{what} was not sent: {} has refused {attempt} connection attempts ({}); \
+                    "{what} was not sent: {} has refused {refused} connection attempts ({}); \
                      retrying in {retry_in_secs}s",
                     self.cfg.base_url,
                     self.redact(&reason)
@@ -830,6 +831,14 @@ impl HubBackend {
         &self,
     ) -> Result<Vec<fleet_core::service::account_usage::AccountUsageSnapshot>, IpcError> {
         self.route("list_account_usage", &json!({})).await
+    }
+
+    /// `commands::account_usage::check_account_headroom` (contract 14).
+    pub async fn check_account_headroom(
+        &self,
+        args: &fleet_core::service::account_limits::CheckAccountHeadroomArgs,
+    ) -> Result<fleet_core::service::account_limits::Headroom, IpcError> {
+        self.route("check_account_headroom", args).await
     }
 
     /// `commands::prs::list_pull_requests`.

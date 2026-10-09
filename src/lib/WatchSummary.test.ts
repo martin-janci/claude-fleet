@@ -50,6 +50,8 @@ describe('WatchSummary', () => {
     expect(screen.getByTestId('watch-summary-meta').textContent).toBe(
       'by haiku on mercury · from 3 turns · checked against the transcript by Jev',
     );
+    // An LLM draft carries the Drafted pill (design-system/ai.md).
+    expect(screen.getByTestId('watch-summary-drafted').textContent).toBe('Drafted');
   });
 
   it('says when the check hid the summary', async () => {
