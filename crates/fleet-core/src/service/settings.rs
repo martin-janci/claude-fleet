@@ -556,6 +556,9 @@ pub const DECIDE_JEV_DUPLICATE: &str = "decide.jev.duplicate";
 /// `control_route`'s mode (K2: where a message typed in Control goes,
 /// redesign step 9.9).
 pub const DECIDE_JEV_CONTROL_ROUTE: &str = "decide.jev.control_route";
+/// `summary_check`'s mode (checking a watcher's summary against the
+/// transcript before it shows, J9).
+pub const DECIDE_JEV_SUMMARY_CHECK: &str = "decide.jev.summary_check";
 /// `turn_outcome`'s mode (J2: what a turn came to when hooks said nothing,
 /// read from the pane tail). Needs the reply-text consent (D48) on top.
 pub const DECIDE_JEV_TURN_OUTCOME: &str = "decide.jev.turn_outcome";
@@ -1386,6 +1389,15 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_SUMMARY_CHECK,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: summary check",
+        "Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: check first")]),
     Spec::new(
         DECIDE_JEV_TURN_OUTCOME,
         "off",
@@ -2658,6 +2670,7 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_SIBLING_REPOS, None), "off");
         assert_eq!(resolve(DECIDE_JEV_DUPLICATE, None), "off");
         assert_eq!(resolve(DECIDE_JEV_CONTROL_ROUTE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_SUMMARY_CHECK, None), "off");
         assert_eq!(resolve(DECIDE_JEV_TURN_OUTCOME, None), "off");
         assert_eq!(resolve(DECIDE_JEV_UNASSIGNED_REPLY, None), "false");
         assert!(validate(DECIDE_JEV_TURN_OUTCOME, "auto").is_err());

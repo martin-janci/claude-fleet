@@ -84,13 +84,18 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.summary_check",
+          "hint": "Checks a watcher's summary of a session against its transcript; in assist a summary it cannot confirm is not shown."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.turn_outcome",
           "hint": "Sends Claude's last reply, redacted, only for organisations that allow reply text. Hooks always win."
         },
         {
           "type": "field",
           "key": "decide.jev.routine_run_outcome",
-          "hint": "Keeps routine runs with nothing to do out of the Inbox. Sends the run's last reply, redacted, only for organisations that allow reply text."
+          "hint": "Keeps runs with nothing to do out of the Inbox. Sends the run's last reply only for organisations that allow reply text."
         },
         {
           "type": "field",

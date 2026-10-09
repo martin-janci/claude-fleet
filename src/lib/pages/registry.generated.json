@@ -2006,6 +2006,46 @@
         "level": "none"
       },
       "default": "off",
+      "help": "Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support.",
+      "key": "decide.jev.summary_check",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: summary check",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: check first"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
       "help": "Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it.",
       "key": "decide.jev.turn_outcome",
       "kind": {
@@ -3471,12 +3511,17 @@
               "type": "field"
             },
             {
+              "hint": "Checks a watcher's summary of a session against its transcript; in assist a summary it cannot confirm is not shown.",
+              "key": "decide.jev.summary_check",
+              "type": "field"
+            },
+            {
               "hint": "Sends Claude's last reply, redacted, only for organisations that allow reply text. Hooks always win.",
               "key": "decide.jev.turn_outcome",
               "type": "field"
             },
             {
-              "hint": "Keeps routine runs with nothing to do out of the Inbox. Sends the run's last reply, redacted, only for organisations that allow reply text.",
+              "hint": "Keeps runs with nothing to do out of the Inbox. Sends the run's last reply only for organisations that allow reply text.",
               "key": "decide.jev.routine_run_outcome",
               "type": "field"
             },

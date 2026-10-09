@@ -1931,6 +1931,22 @@ const ORG_HALF_SITES: &[OrgHalf] = &[
                       created by the session's owner or by its own Claude \
                       and never by a grantee, which is why a person column \
                       on `downloads` would change no answer here",
+    },    OrgHalf {
+        file: "crates/fleet-core/src/service/library.rs",
+        func: "visible",
+        nth: 0,
+        code: "None => scope.org.sees_session_org_only(&row.host_alias, row.org_id),",
+        person_half: "`may_own` in the OTHER arm of the same match, on the \
+                      session row the file was put beside: the downloads' \
+                      `own` tier, because a Library row names a path on the \
+                      owner's host. This arm is the session-is-GONE case, the \
+                      same as `downloads::visible`'s: no person is left to \
+                      ask and `LibraryItemRow.org_id`, recorded for exactly \
+                      this, is the whole of the fence. The residue is BOUNDED \
+                      the same way: `library::add` takes the session only \
+                      when `may_own` holds, so every row that could reach \
+                      this arm was recorded by the session's owner and never \
+                      by a grantee",
     },
 ];
 

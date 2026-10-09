@@ -62,6 +62,9 @@ pub mod start_project;
 #[cfg(test)]
 mod start_project_tests;
 pub mod status_map;
+pub mod summary_check;
+#[cfg(test)]
+mod summary_check_tests;
 #[cfg(test)]
 mod tests;
 pub mod turn_outcome;
@@ -123,6 +126,9 @@ pub enum Feature {
     /// Where a message typed in Control goes: a mission, a session, or
     /// Control itself (K2, redesign step 9.9).
     ControlRoute,
+    /// Checking a watcher's "Since 13:20" summary against its transcript
+    /// before it shows (J9, redesign step 11.11).
+    SummaryCheck,
     /// What a turn came to when hooks said nothing, from the pane tail (J2).
     TurnOutcome,
     /// What a finished routine run came to when its exit and the rules say
@@ -131,7 +137,7 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Feature; 12] = [
+    pub const ALL: [Feature; 13] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
@@ -142,6 +148,7 @@ impl Feature {
         Feature::RestoreTarget,
         Feature::Duplicate,
         Feature::ControlRoute,
+        Feature::SummaryCheck,
         Feature::TurnOutcome,
         Feature::RoutineRunOutcome,
     ];
@@ -158,6 +165,7 @@ impl Feature {
             Feature::RestoreTarget => "restore_target",
             Feature::Duplicate => "duplicate",
             Feature::ControlRoute => "control_route",
+            Feature::SummaryCheck => "summary_check",
             Feature::TurnOutcome => "turn_outcome",
             Feature::RoutineRunOutcome => "routine_run_outcome",
         }
@@ -180,6 +188,7 @@ impl Feature {
             Feature::RestoreTarget => settings::DECIDE_JEV_RESTORE_TARGET,
             Feature::Duplicate => settings::DECIDE_JEV_DUPLICATE,
             Feature::ControlRoute => settings::DECIDE_JEV_CONTROL_ROUTE,
+            Feature::SummaryCheck => settings::DECIDE_JEV_SUMMARY_CHECK,
             Feature::TurnOutcome => settings::DECIDE_JEV_TURN_OUTCOME,
             Feature::RoutineRunOutcome => settings::DECIDE_JEV_ROUTINE_RUN_OUTCOME,
         }

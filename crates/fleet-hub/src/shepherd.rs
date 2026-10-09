@@ -20,8 +20,8 @@ pub enum ShepherdCmd {
     ///
     /// `watch` records what is wrong on the session's timeline; `nudge`
     /// also asks the session that opened the PR to fix a conflict, a lag
-    /// behind the base branch or red CI; `merge` is `nudge` until the merge
-    /// queue lands.
+    /// behind the base branch or red CI; `merge` also merges a PR GitHub
+    /// confirms is green, one per project at a time, with a merge commit.
     Grant {
         /// The project as owner/repo.
         project: String,
@@ -151,6 +151,15 @@ fn run_on(store: &Store, cmd: ShepherdCmd, now: i64) -> Result<ExitCode, String>
                     None => String::new(),
                 };
                 out::line(&format!("{name}\t{}{state}", r.level));
+            }
+            for m in store
+                .list_shepherd_merges(limit)
+                .map_err(|e| e.to_string())?
+            {
+                out::line(&format!(
+                    "{}\tsession {}\tmerge\t{}\t{}",
+                    m.at, m.session_id, m.outcome, m.pr_url
+                ));
             }
             for e in store
                 .list_shepherd_episodes(limit)
