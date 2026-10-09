@@ -46,7 +46,8 @@ export type Scope =
   | 'session-row'
   | 'session-list'
   | 'question-card'
-  | 'form-card';
+  | 'form-card'
+  | 'form';
 
 /** Each scope's heading, in the order the lists show them: Settings →
  *  Shortcuts and the `?` sheet both read it, so they name a scope alike. */
@@ -56,6 +57,7 @@ export const SCOPE_TITLES: Record<Scope, string> = {
   'session-row': 'Session row',
   'question-card': 'Question card',
   'form-card': 'Chat form',
+  form: 'Dialogs and forms',
   conversation: 'Conversation',
   terminal: 'Terminal',
   switcher: 'Quick switcher',
@@ -257,6 +259,12 @@ export const SHORTCUTS: readonly Shortcut[] = [
 
   // ── Chat form (10.1): 1–9 pick the step's only numbered choice ───────
   row('form-card', 'form-card.option', 'Pick option 1–9', keys(...digits(''))),
+
+  // ── Dialogs and forms (G1.2, FormsAnatomy): DialogSheet, WizardDialog
+  // and FormWizard ask `submitKey` (forms/form_frame.ts). Esc cancels
+  // through the native <dialog> (Modal), as it always has.
+  row('form', 'form.submit', 'Submit the form', split(['Meta+Enter'], ['Ctrl+Enter'])),
+  row('form', 'form.submit-one', 'Submit a one-field form', keys('Enter')),
 ];
 
 /** The view handlers each per-view scope lives in, for the freeze test. */
@@ -282,6 +290,7 @@ export const MATCHED_SCOPES: Partial<Record<Scope, string>> = {
   'session-list': 'src/lib/Sidebar.svelte',
   'question-card': 'src/lib/AnswerPrompt.svelte',
   'form-card': 'src/lib/forms/FormWizard.svelte',
+  form: 'src/lib/forms/form_frame.ts',
 };
 
 export interface KeyEventLike {
