@@ -391,15 +391,23 @@ async fn a_run_the_caller_cannot_see_is_not_followed() {
         .unwrap();
     let s = w.store.lock().unwrap();
     let stranger = s.create_person("eve", None).unwrap().id;
-    let eve = ViewScope::for_caller(
-        crate::service::orgs::OrgScope::All,
-        Some(stranger),
-        Default::default(),
-        None,
-        None,
-        false,
-        Default::default(),
-    );
+    // A paired device of a person who is not on the run, built the one way
+    // a caller's scope is built (view_scope_tests pins that).
+    let eve = crate::mcp::auth::Caller {
+        host_alias: None,
+        client: Some(crate::mcp::auth::ClientRef {
+            id: 77,
+            name: "eve's phone".into(),
+            trusted: false,
+            org_id: None,
+            person_id: Some(stranger),
+        }),
+        mode: crate::mcp::auth::TokenMode::Full,
+        pane: None,
+        is_personal_owner: false,
+    }
+    .view_scope(&s)
+    .unwrap();
     assert!(!follow(&s, &eve, run, &w.m(), NOON).unwrap());
     assert!(s.get_decision_run(run).unwrap().unwrap().followup.is_none());
     assert!(
