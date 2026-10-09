@@ -5071,6 +5071,9 @@ fn one_full_row() -> serde_json::Value {
     // With an org, for the same reason: `org_id` is skipped when no org
     // claims the session.
     row.org_id = Some(3);
+    // With live links, for the same reason: `work_rev` is skipped at 0, and a
+    // first cut of review round 3 read that as "no such key" (R3-4).
+    row.work_rev = 42;
     // Through the constructor, so the derived `needs_attention` is stamped
     // the same way `list_sessions` stamps it — the view is pinned against
     // what the wire actually carries, not against a hand-built row.
@@ -5118,6 +5121,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "usage_cost_micros",
             "usage_model",
             "work",
+            "work_rev",
             "work_suggested",
         ]
     );
@@ -6984,6 +6988,10 @@ fn the_phone_view_keeps_the_owner_so_share_survives_a_relist() {
     project_rows(&mut rows, PHONE_SESSION_FIELDS);
     assert_eq!(rows[0]["owner_person_id"], serde_json::json!(7));
     assert_eq!(rows[0]["lost_at"], serde_json::json!(5));
+    // R3-4: the work view's signature carries `work_rev`, which every frame
+    // sends; a re-list without it read as a work change on the next frame and
+    // hid a secondary link's change until then.
+    assert_eq!(rows[0]["work_rev"], serde_json::json!(42));
 }
 
 /// The phone's tags editor starts from the row's `tags` and
