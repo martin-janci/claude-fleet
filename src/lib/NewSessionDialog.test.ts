@@ -1913,6 +1913,69 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     expect(args.with_brief).toBe(true);
   });
 
+  it('drafts the brief with Claude on the chosen host, sends the draft, and Clear goes back (redesign 6.10)', async () => {
+    const mock = mockedInvoke as ReturnType<typeof vi.fn>;
+    mock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'preview_start_work')
+        return {
+          key: 'ABC-7', title: 'Fix login', projects: [], hosts: [], conflicts: [], plan: null,
+          brief: 'Goal: stop the login loop.',
+          brief_draft: { model: 'haiku', host_alias: 'local', notes: 2 },
+        };
+      if (cmd === 'start_work') return started;
+      return null;
+    });
+    render(NewSessionDialog, {
+      props: { project, ticket, initialName: 'ABC-7 Fix login', onCreate: () => {}, onCancel: () => {} },
+    });
+    await tick();
+    await fireEvent.click(screen.getByTestId('ticket-brief-draft-ask'));
+    const field = (await screen.findByTestId('ticket-brief-draft-input')) as HTMLTextAreaElement;
+    await vi.waitFor(() => expect(field.value).toBe('Goal: stop the login loop.'));
+    expect(screen.getByTestId('ticket-brief-draft-meta').textContent).toContain(
+      'by haiku on local · from the ticket and 2 earlier notes',
+    );
+    const ask = mock.mock.calls.find((c) => c[0] === 'preview_start_work')![1] as { args: Record<string, unknown> };
+    expect(ask.args).toMatchObject({ item_id: 42, project_id: 1, host_alias: 'local', with_brief: true, draft_brief: true });
+    // Nothing started by drafting; the person's edit of the draft is what goes.
+    expect(mock.mock.calls.some((c) => c[0] === 'start_work')).toBe(false);
+    await fireEvent.input(field, { target: { value: 'Goal: stop the loop. Start with Safari.' } });
+    await fireEvent.click(screen.getByTestId('create-btn'));
+    await vi.waitFor(() => expect(mock.mock.calls.some((c) => c[0] === 'start_work')).toBe(true));
+    const start = mock.mock.calls.find((c) => c[0] === 'start_work')![1] as { args: { brief?: string } };
+    expect(start.args.brief).toBe('Goal: stop the loop. Start with Safari.');
+  });
+
+  it('Clear drops the draft for the ticket brief, and a hub that cannot draft says so', async () => {
+    const mock = mockedInvoke as ReturnType<typeof vi.fn>;
+    let drafts = true;
+    mock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'preview_start_work')
+        return {
+          key: 'ABC-7', title: 'Fix login', projects: [], hosts: [], conflicts: [], plan: null,
+          brief: drafts ? 'Drafted.' : 'template',
+          ...(drafts ? { brief_draft: { model: 'haiku', host_alias: 'local', notes: 0 } } : {}),
+        };
+      return null;
+    });
+    render(NewSessionDialog, {
+      props: { project, ticket, initialName: 'ABC-7 Fix login', onCreate: () => {}, onCancel: () => {} },
+    });
+    await tick();
+    await fireEvent.click(screen.getByTestId('ticket-brief-draft-ask'));
+    await screen.findByTestId('ticket-brief-draft-input');
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('ticket-brief-draft-meta').textContent).toContain('from the ticket'),
+    );
+    await fireEvent.click(screen.getByTestId('ticket-brief-draft-clear'));
+    const brief = (await screen.findByTestId('ticket-brief')) as HTMLTextAreaElement;
+    expect(brief.value.startsWith('You are starting work on ABC-7')).toBe(true);
+    drafts = false;
+    await fireEvent.click(screen.getByTestId('ticket-brief-draft-ask'));
+    const why = await screen.findByTestId('ticket-brief-draft-error');
+    expect(why.textContent).toContain('cannot draft a brief yet');
+  });
+
   it('a live duplicate jumps to it instead of failing', async () => {
     const onCancel = vi.fn();
     sessionsModule.sessions.set([{ ...started, id: 5, friendly_name: 'already' } as never]);

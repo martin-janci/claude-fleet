@@ -188,6 +188,9 @@ export interface StartWorkArgs {
   with_brief?: boolean;
   /** The brief as edited in the preview. */
   brief?: string;
+  /** The preview only: have a model draft the brief on the planned host
+   *  (redesign 6.10). A start never drafts; it sends `brief`. */
+  draft_brief?: boolean;
   /** The session name as edited. */
   name?: string;
   /** The worktree name as edited. */

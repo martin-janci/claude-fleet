@@ -1827,7 +1827,20 @@ impl FleetTools {
             let view_scope = self.view_scope(&caller)?;
             // Jev K1 asks only when its gate opens (off by default).
             let decide = crate::service::decide::DecideCtx::jev(std::sync::Arc::clone(&self.store));
-            let preview = crate::service::trackers::tickets::preview_start_decided(
+            let draft = args.draft_brief == Some(true);
+            if draft && caller.is_operator() {
+                // A draft spends a model call, like a summary: confirmed.
+                self.confirm_gate(
+                    "work_link",
+                    args.confirm_nonce.as_deref(),
+                    &format!(
+                        "Draft the brief for {} with a model call on its host",
+                        bound_text(args.key.as_deref())
+                    ),
+                    &caller,
+                )?;
+            }
+            let mut preview = crate::service::trackers::tickets::preview_start_decided(
                 &self.store,
                 &crate::service::work::start_args_owned(
                     &args,
@@ -1841,6 +1854,18 @@ impl FleetTools {
             )
             .await
             .map_err(to_mcp_err)?;
+            if draft {
+                // Redesign 6.10: on the planned host, under the same scope
+                // the preview was planned with.
+                crate::service::work::brief_draft::draft_into(
+                    &self.store,
+                    self.ssh.as_ref(),
+                    &mut preview,
+                    &view_scope,
+                )
+                .await
+                .map_err(to_mcp_err)?;
+            }
             return ok_json(&preview);
         }
         if args.action == "start" {

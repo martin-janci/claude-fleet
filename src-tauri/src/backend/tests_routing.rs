@@ -2694,6 +2694,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         ..Default::default()
                     },
                     s,
+                    &ssh(),
                 ))
                 .map(|_| ())
             }),
