@@ -232,6 +232,21 @@ describe('shortcut registry', () => {
     expect(matchShortcut('global', { ...ev, key: 'x', altKey: false }, true)).not.toBe('inspector');
   });
 
+  it('AltGr text on Windows never fires a Ctrl+Alt chord (r18-W1)', () => {
+    // WebView2 reports AltGr as Ctrl+Alt; `key` is the character typed.
+    const brace = { key: '{', code: 'KeyB', metaKey: false, ctrlKey: true, altKey: true, shiftKey: false };
+    const euro = { ...brace, key: '€', code: 'KeyE' };
+    for (const ev of [brace, euro]) {
+      expect(matchShortcut('global', ev, false)).toBeNull();
+      expect(appChord(ev, false)).toBeNull();
+    }
+    // Named AltGr is text on every platform.
+    const named = { ...brace, key: 'b', getModifierState: (k: string) => k === 'AltGraph' };
+    expect(matchShortcut('global', named, false)).toBeNull();
+    // The real chord still works.
+    expect(matchShortcut('global', { ...brace, key: 'b' }, false)).toBe('inspector');
+  });
+
   it('planned chords match nothing until their step wires them', () => {
     const planned = SHORTCUTS.filter((s) => s.status === 'planned');
     // Step 5.3 wired the last planned rows; the guard stays for the next ones.
