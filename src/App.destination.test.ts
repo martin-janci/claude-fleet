@@ -3,8 +3,9 @@
 // overlays at once, and the terminal underneath stays mounted through every
 // overlay round trip.
 import { render, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
+import { invoke } from '@tauri-apps/api/core';
 import App from './App.svelte';
 import { onboardingDismissed } from './lib/onboarding';
 import { clearToasts } from './lib/toasts';
@@ -16,6 +17,10 @@ import { uiLayout } from './lib/prefs';
 import { controlTab } from './lib/control';
 import { todayOpen } from './lib/today';
 import { sessionActionRequest } from './lib/session_actions';
+import { link, task } from './lib/work_view_fixture';
+import type { WorkTreePage } from './lib/work_view';
+import { activeHintId, hintDef, markSeen, resetHints } from './lib/hints';
+import { onboardingWelcomed } from './lib/onboarding';
 
 const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-overlay', 'accounts-overlay', 'control-overlay'];
 
@@ -100,6 +105,112 @@ describe('App: the destination store', () => {
       // The terminal stays mounted under it, as under every destination.
       expect(container.querySelector('.right-body > .view-slot:not(.overlay)')).not.toBeNull();
     } finally {
+      uiLayout.set('classic');
+    }
+  });
+
+  // The board under New is the same `WorkBoard` as Classic (parity P3, P26):
+  // these drive it through App, with a native and a tracker card served.
+  const boardPage = (): WorkTreePage => ({
+    tasks: [
+      task({
+        task_id: 'item:1',
+        item_id: 1,
+        key: 'TASK-1',
+        title: 'Write notes',
+        kind: 'local',
+        origin: 'manual',
+        status_category: 'todo',
+        status_name: null,
+        counts: { active: 0, ended: 0, suggested: 0 },
+        sessions: [],
+      }),
+      task({
+        task_id: 'item:12',
+        item_id: 12,
+        key: 'ABC-12',
+        title: 'Login fails',
+        status_category: 'in_progress',
+        sessions: [link({ name: 'abc-12 login', host: 'mefistos' })],
+      }),
+    ],
+    groups: [],
+    orgs: [],
+    trackers: [],
+    total: 2,
+    next_cursor: null,
+  });
+  async function withBoardBackend(body: () => Promise<void>) {
+    const mock = vi.mocked(invoke);
+    const fallback = mock.getMockImplementation()!;
+    mock.mockImplementation(async (cmd: string, payload?: unknown) => {
+      if (cmd === 'work_tree') return boardPage();
+      if (cmd === 'set_work_status') {
+        const a = (payload as { args: { item_id: number; status: string } }).args;
+        return { id: a.item_id, source: 'local', key: 'TASK-1', title: 'Write notes', status_category: a.status };
+      }
+      return fallback(cmd, payload as never);
+    });
+    try {
+      await body();
+    } finally {
+      mock.mockImplementation(fallback);
+    }
+  }
+
+  it('New layout: on the board, ← → move a focused native card across columns and e opens its edit dialog', async () => {
+    uiLayout.set('new');
+    try {
+      await withBoardBackend(async () => {
+        const { getByTestId, queryByTestId, getAllByTestId } = render(App);
+        workBoardOpen.set(true);
+        await waitFor(() => expect(queryByTestId('board-view')).not.toBeNull());
+        const card = (title: string) =>
+          getAllByTestId('work-board-card').find((el) => el.textContent?.includes(title)) as HTMLElement;
+        const col = (c: string) => getByTestId(`work-board-column-${c}`);
+        await waitFor(() => expect(col('todo').textContent).toContain('Write notes'));
+        const sets = () => vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'set_work_status');
+        const before = sets().length;
+
+        await fireEvent.keyDown(card('Write notes'), { key: 'ArrowRight' });
+        await waitFor(() => expect(col('doing').textContent).toContain('Write notes'));
+        expect(sets().slice(before)[0][1]).toEqual({ args: { item_id: 1, status: 'in_progress' } });
+
+        await fireEvent.keyDown(card('Write notes'), { key: 'ArrowLeft' });
+        await waitFor(() => expect(col('todo').textContent).toContain('Write notes'));
+        expect(sets().slice(before)[1][1]).toEqual({ args: { item_id: 1, status: 'todo' } });
+
+        // e on a tracker card opens nothing; on a native card, the edit dialog.
+        await fireEvent.keyDown(card('Login fails'), { key: 'e' });
+        expect(queryByTestId('edit-task-dialog')).toBeNull();
+        await fireEvent.keyDown(card('Write notes'), { key: 'e' });
+        await waitFor(() => expect(queryByTestId('edit-task-dialog')).not.toBeNull());
+      });
+    } finally {
+      uiLayout.set('classic');
+    }
+  });
+
+  it('New layout: the board offers its one-time move hint, and not again once dismissed', async () => {
+    uiLayout.set('new');
+    resetHints();
+    const welcomed = get(onboardingWelcomed);
+    onboardingWelcomed.set(true);
+    try {
+      await withBoardBackend(async () => {
+        const { getByTestId, queryByTestId } = render(App);
+        workBoardOpen.set(true);
+        await waitFor(() => expect(queryByTestId('board-view')).not.toBeNull());
+        expect(queryByTestId('work-board-hint')).toBeNull();
+        expect(getByTestId('work-board').querySelector('header')!.textContent).not.toContain('Drag a task');
+        await waitFor(() => expect(get(activeHintId)).toBe('board-move'));
+        expect(hintDef('board-move')!.text).toContain('Drag a task to set its status');
+        markSeen('board-move');
+        expect(get(activeHintId)).not.toBe('board-move');
+      });
+    } finally {
+      resetHints();
+      onboardingWelcomed.set(welcomed);
       uiLayout.set('classic');
     }
   });

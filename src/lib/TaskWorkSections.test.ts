@@ -1,7 +1,7 @@
 // The task page's shared-work sections (design 2026-09-29 §4): notes,
 // subtasks, proposals, jobs and agent steps — text as text.
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -141,5 +141,31 @@ describe('TaskWorkSections', () => {
       expect(screen.getByTestId('task-proposal-accept')).toBeTruthy();
       uiLayout.set('classic');
     });
+  });
+});
+
+describe('TaskWorkSections in the New layout', () => {
+  beforeEach(() => uiLayout.set('new'));
+  afterEach(() => uiLayout.set('classic'));
+
+  it('+ Add subtask adds one under this task', async () => {
+    render(TaskWorkSections, { detail, part: 'work' });
+    await flush();
+    expect(screen.queryByTestId('task-subtask-start')).toBeNull(); // New starts through the split button
+    await fireEvent.click(screen.getByTestId('task-add-subtask'));
+    const input = screen.getByLabelText('Subtask title') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'Follow-up' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await flush();
+    expect(calls('create_work_task')[0][1]).toEqual({ args: { title: 'Follow-up', parent: 'item:110' } });
+  });
+
+  it('with no subtasks yet, + Add subtask stays a button', async () => {
+    render(TaskWorkSections, { detail: { ...detail, subtasks: [] }, part: 'work' });
+    await flush();
+    expect(screen.getByText('No subtasks yet.')).toBeTruthy();
+    expect(screen.getByTestId('task-add-subtask').tagName).toBe('BUTTON');
+    await fireEvent.click(screen.getByTestId('task-add-subtask'));
+    expect(screen.getByLabelText('Subtask title')).toBeTruthy();
   });
 });
