@@ -592,6 +592,7 @@ pub fn run() {
             commands::presence::session_presence,
             commands::pages::setting_history,
             commands::pages::set_fleet_setting,
+            commands::runs::list_runs,
             commands::tasks::list_tasks,
             commands::tasks::cancel_task,
             commands::files::repo_changes,

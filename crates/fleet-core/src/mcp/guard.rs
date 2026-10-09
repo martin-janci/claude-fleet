@@ -543,6 +543,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Runs (Orbit Fleet 8.3): the Automation screen's list of every run on
+    // the fleet's behalf, cut to the caller's view scope
+    // (`service::runs::reach`). A read, served to a readonly device too.
+    ToolPolicy {
+        name: "runs",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Debug devices: a host's Claude uses the devices it may see (its own
     // host's, and those a person shared within its org); a person also
     // labels, shares and forgets them (refused to host tokens in the
@@ -1516,6 +1526,10 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "session_access",
     "my_grants",
     "session_presence",
+    // The Automation screen's Runs list is a person's: a host's Claude has
+    // `list_tasks` for the tasks it dispatched, and proves no person, so
+    // its scope would show it next to nothing here anyway.
+    "runs",
 ];
 
 // --- legacy name lists -------------------------------------------------------
