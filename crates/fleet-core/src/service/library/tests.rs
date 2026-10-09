@@ -122,6 +122,37 @@ fn only_the_owner_sees_or_adds_a_sessions_files() {
     assert!(s.library_item(row.id).unwrap().is_none());
 }
 
+/// Review r04 F3: once the session row is reaped, its files stay the
+/// owner's; another person on the same hub (and org) sees and removes none.
+#[test]
+fn a_reaped_sessions_files_stay_the_owners() {
+    let s = Store::open_in_memory().unwrap();
+    let ada = s.create_person("ada", None).unwrap().id;
+    let eve = s.create_person("eve", None).unwrap().id;
+    s.upsert_host("web-1").unwrap();
+    let session = s
+        .upsert_session("fleet-a", "web-1", None, None, 1, 1, "running", None)
+        .unwrap();
+    assert!(s.claim_if_unclaimed(session, Some(ada)).unwrap());
+    let args = AddArgs {
+        kind: KIND_UPLOAD.into(),
+        session_id: session,
+        files: vec![file("/home/ada/contract-SECRET.pdf")],
+    };
+    let row = add(&s, &device(&s, ada), &args).unwrap().remove(0);
+    assert_eq!(row.owner_person_id, Some(ada));
+    s.delete_session(session).unwrap();
+    let row = s.library_item(row.id).unwrap().unwrap();
+    assert!(!visible(&s, &device(&s, eve), &row), "another person");
+    assert!(list(&s, &device(&s, eve), &ListArgs::default())
+        .unwrap()
+        .items
+        .is_empty());
+    assert!(!remove(&s, &device(&s, eve), row.id).unwrap());
+    assert!(visible(&s, &device(&s, ada), &row), "the owner keeps it");
+    assert!(remove(&s, &device(&s, ada), row.id).unwrap());
+}
+
 #[test]
 fn the_index_keeps_its_newest_rows() {
     let s = Store::open_in_memory().unwrap();

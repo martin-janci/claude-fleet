@@ -21,6 +21,11 @@ pub struct LibraryItemRow {
     /// reads once the session row is gone. Never on the wire.
     #[serde(skip)]
     pub org_id: Option<i64>,
+    /// Whose file it is: the session's owner when it was placed (migration
+    /// 147), what the scope check reads once the session row is gone.
+    /// Never on the wire.
+    #[serde(skip)]
+    pub owner_person_id: Option<i64>,
     /// Where the file is on the host.
     pub path: String,
     pub name: String,
@@ -43,7 +48,8 @@ pub struct NewLibraryItem<'a> {
 /// How many rows the index keeps, newest first.
 pub const KEEP: i64 = 5000;
 
-const COLS: &str = "id, at, kind, host_alias, session_id, session_name, org_id, path, name, size";
+const COLS: &str =
+    "id, at, kind, host_alias, session_id, session_name, org_id, path, name, size, owner_person_id";
 
 fn row(r: &rusqlite::Row<'_>) -> Result<LibraryItemRow> {
     Ok(LibraryItemRow {
@@ -57,6 +63,7 @@ fn row(r: &rusqlite::Row<'_>) -> Result<LibraryItemRow> {
         path: r.get(7)?,
         name: r.get(8)?,
         size: r.get(9)?,
+        owner_person_id: r.get(10)?,
     })
 }
 
@@ -64,8 +71,9 @@ impl Store {
     pub fn insert_library_item(&self, d: &NewLibraryItem<'_>) -> Result<LibraryItemRow> {
         self.conn.execute(
             "INSERT INTO library_items (at, kind, host_alias, session_id, session_name, org_id,
-                                        path, name, size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                        path, name, size, owner_person_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                     (SELECT owner_person_id FROM sessions WHERE id = ?4))",
             rusqlite::params![
                 now_unix(),
                 d.kind,

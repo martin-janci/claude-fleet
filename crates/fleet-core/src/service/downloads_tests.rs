@@ -390,3 +390,59 @@ fn a_row_being_copied_carries_its_bytes_so_far() {
         "only while fetching"
     );
 }
+
+/// Review r04 F3: a reaped session's download (its bytes are what
+/// `GET /downloads/<id>` serves) stays its owner's; another person on the
+/// same hub neither lists nor removes it.
+#[test]
+fn a_reaped_sessions_download_stays_the_owners() {
+    use crate::mcp::auth::{Caller, ClientRef, TokenMode};
+    let s = Store::open_in_memory().unwrap();
+    let ada = s.create_person("ada", None).unwrap().id;
+    let eve = s.create_person("eve", None).unwrap().id;
+    s.upsert_host("web-1").unwrap();
+    let session = s
+        .upsert_session("fleet-a", "web-1", None, None, 1, 1, "running", None)
+        .unwrap();
+    assert!(s.claim_if_unclaimed(session, Some(ada)).unwrap());
+    let row = s
+        .insert_download(&NewDownload {
+            host_alias: "web-1",
+            session_id: Some(session),
+            session_name: Some("fleet-a"),
+            org_id: None,
+            path: "/home/ada/.claude/.credentials.json",
+            name: "creds",
+            size: 1,
+            source: SOURCE_AGENT,
+            note: None,
+        })
+        .unwrap();
+    assert_eq!(row.owner_person_id, Some(ada));
+    s.delete_session(session).unwrap();
+    let device = |person: i64| {
+        Caller {
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 1,
+                name: "phone".into(),
+                trusted: false,
+                org_id: None,
+                person_id: Some(person),
+            }),
+            mode: TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
+        }
+        .view_scope(&s)
+        .unwrap()
+    };
+    let row = s.download(row.id).unwrap().unwrap();
+    assert!(!visible(&s, &device(eve), &row), "another person");
+    assert!(list(&s, &device(eve), &ListDownloadsArgs::default())
+        .unwrap()
+        .downloads
+        .is_empty());
+    assert!(!remove(&s, &device(eve), row.id).unwrap());
+    assert!(visible(&s, &device(ada), &row), "the owner keeps it");
+}
