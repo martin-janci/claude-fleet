@@ -1450,13 +1450,14 @@
         "level": "none"
       },
       "default": "stable",
-      "help": "Which releases the hub follows for its fleet.",
+      "help": "Which releases the hub follows for its fleet: stable, beta (release candidates too), nightly (main, at most every two hours) or dev (every green push to main).",
       "key": "update.track",
       "kind": {
         "options": [
           "stable",
           "beta",
-          "nightly"
+          "nightly",
+          "dev"
         ],
         "type": "choice"
       },

@@ -586,9 +586,10 @@ pub const DECIDE_MODES: &[&str] = crate::store::DECISION_MODES;
 // ── update.* (application updates, update-channel design §7.3) ──
 /// The release track the hub follows for its fleet.
 pub const UPDATE_TRACK: &str = "update.track";
-/// `nightly` is every green `main` commit (nightly.yml, S2b);
-/// `src/lib/fleet_settings.ts` keeps the same list.
-pub const UPDATE_TRACKS: &[&str] = &["stable", "beta", "nightly"];
+/// `dev` is every green `main` push, the desktop too; `nightly` is those of
+/// them at most one every two hours (nightly.yml); `src/lib/fleet_settings.ts`
+/// keeps the same list.
+pub const UPDATE_TRACKS: &[&str] = &["stable", "beta", "nightly", "dev"];
 /// Per component: `manual` (only pins), `notify` (offer), `automatic`
 /// (install at the next quiet point).
 pub const UPDATE_HUB_MODE: &str = "update.hub.mode";
@@ -1272,7 +1273,7 @@ pub const SPECS: &[Spec] = &[
         "stable",
         Kind::Choice(UPDATE_TRACKS),
         "Release track",
-        "Which releases the hub follows for its fleet.",
+        "Which releases the hub follows for its fleet: stable, beta (release candidates too), nightly (main, at most every two hours) or dev (every green push to main).",
     ),
     Spec::new(
         UPDATE_HUB_MODE,

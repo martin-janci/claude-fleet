@@ -170,7 +170,13 @@ async fn real_main(cmd: &str, standalone: bool) -> Result<ExitCode, String> {
         let track = match env("FLEET_UPDATER_TRACK").as_deref() {
             None | Some("stable") => Track::Stable,
             Some("beta") => Track::Beta,
-            Some(t) => return Err(format!("FLEET_UPDATER_TRACK={t}: stable or beta")),
+            Some("nightly") => Track::Nightly,
+            Some("dev") => Track::Dev,
+            Some(t) => {
+                return Err(format!(
+                    "FLEET_UPDATER_TRACK={t}: stable, beta, nightly or dev"
+                ))
+            }
         };
         let mode = match env("FLEET_UPDATER_MODE").as_deref() {
             None | Some("notify") => Mode::Notify,

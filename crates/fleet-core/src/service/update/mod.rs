@@ -95,6 +95,7 @@ pub fn track(store: &Store) -> Track {
     match settings::get_string(store, settings::UPDATE_TRACK).as_str() {
         "beta" => Track::Beta,
         "nightly" => Track::Nightly,
+        "dev" => Track::Dev,
         _ => Track::Stable,
     }
 }

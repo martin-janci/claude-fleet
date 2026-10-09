@@ -17,9 +17,11 @@ and the phones. Design and rationale:
 > channel directly (slice S3). The Docker hub updates itself through
 > `fleet-updater` (slice S6, below): opt-in, and under the default
 > `update.hub.mode=notify` it installs only what an operator pins. The
-> desktop updates itself (slice S7, below). The phone installs nothing yet
-> (S8). A hub that cannot verify a channel still offers nothing. `nightly` is published by
-> `nightly.yml` (slice S2b).
+> desktop updates itself (slice S7, below). The phone offers what its hub
+> decides and installs once its person confirms (S8). The agents and a hub
+> without Docker update themselves from a timer (S9). A hub that cannot
+> verify a channel still offers nothing. `nightly` and `dev` are published
+> by `nightly.yml`.
 
 ## Who decides what
 
@@ -44,7 +46,8 @@ A desktop with no hub reads the channel itself (Git mode) and applies its own
 |-------|-----------------|
 | `stable` | `vX.Y.Z` releases |
 | `beta` | `-rc.N` release candidates, and every stable release too |
-| `nightly` | green `main` commits: the hub image and the agent/hub tarballs as `X.Y.Z-dev.N.g<sha>` (at most one every two hours), and once a day every component, the desktop too, as `X.Y.Z-dev.N.desktop.g<sha>`. A desktop on `nightly` is offered the newest one that carries its bundle. The newest 15 are kept |
+| `nightly` | the `dev` releases, at most one every two hours. The newest 15 are kept |
+| `dev` | every green `main` push, every component (the desktop too), as `X.Y.Z-dev.N.desktop.g<sha>`, minutes after it lands. The newest 15 are kept. A client older than the `dev` track cannot read a decision on it: put only current builds on `dev` |
 
 ## What the hub answers
 

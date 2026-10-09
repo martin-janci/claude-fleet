@@ -728,6 +728,9 @@ fn nightly_is_a_track_once_it_is_published() {
     let s = Store::open_in_memory().unwrap();
     s.set_setting(settings::UPDATE_TRACK, "nightly").unwrap();
     assert_eq!(track(&s), Track::Nightly);
+    settings::validate(settings::UPDATE_TRACK, "dev").unwrap();
+    s.set_setting(settings::UPDATE_TRACK, "dev").unwrap();
+    assert_eq!(track(&s), Track::Dev);
     // Anything else stored reads as the default.
     s.set_setting(settings::UPDATE_TRACK, "hourly").unwrap();
     assert_eq!(track(&s), Track::Stable);

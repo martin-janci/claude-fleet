@@ -207,6 +207,7 @@ fn parse_track(s: &str) -> Result<Track, String> {
         "stable" => Ok(Track::Stable),
         "beta" => Ok(Track::Beta),
         "nightly" => Ok(Track::Nightly),
+        "dev" => Ok(Track::Dev),
         other => Err(format!(
             "--track {other:?}: expected stable, beta or nightly"
         )),
