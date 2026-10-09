@@ -10,18 +10,18 @@ Entries before 0.2.4 were plain version bumps and were not recorded individually
 
 ## [Unreleased]
 
-The Orbit Fleet layout is now the default: the rail, the left list with
-filters and grouping, and the inspector. To go back to the 0.5.x layout,
-open Settings → Appearance and set Layout to Classic. Classic stays for
-this release only and is removed in the next one.
+The Orbit Fleet layout replaces the 0.5.x layout: the rail, the left list
+with filters and grouping, and the inspector. The Classic layout and the
+Layout switch in Settings → Appearance are gone.
 
 ### Changed
+- **redesign:** the Classic layout and the `ui.layout` pref are removed; a stored layout choice is cleared at start
 - **hub:** the hub contract is revision 13 (it was 10): upgrade the hub together with the desktop, since a revision-10 hub does not serve the new tools (`wire_contract.rs`)
 - **share:** a grant's level gains Answer, between Watch and Drive; a client that reads the level as a closed enum must accept `answer`
 - **control:** on a hub the operator's starts and kills wait for the owner's paired device to confirm them instead of being refused
 
 ### Added
-- **redesign:** the Orbit Fleet layout, now the default (Classic stays one switch away in Settings → Appearance → Layout for this release): the rail, the inspector, Inbox, Get started and a first-run tour
+- **redesign:** the Orbit Fleet layout, now the only one: the rail, the inspector, Inbox, Get started and a first-run tour
 - **control:** Control with Chat and Today tabs, the Views panel, confirmation cards, handoff receipts, tasks from the agent's plan and the Library with Upload
 - **automation:** routines on a schedule, an event or Run now; one list of runs; start rules that send a task key to a project; the Automation screen
 - **agents:** sessions can run the Codex CLI, offered where the host has it
