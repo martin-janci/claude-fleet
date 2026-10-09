@@ -293,3 +293,57 @@ fn a_reported_failure_counts_as_one() {
     t.report.as_mut().unwrap().outcome = "done".into();
     assert!(!attempt_failed(&t));
 }
+
+fn reviewed(id: i64, outcome: &str) -> TaskRow {
+    let mut t = task(id, "review", "done", None);
+    t.report = Some(TaskReport {
+        outcome: outcome.into(),
+        summary: format!("review {outcome}"),
+        ..Default::default()
+    });
+    t
+}
+
+#[test]
+fn a_finished_review_settles_an_item_without_lines() {
+    let m = mission(MissionPolicy {
+        require_review: true,
+        ..Default::default()
+    });
+    let items = [item(10, "todo"), item(11, "todo")];
+    let nodes = || vec![node(10, "waiting"), node(11, "verifying")];
+    // Approved: the item closes instead of asking for another review.
+    let approved = HashMap::from([(
+        11,
+        vec![reviewed(2, "done"), task(1, "implement", "done", None)],
+    )]);
+    assert_eq!(
+        kinds(&plan(&m, nodes(), &items, approved, 0)),
+        vec!["close:11"]
+    );
+    // Changes asked for: the work runs again.
+    let rejected = HashMap::from([(
+        11,
+        vec![
+            reviewed(2, "changes_requested"),
+            task(1, "implement", "done", None),
+        ],
+    )]);
+    assert_eq!(
+        kinds(&plan(&m, nodes(), &items, rejected, 0)),
+        vec!["retry:11"]
+    );
+    // The retry finished: the old review does not count for it.
+    let redone = HashMap::from([(
+        11,
+        vec![
+            task(3, "implement", "done", None),
+            reviewed(2, "changes_requested"),
+            task(1, "implement", "done", None),
+        ],
+    )]);
+    assert_eq!(
+        kinds(&plan(&m, nodes(), &items, redone, 0)),
+        vec!["review:11"]
+    );
+}
