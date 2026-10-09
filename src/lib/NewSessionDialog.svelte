@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { listHostWorktrees, projects, type ProjectTreeRow, type WorktreeRow } from './projects';
   import { extractWorkKey, keyFromTicketUrl, workKeyFor, worktreeBranchById } from './work_keys';
@@ -1272,7 +1273,7 @@
         onclick={reroll}
         title="Roll a new name (Ctrl/⌘+R)"
         aria-label="Roll a new name"
-      >🎲</button>
+      ><Icon name="dice" size={14} /></button>
     </div>
     {#if plannedKey}
       <p class="work-note" data-testid="work-note">
