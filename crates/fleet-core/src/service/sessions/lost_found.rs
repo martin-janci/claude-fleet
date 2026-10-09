@@ -309,9 +309,24 @@ pub(crate) async fn place_transcript(
             );
         }
     }
+    // The name `new_session` will take: the project's own name, unless a
+    // row on the host already holds it (then a fresh pair, as
+    // `fill_session_name` mints).
+    let tmux_name = {
+        let s = lock(store)?;
+        let own = discover::derive_tmux_name(&owner, &repo, "main");
+        let on_host = s.list_sessions_for_host(&args.host_alias)?;
+        if on_host.iter().any(|r| r.tmux_name == own) {
+            let taken = lifecycle::project_taken_slugs(&s, args.project_id, &owner, &repo)?;
+            let pair = crate::service::names::generate_name_default(&taken);
+            crate::service::names::tmux_safe(&format!("{own}--{pair}"))
+        } else {
+            own
+        }
+    };
     Ok(PlacedTranscript {
         project_id: args.project_id,
-        tmux_name: discover::derive_tmux_name(&owner, &repo, "main"),
+        tmux_name,
         copied,
     })
 }
@@ -594,6 +609,46 @@ mod tests {
         .await
         .unwrap();
         assert!(!kept.copied);
+
+        // The project's own name is taken on the host: a free one instead.
+        w.store
+            .lock()
+            .unwrap()
+            .upsert_session(
+                "dev-acme-papaya-pos",
+                "local",
+                Some(w.project),
+                None,
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        let again = place_transcript(
+            PlaceTranscriptArgs {
+                host_alias: "local".into(),
+                claude_session_id: ID.into(),
+                project_id: w.project,
+            },
+            &w.store,
+            &Shell::answering("cf-place:kept\n"),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            again.tmux_name.starts_with("dev-acme-papaya-pos--"),
+            "{}",
+            again.tmux_name
+        );
+        assert!(w
+            .store
+            .lock()
+            .unwrap()
+            .get_session(&again.tmux_name, "local")
+            .unwrap()
+            .is_none());
 
         let err = place_transcript(
             PlaceTranscriptArgs {

@@ -362,8 +362,12 @@
     applySection(k, p.tasks, p.next_cursor ?? null, more);
   }
 
+  let reviewSeq = 0;
   async function loadReviewCount() {
+    // Only the newest count lands (review r07).
+    const mine = ++reviewSeq;
     const r = await workReview({ limit: 1 });
+    if (mine !== reviewSeq) return;
     reviewTotal = r.ok && r.value && typeof r.value.total === 'number' ? r.value.total : null;
   }
 

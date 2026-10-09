@@ -403,8 +403,14 @@
     if (selectedId != null) await loadDetail(selectedId);
   }
 
+  // Bumped per request and by Back: a late answer for a mission no longer
+  // open (Back pressed, another opened, a newer load) is dropped (review r07).
+  let detailSeq = 0;
+
   async function loadDetail(id: number) {
+    const mine = ++detailSeq;
     const r = await getMission(id);
+    if (mine !== detailSeq || selectedId !== id) return;
     if (r.ok) {
       detail = r.value;
     } else {
@@ -431,6 +437,7 @@
   }
 
   function back() {
+    detailSeq++;
     selectedId = null;
     detail = null;
     editing = false;

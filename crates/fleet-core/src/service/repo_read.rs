@@ -235,44 +235,47 @@ const LOG_DEFAULT_LIMIT: u32 = 200;
 /// `--pretty=format:` with these gives unambiguous parsing of multi-field rows.
 const LOG_FORMAT: &str = "--pretty=format:%x1e%H%x1f%h%x1f%P%x1f%D%x1f%an%x1f%aI%x1f%s";
 
-/// Parse `%D` decoration (e.g. "HEAD -> main, origin/main, tag: v1, feat/x")
-/// into structured refs.
+/// Parse `%D` decoration into structured refs. The log runs with
+/// `--decorate=full` ("HEAD -> refs/heads/main, refs/remotes/origin/main,
+/// tag: refs/tags/v1, refs/heads/feat/x"), so a ref's kind comes from its
+/// prefix: a short name cannot tell a local `feat/x` from a remote one.
+/// Short names (no prefix) still parse, `/` meaning a remote.
 fn parse_decoration(d: &str) -> Vec<GitRef> {
+    let r = |name: &str, kind: &str| GitRef {
+        name: name.trim().into(),
+        kind: kind.into(),
+    };
     let mut out = Vec::new();
     for raw in d.split(',') {
         let t = raw.trim();
         if t.is_empty() {
             continue;
         }
-        if let Some(rest) = t.strip_prefix("HEAD -> ") {
-            out.push(GitRef {
-                name: "HEAD".into(),
-                kind: "head".into(),
-            });
-            out.push(GitRef {
-                name: rest.trim().into(),
-                kind: "branch".into(),
-            });
-        } else if t == "HEAD" {
-            out.push(GitRef {
-                name: "HEAD".into(),
-                kind: "head".into(),
-            });
+        let t = match t.strip_prefix("HEAD -> ") {
+            Some(rest) => {
+                out.push(r("HEAD", "head"));
+                let rest = rest.trim();
+                out.push(r(
+                    rest.strip_prefix("refs/heads/").unwrap_or(rest),
+                    "branch",
+                ));
+                continue;
+            }
+            None => t,
+        };
+        if t == "HEAD" {
+            out.push(r("HEAD", "head"));
         } else if let Some(tag) = t.strip_prefix("tag: ") {
-            out.push(GitRef {
-                name: tag.trim().into(),
-                kind: "tag".into(),
-            });
+            let tag = tag.trim();
+            out.push(r(tag.strip_prefix("refs/tags/").unwrap_or(tag), "tag"));
+        } else if let Some(b) = t.strip_prefix("refs/heads/") {
+            out.push(r(b, "branch"));
+        } else if let Some(rm) = t.strip_prefix("refs/remotes/") {
+            out.push(r(rm, "remote"));
         } else if t.contains('/') {
-            out.push(GitRef {
-                name: t.into(),
-                kind: "remote".into(),
-            });
+            out.push(r(t, "remote"));
         } else {
-            out.push(GitRef {
-                name: t.into(),
-                kind: "branch".into(),
-            });
+            out.push(r(t, "branch"));
         }
     }
     out
@@ -692,7 +695,7 @@ pub async fn repo_log(
     // Quote the format string for the same reason as `repo_branches`: keep any
     // shell metacharacter in the `--pretty=format:` value inert.
     let body = format!(
-        "git -C \"$root\" log {all} --date=iso-strict {fmt} --max-count={limit} --skip={skip}",
+        "git -C \"$root\" log {all} --decorate=full --date=iso-strict {fmt} --max-count={limit} --skip={skip}",
         all = all,
         fmt = quote(LOG_FORMAT),
         limit = limit,
@@ -929,9 +932,9 @@ fn branch_diff_body() -> String {
          {range}\
          printf '%s\\n%s\\n%s\\n\\035' \"$br\" \"$up\" \"$base\"\n\
          if [ -n \"$up\" ]; then\n\
-           git -C \"$root\" log --date=iso-strict {fmt} --max-count={max} \"$up..HEAD\"\n\
+           git -C \"$root\" log --decorate=full --date=iso-strict {fmt} --max-count={max} \"$up..HEAD\"\n\
          else\n\
-           git -C \"$root\" log --date=iso-strict {fmt} --max-count={max} HEAD --not --remotes\n\
+           git -C \"$root\" log --decorate=full --date=iso-strict {fmt} --max-count={max} HEAD --not --remotes\n\
          fi\n\
          printf '\\035'\n\
          if [ -n \"$from\" ]; then git -C \"$root\" diff --name-status -z \"$from\" HEAD; fi\n\
@@ -1245,6 +1248,28 @@ mod tests {
     #[test]
     fn parse_log_handles_empty() {
         assert!(parse_log(b"").is_empty());
+    }
+
+    #[test]
+    fn full_decoration_tells_a_local_slash_branch_from_a_remote() {
+        let refs = parse_decoration(
+            "HEAD -> refs/heads/main, refs/remotes/origin/main, tag: refs/tags/v1, \
+             refs/heads/claude/x",
+        );
+        let got: Vec<(&str, &str)> = refs
+            .iter()
+            .map(|r| (r.name.as_str(), r.kind.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("HEAD", "head"),
+                ("main", "branch"),
+                ("origin/main", "remote"),
+                ("v1", "tag"),
+                ("claude/x", "branch"),
+            ]
+        );
     }
 
     #[test]

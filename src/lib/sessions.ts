@@ -439,6 +439,7 @@ sidebarGroupBy.subscribe((v) => writePref('sidebar.group', v));
 // reconcile pass now; the default returns stored rows while the last pass is
 // within the configured interval, so window-focus reloads stay cheap.
 export async function loadSessions(opts: { force?: boolean } = {}): Promise<Result<SessionRow[]>> {
+  const token = rows.beginList();
   const r = await invokeCmd<SessionRow[]>('list_sessions', { force: opts.force ?? false });
   sessionsAnswered.set(true);
   if (r.ok) {
@@ -446,17 +447,9 @@ export async function loadSessions(opts: { force?: boolean } = {}): Promise<Resu
     // events own CONTENT. Rebuilding from the current store's position would
     // freeze every row at wherever it first landed — position has to be
     // taken from the list every time, and content still has to lose to a
-    // `session:updated` that raced this call and is strictly newer.
-    sessions.update((cur) => {
-      const byId = new Map(cur.map((s) => [s.id, s] as const));
-      const next: SessionRow[] = [];
-      for (const listed of r.value) {
-        if (rows.isTombstoned(listed.id)) continue;
-        const current = byId.get(listed.id);
-        next.push(current && sessionIsStale(listed, current) ? current : listed);
-      }
-      return next;
-    });
+    // `session:updated` that raced this call and is strictly newer, and a
+    // session created or killed while it was in flight keeps that state.
+    rows.applyList(r.value, token);
     sessionsLoaded.set(true);
   }
   return r;
