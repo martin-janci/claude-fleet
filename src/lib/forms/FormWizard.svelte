@@ -23,6 +23,7 @@
     proposal = null,
     initial = {},
     sending = 'Sending…',
+    buttonLoader = true,
     onsubmit,
     onunplaced,
     oncancel,
@@ -39,6 +40,9 @@
     initial?: Values;
     /** The last button while `busy`, after a Comet (step 10.12). */
     sending?: string;
+    /** The Comet in the submit button while sending; off when the host
+     *  draws the flow's own loader (one loader per screen, review r12). */
+    buttonLoader?: boolean;
     onsubmit: (values: Values) => void;
     /** Server problems whose field is on no visible step (nowhere to show them). */
     onunplaced?: (problems: FieldProblem[]) => void;
@@ -300,7 +304,7 @@
     {/if}
     {#if last}
       <button type="button" class="primary" data-testid="form-submit" disabled={off || !ready} onclick={submit}>
-        {#if busy && sent}<Loader name="comet" size={12} class="btn-loader" />{sending}{:else}{spec.submit ?? 'Submit'}{/if}
+        {#if busy && sent}{#if buttonLoader}<Loader name="comet" size={12} class="btn-loader" />{/if}{sending}{:else}{spec.submit ?? 'Submit'}{/if}
       </button>
     {:else}
       <button type="button" class="primary" data-testid="form-next" disabled={off || !ready} onclick={() => (index += 1)}>Next</button>
