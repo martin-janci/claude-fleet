@@ -532,7 +532,9 @@ Today's Nudge ask Jev two closed questions about it: the outcome so far
   already has (Retry, the planner, Cancel, the mission's question card).
 - **What is sent.** Fleet's own stuck reason, the mission's goal and
   done-when lines, the counts of done, failed and blocked items, and the
-  last failure text (600 characters), redacted by the envelope.
+  last failure text (600 characters), redacted by the envelope. When the
+  attempt has no error from fleet and the text is the worker's own summary
+  (Claude's text), it is sent only with the org's reply-text consent (D48).
 - **The card's words** are an LLM draft written on demand (*Draft* /
   *Regenerate*), on the mission's planner host, and booked in `aux_usage`
   with origin `triage`.

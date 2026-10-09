@@ -925,8 +925,9 @@ Index by area (names only; see the reference for details):
   outcome?, org_id?, mission_id?, session_id?, routine_id?, limit? (≤ 200,
   50), offset? }`
   answers `{ runs, total }`; each run carries `id` (`<source>:<rowid>`),
-  `kind` (`operator` | `task` | `mission` | `jev` | `planner` | `summary` |
-  `routine`),
+  `kind` (`operator` | `task` | `mission` | `jev` | `routine`, or a fleet
+  `claude -p` origin: `planner` | `summary` | `commit_message` |
+  `release_note` | `morning_brief` | `brief` | `watch_summary` | `triage`),
   `owner`, `started_at`, `ended_at?`, `duration_ms?`, `outcome` (`ok` |
   `failed` | `needs_person` | `nothing_to_do` | `running`), `error?`,
   `cost_micros?`, `model?`, `host?`, `org_id?`, `mission_id?`,
@@ -1075,8 +1076,8 @@ derive from them.
   urgent first: `waiting` (blocked on a dialog), `stuck` (`stuck_kind` says
   which), `host_down` (the session's host was pinged and did not answer),
   `account_limit` (its account's 5-hour or weekly window is used up and the
-  session is not working), `no_credentials` (its account's login is missing,
-  expired or rejected, and the session is not working), `stop_failed` (the
+  session is not working), `no_credentials` (its account's login has
+  expired or its token was rejected, and the session is not working), `stop_failed` (the
   last turn ended in an API error; re-prompt),
   `failed` (a pane-less agent reported failure), `context_full` (context at or
   past `health.context_red_pct`), `stale_working` (the demotion above),

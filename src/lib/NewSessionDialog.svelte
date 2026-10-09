@@ -295,6 +295,12 @@
       if (best) chosenProfile = best.profile ?? '';
     });
   });
+  // A name typed while the headroom check is still out is a pick too: the
+  // check's default must not overwrite it, and the field stays (review r05).
+  function onTypeProfile() {
+    pickedLogin = true;
+    if (newLayout) otherProfile = true;
+  }
   function onPickLogin(v: string) {
     pickedLogin = true;
     if (v === OTHER_PROFILE) {
@@ -1478,6 +1484,7 @@
               id="launch-profile"
               data-testid="launch-profile"
               bind:value={chosenProfile}
+              oninput={onTypeProfile}
               placeholder="Host login"
               list="launch-profile-options"
               maxlength="32"

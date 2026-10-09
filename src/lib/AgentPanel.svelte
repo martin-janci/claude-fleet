@@ -228,8 +228,9 @@
     <!-- Steps 9.3 and 9.6: what the agent handed on, as chips and cards
          that follow their target's state. -->
     <HandoffCards />
-    <!-- Step 9.9 (Jev K2): where each message just sent here goes. -->
-    {#if session}<ControlRouteReceipts sessionId={session.id} />{/if}
+    <!-- Step 9.9 (Jev K2): where each message just sent here goes. Keyed, so
+         another Control session primes afresh instead of routing its history. -->
+    {#if session}{#key session.id}<ControlRouteReceipts sessionId={session.id} />{/key}{/if}
   {/if}
   {#if ctx}
     <button
@@ -391,8 +392,9 @@
     position: absolute;
     top: 0;
     left: 0;
-    width: 14px;
-    height: 14px;
+    /* A 24 px target (WCAG 2.5.8); the strokes stay a 14 px corner. */
+    width: 24px;
+    height: 24px;
     cursor: nwse-resize;
     border-top-left-radius: var(--radius-lg);
     /* Two short diagonal strokes: the corner reads as a handle. */
@@ -404,6 +406,8 @@
       var(--fg-muted) 52% 60%,
       transparent 60%
     );
+    background-size: 14px 14px;
+    background-repeat: no-repeat;
     opacity: 0.45;
     touch-action: none;
   }

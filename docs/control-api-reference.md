@@ -87,6 +87,12 @@ Changeset cards that adopt, sync and fix assets: list (one in full with id), pro
 
 Parameters: `action`, `change`, `confirm_nonce`, `id`, `positions`
 
+### `check_account_headroom`
+
+Whether starting or switching a session on host_alias under login `profile` (a profile name; omitted or "" for the host's own) crosses accounts.pause_at, and the login on that host with the most headroom: {pause_at_pct, chosen?, over, suggestion?, logins:[{profile?, account_uuid, used_pct?}]}. From the usage account_usage serves; never fetches. Errors: E_NOTFOUND (no such host), E_INVALID.
+
+Parameters: `host_alias`, `profile`
+
 ### `control_handoffs`
 
 What the agent handed on, newest first: prompts and tasks sent to sessions, new sessions, missions, tasks and proposed trees, each with its target's state now.

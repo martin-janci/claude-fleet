@@ -525,6 +525,14 @@ pub async fn run_with(store: &Mutex<Store>, exec: &dyn ShepherdExec, now: i64) -
         }
     }
     for m in merges {
+        // The merges were planned before the nudges went out over SSH: a
+        // Pause all pressed meanwhile stops them (review r06 F5).
+        if store
+            .lock()
+            .map_or(true, |s| crate::service::loops::paused(&s))
+        {
+            break;
+        }
         let outcome = match exec
             .merge_if_green(&m.host_alias, &m.pr_url, &m.head_oid)
             .await

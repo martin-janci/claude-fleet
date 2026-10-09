@@ -384,6 +384,8 @@ fn filters_narrow_and_paging_counts_the_whole() {
     assert_eq!(ids(&rows), ["orchestration:4", "orchestration:3", "task:3"]);
     let (rows, _) = list(&fx, f(|f| f.kind = Some("planner".into())));
     assert_eq!(ids(&rows), ["aux:1"]);
+    let (rows, _) = list(&fx, f(|f| f.kind = Some("summary".into())));
+    assert_eq!(ids(&rows), ["aux:2"]);
     let (rows, _) = list(&fx, f(|f| f.outcome = Some("failed".into())));
     assert_eq!(ids(&rows), ["task:2"]);
     let (rows, _) = list(&fx, f(|f| f.outcome = Some("needs_person".into())));

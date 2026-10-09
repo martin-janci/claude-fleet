@@ -2223,8 +2223,8 @@ phone the columns to re-derive the answer instead of the answer. Its reasons,
 most urgent first (`service/attention.rs`): `waiting`, `stuck`, `host_down`
 (the session's host was pinged and did not answer), `account_limit` (its
 account's 5-hour or weekly window is used up and the session is not
-working), `no_credentials` (its account's login is missing, expired or
-rejected, and the session is not working), `stop_failed`,
+working), `no_credentials` (its account's login has expired or its
+token was rejected, and the session is not working), `stop_failed`,
 `failed`, `context_full` (at or past `health.context_red_pct`),
 `stale_working` (a `working` row demoted after `reconcile.stale_working_secs`
 with no activity; it lifts on the next hook, when its terminal is opened,
@@ -3270,7 +3270,6 @@ Every command below refuses in hub client mode; the full table, with the command
 | `add_host` | registering a host is fleet administration, which the hub reserves for its own operator — add it there with `fleet-hub` |
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `catalog_spawn_author_session` | an author session is a Claude session started in the catalog's checkout on the machine that owns it, and the hub has no tool that starts one; edit the assets from this panel, or start a session in the checkout on the hub's machine |
-| `check_account_headroom` | this app does not poll account usage while a hub owns the fleet, so it cannot tell which account has headroom; start the session as usual |
 | `check_host` | the health checklist reads a host's settings over this app's own SSH; repair a host's hooks from the hub with `fleet-hub provision --host <alias>` |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
 | `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
