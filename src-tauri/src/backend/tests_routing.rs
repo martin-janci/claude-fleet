@@ -836,6 +836,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "routines",
+            "routines",
+            json!({ "action": "failing" }),
+            r#"[]"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::routines::routed::routines(
+                    b,
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                    commands::routines::RoutinesArgs {
+                        action: "failing".into(),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "get_form",
             "ask",
             json!({ "get": "f_a" }),
@@ -6211,6 +6230,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/updates.rs"),
     ),
     ("commands/runs.rs", include_str!("../commands/runs.rs")),
+    (
+        "commands/routines.rs",
+        include_str!("../commands/routines.rs"),
+    ),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",
