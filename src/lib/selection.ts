@@ -242,7 +242,7 @@ function isPrimaryTaskOf(s: SessionRow, taskId: string): boolean {
  */
 export function selectSession(
   s: SessionRow | null,
-  opts: { follow?: boolean; task?: string; remember?: boolean } = {},
+  opts: { follow?: boolean; task?: string; remember?: boolean; stay?: boolean } = {},
 ): void {
   if (s === null) {
     selectedRef.set(null);
@@ -266,7 +266,9 @@ export function selectSession(
       tmux_name: s.tmux_name,
     });
   }
-  if (!opts.follow) for (const fn of openedListeners) fn(s);
+  // `stay`: opened where the user already is (Control's Views panel shows it
+  // in place, UX audit 2026-10-09 C2), so nothing is told to navigate.
+  if (!opts.follow && !opts.stay) for (const fn of openedListeners) fn(s);
 }
 
 // Monotonically increasing counter bumped by `selectSessionExplicitly`,
