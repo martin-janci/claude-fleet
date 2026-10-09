@@ -12,7 +12,7 @@ The shortest path to a working fleet is this machine plus one remote host, such 
 
 ### 1. Build and launch the app
 
-No release has been published yet, so for now run claude-fleet from source. You need Node with pnpm, a stable Rust toolchain, and the Tauri system libraries. The [README](../README.md) lists the exact versions.
+Download a build from the [releases page](https://github.com/martin-janci/claude-fleet/releases), or run claude-fleet from source. From source you need Node with pnpm, a Rust toolchain, and the Tauri system libraries. The [README](../README.md) lists the exact versions.
 
 ```bash
 git clone https://github.com/martin-janci/claude-fleet.git
@@ -23,10 +23,11 @@ pnpm tauri dev
 
 The app drives the `claude` CLI and `tmux`, so both must be on your local `PATH` (`claude --version`, `tmux -V`).
 
-Once releases are published (see [RELEASING.md](RELEASING.md)), you will be able to download a build from the [releases page](https://github.com/martin-janci/claude-fleet/releases) instead: `.dmg` or `.app.tar.gz` on macOS, `.AppImage` or `.deb` on Linux. The macOS builds are signed but not notarized, and the Linux ones are unsigned:
+Each release carries a `.dmg` for macOS (`aarch64` for Apple Silicon, `x64` for Intel), an `.AppImage` and a `.deb` for Linux, and an `_x64-setup.exe` for Windows. The macOS builds are signed but not notarized, and the Linux and Windows ones are unsigned:
 
 - **macOS:** Gatekeeper blocks the first launch of a download (some macOS versions call the app *"damaged"*). Drag it to `/Applications`, then clear the quarantine flag with `xattr -dr com.apple.quarantine /Applications/claude-fleet.app`. Full instructions are in the README's [Installing a release build](../README.md#installing-a-release-build) section.
 - **Linux:** mark the AppImage executable (`chmod +x`) before running it, or install the `.deb` with `sudo apt install ./claude-fleet_*.deb`.
+- **Windows:** SmartScreen stops the first run; click **More info → Run anyway**. Windows is a desktop client only; see [windows.md](windows.md).
 
 ### 2. Add one host
 
@@ -67,7 +68,9 @@ Nothing about this changed when fleet became multi-user: there is no registratio
 
 ## Guided setup — the "Get started" checklist
 
-The sidebar shows a **Get started** card with a progress counter (**{n} of {m} done**) and one row per step. Click a row to act on that step. When all required steps are complete, the card shows **"You're all set 🎉"** and a **Dismiss** button. You can re-open the checklist at any time via Settings → **Replay setup guide**.
+**Layout: Classic or New.** The app has two layouts, switched in **Settings → Appearance → Layout**. Classic is the default and is what this section describes. The New layout has a rail, a filterable left list and an inspector. Its first run is different: a short tour starts after the welcome dialog, and a floating **Get started** checklist in the bottom-right corner replaces the sidebar card. That checklist has six rows: **Add a host**, **Sign in a Claude account**, **Start your first session**, **Connect GitHub for PRs**, **Pair your phone** and **Turn on a routine**. Click a row to open the place that does it.
+
+In the Classic layout, the sidebar shows a **Get started** card with a progress counter (**{n} of {m} done**) and one row per step. Click a row to act on that step. When all required steps are complete, the card shows **"You're all set 🎉"** and a **Dismiss** button. You can re-open the checklist at any time via Settings → Appearance → **Replay setup guide**.
 
 ### Local prerequisites
 
@@ -88,6 +91,7 @@ The tunnel badge reflects the current state:
 | `tunnel: starts with Control API` | Host is provisioned, but the Control API is not enabled — the tunnel starts when you enable it. |
 | `tunnel: up` | Control API is enabled and the SSH reverse tunnel is established. |
 | `tunnel: down — retrying` | Control API is enabled but the tunnel has not connected yet; the app retries automatically. |
+| `tunnel: flapping — N failed attempts` | `ssh` keeps exiting before the tunnel is up; the row's sublabel shows its last error. See [Tunnel shows "flapping"](troubleshooting.md#tunnel-shows-flapping). |
 
 ### Pick projects
 
@@ -97,9 +101,9 @@ Scans this machine's projects base and registers every repository it finds in th
 
 Starts a localhost-only MCP server that lets an AI assistant drive the fleet. It is **off by default**. Click the row to enable it.
 
-Once enabled, the checklist shows the port and a masked bearer token with a **Copy config** button. The default port is **4180** and the endpoint is `http://127.0.0.1:4180/mcp`. You can change the port and regenerate the token in Settings → **Control API (MCP)**.
+Once enabled, the checklist shows the port and a masked bearer token with a **Copy config** button. The default port is **4180** and the endpoint is `http://127.0.0.1:4180/mcp`. You can change the port and regenerate the token in Settings → **Control API**.
 
-That token is the **master token**, for the assistant you configure yourself. Hosts use their own tokens instead. **Provision hosts** (Settings → Control API) creates a separate **per-host token** for each host, `local` included, and writes only that token into the host's `~/.claude.json` and hook config. A per-host token can only act as sessions on its own host, and it cannot run fleet-admin tools such as `add_host` or `provision_hosts`. That way a token copied from one machine cannot pose as another. You can set each host's token to `full` or `readonly` in the **Token** column of Settings → **Hosts**. After upgrading from a build without per-host tokens, re-provision every host. See [Per-host tokens](control-api.md#per-host-tokens).
+That token is the **master token**, for the assistant you configure yourself. Hosts use their own tokens instead. **Provision hosts** (Settings → Control API) creates a separate **per-host token** for each host, `local` included, and writes only that token into the host's `~/.claude.json` and hook config. A per-host token can only act as sessions on its own host, and it cannot run fleet-admin tools such as `add_host` or `provision_hosts`. That way a token copied from one machine cannot pose as another. You can set each host's token to `full` or `readonly` in the **Token** field of the host's detail in **Accounts & hosts** (⌘I, or Ctrl+Shift+H on Linux and Windows). After upgrading from a build without per-host tokens, re-provision every host. See [Per-host tokens](control-api.md#per-host-tokens).
 
 See [control-api.md](control-api.md) for a full reference.
 
@@ -130,7 +134,7 @@ Manage hints in Settings:
 
 Once you have at least one session running:
 
-- **Attach** — click a session row to open the live terminal view and watch the session in real time.
+- **Attach** — click a session row to open it. The Session tab opens in the [Conversation view](conversation-view.md), which shows the transcript and takes prompts; ⌘J (Ctrl+Shift+J on Linux and Windows) flips it to the live terminal.
 - **Quick switcher (⌘K / ⌘P on macOS, Ctrl+Shift+K / Ctrl+Shift+P on Linux and Windows)** — works even while the terminal has focus; plain Ctrl+K and Ctrl+P still go to the terminal (readline kill-line / previous history). Type any part of a session's name, project, host, branch or status; recently opened sessions come first. **Enter** attaches and reveals the session in the sidebar (its project is expanded and the row scrolled into view), **Ctrl/⌘+Enter** opens the new-session dialog with what you typed as the name, and the "New session in <project>" rows start one for that project.
 - **Copy and select in the terminal** — selection works like a text field: drag to select, double-click a word (paths and flags count as one word), triple-click a line, Shift+click to extend, ⌘A / Ctrl+Shift+A for the whole screen. Copy with ⌘C (Ctrl+Shift+C on Linux and Windows), paste with ⌘V (Ctrl+Shift+V) or the right-click menu; **Copy on select** in Settings copies as soon as you release the mouse. Typing drops the highlight. The cursor is a solid block while the terminal has keyboard focus and a hollow outline when it does not.
 - **Send a prompt** — type in the prompt bar to send text to the active session. To send the same prompt to several sessions at once, use the broadcast feature.

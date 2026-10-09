@@ -1,9 +1,10 @@
 //! `fleet.ui/1`: a block an agent writes in its reply that the Conversation
 //! view draws as a card (`docs/chat-blocks.md`). The desktop reads blocks
 //! out of the transcript in `src/lib/rich_blocks.ts`; this module is the
-//! same check in Rust, for what fleet itself writes or relays (Control's
-//! cards, a phone), and the model `docs/chat-block.schema.json` is
-//! generated from (`REGEN_FORM_DOCS=1`). Both checks run
+//! same check in Rust, meant for what fleet itself writes or relays
+//! (Control's cards, a phone) but not yet called by any production path,
+//! and the model `docs/chat-block.schema.json` is generated from
+//! (`REGEN_FORM_DOCS=1`). Both checks run
 //! `docs/chat-block-examples/blocks.json` and must report the same
 //! problems, word for word.
 //!

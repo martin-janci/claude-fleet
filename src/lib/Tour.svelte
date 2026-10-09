@@ -12,7 +12,7 @@
   import {
     TOUR_STEPS,
     endTour,
-    matchesChord,
+    matchesStep,
     nextTourStep,
     placePopover,
     prevTourStep,
@@ -70,7 +70,7 @@
       endTour();
       return;
     }
-    if (matchesChord(e, step.chord, mac)) {
+    if (matchesStep(e, step, mac)) {
       tried[step.id] = true;
       void tick().then(measure);
     }
@@ -106,7 +106,7 @@
     <strong class="title">{step.title}</strong>
     <p class="body">{step.body}</p>
     <div class="try" data-testid="tour-try">
-      <span class="meta grow">Try it: press <Kbd chord={step.chord} {mac} /> to {step.tryLabel}</span>
+      <span class="meta grow">Try it: press <Kbd chord={step.chord} shortcut={step.shortcut} {mac} /> to {step.tryLabel}</span>
       {#if tried[step.id]}<span class="done" data-testid="tour-tried">Done</span>{/if}
     </div>
     <div class="foot">
