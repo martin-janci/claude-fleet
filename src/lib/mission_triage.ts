@@ -98,6 +98,47 @@ export function missionTriage(missionId: number, refresh = false): Promise<Resul
   return invokeCmd<Triage>('mission_triage', { args: { mission_id: missionId, refresh } });
 }
 
+/** What a mission's triage answer depends on that the list row shows: a
+ *  change to any of these is a new question for Jev. */
+export interface TriageFacts {
+  id: number;
+  state: string;
+  version?: number;
+  updated_at?: number;
+  done?: number;
+  total?: number;
+}
+
+function triageKey(m: TriageFacts): string {
+  return [m.state, m.version, m.updated_at, m.done, m.total].join('\u0000');
+}
+
+/** The newest answer per mission, keyed by the facts it was asked on. */
+const triageAsked = new Map<number, { key: string; answer: Promise<Result<Triage>> }>();
+
+/**
+ * `missionTriage(m.id)` at most once per mission per state for the app's
+ * lifetime (review r15): each ask spends Jev's budget, and Today's Nudge
+ * re-reads on every work change. A mission whose state, version, timestamp
+ * or progress moved is asked again; a failed answer is not kept.
+ */
+export function missionTriageOnce(m: TriageFacts): Promise<Result<Triage>> {
+  const key = triageKey(m);
+  const hit = triageAsked.get(m.id);
+  if (hit && hit.key === key) return hit.answer;
+  const answer = missionTriage(m.id);
+  triageAsked.set(m.id, { key, answer });
+  void answer.then((r) => {
+    if (!r.ok && triageAsked.get(m.id)?.answer === answer) triageAsked.delete(m.id);
+  });
+  return answer;
+}
+
+/** Test hook: forget every cached triage answer. Not for production code. */
+export function resetTriageCacheForTests(): void {
+  triageAsked.clear();
+}
+
 /**
  * A hub older than 9.10 answers one of these: no triage there, not a
  * failure. Matched by code, never by message text.

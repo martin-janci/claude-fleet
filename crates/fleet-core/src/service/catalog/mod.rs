@@ -315,6 +315,16 @@ pub fn ensure_fresh(store: &Mutex<Store>) -> Result<(), IpcError> {
     personal_err.map_or(Ok(()), Err)
 }
 
+/// [`ensure_fresh`] off the async runtime (review r06): a reload runs git
+/// and walks each checkout, which must not park a tokio worker. For an
+/// async caller holding the store's `Arc`, as the MCP tools do.
+pub async fn ensure_fresh_blocking(store: &Arc<Mutex<Store>>) -> Result<(), IpcError> {
+    let store = Arc::clone(store);
+    tokio::task::spawn_blocking(move || ensure_fresh(&store))
+        .await
+        .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("catalog refresh: {e}")))?
+}
+
 /// One row of [`ensure_fresh`]'s pass: `Ok(Err(e))` is personal's load
 /// failure, kept for the end of the pass (R5); an outer `Err` stops it.
 ///

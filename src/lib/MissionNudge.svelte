@@ -2,14 +2,14 @@
   Redesign step 9.10: Today's Nudge for stuck missions. Each active or
   paused mission fleet calls stuck, with why and the next step Jev
   proposes; its name opens Missions, where a person picks the step. Asking
-  runs no LLM: only Jev, whose answer on the same facts is reused.
+  runs no LLM: only Jev, asked once per mission per state (missionTriageOnce).
 -->
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import ProposedBy from './ProposedBy.svelte';
   import { preselect } from './ai_proposal';
   import { listMissions } from './missions';
-  import { asProposal, missionTriage, stepLabel, type Triage } from './mission_triage';
+  import { asProposal, missionTriageOnce, stepLabel, type Triage } from './mission_triage';
   import { onWorkChangedDebounced } from './work';
   import { openElsewhere } from './control_views';
 
@@ -25,7 +25,9 @@
     // A hub that predates missions answers nothing.
     if (!list.ok || !Array.isArray(list.value)) return;
     const open = list.value.filter((m) => m.state === 'active' || m.state === 'paused').slice(0, MAX);
-    const answers = await Promise.all(open.map((m) => missionTriage(m.id)));
+    // Asked once per mission per state: a work change re-reads the list, but
+    // Jev is only asked again about a mission that moved (review r15).
+    const answers = await Promise.all(open.map((m) => missionTriageOnce(m)));
     if (mine !== gen) return;
     stuck = open.flatMap((m, i) => {
       const r = answers[i];

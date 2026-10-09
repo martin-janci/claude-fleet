@@ -64,9 +64,13 @@
     picked = req;
     accountsPageRequest.set(null);
   });
+  // Nothing picked yet: the first account. A pick that names an account the
+  // list does not hold (a pill for an account this fleet has no row for)
+  // selects nothing and says so — never a different account (review r05).
   const selected: AccountSummary | null = $derived(
-    list.find((a) => a.uuid === picked) ?? list[0] ?? null,
+    picked === null ? (list[0] ?? null) : (list.find((a) => a.uuid === picked) ?? null),
   );
+  const pickedMissing = $derived(picked !== null && selected === null);
 
   // History for the selected account, re-read when the selection changes or
   // its usage moves (a new snapshot was just written).
@@ -322,6 +326,10 @@
               {/each}
             </ul>
           {/if}
+        </div>
+      {:else if pickedMissing}
+        <div class="detail" data-testid="account-missing">
+          <p class="empty">That account is not in this fleet’s list. Pick one on the left.</p>
         </div>
       {/if}
     </div>

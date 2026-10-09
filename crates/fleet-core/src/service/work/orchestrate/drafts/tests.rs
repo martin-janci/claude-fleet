@@ -8,7 +8,7 @@ use crate::mcp::auth::{Caller, ClientRef, TokenMode};
 use crate::net::https::FakeTransport;
 use crate::service::trackers::TrackerNet;
 use crate::service::work::missions::{self, MissionInput};
-use crate::service::work::today::{TodaySession, TodayShipped};
+use crate::service::work::today::TodayShipped;
 use std::sync::Arc;
 
 fn person(store: &Mutex<Store>, id: i64) -> ViewScope {
@@ -173,6 +173,37 @@ fn a_brief_covers_one_org_and_runs_on_its_latest_sessions_host() {
     assert!(!prompt.contains("AC-9"), "another org's work: {prompt}");
     assert_eq!(from, "1 item and 1 shipped");
     assert!(brief_prompt(&today, Some(3)).is_none());
+}
+
+/// Review r15: the brief's org and its prompt follow one rule (a session
+/// counts for its own org, else its group's). The no-work group mixes orgs:
+/// a brief carries only the sessions of its own org from it, so the org
+/// `brief_target` picks from a session there finds that session in its
+/// prompt, and another org's session never rides along.
+#[test]
+fn a_brief_takes_only_its_own_orgs_sessions_from_a_mixed_group() {
+    let mut today = digest();
+    today.groups.push(TodayGroup {
+        bucket: BUCKET_IN_PROGRESS.into(),
+        key: None,
+        title: "No work".into(),
+        org_id: None,
+        sessions: vec![
+            session(3, "venus", Some(2), 20),
+            session(4, "mercury", Some(1), 95),
+        ],
+        ..Default::default()
+    });
+    assert_eq!(
+        brief_target(&today, None),
+        Some((Some(1), "mercury".to_string()))
+    );
+    let (one, _) = brief_prompt(&today, Some(1)).unwrap();
+    assert!(one.contains("sessions: s4"), "{one}");
+    assert!(!one.contains("s3"), "another org's session: {one}");
+    let (two, _) = brief_prompt(&today, Some(2)).unwrap();
+    assert!(two.contains("sessions: s3"), "{two}");
+    assert!(!two.contains("s4"), "another org's session: {two}");
 }
 
 /// The plan's 9.11 check: opening Today never drafts. Without `refresh` the

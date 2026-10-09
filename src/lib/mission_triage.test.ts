@@ -10,7 +10,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import MissionTriage from './MissionTriage.svelte';
 import MissionNudge from './MissionNudge.svelte';
-import { asProposal, countsLine, outcomeLabel, stepLabel, type Triage } from './mission_triage';
+import { asProposal, countsLine, outcomeLabel, resetTriageCacheForTests, stepLabel, type Triage } from './mission_triage';
 
 const stuck: Triage = {
   stuck: {
@@ -122,7 +122,10 @@ describe('MissionTriage', () => {
 });
 
 describe('MissionNudge', () => {
-  beforeEach(() => vi.mocked(invoke).mockReset());
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    resetTriageCacheForTests();
+  });
 
   it('lists the stuck missions among the open ones, with the proposed next step', async () => {
     vi.mocked(invoke).mockImplementation(async (c, a) => {
@@ -148,5 +151,28 @@ describe('MissionNudge', () => {
     // A finished mission is never asked about.
     expect(triageCalls().map((c) => c.mission_id)).toEqual([1, 2]);
     expect(triageCalls().every((c) => !c.refresh)).toBe(true);
+  });
+
+  it('review r15: asks Jev once per mission per state, across re-opens', async () => {
+    let missions = [
+      { id: 1, name: 'Ship login', state: 'active', version: 3, updated_at: 100 },
+      { id: 2, name: 'Refunds', state: 'paused', version: 1, updated_at: 90 },
+    ];
+    vi.mocked(invoke).mockImplementation(async (c) => {
+      if (c === 'work_missions') return missions;
+      if (c === 'mission_triage') return stuck;
+      return null;
+    });
+    const first = render(MissionNudge);
+    await flush();
+    first.unmount();
+    render(MissionNudge);
+    await flush();
+    expect(triageCalls().map((c) => c.mission_id)).toEqual([1, 2]);
+    // Mission 1 moved: only it is asked again.
+    missions = [{ ...missions[0], version: 4, updated_at: 120 }, missions[1]];
+    render(MissionNudge);
+    await flush();
+    expect(triageCalls().map((c) => c.mission_id)).toEqual([1, 2, 1]);
   });
 });
