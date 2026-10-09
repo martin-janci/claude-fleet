@@ -49,6 +49,9 @@ pub mod jev;
 pub mod lost_target;
 #[cfg(test)]
 mod lost_target_tests;
+pub mod mission_triage;
+#[cfg(test)]
+mod mission_triage_tests;
 pub mod quick_answer;
 #[cfg(test)]
 mod quick_answer_tests;
@@ -123,10 +126,12 @@ pub enum Feature {
     /// Checking a watcher's "Since 13:20" summary against its transcript
     /// before it shows (J9, redesign step 11.11).
     SummaryCheck,
+    /// A stuck mission's outcome and next step (K3, redesign 9.10).
+    MissionTriage,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 11] = [
+    pub const ALL: [Feature; 12] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
@@ -138,6 +143,7 @@ impl Feature {
         Feature::Duplicate,
         Feature::ControlRoute,
         Feature::SummaryCheck,
+        Feature::MissionTriage,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -153,6 +159,7 @@ impl Feature {
             Feature::Duplicate => "duplicate",
             Feature::ControlRoute => "control_route",
             Feature::SummaryCheck => "summary_check",
+            Feature::MissionTriage => "mission_triage",
         }
     }
 
@@ -174,6 +181,7 @@ impl Feature {
             Feature::Duplicate => settings::DECIDE_JEV_DUPLICATE,
             Feature::ControlRoute => settings::DECIDE_JEV_CONTROL_ROUTE,
             Feature::SummaryCheck => settings::DECIDE_JEV_SUMMARY_CHECK,
+            Feature::MissionTriage => settings::DECIDE_JEV_MISSION_TRIAGE,
         }
     }
 }

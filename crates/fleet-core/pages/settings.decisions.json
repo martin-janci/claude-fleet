@@ -89,6 +89,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.mission_triage",
+          "hint": "Proposes a stuck mission's outcome and next step; you still choose. It never completes a mission or sets Verified."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
         }
       ]

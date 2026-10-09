@@ -189,6 +189,7 @@
     "mcp_confirm",
     "mcp_pending_confirms",
     "mission_release_note",
+    "mission_triage",
     "move_session",
     "my_grants",
     "name_session_work",
