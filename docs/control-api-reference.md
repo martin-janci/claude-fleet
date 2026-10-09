@@ -759,6 +759,12 @@ Spawn a review session: a new Claude session in the source session's worktree, s
 
 Parameters: `confirm_nonce`, `prompt`, `source_session_id`
 
+### `start_rules`
+
+Start rules: a task key pattern (PD-*) that names the project, and optionally the host, a start lands in, before the key's history and Jev. Fleet offers one after five identical starts. list: offers, active and dismissed rules; save {rule, rule_id?}: the whole rule, active; accept {rule_id}: an offer, replacing the pattern's other rule; dismiss {rule_id}: never offered again; delete {rule_id}. E_NOTFOUND, E_INVALID, E_EXISTS.
+
+Parameters: `action`, `rule`, `rule_id`
+
 ### `touch_session_viewed`
 
 Mark a session viewed now: the turns it has finished read as seen. Returns the row.
@@ -1055,6 +1061,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::debug_device_logs`
 - `commands::debug_devices::debug_device_screenshot`
 - `commands::prs::list_pull_requests`
+- `commands::start_rules::start_rules`
 - `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`

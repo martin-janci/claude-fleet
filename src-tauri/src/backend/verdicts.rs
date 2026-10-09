@@ -850,6 +850,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     ("list_pull_requests", Verdict::Routed { tool: "prs" }),
+    // Start rules (Orbit Fleet 8.11): the hub decides and tallies its own
+    // starts, so its rules are the ones that count.
+    (
+        "start_rules",
+        Verdict::Routed {
+            tool: "start_rules",
+        },
+    ),
     (
         "session_presence",
         Verdict::Routed {

@@ -286,6 +286,7 @@
     "shutdown_debug_device",
     "spawn_review",
     "start_mission_wave",
+    "start_rules",
     "start_work",
     "start_work_multi",
     "summarize_past_work",

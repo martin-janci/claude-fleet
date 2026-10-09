@@ -2399,6 +2399,7 @@ fn router_sum_serves_every_tool() {
         include_str!("devices.rs"),
         include_str!("prs.rs"),
         include_str!("routines.rs"),
+        include_str!("start_rules.rs"),
         include_str!("presence.rs"),
         include_str!("library.rs"),
         include_str!("runs.rs"),
