@@ -177,8 +177,9 @@ runs. Changing one after seeing results needs a new decision row.
 | Reference | hand labels of ~300 turns; weak signals: the next prompt (a person answering means "asked") |
 | Baselines | "ends with ?" heuristic; the Notification hook `idle_prompt`; haiku |
 | Acceptance | "asks a question" precision ≥ 0.9 and recall ≥ 0.8 (a false "finished" hides a waiting session) |
-| Safety | sends Claude's reply text: the most sensitive input of any card. It needs its own consent line (D31 covers prompts and titles, not replies) → **a new decision before phase 0** |
-| Status | **[hypothesis]**, not started |
+| Safety | sends Claude's reply text: the most sensitive input of any card. It needs its own consent line (D31 covers prompts and titles, not replies) → **decided as D48** (owner, 2026-10-08): only where the org also consents to reply text, off by default |
+| Components | **[built]** (step 5.11) `service/decide/turn_outcome.rs`: setting `decide.jev.turn_outcome` (off / shadow / assist), question `turn_outcome.v1` over finished / asked / stuck / working / unsure, input the visible pane tail (ANSI stripped, chrome dropped, code blocks as placeholders, ≤ 40 lines / 2,000 chars, redacted), baseline the pane rules (`none` where they read nothing), floor 0.5, subject `session_turn` `<session>:<turn_seq>`; asked after a Stop that left the row idle (`spawn_after_stop`), shadow recorded, assist written to `sessions.turn_outcome` (attention: `asked` → waiting, `stuck` → stuck); every hook clears it and an answer lands only while no hook spoke since the Stop; follow-ups from a later Notification and a person's prompt; J8's `pane_unreadable` timeline entry; the bench `fleet-hub decide bench turn-outcome` (providers rule, qmark, jev; synthetic fixture `service/testdata/decide/turn_outcome_tails.jsonl`, LLM-written, D43). Not built: a trigger for hosts without hooks (no turn counter to key one decision per turn), the haiku baseline |
+| Status | **[built, off]**; phase 0 waits on hand labels |
 
 ### J4 — ranking context for the brief and the ticket card
 
@@ -381,7 +382,11 @@ Each becomes a full card above when its adapter is built.
 ## 10. What is still open
 
 - **D32 is decided:** J3 first (built as a shadow/assist adapter), J1 offline only (phase 0 built; no live adapter until its acceptance lines pass).
-- **J2's consent for reply text** (a new decision before phase 0).
+- ~~**J2's consent for reply text**~~ **decided: D48** (owner, 2026-10-08;
+  `docs/decisions.md` → *Decision D48*): reply text goes only where the org
+  consents to reply text, a consent separate from D31 and required on top
+  of it, off by default. J2 is built (step 5.11); its phase-0 run waits on
+  ~300 hand-labeled pane tails.
 - **The owner's census run and D46 labels:** they decide the language
   cells.
 - **The owner's D39 hand labels:** needed for J1's "none" cases
