@@ -182,6 +182,20 @@ struct Guard {
 ///
 /// Ordered by file, as the scan finds them.
 const SCOPE_GUARDS: &[Guard] = &[
+    // ---- service/runs.rs ------------------------------------------------
+    Guard {
+        file: "crates/fleet-core/src/service/runs.rs",
+        func: "reach",
+        nth: 0,
+        code: "let spend = scope.org.is_all() && sessions.len() == all.len();",
+        verdict: Verdict::OrgBoundary,
+        why: "whether the runs that belong to no session or mission (Jev, a \
+              summary of a conversation no session holds) are listed: never \
+              to a reader narrowed to an org. The PERSON half is the \
+              conjunct beside it — every session there is passed \
+              `sees_session_row` — so a person's own device that sees every \
+              session is served them, and one that does not is not",
+    },
     // ---- service/messages.rs -------------------------------------------
     Guard {
         file: "crates/fleet-core/src/service/messages.rs",
