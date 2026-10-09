@@ -10,6 +10,10 @@
     type ProjectTreeRow,
   } from './projects';
   import { setProjectPick } from './project_picks';
+  import { orgs, loadOrgs, addOrgRule } from './orgs';
+  import { trackers, loadTrackers, updateTracker } from './trackers';
+  import { push } from './toasts';
+  import { coveringOrgId, githubTrackers, placeProject, reposWith } from './add_project_place';
   import type { IpcError } from './result';
   import { defaultHost, hosts, isPickableHost } from './hosts';
   import { hubStatus } from './hub';
@@ -92,6 +96,19 @@
     writePref('last-host', chosenHost);
   });
   const host = $derived(mode === 'folder' ? 'local' : chosenHost);
+  /** Clone a URL / From GitHub: more hosts to clone onto after `host` (the
+   *  board's "Clone on" with several). Each gets the checkout a session
+   *  there would otherwise clone on first use. `local` is never one: the
+   *  project's own row lives there. */
+  let alsoHosts = $state<string[]>([]);
+  const multiHost = $derived(mode === 'clone' || mode === 'github');
+  const alsoChoices = $derived(
+    $hosts.filter((h) => !h.hidden && h.reachable && h.alias !== 'local' && h.alias !== host).map((h) => h.alias),
+  );
+  const extraHosts = $derived(multiHost ? alsoHosts.filter((a) => alsoChoices.includes(a)) : []);
+  function toggleAlso(alias: string) {
+    alsoHosts = alsoHosts.includes(alias) ? alsoHosts.filter((a) => a !== alias) : [...alsoHosts, alias];
+  }
   /** Whether stopping cannot reach the run: any host but this machine's own
    *  `local`. On a hub client every host is remote, `local` included. */
   const hostIsRemote = (h: string) => h !== 'local' || $hubStatus.remote;
@@ -117,6 +134,39 @@
       a.localeCompare(b),
     ),
   );
+  // ── Organisation and Tracker (the board's two placement fields) ─────
+  onMount(() => {
+    // Best effort: without them the two fields are simply not offered.
+    if ($orgs.length === 0) void loadOrgs();
+    if ($trackers.length === 0) void loadTrackers();
+  });
+  /** `undefined` until the person picks: then the org the first repository
+   *  already belongs to is shown, and nothing new is written for it. */
+  let orgPick = $state<number | null | undefined>(undefined);
+  let trackerId = $state<number | null>(null);
+  const ghTrackers = $derived(githubTrackers($trackers));
+  const tracker = $derived(ghTrackers.find((t) => t.id === trackerId) ?? null);
+  /** The first `owner/repo` the verb would add, for the defaults and notes. */
+  const firstTarget = $derived.by((): { owner: string; repo: string } | null => {
+    if (mode === 'github') {
+      const n = ghSelected.find((x) => !inFleet(x));
+      const [o, r] = n ? n.split('/') : [];
+      return o && r ? { owner: o, repo: r } : null;
+    }
+    if (mode === 'clone') return parsed;
+    if (mode === 'new') return ownerOk && repoOk ? { owner, repo } : null;
+    return null;
+  });
+  const orgId = $derived(
+    orgPick !== undefined ? orgPick : firstTarget ? coveringOrgId($orgs, firstTarget.owner, firstTarget.repo) : null,
+  );
+  const trackerNote = $derived.by((): string | null => {
+    if (!tracker || !firstTarget) return null;
+    return reposWith(tracker, firstTarget.owner, firstTarget.repo) === null
+      ? `${tracker.name} already covers it.`
+      : `Its issues will sync from ${tracker.name}.`;
+  });
+
   function toggleRepo(name: string) {
     ghSelected = ghSelected.includes(name) ? ghSelected.filter((n) => n !== name) : [...ghSelected, name];
   }
@@ -163,9 +213,11 @@
   /** The board's verb: "Add project", or "Add 2 projects" From GitHub. */
   const verb = $derived(mode === 'github' && pending > 1 ? `Add ${pending} projects` : 'Add project');
   /** The footer's summary From GitHub ("2 repos · on mefistos"). */
-  const summary = $derived(
-    mode === 'github' && pending > 0 ? `${pending} ${pending === 1 ? 'repo' : 'repos'} · on ${host}` : null,
-  );
+  const summary = $derived.by((): string | null => {
+    if (pending === 0 || (mode !== 'github' && extraHosts.length === 0)) return null;
+    const on = [host, ...extraHosts];
+    return `${pending} ${pending === 1 ? 'repo' : 'repos'} · on ${on.join(', ')}`;
+  });
 
   // ── Destination preview ──────────────────────────────────────────────
   // The preview needs the backend's per-host roots, and on a hub client
@@ -260,12 +312,54 @@
       if (s.kind === 'clone') ghSelected = ghSelected.filter((n) => n !== s.url);
     }
     if (added.length === 0) return;
+    await finish(
+      added.map((row, i) => ({ row, source: list[i] })),
+      h,
+    );
+  }
+
+  /** After the adds: the other hosts, the organisation and the tracker,
+   *  then the dialog hands the first project back. What the extras could
+   *  not do is said in a toast: the projects are in the fleet either way. */
+  async function finish(done: { row: ProjectTreeRow; source: AddProjectSource }[], h: string) {
+    const problems: string[] = [];
+    busy = true;
+    for (const { row, source } of done) {
+      if (source.kind !== 'clone') continue;
+      for (const also of extraHosts) {
+        inflight = { host: also, kind: 'clone', github: false };
+        controller = new AbortController();
+        const r = await addProject(also, { ...source, existing: true }, controller.signal);
+        controller = null;
+        if (destroyed) return;
+        if (!r.ok) {
+          const name = `${row.project.owner}/${row.project.repo}`;
+          problems.push(
+            r.error.code === 'E_EXISTS'
+              ? `${name} was not cloned on ${also}: this hub can't add a second host yet. It is cloned there when a session starts.`
+              : `${name} was not cloned on ${also}: ${r.error.message}`,
+          );
+        }
+      }
+    }
+    for (const { row } of done) {
+      problems.push(
+        ...(await placeProject(row.project, { orgId, tracker }, $orgs, {
+          addOrgRule: (rule) => addOrgRule(rule),
+          updateTracker: (id, opts) => updateTracker(id, opts),
+        })),
+      );
+    }
+    busy = false;
+    inflight = null;
+    if (destroyed) return;
+    for (const message of problems) push({ kind: 'error', message });
     // The host answers for the first; the others are kept in the New
     // session picker the same way (onProjectAdded keeps the first).
-    for (const r of added.slice(1)) {
-      void setProjectPick(r.project.owner, r.project.repo, { vis: 'keep' }, { quiet: true });
+    for (const { row } of done.slice(1)) {
+      void setProjectPick(row.project.owner, row.project.repo, { vis: 'keep' }, { quiet: true });
     }
-    onCreated(added[0], h);
+    onCreated(done[0].row, h);
   }
 
   /** Adds one source. Hands the row back instead of reporting it when
@@ -283,7 +377,7 @@
     inflight = null;
     if (destroyed) return null;
     if (r.ok) {
-      if (report) onCreated(r.value, h);
+      if (report) await finish([{ row: r.value, source: s }], h);
       return r.value;
     }
     fail(h, s, r.error);
@@ -375,6 +469,22 @@
           : null}
       onpick={(alias) => (chosenHost = alias)}
     />
+    {#if multiHost && alsoChoices.length > 0}
+      <span class="label" id="add-also-label">Also clone on</span>
+      <div class="also-row" role="group" aria-labelledby="add-also-label">
+        {#each alsoChoices as a (a)}
+          <button
+            type="button"
+            class="btn btn--chip btn--toggle tag--mono"
+            data-testid="add-also-host"
+            data-alias={a}
+            aria-pressed={alsoHosts.includes(a)}
+            disabled={busy}
+            onclick={() => toggleAlso(a)}>{a}</button
+          >
+        {/each}
+      </div>
+    {/if}
 
     {#if mode === 'clone'}
       <label for="add-url">Repository</label>
@@ -459,6 +569,39 @@
       </label>
     {/if}
 
+    {#if mode !== 'folder' && $orgs.length > 0}
+      <label for="add-org">Organisation</label>
+      <select
+        id="add-org"
+        data-testid="add-org"
+        disabled={busy}
+        value={orgId === null ? '' : String(orgId)}
+        onchange={(e) => {
+          const v = (e.currentTarget as HTMLSelectElement).value;
+          orgPick = v === '' ? null : Number(v);
+        }}
+      >
+        <option value="">None</option>
+        {#each $orgs as o (o.id)}<option value={String(o.id)}>{o.name}</option>{/each}
+      </select>
+    {/if}
+    {#if mode !== 'folder' && ghTrackers.length > 0}
+      <label for="add-tracker">Tracker</label>
+      <select
+        id="add-tracker"
+        data-testid="add-tracker"
+        disabled={busy}
+        value={trackerId === null ? '' : String(trackerId)}
+        onchange={(e) => {
+          const v = (e.currentTarget as HTMLSelectElement).value;
+          trackerId = v === '' ? null : Number(v);
+        }}
+      >
+        <option value="">None</option>
+        {#each ghTrackers as t (t.id)}<option value={String(t.id)}>{t.name}</option>{/each}
+      </select>
+      {#if trackerNote}<p class="preview" data-testid="add-tracker-note">{trackerNote}</p>{/if}
+    {/if}
     {#if summary}
       <p class="preview" data-testid="add-summary">{summary}</p>
     {/if}
@@ -541,6 +684,15 @@
     color: var(--fg);
     border-radius: 4px;
     min-width: 0;
+  }
+  .also-row { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+  select {
+    font: inherit;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid var(--border);
+    background: var(--bg-pane);
+    color: var(--fg);
+    border-radius: 4px;
   }
   .pick-folder {
     align-self: flex-start;

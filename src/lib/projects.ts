@@ -144,7 +144,12 @@ export async function listHostWorktrees(
 /** Wire shape of `service::add_project::AddProjectArgs::source`
  *  (`#[serde(tag = "kind", rename_all = "snake_case")]`). */
 export type AddProjectSource =
-  | { kind: 'clone'; url: string }
+  | {
+      kind: 'clone';
+      url: string;
+      /** Already in the fleet: clone it onto this (remote) host too. */
+      existing?: boolean;
+    }
   | { kind: 'folder'; path: string }
   | { kind: 'new'; owner: string; repo: string; create_remote: boolean; confirm?: string };
 

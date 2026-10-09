@@ -64,7 +64,7 @@ import { buildSessionsByProject, buildRelatedCountById } from './sidebar_index';
 import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects, loadProjects } from './projects';
-import { sessions, loadSessions, showBgAgents, showRowDetails, sidebarGroupBy, resetTombstonesForTests, type SessionRow } from './sessions';
+import { sessions, loadSessions, showBgAgents, showFriendlyNames, showRowDetails, sidebarGroupBy, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectedSession, selectSession, selectSessionExplicitly } from './selection';
 import { sessionFocus, focusSession } from './session_focus';
 import { hosts, loadHosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
@@ -518,7 +518,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       const row = (await screen.findAllByTestId('sess-row'))[0];
       const e = keydown(row, 'Enter');
       await tick();
-      // The row IS a role="button": Space/Enter on it must scroll nothing.
+      // The row is a treeitem: Space/Enter on it must scroll nothing.
       expect(e.defaultPrevented).toBe(true);
       expect(get(selectedSession)?.id).toBe(sess.id);
     });
@@ -2396,6 +2396,11 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     await tick();
     const archived = screen.getByTestId('archived-session');
     expect(archived).toHaveTextContent('dev-parked');
+    // Redesign step 7.2: the chip is a control of the archived row itself,
+    // and the whole group (header, Done, rows) passes as a tree.
+    const parkedRow = within(archived).getByRole('treeitem');
+    expect(within(parkedRow).getByRole('button', { name: 'archived · show' })).toBeTruthy();
+    await expectAccessible(group);
     await fireEvent.click(within(archived).getByTestId('archived-chip'));
     await waitFor(() =>
       expect(mockedInvoke).toHaveBeenCalledWith('unarchive_session_work', {
@@ -3311,6 +3316,21 @@ describe('Sidebar accessibility (7.2)', () => {
     for (const r of projRows) expect(r.getAttribute('aria-expanded')).toBe('true');
     await expectAccessible(container);
   });
+
+  it('lists projects and sessions as a tree whose rows keep their own buttons', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a'), sessionFor(2, 'dev-c')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const tree = await screen.findByRole('tree', { name: 'Projects' });
+    const project = within(tree).getAllByTestId('proj-row')[0];
+    expect(project.getAttribute('role')).toBe('treeitem');
+    // A project's sessions are its group; a session row is a treeitem whose
+    // actions a screen reader reaches as buttons, not as hidden children.
+    const group = within(tree).getAllByRole('group')[0];
+    const row = within(group).getAllByRole('treeitem')[0];
+    expect(row.dataset.testid).toBe('sess-row');
+    expect(within(row).getAllByRole('button').length).toBeGreaterThan(0);
+  });
 });
 
 describe('Shared with me (redesign step 5.8)', () => {
@@ -3366,5 +3386,165 @@ describe('Shared with me (redesign step 5.8)', () => {
     await tick(); await tick();
     await screen.findAllByTestId('sess-row');
     expect(screen.queryByTestId('shared-with-me')).toBeNull();
+  });
+});
+
+describe('Sidebar rows and the lost fold in the New layout (parity P8, H7, H8)', () => {
+  beforeEach(() => {
+    uiLayout.set('new');
+    sidebarGroupBy.set('project');
+    showFriendlyNames.set(true);
+  });
+  afterEach(() => {
+    uiLayout.set('classic');
+    showFriendlyNames.set(true);
+  });
+
+  function lostOn(host: string, n: number): SessionRow[] {
+    return Array.from({ length: n }, (_, i) => ({
+      ...sessionFor(1, `${host}-lost-${i}`),
+      host_alias: host,
+      lost_at: 50,
+      claude_session_id: `c-${host}-${i}`,
+      claude_status: 'blocked' as const,
+    }));
+  }
+
+  it('New layout: a mass loss folds into "12 stopped on trn" with Restore, and only the live row is in the tree', async () => {
+    const waiting = { ...sessionFor(2, 'dev-waiting'), claude_status: 'blocked' as const };
+    mockBackend(fakeProjects, [...lostOn('trn', 12), waiting]);
+    render(Sidebar);
+    await tick(); await tick();
+    const fold = screen.getByTestId('lost-fold');
+    expect(within(fold).getByTestId('lost-fold-toggle')).toHaveTextContent('12 stopped on trn');
+    expect(within(fold).getByTestId('lost-fold-restore')).toHaveTextContent('Restore');
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
+  });
+
+  it('New layout: the fold expands to its rows', async () => {
+    mockBackend(fakeProjects, lostOn('trn', 3));
+    render(Sidebar);
+    await tick(); await tick();
+    const toggle = screen.getByTestId('lost-fold-toggle');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryAllByTestId('sess-row')).toHaveLength(0);
+    await fireEvent.click(toggle);
+    await tick();
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    const rows = within(screen.getByTestId('lost-fold')).getAllByTestId('sess-row');
+    expect(rows.map((r) => r.textContent)).toEqual(
+      expect.arrayContaining([expect.stringContaining('trn-lost-0'), expect.stringContaining('trn-lost-2')]),
+    );
+  });
+
+  it('New layout: two lost rows are not a mass loss and stay where they are', async () => {
+    mockBackend(fakeProjects, lostOn('trn', 2));
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('lost-fold')).toBeNull();
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
+  });
+
+  it('New layout: Restore on the fold plans, confirms, then restores', async () => {
+    const lost = lostOn('trn', 3);
+    mockBackend(fakeProjects, lost);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    const calls: { dry_run: boolean; session_ids: number[] | null }[] = [];
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (c: string, x?: unknown) => {
+      if (c === 'restore_host_sessions') {
+        const a = (x as { args: { host_alias: string; dry_run: boolean; session_ids: number[] | null } }).args;
+        calls.push({ dry_run: a.dry_run, session_ids: a.session_ids });
+        return {
+          host_alias: a.host_alias,
+          dry_run: a.dry_run,
+          plan: lost.map((s) => ({
+            session_id: s.id,
+            tmux_name: s.tmux_name,
+            cwd: null,
+            claude_session_id: s.claude_session_id,
+            friendly_name: null,
+            action: 'restore',
+            reason: null,
+          })),
+          results: a.dry_run ? [] : lost.map((s) => ({ session_id: s.id, tmux_name: s.tmux_name, ok: true, error: null })),
+        };
+      }
+      return base(c, x);
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('lost-fold-restore'));
+    const confirm = await screen.findByTestId('lost-fold-confirm');
+    expect(screen.getByTestId('confirm-dialog')).toHaveTextContent('trn-lost-1');
+    expect(calls).toEqual([{ dry_run: true, session_ids: lost.map((s) => s.id) }]);
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]).toEqual({ dry_run: false, session_ids: lost.map((s) => s.id) });
+    await waitFor(() => expect(get(toasts).some((t) => t.message === 'Restored 3 of 3 sessions on trn.')).toBe(true));
+  });
+
+  it('New layout: a ghost row stays one line with an unbracketed host badge', async () => {
+    const ghost = { ...sessionFor(2, 'dev-ghost'), status: 'ghost', lost_at: 5 };
+    mockBackend(fakeProjects, [ghost]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('sess-row');
+    expect(row.querySelector('.sess-lines')).toBeNull();
+    expect(row.querySelector('.sess-details')).toBeNull();
+    expect(screen.getByTestId('host-badge').textContent).toBe('local');
+  });
+
+  it('New layout: the row shows the friendly name with the tmux name secondary', async () => {
+    const named = { ...sessionFor(1, 'dev-martin-janci-claude-fleet--fix-login'), friendly_name: 'Fix login' };
+    mockBackend(fakeProjects, [named]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('sess-row');
+    expect(row.querySelector('.sess-line1 .sess-name')).toHaveTextContent('Fix login');
+    const tmux = screen.getByTestId('sess-tmux-name');
+    expect(tmux).toHaveTextContent('dev-martin-janci-claude-fleet--fix-login');
+    expect(tmux.closest('[data-testid="sess-details"]')).not.toBeNull();
+  });
+
+  it('New layout: the Friendly names switch in ⋯ swaps the row to the tmux name and persists', async () => {
+    const named = { ...sessionFor(1, 'dev-martin-janci-claude-fleet--fix-login'), friendly_name: 'Fix login' };
+    mockBackend(fakeProjects, [named]);
+    render(Sidebar);
+    await tick(); await tick();
+    await openViewOptions();
+    const sw = within(screen.getByTestId('view-options')).getByTestId('friendly-name-toggle');
+    expect(sw).toHaveAttribute('aria-checked', 'true');
+    await fireEvent.click(sw);
+    await tick();
+    expect(sw).toHaveAttribute('aria-checked', 'false');
+    const row = screen.getByTestId('sess-row');
+    expect(row.querySelector('.sess-line1 .sess-name')).toHaveTextContent('dev-martin-janci-claude-fleet--fix-login');
+    expect(row).not.toHaveTextContent('Fix login');
+    expect(JSON.parse(localStorage.getItem('cf:pref:show-friendly-names')!)).toBe(false);
+    await fireEvent.click(sw);
+    await tick();
+    expect(sw).toHaveAttribute('aria-checked', 'true');
+    expect(row.querySelector('.sess-line1 .sess-name')).toHaveTextContent('Fix login');
+    expect(JSON.parse(localStorage.getItem('cf:pref:show-friendly-names')!)).toBe(true);
+  });
+
+  it('New layout: the Row details switch in ⋯ hides the second row line and persists', async () => {
+    mockBackend(fakeProjects, [{ ...sessionFor(1, 'dev-a'), started_at: Math.floor(Date.now() / 1000) - 60 }]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    await openViewOptions();
+    const pill = within(screen.getByTestId('view-options')).getByTestId('toggle-row-details');
+    expect(pill).toHaveAttribute('aria-checked', 'true');
+    await fireEvent.click(pill);
+    await tick();
+    expect(screen.queryByTestId('sess-details')).toBeNull();
+    expect(pill).toHaveAttribute('aria-checked', 'false');
+    expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(false);
+    await fireEvent.click(pill);
+    await tick();
+    expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    expect(pill).toHaveAttribute('aria-checked', 'true');
+    expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(true);
   });
 });

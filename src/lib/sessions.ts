@@ -870,12 +870,47 @@ export interface NewSessionArgs {
   agent?: SessionAgent | null;
 }
 
+/** A ⌘N start whose create command is in flight (redesign step 5.13): the
+ *  Pulse sequence's worktree and tmux steps run inside it. */
+export interface CreatingStart {
+  host_alias: string;
+  /** Empty when the backend mints the name. */
+  name: string;
+  kind: 'work' | 'shell';
+}
+
+export const creatingStart = writable<CreatingStart | null>(null);
+
+/** Rows a create returned before their agent was up; `session_starting.ts`
+ *  follows them until it is. */
+export const startedIds = writable<ReadonlySet<number>>(new Set());
+
+function markStarting(row: Pick<SessionRow, 'id' | 'kind' | 'claude_status'> | null): void {
+  if (!row || row.kind === 'shell' || row.claude_status !== null) return;
+  startedIds.update((s) => new Set([...s, row.id]));
+}
+
 export async function newSessionAbortable(
   args: NewSessionArgs,
   signal?: AbortSignal,
 ): Promise<Result<SessionRow>> {
-  const r = await invokeCmdAbortable<SessionRow>('new_session', { args }, signal);
-  if (r.ok) acceptCommandRow(r.value);
+  // The Pulse sequence (5.13) follows the start: the command in flight is
+  // its worktree and tmux steps, the row it returns waits on the agent.
+  creatingStart.set({
+    host_alias: args.host_alias,
+    name: args.name ?? '',
+    kind: args.kind === 'shell' || args.agent === 'shell' ? 'shell' : 'work',
+  });
+  let r: Result<SessionRow>;
+  try {
+    r = await invokeCmdAbortable<SessionRow>('new_session', { args }, signal);
+  } finally {
+    creatingStart.set(null);
+  }
+  if (r.ok) {
+    acceptCommandRow(r.value);
+    markStarting(r.value);
+  }
   return r;
 }
 

@@ -361,9 +361,38 @@ pub async fn mcp_pending_confirms(
     routed::mcp_pending_confirms(&backend, &guards).await
 }
 
+/// What Control's agent handed on, newest first (redesign step 9.3): the
+/// receipts Control draws its chips and cards from. The hub's on a
+/// hub-backed desktop (`control_handoffs`), where the agent runs.
+#[tauri::command]
+pub async fn control_handoffs(
+    limit: Option<i64>,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<fleet_core::store::ControlHandoffRow>, IpcError> {
+    routed::control_handoffs(&backend, &store, limit).await
+}
+
 pub(crate) mod routed {
     use super::*;
     use serde_json::json;
+
+    /// A hub from before the receipts (contract < 14) refuses the tool as a
+    /// protocol error, and it never wrote one: nothing to show.
+    pub async fn control_handoffs(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        limit: Option<i64>,
+    ) -> Result<Vec<fleet_core::store::ControlHandoffRow>, IpcError> {
+        match backend.hub() {
+            Some(hub) => older_hub(
+                hub.route("control_handoffs", &json!({ "limit": limit }))
+                    .await,
+                Vec::new(),
+            ),
+            None => fleet_core::service::control_handoffs::list(store, limit),
+        }
+    }
 
     pub async fn mcp_confirm(
         backend: &FleetBackend,

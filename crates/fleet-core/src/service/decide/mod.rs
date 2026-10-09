@@ -35,6 +35,9 @@
 
 #[cfg(feature = "nl-detect")]
 pub mod bench;
+pub mod duplicate;
+#[cfg(test)]
+mod duplicate_tests;
 pub mod haiku;
 pub mod host_placement;
 #[cfg(test)]
@@ -106,10 +109,12 @@ pub enum Feature {
     AdoptTarget,
     /// Prefilling the project of a found conversation (J10, Restore).
     RestoreTarget,
+    /// Flagging a proposed task that may duplicate an existing one (K4).
+    Duplicate,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 8] = [
+    pub const ALL: [Feature; 9] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
@@ -118,6 +123,7 @@ impl Feature {
         Feature::QuickAnswer,
         Feature::AdoptTarget,
         Feature::RestoreTarget,
+        Feature::Duplicate,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -130,6 +136,7 @@ impl Feature {
             Feature::QuickAnswer => "quick_answer",
             Feature::AdoptTarget => "adopt_target",
             Feature::RestoreTarget => "restore_target",
+            Feature::Duplicate => "duplicate",
         }
     }
 
@@ -148,6 +155,7 @@ impl Feature {
             Feature::QuickAnswer => settings::DECIDE_JEV_QUICK_ANSWER,
             Feature::AdoptTarget => settings::DECIDE_JEV_ADOPT_TARGET,
             Feature::RestoreTarget => settings::DECIDE_JEV_RESTORE_TARGET,
+            Feature::Duplicate => settings::DECIDE_JEV_DUPLICATE,
         }
     }
 }

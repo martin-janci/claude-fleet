@@ -6,10 +6,10 @@
   //
   // The sheet owns the frame and the footer only; each dialog keeps its own
   // state, gates and calls. `busy` disables both buttons and swaps the verb
-  // for `busyVerb` (no spinner: the loader rules keep spinners out of a
-  // dialog that is waiting on a person, and this one is waiting on a call
-  // that names itself).
+  // for `busyVerb`, with the comet loader in the button (step 3.13): a call
+  // is running, never a wait on a person.
   import type { Snippet } from 'svelte';
+  import Loader from './Loader.svelte';
   import Modal from './Modal.svelte';
 
   let {
@@ -78,13 +78,18 @@
         data-testid={confirmTestid}
         title={confirmTitle ?? ''}
         disabled={!canConfirm || busy}
-        onclick={onconfirm}>{busy ? (busyVerb ?? verb) : verb}</button
+        onclick={onconfirm}
+        >{#if busy}<Loader name="comet" size={12} class="btn-loader" />{busyVerb ?? verb}{:else}{verb}{/if}</button
       >
     </footer>
   </div>
 </Modal>
 
 <style>
+  footer :global(.btn-loader) {
+    margin-right: 0.35em;
+    vertical-align: -1px;
+  }
   .sheet {
     display: flex;
     flex-direction: column;

@@ -380,3 +380,44 @@ describe('PageView — the notifications matrix (11.9)', () => {
     expect((screen.getByTestId('matrix-notify.phone-failed') as HTMLInputElement).disabled).toBe(true);
   });
 });
+
+describe('PageView — Updates lists every part of the fleet (11.9b)', () => {
+  const rows = [
+    { device: 'Hub', part: 'Hub', version: '0.5.4', update: 'Up to date', reported_at: 100 },
+    { device: 'mercury', part: 'Agent', version: '0.5.3', update: 'Update available', offers: '0.5.4', reported_at: 100 },
+    { device: 'Device 7', part: 'Phone', version: '0.5.3', update: 'Update available', offers: '0.5.4', reported_at: 100 },
+  ];
+
+  function updates(props: { readonly?: boolean; remote?: boolean } = {}) {
+    inv.mockImplementation(
+      registryRouter({}, (cmd) => (cmd === 'list_update_targets' ? rows : null)).impl,
+    );
+    render(PageView, {
+      props: {
+        page: pageOf('settings.updates'),
+        pages: bundle.pages,
+        descs,
+        values: defaults,
+        sources: bundle.sources,
+        onnavigate: vi.fn(),
+        ...props,
+      },
+    });
+  }
+
+  it('reads the hub through list_update_targets, agents and the phone included', async () => {
+    updates();
+    const table = await screen.findByTestId('data-table-updates.targets');
+    await waitFor(() => expect(within(table).getByText('mercury')).toBeTruthy());
+    expect(within(table).getByText('Phone')).toBeTruthy();
+    expect(within(table).getAllByText('0.5.4').length).toBeGreaterThan(1);
+    expect(inv).toHaveBeenCalledWith('list_update_targets', undefined);
+    expect(inv).not.toHaveBeenCalledWith('fetch_page_source', expect.anything());
+  });
+
+  it('still shows on a paired desktop, where its command routes to the hub', async () => {
+    updates({ readonly: true, remote: true });
+    const table = await screen.findByTestId('data-table-updates.targets');
+    await waitFor(() => expect(within(table).getByText('Device 7')).toBeTruthy());
+  });
+});

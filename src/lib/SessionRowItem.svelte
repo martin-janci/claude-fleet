@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, type Snippet } from 'svelte';
   import {
     recreateSession,
     dismissGhostSession,
@@ -85,6 +85,7 @@
     askRestart,
     askKill,
     orgColor = null,
+    trailing = undefined,
   }: {
     sess: SessionRow;
     selectMode: boolean;
@@ -127,6 +128,9 @@
     /** Work graph M5: the org's colour, drawn as a thin bar at the row's
      *  left edge — only when two or more orgs exist (the caller decides). */
     orgColor?: string | null;
+    /** Drawn last inside the row: a control that belongs to it (the
+     *  archived chip), so a tree row owns its own controls. */
+    trailing?: Snippet;
   } = $props();
 
   const sessSelected = $derived($selectedSession?.id === sess.id);
@@ -602,7 +606,8 @@
   aria-current={sessSelected ? 'true' : undefined}
   data-stuck={sess.stuck_kind ?? undefined}
   data-bucket={triage.bucket}
-  role="button"
+  role="treeitem"
+  aria-selected={sessSelected}
   tabindex="0"
   ondblclick={(e) => sess.status !== 'ghost' && !readOnly && beginLabelEdit(sess, e)}
   onclick={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onSelectSession(sess, e)}
@@ -613,11 +618,10 @@
   use:wash={bucketState(triage.bucket)}
 >
   {#if selectMode && !readOnly}
-    <!-- a11y smell, known: an <input> nested in a role="button" row. The
-         row is the click target for open/toggle; the box is a visible
-         affordance for the same toggle and stops propagation so the two
-         never double-fire. Splitting the row into a real <button> plus a
-         sibling checkbox is the proper fix (F5 sidebar split). -->
+    <!-- The row is a treeitem (redesign step 7.2), so the box is a control
+         of its own inside it, not a child a button would hide. It is a
+         visible affordance for the row's toggle and stops propagation so
+         the two never double-fire. -->
     <input
       type="checkbox"
       class="select-box"
@@ -986,6 +990,7 @@
       </div>
     {/if}
   {/if}
+  {@render trailing?.()}
 </div>
 {#if nameDialog}
   <!-- `rename` mode is handed an item id and no session, so the dialog cannot
@@ -1081,7 +1086,7 @@
   .sess-row.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
   .sess-row.renaming { background: var(--bg-pane); }
   /* The row is the app's primary navigation surface and is a tabbable
-     role="button". Without this a keyboard user tabbing the session list
+     treeitem. Without this a keyboard user tabbing the session list
      sees nothing move at all (WCAG 2.4.7). Drawn inward: the row is inside
      a scrolling list that clips an outset ring. */
   .sess-row:focus-visible {

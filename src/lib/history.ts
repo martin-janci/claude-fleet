@@ -134,6 +134,21 @@ export function repoUnstage(sessionId: number, paths: string[]): Promise<Result<
   return invokeCmd<null>('repo_unstage', { args: { session_id: sessionId, paths } });
 }
 
+/** A commit message drafted from the staged changes (redesign 5.12). */
+export interface CommitDraft {
+  message: string;
+  model: string;
+  host_alias: string;
+  /** How many staged files it was written from. */
+  files: number;
+}
+
+/** Draft a commit message on the session's own host and account; nothing
+ *  is committed. */
+export function draftCommitMessage(sessionId: number): Promise<Result<CommitDraft>> {
+  return invokeCmd<CommitDraft>('draft_commit_message', { args: { session_id: sessionId } });
+}
+
 export function repoCommitCreate(
   sessionId: number,
   message: string,

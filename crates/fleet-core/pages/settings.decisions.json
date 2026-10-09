@@ -74,6 +74,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.duplicate",
+          "hint": "Marks a proposed task that may repeat an existing one; you still merge or keep both."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
         }
       ]

@@ -657,6 +657,19 @@ pub async fn my_grants(
     routed::my_grants(&backend, &store).await
 }
 
+/// A session's shell terminals (step 5.3): list, open or close one. The
+/// terminal pane then attaches to the `tmux_name` it answers with, through
+/// `pty_open`, like the agent's.
+#[tauri::command]
+pub async fn shell_terminals(
+    args: sessions::ShellTerminalsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<sessions::ShellTerminalsResult, IpcError> {
+    routed::shell_terminals(&backend, args, &store, &ssh).await
+}
+
 /// The routing, away from `tauri::State` so the tests can drive it.
 pub(crate) mod routed {
     use super::*;
@@ -1251,6 +1264,18 @@ pub(crate) mod routed {
                 // grant — `sharing::my_grants`' own first line.
                 sessions::my_grants(&s, who)
             }
+        }
+    }
+
+    pub async fn shell_terminals(
+        backend: &FleetBackend,
+        args: sessions::ShellTerminalsArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<sessions::ShellTerminalsResult, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("shell_terminals", &args).await,
+            None => sessions::shell_terminals(args, store, ssh).await,
         }
     }
 

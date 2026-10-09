@@ -303,7 +303,9 @@ Index by area (names only; see the reference for details):
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
   `new_shell_session`, `new_bg_session`, `spawn_review`, `rename_session`,
   `set_friendly_name`, `touch_session_viewed` (the turns it has finished
-  read as seen; drive reach), `register_self`, `whoami`, `ensure_operator` (the UX
+  read as seen; drive reach), `shell_terminals` (list, open or close the
+  session's shell terminals, tmux sessions `<name>--sh<N>` beside the agent
+  that no session list shows; own reach), `register_self`, `whoami`, `ensure_operator` (the UX
   agent's own session, idempotent), `operator_status` (why it cannot work,
   if it cannot).
 - **Sharing & ownership** (multi-user M1) — `session_share` (give one
@@ -834,20 +836,16 @@ Index by area (names only; see the reference for details):
   `failed` on an error, a lost or removed session, six quiet hours, or a
   session past the run budget (which also turns the routine off with
   `paused_reason`), and `skipped` when the last run is still going under
-<<<<<<< origin/main
   `overlap: skip`, today's budget is spent, the account its login bills
   is at or past `accounts.pause_at` (Orbit Fleet 8.7, read from the stored
   usage readings), or a person skipped it.
-  `automation.paused` (Pause all) stops the schedule and event fires,
-=======
-  `overlap: skip`, today's budget is spent, or a person skipped it.
   A finished run also carries an `outcome` (8.10): `did_work`, `nothing`,
   `failed` or `needs_person`, with `outcome_source` `exit` (a failed run,
   which nothing overrides), `rule` (an open question or a wedged session is
   `needs_person`, a pull request `did_work`) or `jev`; a run no rule can
   read has none until Jev answers. A `nothing` run marks its session seen,
-  so it stays out of the Inbox. `automation.paused` (Pause all) stops the schedule and event fires,
->>>>>>> HEAD
+  so it stays out of the Inbox. `automation.paused` (Pause all) stops the
+  schedule and event fires,
   never `run_now`. Read and changed by the owner and the org's admins, read
   by the org's members, never served to a per-host token; the routine's
   org is its host's.
@@ -1618,6 +1616,17 @@ automatically on app start.
   answered or expired). Both are the owner's own device only, never the
   operator; each change sends an empty `confirm:changed` event. Every
   other caller is unaffected: for them these tools are not gated.
+- **Handoff receipts.** Each successful call of the operator that hands
+  work on leaves a receipt (redesign 9.3): a prompt or task to a session
+  (`send_prompt`, `queue_prompt`, `run_prompt`, `dispatch_task`), a new
+  session, a new or started mission, a created task, a proposed tree of
+  subtasks (`work_link` `create` / `propose_tree` / `mission_*`). Control
+  draws them as chips and cards. `control_handoffs` (`limit?`, default 50)
+  lists them newest first, each with its target's state now (a mission's
+  name and state, a task's or the tree's items with their status and
+  proposal state); like `mcp_confirms` it answers the owner's own device
+  only, since a receipt quotes the operator's prompt. Each new receipt sends
+  an empty `handoff:changed` event. No other caller's calls leave one.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central
   machine.
