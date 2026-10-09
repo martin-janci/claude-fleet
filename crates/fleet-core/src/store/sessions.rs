@@ -793,6 +793,23 @@ impl Store {
         Ok(())
     }
 
+    /// The tmux names of `host_alias`'s rows running `agent` (shell rows
+    /// aside). Reconcile asks the host where those of them that are live
+    /// keep their Codex conversations.
+    pub fn pane_names_running(
+        &self,
+        host_alias: &str,
+        agent: &str,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT tmux_name FROM sessions \
+             WHERE host_alias = ?1 AND agent = ?2 AND kind != 'shell' \
+             ORDER BY tmux_name",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![host_alias, agent], |r| r.get(0))?;
+        rows.collect()
+    }
+
     /// Mark a session as a review of `reviews_session_id` (or back to 'work' with
     /// None). Write-once at spawn_review time. Reconcile never touches these
     /// columns — they survive re-probe because upsert_session's ON CONFLICT clause
@@ -1350,6 +1367,17 @@ impl Store {
     /// value once — a re-create keeps the original start. Emits
     /// `session_updated` so the sidebar's elapsed label does not wait for a
     /// re-list.
+    /// Put session `id` in project `project_id` (Adopt into, step 4.12).
+    /// The worktree it named belonged to its old project, so it is cleared.
+    pub fn set_session_project(&self, id: i64, project_id: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET project_id=?1, worktree_id=NULL WHERE id=?2",
+            rusqlite::params![project_id, id],
+        )?;
+        self.emit_session(id)?;
+        Ok(())
+    }
+
     pub fn set_started_at(&self, id: i64, at: i64) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE sessions SET started_at=COALESCE(started_at, ?1) WHERE id=?2",
@@ -2226,6 +2254,12 @@ impl Store {
     /// moved (redesign step 9.2).
     pub fn bus_confirm_changed(&self) {
         self.bus.confirm_changed();
+    }
+
+    /// Emit `handoff:changed` (redesign step 9.3): Control's agent handed
+    /// work on and a receipt was written.
+    pub fn bus_handoff_changed(&self) {
+        self.bus.handoff_changed();
     }
 }
 

@@ -7,7 +7,7 @@ import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { detectMac } from './terminal_keys';
-import { push } from './toasts';
+import { dismiss, push, setToastProgress } from './toasts';
 
 export type DownloadState = 'fetching' | 'ready' | 'failed';
 
@@ -44,11 +44,46 @@ export const downloads = writable<Download[]>([]);
 /** Where this window saved each file (id → path), for Show in Finder. Per
  *  window: the hub records that a file was saved, not where. */
 export const savedTo = writable<Map<number, string>>(new Map());
+/** Whether the Downloads sheet is open (App mounts it): a copy's toast opens it. */
+export const downloadsOpen = writable(false);
 export const downloadBudget = writable<{ total: number; max: number } | null>(null);
 
 /** Ready files nobody has saved yet: the footer's count. */
 export function unseen(rows: Download[]): number {
   return rows.filter((d) => d.state === 'ready' && d.downloaded_at == null).length;
+}
+
+/** Copies this window started whose size is known: download id → the
+ *  toast carrying their Progress ring (step 10.10), until they finish. */
+const jobToasts = new Map<number, number>();
+
+/** "Copying …" for a copy just asked for: with a known size the toast stays
+ *  up and carries a Progress ring the re-reads move; without one it says so
+ *  once and goes. */
+function announceCopy(row: Download, message: string): void {
+  const f = row.state === 'fetching' ? transferFraction(row) : null;
+  if (f === null) {
+    push({ kind: 'info', message });
+    return;
+  }
+  jobToasts.set(
+    row.id,
+    push({ kind: 'info', message, sticky: true, progress: f, action: { label: 'Open', run: () => downloadsOpen.set(true) } }),
+  );
+}
+
+/** Move each copy's ring; a copy that finished, failed or went drops its toast. */
+function followJobs(rows: Download[]): void {
+  for (const [id, toast] of jobToasts) {
+    const d = rows.find((r) => r.id === id);
+    const f = d && d.state === 'fetching' ? transferFraction(d) : null;
+    if (f === null) {
+      dismiss(toast);
+      jobToasts.delete(id);
+    } else if (!setToastProgress(toast, f)) {
+      jobToasts.delete(id);
+    }
+  }
 }
 
 /** Ids this window has already announced as ready, so a re-read toasts once. */
@@ -75,6 +110,7 @@ export async function loadDownloads(): Promise<Result<DownloadList>> {
   }
   for (const d of rows) if (d.state === 'ready') announced.add(d.id);
   primed = true;
+  followJobs(rows);
   downloads.set(rows);
   downloadBudget.set({ total: value.total_bytes ?? 0, max: value.max_total_bytes ?? 0 });
   return r;
@@ -106,7 +142,7 @@ async function requestCopy(sessionId: number, path: string, note: string | undef
 /** "Send to downloads" from the file viewer. */
 export async function sendFile(sessionId: number, path: string, note?: string): Promise<void> {
   const row = await requestCopy(sessionId, path, note, 'Send to downloads');
-  if (row) push({ kind: 'info', message: `Copying ${row.name}… it appears in Downloads when ready.` });
+  if (row) announceCopy(row, `Copying ${row.name}… it appears in Downloads when ready.`);
 }
 
 /** Copy a failed file again: the same session, path and note sent anew
@@ -120,7 +156,7 @@ export async function retryDownload(d: Download): Promise<boolean> {
   const row = await requestCopy(d.session_id, d.path, d.note, 'Retry');
   if (!row) return false;
   await removeDownload(d.id);
-  push({ kind: 'info', message: `Copying ${row.name} again…` });
+  announceCopy(row, `Copying ${row.name} again…`);
   return true;
 }
 
@@ -213,6 +249,8 @@ export function fmtSize(n: number): string {
 /** For tests: forget what was announced. */
 export function _resetDownloadsForTests(): void {
   announced.clear();
+  jobToasts.clear();
+  downloadsOpen.set(false);
   firstSeen.clear();
   primed = false;
   savedTo.set(new Map());

@@ -35,6 +35,9 @@
 
 #[cfg(feature = "nl-detect")]
 pub mod bench;
+pub mod control_route;
+#[cfg(test)]
+mod control_route_tests;
 pub mod duplicate;
 #[cfg(test)]
 mod duplicate_tests;
@@ -43,6 +46,9 @@ pub mod host_placement;
 #[cfg(test)]
 mod host_placement_tests;
 pub mod jev;
+pub mod lost_target;
+#[cfg(test)]
+mod lost_target_tests;
 pub mod quick_answer;
 #[cfg(test)]
 mod quick_answer_tests;
@@ -102,19 +108,29 @@ pub enum Feature {
     HostPlacement,
     /// The likely option first in an agent's question or a form (J5).
     QuickAnswer,
+    /// Prefilling the project of a pane fleet did not start (N4, Adopt).
+    AdoptTarget,
+    /// Prefilling the project of a found conversation (J10, Restore).
+    RestoreTarget,
     /// Flagging a proposed task that may duplicate an existing one (K4).
     Duplicate,
+    /// Where a message typed in Control goes: a mission, a session, or
+    /// Control itself (K2, redesign step 9.9).
+    ControlRoute,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 7] = [
+    pub const ALL: [Feature; 10] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
         Feature::SiblingRepos,
         Feature::HostPlacement,
         Feature::QuickAnswer,
+        Feature::AdoptTarget,
+        Feature::RestoreTarget,
         Feature::Duplicate,
+        Feature::ControlRoute,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -125,7 +141,10 @@ impl Feature {
             Feature::SiblingRepos => "sibling_repos",
             Feature::HostPlacement => "host_placement",
             Feature::QuickAnswer => "quick_answer",
+            Feature::AdoptTarget => "adopt_target",
+            Feature::RestoreTarget => "restore_target",
             Feature::Duplicate => "duplicate",
+            Feature::ControlRoute => "control_route",
         }
     }
 
@@ -142,7 +161,10 @@ impl Feature {
             Feature::SiblingRepos => settings::DECIDE_JEV_SIBLING_REPOS,
             Feature::HostPlacement => settings::DECIDE_JEV_HOST_PLACEMENT,
             Feature::QuickAnswer => settings::DECIDE_JEV_QUICK_ANSWER,
+            Feature::AdoptTarget => settings::DECIDE_JEV_ADOPT_TARGET,
+            Feature::RestoreTarget => settings::DECIDE_JEV_RESTORE_TARGET,
             Feature::Duplicate => settings::DECIDE_JEV_DUPLICATE,
+            Feature::ControlRoute => settings::DECIDE_JEV_CONTROL_ROUTE,
         }
     }
 }

@@ -11,6 +11,8 @@ import { agentPanelOpen, operatorError, operatorState, operatorSession } from '.
 import { sessions } from './sessions';
 import { hostsViewRequest, settingsOpen, settingsSection } from './app_views';
 import { agentPanelSize, agentPanelMaximized, AGENT_PANEL_MIN_W } from './agent_panel_size';
+import { expectAccessible } from './a11y_check';
+import { uiLayout } from './prefs';
 
 const row = (over = {}) =>
   ({
@@ -200,5 +202,31 @@ describe('AgentPanel: a next step for every blocked state (step 9.1)', () => {
     // Opening Control makes sure there is an agent, without opening the sheet.
     expect(invoke).toHaveBeenCalledWith('operator_status', undefined);
     expect(get(agentPanelOpen)).toBe(false);
+  });
+});
+
+describe('AgentPanel: accessibility', () => {
+  it('the sheet, with its agent running, is accessible', async () => {
+    uiLayout.set('new');
+    try {
+      const { container } = render(AgentPanel);
+      expect(screen.getByTestId('agent-panel')).toBeTruthy();
+      await expectAccessible(container);
+    } finally {
+      uiLayout.set('classic');
+    }
+  });
+
+  it('a blocked agent, with its next step, is accessible', async () => {
+    uiLayout.set('new');
+    operatorState.set('lost');
+    operatorError.set('Restart failed: no tmux');
+    invoke.mockResolvedValue({ ready: false, session: row(), blocked: 'lost' });
+    try {
+      const { container } = render(AgentPanel, { embedded: true });
+      await expectAccessible(container);
+    } finally {
+      uiLayout.set('classic');
+    }
   });
 });

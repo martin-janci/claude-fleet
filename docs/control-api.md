@@ -309,10 +309,10 @@ Index by area (names only; see the reference for details):
   agent's own session, idempotent), `operator_status` (why it cannot work,
   if it cannot).
 - **Sharing & ownership** (multi-user M1) — `session_share` (give one
-  person `watch` or `drive` on a session you own — or, with `org` instead of
+  person `watch`, `answer` or `drive` on a session you own — or, with `org` instead of
   `person`, an org you are a member of: its members and admins as of now,
   never a later joiner or a viewer), `session_unshare` (take it
-  back), `session_narrow` (`drive` → `watch`; there is deliberately no tool
+  back), `session_narrow` (`drive` or `answer` → `watch`; there is deliberately no tool
   that raises a grant — widen by revoking and sharing again),
   `session_access` (who holds a live grant on your session), `my_grants`
   (who *you* are on this fleet and every live grant to you, which is what a
@@ -325,6 +325,11 @@ Index by area (names only; see the reference for details):
   claim is `fleet-hub session claim <id> --person <name>`, beside
   `fleet-hub session unclaimed`. Sharing never confers a terminal: a
   terminal is this machine's own SSH, which no revoke could reach.
+  `answer` (Orbit Fleet 11.7) sits between the two: it reads like `watch`
+  and may also answer the dialog on the pane — `send_prompt` with an empty
+  `prompt` and one of `keys` Enter, Escape, Tab or a digit the dialog
+  numbers, accepted only while a fresh read of the pane shows a dialog. Any
+  prompt text, and `C-c`, still need `drive`.
 - **Presence** (redesign 11.7b) — `session_presence` (`session_id`,
   `leaving?`): say you have a session open, again every `heartbeat_secs`
   (20), and once with `leaving: true` when you close it; the answer is who
@@ -364,7 +369,14 @@ Index by area (names only; see the reference for details):
   when `mcp.confirm_destructive` is on), `kill_session`, `safe_kill_session`,
   `dismiss_ghost_session`, `adopt_session` (a live tmux session fleet did
   not start, `started_at` null, becomes fleet's: `started_at` is set and the
-  caller owns it when nobody did; the pane is untouched), `move_session` (continue a work session on another
+  caller owns it when nobody did; the pane is untouched; `project_id` puts it
+  in a project), `lost_target` (read-only: the project a Lost and found
+  entry would go into, to prefill Adopt or Restore: a directory inside a
+  project answers `rule`; otherwise Jev may propose one, `decide.jev.adopt_target`
+  and `decide.jev.restore_target`, both off by default), `place_transcript`
+  (Restore into a project: copies a found conversation under the directory
+  Claude Code keys the project's root by, so `new_session { resume_claude_session_id }`
+  resumes it there; never moves or overwrites a transcript), `move_session` (continue a work session on another
   host: the transcript is copied and the work travels as it is — unpushed
   commits, uncommitted files and small git-ignored ones, nothing pushed or
   committed for you (`strict: true` restores the old clean + pushed
@@ -811,6 +823,18 @@ Index by area (names only; see the reference for details):
   bytes are `GET /downloads/<id>` (bearer, not a tool result). Events:
   `download:changed { id }`, ids only, never on a host- or org-bound
   stream. See `docs/hub.md` → *File downloads*.
+- **Library** — `library`, by `action` (Orbit Fleet 9.7): the files a
+  person put on a host, by Control's Library Upload… or as a prompt's
+  attachment (`library_items`). `list { session_id?, host_alias?, limit? }`
+  answers `{ items }`, newest first; `add { kind: upload | attachment,
+  session_id, files: [{ path, name?, size? }] }` records files already on
+  the session's host (the desktop puts them there over its own ssh), taking
+  the host, session name and org from the session's row; `remove { id }`
+  drops a row and never the file. A row names a path on the owner's host,
+  so it is the downloads' `own` tier: a grantee or another person sees an
+  empty page and `add` answers `E_NOTFOUND`. Never served to a per-host
+  token. The Library lists downloads and repos beside these from
+  `list_downloads` and the sessions it already has.
 - **Routines** — `routines`, by `action` (Orbit Fleet 8.5): a person's
   saved prompt that starts a session on a cron schedule (`trigger: cron`,
   five fields read at the `utc_offset_min` the device had when it was
@@ -870,6 +894,24 @@ Index by area (names only; see the reference for details):
   gone. A row is served to whoever may see the session that opened it; a PR
   whose session is gone only to the hub's own reader or the person of a
   one-person hub. A read: nothing here merges or closes a PR.
+- **Runs** — `runs`, by `action` (`list` today; Orbit Fleet 8.3). One
+  newest-first list of everything that ran on the fleet's behalf: dispatched
+  tasks, a mission's steps and brakes, Jev's decisions, fleet's own
+  `claude -p` runs (the planner, a summary) and routine fires. `list { since?, until?, kind?,
+  outcome?, org_id?, mission_id?, session_id?, routine_id?, limit? (≤ 200,
+  50), offset? }`
+  answers `{ runs, total }`; each run carries `id` (`<source>:<rowid>`),
+  `kind` (`operator` | `task` | `mission` | `jev` | `planner` | `summary` |
+  `routine`),
+  `owner`, `started_at`, `ended_at?`, `duration_ms?`, `outcome` (`ok` |
+  `failed` | `needs_person` | `nothing_to_do` | `running`), `error?`,
+  `cost_micros?`, `model?`, `host?`, `org_id?`, `mission_id?`,
+  `session_ids`, `summary?` and `routine_id?`. Jev rows are only the
+  decisions that called the provider. The list is cut to the caller's view scope
+  (`service::runs`): a task needs every session it names to be visible, a
+  mission's rows need the mission, a routine's fires the routine, and runs that belong to no session or
+  mission need whole-fleet spend. A person's, never served to a per-host
+  token.
 - **Chat forms** — `ask`. Chat forms: open a `fleet.form/1` form in your own session's chat and wait for a person's answers; the person's side lists, gets, answers and declines. See `docs/forms.md`.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
@@ -960,7 +1002,7 @@ Index by area (names only; see the reference for details):
   `set_member { org, person | person_id, role: admin|member|viewer }` (adds,
   or changes a role; a new name becomes a person), `remove_member { org,
   person, keep_grants }` (revokes what was shared with them on the org's
-  sessions unless `keep_grants`), `member_grants` (`{ watch, drive }`
+  sessions unless `keep_grants`), `member_grants` (`{ watch, answer, drive }`
   counts), `revoke_member_grants` and `narrow_member_grants` — downward
   only. An org admin never changes their own membership or the hub owner's.
   Hub owner only: `set_hub_org { org }` (no org: none), and `update_org`'s
@@ -1606,9 +1648,24 @@ automatically on app start.
   which lists the waiting calls with `mcp_confirms` (each with `nonce`,
   `tool`, `summary`, `caller`, `operator`, `asked_at`) and answers one with
   `answer_mcp_confirm` (`nonce`, `approved`; `false` when it was already
-  answered or expired). Both are the owner's own device only, never the
+  answered or expired). `control_route` (redesign step 9.9, Jev K2,
+  `decide.jev.control_route`) tells the owner's device where a message just
+  sent in Control goes: `propose {text}` answers `{outcome: proposed | ask |
+  none, target?, proposal?, targets, run_id?}` over the active missions and
+  running sessions, and `follow {run_id, chosen}` records the person's pick. Both are the owner's own device only, never the
   operator; each change sends an empty `confirm:changed` event. Every
   other caller is unaffected: for them these tools are not gated.
+- **Handoff receipts.** Each successful call of the operator that hands
+  work on leaves a receipt (redesign 9.3): a prompt or task to a session
+  (`send_prompt`, `queue_prompt`, `run_prompt`, `dispatch_task`), a new
+  session, a new or started mission, a created task, a proposed tree of
+  subtasks (`work_link` `create` / `propose_tree` / `mission_*`). Control
+  draws them as chips and cards. `control_handoffs` (`limit?`, default 50)
+  lists them newest first, each with its target's state now (a mission's
+  name and state, a task's or the tree's items with their status and
+  proposal state); like `mcp_confirms` it answers the owner's own device
+  only, since a receipt quotes the operator's prompt. Each new receipt sends
+  an empty `handoff:changed` event. No other caller's calls leave one.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central
   machine.

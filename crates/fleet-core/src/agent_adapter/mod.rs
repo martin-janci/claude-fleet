@@ -21,7 +21,7 @@
 
 mod agy;
 mod claude;
-mod codex;
+pub(crate) mod codex;
 
 pub use agy::Agy;
 pub use claude::ClaudeCode;
@@ -119,6 +119,23 @@ pub trait AgentAdapter: Send + Sync {
 
     /// The conversation's turns from its transcript file's text.
     fn parse_transcript(&self, transcript: &str) -> Vec<ConvTurn>;
+
+    /// The context the conversation uses now, from its transcript's tail.
+    /// `None` when the tail does not say (or this agent's transcript is not
+    /// read yet).
+    fn context_usage(&self, _transcript: &str) -> Option<crate::service::context::ContextUsage> {
+        None
+    }
+
+    /// Tool call `id`'s input and result from the transcript lines that
+    /// mention it. `None` when no call has that id.
+    fn tool_detail(
+        &self,
+        _lines: &str,
+        _id: &str,
+    ) -> Option<crate::service::transcript::ToolDetail> {
+        None
+    }
 }
 
 static CLAUDE_CODE: ClaudeCode = ClaudeCode;

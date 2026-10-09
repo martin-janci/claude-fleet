@@ -669,6 +669,20 @@ fn peer_links_has_msgs_total(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 142: `session_grants`' CHECK
+/// already admits 'answer'. 142 rebuilds the table, so a re-run only records
+/// the version.
+fn session_grants_has_answer(conn: &Connection) -> rusqlite::Result<bool> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'session_grants'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(sql.is_some_and(|s| s.contains("'answer'")))
+}
+
 /// `already_applied` guard of migration 117.
 /// `already_applied` guard of migration 134.
 fn hosts_has_agents_on_path(conn: &Connection) -> rusqlite::Result<bool> {
@@ -1615,6 +1629,26 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/139_routine_run_outcome.sql"),
         already_applied: Some(routine_runs_has_outcome_source),
     },
+    // Orbit Fleet 9.3: `control_handoffs`, what Control's agent sent where.
+    // A new table only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        140,
+        include_str!("../../migrations/140_control_handoffs.sql"),
+    ),
+    // Orbit Fleet 8.3: the indexes behind `runs { list }` (one list over
+    // tasks, mission actions, Jev, `claude -p` and routine runs). Indexes only,
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(141, include_str!("../../migrations/141_runs_indexes.sql")),
+    // Orbit Fleet 11.7, the Answer share level: `session_grants.level`'s
+    // CHECK gains 'answer'. A table rebuild, so guarded.
+    Migration {
+        version: 142,
+        sql: include_str!("../../migrations/142_share_level_answer.sql"),
+        already_applied: Some(session_grants_has_answer),
+    },
+    // Orbit Fleet 9.7: Control's Library indexes the files a person put on
+    // a host (one CREATE TABLE IF NOT EXISTS, idempotent as written).
+    Migration::plain(143, include_str!("../../migrations/143_library_items.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -5993,6 +6027,79 @@ mod tests {
         // A second open is a no-op.
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// 142 (Orbit Fleet 11.7) rebuilds `session_grants` to widen its CHECK:
+    /// the rows it held come through with their ids, the indexes are back,
+    /// `answer` is admitted, and a re-run is only recorded.
+    #[test]
+    fn migration_142_keeps_every_grant_and_admits_answer() {
+        let s = Store::open_in_memory().unwrap();
+        let ada = s.create_person("ada", None).unwrap().id;
+        let bob = s.create_person("bob", None).unwrap().id;
+        s.upsert_host("h").unwrap();
+        let sid = s
+            .upsert_session("t", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.claim_if_unclaimed(sid, Some(ada)).unwrap();
+        let g = s
+            .grant_session(sid, crate::store::GrantRecipient::Person(bob), "drive", ada)
+            .unwrap();
+        // Back to the table as 100 wrote it, still holding the grant.
+        s.conn
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 CREATE TEMP TABLE keep AS SELECT * FROM session_grants;
+                 DROP TABLE session_grants;",
+            )
+            .unwrap();
+        s.conn
+            .execute_batch(include_str!("../../migrations/100_session_grants.sql"))
+            .unwrap();
+        s.conn
+            .execute_batch(
+                "INSERT INTO session_grants SELECT * FROM keep; DROP TABLE keep;
+                 PRAGMA foreign_keys = ON;",
+            )
+            .unwrap();
+        assert!(!session_grants_has_answer(&s.conn).unwrap());
+        let level_of = |s: &Store| -> String {
+            s.conn
+                .query_row(
+                    "SELECT level FROM session_grants WHERE id = ?1",
+                    [g.id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        s.conn
+            .execute("DELETE FROM schema_version WHERE version >= 142", [])
+            .unwrap();
+        s.migrate().unwrap();
+        assert!(session_grants_has_answer(&s.conn).unwrap());
+        assert_eq!(level_of(&s), "drive", "the grant came through under its id");
+        let indexes: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+                  AND tbl_name = 'session_grants' AND name LIKE 'idx_session_grants_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexes, 3);
+        s.conn
+            .execute(
+                "UPDATE session_grants SET level = 'answer' WHERE id = ?1",
+                [g.id],
+            )
+            .expect("the CHECK admits answer");
+        // A re-run is recorded, not rebuilt: the row keeps its new level.
+        s.conn
+            .execute("DELETE FROM schema_version WHERE version >= 142", [])
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(level_of(&s), "answer");
     }
 }
 
