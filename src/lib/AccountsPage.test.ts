@@ -5,6 +5,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AccountsPage from './AccountsPage.svelte';
+import { get } from 'svelte/store';
+import { hostsViewRequest } from './app_views';
 import { hosts } from './hosts';
 import { accounts } from './accounts';
 import { sessions } from './sessions';
@@ -91,6 +93,20 @@ describe('AccountsPage', () => {
     const s = within(detail).getByTestId('account-sessions');
     expect(s.textContent).toContain('admin-1');
     expect(s.textContent).toContain('admin-2');
+  });
+
+  it('review r08: a login host and All hosts open the Hosts view', async () => {
+    render(AccountsPage, props);
+    const admin = screen.getAllByTestId('account-card').find((c) => c.getAttribute('data-account') === ADMIN.uuid)!;
+    await fireEvent.click(admin);
+    const host = within(screen.getByTestId('account-logins'))
+      .getAllByTestId('account-login-host')
+      .find((b) => b.textContent === 'mefistos')!;
+    await fireEvent.click(host);
+    expect(get(hostsViewRequest)).toEqual({ host: 'mefistos' });
+    await fireEvent.click(screen.getByTestId('accounts-all-hosts'));
+    expect(get(hostsViewRequest)).toEqual({ host: null });
+    hostsViewRequest.set(null);
   });
 
   it('says so when an account has no reading and no history', async () => {
