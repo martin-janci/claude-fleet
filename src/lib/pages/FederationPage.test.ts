@@ -118,14 +118,25 @@ describe('Settings → Federation: loaders (11.12)', () => {
   const show = () => render(ResourcePage, { props: { page, resource } });
 
   it('shows a Constellation with the count from the link’s message counters while its queue drains', async () => {
-    const t = Math.floor(Date.now() / 1000);
-    invoke.mockImplementation(async (cmd: string) =>
-      cmd === 'list_peer_links' ? [{ ...acme, sync: { done: 412, total: 1280, both_ways: false, since: t - 18 } }] : null,
-    );
-    show();
-    await fireEvent.click((await screen.findAllByTestId('resource-row'))[0]);
-    expect(screen.getByTestId('sync-count-sync').textContent).toBe('412 of 1 280 messages · 18 s');
-    expect((await screen.findByTestId('sync-loader-sync')).getAttribute('data-loader')).toBe('constellation');
+    // The clock stands still (only Date is faked, so the loader's delay and
+    // the page's own timers still run): a render that crosses a second
+    // boundary would otherwise read 19 s.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-10-09T01:00:00.900Z'));
+      const t = Math.floor(Date.now() / 1000);
+      invoke.mockImplementation(async (cmd: string) =>
+        cmd === 'list_peer_links' ? [{ ...acme, sync: { done: 412, total: 1280, both_ways: false, since: t - 18 } }] : null,
+      );
+      show();
+      await fireEvent.click((await screen.findAllByTestId('resource-row'))[0]);
+      expect(screen.getByTestId('sync-count-sync').textContent).toBe('412 of 1 280 messages · 18 s');
+      // The loader shows after its 400 ms delay; a loaded box may take longer.
+      const loader = await screen.findByTestId('sync-loader-sync', {}, { timeout: 5000 });
+      expect(loader.getAttribute('data-loader')).toBe('constellation');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shows a Counter-orbit while the hubs trade with nothing queued, and nothing when idle', async () => {
@@ -136,7 +147,7 @@ describe('Settings → Federation: loaders (11.12)', () => {
     const rows = await screen.findAllByTestId('resource-row');
     await fireEvent.click(rows[0]);
     expect(screen.getByTestId('sync-count-sync').textContent).toBe('Trading both ways');
-    expect((await screen.findByTestId('sync-loader-sync')).getAttribute('data-loader')).toBe('counter-orbit');
+    expect((await screen.findByTestId('sync-loader-sync', {}, { timeout: 5000 })).getAttribute('data-loader')).toBe('counter-orbit');
     await fireEvent.click(rows[1]);
     expect(screen.queryByTestId('sync-sync')).toBeNull();
   });
