@@ -178,6 +178,19 @@
   let loginPick = $state<string | null>(null);
   const loginTarget = $derived(loginPick ?? session.claude_profile ?? '');
   let confirmingSwitch = $state(false);
+  // The pane is not keyed by session: a login picked (or a switch being
+  // confirmed) on one session must not carry over to the next one selected,
+  // where Switch would restart it under that pick (review r07).
+  let pickFor = untrack(() => session.id);
+  $effect.pre(() => {
+    const id = session.id;
+    untrack(() => {
+      if (id === pickFor) return;
+      pickFor = id;
+      loginPick = null;
+      confirmingSwitch = false;
+    });
+  });
   async function onSwitchLogin() {
     confirmingSwitch = false;
     if (restartBlocked !== null) return;
