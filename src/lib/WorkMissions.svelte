@@ -12,6 +12,7 @@
   import { hubConnection } from './hub_connection';
   import { projects } from './projects';
   import { readPref, uiLayout, writePref } from './prefs';
+  import ReleaseNote from './ReleaseNote.svelte';
   import MissionGraph from './MissionGraph.svelte';
   import Loader from './Loader.svelte';
   import { defaultLaneBy, type LaneBy } from './mission_graph';
@@ -1079,6 +1080,12 @@
             >Add</button
           >
         </div>
+      {/if}
+
+      {#if $uiLayout === 'new' && detail.may_change && mission.state === 'completed'}
+        <!-- Redesign 9.11: Finish's release note, drafted on demand. -->
+        <h4>Release note</h4>
+        <ReleaseNote missionId={mission.id} />
       {/if}
 
       <h4>Log</h4>
