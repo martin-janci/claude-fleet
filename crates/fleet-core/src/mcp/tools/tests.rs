@@ -2458,6 +2458,7 @@ fn router_sum_serves_every_tool() {
         include_str!("forms.rs"),
         include_str!("devices.rs"),
         include_str!("prs.rs"),
+        include_str!("pr_shepherd.rs"),
         include_str!("routines.rs"),
         include_str!("start_rules.rs"),
         include_str!("presence.rs"),
@@ -8663,6 +8664,7 @@ fn the_settings_tools_reach_the_master_and_the_hub_owners_own_device_only() {
         "setting_history",
         "decide_setting_proposals",
         "list_pages",
+        "pr_shepherd",
     ] {
         assert!(
             enforce_admin(&colleague, t).is_err(),
@@ -9014,7 +9016,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         assert!(!can(&host, t), "{t}: never a host's token");
         assert!(!can(&bound, t), "{t}: never an org-bound device");
     }
-    for t in ["set_setting", "decide_setting_proposals"] {
+    for t in ["set_setting", "decide_setting_proposals", "pr_shepherd"] {
         assert!(can(&laptop, t), "{t}: reached, then trust decides");
         assert!(!can(&phone_ro, t), "{t}: a write");
         assert!(!can(&host, t) && !can(&bound, t), "{t}");
@@ -9032,6 +9034,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         "setting_history",
         "decide_setting_proposals",
         "list_pages",
+        "pr_shepherd",
     ] {
         assert!(!can(&colleague, t), "{t}: never a second person's device");
         assert!(
@@ -9076,6 +9079,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         "setting_history",
         "decide_setting_proposals",
         "list_pages",
+        "pr_shepherd",
     ] {
         assert!(!can(&master, t), "{t}: not served to the master");
     }

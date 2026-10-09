@@ -604,6 +604,17 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // PR shepherd (step 2): a person's standing rule per project, which
+    // lets fleet nudge sessions and merge their green PRs. The owner's own
+    // device only, never the master an agent holds (the operator has
+    // `fleet-hub shepherd`); a write also needs a trusted full device.
+    ToolPolicy {
+        name: "pr_shepherd",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Trusting a client widens what its token can do (unmarked delivery), so
     // it is credential administration like minting and revoking.
     ToolPolicy {

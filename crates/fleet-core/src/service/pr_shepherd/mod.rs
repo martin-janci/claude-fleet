@@ -29,6 +29,7 @@
 //!
 //! The planner is pure; the executor is injected, as in `playbooks.rs`.
 
+pub mod admin;
 pub mod merge;
 pub mod prompts;
 #[cfg(test)]
