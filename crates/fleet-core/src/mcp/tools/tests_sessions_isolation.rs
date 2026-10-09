@@ -773,6 +773,8 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "discover_lost_sessions" => fx.t.discover_lost_sessions(ext, p!()).await,
         "dismiss_ghost_session" => fx.t.dismiss_ghost_session(ext, p!()).await,
         "adopt_session" => fx.t.adopt_session(ext, p!()).await,
+        "lost_target" => fx.t.lost_target(ext, p!()).await,
+        "place_transcript" => fx.t.place_transcript(ext, p!()).await,
         "new_bg_session" => fx.t.new_bg_session(ext, p!()).await,
         // ---- sharing.rs ---------------------------------------------------
         "session_share" => fx.t.session_share(ext, p!()).await,
@@ -1248,6 +1250,7 @@ async fn run_matrix() {
     m.gated("touch_session_viewed", Reach::Drive, row).await;
     m.gated("dismiss_ghost_session", Reach::Drive, row).await;
     m.gated("adopt_session", Reach::Own, row).await;
+    m.gated("lost_target", Reach::Own, row).await;
     m.gated("register_self", Reach::Drive, row).await;
     m.gated("new_bg_session", Reach::Drive, |fx, _| {
         json!({
@@ -1693,6 +1696,23 @@ async fn run_matrix() {
         },
     )
     .await;
+    // A found conversation nobody is recorded against: the host fence
+    // refuses a token bound elsewhere, and the person fence passes it.
+    m.row(
+        "place_transcript",
+        |fx, _| {
+            json!({
+                "host_alias": HOST,
+                "claude_session_id": "44366faf-ae97-426a-91cd-beaf3c74f1d7",
+                "project_id": fx.project,
+            })
+        },
+        |who| match who {
+            Who::HostElsewhere => Out::Code(codes::E_FORBIDDEN),
+            _ => Out::Pass,
+        },
+    )
+    .await;
     // Served to a peer-mode token and to nothing else.
     m.row(
         "peer_exchange",
@@ -2005,7 +2025,7 @@ fn own_tier_args(fx: &Fx, tool: &str) -> Value {
             json!({ "host_alias": HOST, "session_ids": [fx.row], "dry_run": true })
         }
         "rename_session" => json!({ "session_id": fx.row, "new_name": "renamed" }),
-        "adopt_session" => json!({ "session_id": fx.row }),
+        "adopt_session" | "lost_target" => json!({ "session_id": fx.row }),
         "set_session_tags" => json!({ "session_id": fx.row, "tags": ["t"] }),
         "delete_worktree" => json!({ "worktree_id": fx.worktree, "force": true }),
         "session_share" | "session_unshare" | "session_narrow" => {

@@ -45,7 +45,8 @@
   import { creatingStart } from './session_starting';
   import { preselect, type ProposalLike } from './ai_proposal';
   import { HOST_PLACEMENT_FLOOR, hostProposal, proposeHostPlacement, recordHostPlacement } from './host_placement';
-  import { previewStartWork, siblingProposal } from './start_preview';
+  import DraftField from './DraftField.svelte';
+  import { draftBrief, draftSource, previewStartWork, siblingProposal, type BriefDraft } from './start_preview';
   import { openNewSessionPicker } from './switcher_request';
   import { agentChoices, keepAgent, type PickerAgent } from './agent_picker';
 
@@ -879,6 +880,56 @@
   }
   const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
 
+  // Redesign 6.10: "Draft with Claude" asks the chosen host for a brief
+  // written from the ticket and the task's earlier work. The draft is the
+  // field's text, the person's to edit; only Start sends it. Clear goes back
+  // to the ticket brief.
+  let draftMeta = $state<BriefDraft | null>(null);
+  let drafting = $state(false);
+  let draftError = $state<string | null>(null);
+  let draftSeq = 0;
+  $effect(() => {
+    void ticketKey;
+    draftSeq++;
+    draftMeta = null;
+    drafting = false;
+    draftError = null;
+  });
+  async function draftTicketBrief(t: TicketRow) {
+    const mine = ++draftSeq;
+    const before = { text: briefDraft, edited: briefEdited };
+    briefDraft = briefText;
+    briefEdited = true;
+    drafting = true;
+    draftError = null;
+    const r = await draftBrief({
+      ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
+      project_id: project.project.id,
+      host_alias: chosenHost,
+      worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
+    });
+    if (mine !== draftSeq) return;
+    drafting = false;
+    if (!r.ok) {
+      // No draft: the field is as it was, the person's edit or the template.
+      if (!draftMeta) {
+        briefDraft = before.text;
+        briefEdited = before.edited;
+      }
+      draftError = r.error.message;
+      return;
+    }
+    briefDraft = r.value.brief;
+    draftMeta = r.value.draft;
+  }
+  function clearDraft() {
+    draftSeq++;
+    draftMeta = null;
+    drafting = false;
+    briefEdited = false;
+    briefDraft = '';
+  }
+
   // ── Multi-repo start (work graph M9.6) ──
   // One ticket, one sibling session per repository, all on the same branch
   // name (D11). Offered: the projects this key ran in before.
@@ -1246,14 +1297,40 @@
             Brief Claude with the ticket
           </label>
           {#if briefOn}
-            <textarea
-              class="brief"
-              aria-label="Brief for Claude"
-              data-testid="ticket-brief"
-              rows="6"
-              value={briefText}
-              oninput={(e) => onBriefInput((e.target as HTMLTextAreaElement).value)}
-            ></textarea>
+            {#if draftMeta || drafting}
+              <DraftField
+                label="Brief for Claude"
+                bind:value={briefDraft}
+                model={draftMeta?.model}
+                host={draftMeta?.host_alias}
+                from={draftMeta ? draftSource(draftMeta) : null}
+                busy={drafting}
+                rows={8}
+                onregenerate={() => void draftTicketBrief(ticket)}
+                onclear={clearDraft}
+                testid="ticket-brief-draft"
+              />
+            {:else}
+              <textarea
+                class="brief"
+                aria-label="Brief for Claude"
+                data-testid="ticket-brief"
+                rows="6"
+                value={briefText}
+                oninput={(e) => onBriefInput((e.target as HTMLTextAreaElement).value)}
+              ></textarea>
+              <button
+                type="button"
+                class="btn btn--quiet draft-ask"
+                data-testid="ticket-brief-draft-ask"
+                disabled={startBlocked != null || !chosenHost}
+                title="Write the brief from the ticket and earlier sessions on it, with a model call on {chosenHost || 'the host'}"
+                onclick={() => void draftTicketBrief(ticket)}>Draft with Claude</button
+              >
+            {/if}
+            {#if draftError}
+              <p class="draft-error small" role="alert" data-testid="ticket-brief-draft-error">{draftError}</p>
+            {/if}
             <p class="muted small">
               Delivered with the first prompt (never typed into the pane). The description is
               the ticket author's text and stays fenced as untrusted.
@@ -1735,5 +1812,12 @@
   }
   .small {
     font-size: 11px;
+  }
+  .draft-ask {
+    align-self: flex-start;
+  }
+  .draft-error {
+    margin: 0;
+    color: var(--danger);
   }
 </style>

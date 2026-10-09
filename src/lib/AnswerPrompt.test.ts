@@ -12,6 +12,7 @@ vi.mock('./sessions', async () => {
 });
 
 import AnswerPrompt from './AnswerPrompt.svelte';
+import { expectAccessible } from './a11y_check';
 import { sessionActivity, type ActivityProbe } from './conversation';
 import { answerDialog, type SessionRow } from './sessions';
 import { pendingInputFor, type AnswerView, type PendingInput } from './pending_input';
@@ -488,5 +489,11 @@ describe('AnswerPrompt in the New layout (redesign 5.9)', () => {
     await settle();
     expect(mockedSend).not.toHaveBeenCalled();
     expect(onAnswered).not.toHaveBeenCalled();
+  });
+
+  it('is accessible', async () => {
+    uiLayout.set('new');
+    const { container } = render(AnswerPrompt, { session: session(), view: view({ ...DIALOG, detail: 'Bash(git push)' }) });
+    await expectAccessible(container);
   });
 });

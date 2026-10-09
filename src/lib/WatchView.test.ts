@@ -5,6 +5,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import WatchView from './WatchView.svelte';
+import { expectAccessible } from './a11y_check';
 import type { SessionRow } from './sessions';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 
@@ -196,5 +197,11 @@ describe('the watcher’s pane view', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('is accessible', async () => {
+    const { container } = render(WatchView, { props: { session: makeSession(), access: 'watch' } });
+    await screen.findByTestId('watch-pane');
+    await expectAccessible(container);
   });
 });
