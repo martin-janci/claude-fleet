@@ -21,6 +21,8 @@
     type Download,
   } from './downloads';
   import Loader from './Loader.svelte';
+  import LoadError from './states/LoadError.svelte';
+  import type { IpcError } from './result';
   import { transferLoader } from './transfer_loader';
 
   // The notification centre and the Downloads list, one sheet with a tab
@@ -31,13 +33,20 @@
 
   // svelte-ignore state_referenced_locally
   let tab = $state(initialTab);
-  let error = $state<string | null>(null);
+  let error = $state<IpcError | null>(null);
+  let retrying = $state(false);
   let busy = $state<number | null>(null);
   const done = $derived(finished($downloads));
 
-  onMount(async () => {
+  async function load() {
+    retrying = true;
     const r = await loadDownloads();
-    if (!r.ok) error = r.error.message;
+    retrying = false;
+    error = r.ok ? null : r.error;
+  }
+
+  onMount(() => {
+    void load();
   });
 
   function age(at: number): string {
@@ -90,7 +99,7 @@
   {#if tab === 'notifications'}
     <NotificationList />
   {:else if error}
-    <p class="hint err">{error}</p>
+    <LoadError title="Couldn't load downloads" {error} onretry={load} {retrying} testid="downloads-error" />
   {:else if $downloads.length === 0}
     <p class="hint">
       Nothing yet. A session's Claude sends a file here with <code>send_file</code>, or use

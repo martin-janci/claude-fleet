@@ -3,10 +3,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const calls: { cmd: string; args: unknown }[] = [];
 // What the backend holds: the view reads both lists when it opens.
-const backend: { items: unknown[]; downloads: unknown[] } = { items: [], downloads: [] };
+const backend: { items: unknown[]; downloads: unknown[]; fail: boolean } = { items: [], downloads: [], fail: false };
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (cmd: string, args: unknown) => {
     calls.push({ cmd, args });
+    if (cmd === 'list_library' && backend.fail) throw { code: 'E_HUB_UNREACHABLE', message: 'connection refused' };
     if (cmd === 'list_library') return { items: backend.items };
     if (cmd === 'list_downloads') return { downloads: backend.downloads, total_bytes: 0, max_total_bytes: 1, max_file_bytes: 1 };
     if (cmd === 'pick_attachments') return [{ path: '/Users/m/spec.pdf', name: 'spec.pdf', size: 12, kind: 'binary' }];
@@ -36,6 +37,7 @@ beforeEach(() => {
   calls.length = 0;
   backend.items = [];
   backend.downloads = [];
+  backend.fail = false;
   sessions.set([focus]);
 });
 afterEach(() => {
@@ -89,5 +91,20 @@ describe('LibraryView (step 9.7)', () => {
     await fireEvent.click(getByTestId('library-filter-uploads'));
     await waitFor(() => expect(queryAllByTestId('library-row')).toHaveLength(1));
     await expectAccessible(container);
+  });
+});
+
+// Review round 13: a failed read is never shown as an empty Library.
+describe('LibraryView when the read fails (review r13)', () => {
+  it('says it could not load, not "Nothing here yet", and Retry reads again', async () => {
+    backend.fail = true;
+    const { findByTestId, queryByTestId, getByTestId } = render(LibraryView);
+    await findByTestId('library-load-error');
+    expect(queryByTestId('library-empty')).toBeNull();
+    expect(getByTestId('library-load-error-text').textContent).toBe("Couldn't reach the hub.");
+    backend.fail = false;
+    await fireEvent.click(getByTestId('library-load-error-retry'));
+    await waitFor(() => expect(queryByTestId('library-load-error')).toBeNull());
+    expect(getByTestId('library-empty')).toBeTruthy();
   });
 });

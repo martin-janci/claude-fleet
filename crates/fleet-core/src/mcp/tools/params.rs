@@ -347,7 +347,7 @@ pub struct QueuePromptParams {
     /// Omit the untrusted-input marker line. Master token only.
     #[serde(default)]
     pub raw: bool,
-    /// The operator's approved confirmation: its prompts wait for a person.
+    /// Operator only: the nonce a person approved.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
 }
@@ -394,7 +394,7 @@ pub struct SendPromptParams {
     /// (that `pending_input` option; toggles it when `multi`). Unmarked, not recorded; `prompt` must be empty.
     #[serde(default)]
     pub keys: Option<String>,
-    /// The operator's approved confirmation: its prompts wait for a person.
+    /// Operator only: the nonce a person approved.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
 }
@@ -744,7 +744,7 @@ pub struct RunPromptParams {
     /// Omit the untrusted-input marker (master token only).
     #[serde(default)]
     pub raw: bool,
-    /// The operator's approved confirmation: its prompts wait for a person.
+    /// Operator only: the nonce a person approved.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
 }

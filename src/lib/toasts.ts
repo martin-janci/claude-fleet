@@ -3,6 +3,7 @@ import type { IpcError, Result } from './result';
 import { hubNextStep } from './hub';
 import { reportError } from './error_report';
 import { recordNotice } from './notifications';
+import { errorDetail, errorText } from './error_copy';
 
 // Global, non-blocking notifications. Errors used to land in per-component
 // `error: string | null` state that never cleared and dropped the
@@ -32,6 +33,8 @@ export interface Toast {
   /** A long job's progress, 0–1 (step 10.10): drawn as a 28 px Progress
    *  ring. Absent on every other toast. */
   progress?: number;
+  /** What Details shows: the code and the backend's own words (review r13). */
+  detail?: string;
 }
 
 export interface PushOptions {
@@ -46,6 +49,8 @@ export interface PushOptions {
   action?: ToastAction;
   /** 0–1 for a long job of known size; move it with `setToastProgress`. */
   progress?: number;
+  /** Shown under Details instead of in the line itself. */
+  detail?: string;
 }
 
 export const INFO_TIMEOUT_MS = 4000;
@@ -154,6 +159,7 @@ export function push(opts: PushOptions): number {
   const id = nextId++;
   const toast: Toast = { id, kind, code, message: opts.message, sticky, count: 1, action };
   if (opts.progress !== undefined) toast.progress = clamp01(opts.progress);
+  if (opts.detail) toast.detail = opts.detail;
   toasts.update((arr) => capped([...arr, toast]));
   if (!sticky) arm(id, timeout);
   recordNotice(id, true, { kind, code, message: opts.message });
@@ -234,8 +240,10 @@ export function clearToasts(): void {
   droppedToasts.set(0);
 }
 
-/** Sticky error toast for a backend `IpcError`, keeping its `E_*` code
- *  visible. `context` prefixes the message ("Kill failed: …").
+/** Sticky error toast for a backend `IpcError`. The line is a sentence
+ *  (`errorText`); the `E_*` code and the backend's own words sit under
+ *  Details (review r13, step 1.3: no raw codes in user text). `context`
+ *  prefixes the message ("Kill failed: …"); `retry` adds a Retry button.
  *
  *  A hub client gets one sentence more, for the errors whose next step is
  *  different here and is written down nowhere else. `E_CONFIRM_REQUIRED` is
@@ -246,15 +254,23 @@ export function clearToasts(): void {
  *  a refusal, and has nowhere to go. This is the one place every backend
  *  failure passes through, which is why it is here and not at each call
  *  site; in standalone mode `hubNextStep` returns null and nothing changes. */
-export function pushError(error: IpcError, context?: string): number {
-  const base = context ? `${context}: ${error.message}` : error.message;
+export function pushError(error: IpcError, context?: string, retry?: () => void): number {
+  const text = errorText(error);
+  const base = context ? `${context}: ${text}` : text;
   const next = hubNextStep(error);
-  reportError('frontend', base, error.code ?? null);
-  return push({ kind: 'error', code: error.code, message: next ? `${base} — ${next}` : base });
+  reportError('frontend', context ? `${context}: ${error.message}` : error.message, error.code ?? null);
+  return push({
+    kind: 'error',
+    code: error.code,
+    message: next ? `${base} — ${next}` : base,
+    detail: errorDetail(error),
+    action: retry ? { label: 'Retry', run: retry } : undefined,
+    sticky: true,
+  });
 }
 
 /** Convenience: surface a failed `Result`. No-op (returns null) on Ok. */
-export function pushResultError(r: Result<unknown>, context?: string): number | null {
+export function pushResultError(r: Result<unknown>, context?: string, retry?: () => void): number | null {
   if (r.ok) return null;
-  return pushError(r.error, context);
+  return pushError(r.error, context, retry);
 }

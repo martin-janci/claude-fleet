@@ -124,12 +124,12 @@ describe('HostsList: a hub contract skew', () => {
     hubStatus.set(remote);
     hubConnection.set({ state: 'connected' });
     mount({ hosts: [] });
-    expect(screen.getByTestId('hosts-empty').textContent).toContain('No hosts yet');
+    expect(screen.getByTestId('hosts-empty').textContent).toContain('Start with one host');
   });
 
   it('standalone mode is untouched', () => {
     mount({ hosts: [] });
-    expect(screen.getByTestId('hosts-empty').textContent).toContain('No hosts yet');
+    expect(screen.getByTestId('hosts-empty').textContent).toContain('Start with one host');
   });
 });
 
@@ -140,6 +140,16 @@ describe('the states kit (step 10.6)', () => {
     expect(empty.dataset.kind).toBe('none');
     await fireEvent.click(screen.getByTestId('hosts-clear-filter'));
     expect((screen.getByTestId('hosts-filter') as HTMLInputElement).value).toBe('');
-    expect(screen.getByTestId('hosts-empty').textContent).toContain('No hosts yet');
+    expect(screen.getByTestId('hosts-empty').textContent).toContain('Start with one host');
+  });
+});
+
+describe('a first run (review r13)', () => {
+  it('offers Add a host… as the next step', async () => {
+    const onaddhost = vi.fn();
+    mount({ hosts: [], onaddhost });
+    expect(screen.getByTestId('hosts-empty').dataset.kind).toBe('first');
+    await fireEvent.click(screen.getByTestId('hosts-empty-add'));
+    expect(onaddhost).toHaveBeenCalledOnce();
   });
 });

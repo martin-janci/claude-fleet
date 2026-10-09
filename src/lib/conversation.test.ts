@@ -9,6 +9,7 @@ import {
   listConversations,
   toolDetail,
   sameConversation,
+  reuseTurns,
   isPinned,
   emptyStateText,
   agentLabel,
@@ -157,6 +158,24 @@ describe('sameConversation', () => {
 
   it('is false when the first argument is null', () => {
     expect(sameConversation(null, conv())).toBe(false);
+  });
+});
+
+describe('reuseTurns', () => {
+  it('keeps the earlier object for every turn that did not change', () => {
+    const a = conv({ turns: [...conv().turns, { prompt: 'and then', at: '2026-09-13T10:05:00Z', ended_at: null, items: [] }] });
+    const b = structuredClone(a);
+    b.turns[1].items = [{ kind: 'text', text: 'on it' }];
+    const merged = reuseTurns(a, b);
+    expect(merged.turns[0]).toBe(a.turns[0]);
+    expect(merged.turns[1]).toBe(b.turns[1]);
+    expect(merged).toEqual(b);
+  });
+
+  it('hands back the read itself when nothing can be reused', () => {
+    const b = conv();
+    expect(reuseTurns(null, b)).toBe(b);
+    expect(reuseTurns(conv({ turns: [] }), b)).toBe(b);
   });
 });
 

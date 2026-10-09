@@ -357,7 +357,11 @@ describe('ShareSheet', () => {
     });
     render(ShareSheet);
     await settle();
-    expect(screen.getByTestId('share-list-error').textContent).toContain('not answering');
+    const err = screen.getByTestId('share-list-error');
+    expect(err.textContent).toContain("Couldn't reach the hub");
+    // Review r13: no raw code in the line, and a way to try again.
+    expect(err.textContent).not.toContain('E_HUB_UNREACHABLE');
+    expect(screen.getByTestId('share-list-retry')).toBeInTheDocument();
     expect(screen.queryByTestId('share-list-empty')).toBeNull();
   });
 

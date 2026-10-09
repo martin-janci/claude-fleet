@@ -175,9 +175,39 @@ export function toolDetail(
 }
 
 /** Deep (JSON) equality — used to decide whether a poll result actually changed. */
+// Each object's JSON, kept for as long as the object lives. The panel polls
+// every few seconds and keeps the previous read, so the side already on
+// screen is serialised once rather than on every poll (review r16 D3).
+const jsonOf = new WeakMap<object, string>();
+function json(o: object): string {
+  let s = jsonOf.get(o);
+  if (s === undefined) {
+    s = JSON.stringify(o);
+    jsonOf.set(o, s);
+  }
+  return s;
+}
+
 export function sameConversation(a: Conversation | null, b: Conversation): boolean {
   if (a === null) return false;
-  return JSON.stringify(a) === JSON.stringify(b);
+  return a === b || json(a) === json(b);
+}
+
+/** `next` with every turn that is deep-equal to one of `prev`'s replaced by
+ *  `prev`'s object, so a read that only grew the last turn hands the thread
+ *  the same objects for every other turn and their rows are left alone. */
+export function reuseTurns(prev: Conversation | null, next: Conversation): Conversation {
+  if (prev === null || prev.turns.length === 0) return next;
+  const old = new Map<string, ConvTurn>();
+  for (const t of prev.turns) old.set(json(t), t);
+  let reused = 0;
+  const turns = next.turns.map((t) => {
+    const same = old.get(json(t));
+    if (same === undefined) return t;
+    reused++;
+    return same;
+  });
+  return reused === 0 ? next : { ...next, turns };
 }
 
 export function isPinned(scrollTop: number, clientHeight: number, scrollHeight: number): boolean {

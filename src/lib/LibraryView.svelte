@@ -20,6 +20,8 @@
     type LibraryEntry,
     type LibraryFilter,
   } from './library';
+  import type { IpcError } from './result';
+  import LoadError from './states/LoadError.svelte';
 
   const FILTERS: readonly { id: LibraryFilter; label: string }[] = [
     { id: 'all', label: 'All' },
@@ -31,12 +33,21 @@
   let filter = $state<LibraryFilter>('all');
   let busy = $state(false);
   let error = $state<string | null>(null);
+  /** The Library's own read failed: said as a failure, not as empty. */
+  let loadError = $state<IpcError | null>(null);
+  let loading = $state(false);
+
+  async function load() {
+    loading = true;
+    loadError = await refreshLibrary();
+    loading = false;
+  }
 
   const shown = $derived($libraryEntryList.filter((e) => matchesFilter(e, filter)));
   const hosts = $derived([...new Set(shown.map((e) => e.host))]);
 
   onMount(() => {
-    void refreshLibrary();
+    void load();
   });
 
   async function upload() {
@@ -88,7 +99,9 @@
   </div>
   {#if error}<p class="error" role="alert" data-testid="library-error">{error}</p>{/if}
 
-  {#if shown.length === 0}
+  {#if loadError && shown.length === 0}
+    <LoadError title="Couldn't load the library" error={loadError} onretry={load} retrying={loading} testid="library-load-error" />
+  {:else if shown.length === 0}
     <p class="empty" data-testid="library-empty">
       {filter === 'repos' ? 'No repos yet: they appear once a session works in one.' : 'Nothing here yet. Files a session sends, and files you upload, land here.'}
     </p>

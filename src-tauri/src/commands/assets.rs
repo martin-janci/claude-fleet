@@ -619,6 +619,27 @@ pub struct ScanArgs {
 pub(crate) mod routed {
     use super::*;
 
+    /// Review r06: a catalog load, configure, commit or push runs git and
+    /// walks the checkout, so it runs on the blocking pool, not a tokio
+    /// worker (as `fleet-hub`'s startup catalog load does). The closure
+    /// owns the `authoring_lock` guard, so the lock is held until the work
+    /// ends even if the command's future is dropped first.
+    async fn off_runtime<T, F>(store: &Arc<Mutex<Store>>, f: F) -> Result<T, IpcError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Mutex<Store>) -> Result<T, IpcError> + Send + 'static,
+    {
+        let store = Arc::clone(store);
+        tokio::task::spawn_blocking(move || f(&store))
+            .await
+            .map_err(|e| {
+                IpcError::new(
+                    fleet_core::ipc_error::codes::E_INTERNAL,
+                    format!("catalog task: {e}"),
+                )
+            })?
+    }
+
     pub async fn catalog_list_assets(
         backend: &FleetBackend,
         store: &Mutex<Store>,
@@ -656,7 +677,7 @@ pub(crate) mod routed {
     pub async fn catalog_configure(
         backend: &FleetBackend,
         args: ConfigureArgs,
-        store: &Mutex<Store>,
+        store: &Arc<Mutex<Store>>,
     ) -> Result<CatalogConfigRow, IpcError> {
         match backend.hub() {
             Some(hub) => {
@@ -665,8 +686,12 @@ pub(crate) mod routed {
             }
             None => {
                 // PF7: waits for a changeset apply in flight.
-                let _busy = catalog::changesets::authoring_lock().await;
-                catalog::configure(args, store)
+                let busy = catalog::changesets::authoring_lock().await;
+                off_runtime(store, move |s| {
+                    let _busy = busy;
+                    catalog::configure(args, s)
+                })
+                .await
             }
         }
     }
@@ -674,14 +699,18 @@ pub(crate) mod routed {
     pub async fn catalog_load(
         backend: &FleetBackend,
         args: LoadArgs,
-        store: &Mutex<Store>,
+        store: &Arc<Mutex<Store>>,
     ) -> Result<fleet_core::events::CatalogSummary, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("catalog_load", &AdminCall::Load(args)).await,
             None => {
                 // PF7: waits for a changeset apply in flight.
-                let _busy = catalog::changesets::authoring_lock().await;
-                catalog::load_all(args.pull, store)
+                let busy = catalog::changesets::authoring_lock().await;
+                off_runtime(store, move |s| {
+                    let _busy = busy;
+                    catalog::load_all(args.pull, s)
+                })
+                .await
             }
         }
     }
@@ -1101,7 +1130,7 @@ pub(crate) mod routed {
     pub async fn catalog_commit_pending(
         backend: &FleetBackend,
         args: CommitPendingArgs,
-        store: &Mutex<Store>,
+        store: &Arc<Mutex<Store>>,
     ) -> Result<String, IpcError> {
         match backend.hub() {
             Some(hub) => {
@@ -1110,22 +1139,30 @@ pub(crate) mod routed {
             }
             None => {
                 // PF7: waits for a changeset apply in flight.
-                let _busy = catalog::changesets::authoring_lock().await;
-                author::commit_pending(args, store)
+                let busy = catalog::changesets::authoring_lock().await;
+                off_runtime(store, move |s| {
+                    let _busy = busy;
+                    author::commit_pending(args, s)
+                })
+                .await
             }
         }
     }
 
     pub async fn catalog_push(
         backend: &FleetBackend,
-        store: &Mutex<Store>,
+        store: &Arc<Mutex<Store>>,
     ) -> Result<RepoStatus, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("catalog_push", &AdminCall::Push).await,
             None => {
                 // PF7: waits for a changeset apply in flight.
-                let _busy = catalog::changesets::authoring_lock().await;
-                author::push(store)
+                let busy = catalog::changesets::authoring_lock().await;
+                off_runtime(store, move |s| {
+                    let _busy = busy;
+                    author::push(s)
+                })
+                .await
             }
         }
     }

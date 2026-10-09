@@ -119,3 +119,19 @@ describe('Downloads: accessibility', () => {
     await expectAccessible(screen.getByTestId('downloads-sheet'));
   });
 });
+
+// Review round 13: a failed read of the list has a next step.
+describe('Downloads when the list cannot be read (review r13)', () => {
+  it('says so in a sentence, and Retry reads the list again', async () => {
+    invoke.mockRejectedValueOnce({ code: 'E_HUB_UNREACHABLE', message: 'connection refused' });
+    render(DownloadsSheet, { onclose: () => {} });
+    const err = await screen.findByTestId('downloads-error');
+    expect(err.textContent).toContain("Couldn't reach the hub");
+    invoke.mockResolvedValueOnce(list([row(1, 'ready')]));
+    await fireEvent.click(screen.getByTestId('downloads-error-retry'));
+    await tick();
+    await tick();
+    expect(screen.queryByTestId('downloads-error')).toBeNull();
+    expect(invoke.mock.calls.filter((c) => c[0] === 'list_downloads')).toHaveLength(2);
+  });
+});

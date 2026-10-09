@@ -7,6 +7,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AccountsPage from './AccountsPage.svelte';
 import { get } from 'svelte/store';
 import { hostsViewRequest } from './app_views';
+import { accountsPageRequest } from './account_pill';
 import { hosts } from './hosts';
 import { accounts } from './accounts';
 import { sessions } from './sessions';
@@ -156,6 +157,20 @@ describe('AccountsPage', () => {
     await fireEvent.click(screen.getByTestId('account-refresh'));
     const refreshes = inv.mock.calls.filter((c) => c[0] === 'refresh_account_usage');
     expect(refreshes).toHaveLength(1);
+  });
+
+  it('review r05: a pill for an account not in the list shows no other account', async () => {
+    render(AccountsPage, props);
+    accountsPageRequest.set('no-such-account-uuid');
+    await waitFor(() => expect(screen.getByTestId('account-missing')).toBeTruthy());
+    expect(screen.queryByTestId('account-detail')).toBeNull();
+    for (const c of screen.getAllByTestId('account-card')) {
+      expect(c.getAttribute('aria-selected')).toBe('false');
+    }
+    // Picking one by hand afterwards shows it.
+    await fireEvent.click(screen.getAllByTestId('account-card')[0]);
+    expect(screen.getByTestId('account-detail')).toBeTruthy();
+    expect(screen.queryByTestId('account-missing')).toBeNull();
   });
 
   it('has an empty state with no accounts', () => {
