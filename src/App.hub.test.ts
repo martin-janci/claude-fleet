@@ -1,5 +1,5 @@
 import { render, screen, waitFor, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, beforeAll, expect, beforeEach, vi } from 'vitest';
 import App from './App.svelte';
 import { onboardingDismissed } from './lib/onboarding';
 import { clearToasts, toasts } from './lib/toasts';
@@ -8,6 +8,11 @@ import { catalog } from './lib/assets';
 import { hubStatus, STANDALONE, type HubStatus } from './lib/hub';
 import { hubConnection } from './lib/hub_connection';
 import { sessionsAnswered } from './lib/sessions';
+import { preloadLazyViews } from './lib/lazy_views';
+
+// The off-screen views load lazily in the app; here they are in place
+// before the first render, so a test sees them on the frame they open.
+beforeAll(() => preloadLazyViews());
 
 const remote: HubStatus = {
   remote: true,

@@ -1,6 +1,6 @@
 import { findByTestId, render, screen, waitFor } from '@testing-library/svelte';
 import { fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, beforeAll, expect, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 import { vi } from 'vitest';
 import App from './App.svelte';
@@ -8,6 +8,11 @@ import { onboardingDismissed } from './lib/onboarding';
 import { clearToasts } from './lib/toasts';
 import { get } from 'svelte/store';
 import { assetsViewRequest, requestAssetsView } from './lib/app_views';
+import { preloadLazyViews } from './lib/lazy_views';
+
+// The off-screen views load lazily in the app; here they are in place
+// before the first render, so a test sees them on the frame they open.
+beforeAll(() => preloadLazyViews());
 
 beforeEach(() => {
   // Suppress the OnboardingCard so tests don't need stubs for its IPC calls

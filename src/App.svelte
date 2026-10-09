@@ -10,6 +10,8 @@
   import { setContextRedPct } from './lib/attention';
   import { trackersHealth, trackersSummary } from './lib/tracker_health';
   import Sidebar from './lib/Sidebar.svelte';
+  import Lazy from './lib/Lazy.svelte';
+  import { lazyViews, preloadLazyViews } from './lib/lazy_views';
   import { windowHidden } from './lib/window_hidden';
   import Details from './lib/Details.svelte';
   import SessionTabs, { type SessionTab } from './lib/SessionTabs.svelte';
@@ -33,18 +35,11 @@
   import { terminalPane, requestTerminalTab } from './lib/terminals';
   import WatchView from './lib/WatchView.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
-  import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
-  import AssetsPanel from './lib/AssetsPanel.svelte';
-  import Toolkit from './lib/Toolkit.svelte';
   import { toolkitTab } from './lib/toolkit_skills';
-  import AccountsPage from './lib/AccountsPage.svelte';
   import AppRail from './lib/AppRail.svelte';
-  import ControlView from './lib/ControlView.svelte';
-  import AutomationView from './lib/AutomationView.svelte';
   import { toggleControl, toggleToday } from './lib/control';
   import type { RailId } from './lib/rail';
-  import WorkBoard from './lib/WorkBoard.svelte';
   import { loadProjects, applyProjectEvents } from './lib/projects';
   import { loadSessions, applySessionEvents, sessions, sessionsAnswered, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
   import { bootstrapError as bootstrapFailure } from './lib/bootstrap_state';
@@ -490,6 +485,9 @@
     // `E_LOCAL_ONLY`. Calling it anyway would put an error toast on every
     // launch about a panel that simply does not apply here.
     if (!get(hubStatus).remote) void loadAccountUsage();
+    // The lazy views load once launch has drawn, so a first open does not
+    // wait on its chunk.
+    setTimeout(() => void preloadLazyViews(), 2_000);
   });
 
   // Catch-up net for missed Tauri events (e.g. sleep/wake, dropped events).
@@ -1431,12 +1429,13 @@
       {#if hostsMode}
         <div class="view-slot overlay" data-testid="hosts-overlay">
           {#key hostsViewKey}
-            <HostsView
+            <Lazy
+              load={lazyViews.hosts}
               preselect={hostsPreselect}
               onClose={() => closeHosts()}
               onFilterSidebar={onHostsFilterSidebar}
               onNewSession={onHostsNewSession}
-              onSelectionChange={(alias) => (lastViewedHost = alias)}
+              onSelectionChange={(alias: string) => (lastViewedHost = alias)}
             />
           {/key}
         </div>
@@ -1444,25 +1443,25 @@
       {#if assetsMode}
         <div class="view-slot overlay" data-testid="assets-overlay">
           {#if newLayout}
-            <Toolkit visible={assetsMode} />
+            <Lazy load={lazyViews.toolkit} visible={assetsMode} />
           {:else}
-            <AssetsPanel visible={assetsMode} />
+            <Lazy load={lazyViews.assets} visible={assetsMode} />
           {/if}
         </div>
       {/if}
       {#if accountsMode}
         <div class="view-slot overlay" data-testid="accounts-overlay">
-          <AccountsPage />
+          <Lazy load={lazyViews.accounts} />
         </div>
       {/if}
       {#if controlMode}
         <div class="view-slot overlay" data-testid="control-overlay">
-          <ControlView {isMac} contextInput={agentContextInput} />
+          <Lazy load={lazyViews.control} {isMac} contextInput={agentContextInput} />
         </div>
       {/if}
       {#if automationMode}
         <div class="view-slot overlay" data-testid="automation-overlay">
-          <AutomationView />
+          <Lazy load={lazyViews.automation} />
         </div>
       {/if}
       {#if boardMode}
@@ -1470,7 +1469,7 @@
              tab opens it, the other tabs leave it, and it has no close of
              its own. It still sits over the mounted terminal. -->
         <div class="view-slot overlay" data-testid={newLayout ? 'board-view' : 'board-overlay'}>
-          <WorkBoard onclose={newLayout ? undefined : () => leave('board')} />
+          <Lazy load={lazyViews.board} onclose={newLayout ? undefined : () => leave('board')} />
         </div>
       {/if}
       {#if detailsMain}

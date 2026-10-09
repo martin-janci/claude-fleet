@@ -2,7 +2,7 @@
 // the inspector (Classic's Details pane, moved beside the session) on
 // ⌥⌘B / Ctrl+Alt+B. Classic keeps its tabs and its center pane.
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, beforeAll, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 import App from './App.svelte';
 import { onboardingDismissed, onboardingWelcomed } from './lib/onboarding';
@@ -15,6 +15,11 @@ import { uiLayout } from './lib/prefs';
 import { detectMac } from './lib/terminal_keys';
 import type { SessionRow } from './lib/sessions';
 import { session } from './lib/hosts_fixture';
+import { preloadLazyViews } from './lib/lazy_views';
+
+// The off-screen views load lazily in the app; here they are in place
+// before the first render, so a test sees them on the frame they open.
+beforeAll(() => preloadLazyViews());
 
 let rows: SessionRow[] = [];
 let original: ((cmd: string, ...rest: unknown[]) => Promise<unknown>) | undefined;
