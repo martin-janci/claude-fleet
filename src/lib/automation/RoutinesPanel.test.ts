@@ -76,6 +76,18 @@ describe('Routines (8.6)', () => {
     await waitFor(() => expect(argsOf('set_enabled')).toEqual({ action: 'set_enabled', routine_id: 3, enabled: false }));
   });
 
+  it("marks a run outcome Jev read from the screen, and only that one (8.10)", async () => {
+    const quiet: RoutineRunRow = { ...ok, id: 4, outcome: 'nothing', outcome_source: 'jev' };
+    route([sweep], [quiet, { ...ok, outcome_source: 'rule' }]);
+    render(RoutinesPanel);
+    const runs = await screen.findAllByTestId('routine-run');
+    expect(runs[0].textContent).toContain('Nothing to do');
+    const tags = screen.getAllByTestId('routine-run-jev');
+    expect(tags).toHaveLength(1);
+    expect(runs[0].contains(tags[0])).toBe(true);
+    expect(tags[0].getAttribute('title')).toMatch(/last screen/);
+  });
+
   it('starts a new routine from the Morning PR sweep template and saves it whole', async () => {
     route([]);
     render(RoutinesPanel);

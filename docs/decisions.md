@@ -31,7 +31,7 @@ and nothing is sent:
    (Settings → Organisations → *send to Jev*, or `fleet-hub org set <id>
    --jev on`); off by default. A session or item with no org follows
    `decide.jev.unassigned` (off by default). A feature that sends Claude's
-   **reply text** (`turn_outcome`, J2) needs a second consent on top
+   **reply text** (`turn_outcome`, J2; `routine_run_outcome`, N6) needs a second consent on top
    (decision D48): the org's *Also allow Claude's reply text* (`fleet-hub
    org set <id> --jev-reply on`), or `decide.jev.unassigned_reply` for a
    session with no org. Both off by default; either missing is `org_off`.
@@ -479,6 +479,38 @@ hook in `service/hooks.rs`, `Store::set_jev_turn_outcome`;
 `service/decide/bench/turn_outcome.rs`; step 5.11 of the redesign's
 transition plan.
 
+## `routine_run_outcome` — what a routine run came to (N6)
+
+A routine run that found nothing to do ends its turn like one that opened
+three pull requests, so every run lands in the Inbox. The run's own facts
+answer first (`service/routines/outcome.rs`): a failed exit is `failed`; an
+open question, a wedged REPL or J2's `asked`/`stuck` is `needs_person`; a
+pull request is `did_work`. With `decide.jev.routine_run_outcome` on, the
+routine scheduler reads the screen of each run that finished in the last
+hour with no answer yet (at most 5 a pass) and asks Jev one Choice:
+`did_work`, `nothing`, `needs_person` or `unsure`.
+
+- **What is sent.** The same screen J2 sends (its `prepare_tail`): Claude's
+  reply text, chrome left out, fenced code replaced by placeholders,
+  redacted. Only where the run's org gave BOTH consents (D31 and D48).
+- **Shadow.** Recorded only, with today's reading, `did_work` (every run is
+  work to look at), as the baseline.
+- **Assist.** A usable answer (confidence 50% or more, not `unsure`) is the
+  run's outcome, source `jev`. `nothing` also marks the run's session seen,
+  so its finished turn is not unread in the Inbox. The session is not
+  stopped or changed; you can still open it.
+- **Exit and rules always win.** `jev` is the weakest source: it never
+  replaces a failed exit or a rule's answer, and a rule that answers later
+  replaces it.
+- **One decision per run.** Subject `routine_run` `<run id>`.
+- **Follow-up.** A rule that answers after Jev marks the assist answer
+  `confirmed` (it said the same) or `corrected` to what it said. A shadow
+  answer is never marked.
+
+Code: `service/decide/routine_run_outcome.rs` (`spawn_pass` from the
+routine scheduler's tick), `service/routines/outcome.rs`; step 8.10 of the
+redesign's transition plan.
+
 ### Decision D48 — reply text (owner, 2026-10-08)
 
 | # | Question | Decision |
@@ -599,6 +631,7 @@ Code: `service/decide/duplicate.rs`, `duplicate_hint` in
 | `decide.jev.duplicate` | `off` | `off` / `shadow` / `assist` | Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.control_route` | `off` | `off` / `shadow` / `assist` | Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.turn_outcome` | `off` | `off` / `shadow` / `assist` | Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it. Experimental. |
+| `decide.jev.routine_run_outcome` | `off` | `off` / `shadow` / `assist` | Reading whether a routine run did work, found nothing to do or needs you, from the end of its screen. Shadow only records; assist sets the outcome, so a run with nothing to do stays out of the Inbox. A failed exit or a rule wins. Sends reply text only for organisations that allow it. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.unassigned_reply` | `false` | on / off | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |

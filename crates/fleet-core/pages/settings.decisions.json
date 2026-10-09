@@ -89,6 +89,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.routine_run_outcome",
+          "hint": "Keeps routine runs with nothing to do out of the Inbox. Sends the run's last reply, redacted, only for organisations that allow reply text."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
         },
         {

@@ -52,6 +52,9 @@ mod lost_target_tests;
 pub mod quick_answer;
 #[cfg(test)]
 mod quick_answer_tests;
+pub mod routine_run_outcome;
+#[cfg(test)]
+mod routine_run_outcome_tests;
 pub mod sibling_repos;
 #[cfg(test)]
 mod sibling_repos_tests;
@@ -122,10 +125,13 @@ pub enum Feature {
     ControlRoute,
     /// What a turn came to when hooks said nothing, from the pane tail (J2).
     TurnOutcome,
+    /// What a finished routine run came to when its exit and the rules say
+    /// nothing, from the pane tail (N6, redesign step 8.10).
+    RoutineRunOutcome,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 11] = [
+    pub const ALL: [Feature; 12] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
@@ -137,6 +143,7 @@ impl Feature {
         Feature::Duplicate,
         Feature::ControlRoute,
         Feature::TurnOutcome,
+        Feature::RoutineRunOutcome,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -152,6 +159,7 @@ impl Feature {
             Feature::Duplicate => "duplicate",
             Feature::ControlRoute => "control_route",
             Feature::TurnOutcome => "turn_outcome",
+            Feature::RoutineRunOutcome => "routine_run_outcome",
         }
     }
 
@@ -173,15 +181,16 @@ impl Feature {
             Feature::Duplicate => settings::DECIDE_JEV_DUPLICATE,
             Feature::ControlRoute => settings::DECIDE_JEV_CONTROL_ROUTE,
             Feature::TurnOutcome => settings::DECIDE_JEV_TURN_OUTCOME,
+            Feature::RoutineRunOutcome => settings::DECIDE_JEV_ROUTINE_RUN_OUTCOME,
         }
     }
 
     /// Whether this feature sends Claude's reply text (a pane tail): then
     /// the org's SECOND consent (D48, the org's `decide.jev.reply_consent` row, or
     /// `decide.jev.unassigned_reply` for no org) is required on top of
-    /// D31's. Only J2.
+    /// D31's. J2 and N6, which read the same screen.
     pub fn sends_reply_text(self) -> bool {
-        matches!(self, Feature::TurnOutcome)
+        matches!(self, Feature::TurnOutcome | Feature::RoutineRunOutcome)
     }
 }
 

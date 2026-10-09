@@ -559,6 +559,10 @@ pub const DECIDE_JEV_CONTROL_ROUTE: &str = "decide.jev.control_route";
 /// `turn_outcome`'s mode (J2: what a turn came to when hooks said nothing,
 /// read from the pane tail). Needs the reply-text consent (D48) on top.
 pub const DECIDE_JEV_TURN_OUTCOME: &str = "decide.jev.turn_outcome";
+/// `routine_run_outcome`'s mode (N6: what a finished routine run came to
+/// when its exit and the rules say nothing, read from the pane tail). Needs
+/// the reply-text consent (D48) on top.
+pub const DECIDE_JEV_ROUTINE_RUN_OUTCOME: &str = "decide.jev.routine_run_outcome";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -1391,6 +1395,15 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: set the state")]),
+    Spec::new(
+        DECIDE_JEV_ROUTINE_RUN_OUTCOME,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: routine run outcome",
+        "Reading whether a routine run did work, found nothing to do or needs you, from the end of its screen. Shadow only records; assist sets the outcome, so a run with nothing to do stays out of the Inbox. A failed exit or a rule wins. Sends reply text only for organisations that allow it.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: set the outcome")]),
     Spec::new(
         DECIDE_JEV_UNASSIGNED,
         "false",
@@ -2648,6 +2661,8 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_TURN_OUTCOME, None), "off");
         assert_eq!(resolve(DECIDE_JEV_UNASSIGNED_REPLY, None), "false");
         assert!(validate(DECIDE_JEV_TURN_OUTCOME, "auto").is_err());
+        assert_eq!(resolve(DECIDE_JEV_ROUTINE_RUN_OUTCOME, None), "off");
+        assert!(validate(DECIDE_JEV_ROUTINE_RUN_OUTCOME, "auto").is_err());
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "assist").is_ok());
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_HOST_PLACEMENT, None), "off");

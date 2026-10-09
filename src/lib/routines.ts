@@ -235,6 +235,14 @@ export function runWords(run: Pick<RoutineRunRow, 'state' | 'outcome' | 'reason'
   return 'Done';
 }
 
+/** Who read a run's outcome, when it was Jev (step 8.10): its answer is a
+ *  reading of the run's last screen, which the exit and the rules override.
+ *  `undefined` for the exit and the rules, which say it themselves. */
+export function runSourceHint(run: Pick<RoutineRunRow, 'outcome' | 'outcome_source'>): string | undefined {
+  if (run.outcome_source !== 'jev' || !run.outcome) return undefined;
+  return "Jev read this from the run's last screen. Open the run's session to check it.";
+}
+
 /** `$0.38` from micro-dollars. */
 export function dollars(micros: number | undefined): string {
   return `$${((micros ?? 0) / 1_000_000).toFixed(2)}`;

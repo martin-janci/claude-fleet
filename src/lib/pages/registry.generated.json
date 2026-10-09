@@ -2001,6 +2001,86 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it.",
+      "key": "decide.jev.turn_outcome",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: turn outcome",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: set the state"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Reading whether a routine run did work, found nothing to do or needs you, from the end of its screen. Shadow only records; assist sets the outcome, so a run with nothing to do stays out of the Inbox. A failed exit or a rule wins. Sends reply text only for organisations that allow it.",
+      "key": "decide.jev.routine_run_outcome",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: routine run outcome",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: set the outcome"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -2013,6 +2093,28 @@
         "type": "bool"
       },
       "label": "Jev: send unassigned",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "network"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "confirm",
+        "message": "Claude's reply text from sessions outside every organisation will be sent to TypeSafe too."
+      },
+      "default": "false",
+      "help": "Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all.",
+      "key": "decide.jev.unassigned_reply",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Jev: send unassigned replies",
       "modified": false,
       "restart": "none",
       "tags": [
@@ -3369,7 +3471,21 @@
               "type": "field"
             },
             {
+              "hint": "Sends Claude's last reply, redacted, only for organisations that allow reply text. Hooks always win.",
+              "key": "decide.jev.turn_outcome",
+              "type": "field"
+            },
+            {
+              "hint": "Keeps routine runs with nothing to do out of the Inbox. Sends the run's last reply, redacted, only for organisations that allow reply text.",
+              "key": "decide.jev.routine_run_outcome",
+              "type": "field"
+            },
+            {
               "key": "decide.jev.unassigned",
+              "type": "field"
+            },
+            {
+              "key": "decide.jev.unassigned_reply",
               "type": "field"
             }
           ],
@@ -3821,6 +3937,10 @@
             },
             {
               "key": "jev_allowed",
+              "type": "field"
+            },
+            {
+              "key": "jev_reply_allowed",
               "type": "field"
             }
           ],
@@ -5157,6 +5277,20 @@
           "help": "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
           "id": "jev_allowed",
           "label": "Allow Jev (decision model) for this organisation's work",
+          "on_off": true,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "sends replies to Jev",
+            "when": "true"
+          },
+          "confirm": "The end of this org's sessions' screens (Claude's reply text, redacted) will be sent to TypeSafe when Decisions (Jev) and its turn outcome use case are on.",
+          "default": false,
+          "edit": "jev_reply",
+          "help": "On top of Jev above: let the end of this org's sessions' screens — Claude's last reply, redacted, code replaced by placeholders, a few lines — go to TypeSafe's decision model, so Jev can tell a finished turn from a question when hooks say nothing. Off by default (D48).",
+          "id": "jev_reply_allowed",
+          "label": "Also allow Claude's reply text (turn outcome)",
           "on_off": true,
           "type": "bool"
         },
