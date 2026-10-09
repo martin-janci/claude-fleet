@@ -4155,11 +4155,12 @@ fn list_host_worktrees_is_open_to_a_paired_client_in_either_mode() {
 #[test]
 fn the_served_definition_budget_stays_bounded() {
     /// Definition bytes per tool served to the master token (the widest
-    /// surface). Measured at 105,130 bytes for 133 tools (790 a tool) on
-    /// 2026-10-09, when `new_bg_session` took its launch options. Raise it
-    /// only from a measurement the failure prints, and say in the commit
-    /// message what was measured and when.
-    const BYTES_PER_TOOL: usize = 800;
+    /// surface). Measured at 107,112 bytes for 133 tools (805 a tool) on
+    /// 2026-10-09, when the redesign branch (send_prompt's key enum, ask's
+    /// draft, new_session's start_token and over_limit_ok) met main's
+    /// updates S2-S9. Raise it only from a measurement the failure prints,
+    /// and say in the commit message what was measured and when.
+    const BYTES_PER_TOOL: usize = 815;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

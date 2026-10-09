@@ -592,9 +592,9 @@ pub const DECIDE_MODES: &[&str] = crate::store::DECISION_MODES;
 // ── update.* (application updates, update-channel design §7.3) ──
 /// The release track the hub follows for its fleet.
 pub const UPDATE_TRACK: &str = "update.track";
-/// `nightly` joins when S2b publishes it (`src/lib/fleet_settings.ts` keeps
-/// the same list).
-pub const UPDATE_TRACKS: &[&str] = &["stable", "beta"];
+/// `nightly` is every green `main` commit (nightly.yml, S2b);
+/// `src/lib/fleet_settings.ts` keeps the same list.
+pub const UPDATE_TRACKS: &[&str] = &["stable", "beta", "nightly"];
 /// Per component: `manual` (only pins), `notify` (offer), `automatic`
 /// (install at the next quiet point).
 pub const UPDATE_HUB_MODE: &str = "update.hub.mode";
@@ -627,6 +627,15 @@ pub const NOTIFY_STATE_LABELS: &[(&str, &str)] = &[
 /// How often the hub re-reads the channel, and clients re-check.
 pub const UPDATE_CHECK_INTERVAL_SECS: &str = "update.check_interval_secs";
 pub const UPDATE_CHECK_INTERVAL_MIN_SECS: u64 = 900;
+/// A daily `HH:MM-HH:MM` range in UTC inside which an `automatic` component
+/// installs (decide rule 6); `""` = any time. An offer to a person is not held.
+pub const UPDATE_WINDOW: &str = "update.window";
+/// How long a rollout wave soaks before the next one opens (S9).
+pub const UPDATE_ROLLOUT_WAVE_SECS: &str = "update.rollout_wave_secs";
+pub const UPDATE_ROLLOUT_WAVE_MIN_SECS: u64 = 300;
+/// Serve the release files the hub's verified manifests list at
+/// `/update/artifact/<sha256>` (S9), for targets that cannot reach GitHub.
+pub const UPDATE_MIRROR: &str = "update.mirror";
 /// Sessions and items with no org may be sent too (D31). Off by default.
 pub const DECIDE_JEV_UNASSIGNED: &str = "decide.jev.unassigned";
 /// D48: sessions with no org may send reply text (J2) too, on top of
@@ -1307,6 +1316,28 @@ pub const SPECS: &[Spec] = &[
         "How often the hub re-reads the release channel, and clients check again.",
     )
     .unit(Unit::Hours),
+    Spec::new(
+        UPDATE_WINDOW,
+        "",
+        Kind::TimeRange,
+        "Maintenance window",
+        "A daily range in UTC, like 02:00-05:00, in which automatic updates install. Outside it they wait; an offer to a person is not held. Empty: any time.",
+    ),
+    Spec::new(
+        UPDATE_ROLLOUT_WAVE_SECS,
+        "3600",
+        Kind::SecsMin(UPDATE_ROLLOUT_WAVE_MIN_SECS),
+        "Rollout wave soak",
+        "How long each wave of a staged rollout runs before the next opens, if its failure ratio stays under the rollout's halt ratio.",
+    )
+    .unit(Unit::Hours),
+    Spec::new(
+        UPDATE_MIRROR,
+        "false",
+        Kind::Bool,
+        "Mirror release files",
+        "Serve the agent and hub tarballs, desktop bundles and the phone's APK from this hub, for machines that cannot reach GitHub. Each file is fetched once and checked against the signed release.",
+    ),
     Spec::new(
         DECIDE_JEV_ENABLED,
         "false",

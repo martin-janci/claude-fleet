@@ -151,6 +151,12 @@ pub struct Target {
     /// Resolved download URL of `artifact`, when it has one.
     #[serde(default)]
     pub url: Option<String>,
+    /// The same bytes on the deciding hub (`/update/artifact/<sha256>`, a
+    /// path on the hub's own base URL, with the caller's own credential),
+    /// when its operator turned the mirror on (S9). Trusted only by the
+    /// sha256 in the signed manifest, like `url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<Evidence>,
 }

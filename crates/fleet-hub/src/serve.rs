@@ -851,6 +851,10 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             Ok(dir) => tracing::info!(dir = %dir.display(), "downloads ready"),
             Err(e) => tracing::warn!(error = %e, "downloads unavailable"),
         }
+        // The release-file mirror (`update.mirror`, update design S9).
+        if let Err(e) = fleet_core::service::update::mirror::init(&r.data_dir) {
+            tracing::warn!(error = %e, "update mirror unavailable");
+        }
         // Likewise an agent install the last run left `running`: its job
         // died with that process, and it would refuse a new one for 30 min.
         if let Err(e) = fleet_core::service::agent_install::fail_interrupted(&s) {

@@ -202,6 +202,12 @@ pub async fn draft_commit_message(
                 format!("the draft took longer than {HOST_TIMEOUT_SECS}s"),
             ))
         }
+        _ if claude_print::run_signed_out(None, "", &out.stderr) => {
+            return Err(claude_print::signed_out_error(
+                &p.host,
+                p.profile.as_deref(),
+            ))
+        }
         _ if !out.status.success() && stdout.trim().is_empty() => {
             return Err(crate::service::repo::repo_err(&out))
         }
@@ -215,6 +221,12 @@ pub async fn draft_commit_message(
     let text = match claude_print::parse_envelope(&text) {
         Some(env) => {
             book(store, &p, Some(&env));
+            if claude_print::run_signed_out(Some(&env), &env.result, &out.stderr) {
+                return Err(claude_print::signed_out_error(
+                    &p.host,
+                    p.profile.as_deref(),
+                ));
+            }
             if env.is_error || env.result.trim().is_empty() {
                 return Err(IpcError::new(
                     codes::E_CLAUDE_CLI,
@@ -225,6 +237,12 @@ pub async fn draft_commit_message(
         }
         None => {
             book(store, &p, None);
+            if claude_print::run_signed_out(None, &text, &out.stderr) {
+                return Err(claude_print::signed_out_error(
+                    &p.host,
+                    p.profile.as_deref(),
+                ));
+            }
             text
         }
     };

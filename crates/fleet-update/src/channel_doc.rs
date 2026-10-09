@@ -72,6 +72,20 @@ pub struct ReleaseRef {
     pub manifest: String,
     /// Lowercase hex SHA-256 of the manifest's exact bytes.
     pub manifest_sha256: String,
+    /// Signed additions to the release's manifest published after it
+    /// (design §4, owner's answer to §13.2): fleet-mobile's APK, whose
+    /// release runs after this one. An older reader ignores the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub amendments: Vec<AmendmentRef>,
+}
+
+/// One amendment of a release's manifest: which component it adds, where
+/// its document lives, and the exact bytes' sha256.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AmendmentRef {
+    pub component: String,
+    pub manifest: String,
+    pub manifest_sha256: String,
 }
 
 impl ChannelDoc {

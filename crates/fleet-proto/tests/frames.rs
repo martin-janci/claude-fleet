@@ -609,7 +609,8 @@ fn a_hello_with_only_its_kind_decodes_with_empty_informational_fields() {
 ///
 /// This is the field this crate's compatibility story cannot afford to get
 /// wrong: `welcome` is the first frame down every connection, and a
-/// deployed agent has no self-update. A mandatory `proto` would turn a hub
+/// deployed agent updates only when its operator turned that on
+/// (`fleet-agent update`) — an older one never. A mandatory `proto` would turn a hub
 /// that ever omitted it into a permanent decode error — a known kind with a
 /// missing field is [`Decoded`]-level damage, so the agent would close the
 /// connection and reconnect, forever, with no reason to show an operator.

@@ -1710,9 +1710,20 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/150_host_probe_error.sql"),
         already_applied: Some(hosts_has_last_reachable_at),
     },
+    // Update design S9: staged rollouts, one active per component.
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        151,
+        include_str!("../../migrations/151_update_rollouts.sql"),
+    ),
+    // Update design S9: per-org update policy. `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        152,
+        include_str!("../../migrations/152_update_org_policy.sql"),
+    ),
     // Redesign 10.12: a chat form while its agent is still writing it
     // (`ask { draft }`). `IF NOT EXISTS`, safe to re-run.
-    Migration::plain(151, include_str!("../../migrations/151_form_drafts.sql")),
+    Migration::plain(153, include_str!("../../migrations/153_form_drafts.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

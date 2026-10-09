@@ -292,6 +292,14 @@
     hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ??
       $sessionBlocked(sess, 'send_prompt'),
   );
+  // UX audit L2: a Compact row says what the question is ("Waiting for you:
+  // Allow Bash(…)?") and leaves the answer card to the conversation, the
+  // Inbox's open row and ⌘K Approve; Comfortable keeps the card in the row.
+  const waitingLine = $derived(
+    answerView && promptBlocked === null && (answerView.question || answerView.detail)
+      ? `Waiting for you: ${answerView.question || answerView.detail}`
+      : null,
+  );
   /**
    * The row's privacy badge (multi-user M1). Read straight off the row —
    * `visibility` plus whether an owner arrived with it — so it says the same
@@ -763,9 +771,10 @@
             <SessionStatusChip {sess} />
           </span>
           {#if sess.account_uuid}
-            <!-- Redesign 4.3: the account this session runs on, on every row
-                 (outside the chip strip a Compact row hides). -->
-            <AccountPill uuid={sess.account_uuid} />
+            <!-- Redesign 4.3: the account this session runs on, on every
+                 Comfortable row; a Compact row shows it with the chips, on
+                 hover (UX audit L1; the inspector names it too). -->
+            <span class="acct"><AccountPill uuid={sess.account_uuid} /></span>
           {/if}
           {#if compact}
             <span class="sess-age" data-testid="sess-age" title={new Date(sess.last_activity_at * 1000).toLocaleString()}
@@ -977,7 +986,7 @@
           <!-- Chat forms: the agent waits on a form; the row's own click opens the conversation. -->
           <span class="form-chip" data-testid="row-form-chip" title={sess.pending_form.title}>Form waiting</span>
         {/if}
-        {#if answerView && promptBlocked === null}
+        {#if answerView && promptBlocked === null && !compact}
           <!-- Claude is asking this row a question. The "Needs you" filter
                shows exactly these rows, so the answer belongs here and not
                only behind a click into the session.
@@ -998,7 +1007,7 @@
           </div>
         {:else}
           {#if compact}
-            <SessionRowMeta {sess} state={bucketState(triage.bucket)} {promptText} reason={blockedReason} />
+            <SessionRowMeta {sess} state={bucketState(triage.bucket)} {promptText} reason={blockedReason ?? waitingLine} />
           {:else if blockedReason}
             <!-- Comfortable has no meta line, but a Blocked row still says why
                  (the SessionRow component's line two: "Paused · weekly limit
@@ -1330,13 +1339,21 @@
   /* Two lines of 2xs text and the row's padding: 40px (COMPACT_ROW_PX), so
      20 rows fit a 1080p window (SessionRowDensity.test.ts measures it). */
   .sess-row.compact { box-sizing: border-box; min-height: calc(2 * var(--text-2xs-lh) + var(--space-3)); }
-  .sess-row.compact .chips { display: none; }
+  .acct { display: contents; }
+  .sess-row.compact .chips,
+  .sess-row.compact .acct { display: none; }
   .sess-row.compact:hover .chips,
   .sess-row.compact:focus-within .chips,
-  .sess-row.compact.selected .chips { display: contents; }
+  .sess-row.compact.selected .chips,
+  .sess-row.compact:hover .acct,
+  .sess-row.compact:focus-within .acct,
+  .sess-row.compact.selected .acct { display: contents; }
   .sess-row.compact .sess-name {
+    flex: 1 1 auto;
     font-family: var(--font-sans);
-    font-size: var(--text-2xs);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--fg);
   }
   .sess-age {
     flex-shrink: 0;

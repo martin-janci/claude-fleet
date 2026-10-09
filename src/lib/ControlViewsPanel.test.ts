@@ -7,7 +7,7 @@ import ControlViewsPanel from './ControlViewsPanel.svelte';
 import ControlView from './ControlView.svelte';
 import { controlViews, defaultLayout } from './control_views';
 import { sessions } from './sessions';
-import { selectedSession } from './selection';
+import { selectedSession, onSessionOpened } from './selection';
 import { destination } from './destination';
 import { sidebarView } from './work_view';
 import { session } from './hosts_fixture';
@@ -43,6 +43,18 @@ describe('ControlViewsPanel (step 9.4)', () => {
     expect(get(selectedSession)?.id).toBe(asking.id);
     expect(get(controlViews).active).toBe('session');
     expect(getByTestId('control-session-focus').textContent).toContain('Fix the login bug');
+  });
+
+  it('a Needs you row keeps you in Control: nothing is told to navigate (UX audit 2026-10-09, C2)', async () => {
+    destination.set('control');
+    const opened = vi.fn();
+    const off = onSessionOpened(opened);
+    const { getByTestId } = render(ControlViewsPanel);
+    await fireEvent.click(getByTestId('control-needs-you-row'));
+    off();
+    expect(opened).not.toHaveBeenCalled();
+    expect(get(destination)).toBe('control');
+    expect(get(selectedSession)?.id).toBe(asking.id);
   });
 
   it('the session opens here with its conversation; ‹ and Esc go back, ⤢ opens it in full (step 9.5)', async () => {

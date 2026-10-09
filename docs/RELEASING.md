@@ -124,6 +124,20 @@ and the app reports that version in its Settings screen.
 - **versionCode** is fleet-mobile's release-workflow run number, so it only
   grows; `versionName` is the tag without the `v`.
 - **iOS** is not released: there is no signing identity for it yet.
+- **Its place in the update manifest** (update design §4, S8; owner's answer
+  to §13.2). fleet-mobile's release publishes a versioned
+  `fleet-mobile-<v>.apk` with a `SHA256SUMS`, then sends this repository a
+  `repository_dispatch` (`android-release`) with the APK's URL, sha256, size,
+  versionCode, its signing certificate's sha256 and the phone's contract
+  window. `android-amendment.yml` turns that into a signed amendment —
+  `amendments/<v>/android.json` + `.minisig` on the `update-channels`
+  branch, adding the `android` component to that release — and lists it on
+  every track that carries the release (`scripts/update-channels.sh amend`).
+  Hubs then offer the APK to paired phones. The dispatch needs a token that
+  can trigger workflows here: the fine-grained token in fleet-mobile's
+  `FLEET_DISPATCH_TOKEN` secret (Actions: write on claude-fleet only). Without
+  it the APK still ships; phones are just not offered it until someone runs
+  `android-amendment.yml` by hand with the same fields.
 
 ## Upgrading into the work graph
 
@@ -373,6 +387,29 @@ line is worth keeping short), and `+build` metadata is refused outright —
 `+` is not a legal character in a Docker tag, so `hub-image.yml` could not
 publish an image for such a version.
 
+### Nightlies
+
+`.github/workflows/nightly.yml` publishes the `nightly` update track
+(update-channel design S2b). Nobody runs anything by hand:
+
+- after every green CI run of a `main` push (at most one every two hours):
+  `X.Y.Z-dev.N.g<sha>` — the next patch after the newest stable tag, `N` the
+  commits since it — with the hub image and the agent/hub tarballs only;
+- once a day (03:23 UTC) from the newest green `main`:
+  `X.Y.Z-dev.N.desktop.g<sha>`, every leg, the desktop bundles too.
+
+`scripts/cut-nightly.sh` makes scripts/release.sh's release commit on top of
+that `main` commit, pushes **only the tag** (the commit is on no branch;
+`main` never carries a nightly's version), and dispatches `release.yml` and
+`hub-image.yml` at it, since a tag the workflow token pushes starts nothing
+by itself. From there it is an ordinary pre-release: same gate, same
+manifest, published, and listed on `nightly.json` by the `channel` job.
+`scripts/release-assets.sh has-desktop <version>` is the one place that says
+a per-push nightly has no desktop legs, so verify-release and the drift
+check expect none. The newest 12 per-push and 3 daily nightlies are kept;
+older ones lose their release and their tag. `workflow_dispatch` (with
+`desktop`) cuts one now.
+
 ### The CI gate
 
 `scripts/release.sh` refuses to create the tag unless `ci.yml` has passed on
@@ -551,7 +588,11 @@ the operator's side is `docs/updates.md`). Two kinds of signed document:
 
 - **the release manifest** — `release-manifest.json` + `.minisig` on each
   release from 0.4.1: every component's artifacts by digest (the hub image
-  by `sha256:` digest, the tarballs, the desktop downloads) and the
+  by `sha256:` digest, the tarballs, the desktop downloads, and the
+  desktop's updater bundles — `.app.tar.gz`, AppImage, NSIS — each with a
+  `tauri_signature`: `release-manifest.sh` signs the bundle itself with the
+  same key, trusted comment `version:<v>`, for tauri-plugin-updater; no
+  `TAURI_SIGNING_PRIVATE_KEY` and no `.sig` asset) and the
   protocol windows the **released** fleet-hub states itself
   (`fleet-hub compat`). Immutable, like the release. Written by
   `scripts/release-manifest.sh` in the `manifest` job, before `checksums`,
@@ -564,8 +605,8 @@ the operator's side is `docs/updates.md`). Two kinds of signed document:
   started against the manifest (design §8.4); it never names a run, since
   the image is another run and a re-run job another attempt
   (`scripts/release-update-scripts-test.sh` holds the three to one form);
-- **the channel documents** — `stable.json`, `beta.json` (and later
-  `nightly.json`), each with its `.minisig`, on the orphan branch
+- **the channel documents** — `stable.json`, `beta.json` and
+  `nightly.json` (see *Nightlies*), each with its `.minisig`, on the orphan branch
   `update-channels`: what each track currently offers, recommends,
   requires, and rolls back to, with a `sequence` (a replayed older document
   is refused) and an `expires_at` 14 days out (an expired one is treated as

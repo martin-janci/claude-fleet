@@ -19,7 +19,47 @@ fn main() -> ExitCode {
             Err(why) => fail(&why),
         },
         Command::Status(args) => status(args.user),
+        Command::Update(args) => match update_cmd(args) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(why) => fail(&why),
+        },
     }
+}
+
+/// `$HOME`, for the user scope's paths.
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+}
+
+fn update_cmd(args: cli::UpdateArgs) -> Result<bool, String> {
+    let (layout, paths) = if args.user {
+        let home = home().ok_or("--user needs $HOME")?;
+        let config_home = config_home().ok_or("--user needs $XDG_CONFIG_HOME or $HOME")?;
+        (
+            Layout::user(&config_home),
+            fleet_agent::update::UpdatePaths::user(&home),
+        )
+    } else {
+        (Layout::system(), fleet_agent::update::UpdatePaths::system())
+    };
+    let config_path = args.config.clone().unwrap_or(layout.config_path.clone());
+    let config = fleet_agent::config::load(&config_path)
+        .map_err(|e| format!("{}: {e}", config_path.display()))?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("could not start the runtime: {e}"))?;
+    runtime.block_on(fleet_agent::update::run(
+        &config,
+        &paths,
+        &layout.unit_path,
+        args.user,
+        args.status,
+        args.clear,
+    ))
 }
 
 fn fail(why: &str) -> ExitCode {
@@ -77,6 +117,17 @@ fn install_cmd(args: cli::InstallArgs) -> Result<(), String> {
     let binary = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map_err(|e| format!("where is this binary? {e}"))?;
+    // Started through the update layout's symlink, `current_exe` names one
+    // release's directory; the unit must keep running the symlink.
+    let (layout, paths) = match (args.user, home(), config_home()) {
+        (true, Some(h), Some(c)) => (Layout::user(&c), fleet_agent::update::UpdatePaths::user(&h)),
+        _ => (Layout::system(), fleet_agent::update::UpdatePaths::system()),
+    };
+    let existing = std::fs::read_to_string(&layout.unit_path)
+        .ok()
+        .and_then(|u| fleet_agent::update::unit_binary(&u));
+    let binary =
+        fleet_agent::update::stable_binary(&binary, &paths.root, existing, &paths.default_link);
     let env = InstallEnv {
         binary,
         root: is_root(),

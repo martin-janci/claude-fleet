@@ -612,6 +612,10 @@ fn build_app(
                     "/update/report",
                     axum::routing::post(update_route::handle_report),
                 )
+                .route(
+                    "/update/artifact/{sha256}",
+                    axum::routing::get(update_route::handle_artifact),
+                )
                 .layer(axum::extract::DefaultBodyLimit::max(update_route::BODY_MAX))
                 .with_state(report_state),
         )

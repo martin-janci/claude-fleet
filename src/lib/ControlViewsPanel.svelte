@@ -10,7 +10,7 @@
 -->
 <script lang="ts">
   import { tablistKeys } from './tablist_keys';
-  import { selectSessionExplicitly, selectedSession } from './selection';
+  import { selectSession, selectSessionExplicitly, selectedSession } from './selection';
   import { sidebarView } from './work_view';
   import { leave } from './destination';
   import { controlTab } from './control';
@@ -54,6 +54,10 @@
     if (id === 'needs-you') {
       sidebarView.set('inbox');
       leave('control');
+    } else if (id === 'session' && $selectedSession) {
+      // The full session, revealed in the list as any deliberate open is.
+      selectSessionExplicitly($selectedSession);
+      leave('control');
     } else if (id === 'session' || id === 'prs') {
       if (id === 'prs') sidebarView.set('work');
       leave('control');
@@ -65,7 +69,8 @@
   /** A Needs you row puts that session in focus, here in the panel. */
   function openRow(s: SessionRow) {
     from = active;
-    selectSessionExplicitly(s);
+    // In place: Control stays, the panel shows it (board MCSession).
+    selectSession(s, { stay: true });
     selectView('session');
   }
 
@@ -263,6 +268,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
+    white-space: nowrap;
   }
   .tab:hover,
   .icon:hover {

@@ -65,8 +65,10 @@
 </script>
 
 <div class="filters-section" data-testid="filters-section">
-  <div class="fs-row" data-testid="filters-row">
-    <input
+  <!-- UX audit L3: the search takes the full width; Filters, Group and the
+       owner's trailing controls share the line under it. -->
+  <div class="fs-head" data-testid="filters-row">
+  <input
       class="search"
       type="search"
       {placeholder}
@@ -75,6 +77,7 @@
       oninput={(e) => onsearch((e.currentTarget as HTMLInputElement).value)}
       data-testid={searchTestid}
     />
+  <div class="fs-row">
     <button
       bind:this={filtersBtn}
       type="button"
@@ -89,6 +92,8 @@
     >
       <span aria-hidden="true">⏷</span> Filters{#if count > 0}<span class="badge">{count}</span>{/if}
     </button>
+    <label class="group-wrap" title="Group by">
+    <span class="group-label" aria-hidden="true">Group:</span>
     <select
       class="group"
       aria-label="Group by"
@@ -101,7 +106,10 @@
         <option value={o.id} title={o.title}>{o.label}</option>
       {/each}
     </select>
+    </label>
+    <span class="spacer"></span>
     {@render trailing?.()}
+  </div>
   </div>
   {#if open}
     <div class="fs-panel" id={panelId} role="group" aria-label={panelLabel} data-testid={panelTestid}>
@@ -124,6 +132,12 @@
     gap: 6px;
     min-width: 0;
   }
+  .fs-head {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+  }
   .fs-row {
     display: flex;
     gap: 4px;
@@ -131,7 +145,7 @@
     min-width: 0;
   }
   .search {
-    flex: 1;
+    flex: none;
     min-width: 0;
     height: var(--control-h-lg);
     font-size: var(--control-font);
@@ -163,16 +177,29 @@
     line-height: 16px;
     font-weight: 600;
   }
-  .group {
+  .group-wrap {
     flex: 0 1 auto;
-    max-width: 7.5rem;
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
     height: var(--control-h-lg);
-    font-size: var(--control-font);
-    padding: 0 4px;
+    padding-left: 6px;
     border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--fg);
     border-radius: var(--radius-sm);
+    background: var(--bg);
+    font-size: var(--control-font);
+    color: var(--fg-muted);
+  }
+  .group {
+    min-width: 0;
+    max-width: 7.5rem;
+    height: 100%;
+    font-size: var(--control-font);
+    padding: 0 2px;
+    border: 0;
+    background: transparent;
+    color: var(--fg);
   }
   .fs-panel {
     display: flex;

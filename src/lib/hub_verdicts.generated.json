@@ -373,6 +373,8 @@
     "set_local_workspace_excludes",
     "set_tray_state",
     "sync_local_workspace_now",
+    "update_check",
+    "update_install",
     "upload_attachments",
     "upload_to_session",
     "voice_claim",

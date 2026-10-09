@@ -31,9 +31,6 @@
 </script>
 
 <section class="block" data-testid="appearance-section">
-  <div class="section-header">
-    <h4>Appearance</h4>
-  </div>
   <div class="pref">
     <div class="pref-text">
       <span class="lbl">Theme</span>
@@ -81,10 +78,11 @@
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    padding: 6px 0;
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--border);
   }
   .pref-text { flex: 1; min-width: 0; }
-  .lbl { font-size: var(--text-xs); font-weight: 600; }
+  .lbl { font-size: var(--text-sm); font-weight: 500; }
   .hook-desc {
     margin: 2px 0 0;
     font-size: var(--text-2xs);

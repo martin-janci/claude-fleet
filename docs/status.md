@@ -525,7 +525,7 @@ resolve on a conflict, and an overview of every link with Clean up stale.
 Symlinks sync as links (their target, never followed; not on a Windows
 desktop). Not yet: a filesystem watcher, a three-way merge editor.
 
-Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. The app's own wizards (New session, Add host, Pair a device, Add project, Link to a hub, Get started) are fleet.form/1 specs too (redesign 10.12, `src/lib/forms/wizards/`, `docs/forms.md` → *Wizards are forms too*). As dialogs: Link to a hub (Settings › Hub), Pair a device (Settings › Devices) and Get started's first session (`get_started`). In the chat (`ChatForm` at the end of the Conversation panel and of Control's chat): an agent's `wizard` block (`docs/chat-blocks.md`) opens Add host, Add project, Get started, New session or Pair a device, and Control's *Add project* chip opens Add project; nothing runs until the last button. An agent may stream a long form while it writes it, `ask { draft }` (migration 151, the row's `form_draft`), which the chat draws in as skeleton fields until `ask { form }` opens it. The phone's form sheet (14.7) is fleet-mobile's. Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
+Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. The app's own wizards (New session, Add host, Pair a device, Add project, Link to a hub, Get started) are fleet.form/1 specs too (redesign 10.12, `src/lib/forms/wizards/`, `docs/forms.md` → *Wizards are forms too*). As dialogs: Link to a hub (Settings › Hub), Pair a device (Settings › Devices) and Get started's first session (`get_started`). In the chat (`ChatForm` at the end of the Conversation panel and of Control's chat): an agent's `wizard` block (`docs/chat-blocks.md`) opens Add host, Add project, Get started, New session or Pair a device, and Control's *Add project* chip opens Add project; nothing runs until the last button. An agent may stream a long form while it writes it, `ask { draft }` (migration 153, the row's `form_draft`), which the chat draws in as skeleton fields until `ask { form }` opens it. The phone's form sheet (14.7) is fleet-mobile's. Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
 
 PR shepherd, steps 1 to 4 of 5 (step 2 without its Inbox card), are built and do nothing until a person
 grants a rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
@@ -707,14 +707,54 @@ against `keys.rs` before it leaves the runner
 (`scripts/release-update-scripts-test.sh`, CI hub-headless). See
 `docs/RELEASING.md` → *Update manifest and channels*.
 
-**Half of S4b is landed:** `X-Fleet-Client` (`fleet_update::client_header`)
+**S4b is landed** (its rollouts landed with S9): `X-Fleet-Client` (`fleet_update::client_header`)
 recorded into `update_observed` on `last_seen_at`'s once-a-minute beat in
 `authorize`; the `update:changed` row event (kind `update`, ids only, in
 `HOST_BOUND_HIDDEN_KINDS`); `fleet_health.updates` (`service::update::health`:
 `update_required`, `update_failed`, `update_rolled_back`, `rollback_failed`,
 `channel_stale`); and `update_status { target }`, the design's
-`update_check_for`. Left: the per-target `update:decision` push, hub-e2e
-section U, rollouts (S9).
+`update_check_for`; `update:decision` on `/events`
+(`service::update::push_decisions`, woken by a pin, a refreshed channel or an
+`update.*` setting; the desktop checks again on it); and hub-e2e section U (an
+`e2e` hub fetches a channel signed by a throwaway key from a fake GitHub
+through `FLEET_E2E_UPDATE_PORT`, and a paired desktop is told
+`update_available`, `update_required` and `client_too_new`).
+
+**S6 is landed, opt-in:** `crates/fleet-updater` (image
+`ghcr.io/martin-janci/fleet-updater`, built beside the hub's by
+`hub-image.yml`) and the compose profile `auto-update` in both compose
+files, plus `deploy/hub/fleet-updater.{service,timer}` for running one pass
+from systemd instead of keeping the Docker socket in a long-running
+container (owner's §13.4 answer: ship both). It asks `/update/check` as
+`hub:self`, verifies the target, pulls by the signed digest, backs up
+through `fleet-hub backup`, recreates the hub container on the new image,
+gates it (running, healthy, `healthcheck --ready --json`, the manifest's
+version / commit / build, the soak) and otherwise rolls back, restoring the
+backup when the candidate may have migrated (§13.5: the validation window's
+writes are lost and reported). Under `update.hub.mode=notify` (§13.6: the
+default stays `notify`) it installs only a pin, a required update or a
+rollback. It keeps the previous build's config and image id in its state
+file instead of a renamed `-prev` container, so compose never sees two
+containers for one service. `scripts/updater-e2e.sh` (CI hub-headless,
+`ci-local.sh --updater-e2e`) runs it against a real Docker daemon. Not
+built: its own self-update (its token does not reach `/events`, so it
+keeps to its interval).
+
+**S7 is landed:** the desktop updates itself (`src-tauri/src/self_update.rs`,
+`update_check` / `update_install`, both `SameInBoth`; `src/lib/updates.ts`,
+`UpdateBanner.svelte`). Paired it posts `/update/check` through
+`HubBackend::post_update`, the one call outside the contract gate
+(`update_routes_are_the_only_contract_exemption`); standalone it runs
+`git_check` under its own settings. `tauri-plugin-updater` installs only the
+target `verify_target` passed, fed from a one-shot loopback endpoint, and
+checks the bundle's minisign signature again. Owner's answer to the Tauri
+key: the release key itself — no `TAURI_SIGNING_PRIVATE_KEY`. Tauri's signer
+cannot use the unencrypted minisign key, so `release-manifest.sh` signs the
+`.app.tar.gz` / AppImage / NSIS bundles with `minisign` and the signatures
+(`version:` in the trusted comment, `requireSignedVersion`) ride in the
+manifest as `Artifact::Tauri`. Every desktop request carries
+`X-Fleet-Client` (`fleet_core::http_client::set_client_header`). A `.deb` is
+offered as a download. The footer's hover title already names both versions.
 
 **S3 is landed:** `service::update::git_check` (Git mode: a `GitCheck`
 from the hub's own settings, pin and last-seen sequence) and `fleet-hub
@@ -727,11 +767,44 @@ since a3033c2 / #384 (v0.4.1); the secret half is only the
 `RELEASE_SIGNING_KEY` repository secret and the owner's backup. The first
 channel was published with v0.4.1 (2026-09-28); `stable` / `beta` list every
 release since. `FLEET_UPDATE_E2E_KEYS`
-(read by `e2e` builds only) is reserved for S4b's hub-e2e section U;
-nothing uses it yet. `update.track` offers `stable` / `beta` only until S2b
-publishes `nightly` (a stored `nightly` resolves to `stable`). S2b
-(nightly), the rest of S4b and S6–S9 are not built; the
-other §13 questions wait on the owner.
+(read by `e2e` builds only) is what hub-e2e section U and
+`scripts/updater-e2e.sh` sign with. **S2b is landed:** `nightly.yml` cuts a nightly of
+a green `main` commit (`scripts/cut-nightly.sh`: scripts/release.sh's own
+commit on top of it, never pushed to a branch, only its tag) and dispatches
+the same `release.yml` / `hub-image.yml` at it — per push at most every two
+hours `X.Y.Z-dev.N.g<sha>` (hub and tarballs; `release-assets.sh
+has-desktop` is false), once a day `X.Y.Z-dev.N.desktop.g<sha>` with the
+desktop bundles (owner's §13.3 answer). `update.track` offers `nightly`;
+Git mode scans past releases without the caller's artifact, and the hub
+keeps 20 manifests. Pruned to the newest 12 + 3. §13 question 7 waits on
+the owner (2 is answered: a signed amendment).
+
+**S8 is landed:** fleet-mobile's release sends `repository_dispatch`
+`android-release` (secret `FLEET_DISPATCH_TOKEN` there; without it the step
+stands down with a notice) and `android-amendment.yml` signs the APK into the
+release's manifest as an amendment, listed on every track that carries the
+release. A phone asks its hub (`/update/check`, `X-Fleet-Client` on every hub
+request), falls back to GitHub releases only against a hub with no
+`/update/check`, and checks the APK's sha256 and its signer against both the
+decision's `signer_sha256` and the installed app before Android's installer.
+
+**S9 is landed.** Staged rollouts (migration 151 `update_rollouts`,
+`service::update::rollout`; `update_admin` `rollout_start` / `rollout_pause`
+/ `rollout_resume` / `rollout_abort`; waves advance on the decision pusher's
+five-minute beat after `update.rollout_wave_secs` and pause themselves at
+the halt ratio, `fleet_health` `rollout_paused`; `update_status.rollouts`);
+the maintenance window (`update.window`, UTC, holds only `automatic`
+components); per-org policy (migration 152 `update_org_policy`,
+`update_admin set_policy` / `clear_policy`: an org's mode, floor, window and
+pin for its clients and agent hosts; master only, an org owner cannot set
+its own yet); the artifact mirror (`update.mirror`, OFF by default;
+`GET /update/artifact/<sha256>`, `target.mirror`); and the binary target
+(`fleet_updater::binary`, now a library too): `fleet-agent update` with
+`install --auto-update`'s timer, and `fleet-hub update apply` / `pair` with
+`deploy/hub/fleet-hub-update.{service,timer}` for a hub without Docker. The
+binary loop is tested against a pretend machine (`binary::tests`); it has not
+run against a real systemd yet. The desktop and the phone do not use the
+mirror.
 
 Debug devices' first slice is landed (`docs/debug-devices.md`): per-host
 inventory of Android phones, emulators and AVDs, iOS simulators and paired

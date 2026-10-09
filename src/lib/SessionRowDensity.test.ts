@@ -105,6 +105,7 @@ const BADGES_054 = [
 ];
 
 beforeEach(() => {
+  uiDensity.set('comfortable');
   hosts.set([]);
   hubStatus.set({ ...STANDALONE });
   resetAccessForTests();

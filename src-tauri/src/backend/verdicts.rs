@@ -93,6 +93,15 @@ pub fn verdict(command: &str) -> Option<&'static Verdict> {
         .map(|(_, v)| v)
 }
 
+/// Why this desktop's own update is the same in both modes (update design
+/// S7, §6.5, §9): it is about THIS app's installed build. Paired, the check
+/// goes to the hub's `/update/check` — an `update_proto` route, not an MCP
+/// tool, and exempt from the contract gate so a desktop its hub can no
+/// longer read still learns what to update to; standalone, it reads the
+/// published channel. The install always happens on this machine, from a
+/// target verified against the release key.
+const WHY_SELF_UPDATE: &str = "this app's own build: paired, the hub's /update/check decides      (an update_proto route, not an MCP tool, exempt from the contract gate), standalone the      published channel does; either way the target is verified against the release key and      installed on THIS machine";
+
 /// Trackers (work graph M3.1): the hub's `work_admin` is master-only.
 const TRACKERS_ARE_ADMIN: &str = "trackers and their credentials are fleet administration: the \
      hub's work_admin is master-only, and a paired client is never the fleet's administrator; \
@@ -850,6 +859,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     // Settings → Updates (Orbit Fleet 11.9b): what each part of the fleet
     // runs, from the hub's update picture.
+    (
+        "update_check",
+        Verdict::SameInBoth {
+            why: WHY_SELF_UPDATE,
+        },
+    ),
+    (
+        "update_install",
+        Verdict::SameInBoth {
+            why: WHY_SELF_UPDATE,
+        },
+    ),
     (
         "list_update_targets",
         Verdict::Routed {

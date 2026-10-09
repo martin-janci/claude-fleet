@@ -14,4 +14,4 @@ CREATE TABLE IF NOT EXISTS form_drafts (
   updated_at INTEGER NOT NULL
 );
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (151);
+INSERT OR IGNORE INTO schema_version (version) VALUES (153);

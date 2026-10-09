@@ -591,7 +591,9 @@ async fn every_event_name_the_frontend_listens_for_crosses_the_bridge() {
         // `settings:changed` (declarative pages P3) names the key.
         "key": "gc.enabled",
         // `grant:changed` (multi-user M1) names the session and the person.
-        "person_id": 1
+        "person_id": 1,
+        // `update:decision` (update design §6.4) names the target and its status.
+        "target": "client:1", "status": "update_available"
     });
     let body: Vec<String> = fleet_core::events::EVENT_NAMES
         .iter()

@@ -145,6 +145,15 @@ start_hub() { # name port extra-args...
   return 1
 }
 stop_hub() { local pid; pid=$(cat "$ROOT/$1.pid"); kill -TERM "$pid"; wait "$pid"; STOP_RC=$?; rm -f "$ROOT/$1.pid"; }
+# with_timeout SECS CMD...: CMD, killed after SECS. macOS has no timeout(1)
+# (coreutils), so without it or Homebrew's gtimeout, perl's alarm stands in:
+# it survives the exec, and the SIGALRM ends CMD (exit 142).
+with_timeout() {
+  if command -v timeout >/dev/null; then timeout "$@"
+  elif command -v gtimeout >/dev/null; then gtimeout "$@"
+  else perl -e 'alarm shift; exec @ARGV or die "exec $ARGV[0]: $!\n"' "$@"
+  fi
+}
 # until TRIES CONDITION: poll every 0.2 s, at most TRIES times.
 until_ok() { local n=$1 _; for _ in $(seq "$n"); do eval "$2" && return 0; sleep 0.2; done; return 1; }
 
@@ -1234,7 +1243,7 @@ echo "== Work graph (hub W: a fake Jira Cloud, a fake Claude, real tmux and git)
 #     is born (that needs a real Claude on the operator host).
 # Hub W runs with its own HOME and its own tmux server under $ROOT, like the
 # agent leg, so nothing here touches this account's ~/.claude or its tmux.
-out=$(FLEET_E2E_TRACKER_PORT=1 timeout 20 "$BIN" serve --data-dir "$ROOT/refuse" --port "$(free_port)" 2>&1); rc=$?
+out=$(FLEET_E2E_TRACKER_PORT=1 with_timeout 20 "$BIN" serve --data-dir "$ROOT/refuse" --port "$(free_port)" 2>&1); rc=$?
 check "a hub built without the e2e feature refuses the fake-tracker override" '[ $rc -ne 0 ] && echo "$out" | grep -q "FLEET_E2E_TRACKER_PORT is set" && [ ! -e "$ROOT/refuse/state.db" ]' "rc=$rc $out"
 if [ -z "$WBIN" ] && [ "${CI:-}" = true ]; then
   # CI builds the e2e hub and passes it (ci.yml, hub-headless). A missing WBIN
@@ -1599,6 +1608,108 @@ else
   check "and the operator's tidy kill waits too: nothing is killed" 'echo "$opt" | grep -q E_CONFIRM_REQUIRED && wtmux has-session -t "=$TDI" 2>/dev/null' "${opt:0:400}"
   stop_hub w
   check "hub W SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
+fi
+
+echo "== Updates (hub U: a channel signed by an e2e key, a fake GitHub)"
+# Update design S4b, section U: a paired client asks /update/check and is told
+# update_available, update_required or client_too_new from a channel the hub
+# fetched and verified itself. REAL: the hub binary, its refresh tick, its
+# signature checks and decide(). SIMULATED: GitHub (scripts/hub-e2e.sh's
+# python below on 127.0.0.1, reached only through the e2e build's
+# FLEET_E2E_UPDATE_PORT, which keeps the https:// URLs and the GitHub host
+# fence) and the release key (a throwaway minisign key the e2e build trusts
+# through FLEET_UPDATE_E2E_KEYS).
+if [ -z "$WBIN" ] || ! command -v minisign >/dev/null 2>&1; then
+  if [ "${CI:-}" = true ]; then
+    bad "the update leg has WBIN and minisign in CI" "WBIN='$WBIN' minisign=$(command -v minisign || echo missing)"
+  else
+    echo "SKIP  the update scenarios: they need WBIN (an e2e fleet-hub) and minisign"
+  fi
+else
+  U="$ROOT/u"; mkdir -p "$U/www"
+  minisign -G -W -f -p "$U/k.pub" -s "$U/k.key" >/dev/null
+  UKEY=$(sed -n 2p "$U/k.pub")
+  HUBC=$("$WBIN" compat | python3 -c 'import json,sys; print(json.load(sys.stdin)["contract"]["hub_serves"])')
+  python3 - "$U/www" "$HUBC" <<'PY'
+import hashlib, json, os, sys, time
+www, c = sys.argv[1], int(sys.argv[2])
+iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+now = int(time.time())
+base = "https://github.com/martin-janci/claude-fleet/releases/download/v99.0.0/"
+m = {"schema": 1,
+     "release": {"version": "99.0.0", "track": "stable", "commit": "e2e", "build_id": "e2e",
+                 "published_at": iso(now), "assets_base": base},
+     "compatibility": {"contract": {"hub_serves": c, "desktop_accepts": [c, c]},
+                       "agent_proto": {"hub_accepts": [1, 1], "agent_speaks": 1}, "update_proto": 1},
+     "components": {"desktop": {"version": "99.0.0", "artifacts": [
+         {"kind": "tauri", "platform": "linux-x86_64", "variant": "appimage",
+          "name": "claude-fleet_99.0.0_amd64.AppImage", "sha256": "ab" * 32, "size": 1,
+          "tauri_signature": "c2ln"}]}}}
+mpath = os.path.join(www, "martin-janci/claude-fleet/releases/download/v99.0.0")
+os.makedirs(mpath, exist_ok=True)
+body = json.dumps(m)
+open(os.path.join(mpath, "release-manifest.json"), "w").write(body)
+ch = {"schema": 1, "track": "stable", "sequence": 1, "generated_at": iso(now),
+      "expires_at": iso(now + 86400), "current": "99.0.0", "recommended": "99.0.0",
+      "releases": [{"version": "99.0.0", "manifest": base + "release-manifest.json",
+                    "manifest_sha256": hashlib.sha256(body.encode()).hexdigest()}]}
+cpath = os.path.join(www, "martin-janci/claude-fleet/update-channels")
+os.makedirs(cpath, exist_ok=True)
+open(os.path.join(cpath, "stable.json"), "w").write(json.dumps(ch))
+PY
+  for f in "$U"/www/martin-janci/claude-fleet/update-channels/stable.json \
+           "$U"/www/martin-janci/claude-fleet/releases/download/v99.0.0/release-manifest.json; do
+    minisign -S -s "$U/k.key" -m "$f" -x "$f.minisig" </dev/null >/dev/null
+  done
+  PG=$(free_port)
+  # The fake GitHub: any host, files by path (the e2e transport keeps the
+  # host fence and sends only allowed hosts here).
+  (cd "$U/www" && exec python3 -m http.server "$PG" --bind 127.0.0.1) >"$ROOT/ugh.log" 2>&1 &
+  echo $! >"$ROOT/ugh.pid"
+  PU=$(free_port)
+  TOKU=$("$WBIN" init --data-dir "$ROOT/hu" --public-url "https://$PUB" --port "$PU" --local-host false 2>&1 | grep -E '^[0-9a-f]{64}$')
+  FLEET_UPDATE_E2E_KEYS="$UKEY" FLEET_E2E_UPDATE_PORT="$PG" \
+    "$WBIN" serve --data-dir "$ROOT/hu" --port "$PU" --public-url "https://$PUB" --local-host false >"$ROOT/hu.log" 2>&1 &
+  echo $! >"$ROOT/hu.pid"
+  until_ok 50 '[ "$(code "http://127.0.0.1:$PU/healthz")" = 200 ]' || bad "hub U starts" "$(tail -5 "$ROOT/hu.log")"
+  # update_status's channel sequence, out of the tool result's JSON text.
+  useq() { tool "$PU" "$PUB" "$1" update_status '{}' | python3 -c 'import json,sys
+try:
+    r = json.loads(sys.stdin.read()); t = json.loads(r["result"]["content"][0]["text"])
+    print((t.get("channel") or {}).get("sequence", ""))
+except Exception:
+    print("")'; }
+  useq_is_1() { [ "$(useq "$TOKU")" = 1 ]; }
+  check "hub U fetched and verified the e2e channel" 'until_ok 75 useq_is_1' "seq='$(useq "$TOKU")' $(grep -i update "$ROOT/hu.log" | tail -3)"
+  upc=$(tool "$PU" "$PUB" "$TOKU" pair_client '{"name":"e2e updater desk","mode":"full"}')
+  UCODE=$(pair_code "$upc")
+  UTOK=$(curl -s -m 10 -X POST "http://127.0.0.1:$PU/pair" -H "Host: $PUB" -H 'Content-Type: application/json' -d "{\"code\":\"$UCODE\"}" | grep -oE '"token":"[0-9a-f]{64}"' | grep -oE '[0-9a-f]{64}')
+  check "a desktop pairs with hub U" '[ ${#UTOK} -eq 64 ]' "${upc:0:300}"
+  ucheck() { # installed-version contract-min contract-max
+    curl -s -m 10 -X POST "http://127.0.0.1:$PU/update/check" -H "Host: $PUB" \
+      -H "Authorization: Bearer $UTOK" -H 'Content-Type: application/json' \
+      -d "{\"update_proto\":1,\"component\":\"desktop\",\"platform\":{\"os\":\"linux\",\"arch\":\"x86_64\",\"variant\":\"appimage\"},\"installed\":{\"version\":\"$1\"},\"speaks\":{\"contract_accepts\":[$2,$3]}}"
+  }
+  a=$(ucheck 0.0.1 "$HUBC" "$HUBC")
+  check "an older desktop is told update_available, with the signed evidence" 'echo "$a" | grep -q "\"status\":\"update_available\"" && echo "$a" | grep -q "\"version\":\"99.0.0\"" && echo "$a" | grep -q "\"manifest_sig\""' "${a:0:500}"
+  r=$(ucheck 0.0.1 0 $((HUBC - 1)))
+  check "a desktop that speaks no contract the hub serves is told update_required" 'echo "$r" | grep -q "\"status\":\"update_required\""' "${r:0:500}"
+  n=$(ucheck 100.0.0 $((HUBC + 1)) $((HUBC + 2)))
+  check "a desktop newer than its hub is told client_too_new" 'echo "$n" | grep -q "\"status\":\"client_too_new\""' "${n:0:500}"
+  # The update route is outside the contract gate and inside authorize.
+  check "/update/check without a token -> 401" '[ "$(code -X POST "http://127.0.0.1:$PU/update/check" -H "Host: $PUB" -H "Content-Type: application/json" -d "{}")" = 401 ]' ""
+  # A hub without the e2e keys trusts none of it: nothing is offered.
+  kill -TERM "$(cat "$ROOT/hu.pid")"; wait "$(cat "$ROOT/hu.pid")" 2>/dev/null; rm -f "$ROOT/hu.pid"
+  rm -rf "$ROOT/hu2"
+  TOKU2=$("$WBIN" init --data-dir "$ROOT/hu2" --public-url "https://$PUB" --port "$PU" --local-host false 2>&1 | grep -E '^[0-9a-f]{64}$')
+  FLEET_E2E_UPDATE_PORT="$PG" "$WBIN" serve --data-dir "$ROOT/hu2" --port "$PU" --public-url "https://$PUB" --local-host false >"$ROOT/hu2.log" 2>&1 &
+  echo $! >"$ROOT/hu2.pid"
+  until_ok 50 '[ "$(code "http://127.0.0.1:$PU/healthz")" = 200 ]' || bad "hub U2 starts" "$(tail -5 "$ROOT/hu2.log")"
+  sleep 2
+  check "a hub that does not trust the key caches no channel" '[ -z "$(useq "$TOKU2")" ]' "seq='$(useq "$TOKU2")'"
+  for f in hu2 ugh; do
+    [ -f "$ROOT/$f.pid" ] && { kill -TERM "$(cat "$ROOT/$f.pid")" 2>/dev/null; wait "$(cat "$ROOT/$f.pid")" 2>/dev/null; rm -f "$ROOT/$f.pid"; }
+  done
 fi
 
 echo "== ssh-key in an isolated HOME"

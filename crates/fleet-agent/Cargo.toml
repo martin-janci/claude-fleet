@@ -24,6 +24,11 @@ path = "src/main.rs"
 # agent adds no package for `cargo deny` to judge.
 [dependencies]
 fleet-proto = { path = "../fleet-proto" }
+# `fleet-agent update` (update design S9): the signed-release checks and the
+# binary target's loop. Neither depends on fleet-core; both are already in
+# the workspace, with nothing new in the lock.
+fleet-update = { path = "../fleet-update" }
+fleet-updater = { path = "../fleet-updater" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }

@@ -1605,7 +1605,8 @@ included. Input tokens (plain + cache) and cost (`total_cost_usd`) come
 from the `--output-format json` envelope; a call whose envelope has none is
 counted as usage unknown and left out of the totals. A timeout, an
 unreachable host, a missing `claude` or an error result is skipped with
-that reason (`timeout`, `ssh_error`, `noclaude`, `call_failed`).
+that reason (`timeout`, `ssh_error`, `noclaude`, `call_failed`,
+`signed_out` when the host's Claude login has expired).
 
 ## How to run phase 0
 

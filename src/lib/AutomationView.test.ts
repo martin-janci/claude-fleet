@@ -64,6 +64,25 @@ describe('Automation (redesign step 8.4)', () => {
     expect(screen.getAllByTestId('automation-run-session')).toHaveLength(1);
   });
 
+  it('the Runs column filters by outcome', async () => {
+    render(AutomationView);
+    automationTab.set('runs');
+    await screen.findAllByTestId('automation-run');
+    await fireEvent.click(screen.getByTestId('automation-runs-failed'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('list_runs', { args: { limit: 50, outcome: 'failed' } }));
+    expect(screen.getByTestId('automation-runs-failed').getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('+ New on any tab opens the Routines with the template in the editor', async () => {
+    render(AutomationView);
+    automationTab.set('agents');
+    await screen.findByTestId('automation-agent-operator');
+    await fireEvent.click(screen.getByTestId('routine-new'));
+    await fireEvent.click(screen.getByTestId('routine-template-blank'));
+    expect(await screen.findByTestId('routine-editor')).toBeInTheDocument();
+    expect(screen.getByTestId('automation-tab-routines').getAttribute('aria-selected')).toBe('true');
+  });
+
   it('the Rules tab holds the start rules (8.11)', async () => {
     render(AutomationView);
     automationTab.set('rules');
