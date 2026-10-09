@@ -40,9 +40,10 @@ impl TrayState {
     fn tooltip(self) -> &'static str {
         match self {
             Self::Idle => "Orbit Fleet",
-            Self::Working => "Orbit Fleet: working",
-            Self::NeedsYou => "Orbit Fleet: needs you",
-            Self::Lost => "Orbit Fleet: signal lost",
+            // The manual's status words, as the status bar says them.
+            Self::Working => "Orbit Fleet · Working",
+            Self::NeedsYou => "Orbit Fleet · Needs you",
+            Self::Lost => "Orbit Fleet · Hub unavailable",
         }
     }
 

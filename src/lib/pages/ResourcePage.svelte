@@ -179,7 +179,7 @@
     <div class="list">
       <ul role="listbox" aria-label={resource.plural} data-testid="resource-list">
         {#each records as r (idOf(resource, r))}
-          <li>
+          <li role="presentation">
             <button
               type="button"
               role="option"

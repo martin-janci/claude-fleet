@@ -50,6 +50,7 @@
     clampAgentPanelSize,
     dragResize,
     AGENT_PANEL_DEFAULT_W,
+    AGENT_PANEL_MIN_W,
     type AgentPanelSize,
   } from './agent_panel_size';
 
@@ -155,6 +156,12 @@
   // also answers the arrow keys (Home returns to the default size), and a
   // double-click resets it, the way a split-pane divider does.
   let panelEl: HTMLDivElement | undefined = $state();
+  // The grip is a focusable separator, so it says its value: the sheet's width.
+  let winW = $state(0);
+  const gripW = $derived($agentPanelSize?.w ?? AGENT_PANEL_DEFAULT_W);
+  const gripText = $derived(
+    $agentPanelMaximized ? 'Maximized' : $agentPanelSize ? `${$agentPanelSize.w} × ${$agentPanelSize.h} px` : 'Default size',
+  );
   let drag: { x: number; y: number; start: AgentPanelSize } | null = null;
   const RESIZE_STEP = 20;
   // How far the sheet may grow: up to 20px from the window's top and left
@@ -206,6 +213,8 @@
     agentPanelSize.set(clampAgentPanelSize({ w: s.w + step[0], h: s.h + step[1] }, growRoom()));
   }
 </script>
+
+<svelte:window bind:innerWidth={winW} />
 
 {#snippet chip()}
   <!-- Step 9.2: the agent's starts and kills wait here as cards, in the
@@ -266,6 +275,10 @@
       role="separator"
       aria-label="Resize the agent"
       aria-orientation="horizontal"
+      aria-valuenow={gripW}
+      aria-valuemin={AGENT_PANEL_MIN_W}
+      aria-valuemax={Math.max(AGENT_PANEL_MIN_W, gripW, winW - 40)}
+      aria-valuetext={gripText}
       tabindex="0"
       title="Drag to resize · double-click to reset"
       onpointerdown={onGripDown}

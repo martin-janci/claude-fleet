@@ -9,6 +9,7 @@ import { get } from 'svelte/store';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkBoard from './WorkBoard.svelte';
+import { expectAccessible } from './a11y_check';
 import { link, task } from './work_view_fixture';
 import { selectedTaskId, sidebarView, workViewFilters, type WorkTreePage } from './work_view';
 import { activeHintId, hintDef, markSeen, resetHints } from './hints';
@@ -189,6 +190,12 @@ describe('WorkBoard', () => {
     await flush();
     await fireEvent.click(screen.getByTestId('work-board-close'));
     expect(onclose).toHaveBeenCalledOnce();
+  });
+
+  it('is accessible', async () => {
+    const { container } = render(WorkBoard);
+    await flush();
+    await expectAccessible(container);
   });
 });
 

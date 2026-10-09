@@ -276,7 +276,7 @@
           data-board-column={lane.id}
           data-status={lane.status}
           data-testid="work-board-column-{lane.id}"
-          role="list"
+          role="group"
           aria-label={lane.label}
         >
           <h3>
