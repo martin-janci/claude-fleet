@@ -3439,6 +3439,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         name: "worker".into(),
                         prompt: "go".into(),
                         requester_session_id: Some(41),
+                        ..Default::default()
                     },
                     s,
                     h,

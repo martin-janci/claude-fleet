@@ -2,7 +2,7 @@
 // overlays at once, and the terminal underneath stays mounted through every
 // overlay round trip.
 import { render, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, beforeAll, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import App from './App.svelte';
@@ -19,6 +19,11 @@ import { activeHintId, hintDef, markSeen, resetHints } from './lib/hints';
 import { selectSessionExplicitly } from './lib/selection';
 import { session } from './lib/hosts_fixture';
 import { onboardingWelcomed } from './lib/onboarding';
+import { preloadLazyViews } from './lib/lazy_views';
+
+// The off-screen views load lazily in the app; here they are in place
+// before the first render, so a test sees them on the frame they open.
+beforeAll(() => preloadLazyViews());
 
 const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-view', 'accounts-overlay', 'control-overlay', 'automation-overlay'];
 

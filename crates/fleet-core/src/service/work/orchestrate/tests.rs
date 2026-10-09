@@ -566,3 +566,106 @@ fn the_hold_checks_the_host_a_start_rule_picks() {
     let why = e.payload.as_ref().unwrap()["why"].as_str().unwrap();
     assert!(why.contains("mac's own login"), "{why}");
 }
+
+/// Review round 15, F19: what makes a mission due rests partly on agents'
+/// own reports, so completing it is a person's act at every level. The
+/// loop's step is not its own to take, the planner's card is not applied by
+/// the loop, and the loop is refused if it tries; a person still can.
+#[tokio::test]
+async fn the_loop_never_completes_a_mission() {
+    for level in 0..=3 {
+        assert!(
+            !loop_applies_card("complete", level),
+            "the planner's complete card waits for a person at L{level}"
+        );
+        assert!(!loop_applies_card("ask", level));
+    }
+    assert!(loop_applies_card("run", AUTO_LEVEL));
+    let fx = fixture();
+    let step = Step {
+        kind: "complete".into(),
+        item_id: Some(fx.root),
+        role: None,
+        reason: "every task is done".into(),
+        context: None,
+        auto: true,
+    };
+    let m = mission_now(&fx);
+    let r = apply_step(&fx.deps, &m, &step, &Actor::Loop, &ViewScope::internal()).await;
+    assert!(!r.ok, "{}", r.detail);
+    assert!(r.detail.contains("a person completes"), "{}", r.detail);
+    assert_eq!(mission_now(&fx).state, "active");
+    let r = apply_step(
+        &fx.deps,
+        &m,
+        &step,
+        &Actor::Person("person:1".into()),
+        &fx.me,
+    )
+    .await;
+    assert!(r.ok, "{}", r.detail);
+    assert_eq!(mission_now(&fx).state, "completed");
+}
+
+/// Contract 14: the missions list carries each mission's spend and its
+/// grant's budget, and the plan an average run's cost for the run cards.
+#[test]
+fn a_mission_lists_its_spend_and_estimates_a_run_from_finished_ones() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        assert_eq!(run_estimate(&s, fx.m.id).unwrap(), None, "no history yet");
+        s.upsert_host("h").unwrap();
+        for (n, cost, finished) in [
+            ("w1", 2_000_000, Some(10)),
+            ("w2", 4_000_000, Some(20)),
+            ("w3", 9_000_000, None),
+        ] {
+            let sid = s
+                .upsert_session(n, "h", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET usage_cost_micros = ?2 WHERE id = ?1",
+                    rusqlite::params![sid, cost],
+                )
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO tasks (worker_session_id, state, created_at, finished_at, nonce, \
+                                        work_item_id) VALUES (?1, 'done', 1, ?2, ?3, ?4)",
+                    rusqlite::params![sid, finished, n, item],
+                )
+                .unwrap();
+        }
+        let e = run_estimate(&s, fx.m.id).unwrap().unwrap();
+        assert_eq!(
+            (e.micros, e.runs, e.basis.as_str()),
+            (3_000_000, 2, "mission"),
+            "the two finished runs; the open one is not counted"
+        );
+        s.add_grant(
+            fx.m.id,
+            &crate::store::NewGrant {
+                level: 2,
+                granted_by: "me",
+                hosts: None,
+                budget_micros: Some(40_000_000),
+                max_parallel: None,
+                profile: None,
+                expires_at: now_unix() + 3600,
+            },
+        )
+        .unwrap();
+    }
+    let listed = missions::missions(&fx.deps.store, &fx.me).unwrap();
+    let m = listed.iter().find(|m| m.id == fx.m.id).unwrap();
+    assert_eq!(m.cost_micros, Some(15_000_000), "every worker's spend");
+    assert_eq!(m.budget_micros, Some(40_000_000));
+    let json = serde_json::to_value(m).unwrap();
+    assert_eq!(json["cost_micros"], 15_000_000);
+    // A plain store read leaves both out of the wire.
+    let raw = serde_json::to_value(mission_now(&fx)).unwrap();
+    assert!(raw.get("cost_micros").is_none(), "{raw}");
+}

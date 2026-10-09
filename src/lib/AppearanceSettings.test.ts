@@ -18,6 +18,7 @@ describe('AppearanceSettings', () => {
     localStorage.setItem('cf:pref:ui.layout.v2', '"classic"');
     localStorage.setItem('cf:pref:layout.center-collapsed', 'true');
     localStorage.setItem('cf:session-ui', '{"local:dev":{"centerPx":360}}');
+    localStorage.setItem('cf:pref:sidebar.inbox-before-classic', 'true');
     vi.resetModules();
     try {
       await import('./prefs');
@@ -25,6 +26,7 @@ describe('AppearanceSettings', () => {
       expect(localStorage.getItem('cf:pref:ui.layout.v2')).toBeNull();
       expect(localStorage.getItem('cf:pref:layout.center-collapsed')).toBeNull();
       expect(localStorage.getItem('cf:session-ui')).toBeNull();
+      expect(localStorage.getItem('cf:pref:sidebar.inbox-before-classic')).toBeNull();
     } finally {
       vi.resetModules();
     }

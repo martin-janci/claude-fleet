@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
   import { draftedBy } from './ai_proposal';
+  import DraftedLabel from './DraftedLabel.svelte';
   import type { SessionRow } from './sessions';
   import { checkLabel, clock, defaultSince, sessionSummarySince, type WatchSummary } from './watch_summary';
 
@@ -72,7 +73,10 @@
       <p class="muted" data-testid="watch-summary-empty">Nothing happened since {clock(since)}.</p>
     {:else if summary.text}
       <p class="text ai-pre" data-testid="watch-summary-text">{summary.text}</p>
-      <p class="muted" data-testid="watch-summary-meta">{meta} · {checkLabel(summary.check)}</p>
+      <p class="muted drafted">
+        <DraftedLabel testid="watch-summary-drafted" />
+        <span data-testid="watch-summary-meta">{meta} · {checkLabel(summary.check)}</span>
+      </p>
     {:else}
       <p class="muted" data-testid="watch-summary-hidden">The summary is {checkLabel(summary.check)}.</p>
     {/if}
@@ -112,6 +116,12 @@
     margin: 0;
     font-size: var(--text-2xs);
     color: var(--fg-muted);
+  }
+  .drafted {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
   }
   .error {
     margin: 0;

@@ -8,7 +8,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 
 import LimitActions from './LimitActions.svelte';
-import { moveToHeadroom, resetText, waitingOut } from './account_limits';
+import { headroomForAccount, moveToHeadroom, resetText, waitingOut } from './account_limits';
 import type { Result } from './result';
 import { RESET_WEEK, session } from './hosts_fixture';
 
@@ -120,6 +120,34 @@ describe('moveToHeadroom', () => {
       restart,
     );
     expect(r).toEqual({ moved: 1, stayed: 1, nowhere: 1, failed: 1 });
+    expect(restart).toHaveBeenCalledWith('mac', 'a', 'spare');
+  });
+});
+
+// Review r05: a row bills its `account_uuid`, which can differ from the
+// account its profile's login holds now; the move reads the row's account.
+describe('the account a row bills', () => {
+  const logins = [
+    { profile: null, account_uuid: 'acc-own', used_pct: 40 },
+    { profile: 'work', account_uuid: 'acc-work', used_pct: 95 },
+    { profile: 'spare', account_uuid: 'acc-spare', used_pct: 30 },
+  ];
+  const byProfile = { pause_at_pct: 90, chosen: logins[0], over: false, suggestion: null, logins };
+
+  it('reads over and the suggestion for the row\'s account, not its profile', () => {
+    const h = headroomForAccount(byProfile, 'acc-work');
+    expect(h.chosen?.account_uuid).toBe('acc-work');
+    expect(h.over).toBe(true);
+    expect(h.suggestion?.profile).toBe('spare');
+    expect(headroomForAccount(byProfile, null)).toBe(byProfile);
+    expect(headroomForAccount(byProfile, 'acc-unknown')).toBe(byProfile);
+  });
+
+  it('moves a row whose account is over even when its profile\'s login is not', async () => {
+    invoke.mockImplementation(async (cmd: string) => (cmd === 'check_account_headroom' ? byProfile : null));
+    const restart = vi.fn(async (): Promise<Result<unknown>> => ({ ok: true, value: null }));
+    const r = await moveToHeadroom([{ host_alias: 'mac', tmux_name: 'a', account_uuid: 'acc-work' }], restart);
+    expect(r).toEqual({ moved: 1, stayed: 0, nowhere: 0, failed: 0 });
     expect(restart).toHaveBeenCalledWith('mac', 'a', 'spare');
   });
 });

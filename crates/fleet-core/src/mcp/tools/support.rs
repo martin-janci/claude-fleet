@@ -722,10 +722,16 @@ pub(super) fn new_shell_session_summary(p: &NewShellSessionParams) -> String {
 /// prompt as a digest.
 pub(super) fn new_bg_session_summary(a: &crate::service::bg_sessions::NewBgSessionArgs) -> String {
     format!(
-        "host={} name={} requester_session_id={:?} prompt={}",
+        "host={} name={} requester_session_id={:?} project_id={:?} agent={} read_only={} \
+         stop_after_secs={:?} stop_after_usd={:?} prompt={}",
         bound_text(Some(&a.host_alias)),
         bound_text(Some(&a.name)),
         a.requester_session_id,
+        a.project_id,
+        bound_text(a.agent.as_deref()),
+        a.read_only,
+        a.stop_after_secs,
+        a.stop_after_usd,
         bound_body(Some(&a.prompt)),
     )
 }
@@ -746,6 +752,30 @@ pub(super) fn dispatch_new_worker_summary(
         requester_session_id,
         raw,
         bound_body(Some(prompt)),
+    )
+}
+
+/// Bound confirmation summary for a prompt or key the operator types into a
+/// session (`send_prompt`, `run_prompt`, `queue_prompt`, `dispatch_task` to
+/// an existing worker): the target and every argument that changes what
+/// lands in the pane, the text as a readable prefix plus a digest of the
+/// whole, so the person sees the brief and an approval for one text cannot
+/// send another.
+pub(super) fn prompt_summary(
+    row: &crate::store::SessionRow,
+    prompt: &str,
+    keys: Option<&str>,
+    submit: bool,
+    force: bool,
+    raw: bool,
+) -> String {
+    format!(
+        "session={} host={} name={} keys={} submit={submit} force={force} raw={raw} prompt={}",
+        row.id,
+        bound_text(Some(&row.host_alias)),
+        bound_text(Some(&row.tmux_name)),
+        bound_text(keys),
+        bound_text(Some(prompt)),
     )
 }
 

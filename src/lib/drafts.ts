@@ -35,8 +35,11 @@ export function todayBrief(refresh: boolean, since: number = localMidnight()): P
 /**
  * A hub older than 9.11 answers one of these for the call: no drafts there,
  * not a failure. Matched by code, never by message text (as today.ts).
+ * `E_FORBIDDEN` is not one: a refusal (an org that has not consented, a
+ * grant that does not reach) is said in its own words, never read as "an
+ * older hub" and hidden.
  */
-export const HUB_HAS_NO_DRAFTS = ['E_INVALID', 'E_FORBIDDEN', 'E_HUB_PROTOCOL'];
+export const HUB_HAS_NO_DRAFTS = ['E_INVALID', 'E_HUB_PROTOCOL'];
 
 /** "Drafted 08:02": the local time a draft was written. */
 export function draftedAt(at: number): string {

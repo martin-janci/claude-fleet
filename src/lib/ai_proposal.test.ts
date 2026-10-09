@@ -5,6 +5,12 @@ import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, vi } from 'vitest';
 import ProposedBy from './ProposedBy.svelte';
 import DraftField from './DraftField.svelte';
+import AnswerPrompt from './AnswerPrompt.svelte';
+import ReviewApply from './pages/ReviewApply.svelte';
+import { allDescriptors, bundle } from './pages/testing';
+import { pendingInputFor, type PendingInput } from './pending_input';
+import type { SessionRow } from './sessions';
+import type { SettingProposal } from './pages/review';
 import {
   NEVER_DECIDES,
   draftedBy,
@@ -53,6 +59,66 @@ describe('where AI never decides', () => {
     const targets = NEVER_DECIDES.map((r) => r.target);
     expect(new Set(targets).size).toBe(targets.length);
     for (const r of NEVER_DECIDES) expect(r.why.length).toBeGreaterThan(0);
+  });
+});
+
+// The list above only says what is on it; these render the real callers, so
+// a regression in one of them (a reorder, a pre-tick) fails here (F13).
+describe('the callers never pre-select what AI never decides', () => {
+  const PUSH: PendingInput = {
+    kind: 'input',
+    question: 'Push the 3 commits to origin/main now?',
+    options: [
+      { n: 1, label: 'Not yet', selected: true },
+      { n: 2, label: 'Approve and push', selected: false },
+      { n: 3, label: 'Yes, go ahead', selected: false },
+    ],
+  };
+  const row = (value: string) =>
+    ({
+      id: 7,
+      host_alias: 'local',
+      tmux_name: 'dev-foo',
+      claude_status: 'blocked',
+      stuck_kind: null,
+      pending_input: PUSH,
+      proposals: [{ feature: 'quick_answer', value, source: 'jev', confidence_pct: 99 }],
+    }) as unknown as SessionRow;
+  const view = pendingInputFor({ rowStatus: 'blocked', rowStuck: null, rowPending: PUSH, probe: null })!;
+
+  it('AnswerPrompt: a sure Jev pick on a push question moves nothing and draws nothing primary', () => {
+    for (const value of ['o2', 'o3']) {
+      const { unmount } = render(AnswerPrompt, { session: row(value), view });
+      const opts = screen.getAllByTestId('answer-option');
+      expect(opts.map((b) => b.textContent?.replace(/\s+/g, ''))).toEqual(['1Notyet', '2Approveandpush', '3Yes,goahead']);
+      expect(opts.some((b) => b.classList.contains('primary'))).toBe(false);
+      expect(screen.queryByTestId('answer-proposed')).toBeNull();
+      unmount();
+    }
+  });
+
+  it('ReviewApply: an agent-proposed orchestrator.max_level 1 → 3 is not ticked', () => {
+    const p: SettingProposal = {
+      id: 1,
+      at: 0,
+      key: 'orchestrator.max_level',
+      value: '3',
+      before: '1',
+      current: '1',
+      why: 'let missions run on their own',
+      source: 'agent',
+      source_detail: 'control API',
+      state: 'pending',
+    };
+    render(ReviewApply, {
+      proposals: [p],
+      pages: bundle.pages,
+      descs: new Map(allDescriptors.map((d) => [d.key, d])),
+      now: () => 60,
+    });
+    expect((screen.getByTestId('review-tick-orchestrator.max_level') as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByTestId('review-apply-selected').textContent).toContain('(0)');
+    expect((screen.getByTestId('review-apply-selected') as HTMLButtonElement).disabled).toBe(true);
   });
 });
 

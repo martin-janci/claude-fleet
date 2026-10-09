@@ -503,10 +503,13 @@
       >
     </div>
     {#if !host.reachable && !isLocal}
-      <!-- The states kit: an offline host is said here, in its own pane. -->
+      <!-- The states kit: an offline host is said here, in its own pane.
+           "Last answered" is the last health sample, written only when the
+           host answered: `last_pinged_at` moves on a failed probe too
+           (review r13). -->
       <HostOffline
         alias={host.alias}
-        lastSeen={host.last_pinged_at}
+        lastSeen={host.health_at ?? null}
         {now}
         sessions={hostSessions.length}
         ontry={onreprobe}

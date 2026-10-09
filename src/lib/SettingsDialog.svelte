@@ -70,6 +70,7 @@
     resourceBlock,
     hubStrandedToken,
     ownsTheFleet,
+    plainUnavailableReason,
   } from './hub';
   import {
     attentionIdleMinutes,
@@ -587,8 +588,12 @@
         <p class="err" data-testid="hub-unavailable-reason">
           ⚠ This app is set to use
           {#if $hubStatus.configured_url}<code>{$hubStatus.configured_url}</code>{:else}a hub{/if},
-          but this launch cannot: {$hubStatus.unavailable}.
+          but this launch cannot: {plainUnavailableReason($hubStatus.unavailable)}.
         </p>
+        <details class="hook-desc" data-testid="hub-unavailable-detail">
+          <summary>Details</summary>
+          <code>{$hubStatus.unavailable}</code>
+        </details>
         <p class="hook-desc">
           Until that is fixed it manages no fleet at all — no reconcile tick, no
           control API, every fleet action refused — rather than quietly

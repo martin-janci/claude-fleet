@@ -5081,3 +5081,24 @@ describe('ConversationPanel composer access (multi-user M1)', () => {
     return shell;
   }
 });
+
+// Review round 13 (step 10.6): a loading conversation shows nothing for the
+// first 400 ms, then a skeleton; no "Loading conversation…" text flashes on
+// every session switch.
+describe('ConversationPanel while the conversation loads (review r13)', () => {
+  it('waits 400 ms, then shows a skeleton', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      mockedConv.mockReturnValue(new Promise(() => {}));
+      render(ConversationPanel, { session: session(), visible: true });
+      await tick();
+      expect(screen.queryByText(/Loading conversation/)).toBeNull();
+      expect(screen.queryByTestId('skeleton')).toBeNull();
+      await vi.advanceTimersByTimeAsync(400);
+      expect(screen.getByTestId('conv-loading')).toBeTruthy();
+      expect(screen.getByTestId('skeleton')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

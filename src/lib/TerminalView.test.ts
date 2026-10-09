@@ -579,7 +579,8 @@ describe('TerminalView open lifecycle (F12/N4)', () => {
     expect(openedHosts()).toEqual(['alpha', 'beta']);
     expect(screen.getByTestId('terminal-header').textContent).toContain('on beta');
     // Alpha's failure must not be shown under beta's header.
-    expect(document.body.textContent).not.toContain('PTY error');
+    expect(document.body.textContent).not.toContain("Couldn't attach");
+    expect(document.body.textContent).not.toContain('Connection refused');
   });
 
   it('a failing auto-reconnect spends the whole budget, then offers the manual banner', async () => {

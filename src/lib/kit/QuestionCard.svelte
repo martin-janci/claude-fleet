@@ -1,7 +1,11 @@
 <!-- The card a waiting session shows (manual: QuestionCard): the question,
      its age, the exact command in mono, and the answers in the agent's own
-     order with their number keys. Nothing is pre-selected: an answer is
-     primary only when the consumer says so, never as the AI's pick.
+     order with their number keys. Nothing is pre-selected or sent: an
+     answer is primary only when the consumer says so. `AnswerPrompt` marks
+     Jev's quick answer (J5) primary, and `quickOrder` (quick_answer.ts)
+     never proposes on a permission dialog or a risky option (a push, an
+     allow, a step hard to undo), so Approve on a push or a permission is
+     never the highlighted one.
      Redesign 5.9 makes it the one approval card: `AnswerPrompt` draws every
      agent dialog through it, in the Conversation and, as
      `compact`, on a session row. -->

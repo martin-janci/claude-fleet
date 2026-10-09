@@ -132,6 +132,22 @@ describe('TodayView', () => {
     expect(screen.getByTestId('today-error').textContent).toContain('hub unreachable');
   });
 
+  // Review r13 (step 10.6): the first read is a skeleton after 400 ms, never
+  // "Pick a session to see details" while it is still loading.
+  it('the first read is loading, not empty', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      vi.mocked(invoke).mockImplementation(() => new Promise(() => {}));
+      render(TodayView);
+      await flush();
+      expect(screen.queryByTestId('details-empty')).toBeNull();
+      await vi.advanceTimersByTimeAsync(400);
+      expect(screen.getByTestId('skeleton')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a hub without work_today keeps the plain empty state and stops re-asking on row events', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {

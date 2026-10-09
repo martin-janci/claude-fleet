@@ -23,11 +23,11 @@
 //!   host at a time.
 
 use super::planner::{self, PlannerOutput};
-use super::{changeable, mission_id, planner_host, Deps};
+use super::{changeable, host_sees_org, mission_id, planner_host, Deps};
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::settings;
 use crate::service::view_scope::ViewScope;
-use crate::service::work::today::{Today, TodayGroup, BUCKET_IN_PROGRESS};
+use crate::service::work::today::{Today, TodayGroup, TodaySession, BUCKET_IN_PROGRESS};
 use crate::service::work::WorkLinkArgs;
 use crate::store::{MissionRow, Store};
 use serde::{Deserialize, Serialize};
@@ -140,10 +140,10 @@ pub fn release_note_prompt(f: &NoteFacts) -> (String, String) {
 /// as the brief's prompt and its "from" words. `None` when the org has
 /// nothing today.
 pub fn brief_prompt(today: &Today, org: Option<i64>) -> Option<(String, String)> {
-    let groups: Vec<&TodayGroup> = today
+    let groups: Vec<TodayGroup> = today
         .groups
         .iter()
-        .filter(|g| group_org(g) == org)
+        .filter_map(|g| org_part(g, org))
         .take(ITEMS_MAX)
         .collect();
     let shipped: Vec<_> = today
@@ -157,7 +157,7 @@ pub fn brief_prompt(today: &Today, org: Option<i64>) -> Option<(String, String)>
     }
     let mut lines = Vec::new();
     for bucket in ["waiting", BUCKET_IN_PROGRESS, "stale"] {
-        let rows: Vec<&&TodayGroup> = groups.iter().filter(|g| g.bucket == bucket).collect();
+        let rows: Vec<&TodayGroup> = groups.iter().filter(|g| g.bucket == bucket).collect();
         if rows.is_empty() {
             continue;
         }
@@ -203,23 +203,51 @@ pub fn brief_prompt(today: &Today, org: Option<i64>) -> Option<(String, String)>
     Some((format!("{BRIEF_PROMPT}\n\n{}", lines.join("\n")), from))
 }
 
-/// A group's org: its own, else its first session's.
-fn group_org(g: &TodayGroup) -> Option<i64> {
-    g.org_id
-        .or_else(|| g.sessions.first().and_then(|s| s.org_id))
+/// The org a session of `g` counts for in a brief: its own, else its
+/// group's. The one rule [`brief_target`] (which org, which host) and
+/// [`brief_prompt`] (what the prompt carries) share, so a brief never
+/// targets one org and describes another (review r15).
+fn brief_org(g: &TodayGroup, s: &TodaySession) -> Option<i64> {
+    s.org_id.or(g.org_id)
+}
+
+/// The part of `g` a brief for `org` covers: the group with only its
+/// sessions that count for `org` (the no-work group mixes orgs), or `None`
+/// when none does. A group with no session belongs to its own org.
+fn org_part(g: &TodayGroup, org: Option<i64>) -> Option<TodayGroup> {
+    if g.sessions.is_empty() {
+        return (g.org_id == org).then(|| g.clone());
+    }
+    let sessions: Vec<TodaySession> = g
+        .sessions
+        .iter()
+        .filter(|s| brief_org(g, s) == org)
+        .cloned()
+        .collect();
+    (!sessions.is_empty()).then(|| TodayGroup {
+        sessions,
+        ..g.clone()
+    })
 }
 
 /// PURE: the org a brief covers and the host it runs on: the org of the
 /// most recently active session in today's digest, and that session's host.
-/// `wanted` narrows it to one org.
-pub fn brief_target(today: &Today, wanted: Option<i64>) -> Option<(Option<i64>, String)> {
+/// `wanted` narrows it to one org; `host_sees(host, org)` keeps only a
+/// session whose host may be sent that org's text, so a brief never runs on
+/// another org's host (transition plan, risk "Org text leaves the org").
+pub fn brief_target(
+    today: &Today,
+    wanted: Option<i64>,
+    host_sees: impl Fn(&str, Option<i64>) -> bool,
+) -> Option<(Option<i64>, String)> {
     today
         .groups
         .iter()
         .flat_map(|g| g.sessions.iter().map(move |s| (g, s)))
-        .filter(|(g, s)| wanted.is_none() || s.org_id.or(g.org_id) == wanted)
+        .filter(|(g, s)| wanted.is_none() || brief_org(g, s) == wanted)
+        .filter(|(g, s)| host_sees(&s.host_alias, brief_org(g, s)))
         .max_by_key(|(_, s)| s.last_activity_at)
-        .map(|(g, s)| (s.org_id.or(g.org_id), s.host_alias.clone()))
+        .map(|(g, s)| (brief_org(g, s), s.host_alias.clone()))
 }
 
 /// The hosts with a draft running now.
@@ -433,12 +461,28 @@ pub async fn brief(args: &WorkLinkArgs, deps: &Deps, scope: &ViewScope) -> Resul
         return Ok(briefs.get(&key).cloned().unwrap_or_default());
     }
     let today = crate::service::work::today::today(&deps.store, args.since, scope)?;
-    let (org_id, host) = brief_target(&today, args.org_id).ok_or_else(|| {
-        IpcError::new(
-            codes::E_INVALID_STATE,
-            "no session is running today, so there is no host to draft the brief on",
-        )
-    })?;
+    let target = {
+        let s = lock(&deps.store)?;
+        brief_target(&today, args.org_id, |host, org| {
+            host_sees_org(&s, host, org).unwrap_or(false)
+        })
+    };
+    let (org_id, host) = match target {
+        Some(t) => t,
+        None if brief_target(&today, args.org_id, |_, _| true).is_some() => {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "today's sessions all run on hosts of another organisation, so the \
+                 brief has no host it may be drafted on",
+            ))
+        }
+        None => {
+            return Err(IpcError::new(
+                codes::E_INVALID_STATE,
+                "no session is running today, so there is no host to draft the brief on",
+            ))
+        }
+    };
     let (prompt, from) = brief_prompt(&today, org_id).ok_or_else(|| {
         IpcError::new(codes::E_INVALID_STATE, "nothing in today's digest to brief")
     })?;

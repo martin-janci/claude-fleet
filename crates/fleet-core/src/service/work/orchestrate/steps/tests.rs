@@ -28,6 +28,8 @@ fn mission(policy: MissionPolicy) -> MissionRow {
         repos: vec![],
         policy,
         next_wake_at: None,
+        cost_micros: None,
+        budget_micros: None,
     }
 }
 
@@ -240,6 +242,10 @@ fn review_by_policy_and_completion_when_all_is_done() {
         0,
     );
     assert_eq!(kinds(&s), vec!["complete:10"]);
+    assert!(
+        !s[0].auto,
+        "a person completes a mission, never the loop (review round 15, F19)"
+    );
     let cont = MissionRow {
         mode: "continuous".into(),
         ..m

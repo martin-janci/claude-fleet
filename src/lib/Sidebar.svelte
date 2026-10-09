@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   import { tick, untrack, type Snippet } from 'svelte';
   import { get } from 'svelte/store';
   import { projects, refreshProjects, type ProjectTreeRow } from './projects';
@@ -30,7 +31,15 @@
   import AddProjectDialog from './AddProjectDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
   import FirstRun from './FirstRun.svelte';
-  import { hostFilter, effectiveHostFilter, hosts } from './hosts';
+  import { hostFilter, effectiveHostFilter, hosts, hostByAlias } from './hosts';
+  import { bootstrapError } from './bootstrap_state';
+  import { errorText } from './error_copy';
+  import EmptyState from './states/EmptyState.svelte';
+  import HostOffline from './states/HostOffline.svelte';
+  import LoadError from './states/LoadError.svelte';
+  import { openSettingsAt } from './app_views';
+  import { openToday } from './control';
+  import type { IpcError } from './result';
   import { bulkTargets, sessionBlocked, sessionIdBlocked } from './share';
   import { moveToHeadroom } from './account_limits';
   import {
@@ -48,6 +57,7 @@
   import {
     hostsViewOpen,
     addProjectRequest,
+    requestHostsView,
     settingsOpen,
   } from './app_views';
   import { hintAnchor } from './hints';
@@ -140,6 +150,8 @@
   let { onCollapse }: { onCollapse?: () => void } = $props();
 
   let loadError: string | null = $state(null);
+  /** The last refresh's failure, kept whole for the list's error state. */
+  let refreshError: IpcError | null = $state(null);
   let loading = $state(false);
   // Recency filter persists across app restarts. Default to "all" the first
   // time the user opens the app; otherwise honor whatever pill they last
@@ -682,16 +694,23 @@
   async function onRefresh() {
     loading = true;
     loadError = null;
+    refreshError = null;
     const pr = await refreshProjects();
     // Explicit user refresh: bypass the backend's freshness window.
     const sr = await loadSessions({ force: true });
     loading = false;
+    // Review r13: the line under the toolbar is a sentence; the toast keeps
+    // the code under Details.
     if (!pr.ok) {
-      loadError = pr.error.message;
+      loadError = `Couldn't refresh projects: ${errorText(pr.error)}`;
+      refreshError = pr.error;
       pushError(pr.error, 'Refresh projects failed');
     } else if (!sr.ok) {
-      loadError = sr.error.message;
+      loadError = `Couldn't refresh sessions: ${errorText(sr.error)}`;
+      refreshError = sr.error;
       pushError(sr.error, 'Refresh sessions failed');
+    } else {
+      bootstrapError.set(null);
     }
   }
 
@@ -995,11 +1014,23 @@
   // list). An empty tree then reads as "you have no projects" instead of
   // "this couldn't load" — so borrow the connection banner's own sentence for
   // this state rather than inventing a second wording.
+  // Review r13: why the list cannot be trusted to be empty. A hub that is
+  // configured but unusable (its banner says why) or a failed startup load
+  // reads as a failure, never as "No projects yet" or "Nothing needs you".
+  const listUnavailable = $derived(
+    $hubStatus.unavailable !== null ? 'hub' : ($bootstrapError ?? refreshError) !== null ? 'load' : null,
+  );
+
   const hubSkewEmptyMessage = $derived(
     $hubConnection.state === 'hub_too_old' || $hubConnection.state === 'hub_too_new'
       ? connectionBanner($hubConnection, $hubStatus.url)
       : null,
   );
+
+  // The empty list's actions (review r13): the Hosts view to add one, and
+  // New session.
+  const openAddHost = () => requestHostsView();
+  const openNewSession = () => openNewSessionPicker();
 
   // A project row's own `+`: straight to New session for that project.
   // (The switcher's New session mode is the one place a project is picked.)
@@ -1350,6 +1381,40 @@
 <svelte:window onkeydown={onWindowKeydown} />
 
 <div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
+  <!-- Review r13: what an empty Sessions list or Inbox says. A list that
+       could not load says so, with Retry; a calm Inbox says what is going
+       on instead (States board "Inbox empty · calm"). -->
+  {#snippet listState(where: 'sessions' | 'inbox')}
+    {#if listUnavailable === 'hub'}
+      <EmptyState
+        kind="none"
+        testid="{where}-unavailable"
+        title="Not connected to the hub"
+        body="Sessions show here once this app can use its hub; the banner above says what is wrong."
+        actions={[{ label: 'Hub settings', onclick: () => openSettingsAt('hub'), testid: `${where}-unavailable-settings` }]}
+      />
+    {:else if listUnavailable === 'load'}
+      <LoadError
+        title="Couldn't load sessions"
+        error={($bootstrapError ?? refreshError)!}
+        onretry={() => void onRefresh()}
+        retrying={loading}
+        testid="{where}-load-error"
+      />
+    {:else if where === 'inbox'}
+      <EmptyState
+        kind="calm"
+        testid="inbox-calm"
+        title="Nothing needs you right now."
+        body={inboxRestText ? `Not waiting · ${inboxRestText}` : null}
+        actions={[
+          { label: 'See running', onclick: () => sidebarView.set('sessions'), testid: 'inbox-calm-running' },
+          { label: 'Today', onclick: openToday, testid: 'inbox-calm-today' },
+        ]}
+      />
+    {/if}
+  {/snippet}
+
   {#snippet sessionRow(sess: SessionRow, readOnly = false, inWorkGroup = false, trailing: Snippet | undefined = undefined)}
     <SessionRowItem
       {sess}
@@ -1418,8 +1483,15 @@
        first, then one line for everything else and the way to it. -->
   <div class="scroller inbox" data-testid="inbox">
     <div class="section-header inbox-head" data-testid="inbox-head">
-      {inboxNeeding === 0 ? 'Nothing needs you' : `${inboxNeeding} need${inboxNeeding === 1 ? 's' : ''} you`}
+      {listUnavailable && inboxNeeding === 0
+        ? 'Inbox'
+        : inboxNeeding === 0
+          ? 'Nothing needs you'
+          : `${inboxNeeding} need${inboxNeeding === 1 ? 's' : ''} you`}
     </div>
+    {#if inboxNeeding === 0}
+      {@render listState('inbox')}
+    {/if}
     <div class="tree" role="tree" aria-label="Needs you">
       {#each inboxList as sess (sess.id)}
         {@render sessionRow(sess)}
@@ -1428,7 +1500,7 @@
     <!-- Redesign 8.6: routines whose newest run failed, with Fix, Retry, Pause. -->
     <RoutineFailures />
     <div class="inbox-rest" data-testid="inbox-rest">
-      {#if inboxRestText}<span class="muted">Not waiting · {inboxRestText}</span>{/if}
+      {#if inboxRestText && !(inboxNeeding === 0 && !listUnavailable)}<span class="muted">Not waiting · {inboxRestText}</span>{/if}
       <button
         type="button"
         class="btn btn--quiet"
@@ -1633,6 +1705,17 @@
               <span class="count">{g.rows.length}</span>
             </div>
             {#if !isCollapsed}
+              {@const offlineHost = flatBy === 'host' ? $hostByAlias.get(g.key) : undefined}
+              {#if offlineHost && offlineHost.reachable === false}
+                <!-- Review r13 (step 3.14): an unreachable host is said inside
+                     its own group, with what it means for its sessions. -->
+                <HostOffline
+                  alias={offlineHost.alias}
+                  lastSeen={offlineHost.health_at ?? null}
+                  sessions={g.rows.length}
+                  ontry={() => void onRefresh()}
+                  trying={loading} />
+              {/if}
               <div role="group">
                 {#each g.rows as sess (sess.id)}
                   {@render sessionRow(sess)}
@@ -1707,7 +1790,7 @@
                 onclick={(e) => { e.stopPropagation(); pendingPurge = row.project; }}
                 data-testid="purge-project"
                 aria-label="Purge project"
-              >🗑️</button>
+              ><Icon name="trash" size={12} /></button>
             </div>
 
             {#if !isCollapsed}
@@ -1720,16 +1803,40 @@
           </li>
         {/each}
       </ul>
+    {:else if listUnavailable && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
+      {@render listState('sessions')}
     {:else if !loadError && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
       {#if !hubSkewEmptyMessage && listFacets.length > 0 && $projects.length > 0}
         <!-- Filters hide every row: say which, and offer the way back,
-             instead of "no sessions" over a fleet that has some. -->
-        <div class="empty filtered-empty" data-testid="sidebar-empty">
-          <p>No sessions match <strong>{facetSentence(listFacets)}</strong>.</p>
-          <button type="button" class="btn btn--quiet is-bounded" data-testid="sidebar-empty-clear" onclick={clearListFilters}
-            >Clear filters</button
-          >
-        </div>
+             instead of "no sessions" over a fleet that has some, as the states
+             kit's no-results (review r13, States board "Search with no
+             results"). -->
+        
+          <EmptyState
+            kind="none"
+            testid="sidebar-empty"
+            title="No sessions match {facetSentence(listFacets)}."
+            actions={[
+              { label: 'Clear filters', onclick: clearListFilters, primary: true, testid: 'sidebar-empty-clear' },
+              ...(archivedHidden > 0
+                ? [{ label: `Include archived (${archivedHidden})`, onclick: () => setShowArchived(true), testid: 'sidebar-empty-archived' }]
+                : []),
+              { label: 'Start a new session', onclick: openNewSession, testid: 'sidebar-empty-new' },
+            ]}
+          />
+        
+      {:else if !hubSkewEmptyMessage && $hosts.length === 0}
+        <!-- Review r13, States board "First run": one host to start with. -->
+        <EmptyState
+          kind="first"
+          testid="sidebar-empty"
+          title="Start with one host"
+          body="Sessions run in tmux on a host you can reach over SSH. Add one, or pair this app with a hub that already has them."
+          actions={[
+            { label: 'Add a host…', onclick: openAddHost, primary: true, testid: 'sidebar-empty-add-host' },
+            { label: 'Pair with a hub', onclick: () => openSettingsAt('hub'), testid: 'sidebar-empty-pair' },
+          ]}
+        />
       {:else}
         <p class="empty" data-testid="sidebar-empty">
           {hubSkewEmptyMessage ??
@@ -1853,10 +1960,11 @@
       <button
         class="icon-btn"
         title="Launch a supervised Claude background session"
+        aria-label="New background session"
         onclick={() => (showBgModal = true)}
         data-testid="new-bg-session-btn"
         use:hintAnchor={{ id: 'bg-session', when: $sessions.some((s) => !hasNoPane(s)) && !$sessions.some((s) => s.kind === 'bg') }}
-      >⚡</button>
+      ><Icon name="bolt" size={14} /></button>
     </div>
   </footer>
 </div>
@@ -2203,9 +2311,6 @@
     font-size: var(--control-font);
   }
   .archived-row span { flex: 1; }
-  .filtered-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
-  .filtered-empty p { margin: 0; }
-  .filtered-empty strong { color: var(--fg); font-weight: 500; }
 
   .orphan-section {
     border-top: 1px solid var(--border);

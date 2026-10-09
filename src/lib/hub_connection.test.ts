@@ -230,10 +230,10 @@ describe('when the link was lost (step 3.14)', () => {
   it('reads as the design writes it', () => {
     const at = new Date(2026, 9, 8, 14, 52).getTime();
     expect(lostLine(reconnecting, at, 'https://fleet.example.com')).toBe(
-      'Lost https://fleet.example.com at 14:52 · try 3 · your sessions keep running on their hosts',
+      'Lost https://fleet.example.com at 14:52 · try 3 · your sessions keep running on their hosts · showing what was cached at 14:52',
     );
     expect(lostLine(offline, at, null)).toBe(
-      'Cannot reach the hub since 14:52 · try 2 · your sessions keep running on their hosts',
+      'Cannot reach the hub since 14:52 · try 2 · your sessions keep running on their hosts · showing what was cached at 14:52',
     );
     expect(lostLine({ state: 'connected' }, at, null)).toBeNull();
     expect(lostLine(hubTooOld, at, null)).toBeNull();

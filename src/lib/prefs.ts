@@ -83,10 +83,12 @@ sessionView.subscribe((v) => writePref('ui.sessionView', v));
 // Step 13.1 removed the Classic layout, and with it the Classic/New switch
 // and the center Details pane. Their keys (`ui.layout`, then `ui.layout.v2`;
 // the pane's collapsed state, and its per-session widths under
-// `cf:session-ui`) are forgotten once at load.
+// `cf:session-ui`; the Inbox Classic stood in for) are forgotten once at
+// load.
 clearPref('ui.layout');
 clearPref('ui.layout.v2');
 clearPref('layout.center-collapsed');
+clearPref('sidebar.inbox-before-classic');
 try {
   if (typeof localStorage !== 'undefined') localStorage.removeItem('cf:session-ui');
 } catch {

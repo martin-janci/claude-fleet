@@ -223,3 +223,29 @@ describe('WorkBoard editing', () => {
     expect(screen.getByTestId('edit-task-dialog')).toBeTruthy();
   });
 });
+
+// Review round 13 (step 10.6): filters that hide every task say so and offer
+// Clear filters, as the list does; an unfiltered empty board does not.
+describe('WorkBoard with filters that match nothing (review r13)', () => {
+  it('names the filters and clears them', async () => {
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'work_tree' ? { ...page(), tasks: [], total: 0 } : null,
+    );
+    workViewFilters.set({ query: 'nothing-like-this' });
+    render(WorkBoard);
+    await flush();
+    expect(screen.getByTestId('work-board-no-match').textContent).toContain('nothing-like-this');
+    await fireEvent.click(screen.getByTestId('work-board-clear'));
+    expect(get(workViewFilters)).toEqual({});
+  });
+
+  it('an empty board with no filters keeps its columns quiet', async () => {
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'work_tree' ? { ...page(), tasks: [], total: 0 } : null,
+    );
+    workViewFilters.set({});
+    render(WorkBoard);
+    await flush();
+    expect(screen.queryByTestId('work-board-no-match')).toBeNull();
+  });
+});

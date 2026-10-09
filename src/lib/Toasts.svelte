@@ -50,10 +50,11 @@
           <Loader name="progress-ring" size={28} value={t.progress} delay={0} testid="toast-ring" />
         </span>
       {/if}
-      {#if t.code}
-        <code class="code" data-testid="toast-code">{t.code}</code>
-      {/if}
-      <span class="msg">{t.message}</span>
+      <span class="msg"
+        >{t.message}{#if t.code}<details class="details"
+            ><summary>Details</summary><code class="code" data-testid="toast-code">{t.detail ?? t.code}</code></details
+          >{/if}</span
+      >
       {#if t.action}
         <button class="action" onclick={() => runToastAction(t.id)} data-testid="toast-action">{t.action.label}</button>
       {/if}
@@ -150,8 +151,18 @@
   .toast.success { border-left-color: var(--status-done); }
   .toast.warning { border-left-color: var(--status-waiting); }
   .toast.info { border-left-color: var(--accent); }
+  .details {
+    margin-top: 0.2rem;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
+  .details summary {
+    cursor: pointer;
+  }
   .code {
-    flex: 0 0 auto;
+    display: block;
+    margin-top: 0.15rem;
+    overflow-wrap: anywhere;
     font-family: var(--font-mono);
     font-size: var(--text-2xs);
     padding: 0.05rem 0.3rem;

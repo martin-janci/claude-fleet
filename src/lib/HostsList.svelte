@@ -40,6 +40,7 @@
     onselect,
     oneditstart,
     oneditdone,
+    onaddhost = null,
   }: {
     groups: HostGroup[];
     rowInfo: Map<string, HostRowInfo>;
@@ -57,6 +58,8 @@
     onselect: (alias: string) => void;
     oneditstart: (uuid: string) => void;
     oneditdone: () => void;
+    /** Review r13: the first run's next step (States board "First run"). */
+    onaddhost?: (() => void) | null;
   } = $props();
 
   function optionIdFor(alias: string): string {
@@ -161,7 +164,14 @@
           title={`No host matches “${filter}”.`}
           actions={[{ label: 'Clear the filter', onclick: () => (filter = ''), testid: 'hosts-clear-filter' }]} />
       {:else}
-        <EmptyState kind={hubSkewEmptyMessage ? 'calm' : 'first'} testid="hosts-empty" title={hubSkewEmptyMessage ?? 'No hosts yet.'} />
+        <EmptyState
+          kind={hubSkewEmptyMessage ? 'calm' : 'first'}
+          testid="hosts-empty"
+          title={hubSkewEmptyMessage ?? 'Start with one host'}
+          body={hubSkewEmptyMessage ? null : 'Sessions run in tmux on a host you can reach over SSH.'}
+          actions={!hubSkewEmptyMessage && onaddhost
+            ? [{ label: 'Add a host…', onclick: onaddhost, primary: true, testid: 'hosts-empty-add' }]
+            : []} />
       {/if}
     {/each}
   </div>

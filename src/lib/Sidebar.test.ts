@@ -80,6 +80,7 @@ import { switcherRequest } from './switcher_request';
 import { addProjectRequest } from './app_views';
 import { newSessionRequest, clearNewSessionRequest } from './new_session_request';
 import { expectAccessible } from './a11y_check';
+import { bootstrapError } from './bootstrap_state';
 
 /** Open the sidebar's Filters panel (hosts, recency, work filters, include). */
 async function openFilters() {
@@ -1959,7 +1960,8 @@ describe('Sidebar: a hub contract skew', () => {
     render(Sidebar);
     await tick(); await tick();
     const empty = await screen.findByTestId('sidebar-empty');
-    expect(empty.textContent).toContain('No projects yet');
+    // No hosts: the ordinary first-run state (review r13), not a skew sentence.
+    expect(empty.textContent).toContain('Start with one host');
   });
 
   it('standalone mode is untouched', async () => {
@@ -1967,7 +1969,8 @@ describe('Sidebar: a hub contract skew', () => {
     render(Sidebar);
     await tick(); await tick();
     const empty = await screen.findByTestId('sidebar-empty');
-    expect(empty.textContent).toContain('No projects yet');
+    // No hosts: the ordinary first-run state (review r13), not a skew sentence.
+    expect(empty.textContent).toContain('Start with one host');
   });
 
   it('Add project is enabled on a connected hub client', async () => {
@@ -3542,5 +3545,69 @@ describe('Sidebar rows and the lost fold in the New layout (parity P8, H7, H8)',
     expect(screen.getByTestId('sess-details')).toBeInTheDocument();
     expect(pill).toHaveAttribute('aria-checked', 'true');
     expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(true);
+  });
+});
+
+
+// Review round 13: an empty list is only empty when the list could load. A
+// hub that cannot be used, or a failed startup load, is said as a failure;
+// a quiet Inbox says what is going on and where to go.
+describe('Sidebar empty states (review r13)', () => {
+  afterEach(() => {
+    bootstrapError.set(null);
+    hubStatus.set(STANDALONE);
+    sidebarView.set('sessions');
+  });
+
+  it('a hub that cannot be used is not "No projects yet"', async () => {
+    hubStatus.set({ ...STANDALONE, unavailable: 'cannot read the client token (locked)' });
+    mockBackend([], []);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('sidebar-empty')).toBeNull();
+    expect(screen.getByTestId('sessions-unavailable').textContent).toContain('Not connected to the hub');
+  });
+
+  it('a failed startup load says so with Retry, which refreshes', async () => {
+    bootstrapError.set({ code: 'E_HUB_UNREACHABLE', message: 'connection refused' });
+    mockBackend(fakeProjects, []);
+    render(Sidebar);
+    await tick(); await tick();
+    const err = screen.getByTestId('sessions-load-error');
+    expect(err.textContent).toContain("Couldn't load sessions");
+    expect(screen.getByTestId('sessions-load-error-text').textContent).toBe("Couldn't reach the hub.");
+    await fireEvent.click(screen.getByTestId('sessions-load-error-retry'));
+    await waitFor(() => expect(screen.queryByTestId('sessions-load-error')).toBeNull());
+    expect(get(bootstrapError)).toBeNull();
+  });
+
+  it('the Inbox does not say "Nothing needs you" when sessions could not load', async () => {
+    bootstrapError.set({ code: 'E_HUB_TIMEOUT', message: 'deadline' });
+    mockBackend(fakeProjects, []);
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('inbox-head').textContent).not.toContain('Nothing needs you');
+    expect(screen.getByTestId('inbox-load-error')).toBeTruthy();
+  });
+
+  it('a calm Inbox offers See running and Today', async () => {
+    mockBackend(fakeProjects, [sessionFor(1)]);
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('inbox-calm').dataset.kind).toBe('calm');
+    await fireEvent.click(screen.getByTestId('inbox-calm-running'));
+    expect(get(sidebarView)).toBe('sessions');
+  });
+
+  it('a first run starts with one host', async () => {
+    mockBackend([], []);
+    render(Sidebar);
+    await tick(); await tick();
+    const empty = screen.getByTestId('sidebar-empty');
+    expect(empty.dataset.kind).toBe('first');
+    expect(screen.getByTestId('sidebar-empty-add-host')).toBeTruthy();
+    expect(screen.getByTestId('sidebar-empty-pair')).toBeTruthy();
   });
 });

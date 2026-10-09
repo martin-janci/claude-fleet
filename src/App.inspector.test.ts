@@ -1,7 +1,7 @@
 // Redesign step 3.5: the session header and one tab bar, and the inspector
 // (0.5.x's Details pane, moved beside the session) on ⌥⌘B / Ctrl+Alt+B.
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, beforeAll, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 import App from './App.svelte';
 import { onboardingDismissed, onboardingWelcomed } from './lib/onboarding';
@@ -14,6 +14,11 @@ import { sessionActionRequest } from './lib/session_actions';
 import { detectMac } from './lib/terminal_keys';
 import type { SessionRow } from './lib/sessions';
 import { session } from './lib/hosts_fixture';
+import { preloadLazyViews } from './lib/lazy_views';
+
+// The off-screen views load lazily in the app; here they are in place
+// before the first render, so a test sees them on the frame they open.
+beforeAll(() => preloadLazyViews());
 
 let rows: SessionRow[] = [];
 let original: ((cmd: string, ...rest: unknown[]) => Promise<unknown>) | undefined;

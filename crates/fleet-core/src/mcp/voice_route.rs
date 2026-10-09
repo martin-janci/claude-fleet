@@ -10,6 +10,7 @@ use super::auth::{refuses_peer, Caller, TokenMode};
 use super::report_route::ReportState;
 use crate::service::settings;
 use crate::service::voice::{registry, Capture, CaptureRefusal, PcmTx, RevokeReason, VoiceSource};
+use crate::store::Store;
 use axum::body::Body;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -19,7 +20,7 @@ use axum::Extension;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -187,6 +188,10 @@ enum SourceCmd {
 /// `RevokeReason` code).
 const CLOSE_CLAIMED_ELSEWHERE: u16 = 4001;
 
+/// The close code a source socket gets when its device may no longer drive
+/// the session: revoked, re-bound, or its grant narrowed (review r04 K3).
+const CLOSE_NOT_AUTHORIZED: u16 = 4003;
+
 /// How often `/voice/source` pings the device. A claim can sit idle for
 /// many minutes between recordings; a proxy in front of the hub drops an
 /// idle socket (nginx's default is 60 s), and with it the claim.
@@ -339,14 +344,50 @@ pub async fn handle_source(
     }
     let owner = caller.label();
     let session_id = q.session_id;
+    let store = state.store_arc();
     ws.max_frame_size(FRAME_CAP)
         .max_message_size(FRAME_CAP)
-        .on_upgrade(move |socket| serve_source(socket, session_id, owner))
+        .on_upgrade(move |socket| serve_source(socket, session_id, owner, store, caller))
+}
+
+/// May `caller` still supply `session_id`'s microphone? The upgrade checked
+/// it once; the socket then outlives that check, so every ping re-asks
+/// (review r04 K3). A paired device must still hold the binding it opened
+/// with (a revoke or re-bind ends it), and its scope must still drive the
+/// row (a grant narrowed to watch ends it). Anything but a clear yes ends
+/// the claim, like `/events`' `client_is_live`.
+fn may_still_supply(store: &Mutex<Store>, caller: &Caller, session_id: i64) -> bool {
+    let Ok(s) = store.lock() else {
+        return false;
+    };
+    if let Some(c) = &caller.client {
+        let opened_as = crate::store::ClientBinding {
+            org_id: c.org_id,
+            person_id: c.person_id,
+        };
+        if s.client_token_binding(c.id).ok().flatten() != Some(opened_as) {
+            return false;
+        }
+    }
+    let Ok(scope) = caller.view_scope(&s) else {
+        return false;
+    };
+    s.get_session_by_id(session_id)
+        .ok()
+        .flatten()
+        .filter(|r| scope.sees_session_row(r).is_visible())
+        .is_some_and(|r| scope.may_drive(&r))
 }
 
 /// Hold the session's claim for as long as the socket is open: relay start
 /// and stop to the device as text, and its binary PCM into the live capture.
-async fn serve_source(socket: WebSocket, session_id: i64, owner: String) {
+async fn serve_source(
+    socket: WebSocket,
+    session_id: i64,
+    owner: String,
+    store: Arc<Mutex<Store>>,
+    caller: Caller,
+) {
     let (mut sink, mut stream) = socket.split();
     let (source, mut cmd_rx) = WsSource::new();
     let claim_id = registry().claim(session_id, &owner, source);
@@ -359,6 +400,18 @@ async fn serve_source(socket: WebSocket, session_id: i64, owner: String) {
             _ = ping.tick() => {
                 if last_heard.elapsed() > SOURCE_PING * SOURCE_SILENT_PINGS {
                     tracing::debug!(session_id, "voice source silent; dropping its claim");
+                    break;
+                }
+                if !may_still_supply(&store, &caller, session_id) {
+                    tracing::info!(session_id, "voice source no longer authorized; dropping its claim");
+                    let _ = send_bounded(
+                        &mut sink,
+                        Message::Close(Some(CloseFrame {
+                            code: CLOSE_NOT_AUTHORIZED,
+                            reason: "this device may no longer use the microphone".into(),
+                        })),
+                    )
+                    .await;
                     break;
                 }
                 if !send_bounded(&mut sink, Message::Ping(Default::default())).await {

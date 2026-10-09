@@ -213,13 +213,14 @@ fn calls_command_new(line: &str) -> bool {
 
 /// Every child the desktop can start goes through `crate::proc`, which on
 /// Windows keeps a console program (`ssh.exe`, `git.exe`) from flashing a
-/// console window for every spawn. The core and the desktop are scanned; the
-/// hub is a Linux daemon and keeps its own spawns.
+/// console window for every spawn. The core, the desktop and the hub are
+/// scanned: the hub is a Linux daemon, but one spelling of a spawn keeps the
+/// rule checkable everywhere and costs it nothing.
 #[test]
 fn production_code_spawns_through_proc() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let proc_rs = manifest.join("src").join("proc.rs");
-    let (offenders, unterminated) = production_hits(calls_command_new, &proc_rs, false);
+    let (offenders, unterminated) = production_hits(calls_command_new, &proc_rs, true);
     assert_scanned(&unterminated);
     assert!(
         offenders.is_empty(),

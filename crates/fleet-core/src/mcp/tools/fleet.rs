@@ -1459,15 +1459,16 @@ fn pair_ttl(ttl_s: Option<u64>) -> std::time::Duration {
 
 /// The `add_host` audit line's identifying detail. A transport change is
 /// exactly the kind of thing the audit trail should carry, so it rides
-/// alongside `alias`/`ssh_alias` — defaulted the same way `add_host` itself
-/// resolves an unset transport, so the log always names the effective value.
+/// alongside `alias`/`ssh_alias` — but only when the caller named one: an
+/// unset transport writes none (a new row takes the column's `ssh`, a re-add
+/// keeps the row's own, possibly `agent`), so naming `ssh` there would log a
+/// change that did not happen (r18).
 fn add_host_audit_detail(args: &hosts::AddHostArgs) -> String {
-    format!(
-        "alias={} ssh_alias={} transport={}",
-        args.alias,
-        args.ssh_alias,
-        args.transport.as_deref().unwrap_or("ssh")
-    )
+    let mut detail = format!("alias={} ssh_alias={}", args.alias, args.ssh_alias);
+    if let Some(t) = args.transport.as_deref() {
+        detail.push_str(&format!(" transport={t}"));
+    }
+    detail
 }
 
 #[cfg(test)]
@@ -1502,15 +1503,14 @@ mod tests {
     }
 
     #[test]
-    fn add_host_audit_detail_names_the_default_transport_when_unset() {
+    fn add_host_audit_detail_names_no_transport_when_unset() {
+        // Unset keeps the row's transport (a re-add of an agent host stays
+        // agent), so the line must not claim `transport=ssh`.
         let args = hosts::AddHostArgs {
             alias: "h".into(),
             ssh_alias: "h.example".into(),
             transport: None,
         };
-        assert_eq!(
-            add_host_audit_detail(&args),
-            "alias=h ssh_alias=h.example transport=ssh"
-        );
+        assert_eq!(add_host_audit_detail(&args), "alias=h ssh_alias=h.example");
     }
 }

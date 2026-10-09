@@ -347,6 +347,9 @@ pub struct QueuePromptParams {
     /// Omit the untrusted-input marker line. Master token only.
     #[serde(default)]
     pub raw: bool,
+    /// Operator only: the nonce a person approved.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -391,6 +394,9 @@ pub struct SendPromptParams {
     /// (that `pending_input` option; toggles it when `multi`). Unmarked, not recorded; `prompt` must be empty.
     #[serde(default)]
     pub keys: Option<String>,
+    /// Operator only: the nonce a person approved.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -738,6 +744,9 @@ pub struct RunPromptParams {
     /// Omit the untrusted-input marker (master token only).
     #[serde(default)]
     pub raw: bool,
+    /// Operator only: the nonce a person approved.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

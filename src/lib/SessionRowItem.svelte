@@ -22,7 +22,7 @@
   import { pushError } from './toasts';
   import { rowPrompt, shortAge, timeAgo } from './session_status';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
-  import { hubConnection } from './hub_connection';
+  import { hubConnection, isLost } from './hub_connection';
   import { sessionBlocked } from './share';
   import AnswerPrompt from './AnswerPrompt.svelte';
   import NameWorkDialog from './NameWorkDialog.svelte';
@@ -220,6 +220,11 @@
       pushError(r.error, 'Remove failed');
     }
   }
+
+  // Review r13 (States board): with the hub lost, or the row's host known
+  // unreachable, the status shown is the last one read. The row is dimmed
+  // and says so, rather than reading as live.
+  const stale = $derived(isLost($hubConnection) || $hostByAlias.get(sess.host_alias)?.reachable === false);
 
   function hostIsReachable(alias: string): boolean {
     return $hostByAlias.get(alias)?.reachable ?? false;
@@ -611,6 +616,9 @@
   class:checked={isChecked}
   class:stuck={sess.stuck_kind !== null}
   class:compact
+  class:stale
+  data-stale={stale ? 'true' : undefined}
+  title={stale ? 'Last known state: no live updates until the connection is back' : undefined}
   data-testid="sess-row"
   data-density={$uiDensity}
   data-session-id={sess.id}
@@ -1097,6 +1105,9 @@
   .err { color: var(--danger); font-size: var(--text-2xs); padding: 0.2rem 0; margin: 0; }
   .inline-err { padding-left: 1.6rem; font-size: var(--text-2xs); }
 
+  .sess-row.stale {
+    opacity: 0.6;
+  }
   .sess-row {
     display: flex;
     align-items: center;

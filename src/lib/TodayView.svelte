@@ -17,6 +17,8 @@
   import { candidatesFor, inScope, refreshTidy, requestTidy, tidyReport } from './tidy';
   import MorningBrief from './MorningBrief.svelte';
   import MissionNudge from './MissionNudge.svelte';
+  import Skeleton from './states/Skeleton.svelte';
+  import { errorText } from './error_copy';
   import {
     loadToday,
     localMidnight,
@@ -45,6 +47,8 @@
   let today = $state<Today | null>(null);
   let error = $state<string | null>(null);
   let loading = $state(false);
+  /** The hub has no `work_today`: the plain empty state, for good. */
+  let unsupported = $state(false);
   let copied = $state(false);
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -73,9 +77,10 @@
     } else if (HUB_HAS_NO_TODAY.includes(r.error.code)) {
       today = null;
       error = null;
+      unsupported = true;
       stopFollowing();
     } else {
-      error = r.error.message;
+      error = errorText(r.error);
     }
   }
 
@@ -192,7 +197,7 @@
   </header>
 
   {#if error}
-    <p class="error" role="alert" data-testid="today-error">{error}</p>
+    <p class="error" role="alert" data-testid="today-error">Couldn't load Today: {error}. Refresh tries again.</p>
   {/if}
 
   <!-- Redesign 9.11: the brief drafted last; a new one only on Refresh. -->
@@ -245,6 +250,9 @@
       </h3>
       {@render groups(view.stale, 'stale')}
     {/if}
+  {:else if !error && !unsupported && today === null}
+    <!-- Review r13 (step 10.6): the first read is loading, not empty. -->
+    <Skeleton rows={4} label="Loading Today" />
   {:else if !error}
     <p class="empty" data-testid="details-empty">Pick a session to see details.</p>
   {/if}

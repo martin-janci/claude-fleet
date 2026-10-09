@@ -1057,7 +1057,12 @@ struct StreamState {
     /// the binding it opened under: `None` for the master token and for a
     /// per-host token, which are not revocable this way.
     client: Option<(Arc<Mutex<Store>>, i64, crate::store::ClientBinding)>,
-    /// Fires on the keep-alive beat; each tick re-checks [`StreamState::client`].
+    /// A per-host token's host and the SHA-256 of the token the stream
+    /// opened with (review r04 K2): a rotation or a removal ends the stream
+    /// on the next beat, as `agent/ws.rs` already does for an agent.
+    host: Option<(String, String)>,
+    /// Fires on the keep-alive beat; each tick re-checks [`StreamState::client`]
+    /// and [`StreamState::host`].
     heartbeat: tokio::time::Interval,
     /// The caller's view scope (work graph M5's org half, multi-user M1's
     /// person half), applied to every frame.
@@ -1137,6 +1142,26 @@ fn client_is_live(store: &Mutex<Store>, id: i64, opened_as: crate::store::Client
             tracing::warn!(error = %e.message, "[events] could not re-check the client; ending the stream");
             false
         }
+    }
+}
+
+/// Does `alias`'s token row still hold the token the stream opened with?
+///
+/// The per-host twin of [`client_is_live`]: a rotation replaces the token
+/// and removing the host deletes the row, and either one ends the stream.
+/// A narrowing to `readonly` does not, since `/events` only reads. Anything
+/// but a clear yes ends it.
+fn host_token_is_live(store: &Mutex<Store>, alias: &str, credential: &str) -> bool {
+    let Ok(s) = store.lock() else {
+        tracing::warn!("[events] store lock poisoned; ending the stream");
+        return false;
+    };
+    match s.get_host_token(alias) {
+        Ok(Some(row)) => super::auth::constant_time_eq(
+            super::auth::sha256_hex(&row.token).as_bytes(),
+            credential.as_bytes(),
+        ),
+        _ => false,
     }
 }
 
@@ -1430,6 +1455,15 @@ pub(super) async fn handle_events(
             },
         )
     });
+    // A per-host token is checked the same way, against the token it opened
+    // with, so a rotation (how an operator answers a stolen token) ends it.
+    let host = match (&caller.client, &caller.host_alias) {
+        (None, Some(alias)) => {
+            super::auth::bearer_token(headers.get(axum::http::header::AUTHORIZATION))
+                .map(|t| (alias.clone(), super::auth::sha256_hex(t)))
+        }
+        _ => None,
+    };
     // Subscribe BEFORE the first frame goes out: a change emitted between the
     // client's request and its first read must still reach it.
     let rx = (source.subscribe)();
@@ -1491,6 +1525,7 @@ pub(super) async fn handle_events(
             label,
             shutdown,
             client,
+            host,
             heartbeat: {
                 let start = tokio::time::Instant::now() + keepalive;
                 let mut i = tokio::time::interval_at(start, keepalive);
@@ -1589,6 +1624,7 @@ pub(super) async fn handle_events(
                         let cancel = st.shutdown.clone();
                         let label = st.label.clone();
                         let client = st.client.clone();
+                        let host = st.host.clone();
                         let rescope = (Arc::clone(&st.store), st.caller.clone());
                         let received = tokio::select! {
                             // The server is stopping: end the body now rather
@@ -1604,6 +1640,15 @@ pub(super) async fn handle_events(
                                         tracing::info!(
                                             caller = %label,
                                             "[events] stream closed: the client was revoked or re-bound"
+                                        );
+                                        return None;
+                                    }
+                                }
+                                if let Some((alias, credential)) = &host {
+                                    if !host_token_is_live(&rescope.0, alias, credential) {
+                                        tracing::info!(
+                                            caller = %label,
+                                            "[events] stream closed: the host token was rotated or removed"
                                         );
                                         return None;
                                     }

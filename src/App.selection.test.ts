@@ -2,7 +2,7 @@
 // Work view shows its detail beside one of its own sessions or none, never
 // beside the session another task had open.
 import { render, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, beforeAll, expect, beforeEach, afterEach, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import App from './App.svelte';
@@ -13,6 +13,11 @@ import { sessions } from './lib/sessions';
 import { session } from './lib/hosts_fixture';
 import { clearSelection, closeTask, selectedSession, selectSessionExplicitly } from './lib/selection';
 import { openTask, selectedTaskId, sidebarView } from './lib/work_view';
+import { preloadLazyViews } from './lib/lazy_views';
+
+// The off-screen views load lazily in the app; here they are in place
+// before the first render, so a test sees them on the frame they open.
+beforeAll(() => preloadLazyViews());
 
 const s225 = session('mercury', 'task-225', { id: 225, claude_session_id: 'c-225' });
 const s223 = session('mercury', 'task-223', { id: 223, claude_session_id: 'c-223' });

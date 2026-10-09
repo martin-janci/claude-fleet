@@ -1,6 +1,6 @@
 // Step 10.9: what Jev's quick answer may move, and what it never may.
 import { describe, it, expect } from 'vitest';
-import { proposedN, quickOrder, quickProposal, risky } from './quick_answer';
+import { affirmative, proposedN, quickOrder, quickProposal, risky, riskyQuestion } from './quick_answer';
 
 const opts = [
   { n: 1, label: 'Jest' },
@@ -24,6 +24,32 @@ describe('quick answer', () => {
     }
     for (const l of ['Push to main', 'Force-push', 'rm -rf build', 'Deploy to prod', 'Always allow']) expect(risky(l), l).toBe(true);
     expect(risky('Pushover')).toBe(false);
+  });
+
+  it('never moves anything on a question that names a risky action (F10)', () => {
+    const yes = [
+      { n: 1, label: 'Not yet' },
+      { n: 2, label: 'Yes, go ahead' },
+    ];
+    for (const q of ['Push the 3 commits to origin/main now?', 'Merge it?', 'Deploy to staging?', 'Approve the plan?', 'Release v2?']) {
+      expect(riskyQuestion(q), q).toBe(true);
+      const r = quickOrder(yes, jev('o2', 99), 'input', q);
+      expect(r.proposed, q).toBeNull();
+      expect(r.primary, q).toBeNull();
+      expect(r.shown.map((o) => o.n), q).toEqual([1, 2]);
+    }
+    expect(riskyQuestion('Which test runner?')).toBe(false);
+    expect(riskyQuestion(null)).toBe(false);
+    expect(risky('Approve')).toBe(true);
+  });
+
+  it('an affirmative pick may move first but is never the primary (F10)', () => {
+    for (const l of ['Yes', 'Yes, go ahead', 'Proceed', 'Accept', 'Confirm', 'Go ahead', 'Allow']) expect(affirmative(l), l).toBe(true);
+    expect(affirmative('Not yet')).toBe(false);
+    const r = quickOrder([{ n: 1, label: 'Not now' }, { n: 2, label: 'Yes, go ahead' }], jev('o2'), 'input', 'Add tests?');
+    expect(r.proposed?.n).toBe(2);
+    expect(r.primary).toBeNull();
+    expect(quickOrder(opts, jev('o2')).primary?.n).toBe(2);
   });
 
   it('reads the row’s quick-answer proposal and an option word', () => {

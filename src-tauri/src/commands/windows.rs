@@ -34,10 +34,36 @@ pub fn popout_label(session_id: i64, shell: Option<u8>) -> String {
     }
 }
 
+/// The main window's label: Tauri's default for the one window
+/// `tauri.conf.json` declares without a label.
+pub const MAIN_LABEL: &str = "main";
+
 /// Is `label` a pop-out's? The main window is `main`; closing it shuts the
 /// app's connections down, closing a pop-out closes only its own PTY.
 pub fn is_popout_label(label: &str) -> bool {
     label.starts_with(POPOUT_PREFIX)
+}
+
+/// What a window's `Destroyed` event does, by its label.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OnDestroyed {
+    /// The main window: close every ssh master, tunnel and PTY.
+    ShutDown,
+    /// A pop-out: close its own PTY and nothing else.
+    ClosePty,
+    /// Any other window: nothing. Only the main window's going away may
+    /// take the app's connections down (r18).
+    Nothing,
+}
+
+pub fn on_destroyed(label: &str) -> OnDestroyed {
+    if label == MAIN_LABEL {
+        OnDestroyed::ShutDown
+    } else if is_popout_label(label) {
+        OnDestroyed::ClosePty
+    } else {
+        OnDestroyed::Nothing
+    }
 }
 
 fn clean_title(title: &str) -> String {
@@ -109,6 +135,31 @@ pub async fn open_terminal_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_main_window_going_away_shuts_the_app_down() {
+        assert_eq!(on_destroyed("main"), OnDestroyed::ShutDown);
+        assert_eq!(on_destroyed(&popout_label(4, None)), OnDestroyed::ClosePty);
+        assert_eq!(
+            on_destroyed(&popout_label(4, Some(2))),
+            OnDestroyed::ClosePty
+        );
+        assert_eq!(on_destroyed("settings"), OnDestroyed::Nothing);
+        assert_eq!(on_destroyed(""), OnDestroyed::Nothing);
+    }
+
+    /// The config's one window takes Tauri's default label, `main`; a label
+    /// given there must be `main` too, or no window would ever shut down.
+    #[test]
+    fn the_configured_window_is_the_main_one() {
+        let conf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+        let conf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(conf).unwrap()).unwrap();
+        let windows = conf["app"]["windows"].as_array().unwrap();
+        assert_eq!(windows.len(), 1);
+        let label = windows[0]["label"].as_str().unwrap_or("main");
+        assert_eq!(label, MAIN_LABEL);
+    }
 
     #[test]
     fn a_label_names_the_session_and_the_terminal() {

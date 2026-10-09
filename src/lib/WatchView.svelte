@@ -28,6 +28,7 @@
   import { noAttachReason, type SessionAccess } from './access';
   import { hubStatus } from './hub';
   import WatchSummary from './WatchSummary.svelte';
+  import { errorSentence } from './error_copy';
   import { windowHidden } from './window_hidden';
 
   let {
@@ -116,7 +117,7 @@
     }
     // Shown in place, never toasted: this is a poll, and a host that went
     // away would otherwise raise one every few seconds.
-    error = `${r.error.code}: ${r.error.message}`;
+    error = `Couldn't capture the pane: ${errorSentence(r.error)} Trying again on the next poll.`;
   }
 
   // One effect owns the whole poll, keyed on the three things that change what

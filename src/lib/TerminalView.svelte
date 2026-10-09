@@ -41,6 +41,8 @@
   import TerminalStrip from './TerminalStrip.svelte';
   import { AGENT_LABELS } from './row_groups';
   import Self from './TerminalView.svelte';
+  import HostOffline from './states/HostOffline.svelte';
+  import { errorText } from './error_copy';
   import { openTerminalWindow, popoutTitle } from './terminal_popout';
 
   /** Shell terminals (step 5.3). App mounts this pane with no `shell`: it is
@@ -799,7 +801,7 @@
         const made = await shellTerminals(sess.id, 'open', shellN);
         if (standDown()) return;
         if (!made.ok) {
-          openError = `Terminal error: ${made.error.message}`;
+          openError = `Couldn't open the terminal: ${errorText(made.error)}`;
           return;
         }
       }
@@ -825,7 +827,7 @@
           // unreachable.
           scheduleAutoReconnect(target.tmux_name, target.host_alias);
         } else {
-          openError = `PTY error: ${toIpcError(e).message}`;
+          openError = `Couldn't attach to the session: ${errorText(toIpcError(e))}`;
           abandonFollow(sess.id);
         }
         return;
@@ -1625,8 +1627,15 @@
           through a host that can reach it — or move the session somewhere you can attach.
           ({openError})
         </div>
+      {:else if $selectedSession && $hostByAlias.get($selectedSession.host_alias)?.reachable === false}
+        <!-- Review r13 (step 3.14): an offline host is said in the pane with
+             the states kit, not as ssh's own words. -->
+        <HostOffline
+          alias={$selectedSession.host_alias}
+          lastSeen={$hostByAlias.get($selectedSession.host_alias)?.health_at ?? null}
+          ontry={() => void openTerm()} />
       {:else}
-        <div class="err">{openError}</div>
+        <div class="err" data-testid="terminal-open-error">{openError}</div>
       {/if}
     {/if}
   </div>

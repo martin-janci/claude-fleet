@@ -23,6 +23,7 @@
     now = Math.floor(Date.now() / 1000),
     locale,
     timeZone,
+    selectedAccount,
   }: {
     active: string;
     /** DOM id for the "Host" caption that names the group. */
@@ -37,6 +38,12 @@
     now?: number;
     locale?: string;
     timeZone?: string;
+    /**
+     * The account the session will run on, when the caller has picked a
+     * login other than the host's own (New session's Account select).
+     * The selected host's line and warning then describe that account.
+     */
+    selectedAccount?: string | null;
   } = $props();
 
   const visible = $derived($hosts.filter((h) => !h.hidden));
@@ -80,8 +87,8 @@
       timeZone,
       host: selected,
       hosts: $hosts,
-      account: accountOf(selected.account_uuid),
-      snapshot: snapshotOf(selected.account_uuid),
+      account: accountOf(selectedAccount ?? selected.account_uuid),
+      snapshot: snapshotOf(selectedAccount ?? selected.account_uuid),
     }}
   />
 {/if}

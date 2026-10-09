@@ -532,6 +532,7 @@
         }}
         oneditstart={(uuid) => (editing = { uuid, where: 'list' })}
         oneditdone={endEdit}
+        onaddhost={addHostBlocked === null ? () => (showAddPicker = true) : null}
       />
     </div>
     <div class="detail-pane">

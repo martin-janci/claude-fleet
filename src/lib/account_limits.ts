@@ -64,30 +64,57 @@ export function waitOut(sessionId: number, resetsAt: number): void {
 export async function switchTarget(sess: {
   host_alias: string;
   claude_profile?: string | null;
+  account_uuid?: string | null;
 }): Promise<HostLogin | null> {
   const h = await checkAccountHeadroom(sess.host_alias, sess.claude_profile ?? null);
-  return h.ok ? (h.value?.suggestion ?? null) : null;
+  return h.ok && h.value ? headroomForAccount(h.value, sess.account_uuid).suggestion : null;
+}
+
+/** The headroom answer for the account a session actually bills. The
+ *  check reads the login by profile, but a row's `account_uuid` is what it
+ *  runs on (a profile can be re-logged into another account since the
+ *  start), so when the row names an account the host has a login for, `over`
+ *  and the suggestion are read for that account, as `account_limits::
+ *  headroom` reads them for a profile (review r05). */
+export function headroomForAccount(h: Headroom, accountUuid: string | null | undefined): Headroom {
+  const chosen = accountUuid ? h.logins.find((l) => l.account_uuid === accountUuid) : undefined;
+  if (!chosen) return h;
+  const over = chosen.used_pct != null && chosen.used_pct >= h.pause_at_pct;
+  let suggestion: HostLogin | null = null;
+  if (over) {
+    for (const l of h.logins) {
+      if (l.account_uuid === chosen.account_uuid || l.used_pct == null || l.used_pct >= h.pause_at_pct) continue;
+      if (suggestion == null || l.used_pct < (suggestion.used_pct as number)) suggestion = l;
+    }
+  }
+  return { ...h, chosen, over, suggestion };
 }
 
 /** Bulk move (step 4.4): resume each session under the login with the most
  *  headroom on its host. Sessions already under the line stay put; the
  *  answer counts what moved, what had nowhere to go, and what failed. */
 export async function moveToHeadroom(
-  rows: readonly { host_alias: string; tmux_name: string; claude_profile?: string | null }[],
+  rows: readonly {
+    host_alias: string;
+    tmux_name: string;
+    claude_profile?: string | null;
+    account_uuid?: string | null;
+  }[],
   restart: (host: string, name: string, profile: string) => Promise<Result<unknown>>,
 ): Promise<{ moved: number; stayed: number; nowhere: number; failed: number }> {
   const out = { moved: 0, stayed: 0, nowhere: 0, failed: 0 };
   for (const s of rows) {
-    const h = await checkAccountHeadroom(s.host_alias, s.claude_profile ?? null);
-    if (!h.ok) {
+    const r0 = await checkAccountHeadroom(s.host_alias, s.claude_profile ?? null);
+    if (!r0.ok) {
       out.failed += 1;
       continue;
     }
-    if (!h.value.over) {
+    const h = headroomForAccount(r0.value, s.account_uuid);
+    if (!h.over) {
       out.stayed += 1;
       continue;
     }
-    const to = h.value.suggestion;
+    const to = h.suggestion;
     if (!to) {
       out.nowhere += 1;
       continue;

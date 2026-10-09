@@ -131,10 +131,11 @@ pub fn visible(s: &Store, scope: &ViewScope, row: &DownloadRow) -> bool {
         // opens with the org clause, so this one call is the org boundary,
         // the person fence and the tier.
         Some(sess) => scope.may_own(&sess),
-        // ORG-AUTHORITY question only, and the org claim is honest: nothing
-        // is left that names a person. `not a privacy fence` — the person
-        // half is `may_own` in the arm above, and a reaped session leaves
-        // none to ask.
+        // The session is gone (reaped, or the download had none). The org
+        // recorded with the row is the org half; the person half is
+        // `may_own_person_row` on the owner recorded with it (migration
+        // 148), so a reaped session's file stays its owner's (review r04
+        // F3).
         None => {
             scope.org.sees_session_org_only(&row.host_alias, row.org_id)
                 && scope.may_own_person_row(row.org_id, row.owner_person_id)

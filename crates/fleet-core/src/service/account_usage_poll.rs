@@ -106,9 +106,38 @@ async fn fetch_and_emit(
         persist_if_new(store, &before, &after);
     }
     if after.is_newsworthy_change(&before) {
+        let was = account_blocked(bus, account_uuid);
         bus.account_usage_updated(&after);
+        // The hub stamps `needs_attention` onto session frames only, so an
+        // account moving into or out of a limit or a lost login re-announces
+        // its live sessions, or a phone following the stream keeps the old
+        // stamp on an idle one (review r05 F9). Only a bus that follows the
+        // facts (the hub's) can see a move; every other bus knows none.
+        if let Some(store) = store {
+            if account_blocked(bus, account_uuid) != was {
+                let sent = match store.lock() {
+                    Ok(s) => s
+                        .reemit_live_sessions_on_account(account_uuid)
+                        .map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                if let Err(e) = sent {
+                    tracing::warn!(account = %account_uuid, "re-announcing the account's sessions failed: {e}");
+                }
+            }
+        }
     }
     after
+}
+
+/// Whether `bus`'s facts hold `account` at a limit or without a login: the
+/// two account inputs of a session's `Blocked` reasons.
+fn account_blocked(bus: &dyn EventBus, account: &str) -> (bool, bool) {
+    let f = bus.attention_facts();
+    (
+        f.limited_accounts.contains_key(account),
+        f.uncredentialed_accounts.contains(account),
+    )
 }
 
 /// Write `after`'s usage to the history when it is a new successful answer
@@ -1027,5 +1056,94 @@ mod tests {
         assert_eq!(at, vec![200, 300]);
         let err = account_usage_history("nope", 0, &store).unwrap_err();
         assert_eq!(err.code, "E_NOTFOUND");
+    }
+
+    /// Review r05 F9: an account moving into or out of a lost login (or a
+    /// limit) re-announces its live sessions, so the hub's stamped
+    /// `needs_attention` follows; a dead row, another account's session and
+    /// an answer that moves nothing send no session frame.
+    #[tokio::test]
+    async fn an_account_entering_or_leaving_a_block_re_announces_its_live_sessions() {
+        let bus = Arc::new(crate::events::BroadcastEventBus::new(64));
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        for uuid in ["acct-1", "acct-2"] {
+            s.upsert_account(&crate::store::AccountRow {
+                uuid: uuid.into(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        s.insert_host("h1", None).unwrap();
+        let mut ids = Vec::new();
+        for (name, account, status) in [
+            ("idle-1", "acct-1", "running"),
+            ("ghost-1", "acct-1", "ghost"),
+            ("idle-2", "acct-2", "running"),
+        ] {
+            let id = s
+                .upsert_session(name, "h1", None, None, 1, 1, status, None)
+                .unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE sessions SET account_uuid = ?1, claude_status = 'idle' WHERE id = ?2",
+                    rusqlite::params![account, id],
+                )
+                .unwrap();
+            ids.push(id);
+        }
+        let store = Mutex::new(s);
+        let hosts = vec![host("h1", "acct-1")];
+        let clock = TestClock::new();
+        let cache = Mutex::new(UsageCache::with_clock(clock.clone()));
+        let mut rx = bus.subscribe();
+        let mut frames = || {
+            let mut out = Vec::new();
+            while let Ok(m) = rx.try_recv() {
+                let id = m.payload.get("id").and_then(|v| v.as_i64());
+                let reason = m.payload["needs_attention"]["reason"]
+                    .as_str()
+                    .map(String::from);
+                out.push((m.name, id, reason));
+            }
+            out
+        };
+        let fetch = |out: &'static str| {
+            let fake = FakeSsh::new();
+            fake.on(crate::ssh_fake::Match::Any, crate::ssh_fake::Reply::ok(out));
+            fake
+        };
+
+        let gone = fetch("__usage_start__\n__login_expired__\n");
+        fetch_and_emit("acct-1", &hosts, &gone, &cache, bus.as_ref(), Some(&store)).await;
+        assert_eq!(
+            frames(),
+            vec![
+                ("account_usage:updated", None, None),
+                (
+                    "session:updated",
+                    Some(ids[0]),
+                    Some("no_credentials".into())
+                ),
+            ]
+        );
+
+        clock.advance(8 * 86_400);
+        let ok = fetch(OK_OUTPUT);
+        fetch_and_emit("acct-1", &hosts, &ok, &cache, bus.as_ref(), Some(&store)).await;
+        assert_eq!(
+            frames(),
+            vec![
+                ("account_usage:updated", None, None),
+                ("session:updated", Some(ids[0]), None),
+            ],
+            "signed in again: the stamp comes off"
+        );
+
+        clock.advance(8 * 86_400);
+        fetch_and_emit("acct-1", &hosts, &ok, &cache, bus.as_ref(), Some(&store)).await;
+        assert!(
+            frames().iter().all(|f| f.0 != "session:updated"),
+            "a new reading that moves no block re-announces nothing"
+        );
     }
 }

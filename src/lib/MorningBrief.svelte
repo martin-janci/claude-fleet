@@ -15,6 +15,8 @@
   let error = $state<string | null>(null);
   /** False on a hub older than 9.11: the block stays away. */
   let served = $state(true);
+  /** Why this hub refuses the brief (`E_FORBIDDEN`): said once, nothing offered. */
+  let refused = $state<string | null>(null);
 
   function show(d: Draft | null | undefined) {
     draft = d ?? null;
@@ -33,6 +35,8 @@
     busy = false;
     if (r.ok) {
       show(r.value?.draft);
+    } else if (r.error.code === 'E_FORBIDDEN') {
+      refused = r.error.message;
     } else if (!refresh && HUB_HAS_NO_DRAFTS.includes(r.error.code)) {
       served = false;
     } else {
@@ -51,7 +55,9 @@
         <span class="when" data-testid="morning-brief-at">{draftedAt(draft.at)}</span>
       {/if}
     </h3>
-    {#if draft || busy}
+    {#if refused}
+      <p class="muted" data-testid="morning-brief-refused">{refused}</p>
+    {:else if draft || busy}
       <DraftField
         bind:value={text}
         label="Brief"
@@ -92,6 +98,11 @@
     font-size: var(--text-2xs);
     font-weight: 400;
     color: var(--fg-muted);
+  }
+  .muted {
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+    margin: 0;
   }
   .error {
     color: var(--danger);

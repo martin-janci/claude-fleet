@@ -3,7 +3,7 @@
 // nothing else animates; once it answers, the pane asks for a pick and the
 // only mark left is the status bar's idle Breathe (step 3.14), not a wait.
 import { render, screen, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, beforeAll, expect, beforeEach, afterEach, vi } from 'vitest';
 import App from './App.svelte';
 import { onboardingDismissed, onboardingWelcomed } from './lib/onboarding';
 import { clearToasts } from './lib/toasts';
@@ -12,6 +12,11 @@ import { settingsOpen } from './lib/app_views';
 import { sessionsAnswered, type SessionRow } from './lib/sessions';
 import { fleetAccounts, fleetHosts, session } from './lib/hosts_fixture';
 import { resetStartup } from './lib/startup';
+import { preloadLazyViews } from './lib/lazy_views';
+
+// The off-screen views load lazily in the app; here they are in place
+// before the first render, so a test sees them on the frame they open.
+beforeAll(() => preloadLazyViews());
 
 let original: ((cmd: string, ...rest: unknown[]) => Promise<unknown>) | undefined;
 let inv: ReturnType<typeof vi.fn>;

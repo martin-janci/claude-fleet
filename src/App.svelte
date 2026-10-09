@@ -10,6 +10,9 @@
   import { setContextRedPct } from './lib/attention';
   import { trackersHealth, trackersSummary } from './lib/tracker_health';
   import Sidebar from './lib/Sidebar.svelte';
+  import Lazy from './lib/Lazy.svelte';
+  import { lazyViews, preloadLazyViews } from './lib/lazy_views';
+  import { windowHidden } from './lib/window_hidden';
   import Details from './lib/Details.svelte';
   import SessionTabs, { type SessionTab } from './lib/SessionTabs.svelte';
   import { openInEditorIfAllowed } from './lib/editor';
@@ -31,19 +34,15 @@
   import { terminalPane, requestTerminalTab } from './lib/terminals';
   import WatchView from './lib/WatchView.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
-  import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
-  import Toolkit from './lib/Toolkit.svelte';
   import { toolkitTab } from './lib/toolkit_skills';
-  import AccountsPage from './lib/AccountsPage.svelte';
   import AppRail from './lib/AppRail.svelte';
-  import ControlView from './lib/ControlView.svelte';
-  import AutomationView from './lib/AutomationView.svelte';
   import { toggleControl, toggleToday } from './lib/control';
   import type { RailId } from './lib/rail';
-  import WorkBoard from './lib/WorkBoard.svelte';
   import { loadProjects, applyProjectEvents } from './lib/projects';
-  import { loadSessions, applySessionEvents, sessions, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
+  import { loadSessions, applySessionEvents, sessions, sessionsAnswered, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
+  import { bootstrapError as bootstrapFailure } from './lib/bootstrap_state';
+  import { errorText } from './lib/error_copy';
   import { loadHosts, applyHostEvents, hosts } from './lib/hosts';
   import { viewHostSessions } from './lib/host_actions';
   import { loadAccounts, applyAccountEvents, accounts } from './lib/accounts';
@@ -140,10 +139,37 @@
   );
   const trackersLine = $derived(trackersSummary($trackersHealth));
   let healthError = $state<string | null>(null);
+  /** Review r13: the health failure in a sentence; the code stays under Details. */
+  let healthText = $state<string | null>(null);
   // Bootstrap (initial list_* fetches) failures. These used to be swallowed,
   // so a broken DB showed an innocent "No projects yet". Now they surface as
   // a sticky error toast (with the E_* code) plus this footer banner.
   let bootstrapError = $state<string | null>(null);
+  /** Review r13: which lists failed, in words ("sessions, hosts"). */
+  let bootstrapWhat = $state<string | null>(null);
+  let bootstrapRetrying = $state(false);
+
+  /** Review r13: Retry on the footer's failed-startup line re-reads the
+   *  lists that failed; the line goes when they all answer. */
+  async function retryBootstrap() {
+    bootstrapRetrying = true;
+    const [pr, sr, hr, ar] = await Promise.all([loadProjects(), loadSessions({ force: true }), loadHosts(), loadAccounts()]);
+    bootstrapRetrying = false;
+    noteBootstrap(pr, sr, hr, ar);
+  }
+
+  function noteBootstrap(pr: Result<unknown>, sr: Result<unknown>, hr: Result<unknown>, ar: Result<unknown>) {
+    const lists: [string, Result<unknown>][] = [['projects', pr], ['sessions', sr], ['hosts', hr], ['accounts', ar]];
+    const failed = lists.filter(([, r]) => !r.ok);
+    bootstrapWhat = failed.length > 0 ? failed.map(([what]) => what).join(', ') : null;
+    if (failed.length === 0) bootstrapError = null;
+    // The Sessions list and the Inbox read this, so a failed load is never
+    // shown as "No projects yet" or "Nothing needs you".
+    // A skewed hub (`E_HUB_CONTRACT`) has its own sentence in the list,
+    // from the connection banner.
+    const listFailure = !sr.ok ? sr.error : !pr.ok ? pr.error : null;
+    bootstrapFailure.set(listFailure && listFailure.code !== 'E_HUB_CONTRACT' ? listFailure : null);
+  }
   let unlistenEvents: UnlistenFn | null = null;
   let unlistenVoice: UnlistenFn | null = null;
   let showWelcome = $state(false);
@@ -226,6 +252,9 @@
     // The window shows that banner and the way to Settings, and nothing else.
     if (get(hubStatus).unavailable) {
       markStartup('done');
+      // Review r13: no list will arrive, so nothing waits on one (⌘K's
+      // "still arriving", the first-load loaders).
+      sessionsAnswered.set(true);
       return;
     }
     // Only a hub client has a live link to lose; see HubConnectionBanner.
@@ -249,6 +278,7 @@
       healthFailure = `health: ${hr0.error.code}`;
     } else {
       healthError = `${hr0.error.code}: ${hr0.error.message}`;
+      healthText = errorText(hr0.error);
       push({ kind: 'error', code: hr0.error.code, message: `Health check failed: ${hr0.error.message}` });
     }
     // Subscribed BEFORE the first list: a `session:updated` that lands while
@@ -320,6 +350,7 @@
       reportBootstrap('accounts', ar),
     ].filter((f): f is string => f !== null);
     if (failures.length > 0) bootstrapError = `startup load failed — ${failures.join(', ')}`;
+    noteBootstrap(pr, sr, hr, ar);
     markStartup('done');
     stopCatchUp = startCatchUp(get(hosts));
     // Sessions are loaded now — re-open the one the user last had selected.
@@ -379,6 +410,8 @@
     // pushes only real changes), so the chips' "synced … ago" and stale
     // clock read a copy refreshed here.
     trackerRefresh = setInterval(() => {
+      // Only feeds what is on screen (review r16 D7).
+      if (windowHidden()) return;
       void loadTrackers();
       void loadOrgs();
     }, 120_000);
@@ -390,6 +423,9 @@
     // `E_LOCAL_ONLY`. Calling it anyway would put an error toast on every
     // launch about a panel that simply does not apply here.
     if (!get(hubStatus).remote) void loadAccountUsage();
+    // The lazy views load once launch has drawn, so a first open does not
+    // wait on its chunk.
+    setTimeout(() => void preloadLazyViews(), 2_000);
   });
 
   // Catch-up net for missed Tauri events (e.g. sleep/wake, dropped events).
@@ -1111,34 +1147,35 @@
       {#if $destination === 'hosts'}
         <div class="view-slot overlay" data-testid="hosts-overlay">
           {#key hostsViewKey}
-            <HostsView
+            <Lazy
+              load={lazyViews.hosts}
               preselect={hostsPreselect}
               onClose={() => closeHosts()}
               onFilterSidebar={onHostsFilterSidebar}
               onNewSession={onHostsNewSession}
-              onSelectionChange={(alias) => (lastViewedHost = alias)}
+              onSelectionChange={(alias: string) => (lastViewedHost = alias)}
             />
           {/key}
         </div>
       {/if}
       {#if $destination === 'assets'}
         <div class="view-slot overlay" data-testid="assets-overlay">
-          <Toolkit visible />
+          <Lazy load={lazyViews.toolkit} visible />
         </div>
       {/if}
       {#if $destination === 'accounts'}
         <div class="view-slot overlay" data-testid="accounts-overlay">
-          <AccountsPage />
+          <Lazy load={lazyViews.accounts} />
         </div>
       {/if}
       {#if $destination === 'control'}
         <div class="view-slot overlay" data-testid="control-overlay">
-          <ControlView {isMac} contextInput={agentContextInput} />
+          <Lazy load={lazyViews.control} {isMac} contextInput={agentContextInput} />
         </div>
       {/if}
       {#if $destination === 'automation'}
         <div class="view-slot overlay" data-testid="automation-overlay">
-          <AutomationView />
+          <Lazy load={lazyViews.automation} />
         </div>
       {/if}
       {#if boardShown}
@@ -1146,7 +1183,7 @@
              other tabs leave it, and it has no close of its own. It still
              sits over the mounted terminal. -->
         <div class="view-slot overlay" data-testid="board-view">
-          <WorkBoard />
+          <Lazy load={lazyViews.board} />
         </div>
       {/if}
       {#if detailsMain}
@@ -1174,10 +1211,22 @@
 
 <footer class="status">
   <StatusBarMark />
+  <!-- Review r13 (step 1.3): a sentence and the next step; the codes stay
+       under Details. -->
   {#if healthError}
-    <span class="err" data-testid="health-error">ipc error: {healthError}</span>
+    <span class="err" data-testid="health-error"
+      >Couldn't check the backend: {healthText}. <details class="status-details"
+        ><summary>Details</summary>{healthError}</details
+      ></span
+    >
   {:else if bootstrapError}
-    <span class="err" data-testid="bootstrap-error">{bootstrapError}</span>
+    <span class="err" data-testid="bootstrap-error"
+      >Couldn't load {bootstrapWhat ?? 'the fleet'}.
+      <button type="button" class="status-retry" data-testid="bootstrap-retry" disabled={bootstrapRetrying} onclick={() => void retryBootstrap()}
+        >{bootstrapRetrying ? 'Trying…' : 'Retry'}</button
+      >
+      <details class="status-details"><summary>Details</summary>{bootstrapError}</details></span
+    >
   {:else if health}
     <!-- In remote mode these are the HUB's version, database and schema, not
          this app's — `health_check` routes to the hub's `fleet_health`. The
@@ -1294,6 +1343,17 @@
     margin-left: auto;
   }
   .status .err { color: var(--danger); }
+  .status-details { display: inline; }
+  .status-details summary { display: inline; cursor: pointer; }
+  .status-retry {
+    font: inherit;
+    padding: 0 var(--space-1);
+    border: 1px solid currentColor;
+    border-radius: var(--radius-xs);
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
   .hub-badge {
     background: transparent;
     border: 1px solid var(--border);

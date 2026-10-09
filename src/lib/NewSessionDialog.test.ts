@@ -1385,6 +1385,57 @@ describe('NewSessionDialog: account headroom on the host chips', () => {
     expect(screen.getByTestId('host-usage-warning').textContent).toContain('Also used by mefistos.');
   });
 
+  // Review r05 A8: the line and warning describe the account the picked
+  // login runs on, not the host's own login.
+  it('the host line follows the picked login\'s account', async () => {
+    const { NOW, ADMIN, GMAIL, inv } = await setup();
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'refresh_account_usage') throw { code: 'E_RATE_LIMITED', message: 'floor' };
+      if (cmd === 'check_account_headroom') {
+        return {
+          pause_at_pct: 90,
+          chosen: null,
+          over: false,
+          suggestion: null,
+          logins: [
+            { profile: null, account_uuid: ADMIN.uuid, used_pct: 92 },
+            { profile: 'spare', account_uuid: GMAIL.uuid, used_pct: 9 },
+          ],
+        };
+      }
+      return null;
+    });
+    render(NewSessionDialog, {
+      props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, initialHost: 'mefistos', ...USAGE },
+    });
+    await vi.waitFor(() => expect((screen.getByTestId('launch-account') as HTMLSelectElement).value).toBe('spare'));
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('host-usage-line').textContent).toContain('mj-janci@users.noreply.github.com'),
+    );
+    expect(screen.queryByTestId('host-usage-warning')).toBeNull();
+    // Back to the host's own login: its low account warns again.
+    await fireEvent.change(screen.getByTestId('launch-account'), { target: { value: '' } });
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('host-usage-warning').textContent).toContain('admin-janci@users.noreply.github.com'),
+    );
+  });
+
+  it('opening also refreshes the usage of the hosts\' profile accounts', async () => {
+    const fx = await import('./hosts_fixture');
+    const { NOW, inv } = await setup({
+      hosts: [
+        fx.host('local', {
+          account_uuid: fx.GMAIL.uuid,
+          claude_profiles: [{ name: 'spare', account_uuid: 'acc-profile', email: null }],
+        }),
+      ],
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, ...USAGE } });
+    await tick();
+    const refreshed = inv.mock.calls.filter((c) => c[0] === 'refresh_account_usage').map((c) => JSON.stringify(c[1]));
+    expect(refreshed.some((a) => a.includes('acc-profile'))).toBe(true);
+  });
+
   it('a host whose account drops to low while the dialog is open stays chosen', async () => {
     const { NOW, five, accountUsage, GMAIL } = await setup();
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, ...USAGE } });
