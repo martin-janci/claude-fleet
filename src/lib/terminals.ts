@@ -5,6 +5,7 @@
  * agent's, under a pty id of its own, so opening one never replaces the
  * agent's terminal.
  */
+import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 
 /** The most terminals one session keeps (`tmux::MAX_SHELL_TERMINALS`). */
@@ -51,4 +52,30 @@ export function nextTerminalTab(current: number | null, open: readonly number[])
   const tabs: (number | null)[] = [null, ...[...open].sort((a, b) => a - b)];
   const at = tabs.indexOf(current);
   return tabs[(at + 1) % tabs.length] ?? null;
+}
+
+/** What the terminal pane is showing, for the session bar's Terminals tab
+ *  (the board's "Terminals 2 ⌥⌘T"): the pane publishes it, the bar reads it. */
+export interface TerminalPaneState {
+  /** The session the strip belongs to; null when the strip is not shown. */
+  sessionId: number | null;
+  shells: readonly number[];
+  /** The picked terminal; null is the agent. */
+  active: number | null;
+}
+
+export const terminalPane = writable<TerminalPaneState>({ sessionId: null, shells: [], active: null });
+
+/** A tab-bar click the pane carries out: `agent` goes back to the agent,
+ *  `shells` to the last terminal picked, opening one when there is none. */
+export interface TerminalRequest {
+  seq: number;
+  to: 'agent' | 'shells';
+}
+
+export const terminalRequest = writable<TerminalRequest | null>(null);
+
+let requestSeq = 0;
+export function requestTerminalTab(to: TerminalRequest['to']): void {
+  terminalRequest.set({ seq: ++requestSeq, to });
 }

@@ -57,6 +57,9 @@
   import { projectById } from './projects';
   import { uiLayout } from './prefs';
   import SessionRowMenu from './SessionRowMenu.svelte';
+  import PulseSteps from './PulseSteps.svelte';
+  import { sessionPulse } from './session_loaders';
+  import { startingSessions } from './session_starting';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -130,6 +133,16 @@
   } = $props();
 
   const sessSelected = $derived($selectedSession?.id === sess.id);
+  // Step 5.14: a session this window just started, until its agent is up
+  // (`session_starting.ts`). New layout only, as every redesign surface is.
+  const starting = $derived($uiLayout === 'new' && $startingSessions.has(sess.id));
+  const startPulse = $derived(sessionPulse(sess));
+  /** "Worktree ✓ · tmux ✓ · Claude Code starting", as the board words it. */
+  const startText = $derived(
+    startPulse.steps
+      .map((s) => (s.state === 'done' ? `${s.label} ✓` : s.state === 'active' ? `${s.label} starting` : s.label))
+      .join(' · '),
+  );
   // Selection is a bar as well as a tint, so it does not rest on colour
   // alone; with an org colour the bar sits just inside the org stripe.
   const rowShadow = $derived(
@@ -966,7 +979,16 @@
                `blocked` status chip above still says the session is waiting. -->
           <AnswerPrompt session={sess} view={answerView} compact />
         {/if}
-        {#if compact}
+        {#if starting}
+          <!-- Step 5.14: ⌘N closes into the Pulse sequence on the new row;
+               its worktree and tmux steps are done once the row is here, and
+               the agent step lights when the agent reports a status. The
+               only loader on the row: nothing else waits on it. -->
+          <div class="starting-line" data-testid="row-starting">
+            <PulseSteps pulse={startPulse} size={14} markOnly testid="row-pulse" />
+            <span class="starting-text" role="status">{startText}</span>
+          </div>
+        {:else if compact}
           <SessionRowMeta
             {sess}
             state={bucketState(triage.bucket)}
@@ -1260,6 +1282,16 @@
   .sess-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
   .sess-line1 { position: relative; display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
   .sess-line1 .sess-name { flex: 1; }
+  .starting-line {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+    padding-left: 0.85rem;
+    font-size: 11px;
+    color: var(--fg-muted);
+  }
+  .starting-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Redesign step 3.6: the chip strip and the Compact row. */
   .chips { display: contents; }

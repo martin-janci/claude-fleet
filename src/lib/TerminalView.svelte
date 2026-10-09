@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import { invoke } from '@tauri-apps/api/core';
   import { unarchiveSession } from './tidy';
@@ -35,6 +35,8 @@
     shellTerminalName,
     terminalPtyId,
     nextTerminalTab,
+    terminalPane,
+    terminalRequest,
     type ShellTerminalsResult,
   } from './terminals';
   import TerminalStrip from './TerminalStrip.svelte';
@@ -157,11 +159,24 @@
   /** Opening or closing a terminal is `own`, as the attach itself is. */
   const stripBlocked = $derived($sessionBlocked($selectedSession, 'shell_terminals'));
 
+  /** The list for this selection has come back: until then an empty
+   *  `shells` means "not known yet", not "none". */
+  let listed = false;
+  /** The terminal last picked, which the bar's Terminals tab goes back to. */
+  let lastShell: number | null = null;
+  /** The Terminals tab was pressed before the list came back. */
+  let wantShells = false;
+
   function takeTerminals(r: ShellTerminalsResult | null) {
     if (!r || r.session_id !== stripFor) return;
     shells = r.terminals.map((t) => t.n);
+    listed = true;
     if (activeShell != null && !shells.includes(activeShell)) activeShell = null;
     if (activeShell == null) split = false;
+    if (wantShells) {
+      wantShells = false;
+      showShells();
+    }
   }
 
   $effect(() => {
@@ -171,6 +186,9 @@
     shells = [];
     activeShell = null;
     split = false;
+    listed = false;
+    lastShell = null;
+    wantShells = false;
     if (id == null) return;
     void shellTerminals(id).then((r) => {
       if (r.ok && r.value) takeTerminals(r.value);
@@ -188,7 +206,7 @@
         return;
       }
       takeTerminals(r.value);
-      if (r.value?.session_id === stripFor && r.value.opened != null) activeShell = r.value.opened;
+      if (r.value?.session_id === stripFor && r.value.opened != null) selectTab(r.value.opened);
     } finally {
       stripBusy = false;
     }
@@ -220,7 +238,44 @@
   function selectTab(n: number | null) {
     activeShell = n;
     if (n == null) split = false;
+    else lastShell = n;
   }
+
+  /** The session bar's Terminals tab: the terminal last picked, else the
+   *  first one, else a new one. */
+  function showShells() {
+    if (stripFor == null || activeShell != null) return;
+    if (!listed) {
+      wantShells = true;
+      return;
+    }
+    const pick = lastShell != null && shells.includes(lastShell) ? lastShell : ([...shells].sort((a, b) => a - b)[0] ?? null);
+    if (pick != null) selectTab(pick);
+    else void newTerminal();
+  }
+
+  // The bar publishes its clicks, the pane carries them out. A request made
+  // before this pane mounted is not replayed.
+  let seenRequest = get(terminalRequest)?.seq ?? 0;
+  $effect(() => {
+    const req = $terminalRequest;
+    if (!isRoot || !req || req.seq <= seenRequest) return;
+    seenRequest = req.seq;
+    untrack(() => (req.to === 'agent' ? selectTab(null) : showShells()));
+  });
+
+  // What the bar's Terminals tab reads: the count, and whether it is current.
+  $effect(() => {
+    if (!isRoot) return;
+    terminalPane.set({
+      sessionId: showStrip ? ($selectedSession?.id ?? null) : null,
+      shells: [...shells],
+      active: showStrip ? activeShell : null,
+    });
+  });
+  onDestroy(() => {
+    if (isRoot) terminalPane.set({ sessionId: null, shells: [], active: null });
+  });
 
   /** Clear the picked terminal's screen: Ctrl+L to its shell. */
   function clearTerminal() {
