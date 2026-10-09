@@ -4981,7 +4981,7 @@ describe('ConversationPanel composer access (multi-user M1)', () => {
   });
 
   // A hub that has not said who this device is: fail closed, with the sentence
-  // that sends someone to Settings → Hub rather than blaming the session.
+  // that sends someone to Settings → Hub & sync rather than blaming the session.
   it('fails closed, and honestly, while the hub has not said who this device is', async () => {
     hubStatus.set(REMOTE);
     hubConnection.set({ state: 'connected' });

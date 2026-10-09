@@ -1568,7 +1568,7 @@
       type="button"
       class="hub-badge"
       data-testid="hub-badge"
-      title="This window is a client of {$hubStatus.url}. Settings → Hub to disconnect."
+      title="This window is a client of {$hubStatus.url}. Settings → Hub &amp; sync to disconnect."
       onclick={() => settingsOpen.set(true)}
       >hub: {$hubStatus.url}{$hubStatus.client_name ? ` (as ${$hubStatus.client_name})` : ''}</button
     >

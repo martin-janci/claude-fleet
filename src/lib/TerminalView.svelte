@@ -382,6 +382,10 @@
   /** Context-menu position (client px) or null when hidden. */
   let ctxMenu: { x: number; y: number } | null = $state(null);
   let ptyOpen = false;
+  // The generation `pty_open` returned for the attach on screen. Every drain
+  // names it, so a drain issued for the previous attach and reordered after
+  // a new open drains nothing instead of eating its first output (review r06).
+  let ptyGeneration: number | null = null;
   let lastCols = $state(0);
   let lastRows = $state(0);
   /** Bytes drained since this attach. The header shows this and nothing
@@ -808,8 +812,9 @@
         }
       }
 
+      let opened: unknown;
       try {
-        await invoke('pty_open', {
+        opened = await invoke('pty_open', {
           args: {
             id: PTY_ID,
             session_name: shellN == null ? sess.tmux_name : shellTerminalName(sess.tmux_name, shellN),
@@ -849,6 +854,7 @@
       currentHost = sess.host_alias;
       currentShell = shellN;
       ptyOpen = true;
+      ptyGeneration = typeof opened === 'number' ? opened : null;
       attachedAt = Date.now();
       if (shellN == null) {
         // The microphone claim follows the attached session (closeTerm runs
@@ -970,9 +976,12 @@
     // resolved bytes belong to the old PTY — discard them rather than write
     // stale output into the new screen.
     const drainingInto = screen;
+    const generation = ptyGeneration;
     let result: PtyDrainResult;
     try {
-      result = await invoke<PtyDrainResult>('pty_drain', { args: { id: PTY_ID } });
+      result = await invoke<PtyDrainResult>('pty_drain', {
+        args: generation === null ? { id: PTY_ID } : { id: PTY_ID, generation },
+      });
     } catch {
       return false;
     }
@@ -1124,6 +1133,7 @@
     renderVersion++;
     if (ptyOpen) {
       ptyOpen = false;
+      ptyGeneration = null;
       try {
         await invoke('pty_close', { args: { id: PTY_ID } });
       } catch {

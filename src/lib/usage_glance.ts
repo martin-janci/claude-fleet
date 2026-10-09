@@ -19,6 +19,7 @@ import {
   formatResetShort,
   freshness,
   leftPct,
+  severityLeft,
   limitWording,
   severity,
   weekdayClock,
@@ -70,7 +71,7 @@ function bindingNumber(snapshot: AccountUsageSnapshot | null, now: number): Bind
   const fr = freshness(kind, snapshot.fetched_at, w.resets_at, now);
   if (fr === 'expired') return null;
   const left = leftPct(w);
-  return { window: kind, w, left, freshness: fr, level: severity(kind, left, w.resets_at, now) };
+  return { window: kind, w, left, freshness: fr, level: severity(kind, severityLeft(w), w.resets_at, now) };
 }
 
 // ── New-session host chips ──

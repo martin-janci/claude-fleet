@@ -10,7 +10,7 @@
 //!
 //! The `settings_docs_are_current` test enforces all three. Regenerate after
 //! changing any spec with:
-//!   REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current
+//!   REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current
 //!
 //! Entirely `#[cfg(test)]`, like `mcp::doc_gen`.
 
@@ -108,7 +108,7 @@ fn render_rows<'a>(specs: impl Iterator<Item = &'a Spec>) -> String {
 /// One prefix's table, with its markers, as spliced into a guide.
 pub(crate) fn render_table(prefix: &str) -> String {
     format!(
-        "{}\n<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current -->\n{}{}",
+        "{}\n<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current -->\n{}{}",
         begin_marker(prefix),
         render_rows(SPECS.iter().filter(|s| s.key.starts_with(prefix))),
         end_marker(prefix)
@@ -142,7 +142,7 @@ fn group_title(prefix: &str) -> &str {
 pub(crate) fn render_reference() -> String {
     let mut out = String::from(
         "<!-- GENERATED FILE — do not edit by hand.\n     \
-Regenerate with: REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current -->\n\n\
+Regenerate with: REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current -->\n\n\
 # Settings reference\n\n\
 Every operator setting fleet stores, generated from the registry in \
 `crates/fleet-core/src/service/settings.rs`. Change one in Settings on the \
@@ -221,7 +221,7 @@ mod tests {
         assert!(
             stale.is_empty(),
             "\n\n{} out of date with service/settings.rs. Regenerate with:\n  \
-REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current\n",
+REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current\n",
             stale.join(", ")
         );
     }

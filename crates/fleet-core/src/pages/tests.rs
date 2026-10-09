@@ -523,7 +523,7 @@ fn render_catalog() -> String {
         })
         .collect();
     let v = json!({
-        "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+        "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current",
         "spec": super::model::SPEC_VERSION,
         "layouts": layouts,
         "widgets": widgets,
@@ -545,7 +545,7 @@ fn render_catalog() -> String {
 /// first frame without waiting on `list_pages`, which never carries them.
 fn render_embeds() -> String {
     let v = json!({
-        "_generated": "from crates/fleet-core/pages (layout embed); regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+        "_generated": "from crates/fleet-core/pages (layout embed); regenerate with REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current",
         "pages": super::embeds().collect::<Vec<_>>(),
     });
     serde_json::to_string_pretty(&v).unwrap() + "\n"
@@ -562,7 +562,7 @@ fn render_schema() -> String {
 fn render_frontend_fixture() -> String {
     let s = crate::store::Store::open_in_memory().unwrap();
     let v = json!({
-        "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+        "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current",
         "pages": super::navigable(),
         "sources": SOURCES,
         "resources": super::resources::RESOURCES,
@@ -595,7 +595,7 @@ fn page_docs_are_current() {
     assert!(
         stale.is_empty(),
         "\n\n{} out of date with crates/fleet-core/src/pages. Regenerate with:\n  \
-REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current\n",
+REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current\n",
         stale.join(", ")
     );
 }

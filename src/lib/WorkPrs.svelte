@@ -5,6 +5,7 @@
   // opens on GitHub, the session opens in fleet; nothing here merges.
   //
   // Titles and branch names are text a person wrote: rendered as text.
+  import Skeleton from './states/Skeleton.svelte';
   import { onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
   import { sessions } from './sessions';
@@ -101,7 +102,7 @@
       <button class="btn" type="button" onclick={() => void load()}>Retry</button>
     </div>
   {:else if !loaded}
-    <p class="muted" data-testid="work-prs-loading">Loading…</p>
+    <div data-testid="work-prs-loading"><Skeleton rows={3} label="Loading pull requests" /></div>
   {:else if items.length === 0}
     <p class="muted" data-testid="work-prs-empty">
       {filter === 'all' ? 'No pull requests yet. A session’s PR shows here once fleet sees it.' : `No ${filter} pull requests.`}

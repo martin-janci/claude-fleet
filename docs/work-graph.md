@@ -1145,7 +1145,7 @@ them with `get_settings`. This table is generated from
 in [the settings reference](settings-reference.md).
 
 <!-- BEGIN GENERATED: settings work. -->
-<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current -->
+<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current -->
 | Setting | Default | Range | What it does |
 |---|---|---|---|
 | `work.retention.journal_days` | `365` | 0–3650 days, `0` = forever | Days a work journal row is kept once its conversation ended and its work is done or unlinked. |

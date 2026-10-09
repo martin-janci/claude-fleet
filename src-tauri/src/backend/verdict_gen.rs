@@ -37,7 +37,7 @@
 //!
 //! Regenerate both with:
 //! ```text
-//! REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
+//! REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
 //! ```
 //! Read the diff before committing it, the same as `hub_contract.golden.json`:
 //! a command that moved between buckets changed what a hub client can do from
@@ -171,7 +171,7 @@ pub fn render_doc_table() -> String {
     out.push_str(BEGIN_MARKER);
     out.push('\n');
     out.push_str(&format!(
-        "<!-- Regenerate with: {REGEN_ENV}=1 cargo test -p claude-fleet --lib verdict_gen -->\n"
+        "<!-- Regenerate with: {REGEN_ENV}=1 cargo fleet-test -- verdict_gen -->\n"
     ));
     out.push('\n');
     out.push_str(TABLE_LEAD);

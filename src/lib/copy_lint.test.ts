@@ -39,7 +39,7 @@ const WAITING: { file: string; text: string; why: string }[] = [
   { file: 'src/lib/NewSessionDialog.svelte', text: 'Resume', why: 'serial file held by 4.4' },
   { file: 'src/lib/Sidebar.svelte', text: '+ New session', why: 'serial file held by 4.4' },
   // The status bar's hub badge is a state, not a label: clicking it opens
-  // Settings → Hub, but it reads as where this window is connected.
+  // Settings → Hub & sync, but it reads as where this window is connected.
   { file: 'src/App.svelte', text: 'hub unavailable — managing no fleet', why: 'a status badge, not a label' },
   { file: 'src/App.svelte', text: 'hub:', why: 'a status badge, not a label' },
   // The live transfer chip is the move's state ("⇄ moving to x · 2/5"); it
@@ -238,6 +238,16 @@ describe('the app', () => {
     expect(findings.filter((f) => !waits(f)).map((f) => `${f.rule} ${f.file}:${f.line} "${f.text}"`)).toEqual([]);
     const stale = WAITING.filter((w) => !findings.some((f) => f.file === w.file && f.text === w.text));
     expect(stale, 'fixed: drop these from WAITING').toEqual([]);
+  });
+
+  it('points at the Hub & sync settings page by the name the sidebar shows (review r20 D35)', () => {
+    // settings_tree.ts labels the page "Hub & sync"; the backend's refusal
+    // sentence is shown in the app too, so it is held to the same name.
+    const files = { ...svelte, ...ts, 'src-tauri/src/backend/mod.rs': readFileSync('src-tauri/src/backend/mod.rs', 'utf8') };
+    const stale = Object.entries(files).flatMap(([f, s]) =>
+      s.split('\n').flatMap((line, i) => (/Settings → Hub(?! (&|&amp;) sync)/.test(line) ? [`${f}:${i + 1}`] : [])),
+    );
+    expect(stale).toEqual([]);
   });
 
   it("the row menu's labels match the Details buttons they run", () => {

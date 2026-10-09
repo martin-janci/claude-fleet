@@ -85,7 +85,7 @@ fn row(v: serde_json::Value) -> Result<TrackerRow, IpcError> {
         .map_err(|e| IpcError::new(fleet_core::ipc_error::codes::E_SERIALIZE, e.to_string()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_tracker(
     backend: State<'_, Arc<FleetBackend>>,
     args: AddTrackerArgs,
@@ -106,7 +106,7 @@ pub fn add_tracker(
     )?)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_tracker(
     backend: State<'_, Arc<FleetBackend>>,
     args: UpdateTrackerArgs,
@@ -126,7 +126,7 @@ pub fn update_tracker(
     )?)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_tracker_credential(
     backend: State<'_, Arc<FleetBackend>>,
     args: SetTrackerCredentialArgs,
@@ -173,7 +173,7 @@ pub async fn test_tracker(
     .await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_tracker(
     backend: State<'_, Arc<FleetBackend>>,
     args: TrackerIdArgs,
@@ -194,7 +194,7 @@ pub fn remove_tracker(
 /// Work graph M11.4: the tracker sync's counters for each tracker's last
 /// pass (this process's sync, in memory). Fleet administration like the
 /// rest: `work_admin { action: status }` is master-only on the hub.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tracker_sync_metrics(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
@@ -235,7 +235,7 @@ pub struct DecideStatusMapProposalArgs {
 /// answer per section, the shadow comparisons, and the mode. Tracker
 /// administration: `LocalOnly` like `update_tracker` (the hub's operator
 /// reads them with `fleet-hub decide proposals`).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn status_map_proposals(
     backend: State<'_, Arc<FleetBackend>>,
     args: StatusMapProposalsArgs,
@@ -250,7 +250,7 @@ pub fn status_map_proposals(
 /// named by its decision run. An apply writes the tracker's section map
 /// through `work_admin update`, as `update_tracker` does; `LocalOnly` like
 /// it (the hub's operator has `fleet-hub decide proposals apply|reject`).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn decide_status_map_proposal(
     backend: State<'_, Arc<FleetBackend>>,
     args: DecideStatusMapProposalArgs,

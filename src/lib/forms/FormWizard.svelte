@@ -8,7 +8,7 @@
   import { destination } from '../destination';
   import { matchShortcut } from '../shortcuts';
   import { detectMac, isEditable } from '../terminal_keys';
-  import { stepProblems, visibleSteps } from './form_model';
+  import { startingValues, stepProblems, visibleSteps } from './form_model';
   import type { FieldProblem, FormField, FormProposal, FormSpec, Values } from './forms';
   import ProposedBy from '../ProposedBy.svelte';
   import { neverDecidesField, preselect } from '../ai_proposal';
@@ -24,6 +24,7 @@
     initial = {},
     sending = 'Sending…',
     buttonLoader = true,
+    ownDefaults = false,
     onsubmit,
     onunplaced,
     oncancel,
@@ -43,6 +44,9 @@
     /** The Comet in the submit button while sending; off when the host
      *  draws the flow's own loader (one loader per screen, review r12). */
     buttonLoader?: boolean;
+    /** The spec is the app's own (a wizard), so its defaults stand. An
+     *  agent's form starts with no risky default (`startingValues`). */
+    ownDefaults?: boolean;
     onsubmit: (values: Values) => void;
     /** Server problems whose field is on no visible step (nowhere to show them). */
     onunplaced?: (problems: FieldProblem[]) => void;
@@ -51,17 +55,10 @@
   } = $props();
   const uid = $props.id();
 
-  function defaults(s: FormSpec): Values {
-    const out: Values = {};
-    for (const step of s.steps)
-      for (const f of step.fields) if (f.type !== 'secret' && f.value !== undefined) out[f.name] = f.value;
-    return out;
-  }
-
   // The spec of one form never changes under the wizard (FormCard unmounts the
   // wizard while it loads another form), so the starting values are read once on purpose.
   // svelte-ignore state_referenced_locally
-  let values = $state<Values>({ ...defaults(spec), ...initial });
+  let values = $state<Values>({ ...startingValues(spec, !ownDefaults), ...initial });
   let index = $state(0);
   const steps = $derived(visibleSteps(spec, values));
   const step = $derived(steps[Math.min(index, steps.length - 1)]);

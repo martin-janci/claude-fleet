@@ -11,8 +11,10 @@
 //! each is declared `#[tauri::command(async)]` (or `async fn`), which moves it
 //! off the main thread.
 //!
-//! The list is the commands found doing it; a command that grows such a call
-//! joins it.
+//! A command that takes the store needs no entry: every command under
+//! `src-tauri/src/commands/` is checked for that (review r18). The list is
+//! the others found reaching the keychain or the disk; a command that grows
+//! such a call joins it.
 
 /// `(file, command)` pairs, the file relative to the repository root.
 const OFF_MAIN_THREAD: &[(&str, &str)] = &[
@@ -26,7 +28,9 @@ const OFF_MAIN_THREAD: &[(&str, &str)] = &[
     // placeholder that has to download before `metadata` returns.
     ("src-tauri/src/commands/upload.rs", "attachment_preview"),
     ("src-tauri/src/commands/upload.rs", "attachment_describe"),
-    // Reads and rewrites `~/.claude/settings.json` and takes the store lock.
+    // Reads and rewrites `~/.claude/settings.json` (it also takes the store,
+    // which `no_desktop_command_locks_the_store_on_the_main_thread` covers
+    // for every command).
     ("src-tauri/src/commands/mcp.rs", "install_fleet_hook"),
 ];
 
@@ -64,6 +68,80 @@ fn blocking_desktop_commands_stay_off_the_main_thread() {
          `#[tauri::command(async)]`:\n  {}",
         sync.join("\n  ")
     );
+}
+
+/// The plain `#[tauri::command] pub fn`s in `src` whose signature takes the
+/// store: `(name, signature)`.
+fn sync_commands_taking_the_store(src: &str) -> Vec<String> {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        if l.trim() != "#[tauri::command]" {
+            continue;
+        }
+        let Some(decl) = lines.get(i + 1).map(|d| d.trim_start()) else {
+            continue;
+        };
+        let Some(rest) = decl.strip_prefix("pub fn ") else {
+            continue;
+        };
+        let sig: String = lines[i + 1..]
+            .iter()
+            .take_while(|s| !s.trim_end().ends_with('{'))
+            .chain(lines[i + 1..].iter().find(|s| s.trim_end().ends_with('{')))
+            .copied()
+            .collect();
+        if sig.contains("Store>") {
+            out.push(rest.split('(').next().unwrap_or(rest).to_string());
+        }
+    }
+    out
+}
+
+/// Review r18: every desktop command that takes the store runs off the main
+/// thread. The store is a `std::sync::Mutex` that a reconcile pass or a slow
+/// statement can hold, and a sync command waiting on it freezes the window
+/// on macOS. Every file under `src-tauri/src/commands/` is checked, so a new
+/// command cannot slip by the way it could a list.
+#[test]
+fn no_desktop_command_locks_the_store_on_the_main_thread() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/src/commands");
+    let mut files = Vec::new();
+    let mut stack = vec![dir];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap_or_else(|e| panic!("read {}: {e}", d.display())) {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                files.push(p);
+            }
+        }
+    }
+    assert!(files.len() > 20, "found the commands: {}", files.len());
+    let mut sync = Vec::new();
+    for f in files {
+        let src = std::fs::read_to_string(&f).unwrap();
+        for name in sync_commands_taking_the_store(&src) {
+            sync.push(format!("{}: {name}", f.display()));
+        }
+    }
+    sync.sort();
+    assert!(
+        sync.is_empty(),
+        "these commands take the store, and a sync command runs on the macOS \
+         main thread; declare them `#[tauri::command(async)]`:\n  {}",
+        sync.join("\n  ")
+    );
+}
+
+#[test]
+fn sync_commands_taking_the_store_reads_the_signature() {
+    let src = "#[tauri::command]\npub fn a(\n    store: State<'_, Arc<Mutex<Store>>>,\n) -> Result<(), E> {\n}\n\n\
+               #[tauri::command(async)]\npub fn b(store: State<'_, Arc<Mutex<Store>>>) {\n}\n\n\
+               #[tauri::command]\npub fn c(x: u8) -> u8 {\n}\n\n\
+               #[tauri::command]\npub async fn d(store: State<'_, Arc<Mutex<Store>>>) {\n}\n";
+    assert_eq!(sync_commands_taking_the_store(src), vec!["a".to_string()]);
 }
 
 #[test]

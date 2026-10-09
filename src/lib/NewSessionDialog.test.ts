@@ -864,6 +864,35 @@ describe('NewSessionDialog host-scoped worktrees', () => {
     expect(screen.getByText('Create')).not.toBeDisabled();
   });
 
+  // Review r13 D19: a sentence, not the command's name or the raw SSH text
+  // (that sits under Details), and Scan again reruns the scan.
+  it('a failed scan says so in a sentence, keeps the detail under Details, and Scan again rescans', async () => {
+    let fail = true;
+    const calls: string[] = [];
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd !== 'list_host_worktrees') return null;
+      const a = (args as { args: { host_alias: string; project_id: number } }).args;
+      calls.push(a.host_alias);
+      if (fail) throw { code: 'E_SSH', message: 'ssh: connect to host mefistos: timed out' };
+      return { host_alias: a.host_alias, project_id: a.project_id, cloned: true, worktrees: [remoteMain] };
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('wt-status-text')).toHaveTextContent(
+        "Couldn't list the worktrees on mefistos. Couldn't reach the host over SSH.",
+      ),
+    );
+    expect(screen.getByTestId('wt-status-text').textContent).not.toMatch(/list_host_worktrees|ssh:/);
+    expect(screen.getByTestId('wt-status-details')).toHaveTextContent('E_SSH: ssh: connect to host mefistos: timed out');
+    fail = false;
+    await fireEvent.click(screen.getByTestId('wt-scan-again'));
+    await vi.waitFor(() => expect(worktreeLabels()).toEqual(['main', '+ new worktree']));
+    expect(calls).toEqual(['mefistos', 'mefistos']);
+    expect(screen.queryByTestId('wt-status')).toBeNull();
+  });
+
   it('a slow earlier scan cannot overwrite a later host', async () => {
     hosts.update((h) => [...h, { alias: 'vps', ssh_alias: 'vps', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' }]);
     let resolveMef!: (v: unknown) => void;

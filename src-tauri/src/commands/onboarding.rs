@@ -24,7 +24,7 @@ pub async fn check_local_prereqs(
     Ok(onboarding::local_prereqs(&store).await)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tunnel_status(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,

@@ -345,6 +345,34 @@ describe('the unrevocable calls stay single-sited', () => {
   });
 });
 
+describe('TerminalView open generation (review r06)', () => {
+  it("every drain names the generation pty_open returned for the attach on screen", async () => {
+    let gen = 6;
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_open') return ++gen;
+      if (cmd === 'pty_drain') return { data: '', bytes: 0 };
+      return null;
+    });
+    vi.useFakeTimers();
+    try {
+      render(TerminalView);
+      selectSession(onAlpha);
+      await settle();
+      await vi.advanceTimersByTimeAsync(100);
+      const gens = () => calls('pty_drain').map((c) => (c[1] as { args: { generation?: number } }).args.generation);
+      expect(gens().length).toBeGreaterThan(0);
+      expect(new Set(gens())).toEqual(new Set([7]));
+      const before = gens().length;
+      selectSession(onBeta);
+      await settle();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(new Set(gens().slice(before))).toEqual(new Set([8]));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('TerminalView drain resilience (F1)', () => {
   it('runs the rest of the tick after a chunk blows up the parser', async () => {
     // The bytes are already consumed, so the eof the same drain reported must

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Skeleton from './states/Skeleton.svelte';
   import Icon from './kit/Icon.svelte';
   import { tablistKeys } from './tablist_keys';
   import { onWorkChangedDebounced } from './work';
@@ -755,7 +756,7 @@
         <button class="btn" type="button" data-testid="work-tree-retry" onclick={() => void load()}>Retry</button>
       </div>
     {:else if !page}
-      <p class="state muted" data-testid="work-tree-loading">Loading work…</p>
+      <div class="state" data-testid="work-tree-loading"><Skeleton rows={4} label="Loading work" /></div>
     {:else if sections.length === 0}
       {@const facets = workFacets($workViewFilters, {
         orgName: (id) => page?.orgs.find((o) => o.id === id)?.name,
@@ -873,7 +874,7 @@
                           </li>
                         {/each}
                         {#if sectionBusy.has(g.key)}
-                          <li class="state muted" data-testid="work-section-loading">Loading…</li>
+                          <li class="state" data-testid="work-section-loading"><Skeleton rows={1} label="Loading" /></li>
                         {/if}
                         {#if sectionErrors.get(g.key)}
                           <li class="state error" role="alert" data-testid="work-section-error">

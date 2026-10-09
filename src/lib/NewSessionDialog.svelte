@@ -26,6 +26,8 @@
     type HostLogin,
   } from './account_limits';
   import { push, pushError } from './toasts';
+  import { errorDetail, errorSentence } from './error_copy';
+  import type { IpcError } from './result';
   import type { PickerItem } from './PickerList.svelte';
   import {
     fleetSettings,
@@ -402,7 +404,9 @@
     status: 'loading' | 'ready' | 'error' | 'unlistable';
     rows: WorktreeRow[];
     cloned: boolean;
-    error?: string;
+    // Review r13 D19: the code and the backend's words, shown as one plain
+    // sentence with the original under Details.
+    error?: Pick<IpcError, 'code' | 'message'>;
   };
   // Error codes that mean the HUB could not answer the scan at all: it is
   // older than this app and serves no such tool, its wire contract is out of
@@ -439,8 +443,11 @@
   );
   // A slow scan of the previous host must not land after a newer one.
   let scanSeq = 0;
+  // "Scan again" bumps this; the scan effect reads it, so it re-runs.
+  let rescans = $state(0);
   $effect(() => {
     const host = chosenHost;
+    void rescans;
     if (host === 'local') {
       // Only the local branch needs the live project tree; reading it here
       // instead of above the branch keeps this effect from tracking (and
@@ -486,7 +493,7 @@
       if (!r.ok) {
         hostWorktrees = HUB_CANNOT_SCAN.includes(r.error.code)
           ? { status: 'unlistable', rows: [], cloned: true }
-          : { status: 'error', rows: [], cloned: true, error: r.error.message };
+          : { status: 'error', rows: [], cloned: true, error: r.error };
         return;
       }
       if (!r.value || r.value.host_alias !== host) {
@@ -498,7 +505,7 @@
           status: 'error',
           rows: [],
           cloned: true,
-          error: `list_host_worktrees replied unexpectedly for ${host}`,
+          error: { code: 'E_PARSE', message: `the worktree scan answered for another host than ${host}` },
         };
         return;
       }
@@ -738,7 +745,8 @@
   ]);
   const worktreeStatus = $derived.by((): string | null => {
     if (hostWorktrees.status === 'loading') return `Scanning ${chosenHost}…`;
-    if (hostWorktrees.status === 'error') return `Couldn't list worktrees on ${chosenHost}: ${hostWorktrees.error}`;
+    // The error state has its own block (Details, Scan again) below.
+    if (hostWorktrees.status === 'error') return null;
     if (hostWorktrees.status === 'unlistable') return null;
     if (!hostWorktrees.cloned) return `Not cloned on ${chosenHost} yet — it is cloned on the first session.`;
     return null;
@@ -1581,8 +1589,19 @@
     <!-- Not a <label>: the picker is a listbox, which a label cannot name
          (it names itself with ariaLabel). -->
     <span class="field-label" aria-hidden="true">Worktree</span>
-    {#if worktreeStatus}
-      <p class="wt-status" data-testid="wt-status" class:err={hostWorktrees.status === 'error'}>{worktreeStatus}</p>
+    {#if hostWorktrees.status === 'error' && hostWorktrees.error}
+      <div class="wt-status err" role="alert" data-testid="wt-status">
+        <span data-testid="wt-status-text"
+          >Couldn't list the worktrees on {chosenHost}. {errorSentence(hostWorktrees.error)}</span
+        >
+        <button type="button" class="wt-rescan" data-testid="wt-scan-again" onclick={() => rescans++}>Scan again</button>
+        <details class="wt-details">
+          <summary>Details</summary>
+          <code data-testid="wt-status-details">{errorDetail(hostWorktrees.error)}</code>
+        </details>
+      </div>
+    {:else if worktreeStatus}
+      <p class="wt-status" data-testid="wt-status">{worktreeStatus}</p>
     {/if}
     {#if remoteWorktreesUnlistable}
       <p class="wt-status" data-testid="wt-remote-unknown">{remoteWorktreesUnlistable}</p>
@@ -1795,6 +1814,10 @@
   .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
   .wt-status { font-size: var(--text-2xs); color: var(--fg-muted); margin: 0 0 0.2rem; }
   .wt-status.err { color: var(--danger); }
+  .wt-rescan { font: inherit; color: var(--fg); background: none; border: 0; padding: 0; margin-left: 0.4rem; text-decoration: underline; cursor: pointer; }
+  .wt-details { color: var(--fg-muted); }
+  .wt-details summary { cursor: pointer; }
+  .wt-details code { display: block; overflow-wrap: anywhere; }
   .actions {
     display: flex;
     gap: 0.4rem;
