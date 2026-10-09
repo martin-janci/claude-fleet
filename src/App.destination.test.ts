@@ -34,6 +34,7 @@ afterEach(() => {
   destination.set('session');
   uiLayout.set('classic');
   sidebarView.set('sessions');
+  localStorage.removeItem('cf:pref:sidebar.inbox-before-classic');
   settingsOpen.set(false);
   controlTab.set('chat');
   todayOpen.set(false);
@@ -385,6 +386,23 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     sidebarView.set('inbox');
     uiLayout.set('classic');
     await waitFor(() => expect(get(sidebarView)).toBe('sessions'));
+  });
+
+  it('back in New, the Inbox Classic stood in for comes back; a view picked in Classic stands (review r07)', async () => {
+    uiLayout.set('new');
+    render(App);
+    sidebarView.set('inbox');
+    uiLayout.set('classic');
+    await waitFor(() => expect(get(sidebarView)).toBe('sessions'));
+    uiLayout.set('new');
+    await waitFor(() => expect(get(sidebarView)).toBe('inbox'));
+    // Picked Work while in Classic: New keeps it.
+    uiLayout.set('classic');
+    await waitFor(() => expect(get(sidebarView)).toBe('sessions'));
+    sidebarView.set('work');
+    uiLayout.set('new');
+    await Promise.resolve();
+    expect(get(sidebarView)).toBe('work');
   });
 
   it('Settings opens the Settings dialog', async () => {
