@@ -271,14 +271,86 @@ const BRAINSTORM_SKILL: &str = include_str!("../../../../skills/fleet-brainstorm
 /// directory it starts in.
 pub const BRAINSTORM_SKILL_PATH: &str = ".claude/skills/fleet-brainstorm/SKILL.md";
 
+/// Control's own slash commands (redesign step 9.6), as `(name, body)`:
+/// project commands of the operator's directory, which Claude Code runs as
+/// `/<name>` there and nowhere else. `src/lib/control_commands.ts` lists the
+/// same names for the composer's menu
+/// (`control_commands_are_mirrored_in_the_menu`).
+pub const CONTROL_COMMANDS: [(&str, &str); 5] = [
+    (
+        "task",
+        "---\n\
+         description: Create a task\n\
+         argument-hint: <title>\n\
+         ---\n\
+         Create a task titled \"$ARGUMENTS\" with `work_link` action `create`. \
+         If a task or mission is in focus, ask whether it goes under it first. \
+         Answer with the task's key and nothing else.\n",
+    ),
+    (
+        "plan",
+        "---\n\
+         description: Plan subtasks for a task or goal\n\
+         argument-hint: <task or goal>\n\
+         ---\n\
+         Plan \"$ARGUMENTS\" as subtasks. Find the task it means (create it with \
+         `work_link` action `create` when there is none), then propose the subtasks \
+         in ONE `work_link` action `propose_tree` call, with the order between them \
+         as `depends_on`. Never accept them: the person ticks what they want on the \
+         card in Control and presses Create tasks or Create as a mission.\n",
+    ),
+    (
+        "done",
+        "---\n\
+         description: Mark a task done\n\
+         argument-hint: <task>\n\
+         ---\n\
+         Mark the task \"$ARGUMENTS\" done with `work_link` action `set_status`, \
+         status `done`. If more than one task could be meant, list them and ask \
+         which. Say in one line what changed.\n",
+    ),
+    (
+        "assign",
+        "---\n\
+         description: Assign a task to a session\n\
+         argument-hint: <task> to <session>\n\
+         ---\n\
+         Assign as asked: \"$ARGUMENTS\". Link the session to the task with \
+         `work_link` action `link`, then brief the session on it with \
+         `send_prompt`. If the task or the session is unclear, ask first.\n",
+    ),
+    (
+        "start",
+        "---\n\
+         description: Start a session on a task\n\
+         argument-hint: <task>\n\
+         ---\n\
+         Start work on \"$ARGUMENTS\": pick the project and host it belongs to, \
+         start a session with `new_session` (the person approves it on the card), \
+         link it to the task and brief it with `send_prompt`. Say which host and \
+         project you picked and why, in one line.\n",
+    ),
+];
+
+/// Where a [`CONTROL_COMMANDS`] entry lives in the operator's directory.
+pub fn control_command_path(name: &str) -> String {
+    format!(".claude/commands/{name}.md")
+}
+
 /// PURE: every plain (non-secret) file of the operator's directory, as
 /// `(path relative to the directory, body)`. The `.mcp.json` is not here: it
 /// carries the token and takes the secret path.
-pub fn operator_files() -> [(&'static str, &'static str); 2] {
-    [
-        ("CLAUDE.md", claude_md()),
-        (BRAINSTORM_SKILL_PATH, BRAINSTORM_SKILL),
-    ]
+pub fn operator_files() -> Vec<(String, &'static str)> {
+    let mut files = vec![
+        ("CLAUDE.md".to_string(), claude_md()),
+        (BRAINSTORM_SKILL_PATH.to_string(), BRAINSTORM_SKILL),
+    ];
+    files.extend(
+        CONTROL_COMMANDS
+            .iter()
+            .map(|(name, body)| (control_command_path(name), *body)),
+    );
+    files
 }
 
 /// PURE: the operator's standing instructions.
@@ -318,6 +390,11 @@ pub fn claude_md() -> &'static str {
      (safe kill for anything not clean); never turn a safe kill into a kill.\n\
      Kills wait for the person's confirmation on the desktop; a hub has no\n\
      one to confirm, so there offer archive or snooze instead and say so.\n\
+     \n\
+     **Tasks in Control.** `/task`, `/plan`, `/done`, `/assign` and `/start`\n\
+     are this directory's commands. A plan is ONE `propose_tree` call: Control\n\
+     draws it as a card where the person unticks what they do not want and\n\
+     creates the tasks or a mission. Never accept your own proposals.\n\
      \n\
      Answer in the language the person uses. Prefer one short paragraph over\n\
      a report: the sidebar already shows what changed.\n"
@@ -977,7 +1054,9 @@ pub(crate) async fn ensure_operator_on(
     //    records none; that is a property of a guard twenty lines away, not
     //    of this step, and it is the same weakness the birth lock above
     //    closes against a race.
-    host.write_files(&home, &dir, &operator_files(), &mcp_json(&endpoint, &token))
+    let files = operator_files();
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, b)| (p.as_str(), *b)).collect();
+    host.write_files(&home, &dir, &files, &mcp_json(&endpoint, &token))
         .await?;
     //    And the answer to the trust dialog Claude Code would otherwise stop
     //    at when it starts in that directory — part of delivering the
@@ -1077,6 +1156,38 @@ mod tests {
         refuse_if_operator(&s, "local", "blue-sirius", "kill_session").unwrap();
     }
 
+    /// Control's commands (redesign 9.6) are project commands of the
+    /// operator's directory, each with the description the menu shows, and
+    /// the menu lists exactly these names.
+    #[test]
+    fn control_commands_are_mirrored_in_the_menu() {
+        let files = operator_files();
+        let ts = crate::repo_files::read("src/lib/control_commands.ts");
+        for (name, body) in CONTROL_COMMANDS {
+            let path = control_command_path(name);
+            assert!(files.iter().any(|(p, _)| *p == path), "{path} is written");
+            let front = body
+                .strip_prefix("---\n")
+                .and_then(|b| b.split_once("\n---\n"))
+                .map(|(f, _)| f)
+                .expect("a command opens with front matter");
+            let desc = front
+                .lines()
+                .find_map(|l| l.strip_prefix("description: "))
+                .expect("a description");
+            assert!(body.contains("$ARGUMENTS"), "/{name} takes its argument");
+            assert!(
+                ts.contains(&format!("name: '{name}', description: '{desc}'")),
+                "src/lib/control_commands.ts lists /{name} as {desc:?}"
+            );
+        }
+        assert_eq!(
+            ts.matches("name: '").count(),
+            CONTROL_COMMANDS.len(),
+            "the menu lists no command the operator lacks"
+        );
+    }
+
     /// The brainstorming skill is a project skill of the operator's
     /// directory: Claude Code finds it by the directory name, so the
     /// frontmatter's `name` must be that name, and the standing
@@ -1085,7 +1196,7 @@ mod tests {
     fn the_brainstorm_skill_is_named_where_claude_code_looks_for_it() {
         let (path, body) = operator_files()
             .into_iter()
-            .find(|(p, _)| *p == BRAINSTORM_SKILL_PATH)
+            .find(|(p, _)| p == BRAINSTORM_SKILL_PATH)
             .expect("the skill is one of the operator's files");
         let dir_name = path
             .strip_suffix("/SKILL.md")

@@ -40,14 +40,20 @@
   import TerminalStrip from './TerminalStrip.svelte';
   import { AGENT_LABELS } from './row_groups';
   import Self from './TerminalView.svelte';
+  import { openTerminalWindow, popoutTitle } from './terminal_popout';
 
   /** Shell terminals (step 5.3). App mounts this pane with no `shell`: it is
    *  the session's terminal area, with the Agent | Shell N strip in the new
    *  layout, and its grid shows the tab picked there. Split mounts a second
    *  copy beside it with `shell` set, which shows that one terminal and
-   *  nothing else (no strip, no microphone). */
-  let { shell = undefined }: { shell?: number } = $props();
-  const isRoot = $derived(shell === undefined);
+   *  nothing else (no strip, no microphone).
+   *
+   *  A pop-out window (step 5.4) mounts it with `popout` set to the window's
+   *  label: the same single terminal (the agent's when `shell` is absent),
+   *  attached under that label as its pty id, so it is a second attach
+   *  beside the main window's and never replaces it. */
+  let { shell = undefined, popout = undefined }: { shell?: number; popout?: string } = $props();
+  const isRoot = $derived(shell === undefined && popout === undefined);
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -228,6 +234,16 @@
     void invoke('pty_write', { args: { id: terminalPtyId(activeShell), data: '\x0c' } }).catch((e) => {
       pushError(toIpcError(e), 'Clear failed');
     });
+  }
+
+  /** Pop the picked tab out into its own window (step 5.4), or bring its
+   *  window forward. The tab stays here too: the window is a second view. */
+  async function popOutTerminal() {
+    const sel = $selectedSession;
+    if (!sel) return;
+    const n = activeShell;
+    const r = await openTerminalWindow(sel.id, n, popoutTitle(displayName(sel, $showFriendlyNames), n));
+    if (!r.ok) pushError(r.error, 'Pop out failed');
   }
 
   /** ⌥⌘T (Ctrl+Alt+T) opens a terminal, ⌘` (Ctrl+`) goes to the next tab.
@@ -657,7 +673,7 @@
       gen = ++openGeneration;
       if (standDown()) return;
       // From here on every pty call names this open's terminal.
-      PTY_ID = terminalPtyId(shellN);
+      PTY_ID = popout ?? terminalPtyId(shellN);
       openError = null;
       disconnected = false;
       await tick();
@@ -780,8 +796,11 @@
       if (shellN == null) {
         // The microphone claim follows the attached session (closeTerm runs
         // on every switch, so release lives on the deselect / destroy
-        // paths). A shell terminal never takes it: the voice is the agent's.
-        followSession(sess.id, get(hostByAlias).get(sess.host_alias)?.transport ?? 'ssh');
+        // paths). A shell terminal never takes it: the voice is the agent's,
+        // and the main window's, not a pop-out's.
+        if (popout === undefined) {
+          followSession(sess.id, get(hostByAlias).get(sess.host_alias)?.transport ?? 'ssh');
+        }
         // Work graph M7: a person attaching is a touch — it un-archives the
         // session and keeps tidy-up off it for an hour. Not an automatic
         // reconnect. Best-effort: an older hub without the action refuses it.
@@ -1389,6 +1408,7 @@
       onclose={(n) => void closeTerminal(n)}
       onsplit={() => (split = !split)}
       onclear={clearTerminal}
+      onpopout={() => void popOutTerminal()}
     />
   {/if}
   <div class="term-panes">

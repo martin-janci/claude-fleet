@@ -345,6 +345,52 @@ pub struct ProposalView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_by: Option<String>,
     pub at: i64,
+    /// Jev's "may duplicate" (K4, `decide::duplicate`): an open task this
+    /// reader sees that the proposal may repeat. Only a live assist answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate: Option<DuplicateHint>,
+}
+
+/// The existing task a proposal may duplicate, as Jev proposed it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DuplicateHint {
+    pub item_id: i64,
+    /// `item:<id>`, the task page to open.
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub title: String,
+    /// Always `jev` today.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_pct: Option<u8>,
+    /// The recorded run, which a person's Merge or Keep both marks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<i64>,
+}
+
+/// The [`DuplicateHint`] proposal `item_id` carries: its `duplicate`
+/// proposal names an item of the graph, open, whose org `scope` sees.
+fn duplicate_hint(g: &Graph, scope: &OrgScope, item_id: i64) -> Option<DuplicateHint> {
+    let p = g
+        .item_proposals
+        .get(&item_id)?
+        .iter()
+        .find(|p| p.feature == crate::service::decide::Feature::Duplicate.as_str())?;
+    let target = crate::service::decide::duplicate::item_of(&p.value)?;
+    let v = g.items.get(&target)?;
+    if target == item_id || v.item.status_category == "done" || !scope.sees_org(g.item_org(v)) {
+        return None;
+    }
+    Some(DuplicateHint {
+        item_id: target,
+        task_id: format!("item:{target}"),
+        key: v.item.key.clone(),
+        title: v.item.title.clone(),
+        source: p.source.clone(),
+        confidence_pct: p.confidence_pct,
+        run_id: p.run_id,
+    })
 }
 
 /// A delegated job under a task. `result` is agent text.
@@ -3047,6 +3093,9 @@ fn native_work(
             // stays: its title and `why` are item data.
             proposed_by: c.proposed_by.clone().filter(|by| g.proposer_visible(by)),
             at: c.created_at,
+            duplicate: (c.proposal_state.as_deref() == Some("proposed"))
+                .then(|| duplicate_hint(g, scope, c.id))
+                .flatten(),
         };
         match c.proposal_state.as_deref() {
             Some("proposed") => {

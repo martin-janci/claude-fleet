@@ -574,6 +574,7 @@ pub fn run() {
             commands::federation::list_peer_links,
             commands::federation::link_peer_hub,
             commands::federation::unlink_peer_hub,
+            commands::updates::list_update_targets,
             commands::debug_devices::list_debug_devices,
             commands::debug_devices::scan_debug_devices,
             commands::debug_devices::update_debug_device,
@@ -650,6 +651,7 @@ pub fn run() {
             commands::mcp::rotate_host_token,
             commands::mcp::mcp_confirm,
             commands::mcp::mcp_pending_confirms,
+            commands::mcp::control_handoffs,
             commands::operator::ensure_operator,
             commands::operator::operator_status,
             commands::hub::hub_status,
@@ -719,6 +721,7 @@ pub fn run() {
             pty::pty_close,
             pty::pty_drain,
             commands::editor::open_session_in_editor,
+            commands::windows::open_terminal_window,
             commands::voice::voice_claim,
             commands::voice::voice_release,
             cancel_command,
@@ -730,6 +733,18 @@ pub fn run() {
             // On exit: close ssh masters AND any open PTY, so we don't leak
             // background ssh processes or an orphaned `tmux attach` / `ssh
             // -tt` child after quit.
+            // A pop-out terminal (step 5.4) going away closes its own PTY and
+            // nothing else: the app, its ssh masters and the main window's
+            // terminals carry on.
+            if let tauri::WindowEvent::Destroyed = event {
+                if commands::windows::is_popout_label(window.label()) {
+                    use tauri::Manager;
+                    if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
+                        pty::close_pty(pty.inner(), window.label());
+                    }
+                    return;
+                }
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 use tauri::Manager;
                 ssh_client_for_exit.shutdown_all();

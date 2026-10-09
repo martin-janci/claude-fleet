@@ -244,10 +244,16 @@ describe('SessionRowItem action gate (multi-user M1)', () => {
 describe('SessionRowItem accessibility (7.2)', () => {
   it('passes the axe and audit checks, live and ghost', async () => {
     for (const status of ['running', 'ghost'] as const) {
-      const { container, unmount } = render(SessionRowItem, { props: baseProps({ ...sampleSession, status }) });
+      // The row is a treeitem: it is checked inside the tree the Sidebar
+      // puts it in.
+      const tree = document.body.appendChild(document.createElement('div'));
+      tree.setAttribute('role', 'tree');
+      tree.setAttribute('aria-label', 'Sessions');
+      const { unmount } = render(SessionRowItem, { target: tree, props: baseProps({ ...sampleSession, status }) });
       await tick();
-      await expectAccessible(container);
+      await expectAccessible(tree);
       unmount();
+      tree.remove();
     }
   });
 

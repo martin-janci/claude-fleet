@@ -1615,6 +1615,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/139_routine_run_outcome.sql"),
         already_applied: Some(routine_runs_has_outcome_source),
     },
+    // Orbit Fleet 9.3: `control_handoffs`, what Control's agent sent where.
+    // A new table only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        140,
+        include_str!("../../migrations/140_control_handoffs.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
