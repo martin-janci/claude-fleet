@@ -159,7 +159,7 @@ export function receipt(m: OutboxMessage, held: boolean, nowMs: number): { tone:
     case 'sent':
       return { tone: 'muted', label: 'Sent' };
     case 'queued':
-      return { tone: 'warn', label: 'Queued · Claude reads it after this turn' };
+      return { tone: 'warn', label: 'Claude reads it after this turn' };
     case 'received':
       return { tone: 'ok', label: 'Claude is on it' };
     case 'failed':

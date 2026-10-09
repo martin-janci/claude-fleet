@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   // The Hosts view's master list (spec: "The Hosts view" → List). Hosts
   // grouped by Claude account in a stable order; usage is shown once per
   // group. Keyboard handling lives in HostsView: this list is ONE focusable
@@ -146,8 +147,8 @@
             {#if h.transport === 'agent'}<span class="word-agent" data-testid="host-transport-agent">agent</span>{/if}
             <span class="spacer"></span>
             {#if info?.attention}
-              <span class="attention" title={info.attention.title} aria-label={info.attention.title} data-testid="host-attention" data-kind={info.attention.kind}
-                >{info.attention.glyph}</span
+              <span class="attention" title={info.attention.title} role="img" aria-label={info.attention.title} data-testid="host-attention" data-kind={info.attention.kind}
+                ><Icon name={info.attention.icon} size={12} /></span
               >
             {/if}
             {#if info}

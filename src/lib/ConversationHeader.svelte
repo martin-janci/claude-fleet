@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import Meter from './kit/Meter.svelte';
   // Sticky bar above the Conversations tab thread: conversation switcher,
   // context meter, model, status and last notable event (spec §6).
   import { sessionAgent, type SessionRow } from './sessions';
@@ -15,7 +16,7 @@
     type ConversationSummary,
   } from './conversation';
   import type { TurnIndexEntry } from './conversation_nav';
-  import { claudeStatusLabel, contextColor } from './attention';
+  import { claudeStatusLabel } from './attention';
 
   // The find and turn-index state lives in ConversationPanel (it owns the
   // thread and the scroller); the header only renders the controls and
@@ -317,8 +318,7 @@
         aria-valuetext={meter.label}
         aria-label="context usage"
         title={meter.title}
-        style="--ctx-tone: {contextColor(meter.level)};"
-        ><span class="ctx-track" aria-hidden="true"><span class="ctx-fill" style="width: {Math.min(100, Math.max(0, meter.pct))}%;"></span></span
+        ><span class="ctx-track" aria-hidden="true"><Meter value={meter.pct / 100} level={meter.level ?? 'ok'} label={meter.label} /></span
         ><span class="ctx-pct">{meter.pctLabel}</span
         >{#if meter.tokensLabel}<span class="ctx-tokens">{meter.tokensLabel}</span>{/if}</span
       >
@@ -700,36 +700,22 @@
   .ctx[data-stale='true'] {
     opacity: 0.55;
   }
+  /* The kit's Meter (manual: Meter), 44 px beside its number. A stale
+     reading dims the whole tag (above). */
   .ctx-track {
-    position: relative;
     flex: 0 0 auto;
     width: 44px;
-    height: 4px;
-    border-radius: var(--radius-xs);
-    overflow: hidden;
-    background: var(--control-border);
-  }
-  .ctx-fill {
-    position: absolute;
-    inset: 0 auto 0 0;
-    border-radius: inherit;
-    background: var(--ctx-tone);
-  }
-  /* Stale: the fill is a guess until the next reply, so it is drawn as one. */
-  .ctx[data-stale='true'] .ctx-fill {
-    background: repeating-linear-gradient(
-      90deg,
-      var(--ctx-tone) 0 3px,
-      transparent 3px 5px
-    );
   }
   .ctx-pct {
     color: var(--control-fg);
     font-weight: 500;
   }
-  .ctx[data-level='warn'] .ctx-pct,
+  /* The number takes the Meter's level colour (manual: Meter). */
+  .ctx[data-level='warn'] .ctx-pct {
+    color: var(--status-waiting);
+  }
   .ctx[data-level='crit'] .ctx-pct {
-    color: var(--ctx-tone);
+    color: var(--status-failed);
   }
   .ctx-tokens {
     color: var(--control-fg-quiet);

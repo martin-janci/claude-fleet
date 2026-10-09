@@ -92,16 +92,16 @@
     align-items: flex-start;
     gap: 0.1rem;
     padding: 0.35rem 0.65rem;
-    border: 1px solid var(--control-border, var(--border));
-    border-radius: var(--radius-md, var(--radius-md));
-    background: var(--control-bg, var(--bg));
-    color: var(--control-fg, var(--fg));
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-md);
+    background: var(--control-bg);
+    color: var(--control-fg);
     font: inherit;
     font-size: var(--text-xs);
     cursor: pointer;
     text-align: left;
   }
-  .option:hover:not(:disabled) { background: var(--control-bg-hover, var(--bg)); border-color: var(--accent); }
+  .option:hover:not(:disabled) { background: var(--control-bg-hover); border-color: var(--accent); }
   .option:disabled { opacity: 0.6; cursor: default; }
   .option-label { font-weight: 600; }
   .hint { font-size: var(--text-2xs); color: var(--fg-muted); }

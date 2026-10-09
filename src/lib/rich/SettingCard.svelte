@@ -191,7 +191,7 @@
     padding: 0.4rem 0.55rem;
     border-radius: var(--radius-sm);
     background: var(--bg);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--text-2xs);
   }
   .label {
@@ -209,7 +209,7 @@
   .warn {
     margin: 0;
     font-size: var(--text-2xs);
-    color: var(--usage-warn, var(--usage-crit));
+    color: var(--usage-warn);
   }
   .meta {
     margin: 0;

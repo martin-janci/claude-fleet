@@ -114,7 +114,7 @@
     background: color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .name {
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: var(--mono);
     font-size: var(--text-2xs);
     color: var(--fg);
     white-space: nowrap;

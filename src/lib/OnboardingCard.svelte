@@ -158,7 +158,7 @@
     <p class="done-msg" data-testid="onboarding-remote">{setupBlocked}</p>
     <button class="dismiss-all" onclick={dismiss}>Dismiss</button>
   {:else if complete}
-    <p class="done-msg">You're all set 🎉</p>
+    <p class="done-msg">You're all set.</p>
     <button class="dismiss-all" onclick={dismiss}>Dismiss</button>
   {:else}
     <div class="prog" data-testid="onboarding-steps">{doneCount} of {requiredCount} done</div>
@@ -220,14 +220,14 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    padding: 11px 12px;
+    padding: 11px var(--space-3);
     margin: 0 0 10px;
   }
   .top {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 4px;
+    margin-bottom: var(--space-1);
   }
   .top b {
     font-size: var(--text-2xs);
@@ -344,7 +344,7 @@
   }
   .done-msg {
     font-size: var(--text-sm);
-    margin: 4px 0 8px;
+    margin: var(--space-1) 0 var(--space-2);
   }
   .dismiss-all {
     font-size: var(--text-2xs);
@@ -358,8 +358,8 @@
   .mcp-detail {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 4px 0 4px 26px;
+    gap: var(--space-2);
+    padding: var(--space-1) 0 var(--space-1) 26px;
     font-size: var(--text-2xs);
     color: var(--fg-muted);
     border-top: 1px solid var(--border);
@@ -368,7 +368,7 @@
   .mcp-detail-item {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--space-1);
   }
   .mcp-lbl {
     font-size: var(--text-2xs);

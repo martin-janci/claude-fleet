@@ -19,7 +19,8 @@
   import { orgs as orgStore } from './orgs';
   import { openExternal } from './open_external';
   import { shortAge, timeAgo } from './session_status';
-  import { assessRow, hasReading, verdictColor, verdictLabel } from './evidence';
+  import { assessRow, hasReading, verdictLabel, verdictState } from './evidence';
+  import StatusDot from './kit/StatusDot.svelte';
   import { changedAny, describeEvidence, onWorkChangedDebounced, resumeWork } from './work';
   import { providerInfo, startWork, unavailableLabel } from './trackers';
   import StartPopover from './StartPopover.svelte';
@@ -572,9 +573,8 @@
                       class="result"
                       data-testid="work-task-link-result"
                       data-verdict={result.verdict}
-                      style="color: {verdictColor(result.verdict)};"
                       title="Result of the session's PR; open the session for the reasons"
-                    >{verdictLabel(result.verdict)}</span>
+                    ><StatusDot state={verdictState(result.verdict)} label={null} size={6} /> {verdictLabel(result.verdict)}</span>
                   {/if}
                 {/if}
               </p>

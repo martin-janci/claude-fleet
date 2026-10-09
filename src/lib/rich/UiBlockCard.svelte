@@ -161,7 +161,7 @@
     flex-direction: column;
     gap: 0.45rem;
     margin: 0.4em 0 0.7em;
-    padding: 0.65rem 0.8rem;
+    padding: 0.65rem var(--space-3);
     border: 1px solid var(--border);
     border-left: 3px solid var(--tone);
     border-radius: var(--radius-md);
@@ -170,7 +170,7 @@
   .card.accent { --tone: var(--accent); }
   .callout { background: color-mix(in srgb, var(--tone) 8%, var(--bg-pane)); }
   .callout.info { --tone: var(--accent); }
-  .callout.tip { --tone: var(--syn-str, var(--accent)); }
+  .callout.tip { --tone: var(--syn-str); }
   .callout.success { --tone: var(--usage-ok); }
   .callout.warning { --tone: var(--usage-warn); }
   .callout.danger { --tone: var(--usage-crit); }
@@ -178,7 +178,7 @@
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
   .muted,
   .note {
@@ -190,7 +190,7 @@
   dl {
     display: grid;
     grid-template-columns: max-content 1fr;
-    gap: 0.2rem 0.9rem;
+    gap: 0.2rem var(--space-3);
     margin: 0;
     font-size: 0.88em;
   }
@@ -202,7 +202,7 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: var(--space-1);
   }
   .step-head {
     display: flex;
@@ -217,7 +217,7 @@
     min-width: 1.3rem;
     height: 1.3rem;
     border-radius: 50%;
-    border: 1px solid var(--control-border, var(--border));
+    border: 1px solid var(--control-border);
     font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
@@ -236,14 +236,14 @@
   }
   .section {
     border-top: 1px solid var(--border);
-    padding-top: 0.35rem;
+    padding-top: var(--space-1);
   }
   .section summary {
     cursor: pointer;
     font-weight: 600;
   }
   .section-body {
-    padding: 0.3rem 0 0.1rem 1rem;
+    padding: var(--space-1) 0 0.1rem 1rem;
     font-size: 0.9em;
   }
   .options {
@@ -256,17 +256,17 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 0.1rem;
-    padding: 0.35rem 0.65rem;
-    border: 1px solid var(--control-border, var(--border));
-    border-radius: var(--radius-md, var(--radius-md));
-    background: var(--control-bg, var(--bg));
-    color: var(--control-fg, var(--fg));
+    padding: var(--space-1) 0.65rem;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-md);
+    background: var(--control-bg);
+    color: var(--control-fg);
     font: inherit;
     font-size: var(--text-xs);
     cursor: pointer;
     text-align: left;
   }
-  .option:hover:not(:disabled) { background: var(--control-bg-hover, var(--bg)); border-color: var(--accent); }
+  .option:hover:not(:disabled) { background: var(--control-bg-hover); border-color: var(--accent); }
   .option:disabled { opacity: 0.6; cursor: default; }
   .option-label { font-weight: 600; }
   .hint { font-size: var(--text-2xs); color: var(--fg-muted); }

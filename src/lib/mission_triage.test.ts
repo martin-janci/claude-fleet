@@ -43,7 +43,8 @@ describe('mission triage helpers', () => {
     expect(countsLine(stuck.stuck!)).toBe('2 done, 1 failed of 3');
     expect(countsLine({ ...stuck.stuck!, failed: 0, blocked: 2 })).toBe('2 done, 2 blocked of 3');
     expect(stepLabel('give_up')).toBe('Give up');
-    expect(outcomeLabel('done')).toBe('Looks done');
+    expect(outcomeLabel('done')).toBe('Done');
+    expect(outcomeLabel('blocked')).toBe('Needs you · blocked');
     expect(asProposal(null)).toBeNull();
     expect(asProposal(stuck.next)).toEqual({ value: 'retry', source: 'jev', reason: '1 task failed', confidence_pct: 77 });
   });
@@ -67,7 +68,7 @@ describe('MissionTriage', () => {
     await flush();
     expect(screen.getByTestId('mission-triage-why').textContent).toBe('1 task failed');
     expect(screen.getByTestId('mission-triage-counts').textContent).toBe('2 done, 1 failed of 3');
-    expect(screen.getByTestId('mission-triage-outcome').textContent).toBe('Outcome so far: Partly done');
+    expect(screen.getByTestId('mission-triage-outcome').textContent).toBe('Outcome so far: Needs you · partly done');
     expect(screen.getByTestId('mission-triage-next-by').textContent).toContain('Proposed by Jev');
     expect(screen.getByTestId('mission-triage-step-retry').dataset.proposed).toBe('true');
     expect(screen.getByTestId('mission-triage-step-split').dataset.proposed).toBe('false');

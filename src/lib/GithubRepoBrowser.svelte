@@ -213,32 +213,32 @@
     max-height: 14rem;
     overflow-y: auto;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm, var(--radius-sm));
+    border-radius: var(--radius-sm);
   }
   .repo {
     display: flex;
     align-items: center;
-    gap: var(--space-2, 8px);
-    padding: var(--space-1, 4px) var(--space-2, 8px);
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
     cursor: pointer;
   }
-  .repo.active { background: var(--bg-hover, var(--bg-pane)); }
+  .repo.active { background: var(--bg-hover); }
   .repo.added { cursor: default; color: var(--fg-muted); }
   .text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-  .name { font-size: var(--text-sm, 12.5px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .name { font-size: var(--text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .meta {
-    font-size: var(--text-xs, 11.5px);
+    font-size: var(--text-xs);
     color: var(--fg-muted);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .pill {
-    font-size: var(--text-xs, 11.5px);
+    font-size: var(--text-xs);
     color: var(--fg-muted);
     border: 1px solid var(--border);
     border-radius: var(--radius-pill);
-    padding: 0 var(--space-2, 8px);
+    padding: 0 var(--space-2);
     white-space: nowrap;
   }
 </style>

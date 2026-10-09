@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   // The Hosts view: a master–detail screen for every host, grouped by Claude
   // account with each account's usage shown once (spec:
   // docs/superpowers/specs/2026-09-13-hosts-view-and-account-usage-design.md,
@@ -464,7 +465,7 @@
 
   {#if outage}
     <div class="banner" role="status" data-testid="usage-outage-banner">
-      <span class="banner-text"><span aria-hidden="true">⚠</span> {outage.text}</span>
+      <span class="banner-text"><Icon name="warning" size={12} /> {outage.text}</span>
       <button type="button" class="head-btn" data-testid="outage-copy" onclick={copyOutage}>{copied ? 'Copied' : 'Copy details'}</button>
       <button
         type="button"

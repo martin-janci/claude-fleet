@@ -3,9 +3,10 @@
   // person first (blockers, warnings), then tests and follow-ups. It is what
   // the worker said, not proof (report.rs): the card says "reported".
   import type { TaskReport } from '../rich_blocks';
-  import type { BadgeTone } from '../assets_visual';
   import { insertIntoComposer } from '../conversation';
   import Badge from '../Badge.svelte';
+  import StatusChip from '../kit/StatusChip.svelte';
+  import { outcomeLabel, outcomeState } from '../mission_triage';
   import CopyButton from '../CopyButton.svelte';
   import Markdown from '../MarkdownView.svelte';
 
@@ -17,15 +18,12 @@
     sessionId = null,
   }: { report: TaskReport; raw: string; marker?: string | null; title?: string; sessionId?: number | null } = $props();
 
-  const TONE: Record<TaskReport['outcome'], BadgeTone> = { done: 'ok', partial: 'warn', blocked: 'crit', failed: 'crit' };
-  const LABEL: Record<TaskReport['outcome'], string> = { done: 'Done', partial: 'Partly done', blocked: 'Blocked', failed: 'Failed' };
-  const GLYPH: Record<TaskReport['outcome'], string> = { done: '✓', partial: '◐', blocked: '■', failed: '✗' };
 </script>
 
 <section class="card rich-card {report.outcome}" data-testid="rich-report" aria-label="Task report">
   <header>
     <strong>{title ?? 'Task report'}</strong>
-    <Badge label={LABEL[report.outcome]} tone={TONE[report.outcome]} glyph={GLYPH[report.outcome]} testid="rich-report-outcome" />
+    <StatusChip state={outcomeState(report.outcome)} label={outcomeLabel(report.outcome)} testid="rich-report-outcome" />
     {#if report.confidence}<Badge label={`confidence ${report.confidence}`} tone="muted" testid="rich-report-confidence" />{/if}
   </header>
   {#if report.summary}
@@ -117,13 +115,13 @@
     font-size: 0.88em;
   }
   li { margin: 0.1em 0; }
-  .mono { font-family: var(--mono, ui-monospace, monospace); font-size: 0.8em; }
+  .mono { font-family: var(--mono); font-size: 0.8em; }
   .followups li > span { margin-right: 0.4em; }
   .ghost {
     background: none;
     border: 1px solid var(--control-border);
-    border-radius: var(--radius-sm, var(--radius-sm));
-    color: var(--control-fg-quiet, var(--fg-muted));
+    border-radius: var(--radius-sm);
+    color: var(--control-fg-quiet);
     font-size: var(--text-2xs);
     padding: 0 0.4rem;
     cursor: pointer;
@@ -133,7 +131,7 @@
     cursor: pointer;
     font-size: var(--text-2xs);
     color: var(--fg-muted);
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: var(--mono);
   }
   .raw-bar { display: flex; justify-content: flex-end; }
   .raw pre {

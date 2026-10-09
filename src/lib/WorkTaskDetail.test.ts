@@ -200,7 +200,7 @@ describe('WorkTaskDetail', () => {
     await flush();
     const chips = screen.getAllByTestId('work-task-link-result');
     expect(chips).toHaveLength(1);
-    expect(chips[0]).toHaveTextContent('Blocked');
+    expect(chips[0]).toHaveTextContent('Failed · cannot merge');
     expect(chips[0]).toHaveAttribute('data-verdict', 'blocked');
   });
 

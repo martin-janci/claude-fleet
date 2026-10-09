@@ -187,7 +187,7 @@
     border-radius: var(--radius-xs);
     padding: 0 0.3rem;
     font-size: var(--text-2xs);
-    font-family: var(--mono, monospace);
+    font-family: var(--mono);
   }
   .ref.branch { background: var(--done-soft); color: var(--status-done); }
   .ref.remote { background: var(--accent-soft); color: var(--status-working); }

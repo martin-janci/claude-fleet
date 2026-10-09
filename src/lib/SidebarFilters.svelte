@@ -767,13 +767,13 @@
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
-    padding: 0 0.5rem;
+    padding: 0 var(--space-2);
   }
   /* "a · b · c": a dot before every segment after the first. The segments
      belong to LinkReview and TidyReview, hence :global. */
   .attention-line :global(.al-seg ~ .al-seg)::before {
     content: '·';
-    margin-right: 0.3rem;
+    margin-right: var(--space-1);
     color: var(--fg-muted);
     text-decoration: none;
     display: inline-block;
@@ -783,13 +783,13 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    padding: 8px 8px 6px;
+    padding: var(--space-2) var(--space-2) 6px;
     border-bottom: 1px solid var(--border);
     background: var(--bg-pane);
   }
   .row {
     display: flex;
-    gap: 4px;
+    gap: var(--space-1);
     align-items: center;
     min-width: 0;
   }
@@ -816,10 +816,10 @@
     font-weight: 600;
   }
   .tab-badge {
-    margin-left: 4px;
+    margin-left: var(--space-1);
     min-width: 16px;
     height: 16px;
-    padding: 0 4px;
+    padding: 0 var(--space-1);
     border-radius: var(--radius-pill);
     font-size: var(--control-font-sm);
     line-height: 16px;
@@ -831,7 +831,7 @@
     min-width: 0;
     height: var(--control-h-lg);
     font-size: var(--control-font);
-    padding: 0 8px;
+    padding: 0 var(--space-2);
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--fg);
@@ -845,7 +845,7 @@
     max-width: 7.5rem;
     height: var(--control-h-lg);
     font-size: var(--control-font);
-    padding: 0 4px;
+    padding: 0 var(--space-1);
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--fg);
@@ -853,7 +853,7 @@
   }
   .filters-btn {
     height: var(--control-h-lg);
-    gap: 4px;
+    gap: var(--space-1);
   }
   .filters-btn.has-active {
     border-color: var(--accent);
@@ -862,7 +862,7 @@
   .badge {
     min-width: 16px;
     height: 16px;
-    padding: 0 4px;
+    padding: 0 var(--space-1);
     border-radius: var(--radius-pill);
     background: var(--accent);
     color: var(--accent-fg);
@@ -893,8 +893,8 @@
     min-width: 200px;
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 8px;
+    gap: var(--space-1);
+    padding: var(--space-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg);
@@ -907,7 +907,7 @@
     color: var(--fg-muted);
   }
   .group-by {
-    margin-bottom: 4px;
+    margin-bottom: var(--space-1);
   }
 
   .panel {
@@ -916,7 +916,7 @@
     gap: 10px;
     max-height: 50vh;
     overflow-y: auto;
-    padding: 8px;
+    padding: var(--space-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg);
@@ -936,31 +936,31 @@
   }
   .panel section + section {
     border-top: 1px solid var(--border);
-    padding-top: 8px;
+    padding-top: var(--space-2);
   }
   .fgroup {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-1);
   }
   .chips {
     display: flex;
     flex-wrap: wrap;
-    gap: 4px;
+    gap: var(--space-1);
   }
   .panel-foot {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--space-1);
     border-top: 1px solid var(--border);
     padding-top: 6px;
   }
 
   .bulk-bar {
     display: flex;
-    gap: 4px;
+    gap: var(--space-1);
     align-items: center;
-    padding: 4px 6px;
+    padding: var(--space-1) 6px;
     border: 1px solid var(--accent);
     border-radius: var(--radius-sm);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -972,7 +972,7 @@
   }
   .focus-bar {
     display: flex;
-    gap: 4px;
+    gap: var(--space-1);
     align-items: center;
     padding: 2px 6px;
     border: 1px solid var(--accent);

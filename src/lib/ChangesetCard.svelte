@@ -154,9 +154,9 @@
 </section>
 
 <style>
-  .card { display: grid; gap: 8px; margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md, var(--radius-lg)); background: var(--bg-pane); }
+  .card { display: grid; gap: 8px; margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-pane); }
   .card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-  .card:focus-visible { outline: var(--ring-w, 2px) solid var(--ring, var(--accent)); outline-offset: var(--ring-offset, 2px); }
+  .card:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
   .card.banner { padding: 6px 12px; }
   .line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
   .table { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }

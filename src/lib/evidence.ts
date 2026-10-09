@@ -9,6 +9,7 @@
 
 import type { PrEvidence, SessionRow } from './sessions';
 import { timeAgo } from './session_status';
+import type { OfState } from './kit/status';
 
 /** Mirrors Rust `outcome::PR_EVIDENCE_STALE_SECS` (3 × the 300 s probe TTL). */
 export const PR_EVIDENCE_STALE_SECS = 900;
@@ -136,36 +137,39 @@ export function shortSha(oid: string | null | undefined): string {
   return oid ? oid.slice(0, 7) : '?';
 }
 
+/** A verdict as one of the manual's status words, with the reason after
+ *  " · " (content rules: no seventh word, so Blocked reads Failed). */
 export function verdictLabel(v: Verdict): string {
   switch (v) {
     case 'ready':
-      return 'Ready';
+      return 'Done · ready to merge';
     case 'waiting':
-      return 'Waiting';
+      return 'Needs you · not ready to merge';
     case 'unknown':
-      return 'Unknown';
+      return 'Idle · not checked';
     case 'blocked':
-      return 'Blocked';
+      return 'Failed · cannot merge';
     case 'merged':
-      return 'Merged';
+      return 'Done · merged';
     case 'closed':
-      return 'Closed';
+      return 'Idle · closed';
   }
 }
 
-/** The same palette as the CI badge (`ciStatusColor`), so the two read alike. */
-export function verdictColor(v: Verdict): string {
+/** The kit state a verdict's chip and dot take: the same palette as the CI
+ *  badge (`ciStatusColor`), so the two read alike. */
+export function verdictState(v: Verdict): OfState {
   switch (v) {
     case 'ready':
     case 'merged':
-      return 'var(--status-done)';
+      return 'done';
     case 'blocked':
-      return 'var(--status-failed)';
+      return 'failed';
     case 'waiting':
-      return 'var(--status-waiting)';
+      return 'waiting';
     case 'unknown':
     case 'closed':
-      return 'var(--status-idle)';
+      return 'idle';
   }
 }
 

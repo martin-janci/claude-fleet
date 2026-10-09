@@ -6,6 +6,7 @@
 // and never sets Verified.
 import type { ProposalLike } from './ai_proposal';
 import type { Draft } from './drafts';
+import type { OfState } from './kit/status';
 import { invokeCmd, type Result } from './result';
 
 /** Why fleet calls a mission stuck. */
@@ -60,11 +61,14 @@ export const STEP_HINTS: Record<NextStep, string> = {
   ask: 'Answer or add a question on the mission',
 };
 
-const OUTCOME_LABELS: Record<string, string> = {
-  done: 'Looks done',
-  partial: 'Partly done',
-  blocked: 'Blocked',
-  failed: 'Failed',
+/** An outcome (a mission's, or a task report's) as a status word and the
+ *  kit state its chip takes: the manual's six words, with what is partial or
+ *  blocked as the reason. Both wait on a person: Needs you. */
+const OUTCOMES: Record<string, [OfState, string]> = {
+  done: ['done', 'Done'],
+  partial: ['waiting', 'Needs you · partly done'],
+  blocked: ['waiting', 'Needs you · blocked'],
+  failed: ['failed', 'Failed'],
 };
 
 export function stepLabel(step: string): string {
@@ -72,7 +76,11 @@ export function stepLabel(step: string): string {
 }
 
 export function outcomeLabel(outcome: string): string {
-  return OUTCOME_LABELS[outcome] ?? outcome;
+  return OUTCOMES[outcome]?.[1] ?? outcome;
+}
+
+export function outcomeState(outcome: string): OfState {
+  return OUTCOMES[outcome]?.[0] ?? 'idle';
 }
 
 /** "2 done, 1 failed of 4": the card's counts line. */

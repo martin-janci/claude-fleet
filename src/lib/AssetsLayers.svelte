@@ -72,7 +72,7 @@
   .n { font-variant-numeric: tabular-nums; }
   .row { display: grid; grid-template-columns: minmax(0, 1fr) auto 44px auto; gap: 8px; align-items: center; width: 100%; padding: 4px 12px; border: 0; background: none; text-align: left; font: inherit; }
   .row.selected { background: var(--accent-soft); }
-  .row:focus-visible { outline: var(--ring-w, 2px) solid var(--ring, var(--accent)); outline-offset: -2px; }
+  .row:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: -2px; }
   .num { text-align: right; font-variant-numeric: tabular-nums; color: var(--fg-muted); }
   .quiet { padding: 12px; color: var(--fg-muted); }
 </style>

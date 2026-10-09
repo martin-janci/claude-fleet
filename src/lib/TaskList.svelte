@@ -315,13 +315,13 @@
     display: flex;
     gap: 6px;
     align-items: center;
-    padding: 4px 0;
+    padding: var(--space-1) 0;
   }
   .add input {
     flex: 1;
     min-width: 0;
     height: 26px;
-    padding: 0 8px;
+    padding: 0 var(--space-2);
     border: 1px dashed var(--control-border);
     border-radius: var(--radius-md);
     background: var(--bg);
@@ -337,7 +337,7 @@
     display: flex;
     gap: 6px;
     align-items: center;
-    margin: 10px 4px 4px;
+    margin: 10px var(--space-1) var(--space-1);
     font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -369,9 +369,9 @@
   .row {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
-    gap: 8px;
+    gap: var(--space-2);
     align-items: start;
-    padding: 4px;
+    padding: var(--space-1);
     border-radius: var(--radius-sm);
   }
   .row:hover {
@@ -429,7 +429,7 @@
   .meta {
     display: flex;
     flex-wrap: wrap;
-    gap: 0 8px;
+    gap: 0 var(--space-2);
     color: var(--fg-muted);
     font-size: var(--text-2xs);
   }
@@ -439,7 +439,7 @@
   }
   .right {
     display: flex;
-    gap: 4px;
+    gap: var(--space-1);
     align-items: center;
   }
   .edit {
@@ -477,9 +477,9 @@
     color: var(--fg-2);
   }
   .children {
-    margin: 0 0 4px 24px;
+    margin: 0 0 var(--space-1) var(--space-6);
     border-left: 1px solid var(--border);
-    padding-left: 8px;
+    padding-left: var(--space-2);
   }
   .child {
     display: grid;
@@ -513,12 +513,12 @@
   }
   .muted {
     color: var(--fg-muted);
-    padding: 6px 4px;
+    padding: 6px var(--space-1);
     margin: 0;
   }
   .err {
     color: var(--usage-crit);
-    padding: 4px;
+    padding: var(--space-1);
     margin: 0;
   }
 </style>

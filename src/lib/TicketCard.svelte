@@ -170,7 +170,7 @@
     flex-wrap: wrap;
   }
   .key {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   .title {
     font-weight: normal;

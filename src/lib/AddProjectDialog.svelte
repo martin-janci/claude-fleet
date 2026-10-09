@@ -654,9 +654,9 @@
     max-height: calc(85vh - 2rem);
     min-height: 0;
   }
-  header { display: flex; flex-direction: column; gap: var(--space-1, 4px); flex: 0 0 auto; }
-  .dialog h3 { margin: 0; font-size: var(--text-lg, 15px); font-weight: var(--text-lg-weight, 600); }
-  .lead { margin: 0 0 0.3rem 0; color: var(--fg-muted); font-size: var(--text-sm, 12.5px); }
+  header { display: flex; flex-direction: column; gap: var(--space-1); flex: 0 0 auto; }
+  .dialog h3 { margin: 0; font-size: var(--text-lg); font-weight: var(--text-lg-weight); }
+  .lead { margin: 0 0 0.3rem 0; color: var(--fg-muted); font-size: var(--text-sm); }
   .fields {
     display: flex;
     flex-direction: column;

@@ -1827,8 +1827,8 @@
     min-width: 0;
     user-select: none;
     -webkit-user-select: none;
-    background: #0a0a0a;
-    color: #e8e8e8;
+    background: var(--term-bg);
+    color: var(--term-fg);
     overflow: hidden;
     padding: 4px;
     box-sizing: border-box;
@@ -1898,7 +1898,7 @@
   }
   .selection {
     position: absolute;
-    background: rgba(120, 170, 255, 0.35);
+    background: color-mix(in srgb, var(--accent) 35%, transparent);
     pointer-events: none;
     z-index: 1;
   }
@@ -1910,7 +1910,7 @@
      fill for a hollow outline, the standard "input is elsewhere" cue. */
   .cursor {
     position: absolute;
-    background: #e8e8e8;
+    background: var(--term-fg);
     opacity: 0.55;
     pointer-events: none;
     z-index: 1;
@@ -1918,17 +1918,17 @@
   }
   .cursor.underline {
     background: none;
-    border-bottom: 2px solid #e8e8e8;
+    border-bottom: 2px solid var(--term-fg);
     opacity: 0.9;
   }
   .cursor.bar {
     background: none;
-    border-left: 2px solid #e8e8e8;
+    border-left: 2px solid var(--term-fg);
     opacity: 0.9;
   }
   .cursor.unfocused {
     background: none;
-    border: 1px solid #e8e8e8;
+    border: 1px solid var(--term-fg);
     opacity: 0.6;
   }
   .cursor.blink {
@@ -1950,9 +1950,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(20, 30, 50, 0.55);
-    border: 2px dashed var(--accent, #4f8fff);
-    color: #e8e8e8;
+    background: color-mix(in srgb, var(--term-bg) 55%, transparent);
+    border: 2px dashed var(--accent);
+    color: var(--term-fg);
     font-size: var(--text-sm);
     pointer-events: none;
   }

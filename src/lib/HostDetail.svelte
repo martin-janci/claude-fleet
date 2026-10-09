@@ -7,6 +7,9 @@
   // `Rotate token…` and `Remove host…` sit at the bottom, have no keyboard
   // shortcut, and confirm with Cancel focused, stating the consequence.
   import HostOffline from './states/HostOffline.svelte';
+  import Icon from './kit/Icon.svelte';
+  import KeyValue from './kit/KeyValue.svelte';
+  import Meter from './kit/Meter.svelte';
   import type { HostRow } from './hosts';
   import { deleteHost, setHostHarnesses, codexModeOf, harnessesFor, type HarnessMode } from './hosts';
   import type { AccountRow } from './accounts';
@@ -144,6 +147,19 @@
   const isLocal = $derived(host.alias === 'local');
   /** The $HOME disk meter, null until the host was sampled. */
   const disk = $derived(diskMeter(host));
+  // The header's facts, in the kit's KeyValue (manual: KeyValue).
+  const facts = $derived([
+    ...(host.ssh_alias ? [{ label: 'ssh', value: host.ssh_alias, mono: true, testid: 'detail-ssh' }] : []),
+    ...(host.transport === 'agent' ? [{ label: 'transport', value: 'agent', testid: 'detail-transport' }] : []),
+    {
+      label: 'last ping',
+      value: host.last_pinged_at ? `${formatAge(now - host.last_pinged_at)} ago` : 'never',
+      tnum: true,
+      testid: 'detail-ping',
+    },
+    { label: 'claude', content: claudeFact, tnum: true },
+    { label: 'tmux', value: host.tmux_version ?? '—', tnum: true },
+  ]);
 
   // Sessions the backend marked lost (host reboot / tmux server restart) that
   // still carry a Claude conversation to resume. `bg`/`external` rows have no
@@ -472,6 +488,10 @@
   }
 </script>
 
+{#snippet claudeFact()}
+  {host.claude_version ?? '—'} <span class="muted" data-testid="detail-claude-age">{versionAge(host, now)}</span>
+{/snippet}
+
 <section
   bind:this={detailEl}
   class="host-detail"
@@ -519,33 +539,19 @@
         trying={probing}
         tryBlocked={reprobeBlocked} />
     {/if}
-    <dl class="facts">
-      {#if host.ssh_alias}
-        <dt>ssh</dt><dd data-testid="detail-ssh">{host.ssh_alias}</dd>
-      {/if}
-      {#if host.transport === 'agent'}
-        <dt>transport</dt><dd class="transport-agent" data-testid="detail-transport">agent</dd>
-      {/if}
-      <dt>last ping</dt>
-      <dd data-testid="detail-ping">
-        {host.last_pinged_at ? `${formatAge(now - host.last_pinged_at)} ago` : 'never'}
-      </dd>
-      <dt>claude</dt>
-      <dd>{host.claude_version ?? '—'} <span class="muted" data-testid="detail-claude-age">{versionAge(host, now)}</span></dd>
-      <dt>tmux</dt><dd>{host.tmux_version ?? '—'}</dd>
-    </dl>
+    <KeyValue items={facts} testid="detail-facts" />
     <!-- ux F-14: disk, load, uptime and the agent version — the facts the
          live fleet had no signal for (two hosts at 98 % disk). -->
     <div class="health" data-testid="detail-health" aria-label="Health">
       {#if disk}
-        <div class="meter" data-testid="detail-health-meter" data-level={disk.level} role="meter" aria-valuenow={disk.pct} aria-valuemin="0" aria-valuemax="100" aria-label="disk used">
-          <div class="fill" style:width={`${disk.pct}%`}></div>
-        </div>
+        <span class="disk" data-testid="detail-health-meter" data-level={disk.level}
+          ><Meter value={disk.pct / 100} level={disk.level} label="disk used" /></span
+        >
       {/if}
       <span class="line">{healthLine(host, now)}</span>
     </div>
     {#if attention}
-      <p class="attention" data-testid="detail-attention">{attention.glyph} {attention.title}</p>
+      <p class="attention" data-testid="detail-attention"><Icon name={attention.icon} size={12} /> {attention.title}</p>
     {/if}
   </header>
 
@@ -989,20 +995,7 @@
   .status.off { color: var(--usage-warn); }
   .muted { color: var(--fg-muted); }
   .health { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.25rem; font-size: var(--text-2xs); }
-  .meter { width: 6rem; height: 0.4rem; background: var(--track); border-radius: var(--radius-xs); overflow: hidden; flex-shrink: 0; }
-  .fill { height: 100%; background: var(--status-done); }
-  .meter[data-level='warn'] .fill { background: var(--status-waiting); }
-  .meter[data-level='crit'] .fill { background: var(--danger); }
-  .facts {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 0.6rem;
-    row-gap: 0.1rem;
-    margin: 0.4rem 0 0;
-  }
-  .facts dt { color: var(--fg-muted); }
-  .facts dd { margin: 0; font-variant-numeric: tabular-nums; }
-  .transport-agent { color: var(--accent); }
+  .disk { width: 6rem; flex-shrink: 0; }
   .attention { margin: 0.4rem 0 0; color: var(--usage-warn); }
   .block { border-top: 1px solid var(--border); padding-top: 0.6rem; }
   .account-line { display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.4rem; min-width: 0; }

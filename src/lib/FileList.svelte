@@ -4,6 +4,7 @@
   import type { Result } from './result';
   import DraftField from './DraftField.svelte';
   import { fileIcon, folderIcon } from './fileicons';
+  import Icon from './kit/Icon.svelte';
   import Skeleton from './states/Skeleton.svelte';
 
   interface TreeNode {
@@ -220,7 +221,7 @@
               <span class="badge {BADGE[c.status]?.cls ?? 'b-mod'}"
                 >{BADGE[c.status]?.letter ?? '•'}</span
               >
-              <span class="ficon">{fileIcon(c.path)}</span>
+              <span class="ficon"><Icon name={fileIcon(c.path)} size={14} /></span>
               <span class="name">{c.path}</span>
             </button>
           </div>
@@ -255,7 +256,7 @@
               <span class="badge {BADGE[c.status]?.cls ?? 'b-mod'}"
                 >{BADGE[c.status]?.letter ?? '•'}</span
               >
-              <span class="ficon">{fileIcon(c.path)}</span>
+              <span class="ficon"><Icon name={fileIcon(c.path)} size={14} /></span>
               <span class="name">{c.path}</span>
             </button>
           {/each}
@@ -273,7 +274,7 @@
             onclick={() => onSelect(path, statusByPath.get(path))}
             title={path}
           >
-            <span class="ficon">{fileIcon(path)}</span>
+            <span class="ficon"><Icon name={fileIcon(path)} size={14} /></span>
             <span class="name">{path}</span>
           </button>
         {/each}
@@ -344,7 +345,7 @@
       onclick={() => toggle(node.path)}
     >
       <span class="caret">{expanded[node.path] ? '▾' : '▸'}</span>
-      <span class="ficon">{folderIcon(expanded[node.path])}</span>
+      <span class="ficon"><Icon name={folderIcon(expanded[node.path])} size={14} /></span>
       <span class="name">{node.name}</span>
     </button>
     {#if expanded[node.path]}
@@ -360,7 +361,7 @@
       onclick={() => onSelect(node.path, statusByPath.get(node.path))}
       title={node.path}
     >
-      <span class="ficon">{fileIcon(node.name)}</span>
+      <span class="ficon"><Icon name={fileIcon(node.name)} size={14} /></span>
       <span class="name">{node.name}</span>
     </button>
   {/if}
@@ -459,7 +460,7 @@
     white-space: nowrap;
   }
   .row.file .name {
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: var(--mono);
   }
   .caret {
     flex: 0 0 auto;
@@ -469,11 +470,10 @@
   }
   .ficon {
     flex: 0 0 auto;
+    display: inline-flex;
+    justify-content: center;
     width: 1.2rem;
-    overflow: hidden;
-    text-align: center;
-    font-size: var(--text-2xs);
-    line-height: 1;
+    color: var(--fg-muted);
   }
   .badge {
     flex: 0 0 auto;

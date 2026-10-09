@@ -13,7 +13,16 @@
     onchange,
   }: {
     /** `testid` overrides the `<prefix><id>` default for one segment. */
-    options: readonly { id: T; label: string; title?: string; testid?: string }[];
+    options: readonly {
+      id: T;
+      label: string;
+      title?: string;
+      testid?: string;
+      /** This segment alone is off (the group's `disabled` turns them all off). */
+      disabled?: boolean;
+      /** `aria-keyshortcuts` for the chord that flips to it. */
+      keyshortcuts?: string;
+    }[];
     value: T;
     /** Accessible name of the group. */
     label: string;
@@ -30,6 +39,7 @@
     e.preventDefault();
     const i = options.findIndex((o) => o.id === value);
     const next = options[(i + (e.key === 'ArrowRight' ? 1 : options.length - 1)) % options.length];
+    if (next.disabled) return;
     onchange(next.id, 'arrow');
     root?.querySelectorAll<HTMLElement>('button')[options.indexOf(next)]?.focus();
   }
@@ -41,7 +51,8 @@
       type="button"
       class="btn btn--chip btn--toggle"
       aria-pressed={value === o.id}
-      {disabled}
+      disabled={disabled || o.disabled}
+      aria-keyshortcuts={o.keyshortcuts}
       title={o.title}
       data-testid={o.testid ?? `${testidPrefix}${o.id}`}
       onclick={() => onchange(o.id, 'click')}

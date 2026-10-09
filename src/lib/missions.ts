@@ -8,6 +8,7 @@ import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import type { WorkItemRow } from './trackers';
 import { bumpWorkChanged } from './work';
+import type { StatusWord } from './kit/status';
 
 /** One mission (`store::MissionRow`). */
 export interface Mission {
@@ -387,27 +388,34 @@ export function doneWhenRows(text: string): string[] {
     .filter((l) => l.length > 0);
 }
 
-const NODE_GLYPH: Record<string, string> = {
-  done: '✓',
-  running: '●',
-  failed: '⚠',
-  blocked: '⚠',
-  held: '⏸',
-  proposed: '?',
-  rejected: '✕',
-  doing: '◐',
-  waiting: '…',
-  ready: '○',
+/** A node's state as one of the manual's six status words, and the reason
+ *  after " · " when the word alone would hide what the node waits on. The
+ *  dot's colour is `toneOf` (mission_graph.ts); no glyph prefixes. */
+const NODE_WORDS: Record<string, [StatusWord, string | null]> = {
+  done: ['Done', null],
+  running: ['Working', null],
+  doing: ['Working', null],
+  verifying: ['Working', 'verifying'],
+  failed: ['Failed', null],
+  blocked: ['Failed', 'blocked'],
+  proposed: ['Needs you', 'proposed'],
+  held: ['Paused', null],
+  waiting: ['Idle', 'waiting'],
+  ready: ['Idle', 'ready'],
+  rejected: ['Idle', 'rejected'],
 };
 
-/** A node's state as one glyph. */
-export function nodeGlyph(state: string): string {
-  return NODE_GLYPH[state] ?? '·';
+/** A node's state in words: "Working", "Needs you · proposed". */
+export function nodeLabel(state: string): string {
+  const [word, why] = NODE_WORDS[state] ?? ['Idle', state];
+  return why ? `${word} · ${why}` : word;
 }
 
-/** A node's state in words. */
-export function nodeLabel(state: string): string {
-  return state === 'ready' ? 'Ready' : state.charAt(0).toUpperCase() + state.slice(1);
+/** A node's state as a count's noun ("2 proposed", "1 working"): the reason
+ *  when there is one, else the word. */
+export function nodeCountWord(state: string): string {
+  const [word, why] = NODE_WORDS[state] ?? ['Idle', state];
+  return why ?? word.toLowerCase();
 }
 
 /** Node states a mission is working on now (a run or a person's task in

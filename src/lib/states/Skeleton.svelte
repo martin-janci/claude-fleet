@@ -44,7 +44,7 @@
   .bar {
     height: 0.7rem;
     border-radius: var(--radius-sm);
-    background: var(--bg-hover, var(--border));
+    background: var(--bg-hover);
     animation: pulse 1.6s ease-in-out infinite;
   }
   .slow {

@@ -22,6 +22,7 @@ These rules hold for the desktop app (Tauri + Svelte, `src/app.css`) and the pho
 - `org-1` to `org-4` mark organisations as 8 px swatches; never as fills.
 - `brand-ink`, `brand-light` and `brand-amber` belong to the mark, the splash and the loaders, never to UI chrome.
 - `syn-*` and `code` are for the code viewer and inline code.
+- `term-bg` and `term-fg` are the terminal grid's own ground and text, dark in both themes; terminal chrome only.
 
 ## Type
 

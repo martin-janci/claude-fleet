@@ -22,11 +22,14 @@ export function isFlatGroupBy(v: unknown): v is FlatGroupBy {
 }
 
 /** The status words of the design manual's content rules (step 7.8 lints
- *  them): one per attention state from step 0.4. */
+ *  them): one per attention state from step 0.4. The model keeps seven
+ *  states, the manual six words: Blocked reads as Needs you, and its reason
+ *  line says what it is blocked on (`blockedLine`, transition plan decision
+ *  on status words). */
 export const STATE_LABELS: Record<AttentionState, string> = {
   action_required: 'Needs you',
   failed: 'Failed',
-  blocked: 'Blocked',
+  blocked: 'Needs you',
   working: 'Working',
   paused: 'Paused',
   done: 'Done',
@@ -67,6 +70,8 @@ export function groupRows(
       // Step 5.14: a session ⌘N just made lands under Working while its
       // agent comes up, rather than reading Idle before it has run at all.
       const st = attentionState(s, opts);
+      // Blocked shares the Needs you group: one header per status word.
+      if (st === 'blocked') return 'action_required';
       return st === 'idle' && starting.has(s.id) ? 'working' : st;
     }
     if (by === 'agent') return sessionAgent(s);

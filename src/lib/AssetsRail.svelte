@@ -1,5 +1,5 @@
 <script lang="ts">
-  import Icon from './Icon.svelte';
+  import Icon from './kit/Icon.svelte';
   import { RAIL_VIEWS, type WorkspaceView } from './assets_workspace';
 
   /** The rail (spec: Inbox default, Library; Layers and Hosts join with

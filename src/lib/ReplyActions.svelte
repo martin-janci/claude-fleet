@@ -11,7 +11,7 @@
   // by a send, so it inherits every refusal the rewind has (including the
   // mid-turn one) instead of keeping a second copy of them in step.
   import CopyButton from './CopyButton.svelte';
-  import Icon from './Icon.svelte';
+  import Icon from './kit/Icon.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { rewindConversation } from './sessions';
   import { insertIntoComposer, promptCount, splitMarker, type ConvTurn } from './conversation';
@@ -286,7 +286,7 @@
     width: 1px;
     height: 14px;
     margin: 0 6px;
-    background: var(--border, currentColor);
+    background: var(--border);
     opacity: 0.6;
   }
 </style>

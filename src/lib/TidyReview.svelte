@@ -660,7 +660,7 @@
     background: var(--bg-hover);
   }
   .key {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
   }
   .meta {
     color: var(--fg-muted);

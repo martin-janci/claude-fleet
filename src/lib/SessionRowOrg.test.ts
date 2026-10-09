@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 // Work graph M5.4: the org colour bar on a row, and the cross-org link
 // refusal explained in the work menu, with "Link anyway".
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
@@ -52,12 +53,15 @@ beforeEach(() => {
   vi.mocked(invoke).mockReset();
 });
 
+const ROW_CSS = readFileSync('src/lib/SessionRowItem.svelte', 'utf8');
+
 describe('a session row and its org', () => {
   it('draws the colour bar it is given, and none otherwise', () => {
     const { unmount } = render(SessionRowItem, { props: props(live(), { orgColor: '#ff0000' }) });
     const r = screen.getByTestId('sess-row');
     expect(r.dataset.orgColor).toBe('#ff0000');
-    expect(r.style.boxShadow).toContain('3px');
+    expect(r.style.getPropertyValue('--org-color')).toBe('#ff0000');
+    expect(ROW_CSS).toContain('.sess-row[data-org-color] { box-shadow: inset 3px 0 0 var(--org-color); }');
     unmount();
     render(SessionRowItem, { props: props(live()) });
     expect(screen.getByTestId('sess-row').dataset.orgColor).toBeUndefined();
@@ -71,18 +75,23 @@ describe('a session row and its org', () => {
       const { unmount } = render(SessionRowItem, { props: props(sess, { orgColor: '#ff0000' }) });
       let r = screen.getByTestId('sess-row');
       expect(r.getAttribute('aria-current')).toBe('true');
-      expect(r.style.boxShadow).toContain('3px');
-      expect(r.style.boxShadow).toContain('inset 5px 0 0 var(--accent)');
+      expect(r.classList).toContain('selected');
+      // Component CSS never reaches jsdom: the bar is the stylesheet's
+      // (manual: SessionRow), so the rules are read from the source.
+      expect(ROW_CSS).toContain(
+        '.sess-row.selected[data-org-color] { box-shadow: inset 3px 0 0 var(--org-color), inset 5px 0 0 var(--accent); }',
+      );
       unmount();
       render(SessionRowItem, { props: props(sess) });
       r = screen.getByTestId('sess-row');
-      expect(r.style.boxShadow).toBe('inset 2px 0 0 var(--accent)');
+      expect(r.classList).toContain('selected');
+      expect(ROW_CSS).toContain('.sess-row.selected { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }');
     } finally {
       clearSelection();
     }
     await tick();
     expect(screen.getByTestId('sess-row').getAttribute('aria-current')).toBeNull();
-    expect(screen.getByTestId('sess-row').style.boxShadow).toBe('');
+    expect(screen.getByTestId('sess-row').classList).not.toContain('selected');
   });
 
   it('explains a cross-org refusal with org names, and "Link anyway" retries with the override', async () => {

@@ -68,10 +68,10 @@
   font-weight: 600;
 }
 .btn--primary:hover:not(:disabled) {
-  background: color-mix(in srgb, #000 10%, var(--accent));
+  background: color-mix(in srgb, var(--fg) 10%, var(--accent));
 }
 .btn--primary:active:not(:disabled) {
-  background: color-mix(in srgb, #000 18%, var(--accent));
+  background: color-mix(in srgb, var(--fg) 18%, var(--accent));
 }
 
 .btn--quiet {
@@ -129,7 +129,7 @@
 .btn--toggle[aria-pressed='true']:hover:not(:disabled),
 .btn--toggle.is-active:hover:not(:disabled) {
   border-color: var(--accent);
-  background: color-mix(in srgb, #000 10%, var(--accent-soft));
+  background: color-mix(in srgb, var(--fg) 10%, var(--accent-soft));
   color: var(--control-fg);
 }
 

@@ -322,7 +322,7 @@ describe('App: the Conversation tab', () => {
   const tab = (id: string) => screen.getByTestId(id) as HTMLButtonElement;
   const selected = (id: string) => tab(id).getAttribute('aria-selected');
   const subtab = (id: string) => screen.getByTestId(id) as HTMLButtonElement;
-  const checked = (id: string) => subtab(id).getAttribute('aria-checked');
+  const checked = (id: string) => subtab(id).getAttribute('aria-pressed');
   const NO_PANE_TITLE_TEXT = 'Runs outside tmux — no terminal';
 
   it('the Conversation sub-view is disabled without a claude_session_id and enabled with one', async () => {

@@ -281,7 +281,7 @@
   }
   .actions button.fresh {
     color: var(--fg);
-    border-color: var(--accent, var(--border));
+    border-color: var(--accent);
   }
   .hint {
     font-size: var(--text-2xs);

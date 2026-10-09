@@ -89,9 +89,9 @@ describe('groupHostsByAccount', () => {
 describe('sessionCounts', () => {
   it('counts total, working and blocked, omitting zero parts', () => {
     const rows = fleetSessions();
-    expect(sessionCounts('mefistos', rows).text).toBe('6 ⚡2 ⏸1');
-    expect(sessionCounts('claude-fleet-trn', rows).text).toBe('14 ⚡2 ⏸1');
-    expect(sessionCounts('local', rows)).toMatchObject({ text: '0', title: '0 sessions, 0 working, 0 blocked' });
+    expect(sessionCounts('mefistos', rows).text).toBe('6 · 2 working · 1 needs you');
+    expect(sessionCounts('claude-fleet-trn', rows).text).toBe('14 · 2 working · 1 needs you');
+    expect(sessionCounts('local', rows)).toMatchObject({ text: '0', title: '0 sessions, 0 working, 0 need you' });
   });
 
   it('ignores external rows (sessions running outside fleet)', () => {
@@ -104,7 +104,7 @@ describe('sessionCounts', () => {
       claude_status,
     });
     const counts = sessionCounts('mefistos', [...rows, ext(1, 'working'), ext(2, 'blocked')]);
-    expect(counts.text).toBe('6 ⚡2 ⏸1');
+    expect(counts.text).toBe('6 · 2 working · 1 needs you');
     expect(counts.total).toBe(6);
   });
 });

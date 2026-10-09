@@ -490,13 +490,13 @@
 </div>
 
 <style>
-  .routines { display: grid; grid-template-columns: minmax(200px, 260px) 1fr; gap: var(--space-4, 16px); min-height: 360px; }
-  .list { display: flex; flex-direction: column; gap: var(--space-2, 8px); border-right: 1px solid var(--border); padding-right: var(--space-3, 12px); }
+  .routines { display: grid; grid-template-columns: minmax(200px, 260px) 1fr; gap: var(--space-4); min-height: 360px; }
+  .list { display: flex; flex-direction: column; gap: var(--space-2); border-right: 1px solid var(--border); padding-right: var(--space-3); }
   .list-head { display: flex; align-items: center; justify-content: space-between; }
   .title { font-weight: 600; }
   .count { color: var(--fg-muted); font-weight: 400; }
   .new { position: relative; }
-  .menu { position: absolute; right: 0; top: 100%; z-index: 5; min-width: 260px; display: flex; flex-direction: column; background: var(--bg-pane); border: 1px solid var(--border); border-radius: var(--radius-md, var(--radius-lg)); padding: 4px; }
+  .menu { position: absolute; right: 0; top: 100%; z-index: 5; min-width: 260px; display: flex; flex-direction: column; background: var(--bg-pane); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 4px; }
   .menu button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 6px 8px; border: 0; background: none; color: var(--fg); border-radius: var(--radius-md); cursor: pointer; }
   .menu button:hover { background: var(--bg-hover); }
   ul { list-style: none; margin: 0; padding: 0; }
@@ -504,30 +504,30 @@
   .row[aria-selected='true'] { background: var(--accent-soft); }
   .row:hover { background: var(--bg-hover); }
   .name { font-weight: 500; }
-  .muted { color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
-  .empty { color: var(--fg-muted); font-size: var(--text-sm, 12.5px); }
-  .err { color: var(--danger); font-size: var(--text-xs, 11.5px); margin: 0; }
-  .detail { display: flex; flex-direction: column; gap: var(--space-3, 12px); min-width: 0; }
-  .kicker { margin: 0; color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
-  h3 { margin: 0; font-size: var(--text-lg, 15px); }
-  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2, 8px); margin-top: var(--space-2, 8px); }
-  .state { font-size: var(--text-xs, 11.5px); padding: 2px 8px; border-radius: var(--radius-pill); background: var(--done-soft); color: var(--status-done); }
+  .muted { color: var(--fg-muted); font-size: var(--text-xs); }
+  .empty { color: var(--fg-muted); font-size: var(--text-sm); }
+  .err { color: var(--danger); font-size: var(--text-xs); margin: 0; }
+  .detail { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+  .kicker { margin: 0; color: var(--fg-muted); font-size: var(--text-xs); }
+  h3 { margin: 0; font-size: var(--text-lg); }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }
+  .state { font-size: var(--text-xs); padding: 2px 8px; border-radius: var(--radius-pill); background: var(--done-soft); color: var(--status-done); }
   .state.off { background: var(--bg-raise); color: var(--fg-muted); }
-  .tabs { display: flex; gap: var(--space-2, 8px); border-bottom: 1px solid var(--border); }
+  .tabs { display: flex; gap: var(--space-2); border-bottom: 1px solid var(--border); }
   .tabs button { border: 0; background: none; padding: 6px 2px; color: var(--fg-muted); cursor: pointer; border-bottom: 2px solid transparent; }
   .tabs button[aria-selected='true'] { color: var(--fg); border-bottom-color: var(--accent); }
-  .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; font-size: var(--text-sm, 12.5px); }
+  .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; font-size: var(--text-sm); }
   .facts dt { color: var(--fg-muted); }
   .facts dd { margin: 0; }
-  .runs li { display: grid; grid-template-columns: 90px 1fr auto auto; gap: 4px 12px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: var(--text-sm, 12.5px); }
+  .runs li { display: grid; grid-template-columns: 90px 1fr auto auto; gap: 4px 12px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: var(--text-sm); }
   .runs li.failed .what { color: var(--status-failed); }
-  .by-jev { margin-left: var(--space-1, 4px); color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
-  .fix { grid-column: 2 / -1; display: flex; gap: var(--space-2, 8px); }
-  .prompt { white-space: pre-wrap; margin: 0; padding: 8px; background: var(--bg-sunk); border-radius: var(--radius-md); font-size: var(--text-sm, 12.5px); }
-  .confirm { display: flex; align-items: center; gap: var(--space-2, 8px); margin: 0; font-size: var(--text-sm, 12.5px); }
-  .editor { display: flex; flex-direction: column; gap: var(--space-2, 8px); }
-  .editor label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-sm, 12.5px); }
-  .editor .hint { color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
-  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2, 8px); }
-  .actions { display: flex; justify-content: flex-end; gap: var(--space-2, 8px); }
+  .by-jev { margin-left: var(--space-1); color: var(--fg-muted); font-size: var(--text-xs); }
+  .fix { grid-column: 2 / -1; display: flex; gap: var(--space-2); }
+  .prompt { white-space: pre-wrap; margin: 0; padding: 8px; background: var(--bg-sunk); border-radius: var(--radius-md); font-size: var(--text-sm); }
+  .confirm { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--text-sm); }
+  .editor { display: flex; flex-direction: column; gap: var(--space-2); }
+  .editor label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-sm); }
+  .editor .hint { color: var(--fg-muted); font-size: var(--text-xs); }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
+  .actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 </style>

@@ -330,7 +330,7 @@
     background: var(--bg-hover);
   }
   .key {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
   }
   .why {
     color: var(--fg-muted);

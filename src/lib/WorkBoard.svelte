@@ -356,7 +356,7 @@
       <span class="top">
         <span class="tb" title={t.tracker_name ?? t.kind}>{badge(t)}</span>
         {#if t.key}<span class="key">{t.key}</span>{/if}
-        {#if refusal}<span class="lock" aria-label="status set elsewhere">🔒</span>{/if}
+        {#if refusal}<span class="lock" role="img" aria-label="status set elsewhere"><Icon name="lock" size={12} /></span>{/if}
         {#if t.needs_you}<span class="needs" title="A session needs you" aria-label="needs you">●</span>{/if}
       </span>
       <span class="title" class:derived={t.title_derived}>{displayTitle(t)}</span>
@@ -387,7 +387,7 @@
 
 <style>
   .board-note {
-    margin: 8px 0 0;
+    margin: var(--space-2) 0 0;
     font-size: var(--text-2xs);
   }
   .board {
@@ -403,7 +403,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border);
   }
   h2 {
@@ -425,11 +425,11 @@
     color: var(--fg-muted);
   }
   .pad {
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     margin: 0;
   }
   .err {
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     color: var(--usage-crit);
   }
   .columns {
@@ -438,7 +438,7 @@
     display: grid;
     grid-template-columns: repeat(3, minmax(200px, 1fr));
     gap: 10px;
-    padding: 10px 12px;
+    padding: 10px var(--space-3);
     overflow: auto;
   }
   .column {
@@ -459,7 +459,7 @@
     gap: 6px;
     align-items: center;
     margin: 0;
-    padding: 8px 10px 4px;
+    padding: var(--space-2) 10px var(--space-1);
     font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -478,7 +478,7 @@
   ul {
     list-style: none;
     margin: 0;
-    padding: 4px 8px 8px;
+    padding: var(--space-1) var(--space-2) var(--space-2);
     display: grid;
     gap: 6px;
   }
@@ -491,7 +491,7 @@
     width: 100%;
     display: grid;
     gap: 3px;
-    padding: 6px 8px;
+    padding: 6px var(--space-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg);
@@ -584,7 +584,7 @@
   .meta {
     display: flex;
     flex-wrap: wrap;
-    gap: 0 8px;
+    gap: 0 var(--space-2);
     color: var(--fg-muted);
     font-size: var(--text-2xs);
   }
@@ -611,7 +611,7 @@
     z-index: 1000;
     pointer-events: none;
     max-width: 240px;
-    padding: 4px 8px;
+    padding: var(--space-1) var(--space-2);
     border: 1px solid var(--accent);
     border-radius: var(--radius-md);
     background: var(--bg);

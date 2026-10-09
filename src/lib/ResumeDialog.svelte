@@ -401,7 +401,7 @@
   textarea {
     width: 100%;
     box-sizing: border-box;
-    font-family: var(--mono, monospace);
+    font-family: var(--mono);
     font-size: 0.8em;
   }
   .muted {

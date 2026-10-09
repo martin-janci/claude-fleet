@@ -16,7 +16,7 @@
   data-icon={name}
 >
   {#each OF_ICONS[name] as s, i (i)}
-    {#if s.kind === 'path'}<path d={s.d} />{:else if s.kind === 'circle'}<circle cx={s.cx} cy={s.cy} r={s.r} />{:else}<rect
+    {#if s.kind === 'path'}<path d={s.d} fill={s.fill ? 'currentColor' : undefined} stroke={s.fill ? 'none' : undefined} />{:else if s.kind === 'circle'}<circle cx={s.cx} cy={s.cy} r={s.r} />{:else}<rect
         x={s.x}
         y={s.y}
         width={s.width}

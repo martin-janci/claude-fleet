@@ -164,7 +164,7 @@ describe('HostsView: list', () => {
     expect(htz.textContent).toContain('○');
     const mef = screen.getAllByTestId('host-row').find((r) => r.dataset.alias === 'mefistos')!;
     expect(within(mef).queryByTestId('host-offline')).toBeNull();
-    expect(within(mef).getByTestId('host-counts').textContent).toBe('6 ⚡2 ⏸1');
+    expect(within(mef).getByTestId('host-counts').textContent).toBe('6 · 2 working · 1 needs you');
   });
 
   it('shows one attention mark with an explaining title, and no × or 🚫 in rows', async () => {

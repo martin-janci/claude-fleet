@@ -38,6 +38,7 @@
   import TicketCard from './TicketCard.svelte';
   import LocalWorkspaceCard from './LocalWorkspaceCard.svelte';
   import PrResult from './PrResult.svelte';
+  import KeyValue from './kit/KeyValue.svelte';
   import { assessRow, hasReading } from './evidence';
   import SessionTasks from './SessionTasks.svelte';
   import ProposedBy from './ProposedBy.svelte';
@@ -621,7 +622,111 @@
       if (a.blocked() === null) a.run();
     });
   });
+
+  // The facts block, in the kit's KeyValue (manual: KeyValue): label, then
+  // the value; the richer ones are the snippets under the script.
+  const facts = $derived([
+    { label: 'Host', value: session.host_alias, testid: 'session-host' },
+    { label: 'Account', value: accountEmailTier(accountRow), testid: 'session-account' },
+    ...(canSwitchLogin ? [{ label: 'Login', content: loginFact, testid: 'session-login' }] : []),
+    { label: 'Project', content: projectFact },
+    { label: 'Created', value: formatRelative(session.created_at), tnum: true },
+    { label: 'Last activity', value: formatRelative(session.last_activity_at), tnum: true },
+    { label: 'Elapsed', content: elapsedFact, tnum: true },
+    ...(session.last_turn_at !== null
+      ? [{ label: 'Last turn', value: formatRelative(session.last_turn_at), tnum: true, testid: 'details-last-turn' }]
+      : []),
+    ...(session.last_prompt ? [{ label: 'Last prompt', content: promptFact, testid: 'details-last-prompt' }] : []),
+    ...(sessionUsageTokens(session) > 0 ? [{ label: 'Usage', content: usageFact, tnum: true }] : []),
+    ...(session.pr_url ? [{ label: 'Pull request', content: prFact, testid: 'details-pr' }] : []),
+    ...(session.pr_url && hasReading(assessRow(session, nowSec))
+      ? [{ label: 'Result', content: resultFact, testid: 'details-pr-result' }]
+      : []),
+    ...(reviewedSource ? [{ label: 'Reviewing', content: reviewingFact }] : []),
+  ]);
 </script>
+
+<!-- The facts block's richer values (kit KeyValue, manual: KeyValue). -->
+{#snippet loginFact()}
+  <span class="login">
+    <select
+      aria-label="Claude login"
+      data-testid="session-login-pick"
+      value={loginTarget}
+      onchange={(e) => (loginPick = (e.currentTarget as HTMLSelectElement).value)}
+      disabled={restartBlocked !== null}
+      title="The Claude login this session bills: the host's own, or a login profile (~/.claude-profiles/<name>)"
+    >
+      <option value="">Host login</option>
+      {#each loginChoices as p (p.name)}
+        <option value={p.name}>{p.name}{p.email ? ` (${p.email})` : p.account_uuid ? '' : ' (not logged in)'}</option>
+      {/each}
+    </select>
+    {#if loginTarget !== (session.claude_profile ?? '')}
+      <button
+        data-testid="session-login-switch"
+        onclick={() => (confirmingSwitch = true)}
+        disabled={restartBlocked !== null}
+        title={restartBlocked ?? ''}
+      >Switch…</button>
+    {/if}
+  </span>
+{/snippet}
+
+{#snippet projectFact()}
+  {#if parentProject}
+    {parentProject.project.owner}/{parentProject.project.repo}
+  {:else}
+    <span class="muted">unmapped (orphan)</span>
+  {/if}
+{/snippet}
+
+{#snippet elapsedFact()}
+  <span
+    data-testid="details-elapsed"
+    title={session.started_at === null ? 'since tmux created the session (fleet did not start it)' : 'since fleet started the session'}
+    >{formatElapsed(sessionStart(session), nowSec)}</span
+  >
+{/snippet}
+
+{#snippet promptFact()}
+  <div class="last-prompt">{session.last_prompt}</div>
+{/snippet}
+
+{#snippet usageFact()}
+  <span
+    data-testid="details-usage"
+    title="Estimated from the Claude Code transcript's token counts and a built-in per-model price table (override: usage.prices_json). Not a bill."
+  >
+    <span data-testid="details-cost">{#if (session.usage_cost_micros ?? 0) > 0}{formatCostMicros(session.usage_cost_micros)} estimated{:else}unpriced ({session.usage_model ?? 'unknown model'}){/if}</span>
+    <span class="muted">· {formatTokens(session.usage_input_tokens)} in · {formatTokens(session.usage_output_tokens)} out · {formatTokens(session.usage_cache_write_tokens)} cache write · {formatTokens(session.usage_cache_read_tokens)} cache read{#if session.usage_model} · {session.usage_model}{/if}</span>
+  </span>
+{/snippet}
+
+{#snippet prFact()}
+  <a class="pr-link" href={session.pr_url} target="_blank" rel="noreferrer">{(session.pr_url ?? '').replace(/^https:\/\/github\.com\//, '')}</a>
+  {#if session.ci_status}
+    <span
+      class="chip"
+      data-testid="details-ci"
+      style="color: {ciStatusColor(session.ci_status)}; border-color: color-mix(in srgb, {ciStatusColor(session.ci_status)} 33%, transparent);"
+      title="CI checks: {session.ci_status}"
+    >{ciStatusLabel(session.ci_status)}</span>
+  {/if}
+{/snippet}
+
+{#snippet resultFact()}
+  <PrResult {session} {nowSec} />
+{/snippet}
+
+{#snippet reviewingFact()}
+  {#if reviewedSource}
+    {@const src = reviewedSource}
+    <button class="link" onclick={() => selectSessionExplicitly(src)} data-testid="reviewing-link">
+      {src.tmux_name}
+    </button>
+  {/if}
+{/snippet}
 
 <article class="details" data-testid="session-details">
   <header class="header">
@@ -683,109 +788,7 @@
     <WatchSummary {session} />
   {/if}
 
-  <dl class="meta">
-    <dt>Host</dt>
-    <dd data-testid="session-host">{session.host_alias}</dd>
-
-    <dt>Account</dt>
-    <dd data-testid="session-account">{accountEmailTier(accountRow)}</dd>
-
-    {#if canSwitchLogin}
-      <dt>Login</dt>
-      <dd class="login" data-testid="session-login">
-        <select
-          aria-label="Claude login"
-          data-testid="session-login-pick"
-          value={loginTarget}
-          onchange={(e) => (loginPick = (e.currentTarget as HTMLSelectElement).value)}
-          disabled={restartBlocked !== null}
-          title="The Claude login this session bills: the host's own, or a login profile (~/.claude-profiles/<name>)"
-        >
-          <option value="">Host login</option>
-          {#each loginChoices as p (p.name)}
-            <option value={p.name}>{p.name}{p.email ? ` (${p.email})` : p.account_uuid ? '' : ' (not logged in)'}</option>
-          {/each}
-        </select>
-        {#if loginTarget !== (session.claude_profile ?? '')}
-          <button
-            data-testid="session-login-switch"
-            onclick={() => (confirmingSwitch = true)}
-            disabled={restartBlocked !== null}
-            title={restartBlocked ?? ''}
-          >Switch…</button>
-        {/if}
-      </dd>
-    {/if}
-
-    <dt>Project</dt>
-    <dd>
-      {#if parentProject}
-        {parentProject.project.owner}/{parentProject.project.repo}
-      {:else}
-        <span class="muted">unmapped (orphan)</span>
-      {/if}
-    </dd>
-
-    <dt>Created</dt>
-    <dd>{formatRelative(session.created_at)}</dd>
-
-    <dt>Last activity</dt>
-    <dd>{formatRelative(session.last_activity_at)}</dd>
-
-    <dt>Elapsed</dt>
-    <dd data-testid="details-elapsed" title={session.started_at === null ? 'since tmux created the session (fleet did not start it)' : 'since fleet started the session'}>
-      {formatElapsed(sessionStart(session), nowSec)}
-    </dd>
-
-    {#if session.last_turn_at !== null}
-      <dt>Last turn</dt>
-      <dd data-testid="details-last-turn">{formatRelative(session.last_turn_at)}</dd>
-    {/if}
-
-    {#if session.last_prompt}
-      <dt>Last prompt</dt>
-      <dd class="last-prompt" data-testid="details-last-prompt">{session.last_prompt}</dd>
-    {/if}
-
-    {#if sessionUsageTokens(session) > 0}
-      <dt>Usage</dt>
-      <dd
-        data-testid="details-usage"
-        title="Estimated from the Claude Code transcript's token counts and a built-in per-model price table (override: usage.prices_json). Not a bill."
-      >
-        <span data-testid="details-cost">{#if (session.usage_cost_micros ?? 0) > 0}{formatCostMicros(session.usage_cost_micros)} estimated{:else}unpriced ({session.usage_model ?? 'unknown model'}){/if}</span>
-        <span class="muted">· {formatTokens(session.usage_input_tokens)} in · {formatTokens(session.usage_output_tokens)} out · {formatTokens(session.usage_cache_write_tokens)} cache write · {formatTokens(session.usage_cache_read_tokens)} cache read{#if session.usage_model} · {session.usage_model}{/if}</span>
-      </dd>
-    {/if}
-
-    {#if session.pr_url}
-      <dt>Pull request</dt>
-      <dd data-testid="details-pr">
-        <a class="pr-link" href={session.pr_url} target="_blank" rel="noreferrer">{session.pr_url.replace(/^https:\/\/github\.com\//, '')}</a>
-        {#if session.ci_status}
-          <span
-            class="chip"
-            data-testid="details-ci"
-            style="color: {ciStatusColor(session.ci_status)}; border-color: color-mix(in srgb, {ciStatusColor(session.ci_status)} 33%, transparent);"
-            title="CI checks: {session.ci_status}"
-          >{ciStatusLabel(session.ci_status)}</span>
-        {/if}
-      </dd>
-      {#if hasReading(assessRow(session, nowSec))}
-        <dt>Result</dt>
-        <dd data-testid="details-pr-result"><PrResult {session} {nowSec} /></dd>
-      {/if}
-    {/if}
-
-    {#if reviewedSource}
-      <dt class="meta-label">Reviewing</dt>
-      <dd>
-        <button class="link" onclick={() => selectSessionExplicitly(reviewedSource)} data-testid="reviewing-link">
-          {reviewedSource.tmux_name}
-        </button>
-      </dd>
-    {/if}
-  </dl>
+  <KeyValue items={facts} testid="session-facts" />
 
   <TicketCard {session} />
   <SessionTasks {session} />
@@ -1329,19 +1332,9 @@
   .status-frozen { background: var(--accent-soft); color: var(--status-working); }
   .status-orphan { background: var(--failed-soft); color: var(--status-failed); }
 
-  .meta {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    gap: 0.25rem 0.75rem;
-    margin: 0;
+  .last-prompt {
+    display: block;
   }
-  .meta dt {
-    color: var(--fg-muted);
-    font-size: var(--text-2xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  .meta dd { margin: 0; font-size: var(--text-sm); }
   .muted { color: var(--fg-muted); font-style: italic; }
 
   .block h3 {

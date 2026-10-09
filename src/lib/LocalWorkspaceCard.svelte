@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   // Local workspace sync (Phase 1): the session's worktree, kept in step with
   // a folder on this machine. Off: a folder field and Enable. On: state,
   // both paths, when it last synced, open conflicts with Keep local / Keep
@@ -249,7 +250,7 @@
     {/if}
     {#if link.conflicts.length > 0}
       <div class="conflicts" data-testid="lw-conflicts">
-        <p class="warn">⚠ Sync conflict: nothing was overwritten on either side.</p>
+        <p class="warn"><Icon name="warning" size={12} /> Sync conflict: nothing was overwritten on either side.</p>
         <ul>
           {#each link.conflicts as c (c.path)}
             <li data-testid="lw-conflict">

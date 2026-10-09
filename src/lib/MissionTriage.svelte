@@ -8,6 +8,7 @@
 <script lang="ts">
   import DraftField from './DraftField.svelte';
   import ProposedBy from './ProposedBy.svelte';
+  import StatusChip from './kit/StatusChip.svelte';
   import { preselect } from './ai_proposal';
   import type { Draft } from './drafts';
   import {
@@ -18,6 +19,7 @@
     countsLine,
     missionTriage,
     outcomeLabel,
+    outcomeState,
     stepLabel,
     type NextStep,
     type Triage,
@@ -80,13 +82,13 @@
 
 {#if triage?.stuck}
   <section class="triage" aria-label="Stuck mission" data-testid="mission-triage">
-    <p class="why"><strong>Stuck</strong> · <span data-testid="mission-triage-why">{triage.stuck.why}</span></p>
+    <p class="why"><strong>Failed · stuck</strong> · <span data-testid="mission-triage-why">{triage.stuck.why}</span></p>
     <p class="muted small" data-testid="mission-triage-counts">{countsLine(triage.stuck)}</p>
     {#if triage.stuck.last_failure}
       <p class="muted small failure" data-testid="mission-triage-failure">{triage.stuck.last_failure}</p>
     {/if}
     {#if proposedOutcome}
-      <p class="outcome" data-testid="mission-triage-outcome">Outcome so far: {outcomeLabel(proposedOutcome)}</p>
+      <p class="outcome" data-testid="mission-triage-outcome">Outcome so far: <StatusChip state={outcomeState(proposedOutcome)} label={outcomeLabel(proposedOutcome)} /></p>
       <ProposedBy proposal={outcome} field="mission_outcome" testid="mission-triage-outcome-by" />
     {/if}
     {#if triage.may_change}

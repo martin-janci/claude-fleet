@@ -385,10 +385,10 @@
     color: var(--fg-muted);
   }
   .block {
-    margin: 0 0 0.8rem;
+    margin: 0 0 var(--space-3);
   }
   .block h4 {
-    margin: 0 0 0.35rem;
+    margin: 0 0 var(--space-1);
     font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -405,12 +405,12 @@
     min-width: 0;
   }
   .warn {
-    margin: 0.3rem 0 0;
+    margin: var(--space-1) 0 0;
     font-size: 0.85em;
     color: var(--status-waiting);
   }
   .note {
-    margin: 0.3rem 0 0;
+    margin: var(--space-1) 0 0;
     font-size: 0.8em;
     color: var(--fg-muted);
   }
@@ -420,7 +420,7 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    gap: var(--space-1);
   }
   .grant {
     display: flex;
@@ -436,14 +436,14 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     font-size: var(--text-2xs);
-    padding: 0.1rem 0.35rem;
+    padding: 0.1rem var(--space-1);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
   }
   .confirm {
     display: flex;
     align-items: center;
-    gap: 0.3rem;
+    gap: var(--space-1);
     margin-left: auto;
   }
   .grant button {
@@ -465,17 +465,17 @@
   .err {
     color: var(--danger);
     font-size: 0.85em;
-    margin: 0 0 0.5rem;
+    margin: 0 0 var(--space-2);
   }
   .actions {
     display: flex;
     justify-content: flex-end;
-    gap: 0.5rem;
-    margin-top: 0.6rem;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
   }
   button {
     font-size: var(--text-xs);
-    padding: 0.25rem 0.7rem;
+    padding: var(--space-1) 0.7rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
@@ -496,9 +496,9 @@
   input,
   select {
     font-size: var(--text-xs);
-    padding: 0.25rem 0.4rem;
+    padding: var(--space-1) 0.4rem;
     border: 1px solid var(--border);
-    background: var(--bg-raise, transparent);
+    background: var(--bg-raise);
     color: var(--fg);
     border-radius: var(--radius-sm);
   }

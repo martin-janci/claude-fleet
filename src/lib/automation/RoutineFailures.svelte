@@ -80,6 +80,6 @@
   .text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .name { border: 0; background: none; padding: 0; color: var(--fg); font: inherit; font-weight: 500; text-align: left; cursor: pointer; }
   .chip { font-size: var(--text-2xs); color: var(--fg-muted); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0 6px; font-weight: 400; }
-  .line { color: var(--fg-muted); font-size: var(--text-xs, 11.5px); overflow-wrap: anywhere; }
+  .line { color: var(--fg-muted); font-size: var(--text-xs); overflow-wrap: anywhere; }
   .actions { display: flex; gap: 6px; margin-top: 4px; }
 </style>

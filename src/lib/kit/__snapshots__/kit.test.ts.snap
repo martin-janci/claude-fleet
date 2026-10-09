@@ -4,9 +4,9 @@ exports[`the kit’s colours, light and dark > match the snapshot of what each s
 {
   "Banner failed": [
     "base "Headline" fg on failed-soft/bg-pane 14.62/13.6",
-    "base "Meta" fg-muted on failed-soft/bg-pane 4.35/4.92",
+    "base "Meta" fg-2 on failed-soft/bg-pane 8.62/7.68",
     "hover "Headline" fg on failed-soft/bg-pane 14.62/13.6",
-    "hover "Meta" fg-muted on failed-soft/bg-pane 4.35/4.92",
+    "hover "Meta" fg-2 on failed-soft/bg-pane 8.62/7.68",
   ],
   "Banner waiting": [
     "base "Headline" fg on waiting-faint/bg-pane 16.04/13.99",
@@ -25,7 +25,7 @@ exports[`the kit’s colours, light and dark > match the snapshot of what each s
   "Button default": [
     "base "1" fg-muted on bg-raise 4.72/5.27",
     "base "Go" fg on bg-raise 15.85/14.56",
-    "hover "1" fg-muted on bg-hover 4.43/4.86",
+    "hover "1" fg-2 on bg-hover 8.78/7.58",
     "hover "Go" fg on bg-hover 14.89/13.42",
   ],
   "Button primary": [
@@ -44,8 +44,8 @@ exports[`the kit’s colours, light and dark > match the snapshot of what each s
     "base "line" fg-muted on accent-soft 4.54/4.67",
     "base "Waiting:" status-waiting on accent-soft 5.34/6.13",
     "hover "Title" fg on accent-soft 15.24/12.9",
-    "hover "2m" fg-muted on accent-soft 4.54/4.67",
-    "hover "line" fg-muted on accent-soft 4.54/4.67",
+    "hover "2m" fg-2 on accent-soft 8.98/7.28",
+    "hover "line" fg-2 on accent-soft 8.98/7.28",
     "hover "Waiting:" status-waiting on accent-soft 5.34/6.13",
   ],
   "StatusChip accent": [

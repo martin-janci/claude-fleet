@@ -109,7 +109,7 @@
 
 <style>
   .drift { display: grid; gap: 10px; }
-  .file { border: 1px solid var(--border); border-radius: var(--radius-sm, var(--radius-md)); overflow: hidden; }
+  .file { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
   .file header { display: flex; justify-content: space-between; gap: 8px; padding: 4px 8px; font-size: var(--text-xs); background: var(--bg-pane); border-bottom: 1px solid var(--border); }
   .file p { padding: 6px 8px; }
   .file :global([data-testid='diff-view']) { max-height: 320px; height: auto; }
@@ -117,5 +117,5 @@
   .muted { color: var(--fg-muted); font-size: var(--text-xs); margin: 0; }
   .small { font-size: var(--text-2xs); }
   .note { margin: 0; font-size: var(--text-xs); }
-  .mono { font-family: var(--mono, ui-monospace, monospace); }
+  .mono { font-family: var(--mono); }
 </style>

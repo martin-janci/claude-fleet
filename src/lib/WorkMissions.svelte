@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from './kit/Icon.svelte';
+  import StatusDot from './kit/StatusDot.svelte';
   import { tablistKeys } from './tablist_keys';
   // Missions (orchestration O1, design 2026-10-07 §9): the Work view's third
   // tab. A mission is a goal over a root task: its member tasks, the repos
@@ -19,7 +20,7 @@
   import type { NextStep } from './mission_triage';
   import MissionGraph from './MissionGraph.svelte';
   import Loader from './Loader.svelte';
-  import { defaultLaneBy, type LaneBy } from './mission_graph';
+  import { defaultLaneBy, toneOf, type LaneBy } from './mission_graph';
   import { PLAN_IMPORT_MAX_ROWS, importLine, importMissionPlan, parsePlan } from './plan_import';
   import { hosts } from './hosts';
   import { shortAge, timeAgo } from './session_status';
@@ -45,7 +46,6 @@
     stateLabel,
     updateMission,
     acceptWorkProposals,
-    nodeGlyph,
     nodeLabel,
     openProposals,
     setWorkDep,
@@ -943,7 +943,7 @@
               {@const it = itemById.get(n.item_id)}
               {#if it}
                 <li data-testid="mission-node" data-state={n.state}>
-                  <span class="glyph s-{n.state}" title={nodeLabel(n.state)} aria-label={nodeLabel(n.state)}>{nodeGlyph(n.state)}</span>
+                  <span class="node-dot" title={nodeLabel(n.state)}><StatusDot state={toneOf(n.state)} label={nodeLabel(n.state)} /></span>
                   {#if trails.has(n.item_id)}
                     <Loader name="comet-trails" size={20} label="Working on it" testid="mission-trails" />
                   {/if}
@@ -1059,7 +1059,7 @@
                         title={it.held_at ? 'Release' : 'Hold: never start this on its own'}
                         disabled={busy}
                         data-testid="mission-hold"
-                        onclick={() => void setHold(it.id, !it.held_at)}>{it.held_at ? '▶' : '⏸'}</button
+                        onclick={() => void setHold(it.id, !it.held_at)}><Icon name={it.held_at ? 'play' : 'pause'} size={14} /></button
                       >
                     {/if}
                     <button
@@ -1214,7 +1214,7 @@
   }
   .mi {
     text-align: left; border: none; background: transparent; color: var(--fg); cursor: pointer;
-    font: inherit; font-size: var(--text-xs); padding: 0.35rem 0.5rem; border-radius: var(--radius-sm, var(--radius-sm));
+    font: inherit; font-size: var(--text-xs); padding: 0.35rem 0.5rem; border-radius: var(--radius-sm);
   }
   .mi:hover, .mi:focus-visible { background: var(--bg-hover); }
   .mi.danger { color: var(--danger); }
@@ -1259,9 +1259,7 @@
   .done-when li { padding: 0.1rem 0; }
   .events li { padding: 0.1rem 0; }
   .glyph { width: 1.1rem; text-align: center; flex: 0 0 auto; color: var(--fg-muted); }
-  .glyph.s-done, .glyph.s-ready { color: var(--status-done); }
-  .glyph.s-running, .glyph.s-doing { color: var(--status-waiting); }
-  .glyph.s-failed, .glyph.s-blocked { color: var(--danger); }
+  .node-dot { display: inline-flex; align-items: center; height: 1lh; flex: 0 0 auto; }
   .main { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
   .deps { display: flex; flex-wrap: wrap; gap: 0.2rem; margin-top: 0.15rem; }
   .dep { font-size: var(--text-2xs); }
@@ -1282,7 +1280,7 @@
   .vbadge.v-verified { color: var(--status-done); border-color: var(--status-done); }
   .vbadge.v-failed { color: var(--danger); border-color: var(--danger); }
   .checks li { display: flex; gap: 0.3rem; align-items: baseline; border: none; padding: 0; font-size: var(--text-2xs); }
-  .checks .line { font-family: var(--font-mono, monospace); }
+  .checks .line { font-family: var(--font-mono); }
   .checks .c-pass .glyph { color: var(--status-done); }
   .checks .c-fail .glyph { color: var(--danger); }
   .conds { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.2rem; }

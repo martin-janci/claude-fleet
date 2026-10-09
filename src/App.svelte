@@ -1,4 +1,7 @@
 <script lang="ts">
+  import Icon from './lib/kit/Icon.svelte';
+  import StatusBar from './lib/kit/StatusBar.svelte';
+  import SegmentedControl from './lib/SegmentedControl.svelte';
   import { applyWorkEvents, loadTrackers, sessionsMentioning } from './lib/trackers';
   import { loadOrgs, cycleScope } from './lib/orgs';
   import type { WorkEvent } from './lib/trackers';
@@ -1318,38 +1321,36 @@
            announce two independent tab positions for one place. -->
       <div class="tab-tail">
         {#if sessionTabActive && $selectedSession}
-          <div class="subtabs" role="radiogroup" aria-label="Session view">
-            <button
-              class="subtab"
-              class:active={effectiveView === 'conversation'}
-              role="radio"
-              aria-checked={effectiveView === 'conversation'}
-              aria-keyshortcuts={isMac ? 'Meta+J' : 'Control+Shift+J'}
-              disabled={!selHasClaudeId && !selNoPane}
-              title={!selHasClaudeId
-                ? selNoPane
-                  ? 'No transcript yet — nothing to show'
-                  : 'No Claude session id yet'
-                : `Claude conversation from the transcript (${sessionViewChord})`}
-              onclick={() => setSessionView('conversation')}
-              data-testid="subtab-conversation">Conversation</button
-            >
-            <button
-              class="subtab"
-              class:active={effectiveView === 'terminal'}
-              role="radio"
-              aria-checked={effectiveView === 'terminal'}
-              aria-keyshortcuts={isMac ? 'Meta+J' : 'Control+Shift+J'}
-              disabled={selNoPane}
-              title={selNoPane
-                ? NO_PANE_TITLE
-                : selWatchOnly
-                  ? `${WATCH_ONLY_TITLE} (${sessionViewChord})`
-                  : `The tmux pane (${sessionViewChord})`}
-              onclick={() => setSessionView('terminal')}
-              data-testid="subtab-terminal">Terminal</button
-            >
-          </div>
+          <SegmentedControl
+            label="Session view"
+            testidPrefix="subtab-"
+            value={effectiveView}
+            options={[
+              {
+                id: 'conversation',
+                label: 'Conversation',
+                keyshortcuts: isMac ? 'Meta+J' : 'Control+Shift+J',
+                disabled: !selHasClaudeId && !selNoPane,
+                title: !selHasClaudeId
+                  ? selNoPane
+                    ? 'No transcript yet — nothing to show'
+                    : 'No Claude session id yet'
+                  : `Claude conversation from the transcript (${sessionViewChord})`,
+              },
+              {
+                id: 'terminal',
+                label: 'Terminal',
+                keyshortcuts: isMac ? 'Meta+J' : 'Control+Shift+J',
+                disabled: selNoPane,
+                title: selNoPane
+                  ? NO_PANE_TITLE
+                  : selWatchOnly
+                    ? `${WATCH_ONLY_TITLE} (${sessionViewChord})`
+                    : `The tmux pane (${sessionViewChord})`,
+              },
+            ]}
+            onchange={(v) => setSessionView(v)}
+          />
         {/if}
       </div>
       <!-- Fleet-scoped, so set apart on the right and never disabled. -->
@@ -1498,7 +1499,7 @@
   <DownloadsSheet onclose={() => downloadsOpen.set(false)} />
 {/if}
 
-<footer class="status">
+<StatusBar testid="status-bar">
   <StatusBarMark />
   <!-- Review r13 (step 1.3): a sentence and the next step; the codes stay
        under Details. -->
@@ -1577,32 +1578,37 @@
            sending a fleet-wide credential in the clear, and a decision
            nobody is ever reminded of stops being a decision. -->
       <span class="err hub-warning" data-testid="hub-warning" title={$hubStatus.warning}
-        >⚠ {$hubStatus.warning}</span
+        ><Icon name="warning" size={12} /> {$hubStatus.warning}</span
       >
     {/if}
   {/if}
-  <!-- The usage segment is the embed page `embed.status_footer`. -->
-  <EmbedSlot
-    slot="status_footer"
-    ctx={{
-      now: nowSec,
-      hosts: $hosts,
-      accounts: $accounts,
-      snapshots: $accountUsage,
-      onopenhost: (host) => openHosts(host),
-    }}
-  />
-  {#if $uiLayout === 'new'}
-    <!-- The manual's StatusBar ends on the shortcuts sheet (3.17). -->
-    <button
-      type="button"
-      class="hub-badge footer-end"
-      data-testid="footer-shortcuts"
-      title="Keyboard shortcuts  ?"
-      onclick={() => shortcutSheetOpen.set(true)}>? Shortcuts…</button
-    >
-  {/if}
-</footer>
+  <!-- The usage segment is the embed page `embed.status_footer`. Wrapped:
+       a direct child's `slot=` would read as a named slot of StatusBar. -->
+  <span class="footer-embed"
+    ><EmbedSlot
+      slot="status_footer"
+      ctx={{
+        now: nowSec,
+        hosts: $hosts,
+        accounts: $accounts,
+        snapshots: $accountUsage,
+        onopenhost: (host) => openHosts(host),
+      }}
+    /></span
+  >
+  <!-- The manual's StatusBar ends on the shortcuts sheet (3.17). -->
+  {#snippet end()}
+    {#if $uiLayout === 'new'}
+      <button
+        type="button"
+        class="hub-badge"
+        data-testid="footer-shortcuts"
+        title="Keyboard shortcuts  ?"
+        onclick={() => shortcutSheetOpen.set(true)}>? Shortcuts…</button
+      >
+    {/if}
+  {/snippet}
+</StatusBar>
 
 <style>
   .layout {
@@ -1618,24 +1624,10 @@
   .layout.with-header {
     height: calc(100vh - var(--status-h) - var(--header-h));
   }
-  .status {
-    /* border-box: --status-h is the occupied height, border included. */
-    box-sizing: border-box;
-    height: var(--status-h);
-    line-height: calc(var(--status-h) - 1px);
-    padding: 0 0.75rem;
-    background: var(--bg-pane);
-    border-top: 1px solid var(--border);
-    font-size: var(--text-2xs);
-    color: var(--fg-muted);
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-  }
-  .footer-end {
-    margin-left: auto;
-  }
-  .status .err { color: var(--danger); }
+  /* The footer is the kit's StatusBar (manual: StatusBar, --status-h
+     border included). */
+  .err { color: var(--danger); }
+  .footer-embed { display: contents; }
   .status-details { display: inline; }
   .status-details summary { display: inline; cursor: pointer; }
   .status-retry {
@@ -1771,29 +1763,6 @@
   }
   /* A pill, deliberately unlike the tabs above it: this is a switch within
      the active tab, not a sibling of it. */
-  .subtabs {
-    display: flex;
-    gap: 1px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-pill);
-    padding: 1px;
-    margin-bottom: 0.2rem;
-  }
-  .subtab {
-    background: transparent;
-    border: none;
-    border-radius: var(--radius-pill);
-    color: var(--fg-muted);
-    cursor: pointer;
-    font-size: var(--text-2xs);
-    padding: 0.1rem 0.6rem;
-  }
-  .subtab:hover:not(:disabled) { color: var(--fg); }
-  .subtab.active {
-    background: var(--bg);
-    color: var(--fg);
-  }
-  .subtab:disabled { opacity: 0.4; cursor: not-allowed; }
   .hosts-tab {
     margin-left: 0.75rem;
     position: relative;

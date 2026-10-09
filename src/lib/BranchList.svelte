@@ -126,7 +126,7 @@
   }
   .brow:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .brow:hover .bactions { visibility: visible; }
-  .bname { flex: 1 1 auto; font-family: var(--mono, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bname { flex: 1 1 auto; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cur .bname { color: var(--accent); }
   .merged {
     flex: 0 0 auto; color: var(--fg-muted); font-size: var(--text-2xs);

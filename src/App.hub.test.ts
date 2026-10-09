@@ -645,11 +645,11 @@ describe('the Session tab for a shared session', () => {
       await waitFor(() => expect(screen.getAllByTestId('sess-row').length).toBeGreaterThan(0));
       selectSession(theirs as never);
       await waitFor(() =>
-        expect(screen.getByTestId('subtab-terminal').getAttribute('aria-checked')).toBe('false'),
+        expect(screen.getByTestId('subtab-terminal').getAttribute('aria-pressed')).toBe('false'),
       );
       await fireEvent.click(screen.getByTestId('subtab-terminal'));
       await waitFor(() =>
-        expect(screen.getByTestId('subtab-terminal').getAttribute('aria-checked')).toBe('true'),
+        expect(screen.getByTestId('subtab-terminal').getAttribute('aria-pressed')).toBe('true'),
       );
       expect(screen.queryByTestId('terminal-host')).toBeNull();
     } finally {
