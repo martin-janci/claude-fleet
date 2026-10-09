@@ -67,13 +67,14 @@
     align-items: center;
     gap: 0.75rem;
     padding: 0.4rem 0.9rem;
-    font-size: 0.85rem;
-    background: var(--surface-2, #eef3ff);
-    color: var(--text, inherit);
-    border-bottom: 1px solid var(--border, rgba(0, 0, 0, 0.1));
+    font-size: var(--text-xs);
+    background: var(--accent-soft);
+    color: var(--fg);
+    border-bottom: 1px solid var(--border);
   }
   .update-banner[data-tone='warn'] {
-    background: var(--warn-bg, #fff4e5);
+    background: var(--waiting-soft);
+    border-bottom-color: var(--waiting-line);
   }
   .text {
     flex: 1;
@@ -92,6 +93,6 @@
     text-decoration: underline;
   }
   .error {
-    color: var(--danger, #b42318);
+    color: var(--danger);
   }
 </style>
