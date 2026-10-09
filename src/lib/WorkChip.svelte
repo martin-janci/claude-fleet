@@ -83,8 +83,8 @@
     // add instead of pretending there is none.
     if (unbound) {
       t += ownStatus
-        ? ` · the dot is fleet's own status; connect its tracker in Settings → Work to see ${workKey.key}'s too`
-        : ` · connect its tracker in Settings → Work to see ${workKey.key}'s status`;
+        ? ` · the dot is fleet's own status; connect its tracker in Settings → Trackers to see ${workKey.key}'s too`
+        : ` · connect its tracker in Settings → Trackers to see ${workKey.key}'s status`;
     }
     if (suggested && proposed) t = `${proposedByLabel('jev')} · ${t}`;
     if (suggested) t += ' · suggestion: Confirm (y) or Not this (n)';
@@ -124,11 +124,11 @@
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-family: var(--font-mono, ui-monospace, monospace);
     padding: 0 0.3rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     white-space: nowrap;
   }
@@ -178,11 +178,11 @@
     background: var(--status-done);
   }
   .stale {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     opacity: 0.8;
   }
   .prov {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-weight: 600;
     opacity: 0.7;
     margin-right: 0.15rem;

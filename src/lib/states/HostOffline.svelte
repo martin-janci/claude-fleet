@@ -78,9 +78,9 @@
     gap: 0.3rem;
     padding: 0.55rem 0.7rem;
     border: 1px solid color-mix(in srgb, var(--usage-warn) 45%, transparent);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: color-mix(in srgb, var(--usage-warn) 7%, transparent);
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
   }
   .head,
   .body {
@@ -96,11 +96,11 @@
   }
   .details summary {
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .details code {
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .actions {
     display: flex;

@@ -1083,24 +1083,24 @@ impl EventBus for BroadcastEventBus {
                 }
             }
         }
-        // The number and the ring position are taken under one lock, so a
-        // client resuming at N can never be sent N+1 before N.
-        let msg = {
-            let Ok(mut ring) = self.ring.lock() else {
-                tracing::warn!("[events] replay ring poisoned; the stream stops recording");
-                return;
-            };
-            let msg = EventMessage {
-                name: e.name(),
-                payload,
-                seq: self.seq.fetch_add(1, Ordering::Relaxed) + 1,
-            };
-            if ring.len() == REPLAY_RING {
-                ring.pop_front();
-            }
-            ring.push_back(msg.clone());
-            msg
+        // The number, the ring position and the live send are taken under
+        // one lock, so a client resuming at N can never be sent N+1 before
+        // N, and a live stream (which skips `seq <= sent_through`) never sees
+        // a later number first and then drops the earlier one (review r06).
+        // `send` does not block.
+        let Ok(mut ring) = self.ring.lock() else {
+            tracing::warn!("[events] replay ring poisoned; the stream stops recording");
+            return;
         };
+        let msg = EventMessage {
+            name: e.name(),
+            payload,
+            seq: self.seq.fetch_add(1, Ordering::Relaxed) + 1,
+        };
+        if ring.len() == REPLAY_RING {
+            ring.pop_front();
+        }
+        ring.push_back(msg.clone());
         // `Err` means the last receiver went away in that window. Not an
         // error, not a log line.
         let _ = self.tx.send(msg);
@@ -1530,6 +1530,36 @@ mod tests {
         drop(rx);
         assert_eq!(bus.receiver_count(), 0);
         bus.emit(&RowChange::SessionKilled(2.into()));
+    }
+
+    /// Review r06: a live stream drops any `seq` at or below the last one it
+    /// sent, so emitters on several threads must reach a subscriber in
+    /// number order, or the earlier event is skipped for good.
+    #[test]
+    fn concurrent_emitters_reach_a_subscriber_in_number_order() {
+        const THREADS: usize = 8;
+        const EACH: usize = 2_000;
+        let bus = std::sync::Arc::new(BroadcastEventBus::new(THREADS * EACH));
+        let mut rx = bus.subscribe();
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let bus = std::sync::Arc::clone(&bus);
+                std::thread::spawn(move || {
+                    for i in 0..EACH {
+                        bus.emit(&RowChange::SessionKilled(((t * EACH + i) as i64).into()));
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let mut last = 0;
+        for _ in 0..THREADS * EACH {
+            let msg = rx.try_recv().expect("every event was sent");
+            assert!(msg.seq > last, "seq {} arrived after {last}", msg.seq);
+            last = msg.seq;
+        }
     }
 
     /// The stream and the tool boundary must agree about what a null field

@@ -64,7 +64,7 @@ export interface BindingNumber {
 /** The binding window's number while it may still be shown (not expired). */
 function bindingNumber(snapshot: AccountUsageSnapshot | null, now: number): BindingNumber | null {
   if (!snapshot?.usage) return null;
-  const kind = bindingWindow(snapshot.usage);
+  const kind = bindingWindow(snapshot.usage, now);
   const w = kind ? windowOf(snapshot.usage, kind) : null;
   if (!kind || !w) return null;
   const fr = freshness(kind, snapshot.fetched_at, w.resets_at, now);

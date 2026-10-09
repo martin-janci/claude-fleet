@@ -206,49 +206,49 @@
   .tasks { display: flex; flex-direction: column; gap: 0.4rem; }
   .tasks h3 {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  .empty { margin: 0; font-size: 0.8rem; color: var(--fg-muted); font-style: italic; }
+  .empty { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); font-style: italic; }
   .list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
   .row {
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     padding: 0.4rem 0.55rem;
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .head { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
   .pill {
     padding: 0.05rem 0.4rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     border: 1px solid;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  .id { color: var(--fg-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+  .id { color: var(--fg-muted); font-family: var(--font-mono); font-size: var(--text-2xs); }
   .parties { display: inline-flex; gap: 0.3rem; align-items: baseline; min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; }
   .arrow { color: var(--fg-muted); }
   .link {
     background: transparent; border: none; padding: 0; cursor: pointer;
-    color: var(--accent); font-size: 0.8rem; text-decoration: underline; text-underline-offset: 2px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--accent); font-size: var(--text-2xs); text-decoration: underline; text-underline-offset: 2px;
+    font-family: var(--font-mono);
   }
-  .elapsed { color: var(--fg-muted); font-size: 11px; }
+  .elapsed { color: var(--fg-muted); font-size: var(--text-2xs); }
   .cancel {
-    font-size: 11px; padding: 0.15rem 0.5rem; border-radius: 4px; cursor: pointer;
+    font-size: var(--text-2xs); padding: 0.15rem 0.5rem; border-radius: var(--radius-sm); cursor: pointer;
     border: 1px solid var(--danger); color: var(--danger); background: transparent;
   }
   .cancel:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
   .prompt { margin: 0; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .result, .error {
-    margin: 0; font-size: 11px; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere;
-    max-height: 5.5rem; overflow: auto; padding: 0.3rem 0.45rem; border-radius: 4px;
+    margin: 0; font-size: var(--text-2xs); line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere;
+    max-height: 5.5rem; overflow: auto; padding: 0.3rem 0.45rem; border-radius: var(--radius-sm);
   }
   .result { background: var(--done-soft); color: var(--fg); }
   .error { background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); }

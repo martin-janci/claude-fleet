@@ -239,11 +239,13 @@ change settings shows the change with no Apply.
 `docs/chat-block.schema.json` is the JSON Schema, generated from the Rust
 model (`REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_current`), for
 editors, LLM structured output and fleet-mobile. The app's check is
-`checkUiBlock` in `src/lib/rich_blocks.ts`; its Rust twin is
-`crates/fleet-core/src/pages/chat_blocks.rs`, for blocks fleet writes or
-relays itself. Both run `docs/chat-block-examples/blocks.json` and report
-the same problems, in the same words and order:
-`item 1 › point 3: must be [x, number]`. At most 20 problems are reported.
+`checkUiBlock` in `src/lib/rich_blocks.ts`. Its Rust twin,
+`crates/fleet-core/src/pages/chat_blocks.rs`, is the model the schema is
+generated from and the same check, meant for blocks fleet writes or relays
+itself; no production path calls it yet. Both run
+`docs/chat-block-examples/blocks.json` and report the same problems, in
+the same words and order: `item 1 › point 3: must be [x, number]`. At
+most 20 problems are reported.
 
 ## Where it lives
 

@@ -15,6 +15,23 @@ filters and grouping, and the inspector. To go back to the 0.5.x layout,
 open Settings → Appearance and set Layout to Classic. Classic stays for
 this release only and is removed in the next one.
 
+### Changed
+- **hub:** the hub contract is revision 13 (it was 10): upgrade the hub together with the desktop, since a revision-10 hub does not serve the new tools (`wire_contract.rs`)
+- **share:** a grant's level gains Answer, between Watch and Drive; a client that reads the level as a closed enum must accept `answer`
+- **control:** on a hub the operator's starts and kills wait for the owner's paired device to confirm them instead of being refused
+
+### Added
+- **redesign:** the Orbit Fleet layout, now the default (Classic stays one switch away in Settings → Appearance → Layout for this release): the rail, the inspector, Inbox, Get started and a first-run tour
+- **control:** Control with Chat and Today tabs, the Views panel, confirmation cards, handoff receipts, tasks from the agent's plan and the Library with Upload
+- **automation:** routines on a schedule, an event or Run now; one list of runs; start rules that send a task key to a project; the Automation screen
+- **agents:** sessions can run the Codex CLI, offered where the host has it
+- **jev:** use cases K2–K5, J1 live, J2, J5, J9, N1, N3–N6 and J10, each off by default
+- **pr-shepherd:** nudge a session to fix its conflicting or red PR, a merge queue at the `merge` level, and the owner's `pr_shepherd` control-API tool
+- **sessions:** shell terminals and a pop-out terminal, Files with Go to file, queued prompts for a busy session, Lost and found proposals
+- **wizards:** New session, Add host, Pair a device, Add project and Link to a hub as forms, in a dialog or in the chat
+- **notifications:** a per-state matrix for desktop and phone, and quiet hours
+- **orgs:** spend by person; federation links managed from the desktop
+
 ## [0.5.4] - 2026-10-08
 
 ### Added

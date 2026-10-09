@@ -34,23 +34,22 @@ const EXEMPT: Record<string, string> = {
  * next PR that edits one of these files moves its lines to tokens and
  * deletes its entry here.
  */
-const PENDING: Record<string, { literals: string[]; undeclared: string[] }> = {
-  'App.svelte': { literals: ['.status .err { color: #e64a4a; }'], undeclared: [] },
-};
+const PENDING: Record<string, { literals: string[]; undeclared: string[] }> = {};
 
 /** Black and white used as shade, never as a surface or text colour. */
 const SHADE = /^(?:#000(?:0{3})?|rgba?\(0,\s*0,\s*0[,\s/][^)]*\)|rgb\(0 0 0 \/ [^)]*\))$/;
 
 const COLOR_LITERAL = /#[0-9a-fA-F]{3,8}\b|\b(?:rgb|rgba|hsl|hsla)\([^)]*\)/g;
 
-/** Lines that colour something with a literal, minus shade in shadows,
- *  scrims and masks. */
+/** Lines that colour something with a literal, minus shade in shadows
+ *  and masks. */
 function literalLines(css: string): string[] {
   return css.split('\n').flatMap((line) => {
     const hits = (line.match(COLOR_LITERAL) ?? []).filter((lit) => {
       if (!SHADE.test(lit)) return true;
-      // Shade is fine where it darkens: a shadow, a modal scrim, a mask.
-      return !/box-shadow|mask-image|background:\s*rgba\(0,\s*0,\s*0|color-mix\(in srgb, #000/.test(line);
+      // Shade is fine where it darkens: a shadow or a mask. A scrim is
+      // --scrim / --scrim-strong (review r10).
+      return !/box-shadow|mask-image|color-mix\(in srgb, #000/.test(line);
     });
     return hits.length ? [line.trim()] : [];
   });

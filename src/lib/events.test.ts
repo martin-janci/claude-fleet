@@ -494,3 +494,47 @@ describe('row event batching', () => {
   });
 });
 
+
+describe('review r20-sweep: one failure does not cost the rest', () => {
+  it('a throwing handler does not drop the other kinds in its flush', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onTimelineEvents = vi.fn(() => {
+      throw new Error('boom');
+    });
+    const onWorkEvents = vi.fn();
+    const onGrantChanged = vi.fn();
+    const unlisten = await subscribeToRowEvents({ onTimelineEvents, onWorkEvents, onGrantChanged });
+    fire('session:event', { session_id: 1 });
+    fire('work:tracker_removed', { id: 7 });
+    fire('grant:changed', { session_id: 3, person_id: 1, level: null });
+    await flush();
+    expect(onTimelineEvents).toHaveBeenCalledTimes(1);
+    expect(onWorkEvents).toHaveBeenCalledWith([{ type: 'tracker_removed', id: 7 }]);
+    expect(onGrantChanged).toHaveBeenCalledTimes(1);
+    expect(err).toHaveBeenCalled();
+    unlisten();
+    err.mockRestore();
+  });
+
+  it('a listen that rejects removes the listeners that already registered', async () => {
+    const real = vi.mocked(listen).getMockImplementation()!;
+    const removed: string[] = [];
+    vi.mocked(listen).mockImplementation((async (name: string, cb: (e: { payload: unknown }) => void) => {
+      if (name === 'host:added') throw new Error('ipc down');
+      const un = await (real as (n: string, c: typeof cb) => Promise<() => void>)(name, cb);
+      return () => {
+        removed.push(name);
+        un();
+      };
+    }) as unknown as typeof listen);
+    try {
+      await expect(
+        subscribeToRowEvents({ onSessionEvents: () => {}, onHostEvents: () => {} }),
+      ).rejects.toThrow('ipc down');
+      expect(removed).toContain('session:updated');
+      expect(removed).toContain('host:probed');
+    } finally {
+      vi.mocked(listen).mockImplementation(real);
+    }
+  });
+});

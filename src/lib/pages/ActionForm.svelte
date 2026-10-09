@@ -104,14 +104,14 @@
   input[type='text'],
   select {
     font: inherit;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.35rem;
   }
   .busy {
     display: inline-flex;
     align-items: center;
     gap: 0.35rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
 </style>

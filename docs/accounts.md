@@ -70,8 +70,9 @@ same name on that host reuse it.
 
 Desktop: session details → **Login**, pick the login, **Switch**, confirm.
 
-MCP: `restart_session { session_id, profile: "work" }` stores the new profile and
-restarts the session, resuming its conversation under that login.
+MCP: `restart_session { session_id, profile: "work" }` restarts the session,
+resuming its conversation under that login, and stores the new profile once
+the relaunch succeeded (a failed one leaves the row as it was).
 `profile: ""` switches back to the host's login; leaving `profile` out keeps
 the current one. Restart, recreate, repair, rewind and move all relaunch
 with the stored profile (`sessions.claude_profile`, migration 113).
@@ -84,6 +85,9 @@ separate profile, which asks for its own `/login` the first time.
 A session under a profile is attributed to its profile's account, never the
 host's; until the host reports the profile logged in, its account stays
 empty. Switching drops the old link and the next pass sets the new one.
+A session on the host's own login keeps its account while it runs, and a
+relaunch (restart, recreate, repair, rewind) drops it, so the next pass
+takes the account the host is logged into now.
 
 The usage poll asks a profile for its account's usage like a host: the
 script runs with `CLAUDE_CONFIG_DIR` at the profile and reads that

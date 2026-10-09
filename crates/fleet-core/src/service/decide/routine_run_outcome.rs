@@ -57,6 +57,9 @@ pub const RECENT_SECS: i64 = 3600;
 /// Runs read per pass, at most.
 pub const PER_PASS: i64 = 5;
 
+/// The finished runs one pass looks at to find its [`PER_PASS`] reads.
+const SCAN_CAP: i64 = 200;
+
 /// The instruction, read literally: the exact condition and what to use.
 pub const INSTRUCTIONS: &str = "state.screen is the end of a terminal screen of Claude Code, an \
      AI coding assistant, captured after it finished a scheduled task nobody was watching: its \
@@ -166,7 +169,13 @@ fn has_pane(row: &SessionRow) -> bool {
 /// not decided already. Short: the caller holds the store lock for it.
 pub fn pending(s: &Store, now: i64) -> Result<Vec<RunInput>, IpcError> {
     let mut out = Vec::new();
-    for run in s.recent_routine_runs_without_outcome(now - RECENT_SECS, PER_PASS)? {
+    // PER_PASS caps the reads, not the rows looked at: a run skipped below
+    // (decided, no pane, refused) keeps its NULL outcome, so a SQL limit of
+    // PER_PASS would let five such runs hide every older one.
+    for run in s.recent_routine_runs_without_outcome(now - RECENT_SECS, SCAN_CAP)? {
+        if out.len() as i64 >= PER_PASS {
+            break;
+        }
         let Some(sid) = run.session_id else { continue };
         let Some(session) = s.get_session_by_id(sid)? else {
             continue;
@@ -311,8 +320,8 @@ pub fn spawn_pass(store: &Arc<Mutex<Store>>, panes: Arc<dyn PaneReader>, now: i6
     }
     let ctx = DecideCtx::jev(Arc::clone(store));
     let spawned = crate::rt::try_spawn(async move {
+        let _flight = crate::rt::ClearOnDrop::of_static(&IN_FLIGHT);
         read_pending(&ctx, panes.as_ref()).await;
-        IN_FLIGHT.store(false, Ordering::SeqCst);
     });
     if spawned.is_none() {
         IN_FLIGHT.store(false, Ordering::SeqCst);

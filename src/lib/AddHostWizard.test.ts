@@ -148,6 +148,16 @@ describe('AddHostWizard', () => {
     expect(onNewSession).toHaveBeenCalledWith('mercury');
   });
 
+  it('a different host after going back runs its own checks (r18-A7)', async () => {
+    await toCheckStep();
+    await fireEvent.click(screen.getByTestId('wizard-back'));
+    await fireEvent.input(screen.getByTestId('wizard-ssh-alias'), { target: { value: 'venus' } });
+    checksRun = [];
+    await fireEvent.click(screen.getByTestId('wizard-next'));
+    await waitFor(() => expect(checksRun).toHaveLength(6));
+    expect(screen.getByText('Check venus')).toBeTruthy();
+  });
+
   it('discards a saved draft', async () => {
     db.set('venus', { ssh_alias: 'venus', alias: 'venus', step: 3, checks: [], answers: {}, created_at: 1, updated_at: 1 });
     render(AddHostWizard, { props: { onClose: vi.fn() } });

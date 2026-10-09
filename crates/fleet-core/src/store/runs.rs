@@ -35,10 +35,24 @@ use serde::{Deserialize, Serialize};
 /// - `mission`: a mission's run: a task that is an attempt at one of its
 ///   items, or an action / brake of its loop;
 /// - `jev`: a decision Jev was asked for;
-/// - `planner`, `summary`: fleet's own `claude -p` runs, by origin;
+/// - `planner`, `summary`, `commit_message`, `release_note`,
+///   `morning_brief`, `brief`, `watch_summary`, `triage`: fleet's own
+///   `claude -p` runs, by origin ([`super::AUX_ORIGINS`]);
 /// - `routine`: a routine's fire (a schedule, an event or Run now).
 pub const RUN_KINDS: &[&str] = &[
-    "operator", "task", "mission", "jev", "planner", "summary", "routine",
+    "operator",
+    "task",
+    "mission",
+    "jev",
+    "planner",
+    "summary",
+    "commit_message",
+    "release_note",
+    "morning_brief",
+    "brief",
+    "watch_summary",
+    "triage",
+    "routine",
 ];
 
 /// Every [`RunRow::outcome`], in plain words.
@@ -296,8 +310,11 @@ pub const ORCH_BRANCH: &str = "SELECT 'orchestration' AS src, e.id AS rid, 'miss
 ///   sent); ended_at: `at` plus it.
 /// - outcome: a call that failed (`timeout`, `http_error`,
 ///   `rate_limited`, `invalid_answer`) → failed, error = the fallback; any
-///   other fallback after the call (low confidence) → nothing_to_do; an `unsure` answer → nothing_to_do;
-///   an `assist` answer nobody has followed up yet → needs_person; else ok.
+///   other fallback after the call (low confidence) → nothing_to_do; an
+///   `unsure` answer, or one that proposes nothing (`none`, control_route's
+///   `control`) → nothing_to_do; an applied answer (turn_outcome,
+///   routine_run_outcome) → ok; an `assist` proposal nobody has followed up
+///   yet → needs_person; else ok.
 /// - kind `jev`; owner: the use case (`feature`); model: `model_version`,
 ///   else the provider; cost: `cost_microusd`; org: `org_id`.
 /// - sessions: the subject, when the run was about a session
@@ -310,7 +327,10 @@ pub const JEV_BRANCH: &str = "SELECT 'jev' AS src, d.id AS rid, 'jev' AS kind, \
        CASE WHEN d.fallback IN ('timeout', 'http_error', 'rate_limited', 'invalid_answer') \
               THEN 'failed' \
             WHEN d.fallback IS NOT NULL THEN 'nothing_to_do' \
-            WHEN d.answer IS NULL OR d.answer = 'unsure' THEN 'nothing_to_do' \
+            WHEN d.answer IS NULL OR d.answer IN ('unsure', 'none') \
+              OR (d.feature = 'control_route' AND d.answer = 'control') \
+              THEN 'nothing_to_do' \
+            WHEN d.feature IN ('turn_outcome', 'routine_run_outcome') THEN 'ok' \
             WHEN d.mode = 'assist' AND d.followup IS NULL THEN 'needs_person' \
             ELSE 'ok' END AS outcome, \
        CASE WHEN d.fallback IN ('timeout', 'http_error', 'rate_limited', 'invalid_answer') \
@@ -386,7 +406,7 @@ fn branch_can_match(src: &str, f: &RunsFilter) -> bool {
         ),
         "orchestration" => (&["mission"], &["ok", "failed", "needs_person"]),
         "jev" => (&["jev"], &["ok", "failed", "needs_person", "nothing_to_do"]),
-        "aux" => (&["planner", "summary"], &["ok"]),
+        "aux" => (super::AUX_ORIGINS, &["ok"]),
         _ => (&["routine"], &["ok", "failed", "nothing_to_do", "running"]),
     };
     f.kind.as_deref().is_none_or(|k| kinds.contains(&k))

@@ -92,6 +92,25 @@ describe('the start popover', () => {
   });
 });
 
+describe('review r20-sweep: the start popover', () => {
+  it('closed mid-debounce, it reads no preview', async () => {
+    const { unmount } = render(StartPopover, {
+      base: { item_id: 12, with_brief: true },
+      preview: { ...preview, suggested_project: null },
+      heading: 'Start ABC-12',
+      onclose: () => {},
+      onstarted: () => {},
+      debounceMs: 30,
+    });
+    await flush();
+    vi.mocked(invoke).mockClear();
+    await fireEvent.change(screen.getByTestId('start-popover-project'), { target: { value: '3' } });
+    unmount();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'preview_start_work')).toHaveLength(0);
+  });
+});
+
 describe('the New session dialog', () => {
   const project = {
     project: { id: 2, owner: 'acme', repo: 'papaya-pos', base_path: '/r/pp', last_session_at: null, adopted: false, system: false },

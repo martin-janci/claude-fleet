@@ -203,6 +203,11 @@ pub async fn check(deps: &Deps, m: &MissionRow) -> Vec<PairState> {
             Ok(o) => o,
             Err(e) => {
                 tracing::debug!(mission = m.id, %host, error = %e.message, "[integrate] not checked");
+                // Not checked: forget the heads so the next tick asks again
+                // (a finished mission's heads never move).
+                if let Ok(mut c) = checked().lock() {
+                    c.remove(&m.id);
+                }
                 continue;
             }
         };

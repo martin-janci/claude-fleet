@@ -47,7 +47,7 @@
 
 <style>
   .why {
-    font-size: 12px;
+    font-size: var(--text-xs);
     line-height: 16px;
     color: var(--fg-muted);
     display: flex;
@@ -59,7 +59,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 16px;
     font-weight: 500;
     color: var(--accent);
@@ -70,7 +70,7 @@
   }
   .pill::before {
     content: '\2726';
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .pct {
     font-variant-numeric: tabular-nums;

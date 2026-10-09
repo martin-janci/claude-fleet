@@ -81,7 +81,7 @@
 <style>
   .diff {
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 1.5;
     white-space: pre;
     overflow: auto;

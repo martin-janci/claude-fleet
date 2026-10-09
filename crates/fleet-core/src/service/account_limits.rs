@@ -11,9 +11,11 @@
 //! (`restart_session { profile }`). This module only answers the question;
 //! nothing here refuses a start or moves a session.
 //!
-//! Usage comes from the same cache the Hosts view and the Accounts page read
-//! (`service::account_usage`), so it is local-only like them: a hub client
-//! has no cache to read.
+//! On the desktop, usage comes from the same cache the Hosts view and the
+//! Accounts page read (`service::account_usage`). On a hub it comes from what
+//! the bus followed, the answers `account_usage` serves
+//! ([`served_check_account_headroom`], hub contract 14), so a phone and a
+//! paired desktop ask the hub.
 
 use std::sync::Mutex;
 
@@ -62,19 +64,25 @@ pub struct Headroom {
 }
 
 /// Percent used of the account's tighter window at `now`: the larger of the
-/// 5-hour and weekly use, counting only a window that has not reset yet.
+/// 5-hour and weekly use, counting only a window that has not reset yet
+/// ([`Window::live_at`]).
 pub fn used_pct(snap: Option<&AccountUsageSnapshot>, now: i64) -> Option<f64> {
-    used_pct_of(snap?.usage.as_ref()?, now)
+    let snap = snap?;
+    used_pct_of(snap.usage.as_ref()?, snap.fetched_at, now)
 }
 
-/// [`used_pct`] of one reading.
-pub fn used_pct_of(usage: &AccountUsage, now: i64) -> Option<f64> {
-    let live = |w: &Option<Window>| {
+/// [`used_pct`] of one reading, fetched at `fetched_at`.
+pub fn used_pct_of(usage: &AccountUsage, fetched_at: Option<i64>, now: i64) -> Option<f64> {
+    let live = |w: &Option<Window>, len: i64| {
         w.as_ref()
-            .filter(|w| w.utilization.is_finite() && w.resets_at.is_none_or(|at| at > now))
+            .filter(|w| w.utilization.is_finite() && w.live_at(fetched_at, len, now))
             .map(|w| w.utilization.clamp(0.0, 100.0))
     };
-    match (live(&usage.five_hour), live(&usage.seven_day)) {
+    use crate::service::account_usage::{FIVE_HOUR_SECS, WEEK_SECS};
+    match (
+        live(&usage.five_hour, FIVE_HOUR_SECS),
+        live(&usage.seven_day, WEEK_SECS),
+    ) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
     }
@@ -202,7 +210,7 @@ pub fn login_account(
         snaps
             .iter()
             .find(|r| r.account_uuid == uuid)
-            .and_then(|r| used_pct_of(&r.usage, now))
+            .and_then(|r| used_pct_of(&r.usage, Some(r.fetched_at), now))
     })
     .into_iter()
     .find(|l| l.profile.as_deref() == profile) else {
@@ -241,8 +249,10 @@ pub fn over_limit(
         }))
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "CheckAccountHeadroomParams")]
 pub struct CheckAccountHeadroomArgs {
+    /// The host the session runs or will run on.
     pub host_alias: String,
     /// The login to start or switch to: a profile name, or `None` / `""`
     /// for the host's own.
@@ -259,18 +269,11 @@ pub fn check_account_headroom(
     cache: &Mutex<UsageCache>,
     now: i64,
 ) -> Result<Headroom, IpcError> {
-    crate::validate::host_alias(&args.host_alias)?;
     let (host, pause_at, accounts) = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new(codes::E_INTERNAL, "store lock poisoned"))?;
-        let host = s.get_host_row(&args.host_alias)?.ok_or_else(|| {
-            IpcError::new(
-                codes::E_NOTFOUND,
-                format!("no host {} to check the accounts of", args.host_alias),
-            )
-        })?;
-        (host, pause_at_pct(&s), s.list_accounts()?)
+        host_and_line(&s, args)?
     };
     let usage: Vec<AccountUsageSnapshot> = {
         let c = cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -283,6 +286,44 @@ pub fn check_account_headroom(
         pause_at,
         now,
     ))
+}
+
+/// The hub's `check_account_headroom` (contract 14): [`headroom`] from what
+/// the hub's bus followed, the same answers its `account_usage` tool serves,
+/// so a phone can offer Switch to the login with headroom. An account the bus
+/// has no answer for reads as unknown use, as an unfetched one does on the
+/// desktop. `E_NOTFOUND` for an unknown host.
+pub fn served_check_account_headroom(
+    args: &CheckAccountHeadroomArgs,
+    store: &Mutex<Store>,
+    now: i64,
+) -> Result<Headroom, IpcError> {
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new(codes::E_INTERNAL, "store lock poisoned"))?;
+    let (host, pause_at, _) = host_and_line(&s, args)?;
+    let usage = s.bus_account_usage();
+    Ok(headroom(
+        &host,
+        args.profile.as_deref(),
+        &usage,
+        pause_at,
+        now,
+    ))
+}
+
+fn host_and_line(
+    s: &Store,
+    args: &CheckAccountHeadroomArgs,
+) -> Result<(HostRow, f64, Vec<crate::store::AccountRow>), IpcError> {
+    crate::validate::host_alias(&args.host_alias)?;
+    let host = s.get_host_row(&args.host_alias)?.ok_or_else(|| {
+        IpcError::new(
+            codes::E_NOTFOUND,
+            format!("no host {} to check the accounts of", args.host_alias),
+        )
+    })?;
+    Ok((host, pause_at_pct(s), s.list_accounts()?))
 }
 
 /// Test seam: put `host_alias`'s login `profile` (its own for `None`) on
@@ -444,6 +485,32 @@ mod tests {
         assert_eq!(h.suggestion, None, "work is over too; spare has no reading");
     }
 
+    /// Review r05 F7: a window with no reset time is live only while the
+    /// reading is younger than the window: an 8-day-old weekly reading (and
+    /// a 6-hour-old 5-hour one) says nothing about now.
+    #[test]
+    fn a_window_with_no_reset_time_lapses_with_its_length() {
+        let mut s = snap("own", 95.0, 97.0);
+        let u = s.usage.as_mut().unwrap();
+        u.five_hour.as_mut().unwrap().resets_at = None;
+        u.seven_day.as_mut().unwrap().resets_at = None;
+        assert_eq!(used_pct(Some(&s), NOW), Some(97.0), "a fresh reading");
+        s.fetched_at = Some(NOW - 6 * 3_600);
+        assert_eq!(used_pct(Some(&s), NOW), Some(97.0), "the week still runs");
+        s.usage
+            .as_mut()
+            .unwrap()
+            .seven_day
+            .as_mut()
+            .unwrap()
+            .utilization = 10.0;
+        assert_eq!(used_pct(Some(&s), NOW), Some(10.0), "the 5 hours lapsed");
+        s.fetched_at = Some(NOW - 8 * 86_400);
+        assert_eq!(used_pct(Some(&s), NOW), None, "8 days old");
+        s.fetched_at = None;
+        assert_eq!(used_pct(Some(&s), NOW), None, "no time, no claim");
+    }
+
     #[test]
     fn a_window_that_already_reset_does_not_count() {
         let mut s = snap("own", 100.0, 10.0);
@@ -496,5 +563,101 @@ mod tests {
         // The line is the setting.
         settings::set(&s, settings::ACCOUNTS_PAUSE_AT, "99").unwrap();
         assert_eq!(over_limit(&s, "mac", None, NOW).unwrap(), None);
+    }
+
+    /// Contract 14: the hub answers from what its bus followed, so a phone
+    /// asking about a host whose own login is over the line is offered the
+    /// profile with headroom; an account the bus has no answer for is
+    /// unknown use, never over.
+    #[test]
+    fn the_hub_answers_headroom_from_the_usage_its_bus_followed() {
+        use crate::events::EventBus;
+        let bus = std::sync::Arc::new(crate::events::BroadcastEventBus::new(4));
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        s.insert_host("mac", None).unwrap();
+        for uuid in ["acct-own", "acct-work"] {
+            s.upsert_account(&crate::store::AccountRow {
+                uuid: uuid.into(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        s.set_host_account("mac", Some("acct-own")).unwrap();
+        s.set_host_profiles(
+            "mac",
+            &[HostProfileRow {
+                name: "work".into(),
+                account_uuid: Some("acct-work".into()),
+                email: None,
+            }],
+        )
+        .unwrap();
+        let store = Mutex::new(s);
+        let args = CheckAccountHeadroomArgs {
+            host_alias: "mac".into(),
+            profile: None,
+        };
+        let now = crate::store::now_unix();
+        let unknown = served_check_account_headroom(&args, &store, now).unwrap();
+        assert!(!unknown.over, "no answer is not over the line");
+
+        let mut over = snap("acct-own", 97.0, 40.0);
+        let mut under = snap("acct-work", 10.0, 20.0);
+        for w in [&mut over, &mut under] {
+            let u = w.usage.as_mut().unwrap();
+            u.five_hour.as_mut().unwrap().resets_at = Some(now + 3_600);
+            u.seven_day.as_mut().unwrap().resets_at = Some(now + 86_400);
+        }
+        bus.emit(&crate::events::RowChange::AccountUsageUpdated(over));
+        bus.emit(&crate::events::RowChange::AccountUsageUpdated(under));
+        let h = served_check_account_headroom(&args, &store, now).unwrap();
+        assert!(h.over);
+        assert_eq!(h.suggestion.unwrap().profile.as_deref(), Some("work"));
+        assert_eq!(h.logins.len(), 2);
+
+        let missing = CheckAccountHeadroomArgs {
+            host_alias: "gone".into(),
+            profile: None,
+        };
+        let e = served_check_account_headroom(&missing, &store, now).unwrap_err();
+        assert_eq!(e.code, codes::E_NOTFOUND);
+    }
+
+    /// Review r05 F4: `LoginAccount` is FLAT on the wire (its `HostLogin`
+    /// is flattened in), which `RoutineAccount` in `src/lib/routines.ts`
+    /// reads; a nested `login` object left the routine header saying
+    /// "its account".
+    #[test]
+    fn a_login_account_is_flat_on_the_wire() {
+        let a = LoginAccount {
+            host_alias: "mac".into(),
+            login: HostLogin {
+                profile: Some("work".into()),
+                account_uuid: "u1".into(),
+                used_pct: Some(12.0),
+            },
+            email: Some("me@x.com".into()),
+            over: false,
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "host_alias": "mac",
+                "profile": "work",
+                "account_uuid": "u1",
+                "used_pct": 12.0,
+                "email": "me@x.com",
+                "over": false,
+            })
+        );
+        assert_eq!(serde_json::from_value::<LoginAccount>(v).unwrap(), a);
+        let ts = crate::repo_files::read("src/lib/routines.ts");
+        let start = ts.find("export interface RoutineAccount {").unwrap();
+        let body = &ts[start..start + ts[start..].find("\n}").unwrap()];
+        for field in ["host_alias", "profile?", "account_uuid", "email?", "over"] {
+            assert!(body.contains(&format!("  {field}:")), "{field} in {body}");
+        }
+        assert!(!body.contains("  login"), "{body}");
     }
 }

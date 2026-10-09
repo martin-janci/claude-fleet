@@ -441,6 +441,23 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "check_account_headroom",
+            "check_account_headroom",
+            json!({ "host_alias": "mac", "profile": "work" }),
+            r#"{"pause_at_pct":90.0,"over":false,"logins":[]}"#,
+            Box::new(|b, s, _| {
+                let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
+                let args = fleet_core::service::account_limits::CheckAccountHeadroomArgs {
+                    host_alias: "mac".into(),
+                    profile: Some("work".into()),
+                };
+                block_on(commands::account_usage::routed::check_account_headroom(
+                    b, args, s, &cache,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "list_projects",
             "list_projects",
             json!({ "summary": false }),

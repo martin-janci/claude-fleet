@@ -292,7 +292,9 @@ pub async fn run_check(
         crate::ssh::run_shell_bounded(ssh, ssh_alias, &script, CONNECT_TIMEOUT, CHECK_WALL).await;
     let ms = started.elapsed().as_millis();
     Ok(match out {
-        Ok(o) if o.status.success() || key != "ssh" => parse(
+        // Every check script ends in printf/echo, so the exit is ssh's:
+        // 255 is a connection that failed, not a tool that is missing.
+        Ok(o) if o.status.success() || (key != "ssh" && o.status.code() != Some(255)) => parse(
             key,
             &String::from_utf8_lossy(&o.stdout),
             ms,
@@ -327,6 +329,19 @@ fn first_line(s: &str, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_dropped_connection_is_not_a_missing_tool() {
+        let fake = crate::ssh_fake::FakeSsh::new();
+        fake.set_default(crate::ssh_fake::Reply::fail(
+            255,
+            "Connection reset by peer\n",
+        ));
+        let c = run_check(&fake, "box", "tmux", false).await.unwrap();
+        assert_eq!(c.state, "fail");
+        assert_ne!(c.label, "tmux not installed");
+        assert!(c.detail.contains("Connection reset"), "{}", c.detail);
+    }
 
     #[test]
     fn each_check_reads_its_answer() {

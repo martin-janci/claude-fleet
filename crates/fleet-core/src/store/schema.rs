@@ -694,6 +694,16 @@ fn hosts_has_agents_on_path(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// already_applied guard of migration 148.
+fn downloads_has_owner(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name = 'owner_person_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn hosts_has_worktree_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'worktree_at'",
@@ -1658,6 +1668,27 @@ const MIGRATIONS: &[Migration] = &[
         145,
         include_str!("../../migrations/145_pr_shepherd_merges.sql"),
     ),
+    // Review r02: routines whose project or host is gone are paused with
+    // the reason, and a partial index serves the scheduler's scan of runs
+    // without an outcome. Idempotent as written (the UPDATEs match only
+    // enabled orphans; the index is `IF NOT EXISTS`).
+    Migration::plain(
+        146,
+        include_str!("../../migrations/146_routine_orphans.sql"),
+    ),
+    // Review r16: a partial index on the live org grants, for the org half
+    // of `grants_for_person` (`IF NOT EXISTS`, safe to re-run).
+    Migration::plain(
+        147,
+        include_str!("../../migrations/147_session_grants_org.sql"),
+    ),
+    // Review r04 F3: Library items and downloads record their owner, so a
+    // reaped session's files stay that person's. Two ALTERs, so guarded.
+    Migration {
+        version: 148,
+        sql: include_str!("../../migrations/148_file_owner.sql"),
+        already_applied: Some(downloads_has_owner),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -6096,7 +6127,9 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(indexes, 3);
+        // 142's three, rebuilt with the table, and 147's org index (review
+        // r16), which runs again after it.
+        assert_eq!(indexes, 4);
         s.conn
             .execute(
                 "UPDATE session_grants SET level = 'answer' WHERE id = ?1",

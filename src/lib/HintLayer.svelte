@@ -82,10 +82,10 @@
     background: var(--bg);
     color: var(--fg);
     border: 1px solid var(--border);
-    border-radius: 9px;
+    border-radius: var(--radius-lg);
     padding: 10px 11px;
-    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.16);
-    font-size: 11px;
+    box-shadow: var(--shadow-pop);
+    font-size: var(--text-2xs);
     line-height: 1.45;
   }
   .htext {
@@ -101,16 +101,16 @@
     background: var(--accent);
     color: var(--accent-fg);
     border: none;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     padding: 4px 10px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     cursor: pointer;
   }
   .x {
     background: none;
     border: none;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     cursor: pointer;
   }
   .gotit:hover {

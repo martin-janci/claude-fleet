@@ -37,7 +37,7 @@ const bad: RoutineRunRow = { id: 1, routine_id: 3, trigger: 'cron', state: 'fail
 const argsOf = (action: string) =>
   inv.mock.calls.map((c) => c[1]?.args).filter((a) => a?.action === action).at(-1);
 
-function route(list: RoutineRow[] = [sweep], runs: RoutineRunRow[] = [ok, bad], failingNow: unknown[] = []) {
+function route(list: RoutineRow[] = [sweep], runs: RoutineRunRow[] = [ok, bad], failingNow: unknown[] = [], account?: unknown) {
   inv.mockReset();
   inv.mockImplementation(async (cmd: string, a: { args: { action: string; routine?: { name: string } } }) => {
     if (cmd !== 'routines') return null;
@@ -45,7 +45,7 @@ function route(list: RoutineRow[] = [sweep], runs: RoutineRunRow[] = [ok, bad], 
       case 'list':
         return list;
       case 'get':
-        return { routine: list[0], runs, may_change: true };
+        return { routine: list[0], runs, may_change: true, account };
       case 'failing':
         return failingNow;
       case 'save':
@@ -76,6 +76,14 @@ describe('Routines (8.6)', () => {
     await waitFor(() => expect(argsOf('run_now')).toEqual({ action: 'run_now', routine_id: 3 }));
     await fireEvent.click(screen.getByTestId('routine-run-pause'));
     await waitFor(() => expect(argsOf('set_enabled')).toEqual({ action: 'set_enabled', routine_id: 3, enabled: false }));
+  });
+
+  it('says which account the routine runs as, from the flat wire shape (review r05 F4)', async () => {
+    // fleet-core `LoginAccount` flattens its `HostLogin`: no nested `login`.
+    route([sweep], [ok], [], { host_alias: 'mac', profile: null, account_uuid: 'abcdef1234', used_pct: 12, email: 'me@x.com', over: false });
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    expect(document.querySelector('.kicker')?.textContent).toContain('runs as me@x.com on mac');
   });
 
   it("marks a run outcome Jev read from the screen, and only that one (8.10)", async () => {

@@ -103,7 +103,7 @@
     width: 50%;
   }
   kbd {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: var(--control-font-sm);
   }
   .soon {

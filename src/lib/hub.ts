@@ -219,8 +219,6 @@ const REASONS = {
     'this app does not poll account usage while a hub owns the fleet, so it keeps no history',
   account_spend:
     'this app collects no usage while a hub owns the fleet, so it has no spend per account',
-  check_account_headroom:
-    'this app does not poll account usage while a hub owns the fleet, so it cannot tell which account has headroom',
   propose_host_placement:
     'the decision model and the account usage are the hub’s while it owns the fleet; pick the host as usual',
   record_host_placement: 'the decision model’s runs are recorded on the hub that owns the fleet; nothing to record here',
@@ -274,7 +272,7 @@ export function unavailableReason(status: HubStatus): string | null {
   if (!status.unavailable) return null;
   // Not "do it on the hub": the hub is the problem, and every action is
   // refused until it is fixed.
-  return `Not available: ${status.unavailable}. This app is set to use that hub, so it manages no fleet of its own until that is fixed — pair again, or Disconnect, in Settings → Hub.`;
+  return `Not available: ${status.unavailable}. This app is set to use that hub, so it manages no fleet of its own until that is fixed — pair again, or Disconnect, in Settings → Hub & sync.`;
 }
 
 /**
@@ -520,7 +518,7 @@ export function hubNextStep(
     case 'E_CONFIRM_REQUIRED':
       return `${where} is holding this until someone confirms it there, and this desktop's confirmation dialog answers only its own queue, which is empty. Approve it on the hub — this window will follow.`;
     case 'E_UNAUTHORIZED':
-      return `${where} no longer accepts this desktop's client token. Pair again in Settings → Hub.`;
+      return `${where} no longer accepts this desktop's client token. Pair again in Settings → Hub & sync.`;
     default:
       return null;
   }

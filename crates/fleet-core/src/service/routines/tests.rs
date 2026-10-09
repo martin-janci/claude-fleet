@@ -152,7 +152,7 @@ fn new_routine(f: &Fx, input: RoutineInput) -> RoutineRow {
 fn due_at(f: &Fx, id: i64, at: i64) {
     lock(&f.store)
         .unwrap()
-        .advance_routine(id, Some(at))
+        .advance_routine(id, Some(at), true)
         .unwrap();
 }
 
@@ -277,6 +277,101 @@ async fn skip_next_records_the_fire_as_skipped_once() {
     let next = routine(&f, r.id).next_run_at.unwrap();
     tick_once(&f.deps, next).await;
     assert_eq!(runs_of(&f, r.id).last().unwrap().state, "running");
+}
+
+/// A start path that waits for the test to let it finish, so a second fire
+/// can land while the first one's session is being made.
+struct GatedSpawn {
+    inner: Arc<FakeSpawn>,
+    entered: tokio::sync::Notify,
+    gate: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl tick::Spawn for GatedSpawn {
+    async fn spawn(
+        &self,
+        args: crate::service::sessions::NewSessionArgs,
+    ) -> Result<SessionRow, IpcError> {
+        self.entered.notify_one();
+        self.gate.notified().await;
+        tick::Spawn::spawn(&*self.inner, args).await
+    }
+}
+
+/// Review r06 F1: a second Run now while the first one's session is still
+/// being made sees the first one starting and skips, rather than starting a
+/// second session for an `overlap: skip` routine.
+#[tokio::test]
+async fn a_run_now_during_a_starting_run_is_skipped() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let gated = Arc::new(GatedSpawn {
+        inner: f.fake.clone(),
+        entered: tokio::sync::Notify::new(),
+        gate: tokio::sync::Notify::new(),
+    });
+    let deps = Deps {
+        store: Arc::clone(&f.store),
+        spawn: gated.clone(),
+    };
+    let first = {
+        let (deps, ana) = (deps.clone(), ana.clone());
+        tokio::spawn(async move { run_now(&deps, &ana, r.id, OCT8).await })
+    };
+    if tokio::time::timeout(std::time::Duration::from_secs(5), gated.entered.notified())
+        .await
+        .is_err()
+    {
+        panic!("the first run never started: {:?}", first.await);
+    }
+    let second = run_now(&f.deps, &ana, r.id, OCT8 + 1).await.unwrap();
+    assert_eq!(second.state, "skipped");
+    assert_eq!(
+        second.reason.as_deref(),
+        Some("its last run is still starting")
+    );
+    gated.gate.notify_one();
+    assert_eq!(first.await.unwrap().unwrap().state, "running");
+    assert_eq!(f.fake.started.lock().unwrap().len(), 1, "one session");
+    // The claim is gone once the run is recorded; the open run answers now.
+    let third = run_now(&f.deps, &ana, r.id, OCT8 + 2).await.unwrap();
+    assert_eq!(third.reason.as_deref(), Some("its last run is still going"));
+}
+
+/// Review r06 F3: a Skip next a person sets while a scheduled fire is
+/// starting its session is kept for the next fire, not cleared by it.
+#[tokio::test]
+async fn a_skip_next_set_during_a_fire_survives_it() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    due_at(&f, r.id, OCT8);
+    let gated = Arc::new(GatedSpawn {
+        inner: f.fake.clone(),
+        entered: tokio::sync::Notify::new(),
+        gate: tokio::sync::Notify::new(),
+    });
+    let deps = Deps {
+        store: Arc::clone(&f.store),
+        spawn: gated.clone(),
+    };
+    let pass = tokio::spawn(async move { tick::tick_once(&deps, OCT8).await });
+    if tokio::time::timeout(std::time::Duration::from_secs(5), gated.entered.notified())
+        .await
+        .is_err()
+    {
+        panic!("the fire never started: {:?}", pass.await);
+    }
+    assert!(skip_next(&f.store, &ana, r.id, true).unwrap().skip_next);
+    gated.gate.notify_one();
+    pass.await.unwrap();
+    assert_eq!(runs_of(&f, r.id)[0].state, "running");
+    assert!(
+        routine(&f, r.id).skip_next,
+        "the person's skip is still to come"
+    );
 }
 
 #[tokio::test]
@@ -591,6 +686,36 @@ async fn an_event_routine_fires_on_its_owners_sessions_only() {
     assert_eq!(runs_of(&f, r.id).len(), 1);
     // Nor does the same event twice.
     tick_once(&f.deps, OCT8 + 60).await;
+    assert_eq!(runs_of(&f, r.id).len(), 1);
+}
+
+/// Review r16: a pass that finds nothing of its kind still moves the cursor
+/// past the events it skipped, so a rare kind does not rescan the whole
+/// event history on every pass, and a later event of the kind still fires.
+#[tokio::test]
+async fn an_event_routine_with_nothing_to_fire_moves_its_cursor_on() {
+    let f = fx();
+    let mut i = input(&f);
+    i.trigger = "event".into();
+    i.cron = None;
+    i.event = Some("stuck".into());
+    let r = new_routine(&f, i);
+    let mine = {
+        let s = lock(&f.store).unwrap();
+        let mine = s
+            .upsert_session("mine", "mac", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.claim_if_unclaimed(mine, Some(f.ana)).unwrap();
+        mine
+    };
+    event(&f, mine, "turn_done");
+    event(&f, mine, "turn_done");
+    let newest = lock(&f.store).unwrap().latest_session_event_id().unwrap();
+    tick_once(&f.deps, OCT8).await;
+    assert!(runs_of(&f, r.id).is_empty());
+    assert_eq!(routine(&f, r.id).event_cursor, newest);
+    event(&f, mine, "stuck");
+    tick_once(&f.deps, OCT8 + 20).await;
     assert_eq!(runs_of(&f, r.id).len(), 1);
 }
 
@@ -912,7 +1037,8 @@ async fn the_rules_read_an_open_question_and_a_pull_request() {
     assert_eq!(rule_outcome(&done, Some(&asked)), Some((NeedsPerson, Rule)));
     let mut j2 = row.clone();
     j2.turn_outcome = Some("asked".into());
-    assert_eq!(rule_outcome(&done, Some(&j2)), Some((NeedsPerson, Rule)));
+    // J2 is Jev's answer: the run is never labelled as a rule's.
+    assert_eq!(rule_outcome(&done, Some(&j2)), Some((NeedsPerson, Jev)));
     j2.turn_outcome = Some("finished".into());
     assert_eq!(
         rule_outcome(&done, Some(&j2)),

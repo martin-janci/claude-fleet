@@ -5,11 +5,13 @@ invariants it keeps, and the `REGEN_*` command for anything generated from it.
 Moved out of `CLAUDE.md` (which every session loads) on 2026-10-06; read the
 bullet for the area you are about to change.
 
-- **Frontend stores** (`src/lib/*.ts`) hold app state as Svelte 5 runes. Backend
-  mutations emit row events (`events.rs` → `events.ts` `subscribeToRowEvents`);
-  the frontend patches stores in place (`mergeOne`/`removeOne`) instead of
-  re-fetching. Mutation wrappers also do an optimistic patch from the command's
-  return value.
+- **Frontend stores** (`src/lib/*.ts`) hold app state in `svelte/store`
+  stores; row lists are built on `createRowStore` (`src/lib/row_store.ts`).
+  Backend mutations emit row events (`events.rs` → `events.ts`
+  `subscribeToRowEvents`); the frontend patches stores in place (each
+  store's own `mergeSession`/`removeSession`, `mergeTask`, `mergeProject`,
+  …) instead of re-fetching. Mutation wrappers also do an optimistic patch
+  from the command's return value.
 - **Backend** (`crates/fleet-core/src/`, thin Tauri handlers in
   `src-tauri/src/commands/`): the handlers wrap the transport-agnostic logic in
   `service/`; SSH multiplexing in `ssh.rs` (per-host `ControlMaster`, async
@@ -499,5 +501,5 @@ bullet for the area you are about to change.
   in `docs/hub.md`. Adding a command means: a row, then `route`/
   `refuse_local_only` **by command name** (never a second tool literal or a
   pasted sentence), then `REGEN_HUB_VERDICTS=1`, then — for a `LocalOnly`
-  command the UI can reach — a `REASONS` entry or an allowlist line in
-  `src/lib/hub_verdicts.test.ts`.
+  command the UI can reach — a `REASONS` entry in `src/lib/hub.ts` or an
+  allowlist line in `src/lib/hub_verdicts.test.ts`.

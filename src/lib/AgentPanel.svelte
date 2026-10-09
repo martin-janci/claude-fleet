@@ -228,8 +228,9 @@
     <!-- Steps 9.3 and 9.6: what the agent handed on, as chips and cards
          that follow their target's state. -->
     <HandoffCards />
-    <!-- Step 9.9 (Jev K2): where each message just sent here goes. -->
-    {#if session}<ControlRouteReceipts sessionId={session.id} />{/if}
+    <!-- Step 9.9 (Jev K2): where each message just sent here goes. Keyed, so
+         another Control session primes afresh instead of routing its history. -->
+    {#if session}{#key session.id}<ControlRouteReceipts sessionId={session.id} />{/key}{/if}
   {/if}
   {#if ctx}
     <button
@@ -369,10 +370,10 @@
     gap: 0.5rem;
     padding: 0.75rem;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     background: var(--bg-pane);
     color: var(--fg);
-    box-shadow: 0 4px 20px rgb(0 0 0 / 35%);
+    box-shadow: var(--shadow-pop);
     z-index: 39;
   }
   /* A size the person chose (drag / arrow keys), capped by the window so a
@@ -391,10 +392,11 @@
     position: absolute;
     top: 0;
     left: 0;
-    width: 14px;
-    height: 14px;
+    /* A 24 px target (WCAG 2.5.8); the strokes stay a 14 px corner. */
+    width: 24px;
+    height: 24px;
     cursor: nwse-resize;
-    border-top-left-radius: 8px;
+    border-top-left-radius: var(--radius-lg);
     /* Two short diagonal strokes: the corner reads as a handle. */
     background: linear-gradient(
       135deg,
@@ -404,6 +406,8 @@
       var(--fg-muted) 52% 60%,
       transparent 60%
     );
+    background-size: 14px 14px;
+    background-repeat: no-repeat;
     opacity: 0.45;
     touch-action: none;
   }
@@ -420,7 +424,7 @@
   .who {
     margin-right: auto;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
@@ -428,11 +432,11 @@
     border: none;
     background: none;
     color: var(--fg-muted);
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
     line-height: 1;
     padding: 0.15rem 0.3rem;
     cursor: pointer;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .close:hover {
     color: var(--fg);
@@ -466,15 +470,15 @@
   .error {
     margin: 0;
     color: var(--usage-crit);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .chip {
     align-self: flex-start;
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--bg);
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.15rem 0.6rem;
     cursor: pointer;
   }

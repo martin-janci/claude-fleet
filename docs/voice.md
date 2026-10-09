@@ -13,7 +13,7 @@ Design: `docs/superpowers/specs/2026-10-05-voice-relay-design.md`.
 
 ## Turn it on
 
-1. **Settings -> Limits -> Voice**: switch on `voice.enabled` (off by default).
+1. **Settings -> Voice**: switch on `voice.enabled` (off by default).
 2. **Re-provision the host** so it gets the stand-in: `fleet-hub provision
    --host <alias> --content-only` (or re-provision it from the desktop). This
    installs `~/.claude-fleet/voice/bin/arecord` and
@@ -22,14 +22,16 @@ Design: `docs/superpowers/specs/2026-10-05-voice-relay-design.md`.
    when the session starts.
 4. **Standalone desktop only** (not paired to a hub): the host's recorder
    reaches the desktop through its Control API, the embedded MCP server
-   (Settings -> Control API (MCP)). It must be running, and reachable from the
+   (Settings -> Control API). It must be running, and reachable from the
    host (the same path the hooks use), or every recording fails to connect.
 
 ## Use it
 
 1. In the session, run `/voice` (or `/voice tap` for tap mode).
-2. In the terminal header, switch on the 🎤 button. It follows the session you
-   are attached to; one session at a time holds the microphone.
+2. In the session's Terminal view (⌘J, or Ctrl+Shift+J on Windows, flips the
+   Session tab from the Conversation view), switch on the 🎤 button in the
+   terminal header. It follows the session you are attached to; one session
+   at a time holds the microphone.
 3. Hold space and speak; release to finish. The red dot shows only while the
    microphone is open.
 

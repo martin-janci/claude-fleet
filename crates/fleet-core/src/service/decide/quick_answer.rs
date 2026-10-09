@@ -664,10 +664,10 @@ impl QuickAnswerTrigger {
         let ctx = self.ctx.clone();
         let running = Arc::clone(&self.running);
         Some(crate::rt::spawn(async move {
+            let _flight = crate::rt::ClearOnDrop::of_shared(running);
             for input in &inputs {
                 ask(&ctx, input).await;
             }
-            running.store(false, Ordering::Release);
         }))
     }
 }

@@ -79,18 +79,36 @@ fn uri_path(path: &str) -> String {
 }
 
 /// The program and its arguments that open `folder` on `host_alias` in
-/// VS Code on `os`.
+/// VS Code on `os`. `wsl_distro` is the host's WSL distro when it is one
+/// (`wsl::distro_for`): a `wsl-*` alias is no `~/.ssh/config` entry, so
+/// Remote-SSH cannot reach it and VS Code's WSL authority opens it instead.
 pub(crate) fn editor_command(
     host_alias: &str,
     folder: &str,
     os: Os,
+    wsl_distro: Option<&str>,
 ) -> Result<(String, Vec<String>), IpcError> {
     if host_alias == LOCAL_HOST {
         return open::command_for(OpenApp::Vscode, folder, os);
     }
     crate::validate::host_alias_syntax(host_alias)?;
     crate::validate::remote_abs_path("the session's folder", folder)?;
-    let authority = format!("ssh-remote+{host_alias}");
+    let authority = match wsl_distro {
+        Some(d) => {
+            if d.is_empty()
+                || !d
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("not a WSL distro name: {d:?}"),
+                ));
+            }
+            format!("wsl+{d}")
+        }
+        None => format!("ssh-remote+{host_alias}"),
+    };
     Ok(match os {
         // A Finder-launched app has no shell PATH, so no `code`: VS Code's
         // own URI handler opens the remote folder instead.
@@ -138,7 +156,8 @@ pub async fn open_session_in_editor(
     crate::validate::tmux_name_addressable(tmux_name)?;
     let folder = session_folder(ssh, host_alias, tmux_name).await?;
     let os = Os::current();
-    let (program, args) = editor_command(host_alias, &folder, os)?;
+    let distro = crate::wsl::distro_for(host_alias);
+    let (program, args) = editor_command(host_alias, &folder, os, distro.as_deref())?;
     let cwd = (host_alias == LOCAL_HOST).then_some(folder.as_str());
     open::spawn_detached(&program, &args, cwd, OpenApp::Vscode, os)
 }
@@ -147,24 +166,37 @@ pub async fn open_session_in_editor(
 mod tests {
     use super::*;
 
+    /// r18-W2: a WSL host opens through VS Code's WSL authority.
+    #[test]
+    fn a_wsl_host_opens_through_the_wsl_authority() {
+        let (p, a) =
+            editor_command("wsl-ubuntu", "/home/u/r", Os::Windows, Some("Ubuntu-22.04")).unwrap();
+        assert_eq!(p, "cmd");
+        assert_eq!(
+            a,
+            ["/C", "code", "--remote", "wsl+Ubuntu-22.04", "/home/u/r"]
+        );
+        assert!(editor_command("wsl-x", "/home/u/r", Os::Windows, Some("a&b")).is_err());
+    }
+
     #[test]
     fn a_local_session_opens_its_folder_directly() {
-        let (p, a) = editor_command("local", "/Users/u/repo/.worktrees/x", Os::Mac).unwrap();
+        let (p, a) = editor_command("local", "/Users/u/repo/.worktrees/x", Os::Mac, None).unwrap();
         assert_eq!(p, "open");
         assert_eq!(
             a,
             ["-a", "Visual Studio Code", "/Users/u/repo/.worktrees/x"]
         );
-        let (p, a) = editor_command("local", "/home/u/repo", Os::Linux).unwrap();
+        let (p, a) = editor_command("local", "/home/u/repo", Os::Linux, None).unwrap();
         assert_eq!((p.as_str(), a), ("code", vec!["/home/u/repo".to_string()]));
     }
 
     #[test]
     fn an_ssh_session_opens_through_remote_ssh_on_every_os() {
-        let (p, a) = editor_command("mercury", "/home/m/repo", Os::Linux).unwrap();
+        let (p, a) = editor_command("mercury", "/home/m/repo", Os::Linux, None).unwrap();
         assert_eq!(p, "code");
         assert_eq!(a, ["--remote", "ssh-remote+mercury", "/home/m/repo"]);
-        let (p, a) = editor_command("mercury", "/home/m/repo", Os::Windows).unwrap();
+        let (p, a) = editor_command("mercury", "/home/m/repo", Os::Windows, None).unwrap();
         assert_eq!(p, "cmd");
         assert_eq!(
             a,
@@ -176,7 +208,7 @@ mod tests {
                 "/home/m/repo"
             ]
         );
-        let (p, a) = editor_command("mercury", "/home/m/my repo", Os::Mac).unwrap();
+        let (p, a) = editor_command("mercury", "/home/m/my repo", Os::Mac, None).unwrap();
         assert_eq!(p, "open");
         assert_eq!(
             a,
@@ -186,12 +218,12 @@ mod tests {
 
     #[test]
     fn a_bad_alias_or_folder_never_reaches_the_editor() {
-        assert!(editor_command("-oProxyCommand=x", "/home/m", Os::Linux).is_err());
-        assert!(editor_command("mercury", "relative/path", Os::Linux).is_err());
-        assert!(editor_command("mercury", "/home/m/a\nb", Os::Mac).is_err());
-        let e = editor_command("mercury", "/home/m/a&calc", Os::Windows).unwrap_err();
+        assert!(editor_command("-oProxyCommand=x", "/home/m", Os::Linux, None).is_err());
+        assert!(editor_command("mercury", "relative/path", Os::Linux, None).is_err());
+        assert!(editor_command("mercury", "/home/m/a\nb", Os::Mac, None).is_err());
+        let e = editor_command("mercury", "/home/m/a&calc", Os::Windows, None).unwrap_err();
         assert_eq!(e.code, codes::E_INVALID);
-        assert!(editor_command("mercury", "/home/m/a&b", Os::Linux).is_ok());
+        assert!(editor_command("mercury", "/home/m/a&b", Os::Linux, None).is_ok());
     }
 
     #[test]

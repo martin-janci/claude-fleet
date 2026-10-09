@@ -8,6 +8,7 @@ import Skeleton from './Skeleton.svelte';
 import EmptyState from './EmptyState.svelte';
 import HostOffline from './HostOffline.svelte';
 import { LOADING_DELAY_MS, sinceWords } from './states';
+import { motionPref } from '../motion';
 
 afterEach(() => vi.useRealTimers());
 
@@ -22,6 +23,19 @@ describe('skeleton', () => {
     const s = screen.getByTestId('skeleton');
     expect(s.getAttribute('aria-busy')).toBe('true');
     expect(s.querySelectorAll('.bar')).toHaveLength(4);
+  });
+
+  // Review r12: the app's Motion setting, not only the OS query, stills it.
+  it('rests its bars under Reduced motion', async () => {
+    vi.useFakeTimers();
+    motionPref.set('reduced');
+    try {
+      render(Skeleton);
+      await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
+      expect(screen.getByTestId('skeleton').classList.contains('still')).toBe(true);
+    } finally {
+      motionPref.set('system');
+    }
   });
 
   it('a load that ends first never shows one', async () => {

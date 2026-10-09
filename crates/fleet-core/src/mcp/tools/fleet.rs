@@ -254,6 +254,25 @@ impl FleetTools {
         )
     }
 
+    #[tool(description = "Whether starting or switching a session on \
+        host_alias under login `profile` (a profile name; omitted or \"\" for \
+        the host's own) crosses accounts.pause_at, and the login on that host \
+        with the most headroom: {pause_at_pct, chosen?, over, suggestion?, \
+        logins:[{profile?, account_uuid, used_pct?}]}. From the usage \
+        account_usage serves; never fetches. Errors: E_NOTFOUND (no such \
+        host), E_INVALID.")]
+    pub(super) async fn check_account_headroom(
+        &self,
+        Parameters(p): Parameters<crate::service::account_limits::CheckAccountHeadroomArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("check_account_headroom", &p.host_alias);
+        let now = crate::store::now_unix();
+        ok_json_compact(
+            &crate::service::account_limits::served_check_account_headroom(&p, self.reader(), now)
+                .map_err(to_mcp_err)?,
+        )
+    }
+
     #[tool(description = "Read or replace the fleet's quick replies: the \
         chip row the desktop and phone composers draw above the prompt box, \
         as [{label, text, auto_send}] in order. No arguments reads; `set` \
@@ -283,6 +302,19 @@ impl FleetTools {
             return Err(to_mcp_err(IpcError::new(
                 codes::E_FORBIDDEN,
                 "quick replies are the person's: an agent token may read them, not replace them",
+            )));
+        }
+        // The list is fleet-wide (`ui.quick_replies`), so it is the hub
+        // owner's, like every fleet-wide setting since M1: a second
+        // person's device or an org-bound one reads it, never replaces it
+        // (review r04 F4).
+        if p.set.is_some()
+            && !(caller.is_master() || (caller.is_personal_owner && caller.is_person_device()))
+        {
+            return Err(to_mcp_err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "quick replies are the hub owner's: another person's or an org's device \
+                 may read them, not replace them",
             )));
         }
         let entries = match p.set {
@@ -1021,13 +1053,32 @@ impl FleetTools {
                         )
                     })?;
                 let s = lock(&self.store).map_err(to_mcp_err)?;
-                let member = match s.get_person_by_name(person).map_err(to_mcp_err)? {
+                let found = s.get_person_by_name(person).map_err(to_mcp_err)?;
+                let member = match &found {
                     Some(p) => {
                         s.personal_owner_id().map_err(to_mcp_err)? != Some(p.id)
                             && s.org_role(org, p.id).map_err(to_mcp_err)?.is_some()
                     }
                     None => false,
                 };
+                // An org admin pairs a member's first device. A second
+                // device of someone who already has one would be a token
+                // that is that person, their private sessions included;
+                // that is the hub owner's (review r04 F1).
+                if let Some(p) = found.filter(|_| member) {
+                    if crate::service::org_admin::has_identity_beyond(&s, p.id, org)
+                        .map_err(to_mcp_err)?
+                    {
+                        return Err(mcp_err(
+                            "E_FORBIDDEN",
+                            format!(
+                                "{person:?} already has a device or belongs to another org; \
+                                 the hub owner pairs their next device"
+                            ),
+                            None,
+                        ));
+                    }
+                }
                 if !member {
                     return Err(mcp_err(
                         "E_FORBIDDEN",

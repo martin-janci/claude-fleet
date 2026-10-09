@@ -18,7 +18,7 @@
 import { STATUS_WORDS } from './kit/status';
 
 export interface CopyFinding {
-  rule: 'status-word' | 'dialog-ellipsis' | 'three-dots';
+  rule: 'status-word' | 'dialog-ellipsis' | 'three-dots' | 'old-name' | 'glyph-prefix' | 'sentence-case';
   file: string;
   line: number;
   text: string;
@@ -395,6 +395,30 @@ export function buttonsOf(src: string, index: DialogIndex, name = ''): DialogBut
   });
 }
 
+/** The app's old name in copy: it is Orbit Fleet now. The OS still lists
+ *  the desktop bundle as claude-fleet, which copy may say in parentheses. */
+const OLD_NAME = /claude[- ]fleet/i;
+const OLD_NAME_ALLOWED = /\(listed as claude-fleet\)/g;
+
+/** A label that starts with a pictograph ("🔍 Review…"). The manual's
+ *  compact markers stay: ✓ ✗ for checks, ✦ a Jev proposal, ✎ an LLM draft. */
+const GLYPH_PREFIX = /^(?![✓✗✦✎])\p{Extended_Pictographic}\uFE0F?\s+\p{L}/u;
+
+/** Words that keep their capital inside a sentence-case title: names of
+ *  products, places in the app, and keys. All-caps words (API, MCP) pass. */
+export const PROPER_WORDS = new Set([
+  'Orbit', 'Fleet', 'Claude', 'Code', 'Codex', 'Agy', 'Jev', 'GitHub', 'GitLab', 'Jira', 'Linear', 'Asana',
+  'Control', 'Inbox', 'Sessions', 'Work', 'Automation', 'Accounts', 'Toolkit', 'Settings', 'Today',
+  'Mac', 'Windows', 'Linux', 'Android', 'Enter', 'Esc', 'Tab', 'Ctrl', 'Alt', 'Shift', 'Data', 'Center', 'Cloud',
+]);
+
+/** A title in sentence case: after the first word, a capital only on a
+ *  name (`PROPER_WORDS`) or an all-caps word. */
+export function isSentenceCase(text: string): boolean {
+  const words = text.match(/[A-Za-z][A-Za-z'’]*/g) ?? [];
+  return words.slice(1).every((w) => w[0] === w[0].toLowerCase() || w === w.toUpperCase() || PROPER_WORDS.has(w));
+}
+
 /** Lint one `.svelte` file. */
 export function lintSvelte(file: string, src: string, index: DialogIndex): CopyFinding[] {
   const out: CopyFinding[] = [];
@@ -407,6 +431,21 @@ export function lintSvelte(file: string, src: string, index: DialogIndex): CopyF
     if (b.opens && /\p{L}/u.test(b.text) && !b.text.endsWith('…')) out.push({ rule: 'dialog-ellipsis', file, line: b.line, text: b.text });
   }
   const markup = markupOf(src);
+  for (const b of buttonsOf(src, index, nameOf(file)))
+    if (GLYPH_PREFIX.test(b.text)) out.push({ rule: 'glyph-prefix', file, line: b.line, text: b.text });
+  // The old name, anywhere in the markup's words or attributes.
+  markup.split('\n').forEach((l, i) => {
+    const hit = l.replace(OLD_NAME_ALLOWED, '').match(OLD_NAME);
+    if (hit && !/\b(?:import|href|src)\b|mcp__/.test(l)) out.push({ rule: 'old-name', file, line: i + 1, text: l.trim() });
+  });
+  // Dialog titles and headings are sentence case.
+  for (const m of markup.matchAll(/<(?:Modal|DialogSheet)\b[^>]*?\b(?:title|label)="([^"{]+)"/g))
+    if (!isSentenceCase(m[1])) out.push({ rule: 'sentence-case', file, line: lineOf(markup, m.index!), text: m[1] });
+  for (const h of ['h1', 'h2', 'h3', 'h4'])
+    for (const t of tagsOf(markup, h)) {
+      const text = literalText(t.body);
+      if (text && !isSentenceCase(text)) out.push({ rule: 'sentence-case', file, line: lineOf(markup, t.at), text });
+    }
   // Status surfaces: an element with a status class says one of the six
   // words in its literal text, and draws any computed text from the status
   // vocabulary (`STATUS_SOURCES`), never from a raw state.

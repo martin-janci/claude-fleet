@@ -92,6 +92,20 @@ describe('LinkReview', () => {
     expect(screen.queryByTestId('link-review-sheet')).toBeNull();
   });
 
+  it('closing the sheet hands focus back to the pill (review r11)', async () => {
+    sessions.set(rows());
+    render(LinkReview);
+    const pill = screen.getByTestId('link-review-pill');
+    pill.focus();
+    await fireEvent.click(pill);
+    await tick();
+    expect(document.activeElement).toBe(screen.getByTestId('link-review-sheet'));
+    await fireEvent.keyDown(screen.getByTestId('link-review-sheet'), { key: 'Escape' });
+    await tick();
+    expect(screen.queryByTestId('link-review-sheet')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId('link-review-pill'));
+  });
+
   it('j from a focused button still moves the cursor', async () => {
     sessions.set(rows());
     render(LinkReview);

@@ -131,18 +131,18 @@
 </Modal>
 
 <style>
-  .muted { color: var(--fg-muted); font-size: 12px; margin: 0 0 6px; }
+  .muted { color: var(--fg-muted); font-size: var(--text-xs); margin: 0 0 6px; }
   .error { color: var(--usage-crit); }
   .add-name { display: flex; gap: 6px; margin-bottom: 8px; }
   .add-name input { flex: 1; }
   .rows { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow: auto; }
-  .secret-row { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
-  .head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; margin-bottom: 4px; }
-  .name { font-family: ui-monospace, monospace; }
+  .secret-row { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 6px 8px; }
+  .head { display: flex; justify-content: space-between; align-items: center; font-size: var(--text-xs); margin-bottom: 4px; }
+  .name { font-family: var(--font-mono); }
   .status { color: var(--fg-muted); }
   .controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .controls input { flex: 1; min-width: 100px; }
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
-  .actions button, .controls button { font-size: 0.85rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: 4px; cursor: pointer; }
+  .actions button, .controls button { font-size: var(--text-xs); padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: var(--radius-sm); cursor: pointer; }
   .actions button:disabled, .controls button:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

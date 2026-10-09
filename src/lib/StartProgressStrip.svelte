@@ -109,7 +109,7 @@
     justify-items: end;
     gap: 2px;
     max-width: 320px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .steps {
     display: inline-flex;

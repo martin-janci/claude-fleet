@@ -273,6 +273,7 @@
   let hostLogins = $state<HostLogin[] | null>(null);
   let pickedLogin = false;
   let otherProfile = $state(false);
+  let loginsHost: string | null = null;
   $effect(() => {
     const host = chosenHost;
     if (!newLayout) return;
@@ -280,6 +281,11 @@
       hostLogins = null;
       pickedLogin = false;
       otherProfile = false;
+      // A login belongs to its host: a host change drops the last one, so
+      // Create never sends a profile the select no longer shows (review r05
+      // A4). The first host keeps a prefilled profile.
+      if (loginsHost !== null && loginsHost !== host) chosenProfile = '';
+      loginsHost = host;
     });
     void checkAccountHeadroom(host, null).then((h) => {
       if (chosenHost !== host) return;
@@ -289,6 +295,12 @@
       if (best) chosenProfile = best.profile ?? '';
     });
   });
+  // A name typed while the headroom check is still out is a pick too: the
+  // check's default must not overwrite it, and the field stays (review r05).
+  function onTypeProfile() {
+    pickedLogin = true;
+    if (newLayout) otherProfile = true;
+  }
   function onPickLogin(v: string) {
     pickedLogin = true;
     if (v === OTHER_PROFILE) {
@@ -1472,6 +1484,7 @@
               id="launch-profile"
               data-testid="launch-profile"
               bind:value={chosenProfile}
+              oninput={onTypeProfile}
               placeholder="Host login"
               list="launch-profile-options"
               maxlength="32"
@@ -1656,7 +1669,7 @@
 
 <style>
   .soon {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .limit-ask {
@@ -1667,9 +1680,9 @@
     gap: 0.4rem;
     padding: 0.4rem 0.5rem;
     border: 1px solid color-mix(in srgb, var(--usage-warn) 45%, transparent);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   /* The dialog owns its height budget: the field stack scrolls, the
      Create/Cancel row is pinned, so no number of worktrees or hosts can push
@@ -1682,7 +1695,7 @@
     max-height: calc(85vh - 2rem);
     min-height: 0;
   }
-  .dialog h3 { margin: 0 0 0.3rem 0; font-size: 0.95rem; flex: 0 0 auto; }
+  .dialog h3 { margin: 0 0 0.3rem 0; font-size: var(--text-sm); flex: 0 0 auto; }
   .fields {
     display: flex;
     flex-direction: column;
@@ -1697,20 +1710,20 @@
      scrolls instead of squeezing them toward zero. :global so it reaches
      PickerList's root too. */
   .fields > :global(*) { flex-shrink: 0; }
-  label, .field-label { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; }
+  label, .field-label { font-size: var(--text-2xs); color: var(--fg-muted); text-transform: uppercase; }
   input {
     font: inherit;
     padding: 0.3rem 0.4rem;
     border: 1px solid var(--border);
     background: var(--bg-pane);
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     min-width: 0;
   }
   .name-row { display: flex; gap: 0.3rem; }
   .work-note {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .work-note .dup { color: var(--fg); }
@@ -1725,12 +1738,12 @@
   }
   .name-row input { flex: 1 1 auto; }
   .dice {
-    font-size: 1rem;
+    font-size: var(--text-md);
     line-height: 1;
     padding: 0.2rem 0.45rem;
     border: 1px solid var(--border);
     background: transparent;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .dice:hover { border-color: var(--accent); }
@@ -1741,33 +1754,33 @@
     font: inherit;
     padding: 0.3rem 0.4rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg-pane);
     color: var(--fg);
     min-width: 0;
   }
   .kind-pick {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.7rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg-muted);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     cursor: pointer;
   }
   .kind-pick.active { color: var(--fg); border-color: var(--accent); }
   .preview {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .preview .k { text-transform: uppercase; font-size: 11px; margin-right: 0.3rem; }
-  .preview code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
-  .wt-status { font-size: 11px; color: var(--fg-muted); margin: 0 0 0.2rem; }
+  .preview .k { text-transform: uppercase; font-size: var(--text-2xs); margin-right: 0.3rem; }
+  .preview code { font-family: var(--font-mono); }
+  .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
+  .wt-status { font-size: var(--text-2xs); color: var(--fg-muted); margin: 0 0 0.2rem; }
   .wt-status.err { color: var(--danger); }
   .actions {
     display: flex;
@@ -1778,15 +1791,15 @@
     padding-top: 0.2rem;
     border-top: 1px solid var(--border);
   }
-  .actions .hint { margin-right: auto; font-size: 11px; color: var(--fg-muted); }
-  .hub-create-note { font-size: 11px; color: var(--fg-muted); text-align: right; }
+  .actions .hint { margin-right: auto; font-size: var(--text-2xs); color: var(--fg-muted); }
+  .hub-create-note { font-size: var(--text-2xs); color: var(--fg-muted); text-align: right; }
   .actions button {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.8rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .actions button.primary { border-color: var(--accent); }
@@ -1800,18 +1813,18 @@
     display: flex;
     align-items: center;
     gap: 0.35rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .brief {
     font: inherit;
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     width: 100%;
     box-sizing: border-box;
     resize: vertical;
   }
   .small {
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .draft-ask {
     align-self: flex-start;

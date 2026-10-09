@@ -1,7 +1,7 @@
 <script lang="ts" module>
   // What a person did on a settings card, by proposal id, so a re-drawn
   // transcript keeps it. Per window, never saved: "Not now" leaves the
-  // proposal waiting in Settings › Review, it only folds this card.
+  // proposal waiting in Settings › Proposed changes, it only folds this card.
   const outcome = new Map<number, 'applied' | 'later'>();
 </script>
 
@@ -11,7 +11,7 @@
   // it here. The key and both values come from the proposal in the store,
   // never from the block's text. Apply always asks first, then decides the
   // one proposal through `decide_setting_proposals`, the same write and
-  // guard Settings › Review uses; Not now writes nothing.
+  // guard Settings › Proposed changes uses; Not now writes nothing.
   import { onMount } from 'svelte';
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import { openSettingsAt } from '../app_views';
@@ -122,7 +122,7 @@
     {#if done === 'later'}
       <p class="meta" data-testid="rich-setting-later">
         Not applied. It still waits in
-        <button type="button" class="link" onclick={() => openSettingsAt('settings.review')}>Settings › Review</button>.
+        <button type="button" class="link" onclick={() => openSettingsAt('settings.review')}>Settings › Proposed changes</button>.
       </p>
     {:else if !$settingsWritable}
       <p class="meta" data-testid="rich-setting-readonly">This device cannot change the fleet's settings; the hub's operator decides it.</p>
@@ -142,7 +142,7 @@
   {:else if loaded}
     <p class="meta" data-testid="rich-setting-gone">
       This change no longer waits for review: it was applied or rejected.
-      <button type="button" class="link" onclick={() => openSettingsAt('settings.review')}>Open Settings › Review</button>
+      <button type="button" class="link" onclick={() => openSettingsAt('settings.review')}>Open Settings › Proposed changes</button>
     </p>
   {:else}
     <p class="meta" data-testid="rich-setting-loading">Reading the proposal…</p>
@@ -168,7 +168,7 @@
     margin: 0.4em 0 0.7em;
     padding: 0.65rem 0.8rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
   }
   header {
@@ -176,11 +176,11 @@
     justify-content: space-between;
     align-items: baseline;
     gap: 0.5rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .tag {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
   }
@@ -189,10 +189,10 @@
     flex-direction: column;
     gap: 0.1rem;
     padding: 0.4rem 0.55rem;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg);
     font-family: var(--font-mono, monospace);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .label {
     font-family: inherit;
@@ -203,17 +203,17 @@
   .plus { color: var(--usage-ok); }
   .note, .why, .receipt {
     margin: 0;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .why { color: var(--fg-muted); font-style: italic; }
   .warn {
     margin: 0;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--usage-warn, var(--usage-crit));
   }
   .meta {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .actions {
