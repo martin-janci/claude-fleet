@@ -102,7 +102,7 @@ write, and `fleet_health.loops` shows its last run.
    `pull_requests` table (#524) instead of reading `sessions.pr_evidence`
    directly. Contract bump through Lane A.
 3. **Merge queue** (`merge` level, built: `service/pr_shepherd/merge.rs`,
-   migration 144 `pr_shepherd_merges`). Per project, at most one merge per
+   migration 145 `pr_shepherd_merges`). Per project, at most one merge per
    `MERGE_SPACING_SECS` (180 s), lowest PR number first, among PRs whose
    stored reading is open, not draft, `mergeStateStatus = CLEAN`, review
    not `CHANGES_REQUESTED`, at least one check and none pending or

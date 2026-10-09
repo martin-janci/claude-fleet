@@ -56,6 +56,7 @@ mod schema;
 mod session_grants;
 mod sessions;
 mod setting_review;
+mod start_rules;
 mod task_report;
 mod tasks;
 #[cfg(test)]
@@ -184,6 +185,7 @@ pub use setting_review::{
     NewSettingProposal, SettingAuditRow, SettingProposalRow, DECIDED_PROPOSAL_KEEP_SECS,
     SETTING_AUDIT_KEEP,
 };
+pub use start_rules::{StartRuleRow, START_RULE_STATES};
 pub use task_report::{
     EvidenceCommit, EvidenceFile, TaskEvidence, TaskReport, EVIDENCE_COMMITS_MAX,
     EVIDENCE_FILES_MAX, REPORT_ENTRY_MAX_CHARS, REPORT_LIST_MAX, REPORT_OUTCOMES,

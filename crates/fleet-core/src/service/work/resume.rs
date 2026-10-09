@@ -2109,6 +2109,7 @@ mod tests {
             per_project: false,
             parallel: false,
             decider: crate::store::Decider::Person,
+            rule_id: None,
         };
         let start = async {
             at_spawn.await.unwrap();

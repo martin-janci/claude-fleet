@@ -35,6 +35,9 @@
 
 #[cfg(feature = "nl-detect")]
 pub mod bench;
+pub mod control_route;
+#[cfg(test)]
+mod control_route_tests;
 pub mod duplicate;
 #[cfg(test)]
 mod duplicate_tests;
@@ -111,10 +114,13 @@ pub enum Feature {
     RestoreTarget,
     /// Flagging a proposed task that may duplicate an existing one (K4).
     Duplicate,
+    /// Where a message typed in Control goes: a mission, a session, or
+    /// Control itself (K2, redesign step 9.9).
+    ControlRoute,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 9] = [
+    pub const ALL: [Feature; 10] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
@@ -124,6 +130,7 @@ impl Feature {
         Feature::AdoptTarget,
         Feature::RestoreTarget,
         Feature::Duplicate,
+        Feature::ControlRoute,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -137,6 +144,7 @@ impl Feature {
             Feature::AdoptTarget => "adopt_target",
             Feature::RestoreTarget => "restore_target",
             Feature::Duplicate => "duplicate",
+            Feature::ControlRoute => "control_route",
         }
     }
 
@@ -156,6 +164,7 @@ impl Feature {
             Feature::AdoptTarget => settings::DECIDE_JEV_ADOPT_TARGET,
             Feature::RestoreTarget => settings::DECIDE_JEV_RESTORE_TARGET,
             Feature::Duplicate => settings::DECIDE_JEV_DUPLICATE,
+            Feature::ControlRoute => settings::DECIDE_JEV_CONTROL_ROUTE,
         }
     }
 }

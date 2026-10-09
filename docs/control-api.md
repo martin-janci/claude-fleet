@@ -866,6 +866,23 @@ Index by area (names only; see the reference for details):
   never `run_now`. Read and changed by the owner and the org's admins, read
   by the org's members, never served to a per-host token; the routine's
   org is its host's.
+- **Start rules** — `start_rules`, by `action` (Orbit Fleet 8.11): a task
+  key pattern (`PD-*`, `*` for any run of characters, any case) that names
+  the project, and optionally the host, a start of a matching task lands
+  in. An active rule decides before the key's history and before Jev K1,
+  so a rule match records no decision run; a project or host the caller
+  names still wins. The most specific pattern decides. After a person
+  starts tasks of one `PREFIX-N` prefix in the same project five times in
+  a row, fleet offers the rule: the start preview carries it as
+  `rule_offer`, and `list` shows it first. `list` (offers, active and
+  dismissed rules, each with `project` and `may_change`); `save { rule,
+  rule_id? }` writes the whole rule (`pattern`, `project_id`,
+  `host_alias?`, `org_id?` on a new one) as active; `accept { rule_id }`
+  makes an offer the caller's active rule and replaces the pattern's other
+  active rule; `dismiss { rule_id }` (an offer is never made again);
+  `delete { rule_id }`. A rule decides for its org's tasks only; read by
+  the org's members, added and changed by its admins and the owner, never
+  served to a per-host token. A plan a rule decided carries `rule_id`.
 - **Debug devices** — `debug_devices`, by `action`. Android phones and
   emulators, iOS simulators and devices attached to any fleet host,
   inventoried by a scan of that host (`list { refresh? }`, `scan { host? }`,
@@ -1648,7 +1665,11 @@ automatically on app start.
   which lists the waiting calls with `mcp_confirms` (each with `nonce`,
   `tool`, `summary`, `caller`, `operator`, `asked_at`) and answers one with
   `answer_mcp_confirm` (`nonce`, `approved`; `false` when it was already
-  answered or expired). Both are the owner's own device only, never the
+  answered or expired). `control_route` (redesign step 9.9, Jev K2,
+  `decide.jev.control_route`) tells the owner's device where a message just
+  sent in Control goes: `propose {text}` answers `{outcome: proposed | ask |
+  none, target?, proposal?, targets, run_id?}` over the active missions and
+  running sessions, and `follow {run_id, chosen}` records the person's pick. Both are the owner's own device only, never the
   operator; each change sends an empty `confirm:changed` event. Every
   other caller is unaffected: for them these tools are not gated.
 - **Handoff receipts.** Each successful call of the operator that hands

@@ -714,6 +714,10 @@ pub struct StartPlan {
     /// `owner`'s reason: a plan a client hands back must not name a mission.
     #[serde(skip)]
     pub origin: Option<crate::store::SessionOrigin>,
+    /// The start rule (redesign 8.11) that picked the project, when one
+    /// did: the popover says "by rule PD-*".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<i64>,
     /// The login it bills ([`StartArgs::profile`]). `#[serde(skip)]`: only
     /// a mission's grant names one.
     #[serde(skip)]
@@ -953,9 +957,20 @@ pub fn plan_resolved(
     {
         return Err(already_running(&key, row, view, "", "jump to it"));
     }
+    // A start rule (redesign 8.11) decides first, when the caller named no
+    // project: before the key's history, and so before Jev is ever asked.
+    let rule = match args.project_id {
+        None => crate::service::start_rules::matching(&s, item_org, &key)?,
+        Some(_) => None,
+    };
     // Where this kind of work last ran: a GitHub issue's own repository's
     // project first, else the newest link with the same key prefix.
     let (seen, prefix_label) = match crate::store::github_ref(&key) {
+        _ if rule.is_some() => (
+            rule.as_ref()
+                .map(|r| (r.project_id, r.host_alias.clone().unwrap_or_default())),
+            String::new(),
+        ),
         Some((repo, _)) => (
             s.project_for_repo(repo)?.map(|pid| {
                 let host = s.last_host_for_project(pid).ok().flatten();
@@ -1133,6 +1148,7 @@ pub fn plan_resolved(
         decider: args.decider,
         owner: args.owner,
         origin: args.origin.clone(),
+        rule_id: rule.map(|r| r.id),
         profile: args.profile.clone(),
     })
 }
@@ -1683,6 +1699,18 @@ pub async fn start_work_unprompted(
         crate::service::sessions::new_session(a, store.as_ref(), ssh, reg)
     })
     .await?;
+    // Redesign 8.11: a rule that decided counts the start; a person's start
+    // no rule decided counts toward offering one.
+    match plan.rule_id {
+        Some(id) => crate::service::start_rules::note_hit(store, id),
+        None if args.decider == Decider::Person => crate::service::start_rules::tally_logged(
+            store,
+            plan.item_id,
+            &plan.key,
+            plan.project_id,
+        ),
+        None => {}
+    }
     // Jev K1's follow-up: where a person's start landed answers a proposal
     // they were shown. Best effort; an agent's start answers nothing.
     if args.decider == Decider::Person {
@@ -1791,6 +1819,11 @@ pub struct StartPreview {
     /// pre-tick only; the person still starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_sibling: Option<crate::service::decide::sibling_repos::SuggestedSibling>,
+    /// The start rule fleet offers for this key after a person started its
+    /// prefix in one project five times in a row (redesign 8.11): "Add rule
+    /// PD-* → papaya-pos?". Accept or dismiss it with `start_rules`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_offer: Option<crate::store::StartRuleRow>,
     /// The brief above was drafted by a model (redesign 6.10, `draft_brief`):
     /// by which, on which host, from how many notes. `None` for the template.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2022,7 +2055,7 @@ pub async fn preview_start(
     let args = with_native_defaults(store, args, &view.org)?;
     let mut conflicts = Vec::new();
     let ticket = resolve_ticket(store, &args, view, net, true).await?;
-    let (projects, hosts, live, done) = {
+    let (projects, hosts, live, done, rule_offer) = {
         let s = lock(store)?;
         let mut projects = s.list_projects()?;
         projects.retain(|p| !p.system);
@@ -2073,7 +2106,8 @@ pub async fn preview_start(
             }
         }
         let done = item.as_ref().is_some_and(|i| i.status_category == "done");
-        (projects, hosts, live, done)
+        let offer = crate::service::start_rules::offer_for(&s, view, item_org, &ticket.key)?;
+        (projects, hosts, live, done, offer)
     };
     if let Some(row) = live.first() {
         let visible = view.sees_session_row(row).is_visible();
@@ -2117,6 +2151,7 @@ pub async fn preview_start(
         suggested_project: None,
         proposal: None,
         suggested_sibling: None,
+        rule_offer,
         brief_draft: None,
     };
     let plan = match plan_resolved(store, &planned, view, &ticket) {
@@ -2468,6 +2503,8 @@ where
     // not what came up: a sibling that failed to start was still chosen.
     if args.decider == Decider::Person {
         record_sibling_start(store, ticket.item_id, &ticket.key, ids[0], &ids);
+        // Redesign 8.11: the dialog's own project counts toward a rule.
+        crate::service::start_rules::tally_logged(store, ticket.item_id, &ticket.key, ids[0]);
     }
     Ok(out)
 }

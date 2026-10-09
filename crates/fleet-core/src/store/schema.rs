@@ -1649,11 +1649,14 @@ const MIGRATIONS: &[Migration] = &[
     // Orbit Fleet 9.7: Control's Library indexes the files a person put on
     // a host (one CREATE TABLE IF NOT EXISTS, idempotent as written).
     Migration::plain(143, include_str!("../../migrations/143_library_items.sql")),
+    // Orbit Fleet 8.11, from AI to rule: `start_rules`, the key patterns
+    // that pick a start's project before history and Jev. New objects only.
+    Migration::plain(144, include_str!("../../migrations/144_start_rules.sql")),
     // PR shepherd, step 3: the merge queue's record (a new table and an
     // index, `IF NOT EXISTS`, safe to re-run).
     Migration::plain(
-        144,
-        include_str!("../../migrations/144_pr_shepherd_merges.sql"),
+        145,
+        include_str!("../../migrations/145_pr_shepherd_merges.sql"),
     ),
 ];
 

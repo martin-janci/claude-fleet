@@ -22,7 +22,7 @@ import type { WorkTreePage } from './lib/work_view';
 import { activeHintId, hintDef, markSeen, resetHints } from './lib/hints';
 import { onboardingWelcomed } from './lib/onboarding';
 
-const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-overlay', 'accounts-overlay', 'control-overlay'];
+const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-overlay', 'accounts-overlay', 'control-overlay', 'automation-overlay'];
 
 beforeEach(() => {
   onboardingDismissed.set(true);
@@ -237,7 +237,16 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     const ids = Array.from(getByTestId('rail').querySelectorAll('[data-testid^="rail-"]'), (e) =>
       e.getAttribute('data-testid'),
     );
-    expect(ids).toEqual(['rail-control', 'rail-inbox', 'rail-sessions', 'rail-work', 'rail-accounts', 'rail-toolkit', 'rail-settings']);
+    expect(ids).toEqual([
+      'rail-control',
+      'rail-inbox',
+      'rail-sessions',
+      'rail-work',
+      'rail-automation',
+      'rail-accounts',
+      'rail-toolkit',
+      'rail-settings',
+    ]);
     expect(getByTestId('rail-sessions').getAttribute('aria-current')).toBe('page');
   });
 
@@ -252,6 +261,19 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     expect(openOverlays(container)).toEqual(['accounts-overlay']);
     expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
     expect(getByTestId('stab-agent').getAttribute('aria-selected')).toBe('false');
+    await fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(get(destination)).toBe('session');
+    expect(terminalSlot(container)).toBe(term);
+  });
+
+  it('Automation (step 8.4) opens from the rail over a mounted terminal, and Esc leaves it', async () => {
+    uiLayout.set('new');
+    const { container, getByTestId } = render(App);
+    const term = terminalSlot(container);
+    await fireEvent.click(getByTestId('rail-automation'));
+    expect(openOverlays(container)).toEqual(['automation-overlay']);
+    expect(getByTestId('rail-automation').getAttribute('aria-current')).toBe('page');
+    expect(getByTestId('automation-view')).toBeTruthy();
     await fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(get(destination)).toBe('session');
     expect(terminalSlot(container)).toBe(term);

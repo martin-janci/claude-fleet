@@ -850,6 +850,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     ("list_pull_requests", Verdict::Routed { tool: "prs" }),
+    // Start rules (Orbit Fleet 8.11): the hub decides and tallies its own
+    // starts, so its rules are the ones that count.
+    (
+        "start_rules",
+        Verdict::Routed {
+            tool: "start_rules",
+        },
+    ),
     (
         "session_presence",
         Verdict::Routed {
@@ -1321,6 +1329,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "operator_status",
         Verdict::Routed {
             tool: "operator_status",
+        },
+    ),
+    // Redesign step 9.9 (Jev K2): the hub decides where a Control message
+    // goes, since it owns the fleet and the decision envelope.
+    (
+        "control_route_propose",
+        Verdict::Routed {
+            tool: "control_route",
+        },
+    ),
+    (
+        "control_route_follow",
+        Verdict::Routed {
+            tool: "control_route",
         },
     ),
     // ── the pairing itself — about THIS process, either way ─────────────────

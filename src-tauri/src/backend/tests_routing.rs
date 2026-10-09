@@ -818,6 +818,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "start_rules",
+            "start_rules",
+            json!({ "action": "accept", "rule_id": 3 }),
+            r#"{"id":3,"pattern":"PD-*","project_id":2,"state":"active","confirmations":5,"hits":0,"created_at":1,"updated_at":2,"may_change":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::start_rules::routed::start_rules(
+                    b,
+                    s,
+                    fleet_core::service::start_rules::StartRulesArgs {
+                        action: "accept".into(),
+                        rule_id: Some(3),
+                        rule: None,
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "control_handoffs",
             "control_handoffs",
             json!({ "limit": 5 }),
@@ -2528,6 +2546,35 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     s,
                     "f_a".into(),
                     Some("later".into()),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "control_route_propose",
+            "control_route",
+            json!({ "action": "propose", "text": "how is the federation handshake doing" }),
+            r#"{"outcome":"none","targets":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::operator::routed::control_route_propose(
+                    b,
+                    s,
+                    "how is the federation handshake doing".into(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "control_route_follow",
+            "control_route",
+            json!({ "action": "follow", "run_id": 7, "chosen": "m3" }),
+            "true",
+            Box::new(|b, s, _| {
+                block_on(commands::operator::routed::control_route_follow(
+                    b,
+                    s,
+                    7,
+                    "m3".into(),
                 ))
                 .map(|_| ())
             }),
@@ -6355,6 +6402,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/federation.rs"),
     ),
     ("commands/prs.rs", include_str!("../commands/prs.rs")),
+    (
+        "commands/start_rules.rs",
+        include_str!("../commands/start_rules.rs"),
+    ),
     (
         "commands/presence.rs",
         include_str!("../commands/presence.rs"),
