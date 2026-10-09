@@ -53,7 +53,7 @@ Parameters: `confirm_nonce`, `force_partial`, `plan_id`
 
 ### `ask`
 
-Chat forms: `form` (fleet.form/1) opens a form in YOUR session's chat and waits ≤600 s for the person's answers (status answered | pending | declined | cancelled | expired; on pending call `wait`). `draft` (the JSON so far) shows a long form building first. `cancel` withdraws. A person's side: list, get, answer, decline. Spec: docs/forms.md.
+Chat forms: `form` (fleet.form/1) opens a form in YOUR session's chat and waits ≤600 s for the person's answers (status answered | pending | declined | cancelled | expired; on pending call `wait`). `draft` shows it while written. `cancel` withdraws. A person's side: list, get, answer, decline. Spec: docs/forms.md.
 
 Parameters: `answer`, `cancel`, `decline`, `draft`, `form`, `get`, `list`, `note`, `timeout_s`, `values`, `wait`, `why`
 
@@ -197,7 +197,7 @@ Parameters: `fresh_for`, `limit`, `mark_read`, `session_id`, `summary`, `unread_
 
 ### `install_agent`
 
-Install fleet-agent on a host this hub reaches over SSH, then move the host onto it. Returns the job at once (see agent_installs): target, download (checked against SHA256SUMS), start (token on stdin), connect (no hello in 120 s: back on SSH). Defaults: this hub's public URL and version. Hub only.
+Install fleet-agent on a host this hub reaches over SSH and move the host onto it. Returns the job at once (see agent_installs): target, download (SHA256SUMS-checked), start, connect (no hello in 120 s: back on SSH). Hub only.
 
 Parameters: `alias`, `hub_url`, `version`
 
@@ -767,7 +767,7 @@ Settings proposals waiting for review, each with the key's value now, and can_wr
 
 ### `shell_terminals`
 
-A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory (or at=home: the home directory) and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals.
+A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory (at=home: home) and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals.
 
 Parameters: `action`, `at`, `n`, `session_id`
 

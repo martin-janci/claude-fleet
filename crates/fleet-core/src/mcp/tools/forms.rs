@@ -19,7 +19,7 @@ impl FleetTools {
         description = "Chat forms: `form` (fleet.form/1) opens a form in YOUR \
         session's chat and waits ≤600 s for the person's answers (status \
         answered | pending | declined | cancelled | expired; on pending call \
-        `wait`). `draft` (the JSON so far) shows a long form building first. \
+        `wait`). `draft` shows it while written. \
         `cancel` withdraws. A person's side: list, get, answer, decline. \
         Spec: docs/forms.md."
     )]

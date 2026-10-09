@@ -345,10 +345,9 @@ impl FleetTools {
     }
 
     #[tool(description = "Install fleet-agent on a host this hub reaches \
-        over SSH, then move the host onto it. Returns the job at once (see \
-        agent_installs): target, download (checked against SHA256SUMS), \
-        start (token on stdin), connect (no hello in 120 s: back on SSH). \
-        Defaults: this hub's public URL and version. Hub only.")]
+        over SSH and move the host onto it. Returns the job at once (see \
+        agent_installs): target, download (SHA256SUMS-checked), start, \
+        connect (no hello in 120 s: back on SSH). Hub only.")]
     pub(super) async fn install_agent(
         &self,
         Extension(caller): Extension<Caller>,

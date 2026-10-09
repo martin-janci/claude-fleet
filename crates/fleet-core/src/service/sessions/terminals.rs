@@ -34,10 +34,8 @@ pub enum ShellTerminalAction {
     Close,
 }
 
-/// Where `open` starts a new terminal: the strip's "New terminal opens on"
-/// picker (Terminals board). Both are on the session's own host — a
-/// terminal is a tmux session beside the agent's, so it cannot be anywhere
-/// else.
+/// Where `open` starts a new terminal, on the session's own host (the
+/// strip's "New terminal opens on" picker).
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
 )]

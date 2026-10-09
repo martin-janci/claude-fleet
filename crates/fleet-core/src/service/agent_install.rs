@@ -51,12 +51,12 @@ const STEP_WALL: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "InstallAgentParams")]
 pub struct InstallAgentArgs {
-    /// The host to install on; it must be reachable over SSH now.
+    /// The host; reachable over SSH now.
     pub alias: String,
-    /// The URL the agent dials. Default: this hub's public URL.
+    /// The URL the agent dials (default: this hub's public URL).
     #[serde(default)]
     pub hub_url: Option<String>,
-    /// The release to install. Default: this hub's own version.
+    /// The release (default: this hub's version).
     #[serde(default)]
     pub version: Option<String>,
 }

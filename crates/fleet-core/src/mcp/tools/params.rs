@@ -109,13 +109,10 @@ pub struct NewSessionParams {
     /// claude (default), codex or shell.
     #[serde(default)]
     pub agent: Option<String>,
-    /// Opaque id (1–64 of A-Z a-z 0-9 _ -): the start's worktree, tmux and
-    /// agent steps arrive as `start:progress` events carrying it.
+    /// Opaque id (1–64 of A-Za-z0-9_-) its `start:progress` events carry.
     #[serde(default)]
     pub start_token: Option<String>,
-    /// The person chose to start on a login past `accounts.pause_at`;
-    /// without it such a start fails `E_ACCOUNT_LIMIT`, naming the login
-    /// with headroom.
+    /// The person chose a login past `accounts.pause_at`.
     #[serde(default)]
     pub over_limit_ok: Option<bool>,
     /// Approved confirmation.
@@ -160,7 +157,7 @@ pub struct ShellTerminalsParams {
     /// takes the lowest free one.
     #[serde(default)]
     pub n: Option<u32>,
-    /// open only: worktree (default, the agent's directory) or home.
+    /// open only: worktree (default) or home.
     #[serde(default)]
     pub at: crate::service::sessions::ShellTerminalStart,
 }
@@ -402,10 +399,8 @@ pub struct SendPromptParams {
     /// session.
     #[serde(default)]
     pub client_msg_id: Option<String>,
-    /// Press a key instead: `Enter`, `Escape`, `Tab`, `BTab`, an arrow
-    /// (`Up` …), `C-c` or a listed Ctrl key, or `1`-`9` (that
-    /// `pending_input` option; toggles it when `multi`). Unmarked, not
-    /// recorded; `prompt` must be empty.
+    /// Press a key instead; `1`-`9` picks that `pending_input` option
+    /// (toggles it when `multi`). Not recorded; `prompt` must be empty.
     #[serde(default)]
     #[schemars(extend("enum" = crate::tmux::NamedKey::all_names()))]
     pub keys: Option<String>,
@@ -1143,8 +1138,7 @@ pub struct AskParams {
     /// form / draft: why you ask (≤500 chars).
     #[serde(default)]
     pub why: Option<String>,
-    /// The form's JSON as written so far (≤16 KiB): your chat draws it in
-    /// until `form` opens it. "" drops it.
+    /// The form's JSON so far (≤16 KiB), drawn in until `form`; "" drops it.
     #[serde(default)]
     pub draft: Option<String>,
     /// Wait again on this pending form_id.
