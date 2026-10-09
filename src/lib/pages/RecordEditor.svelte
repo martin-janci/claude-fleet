@@ -13,13 +13,18 @@
   import type { OrgMember } from '../orgs';
   import Chart from './Chart.svelte';
   import Loader from '../Loader.svelte';
+  import Meter from '../kit/Meter.svelte';
+  import KitTabs from '../kit/Tabs.svelte';
   import type { OrgSettingRow } from '../orgs';
   import type { TrackerRow } from '../trackers';
-  import { evalCondition, type Section } from './pages';
+  import { evalCondition, type Section, type Tab } from './pages';
   import {
     ago,
     applies,
+    budgetMeter,
     dollars,
+    labelOf,
+    overBudgetDays,
     buildArgs,
     choiceLabel,
     fieldValue,
@@ -48,6 +53,8 @@
   let {
     resource,
     sections,
+    tabs = [],
+    tab = $bindable(''),
     record,
     readonly = false,
     options,
@@ -58,6 +65,12 @@
   }: {
     resource: ResourceType;
     sections: Section[];
+    /** The page's tabs, when it lays the record out in tabs instead of
+     *  sections (the org's Overview, Members, Devices, Spend, Settings). */
+    tabs?: Tab[];
+    /** The open tab's title; bound by the page so a re-read (which
+     *  remounts the editor) keeps it. Empty: the first. */
+    tab?: string;
     record: ResourceRecord;
     readonly?: boolean;
     options: (field: FieldSpec, param: string) => { value: string; label: string }[];
@@ -89,6 +102,8 @@
   }
 
   const fieldOf = (id: string) => resource.fields.find((f) => f.id === id);
+  /** A field's label, `{title}` filled with this record's title. */
+  const lbl = (f: FieldSpec) => labelOf(f, titleOf(resource, record));
   const saved = $derived(
     Object.fromEntries(
       resource.fields
@@ -103,6 +118,25 @@
     resource.fields.filter((f) => f.edit && f.type !== 'items' && draft[f.id] !== saved[f.id]),
   );
   const values = $derived({ ...recordValues(resource, record), ...Object.fromEntries(Object.entries(draft).map(([k, v]) => [k, String(v)])) });
+
+  const shownTabs = $derived(tabs.filter((t) => evalCondition(t.when, values)));
+  const tabSections = $derived(
+    shownTabs.length ? (shownTabs.find((t) => t.title === tab) ?? shownTabs[0]).sections : sections,
+  );
+  /** A tab's count: how many entries its one list holds (Members 5). */
+  function tabCount(t: Tab): number | undefined {
+    const lists = t.sections
+      .flatMap((s) => s.items)
+      .flatMap((i) => (i.type === 'field' ? [fieldOf(i.key)] : []))
+      .filter((f): f is FieldSpec => f?.type === 'items' && f.item_label.type !== 'admin_need' && f.item_label.type !== 'person_spend');
+    if (lists.length !== 1 || !Array.isArray(record[lists[0].id])) return undefined;
+    return itemsOf(lists[0], record).length;
+  }
+  /** The tab a "Needs an admin" line opens, if the page has it. */
+  function needTab(n: AdminNeed): string | null {
+    const want = n.kind === 'budget' ? 'Spend' : n.kind === 'untrusted_device' ? 'Devices' : null;
+    return want && shownTabs.some((t) => t.title === want) ? want : null;
+  }
 
   let busy = $state(false);
   /** A confirmation waiting on the person: its sentences and what runs. */
@@ -206,7 +240,18 @@
     </div>
   {/each}
 
-  {#each sections.filter((s) => evalCondition(s.when, values)) as section (section.title)}
+  {#if shownTabs.length > 1}
+    <div class="tabs">
+      <KitTabs
+        tabs={shownTabs.map((t) => ({ id: t.title, label: t.title, count: tabCount(t) }))}
+        selected={shownTabs.some((t) => t.title === tab) ? tab : shownTabs[0].title}
+        onselect={(id) => (tab = id)}
+        label={titleOf(resource, record)}
+        testid="record-tabs" />
+    </div>
+  {/if}
+
+  {#each tabSections.filter((s) => evalCondition(s.when, values)) as section (section.title)}
     <section class="section">
       <h6>{section.title}</h6>
       {#if section.tiles}
@@ -217,9 +262,11 @@
             {@const f = item.type === 'field' ? fieldOf(item.key) : undefined}
             {#if f && !(f.type === 'money' && record[f.id] === undefined)}
               {@const sub = subLine(f.sub, record[f.id], record)}
+              {@const meter = budgetMeter(f.sub, record[f.id], record)}
               <div class="tile" data-testid={`tile-${f.id}`} title={f.help}>
-                <span class="tile-label">{f.label}</span>
+                <span class="tile-label">{lbl(f)}</span>
                 <span class="tile-value" data-testid={`value-${f.id}`}>{shown(f)}</span>
+                {#if meter}<Meter value={meter.value} level={meter.level} label={`${lbl(f)}: ${sub}`} testid={`tile-meter-${f.id}`} />{/if}
                 {#if sub}<span class="tile-sub" data-testid={`tile-sub-${f.id}`}>{sub}</span>{/if}
               </div>
             {/if}
@@ -238,16 +285,25 @@
                left out, rather than shown as empty. -->
           {#if f && !(['items', 'money', 'money_series', 'settings', 'sync'].includes(f.type) && record[f.id] == null)}
             <div class="field" class:changed={changed.includes(f)} data-testid={`record-field-${f.id}`}>
-              <span class="label" id={`rf-${f.id}`}>{f.label}</span>
+              <span class="label" id={`rf-${f.id}`}>{lbl(f)}</span>
               <div class="control">
                 {#if f.type === 'items' && f.item_label.type === 'admin_need'}
                   <ul class="needs" aria-labelledby={`rf-${f.id}`}>
                     {#each itemsOf(f, record) as it, n (n)}
                       {@const line = needLine(it as AdminNeed, now())}
+                      {@const go = needTab(it as AdminNeed)}
                       <li class={`need ${line.tone}`} data-testid={`item-${f.id}`}>
                         <span class="need-mark" aria-hidden="true">{line.tone === 'warn' ? '!' : 'i'}</span>
                         <span class="need-text">{line.text}</span>
                         <span class="need-detail">{line.detail}</span>
+                        {#if go}
+                          <button
+                            type="button"
+                            class="btn btn--quiet need-go"
+                            data-testid={`need-go-${f.id}`}
+                            onclick={() => (tab = go)}>{go}</button
+                          >
+                        {/if}
                       </li>
                     {:else}
                       <li class="none">Nothing needs an admin.</li>
@@ -286,14 +342,23 @@
                     </tbody>
                   </table>
                 {:else if f.type === 'money_series'}
+                  {@const points = (record[f.id] as { day: string; cost_micros: number }[]) ?? []}
+                  {@const daily = record.budget_daily_usd}
+                  {@const over = overBudgetDays(points, daily)}
                   <div class="series">
                     <Chart
-                      points={(record[f.id] as Record<string, unknown>[]) ?? []}
+                      points={points as unknown as Record<string, unknown>[]}
                       x={{ id: 'day', label: 'Day', ty: 'day' }}
-                      y={{ id: 'cost_micros', label: f.label, ty: 'usd_micros' }}
+                      y={{ id: 'cost_micros', label: lbl(f), ty: 'usd_micros' }}
                       kind="bar"
-                      title={f.label}
+                      title={lbl(f)}
+                      limit={typeof daily === 'number' && daily > 0
+                        ? { value: daily * 1_000_000, label: `daily budget $${daily.toLocaleString('en-US')}` }
+                        : null}
                       testid={`chart-${f.id}`} />
+                    {#if over.length}
+                      <p class="over" data-testid={`chart-over-${f.id}`}>{over.join(' · ')}. Fleet warns; it never stops a session.</p>
+                    {/if}
                   </div>
                 {:else if f.type === 'items' && f.item_label.type === 'member'}
                   <OrgMembers
@@ -557,6 +622,19 @@
   .series {
     width: 100%;
   }
+  .over {
+    margin: 0.3rem 0 0;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
+  .tabs {
+    margin-top: 0.6rem;
+  }
+  .need-go {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+    align-self: center;
+  }
   .needs {
     list-style: none;
     margin: 0;
@@ -568,7 +646,7 @@
   }
   .need {
     display: grid;
-    grid-template-columns: 1.1rem 1fr;
+    grid-template-columns: 1.1rem 1fr auto;
     column-gap: 0.4rem;
     font-size: var(--text-2xs);
   }
@@ -588,6 +666,10 @@
   .need.warn .need-mark {
     border-color: var(--usage-warn);
     color: var(--usage-warn);
+  }
+  .need-text,
+  .need-detail {
+    grid-column: 2;
   }
   .need-detail {
     font-size: var(--text-2xs);

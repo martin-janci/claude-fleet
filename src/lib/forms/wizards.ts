@@ -12,8 +12,16 @@ import addHost from './wizards/add_host.json';
 import pairDevice from './wizards/pair_device.json';
 import newSession from './wizards/new_session.json';
 import getStarted from './wizards/get_started.json';
+import linkPeer from './wizards/link_peer.json';
 
-export type WizardId = 'link_hub' | 'add_project' | 'add_host' | 'pair_device' | 'new_session' | 'get_started';
+export type WizardId =
+  | 'link_hub'
+  | 'add_project'
+  | 'add_host'
+  | 'pair_device'
+  | 'new_session'
+  | 'get_started'
+  | 'link_peer';
 
 export interface Wizard {
   id: WizardId;
@@ -34,7 +42,7 @@ export const WIZARDS: Record<WizardId, Wizard> = {
   // The one-step Add host, for the chat and Get started: 4.9's guided
   // wizard keeps its drafts and per-step checks, which a form cannot hold.
   add_host: { id: 'add_host', spec: addHost as FormSpec, sending: 'Checking…', loader: 'sonar' },
-  // Settings › Devices' Pair a device in the New layout.
+  // Settings › Devices' Pair a device.
   pair_device: { id: 'pair_device', spec: pairDevice as FormSpec, sending: 'Pairing…', loader: 'halo' },
   // ⌘N's start as a form, for the chat and Get started; its answered line
   // carries the Pulse while the agent comes up (5.13).
@@ -42,6 +50,11 @@ export const WIZARDS: Record<WizardId, Wizard> = {
   // 10.5's Get started as one form: a host, a project and the first
   // session; the Galaxy while the first fleet is built (10.10).
   get_started: { id: 'get_started', spec: getStarted as FormSpec, sending: 'Building…', loader: 'galaxy' },
+  // Settings › Federation's Link a hub (11.12): the
+  // Counter-orbit runs while the two hubs trade keys (`link_peer_hub`
+  // redeems the code). Nothing waits on a person once it runs: the other
+  // side's operator minted the code before, so no step says "waiting for".
+  link_peer: { id: 'link_peer', spec: linkPeer as FormSpec, sending: 'Linking…', loader: 'counter-orbit' },
 };
 
 /** `spec` with the choices only known when it opens (the fleet's hosts, a

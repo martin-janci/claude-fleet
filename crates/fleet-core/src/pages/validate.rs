@@ -729,6 +729,7 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
                 cx.text(&at, "text", text, MAX_TEXT);
             }
         }
+        check_graph(&mut cx, page);
         if let Some(res) = resource {
             for f in res.fields {
                 if !placed.contains_key(&format!("{}#{}", page.id, f.id)) {
@@ -825,6 +826,61 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
         });
     }
     problems
+}
+
+/// Most facts a graph node shows under its name.
+pub const MAX_GRAPH_FACTS: usize = 3;
+
+/// A `graph` (`Page::graph`) is a `master_detail` page's: its `state` is a
+/// `choice` field of the resource, `up` names at least one of its options
+/// (and not all of them: a graph that can never show a link down says
+/// nothing), and its facts are the resource's plain fields.
+fn check_graph(cx: &mut Ctx, page: &Page) {
+    use super::resources::FieldKind;
+    let Some(g) = &page.graph else { return };
+    let Some(res) = cx.resource else {
+        cx.bad("graph", "a graph belongs to a master_detail page");
+        return;
+    };
+    cx.text("graph", "center", &g.center, MAX_TITLE);
+    match res.field(&g.state).map(|f| f.kind) {
+        Some(FieldKind::Choice { options }) => {
+            for v in &g.up {
+                if !options.iter().any(|(o, _)| o == v) {
+                    cx.bad(
+                        "graph",
+                        format!("`{v}` is not one of {}'s `{}` values", res.id, g.state),
+                    );
+                }
+            }
+            if g.up.is_empty() || g.up.len() >= options.len() {
+                cx.bad(
+                    "graph",
+                    "`up` names some of the state's values, not none and not all",
+                );
+            }
+        }
+        _ => cx.bad(
+            "graph",
+            format!("`{}` is not a choice field of {}", g.state, res.id),
+        ),
+    }
+    if g.facts.len() > MAX_GRAPH_FACTS {
+        cx.bad(
+            "graph",
+            format!("at most {MAX_GRAPH_FACTS} facts under a node"),
+        );
+    }
+    for f in &g.facts {
+        match res.field(f).map(|f| f.kind) {
+            Some(FieldKind::Text { .. } | FieldKind::Count | FieldKind::Time) => {}
+            Some(_) => cx.bad(
+                "graph",
+                format!("`{f}` is not a plain field: a fact is text, a count or a time"),
+            ),
+            None => cx.bad("graph", format!("`{f}` is not a field of {}", res.id)),
+        }
+    }
 }
 
 /// Call `f` with every item of `page` and where it is.

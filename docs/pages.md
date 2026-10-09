@@ -274,7 +274,27 @@ A `master_detail` page names its resource and lays out one record's fields
 in sections, each field exactly once. A section with `"tiles": true` holds
 only `count` and `money` fields and shows them as tiles: the label, the
 value, and the field's `sub` line (`budget`: "82% of $750" from a budget in
-whole USD; `count`: "2 need you"), as the org overview does:
+whole USD, with a Meter that warns from 80% and is critical once reached;
+`count`: "2 need you"), as the org overview does. The record's fields can be
+laid out in `tabs` instead of `sections` (the org's Overview, Members,
+Devices, Spend and Settings): the editor keeps one draft across them, and a
+tab whose sections hold exactly one list shows its count. A field label may
+name the record with `{title}`, its one placeholder ("Allow Jev (decision
+model) for {title}'s work" reads "… for Acme's work").
+
+A page may also draw its records as a `graph` above the list — the centre
+node joined to each record, the line solid while the record's `state`
+(a `choice` field) is one of `up` and dashed otherwise, with up to three
+plain `facts` (text, count or time fields) under each name. The list stays
+the keyboard path, and the figure says the same in its label and legend.
+Federation's linked hubs use it:
+
+```json
+"graph": { "center": "This hub", "state": "state", "up": ["connected"],
+           "facts": ["latency", "messages_today"] }
+```
+
+The org overview, shortened:
 
 ```json
 { "spec": "fleet.page/1", "id": "settings.orgs", "title": "Organisations",
@@ -442,6 +462,9 @@ desktop the guides are the hub's (`list_guides`, `decide_guide`,
   filtered parameter itself.
 - Titles are at most 60 characters. Text is plain, with no `<` or `>`.
 - Parents form a tree.
+- A `graph` is on a `master_detail` page; its `state` is a `choice` field,
+  `up` names some of its values (not none, not all), and its facts are at
+  most three plain fields.
 - Unknown fields and item types are refused when the file is parsed.
 
 ## Add a setting

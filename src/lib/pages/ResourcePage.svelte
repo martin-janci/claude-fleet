@@ -7,6 +7,7 @@
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import RecordEditor from './RecordEditor.svelte';
+  import ResourceGraph from './ResourceGraph.svelte';
   import ActionForm from './ActionForm.svelte';
   import FlowView from './FlowView.svelte';
   import OrgSuggestions from '../OrgSuggestions.svelte';
@@ -21,6 +22,7 @@
   import WizardDialog from '../forms/WizardDialog.svelte';
   import type { Values } from '../forms/forms';
   import { pairDevice, pairDeviceWizard } from '../forms/pair_device_wizard';
+  import { WIZARDS } from '../forms/wizards';
   import type { Page } from './pages';
   import {
     afterChange,
@@ -60,6 +62,8 @@
   /** Bumped on every re-read, so the editor's draft restarts from it. */
   let version = $state(0);
   let adding = $state(false);
+  /** The record editor's open tab, kept across re-reads and records. */
+  let recordTab = $state('');
   let busy = $state(false);
   /** A create whose answer is shown (`result: pairing`), until dismissed. */
   let pairing = $state<Pairing | null>(null);
@@ -72,6 +76,10 @@
    *  (one fleet.form/1 spec, the same one the chat shows) rather than the
    *  inline create form; its answer is the same PairingResult. */
   const pairWizard = $derived(resource.id === 'device');
+  /** 11.12: Settings › Federation's Link a hub is the link_peer wizard (the
+   *  address, then the code), with its Counter-orbit while the hubs trade
+   *  keys. */
+  const linkWizard = $derived(resource.id === 'peer_link' && !!resource.create);
   let wizardOpen = $state(false);
   let wizardBusy = $state(false);
   let wizardError = $state<string | null>(null);
@@ -91,6 +99,25 @@
     await afterChange(resource);
     const made = records.find((x) => titleOf(resource, x) === r.value.name);
     if (made) selected = idOf(resource, made);
+  }
+
+  async function linkFromWizard(v: Values) {
+    const c = resource.create;
+    if (!c) return;
+    wizardBusy = true;
+    wizardError = null;
+    const r = await runAction(c, buildArgs(c, null, null, { url: String(v.url ?? '').trim(), code: String(v.code ?? '').trim() }));
+    wizardBusy = false;
+    if (!r.ok) {
+      wizardError = r.error.message;
+      return;
+    }
+    wizardOpen = false;
+    push({ kind: 'success', message: 'Linked. The hubs connect within seconds.' });
+    await reload();
+    await afterChange(resource);
+    const made = (r.value as { id?: unknown } | null)?.id;
+    if (made !== undefined && records.some((x) => idOf(resource, x) === String(made))) selected = String(made);
   }
 
   async function reload() {
@@ -203,6 +230,10 @@
     {/each}
   {/if}
 
+  {#if page.graph}
+    <ResourceGraph graph={page.graph} {resource} {records} {selected} />
+  {/if}
+
   <div class="md">
     <div class="list">
       <ul role="listbox" aria-label={resource.plural} data-testid="resource-list">
@@ -231,7 +262,7 @@
         <button type="button" class="btn" data-testid="resource-add" disabled={adding} onclick={() => (adding = true)}
           >Add {resource.label.toLowerCase()}</button
         >
-      {:else if !readonly && resource.create && pairWizard}
+      {:else if !readonly && resource.create && (pairWizard || linkWizard)}
         <button
           type="button"
           class="btn"
@@ -243,10 +274,10 @@
         >
         {#if wizardOpen}
           <WizardDialog
-            wizard={pairDeviceWizard($orgs)}
+            wizard={linkWizard ? WIZARDS.link_peer : pairDeviceWizard($orgs)}
             busy={wizardBusy}
             error={wizardError}
-            run={(v) => void pairFromWizard(v)}
+            run={(v) => void (linkWizard ? linkFromWizard(v) : pairFromWizard(v))}
             onclose={() => (wizardOpen = false)} />
         {/if}
       {:else if !readonly && resource.create}
@@ -282,6 +313,8 @@
           <RecordEditor
             {resource}
             sections={page.sections ?? []}
+            tabs={page.tabs ?? []}
+            bind:tab={recordTab}
             record={current}
             {readonly}
             {options}

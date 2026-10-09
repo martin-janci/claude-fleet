@@ -16,7 +16,7 @@ import { host } from '../hosts_fixture';
 import { trackers, type TrackerRow } from '../trackers';
 import { toasts } from '../toasts';
 import { orgs, type OrgDetail } from '../orgs';
-import { bundle } from './testing';
+import { bundle, openRecordTab } from './testing';
 import type { Page } from './pages';
 
 const page = bundle.pages.find((p) => p.id === 'settings.orgs') as Page;
@@ -89,6 +89,7 @@ describe('Organisations (master_detail over the org resource)', () => {
     await waitFor(() => expect(screen.getByTestId('value-session_count').textContent).toBe('3'));
     expect(screen.getByTestId('value-needs_you').textContent).toBe('1');
     expect(screen.getByTestId('item-catalogs').textContent).toContain('acme-assets');
+    await openRecordTab('Devices');
     expect(screen.getAllByTestId('item-devices').map((c) => c.textContent?.replace('×', '').trim())).toEqual([
       'phone · read-only, trusted',
       'laptop',
@@ -171,6 +172,7 @@ describe('Organisations (master_detail over the org resource)', () => {
   it('isolation asks first, with a plain warning', async () => {
     const inv = route();
     show();
+    await openRecordTab('Settings');
     await fireEvent.click(await screen.findByTestId('edit-isolate_sessions'));
     await fireEvent.click(screen.getByTestId('record-apply'));
     const dialog = await screen.findByTestId('confirm-dialog');
@@ -185,6 +187,7 @@ describe('Organisations (master_detail over the org resource)', () => {
   it('per-org auto-tidy is inherit / on / off (work graph M7)', async () => {
     const inv = route();
     show();
+    await openRecordTab('Settings');
     expect(((await screen.findByTestId('edit-auto_tidy-inherit')) as HTMLInputElement).checked).toBe(true);
     await fireEvent.click(screen.getByTestId('edit-auto_tidy-on'));
     await fireEvent.click(screen.getByTestId('record-apply'));
@@ -194,6 +197,7 @@ describe('Organisations (master_detail over the org resource)', () => {
   it('an org opts in to Jev, off by default, and is asked first (D31)', async () => {
     const inv = route();
     show();
+    await openRecordTab('Settings');
     const box = (await screen.findByTestId('edit-jev_allowed')) as HTMLInputElement;
     expect(box.checked).toBe(false);
     await fireEvent.click(box);
@@ -206,6 +210,7 @@ describe('Organisations (master_detail over the org resource)', () => {
   it('what bound devices see of unassigned work is on by default, and off says so (D31)', async () => {
     const inv = route();
     show();
+    await openRecordTab('Settings');
     const box = (await screen.findByTestId('edit-bound_sees_unassigned')) as HTMLInputElement;
     expect(box.checked).toBe(true);
     await fireEvent.click(box);
@@ -288,6 +293,7 @@ describe('Organisations (master_detail over the org resource)', () => {
       expect(screen.queryByTestId(id), id).toBeNull();
     }
     expect(screen.queryByLabelText('Remove rule: acme/*')).toBeNull();
+    await openRecordTab('Settings');
     expect(screen.getByTestId('value-isolate_sessions').textContent).toBe('Off');
     expect(calls(inv, 'org_suggestions')).toHaveLength(0);
   });

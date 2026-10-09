@@ -326,6 +326,45 @@ export function subLine(sub: Sub | undefined, value: unknown, record: ResourceRe
   return spent > 0 ? `${Math.floor((spent * 100) / (n * 1_000_000))}% of ${budget}` : `of ${budget} budget`;
 }
 
+/** A budget tile's Meter (the OrgOverview board): the share of the budget
+ *  spent, warn from 80% (`NEAR_BUDGET_PCT`, as "Needs an admin" lists it)
+ *  and crit once reached. `null` with no budget, or for a count's line. */
+export function budgetMeter(
+  sub: Sub | undefined,
+  value: unknown,
+  record: ResourceRecord,
+): { value: number; level: 'ok' | 'warn' | 'crit' } | null {
+  if (sub?.type !== 'budget') return null;
+  const n = record[sub.field];
+  if (typeof n !== 'number' || n <= 0) return null;
+  const share = (typeof value === 'number' ? value : 0) / (n * 1_000_000);
+  return { value: share, level: share >= 1 ? 'crit' : share >= 0.8 ? 'warn' : 'ok' };
+}
+
+/** A field's label with the record in it: `{title}` is the one placeholder
+ *  (`FieldSpec::label`), so a consent names its org ("Allow Jev (decision
+ *  model) for Acme's work"). */
+export function labelOf(f: { label: string }, title: string): string {
+  return f.label.replaceAll('{title}', title || 'this record');
+}
+
+/** The days a spend series went over a daily budget (whole USD), as the
+ *  line under the chart says it: "2 Oct went over: $71.00". Empty with no
+ *  budget. */
+export function overBudgetDays(series: { day: string; cost_micros: number }[], budgetUsd: unknown): string[] {
+  if (typeof budgetUsd !== 'number' || budgetUsd <= 0) return [];
+  const limit = budgetUsd * 1_000_000;
+  return series
+    .filter((p) => p.cost_micros > limit)
+    .map((p) => {
+      const d = new Date(`${p.day}T00:00:00Z`);
+      const day = Number.isNaN(d.getTime())
+        ? p.day
+        : `${d.getUTCDate()} ${d.toLocaleString('en-GB', { month: 'short', timeZone: 'UTC' })}`;
+      return `${day} went over: ${dollars(p.cost_micros)}`;
+    });
+}
+
 /** A paired device in an org's `devices` (`OrgDevice`). */
 export interface DeviceItem {
   name: string;

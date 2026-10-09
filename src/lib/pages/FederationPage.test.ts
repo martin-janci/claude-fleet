@@ -94,15 +94,6 @@ describe('Settings → Federation', () => {
     expect(screen.getByTestId('value-role').textContent).toBe('We dial');
   });
 
-  it('links a hub with its address and code', async () => {
-    show();
-    await fireEvent.click(await screen.findByTestId('resource-add'));
-    await fireEvent.input(screen.getByTestId('param-peer_link.add-url'), { target: { value: 'https://hub.b.example' } });
-    await fireEvent.input(screen.getByTestId('param-peer_link.add-code'), { target: { value: 'AB12CD34' } });
-    await fireEvent.click(screen.getByTestId('run-peer_link.add'));
-    await waitFor(() => expect(argsOf('link_peer_hub')).toEqual({ url: 'https://hub.b.example', code: 'AB12CD34' }));
-  });
-
   it('unlinks a hub after asking', async () => {
     show();
     await fireEvent.click((await screen.findAllByTestId('resource-row'))[0]);
@@ -150,30 +141,84 @@ describe('Settings → Federation: loaders (11.12)', () => {
     await fireEvent.click(rows[1]);
     expect(screen.queryByTestId('sync-sync')).toBeNull();
   });
+});
 
-  it('runs a Counter-orbit while Link a hub talks to the other hub', async () => {
+describe('Settings → Federation: accessibility', () => {
+  it('the list and a linked hub’s detail is accessible', async () => {
+    const { container } = render(ResourcePage, { props: { page, resource } });
+    await fireEvent.click((await screen.findAllByTestId('resource-row'))[0]);
+    await screen.findByTestId('value-latency');
+    await expectAccessible(container);
+  });
+});
+
+describe('Settings → Federation: the graph (Federation board)', () => {
+  const show = () => render(ResourcePage, { props: { page, resource } });
+
+  it('draws each linked hub joined to this hub, solid while up and dashed while down', async () => {
+    show();
+    const graph = await screen.findByTestId('resource-graph');
+    const links = within(graph).getAllByTestId('graph-link');
+    expect(links.map((l) => l.getAttribute('data-up'))).toEqual(['true', 'false']);
+    expect(links[1].classList.contains('down')).toBe(true);
+    // The words say what the picture does.
+    expect(graph.querySelector('svg')!.getAttribute('aria-label')).toBe(
+      'This hub, linked to 2: acme up, Link 2 down (Retrying).',
+    );
+    expect(graph.textContent).toContain('42 ms · 7 messages today');
+    expect(screen.getByTestId('resource-graph-legend').textContent).toContain('Dashed line: link down');
+  });
+
+  it('draws nothing with no link', async () => {
+    invoke.mockImplementation(async (cmd: string) => (cmd === 'list_peer_links' ? [] : null));
+    show();
+    await screen.findByTestId('resource-empty');
+    expect(screen.queryByTestId('resource-graph')).toBeNull();
+  });
+});
+
+describe('Settings → Federation: Link two hubs (11.12)', () => {
+  it('asks the address, then the code, and runs a Counter-orbit while the hubs trade keys', async () => {
     let finish: (v: unknown) => void = () => {};
     invoke.mockImplementation(async (cmd: string) => {
       if (cmd === 'list_peer_links') return [];
       if (cmd === 'link_peer_hub') return new Promise((r) => (finish = r));
       return null;
     });
-    show();
+    render(ResourcePage, { props: { page, resource } });
     await fireEvent.click(await screen.findByTestId('resource-add'));
-    await fireEvent.input(screen.getByTestId('param-peer_link.add-url'), { target: { value: 'https://hub.b.example' } });
-    await fireEvent.input(screen.getByTestId('param-peer_link.add-code'), { target: { value: 'AB12CD34' } });
-    await fireEvent.click(screen.getByTestId('run-peer_link.add'));
-    await waitFor(() => expect(screen.getByTestId('busy-peer_link.add')).toBeTruthy());
-    finish(null);
-    await waitFor(() => expect(screen.queryByTestId('busy-peer_link.add')).toBeNull());
+    const dialog = await screen.findByTestId('wizard-link_peer');
+    expect(dialog.textContent).toContain('Link two hubs');
+    await fireEvent.input(within(dialog).getByLabelText(/Hub address/), { target: { value: 'https://hub.b.example' } });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Next' }));
+    expect(dialog.textContent).toContain('fleet-hub pair --mode peer');
+    await fireEvent.input(within(dialog).getByLabelText(/Link code/), { target: { value: 'AB12CD34' } });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Link' }));
+    await waitFor(() => expect(argsOf('link_peer_hub')).toEqual({ url: 'https://hub.b.example', code: 'AB12CD34' }));
+    const running = await screen.findByTestId('wizard-running');
+    // The loader shows after its 400 ms delay; a loaded box may take longer.
+    await waitFor(() => expect(running.querySelector('[data-loader]')?.getAttribute('data-loader')).toBe('counter-orbit'), {
+      timeout: 5000,
+    });
+    // Nothing in the exchange waits on a person: no "waiting for" line.
+    expect(dialog.textContent).not.toMatch(/waiting for/i);
+    finish({ ...acme, id: 3 });
+    await waitFor(() => expect(screen.queryByTestId('wizard-link_peer')).toBeNull());
   });
-});
 
-describe('Settings → Federation: accessibility', () => {
-  it('the list and a linked hub’s detail, in the New layout, is accessible', async () => {
-    const { container } = render(ResourcePage, { props: { page, resource } });
-    await fireEvent.click((await screen.findAllByTestId('resource-row'))[0]);
-    await screen.findByTestId('value-latency');
-    await expectAccessible(container);
+  it('keeps the wizard open with the hub’s refusal', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_peer_links') return [];
+      if (cmd === 'link_peer_hub') throw { code: 'E_INVALID', message: 'that code expired' };
+      return null;
+    });
+    render(ResourcePage, { props: { page, resource } });
+    await fireEvent.click(await screen.findByTestId('resource-add'));
+    const dialog = await screen.findByTestId('wizard-link_peer');
+    await fireEvent.input(within(dialog).getByLabelText(/Hub address/), { target: { value: 'https://hub.b.example' } });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Next' }));
+    await fireEvent.input(within(dialog).getByLabelText(/Link code/), { target: { value: 'AB12CD34' } });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Link' }));
+    expect((await screen.findByTestId('wizard-error')).textContent).toContain('that code expired');
   });
 });

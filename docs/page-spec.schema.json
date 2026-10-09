@@ -11,6 +11,17 @@
         "$ref": "#/$defs/Filter"
       }
     },
+    "graph": {
+      "description": "A `master_detail` page's records also drawn as a graph above the\nlist: each one a node joined to the centre, its line solid while\nits state is up and dashed while it is not (Federation's linked\nhubs). The list stays the text alternative and the keyboard path.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GraphView"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "id": {
       "description": "Dotted lowercase route, e.g. \"settings.automation\". Also the deep\nlink: `settings/<id>#<key>`.",
       "type": "string"
@@ -226,6 +237,40 @@
       "additionalProperties": false,
       "required": [
         "param"
+      ]
+    },
+    "GraphView": {
+      "description": "How a `master_detail` page draws its records as a graph (`Page::graph`).",
+      "type": "object",
+      "properties": {
+        "center": {
+          "description": "The centre node's name, e.g. \"This hub\".",
+          "type": "string"
+        },
+        "facts": {
+          "description": "Fields shown under a node's name, at most three: plain values\n(text, count or time), never a list.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "state": {
+          "description": "The resource's `choice` field each line follows.",
+          "type": "string"
+        },
+        "up": {
+          "description": "The values of `state` drawn as a link that is up (a solid line);\nevery other value is down (a dashed line).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "center",
+        "state",
+        "up"
       ]
     },
     "Item": {

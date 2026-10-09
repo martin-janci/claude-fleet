@@ -105,3 +105,15 @@ export function registryRouter(
   };
   return { impl, values };
 }
+
+/** Open one of a record editor's tabs (the org's Overview, Members,
+ *  Devices, Spend, Settings) once it is drawn. */
+export async function openRecordTab(name: string): Promise<void> {
+  const { waitFor, fireEvent } = await import('@testing-library/svelte');
+  const tab = await waitFor(() => {
+    const el = document.querySelector<HTMLElement>(`[data-testid="record-tabs"] [data-tab="${name}"]`);
+    if (!el) throw new Error(`no ${name} tab`);
+    return el;
+  });
+  await fireEvent.click(tab);
+}

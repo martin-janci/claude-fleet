@@ -13,7 +13,7 @@ import ResourcePage from './ResourcePage.svelte';
 import { hubStatus, STANDALONE } from '../hub';
 import { memberPairing, orgs, type OrgDetail } from '../orgs';
 import { toasts } from '../toasts';
-import { bundle } from './testing';
+import { bundle, openRecordTab as openTab } from './testing';
 import type { Descriptor, Page } from './pages';
 import { orgBudgetItems } from '../org_budget';
 
@@ -118,6 +118,7 @@ describe('an org’s spend and its own settings', () => {
   it('charts the last 14 days of spend, today last', async () => {
     route([acme]);
     render(ResourcePage, { props: { page, resource } });
+    await openTab('Spend');
     await fireEvent.click(await screen.findByTestId('chart-spend_series-table-toggle'));
     const rows = screen.getByTestId('chart-spend_series-table').querySelectorAll('tbody tr');
     expect(rows).toHaveLength(14);
@@ -147,6 +148,7 @@ describe('an org’s spend and its own settings', () => {
       },
     ]);
     render(ResourcePage, { props: { page, resource } });
+    await openTab('Spend');
     const rows = await screen.findAllByTestId('item-spend_by_person');
     expect(rows.map((r) => r.textContent)).toEqual([
       expect.stringMatching(/Martin.*\$18\.40.*\$121\.00.*\$402\.00/),
@@ -158,6 +160,8 @@ describe('an org’s spend and its own settings', () => {
     route([acme]);
     render(ResourcePage, { props: { page, resource } });
     await waitFor(() => expect(screen.getByTestId('tile-spent_today_micros')).toBeTruthy());
+    await openTab('Spend');
+    expect(screen.getByTestId('record-field-spend_series')).toBeTruthy();
     expect(screen.queryByTestId('record-field-spend_by_person')).toBeNull();
   });
 
@@ -166,14 +170,17 @@ describe('an org’s spend and its own settings', () => {
     render(ResourcePage, { props: { page, resource } });
     await waitFor(() => expect(screen.getByTestId('record-field-name')).toBeTruthy());
     expect(screen.queryByTestId('tile-spent_today_micros')).toBeNull();
-    expect(screen.queryByTestId('record-field-spend_series')).toBeNull();
     expect(screen.queryByTestId('record-field-needs_admin')).toBeNull();
+    await openTab('Spend');
+    expect(screen.queryByTestId('record-field-spend_series')).toBeNull();
+    await openTab('Settings');
     expect(screen.queryByTestId('record-field-settings')).toBeNull();
   });
 
   it('inherits a setting again, and takes one for the org, through set_org_setting', async () => {
     route([acme]);
     render(ResourcePage, { props: { page, resource } });
+    await openTab('Settings');
     await fireEvent.click(await screen.findByTestId('org-setting-inherit-budget.org_daily_usd'));
     await waitFor(() => expect(argsOf('set_org_setting')).toEqual({ org_id: 1, key: 'budget.org_daily_usd', value: null }));
     expect(screen.getByTestId('org-setting-fleet-work.summary_model').textContent).toContain("(the fleet's)");
@@ -194,6 +201,7 @@ describe('an org’s members (phase D)', () => {
       },
     ]);
     render(ResourcePage, { props: { page, resource } });
+    await openTab('Members');
     await waitFor(() => expect(screen.getAllByTestId('item-members')[0].textContent).toContain('jane'));
     expect(screen.getAllByTestId('item-members')[0].textContent).toContain('admin');
     expect(screen.getAllByTestId('item-members')[1].textContent).toContain('Bob B');
@@ -221,6 +229,7 @@ describe('an org’s members (phase D)', () => {
   it('shows since when a share reaches each member, and their devices', async () => {
     route([team]);
     render(ResourcePage, { props: { page, resource } });
+    await openTab('Members');
     const since = await screen.findAllByTestId('member-shares-since');
     expect(since.map((s) => s.textContent)).toEqual(['2026-09-12', '2026-09-12', 'never (viewer)']);
     expect(screen.getAllByTestId('member-devices').map((d) => d.textContent)).toEqual(['jane-mac, jane-phone', 'none', 'browser']);
@@ -230,6 +239,7 @@ describe('an org’s members (phase D)', () => {
     grants = { watch: 4, drive: 2 };
     route([team]);
     render(ResourcePage, { props: { page, resource } });
+    await openTab('Members');
     await fireEvent.click((await screen.findAllByTestId('item-remove-members'))[1]);
     expect((await screen.findByTestId('member-grants')).textContent).toContain('6 sessions of Acme are shared with them');
     expect(argsOf('org_member_grants')).toEqual({ org_id: 1, person_id: 3 });
@@ -245,6 +255,7 @@ describe('an org’s members (phase D)', () => {
     grants = { watch: 1, drive: 0 };
     route([team]);
     render(ResourcePage, { props: { page, resource } });
+    await openTab('Members');
     await fireEvent.click((await screen.findAllByTestId('item-remove-members'))[1]);
     expect((await screen.findByTestId('member-grants')).textContent).toContain('1 session of Acme is shared with them');
     await fireEvent.click(screen.getByTestId('record-confirm'));
@@ -254,6 +265,7 @@ describe('an org’s members (phase D)', () => {
   it('adding a member offers a pairing code for their device', async () => {
     route([team]);
     render(ResourcePage, { props: { page, resource } });
+    await openTab('Members');
     await fireEvent.input(await screen.findByTestId('param-org.set_member-person'), { target: { value: 'cleo' } });
     await fireEvent.change(screen.getByTestId('param-org.set_member-role'), { target: { value: 'member' } });
     await fireEvent.click(screen.getByTestId('run-org.set_member'));
@@ -273,6 +285,7 @@ describe('an org’s members (phase D)', () => {
       return null;
     });
     render(ResourcePage, { props: { page, resource } });
+    await openTab('Members');
     await fireEvent.click(await screen.findByTestId('member-pair-3'));
     await fireEvent.click(screen.getByTestId('member-pair-mint'));
     expect((await screen.findByTestId('member-pair-error')).textContent).toContain('minted by a hub');
@@ -282,7 +295,79 @@ describe('an org’s members (phase D)', () => {
     route([acme]);
     render(ResourcePage, { props: { page, resource } });
     await waitFor(() => expect(screen.getByTestId('record-field-name')).toBeTruthy());
+    await openTab('Members');
     expect(screen.queryByTestId('record-field-members')).toBeNull();
+  });
+});
+
+describe('the org overview boards (OrgOverview, OrgSpend)', () => {
+  it('lays the org out in tabs, a list tab with its count', async () => {
+    route([{ ...acme, members: [{ person_id: 2, name: 'jane', role: 'admin' }], devices: [] }]);
+    render(ResourcePage, { props: { page, resource } });
+    await openTab('Overview');
+    const tabs = Array.from(document.querySelectorAll('[data-testid="record-tabs"] [role="tab"]')).map((t) => t.getAttribute('data-tab'));
+    expect(tabs).toEqual(['Overview', 'Members', 'Devices', 'Spend', 'Settings']);
+    expect(document.querySelector('[data-tab="Members"]')!.textContent).toContain('1');
+    // The overview holds the tiles and the needs, not the members.
+    expect(screen.getByTestId('tile-spent_today_micros')).toBeTruthy();
+    expect(screen.queryByTestId('record-field-members')).toBeNull();
+  });
+
+  it('draws a budget tile’s Meter: crit once reached, warn from 80%', async () => {
+    route([{ ...acme, budget_monthly_usd: 100 }]);
+    render(ResourcePage, { props: { page, resource } });
+    const today = await screen.findByTestId('tile-meter-spent_today_micros');
+    expect(today.getAttribute('aria-valuenow')).toBe('100');
+    expect(today.classList.contains('crit')).toBe(true);
+    expect(today.getAttribute('aria-label')).toBe('Spent today: 123% of $10');
+    const month = screen.getByTestId('tile-meter-spent_month_micros');
+    expect(month.getAttribute('aria-valuenow')).toBe('91');
+    expect(month.classList.contains('warn')).toBe(true);
+  });
+
+  it('opens the tab a need is acted on from', async () => {
+    route([acme]);
+    render(ResourcePage, { props: { page, resource } });
+    const go = await screen.findAllByTestId('need-go-needs_admin');
+    // The budget opens Spend, the untrusted device Devices; unclaimed sessions have none.
+    expect(go.map((b) => b.textContent)).toEqual(['Spend', 'Devices']);
+    await fireEvent.click(go[0]);
+    expect(await screen.findByTestId('chart-spend_series')).toBeTruthy();
+  });
+
+  it('draws the daily budget across the 14-day chart and names the days that went over', async () => {
+    route([
+      {
+        ...acme,
+        spend_series: [
+          { day: '2026-10-01', cost_micros: 5_000_000 },
+          { day: '2026-10-02', cost_micros: 71_000_000 },
+          { day: '2026-10-03', cost_micros: 10_000_000 },
+        ],
+      },
+    ]);
+    render(ResourcePage, { props: { page, resource } });
+    await openTab('Spend');
+    expect((await screen.findByTestId('chart-spend_series-limit')).textContent).toContain('daily budget $10');
+    expect(screen.getByTestId('chart-spend_series-limit-line')).toBeTruthy();
+    // Only the day above the budget, not the one that met it.
+    expect(screen.getByTestId('chart-over-spend_series').textContent).toBe(
+      '2 Oct went over: $71.00. Fleet warns; it never stops a session.',
+    );
+  });
+
+  it('says the by-person rule beside the spend', async () => {
+    route([acme]);
+    render(ResourcePage, { props: { page, resource } });
+    await openTab('Spend');
+    expect(screen.getByText(/hidden whole, never in part/)).toBeTruthy();
+  });
+
+  it('names the org in its Jev consent (7.7)', async () => {
+    route([acme]);
+    render(ResourcePage, { props: { page, resource } });
+    await openTab('Settings');
+    expect(screen.getByTestId('record-field-jev_allowed').textContent).toContain("Allow Jev (decision model) for Acme's work");
   });
 });
 

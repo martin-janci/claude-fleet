@@ -14,7 +14,7 @@ import { orgs, type OrgDetail } from '../orgs';
 import { devices, qrRects, type DeviceSummary } from '../devices';
 import { catalogStatuses } from '../assets_workspace';
 import { toasts } from '../toasts';
-import { bundle } from './testing';
+import { bundle, openRecordTab } from './testing';
 import type { Page } from './pages';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
@@ -204,6 +204,7 @@ describe('the org page binds and unbinds devices', () => {
   it('binds a device picked from the devices, and unbinds one', async () => {
     route({ list_orgs: [{ ...acme, devices: [{ name: 'ada-phone', mode: 'readonly', trusted: false }] }] });
     render(ResourcePage, { props: { page: pageOf('settings.orgs'), resource: resourceOf('org') } });
+    await openRecordTab('Devices');
     const select = (await screen.findByTestId('param-org.bind_device-device')) as HTMLSelectElement;
     // The device already bound is left out.
     expect(Array.from(select.options).map((o) => o.value)).toEqual(['', 'laptop']);

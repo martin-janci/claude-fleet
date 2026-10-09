@@ -12,171 +12,201 @@
       "component": "org_suggestions"
     }
   ],
-  "sections": [
-    {
-      "title": "Organisation",
-      "items": [
-        {
-          "type": "field",
-          "key": "name"
-        },
-        {
-          "type": "field",
-          "key": "color"
-        }
-      ]
-    },
+  "tabs": [
     {
       "title": "Overview",
-      "tiles": true,
-      "items": [
+      "sections": [
         {
-          "type": "field",
-          "key": "spent_today_micros"
+          "title": "Organisation",
+          "items": [
+            {
+              "type": "field",
+              "key": "name"
+            },
+            {
+              "type": "field",
+              "key": "color"
+            }
+          ]
         },
         {
-          "type": "field",
-          "key": "spent_month_micros"
+          "title": "Overview",
+          "tiles": true,
+          "items": [
+            {
+              "type": "field",
+              "key": "spent_today_micros"
+            },
+            {
+              "type": "field",
+              "key": "spent_month_micros"
+            },
+            {
+              "type": "field",
+              "key": "spent_week_micros"
+            },
+            {
+              "type": "field",
+              "key": "session_count"
+            }
+          ]
         },
         {
-          "type": "field",
-          "key": "spent_week_micros"
+          "title": "Needs an admin",
+          "items": [
+            {
+              "type": "field",
+              "key": "needs_admin"
+            },
+            {
+              "type": "field",
+              "key": "needs_you"
+            }
+          ]
         },
         {
-          "type": "field",
-          "key": "session_count"
-        }
-      ]
-    },
-    {
-      "title": "Spend",
-      "items": [
-        {
-          "type": "field",
-          "key": "spend_series"
-        },
-        {
-          "type": "field",
-          "key": "spend_by_person"
-        }
-      ]
-    },
-    {
-      "title": "Needs an admin",
-      "items": [
-        {
-          "type": "field",
-          "key": "needs_admin"
-        },
-        {
-          "type": "field",
-          "key": "needs_you"
-        }
-      ]
-    },
-    {
-      "title": "What belongs to it",
-      "items": [
-        {
-          "type": "field",
-          "key": "rules"
-        },
-        {
-          "type": "field",
-          "key": "hosts"
-        },
-        {
-          "type": "field",
-          "key": "trackers"
-        },
-        {
-          "type": "field",
-          "key": "catalogs"
+          "title": "What belongs to it",
+          "items": [
+            {
+              "type": "field",
+              "key": "rules"
+            },
+            {
+              "type": "field",
+              "key": "hosts"
+            },
+            {
+              "type": "field",
+              "key": "trackers"
+            },
+            {
+              "type": "field",
+              "key": "catalogs"
+            }
+          ]
         }
       ]
     },
     {
       "title": "Members",
-      "items": [
+      "sections": [
         {
-          "type": "field",
-          "key": "members"
-        },
-        {
-          "type": "notice",
-          "tone": "info",
-          "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. Adding a member offers a pairing code for their device; Pair a device mints another."
+          "title": "Members",
+          "items": [
+            {
+              "type": "field",
+              "key": "members"
+            },
+            {
+              "type": "notice",
+              "tone": "info",
+              "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. Adding a member offers a pairing code for their device; Pair a device mints another."
+            }
+          ]
         }
       ]
     },
     {
       "title": "Devices",
-      "items": [
+      "sections": [
         {
-          "type": "field",
-          "key": "devices"
-        },
-        {
-          "type": "notice",
-          "tone": "info",
-          "text": "Pair a new phone, browser or desktop in Settings → Devices, and bind it to this org there or here."
+          "title": "Devices",
+          "items": [
+            {
+              "type": "field",
+              "key": "devices"
+            },
+            {
+              "type": "notice",
+              "tone": "info",
+              "text": "Pair a new phone, browser or desktop in Settings → Devices, and bind it to this org there or here."
+            }
+          ]
         }
       ]
     },
     {
-      "title": "Boundary",
-      "items": [
+      "title": "Spend",
+      "sections": [
         {
-          "type": "field",
-          "key": "isolate_sessions"
-        },
-        {
-          "type": "notice",
-          "tone": "warn",
-          "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way."
-        },
-        {
-          "type": "field",
-          "key": "bound_sees_unassigned"
-        },
-        {
-          "type": "field",
-          "key": "owns_hub"
-        },
-        {
-          "type": "field",
-          "key": "admins_see_unclaimed"
+          "title": "Spend",
+          "items": [
+            {
+              "type": "field",
+              "key": "spend_series"
+            },
+            {
+              "type": "field",
+              "key": "spend_by_person"
+            },
+            {
+              "type": "notice",
+              "tone": "info",
+              "text": "Spend by person is shown only to an admin who sees every session; otherwise it is hidden whole, never in part. Fleet warns at a budget; it never stops a session."
+            }
+          ]
         }
       ]
     },
     {
-      "title": "Automation",
-      "items": [
+      "title": "Settings",
+      "sections": [
         {
-          "type": "field",
-          "key": "auto_tidy"
+          "title": "Boundary",
+          "items": [
+            {
+              "type": "field",
+              "key": "isolate_sessions"
+            },
+            {
+              "type": "notice",
+              "tone": "warn",
+              "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way."
+            },
+            {
+              "type": "field",
+              "key": "bound_sees_unassigned"
+            },
+            {
+              "type": "field",
+              "key": "owns_hub"
+            },
+            {
+              "type": "field",
+              "key": "admins_see_unclaimed"
+            }
+          ]
         },
         {
-          "type": "field",
-          "key": "jev_allowed"
+          "title": "Automation",
+          "items": [
+            {
+              "type": "field",
+              "key": "auto_tidy"
+            },
+            {
+              "type": "field",
+              "key": "jev_allowed"
+            },
+            {
+              "type": "field",
+              "key": "jev_reply_allowed"
+            }
+          ]
         },
         {
-          "type": "field",
-          "key": "jev_reply_allowed"
-        }
-      ]
-    },
-    {
-      "title": "Its own settings",
-      "items": [
-        {
-          "type": "field",
-          "key": "settings"
-        },
-        {
-          "type": "notice",
-          "tone": "info",
-          "text": "The fleet-wide values are in Settings → Limits and Settings → Work; what is set here applies to this org's sessions only."
+          "title": "Its own settings",
+          "items": [
+            {
+              "type": "field",
+              "key": "settings"
+            },
+            {
+              "type": "notice",
+              "tone": "info",
+              "text": "The fleet-wide values are in Settings → Limits and Settings → Work; what is set here applies to this org's sessions only."
+            }
+          ]
         }
       ]
     }

@@ -326,7 +326,15 @@ default, guide `docs/decisions.md`): `sibling_repos`, `host_placement`,
 `control_route`, `mission_triage`, `summary_check` and the PR shepherd's
 `pr_triage`. The ones that send
 Claude's reply text (`turn_outcome`, `routine_run_outcome`) also need the
-org's reply-text consent (D48), off by default. The notifications matrix and quiet hours (`notify.*`, 11.9) are
+org's reply-text consent (D48), off by default.
+**Waits on the owner (11.11):** the plan says Jev checks the "Since 13:20"
+summary against the transcript (J9) *before* it shows. With
+`decide.jev.summary_check` off — the default, like every Jev use case — the
+summary still shows, unchecked, labelled "Drafted · Not checked" beside the
+text (`WatchSummary.svelte`); a failed check (or one that could not run)
+hides it. Whether an unchecked summary should show at all, or the use case
+should default to `shadow`/`assist`, is the owner's decision: it trades a
+summary every watcher can read for Jev budget and the org's consent. The notifications matrix and quiet hours (`notify.*`, 11.9) are
 on: the phone and the desktop (while its window is in the background, and
 only with OS notifications on for the desktop column) follow them.
 
@@ -558,7 +566,11 @@ first read booked as `backfill` apart from the day's live cost (migration
 
 Org administration (spec
 `docs/superpowers/specs/2026-10-06-org-administration-design.md`) is landed
-in four phases: A, the org overview in Settings → Organisations; B, the hub
+in four phases: A, the org overview in Settings → Organisations (since
+the OrgOverview / OrgSpend boards, the page's tabs Overview, Members,
+Devices, Spend and Settings: budget tiles with Meters, "Needs an admin"
+lines that open the tab to act on, and the 14-day spend chart with the daily
+budget drawn across it); B, the hub
 tool `org_admin` (`service/org_admin.rs`) for devices and people; C,
 per-org settings (`Spec::per_org`, migration 106 `org_settings`) and spend
 and budgets (`usage_daily_org`, `service/org_spend.rs`,
@@ -628,7 +640,13 @@ and `fleet_health.peer_links_down` reports a link in trouble, per
 `docs/superpowers/specs/2026-09-24-hub-federation-design.md`. Since
 contract revision 12 the desktop links and unlinks a peer through the
 hub's `link_peer` / `unlink_peer` tools (redesign 11.5), and each link's
-traffic is recorded for the Federation page (migration 132).
+traffic is recorded for the Federation page (migration 132). The page
+draws the links as a graph above the list (the spec's `graph`: solid line
+up, dashed down), and Link a hub is the two-step
+`link_peer` wizard (address, then the code) with a Counter-orbit while the
+hubs trade keys (11.12). The link protocol has no step that waits on the
+other side's approval — its operator mints the code first, and redeeming it
+completes the link — so the wizard never says "waiting for … to sign".
 
 Application updates: design
 `docs/superpowers/specs/2026-09-28-update-channel-design.md` (with

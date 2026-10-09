@@ -5,6 +5,12 @@
   "parent": "settings",
   "layout": "master_detail",
   "resource": "peer_link",
+  "graph": {
+    "center": "This hub",
+    "state": "state",
+    "up": ["connected"],
+    "facts": ["latency", "messages_today"]
+  },
   "intro": "Other fleets' hubs this hub is linked to. Sessions on both sides can message each other through the link. Linking and unlinking need this device to be trusted.",
   "sections": [
     {

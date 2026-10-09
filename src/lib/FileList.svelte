@@ -130,6 +130,16 @@
   const stagedCount = $derived(changes.filter((c) => c.staged).length);
 
   const statusByPath = $derived(new Map(changes.map((c) => [c.path, c.status])));
+  /** The folders a changed file sits in (the FilesTree board's tree marks
+   *  them, so a change deep in a closed folder is still seen). */
+  const changedDirs = $derived(
+    new Set(
+      changes.flatMap((c) => {
+        const parts = c.path.split('/');
+        return parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join('/'));
+      }),
+    ),
+  );
 
   const filterLc = $derived(filter.trim().toLowerCase());
 
@@ -347,6 +357,9 @@
       <span class="caret">{expanded[node.path] ? '▾' : '▸'}</span>
       <span class="ficon"><Icon name={folderIcon(expanded[node.path])} size={14} /></span>
       <span class="name">{node.name}</span>
+      {#if changedDirs.has(node.path)}
+        <span class="dir-dot" data-testid="tree-dir-changed" title="Has changed files" aria-label="has changed files"></span>
+      {/if}
     </button>
     {#if expanded[node.path]}
       {#each node.children as child (child.path)}
@@ -363,6 +376,10 @@
     >
       <span class="ficon"><Icon name={fileIcon(node.name)} size={14} /></span>
       <span class="name">{node.name}</span>
+      {#if statusByPath.has(node.path)}
+        {@const st = statusByPath.get(node.path) ?? ''}
+        <span class="badge tb {BADGE[st]?.cls ?? 'b-mod'}" data-testid="tree-badge" title={st}>{BADGE[st]?.letter ?? '•'}</span>
+      {/if}
     </button>
   {/if}
 {/snippet}
@@ -484,6 +501,17 @@
     border-radius: var(--radius-xs);
     font-size: var(--text-2xs);
     font-weight: 700;
+  }
+  .tb {
+    margin-left: auto;
+  }
+  .dir-dot {
+    flex: 0 0 auto;
+    margin-left: auto;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--status-waiting);
   }
   .b-mod {
     background: var(--waiting-soft);

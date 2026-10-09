@@ -81,6 +81,25 @@ describe('WatchSummary', () => {
     );
   });
 
+  it('marks a summary nobody checked as not checked, beside the Drafted pill', async () => {
+    // decide.jev.summary_check is off by default: the text shows, labelled.
+    vi.mocked(invoke).mockResolvedValue({ ...ok, check: 'off' });
+    render(WatchSummary, { session });
+    await fireEvent.click(screen.getByTestId('watch-summary-run'));
+    await flush();
+    expect(screen.getByTestId('watch-summary-text').textContent).toBe(ok.text);
+    expect(screen.getByTestId('watch-summary-drafted').textContent).toBe('Drafted');
+    expect(screen.getByTestId('watch-summary-unchecked').textContent).toBe('Not checked');
+  });
+
+  it('has no Not checked mark once Jev passed it', async () => {
+    vi.mocked(invoke).mockResolvedValue(ok);
+    render(WatchSummary, { session });
+    await fireEvent.click(screen.getByTestId('watch-summary-run'));
+    await flush();
+    expect(screen.queryByTestId('watch-summary-unchecked')).toBeNull();
+  });
+
   it('says when the check hid the summary', async () => {
     vi.mocked(invoke).mockResolvedValue({ ...ok, text: null, check: 'failed' });
     render(WatchSummary, { session });

@@ -246,24 +246,22 @@ describe('AccountsPage: spend, routines and paused sessions (4.1 / 4.2)', () => 
 
   it('an account at its limit offers Show and Switch to the account with headroom; nothing moves before the click', async () => {
     accountUsage.set(atLimit());
-    {
-      render(AccountsPage, props);
-      const paused = await screen.findByTestId('account-paused');
-      expect(paused.textContent).toContain('2 paused sessions → Show');
-      const sw = await screen.findByTestId('account-paused-switch');
-      expect(sw.textContent).toBe(`Switch to ${WORK.email}`);
-      expect(inv.mock.calls.some((c) => c[0] === 'restart_session')).toBe(false);
+    render(AccountsPage, props);
+    const paused = await screen.findByTestId('account-paused');
+    expect(paused.textContent).toContain('2 paused sessions → Show');
+    const sw = await screen.findByTestId('account-paused-switch');
+    expect(sw.textContent).toBe(`Switch to ${WORK.email}`);
+    expect(inv.mock.calls.some((c) => c[0] === 'restart_session')).toBe(false);
 
-      await fireEvent.click(screen.getByTestId('account-paused-show'));
-      expect(screen.getByTestId('account-detail').textContent).toContain('Paused by its limit');
-      expect(within(screen.getByTestId('account-sessions')).getAllByRole('button')).toHaveLength(2);
+    await fireEvent.click(screen.getByTestId('account-paused-show'));
+    expect(screen.getByTestId('account-detail').textContent).toContain('Paused by its limit');
+    expect(within(screen.getByTestId('account-sessions')).getAllByRole('button')).toHaveLength(2);
 
-      await fireEvent.click(sw);
-      await waitFor(() => expect(inv.mock.calls.filter((c) => c[0] === 'restart_session')).toHaveLength(2));
-      expect(inv.mock.calls.find((c) => c[0] === 'restart_session')?.[1]).toEqual({
-        args: { host_alias: 'mefistos', name: 'admin-1', profile: 'work' },
-      });
-    }
+    await fireEvent.click(sw);
+    await waitFor(() => expect(inv.mock.calls.filter((c) => c[0] === 'restart_session')).toHaveLength(2));
+    expect(inv.mock.calls.find((c) => c[0] === 'restart_session')?.[1]).toEqual({
+      args: { host_alias: 'mefistos', name: 'admin-1', profile: 'work' },
+    });
   });
 
   it('an account under its limit shows no paused line', () => {

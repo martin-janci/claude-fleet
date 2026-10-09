@@ -43,6 +43,12 @@ pub struct Page {
     /// above the list: notices and custom items only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub list_items: Vec<Item>,
+    /// A `master_detail` page's records also drawn as a graph above the
+    /// list: each one a node joined to the centre, its line solid while
+    /// its state is up and dashed while it is not (Federation's linked
+    /// hubs). The list stays the text alternative and the keyboard path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<GraphView>,
     /// An `embed` page's place in a hand-built screen (`Slot`). Only an
     /// embed page names one, and each slot has at most one page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -60,6 +66,24 @@ pub struct Page {
     pub sections: Vec<Section>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tabs: Vec<Tab>,
+}
+
+/// How a `master_detail` page draws its records as a graph (`Page::graph`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+pub struct GraphView {
+    /// The centre node's name, e.g. "This hub".
+    pub center: String,
+    /// The resource's `choice` field each line follows.
+    pub state: String,
+    /// The values of `state` drawn as a link that is up (a solid line);
+    /// every other value is down (a dashed line).
+    pub up: Vec<String>,
+    /// Fields shown under a node's name, at most three: plain values
+    /// (text, count or time), never a list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub facts: Vec<String>,
 }
 
 /// One control in a `data_page`'s filter bar, bound by name to a source
