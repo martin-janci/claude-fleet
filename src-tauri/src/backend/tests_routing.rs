@@ -1781,6 +1781,26 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Redesign 11.11: the watcher's "Since 13:20" summary; `since`
+        // crosses as given.
+        (
+            "session_summary_since",
+            "session_summary_since",
+            json!({ "session_id": 42, "since": 1_791_465_600 }),
+            r#"{"text":"Fixed it.","check":"passed","since":1791465600,"turns":2,"model":"haiku","host_alias":"h","at":1791466000}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::session_summary_since(
+                    b,
+                    commands::sessions::SessionSummarySinceArgs {
+                        session_id: 42,
+                        since: 1_791_465_600,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "session_access",
             "session_access",

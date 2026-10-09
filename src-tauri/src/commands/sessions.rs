@@ -554,6 +554,32 @@ pub async fn capture_session(
     routed::capture_session(&backend, args, &store, &ssh).await
 }
 
+/// `session_summary_since`'s arguments — `SessionSummarySinceParams`
+/// field for field.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SessionSummarySinceArgs {
+    pub session_id: i64,
+    /// Unix seconds: the turns that ended at or after it are summarised.
+    pub since: i64,
+}
+
+/// A short summary of what a session did since a time (Orbit Fleet 11.11),
+/// for its watcher or its owner: drafted on the session's host under its
+/// account, only with its org's consent, and hidden when the Jev check
+/// (`decide.jev.summary_check`) cannot confirm it.
+///
+/// Errors: `E_FORBIDDEN` (no consent), `E_NOTFOUND`, `E_CLAUDE_CLI`,
+/// `E_TIMEOUT`, transport codes.
+#[tauri::command]
+pub async fn session_summary_since(
+    args: SessionSummarySinceArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<fleet_core::service::watch_summary::WatchSummary, IpcError> {
+    routed::session_summary_since(&backend, args, &store, &ssh).await
+}
+
 /// `session_share`'s arguments — `SessionShareParams` field for field.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct SessionShareArgs {
@@ -1153,6 +1179,29 @@ pub(crate) mod routed {
     // fleet with no personal owner at all) is refused too —
     // `sharing::require_granter` turns it into `E_FORBIDDEN` rather than
     // letting a caller who proves no person write a grant.
+
+    pub async fn session_summary_since(
+        backend: &FleetBackend,
+        args: SessionSummarySinceArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<fleet_core::service::watch_summary::WatchSummary, IpcError> {
+        if let Some(hub) = backend.hub() {
+            return hub.route("session_summary_since", &args).await;
+        }
+        let row = {
+            let s = lock(store)?;
+            s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+                IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("session {} not found", args.session_id),
+                )
+            })?
+        };
+        let decide = fleet_core::service::decide::DecideCtx::jev(Arc::clone(store));
+        fleet_core::service::watch_summary::summarize_since(store, ssh, &decide, &row, args.since)
+            .await
+    }
 
     pub async fn capture_session(
         backend: &FleetBackend,

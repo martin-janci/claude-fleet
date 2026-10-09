@@ -1652,6 +1652,12 @@ const MIGRATIONS: &[Migration] = &[
     // Orbit Fleet 8.11, from AI to rule: `start_rules`, the key patterns
     // that pick a start's project before history and Jev. New objects only.
     Migration::plain(144, include_str!("../../migrations/144_start_rules.sql")),
+    // PR shepherd, step 3: the merge queue's record (a new table and an
+    // index, `IF NOT EXISTS`, safe to re-run).
+    Migration::plain(
+        145,
+        include_str!("../../migrations/145_pr_shepherd_merges.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

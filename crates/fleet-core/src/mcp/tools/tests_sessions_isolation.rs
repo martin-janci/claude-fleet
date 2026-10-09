@@ -757,6 +757,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "session_transcript" => fx.t.session_transcript(ext, p!()).await,
         "session_conversation" => fx.t.session_conversation(ext, p!()).await,
         "session_tool_detail" => fx.t.session_tool_detail(ext, p!()).await,
+        "session_summary_since" => fx.t.session_summary_since(ext, p!()).await,
         "run_prompt" => fx.t.run_prompt(ext, p!()).await,
         "dispatch_task" => fx.t.dispatch_task(ext, p!()).await,
         "wait_for_task" => fx.t.wait_for_task(ext, p!()).await,
@@ -1360,6 +1361,12 @@ async fn run_matrix() {
     )
     .await;
     m.gated("session_transcript", Reach::Read, row).await;
+    m.gated(
+        "session_summary_since",
+        Reach::Read,
+        |fx, _| json!({ "session_id": fx.row, "since": 0 }),
+    )
+    .await;
     m.gated(
         "wait_for_reply",
         Reach::Read,
