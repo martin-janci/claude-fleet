@@ -85,6 +85,9 @@ pub struct WorkAdminArgs {
     /// Org Jev consent: on|off
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jev: Option<String>,
+    /// Org reply-text consent (D48, J2): on|off
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev_reply: Option<String>,
     /// D31: bound clients see unassigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_sees_unassigned: Option<bool>,
@@ -153,6 +156,7 @@ impl fmt::Debug for WorkAdminArgs {
             .field("rule_id", &self.rule_id)
             .field("auto_tidy", &self.auto_tidy)
             .field("jev", &self.jev)
+            .field("jev_reply", &self.jev_reply)
             .field("bound_sees_unassigned", &self.bound_sees_unassigned)
             .field("days", &self.days)
             .field("bucket_id", &self.bucket_id)
@@ -171,7 +175,7 @@ impl WorkAdminArgs {
             "action={} tracker_id={:?} provider={:?} site_url={:?} auth_kind={:?} \
              credential_ref={:?} transport={:?} settings={} secret={} org_id={:?} \
              rule_id={:?} host_alias={:?} owner={:?} repo={:?} path_prefix={:?} \
-             isolate_sessions={:?} auto_tidy={:?} jev={:?} bound_sees_unassigned={:?} days={:?} \
+             isolate_sessions={:?} auto_tidy={:?} jev={:?} jev_reply={:?} bound_sees_unassigned={:?} days={:?} \
              bucket_id={:?} kind={:?} state={:?} carry_to={:?} external_id={:?}",
             self.action,
             self.tracker_id,
@@ -199,6 +203,7 @@ impl WorkAdminArgs {
             self.isolate_sessions,
             self.auto_tidy,
             self.jev,
+            self.jev_reply,
             self.bound_sees_unassigned,
             self.days,
             self.bucket_id,

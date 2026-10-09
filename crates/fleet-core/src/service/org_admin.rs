@@ -72,6 +72,9 @@ pub struct OrgAdminArgs {
     /// on|off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jev: Option<String>,
+    /// on|off: the org's reply-text consent (D48), on top of jev.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev_reply: Option<String>,
     /// Its bound devices also see unassigned work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_sees_unassigned: Option<bool>,
@@ -879,6 +882,7 @@ pub fn run(
                     isolate_sessions: args.isolate_sessions,
                     auto_tidy: args.auto_tidy.clone(),
                     jev: args.jev.clone(),
+                    jev_reply: args.jev_reply.clone(),
                     bound_sees_unassigned: args.bound_sees_unassigned,
                     rule_id: args.rule_id,
                     owner: args.owner.clone(),
