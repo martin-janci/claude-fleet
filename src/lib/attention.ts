@@ -270,7 +270,14 @@ export interface TriageRank {
 /** A2: `waiting_for` will distinguish permission, question and elicitation.
  *  Until then a blocked session is the only thing known to await the user. */
 function isWaiting(s: SessionRow): boolean {
-  return s.claude_status === 'blocked' || s.pending_form != null;
+  return s.claude_status === 'blocked' || s.pending_form != null || jevSays(s, 'asked');
+}
+
+/** J2 (step 5.11): what Jev read a silent turn's end as, on a row still idle
+ *  after it. Every hook clears `turn_outcome`, so it never outvotes one;
+ *  the same rule as the hub's `attention::needs_attention_in`. */
+function jevSays(s: SessionRow, outcome: 'asked' | 'stuck'): boolean {
+  return isIdleStatus(s.claude_status) && s.turn_outcome === outcome;
 }
 
 /** A turn ended after the session was last viewed (redesign 2.3, migration
@@ -310,7 +317,7 @@ export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
   if (s.kind === 'external') return s.claude_status === 'working' ? 'working' : 'idle';
   if (s.kind === 'shell') return 'idle';
   if (isWaiting(s)) return 'waiting';
-  if (s.stuck_kind) return 'stuck';
+  if (s.stuck_kind || jevSays(s, 'stuck')) return 'stuck';
   // A dead row keeps its last context reading; a lost one reads `lifecycle`.
   const live = s.status !== 'ghost' && s.lost_at === null;
   // Step 2.4: Blocked on something outside the session. Live rows only: a

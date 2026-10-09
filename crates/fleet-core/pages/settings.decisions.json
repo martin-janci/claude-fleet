@@ -89,7 +89,16 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.turn_outcome",
+          "hint": "Sends Claude's last reply, redacted, only for organisations that allow reply text. Hooks always win."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.unassigned_reply"
         }
       ]
     },
