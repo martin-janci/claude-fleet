@@ -5,6 +5,8 @@
   // (`list_pages` carries the shapes).
   import { untrack } from 'svelte';
   import Chart from './Chart.svelte';
+  import TransferMark from '../TransferMark.svelte';
+  import { rowTransfer } from '../transfer_loader';
   import { copyText } from '../clipboard';
   import { subscribeToRowEvents } from '../events';
   import {
@@ -141,7 +143,15 @@
           {#each rows as row, i (i)}
             <tr>
               {#each tableColumns as c (c.id)}
-                <td class:num={c.ty !== 'text' && c.ty !== 'day'}>{formatCell(c.ty, row[c.id])}</td>
+                {@const moving = rowTransfer(row, c.id)}
+                <td class:num={c.ty !== 'text' && c.ty !== 'day'}
+                  >{#if moving}<span class="moving"
+                      ><TransferMark fraction={moving.fraction} label={formatCell(c.ty, row[c.id])} testid={`${testid}-transfer`} />{formatCell(
+                        c.ty,
+                        row[c.id],
+                      )}</span
+                    >{:else}{formatCell(c.ty, row[c.id])}{/if}</td
+                >
               {/each}
             </tr>
           {/each}
@@ -164,6 +174,7 @@
 {/if}
 
 <style>
+  .moving { display: inline-flex; align-items: center; gap: var(--space-1, 4px); }
   .stat {
     display: flex;
     flex-direction: column;

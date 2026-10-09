@@ -408,12 +408,47 @@
         "kind",
         "proposal"
       ]
+    },
+    {
+      "description": "One of the app's own wizards, opened in the chat as a form (redesign\n10.12): the spec is the app's (`src/lib/forms/wizards/<id>.json`),\nnever the block's, and nothing runs until the person presses its last\nstep's button.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "wizard"
+        },
+        "why": {
+          "description": "Why the agent opens it, in one sentence.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wizard": {
+          "$ref": "#/$defs/ChatWizard"
+        }
+      },
+      "required": [
+        "kind",
+        "wizard"
+      ]
     }
   ],
   "required": [
     "spec"
   ],
   "$defs": {
+    "ChatWizard": {
+      "description": "A wizard a `wizard` block opens ([`CHAT_WIZARDS`]).",
+      "type": "string",
+      "enum": [
+        "add_host",
+        "add_project",
+        "get_started",
+        "new_session",
+        "pair_device"
+      ]
+    },
     "Choice": {
       "type": "object",
       "properties": {

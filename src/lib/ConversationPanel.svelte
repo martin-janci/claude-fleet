@@ -19,6 +19,7 @@
   import { sendPrompt, hasNoPane, sessions, sessionAgent, type SessionRow } from './sessions';
   import AnswerPrompt from './AnswerPrompt.svelte';
   import FormCard from './forms/FormCard.svelte';
+  import ChatWizards from './forms/ChatWizards.svelte';
   import { pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
   import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
@@ -2377,6 +2378,7 @@
         {#if closedForm && !pendingForm}
           <FormCard formId={closedForm} sessionName={session.friendly_name ?? session.tmux_name} blocked={null} closed ondismiss={() => (closedForm = null)} />
         {/if}
+        <ChatWizards {session} {agentName} live={viewing === null} />
       </div>
     </div>
     {#if turnEntries.length > 1 || !atBottom}

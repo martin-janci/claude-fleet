@@ -40,6 +40,7 @@
   import { OPERATOR_COMMANDS } from './operator';
   import { insertIntoComposer } from './conversation';
   import ConfirmCards from './ConfirmCards.svelte';
+  import { openChatWizard } from './forms/chat_wizards';
   import HandoffCards from './HandoffCards.svelte';
   import { controlThinking } from './control_loaders';
   import ControlRouteReceipts from './ControlRouteReceipts.svelte';
@@ -127,9 +128,10 @@
 </script>
 
 {#snippet chip()}
-  <!-- Step 9.2: the agent's starts and kills wait here as cards, in the
-       transcript. Mounted only while this row renders, so
-       a request is never parked on a card nobody can see (confirms.ts). -->
+  <!-- Step 9.2: the agent's starts and kills wait here as cards, above the
+       composer (not in the transcript; parity P30 accepts the placement).
+       Mounted only while this row renders, so a request is never parked on
+       a card nobody can see (confirms.ts). -->
   <ConfirmCards />
   <!-- Steps 9.3 and 9.6: what the agent handed on, as chips and cards
        that follow their target's state. -->
@@ -148,6 +150,16 @@
     </button>
   {/if}
   <!-- Operator commands (work graph M9): they fill the composer, never send. -->
+  <!-- Step 10.12: Add project as a form at the end of this chat; nothing
+       runs until its last button. -->
+  {#if session}
+    <button
+      class="chip command"
+      data-testid="agent-add-project"
+      title="Add a repository to the fleet with a form in this chat"
+      onclick={() => session && openChatWizard(session.id, 'add_project', { from: 'Control' })}>Add project</button
+    >
+  {/if}
   {#each OPERATOR_COMMANDS as c (c.label)}
     <button
       class="chip command"

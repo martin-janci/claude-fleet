@@ -15,6 +15,7 @@
 // interpreted as HTML, and a block that does not check out falls back to the
 // code block it was written as, with what is wrong under it.
 import type { FormField, FormSpec } from './forms/forms';
+import { CHAT_WIZARD_IDS, type ChatWizardId } from './forms/chat_wizard_ids';
 import { fenceOpen, isClosingFence } from './markdown';
 
 export const UI_SPEC = 'fleet.ui/1';
@@ -115,10 +116,13 @@ export type UiBlock =
   /** A settings change waiting for a person: the id `set_setting` with
    *  `propose: true` answered. The card reads the key and values from the
    *  proposal, never from the block (`rich/SettingCard.svelte`). */
-  | { kind: 'setting'; proposal: number; note?: string };
+  | { kind: 'setting'; proposal: number; note?: string }
+  /** One of the app's own wizards as a form in the chat (step 10.12): the
+   *  spec is the app's, never the block's (`forms/WizardChatCard.svelte`). */
+  | { kind: 'wizard'; wizard: ChatWizardId; why?: string };
 
 export type UiKind = UiBlock['kind'];
-export const UI_KINDS: UiKind[] = ['report', 'steps', 'guide', 'callout', 'facts', 'choices', 'form', 'progress', 'results', 'error', 'setting'];
+export const UI_KINDS: UiKind[] = ['report', 'steps', 'guide', 'callout', 'facts', 'choices', 'form', 'progress', 'results', 'error', 'setting', 'wizard'];
 /** A progress `id`, an error `code` and a guide's `page`: a key, never prose. */
 const KEY_RE = /^[A-Za-z0-9_.:-]+$/;
 const KEY_MAX = 64;
@@ -664,6 +668,12 @@ export function checkUiBlock(raw: string): Check {
       if (v.proposal === undefined || v.proposal === null) p.add('', '`proposal` is required');
       else proposal = num(v, 'proposal', p, '', { min: 1 });
       block = { kind: 'setting', proposal: proposal ?? 0, note: str(v, 'note', p, '', { max: 500 }) };
+      break;
+    }
+    case 'wizard': {
+      const wizard = oneOf(v, 'wizard', p, '', CHAT_WIZARD_IDS);
+      const why = str(v, 'why', p, '', { max: 500 });
+      if (wizard) block = { kind: 'wizard', wizard, why };
       break;
     }
   }

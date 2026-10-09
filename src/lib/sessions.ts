@@ -201,6 +201,9 @@ export interface SessionRow {
   // Chat forms (migration 119): the form this session's agent asked and is
   // waiting on. Optional: an older hub sends none.
   pending_form?: { form_id: string; title: string } | null;
+  /** The form this session's agent is still writing (`ask { draft }`,
+   *  redesign 10.12): the JSON so far, drawn in by ChatWizards. */
+  form_draft?: { draft: string; why: string | null; updated_at: number } | null;
   /** The session's primary work link (migration 046), set through the work
    *  commands (`work.ts`). Absent from a hub older than the work graph. */
   work?: SessionWork | null;

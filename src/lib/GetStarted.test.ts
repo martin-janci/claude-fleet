@@ -109,6 +109,8 @@ describe('GetStarted', () => {
     expect(get(destination)).toBe('accounts');
     await fireEvent.click(screen.getByTestId('get-started-session'));
     expect(await screen.findByRole('dialog')).toBeTruthy();
+    // Step 10.12: Get started runs on its own form spec.
+    expect(screen.getByTestId('wizard-get_started')).toBeTruthy();
     expect(get(switcherRequest)).toBeNull();
     await fireEvent.click(screen.getByTestId('get-started-github'));
     expect(get(settingsSection)).toBe('trackers');

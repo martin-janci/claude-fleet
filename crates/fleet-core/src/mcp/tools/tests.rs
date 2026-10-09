@@ -18648,6 +18648,7 @@ fn small_form() -> serde_json::Value {
 fn ask_p() -> AskParams {
     AskParams {
         form: None,
+        draft: None,
         why: None,
         wait: None,
         cancel: None,
@@ -18659,6 +18660,49 @@ fn ask_p() -> AskParams {
         note: None,
         timeout_s: None,
     }
+}
+
+/// Redesign 10.12: an agent streams its form while it writes it; the draft
+/// rides its own session's row, and only a session may draft.
+#[tokio::test]
+async fn an_agent_drafts_its_form_on_its_own_row() {
+    let g = gate_fixture();
+    let a_row = g.a_row;
+    let t = test_tools(g.store);
+    let out = t
+        .ask(
+            Extension(pane_caller(Some("%7"))),
+            Parameters(AskParams {
+                draft: Some(r#"{"spec":"fleet.form/1","title":"Pi"#.into()),
+                why: Some("your hosts".into()),
+                ..ask_p()
+            }),
+        )
+        .await
+        .expect("a session drafts");
+    assert!(text_of(&out.content[0]).contains("drafting"));
+    let row = t
+        .store
+        .lock()
+        .unwrap()
+        .get_session_by_id(a_row)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.form_draft.map(|d| d.why),
+        Some(Some("your hosts".into()))
+    );
+    let err = t
+        .ask(
+            Extension(Caller::master()),
+            Parameters(AskParams {
+                draft: Some("{".into()),
+                ..ask_p()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("asking session"), "{err:?}");
 }
 
 #[tokio::test]

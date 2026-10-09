@@ -3,6 +3,7 @@
   import { importHost, type ImportReport } from './assets';
   import { hosts } from './hosts';
   import Modal from './Modal.svelte';
+  import TransferMark from './TransferMark.svelte';
 
   let {
     host = 'local',
@@ -40,6 +41,10 @@
       </select>
     </label>
     {#if only.length > 0}<p class="muted" data-testid="import-only">Only: {only.join(', ')}</p>{/if}
+    {#if busy}
+      <!-- Step 10.10: an import cannot say its size, so Data rain. -->
+      <p class="running" data-testid="import-running"><TransferMark fraction={null} label="Reading the host's config" testid="import-transfer" /> Reading the host's config…</p>
+    {/if}
     {#if error}<p class="error">{error}</p>{/if}
     {#if report}
       <h4>{report.dry_run ? 'Would create' : 'Created'} {report.created.length}</h4>
@@ -58,6 +63,7 @@
 
 <style>
   .dialog { max-height: 70vh; overflow: auto; }
+  .running { display: flex; align-items: center; gap: var(--space-2, 8px); color: var(--fg-muted); font-size: var(--text-xs); }
   h4 { margin: 10px 0 4px; font-size: var(--text-xs); }
   .muted { color: var(--fg-muted); font-size: var(--text-xs); } .error { color: var(--usage-crit); }
   .list { margin: 0; padding-left: 18px; font-size: var(--text-xs); max-height: 200px; overflow: auto; }

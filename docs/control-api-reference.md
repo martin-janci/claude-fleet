@@ -53,9 +53,9 @@ Parameters: `confirm_nonce`, `force_partial`, `plan_id`
 
 ### `ask`
 
-Chat forms: `form` (fleet.form/1) opens a form in YOUR session's chat and waits ≤600 s for the person's answers (status answered | pending | declined | cancelled | expired; on pending call `wait`). `cancel` withdraws. A person's side: list, get, answer, decline. Spec: docs/forms.md.
+Chat forms: `form` (fleet.form/1) opens a form in YOUR session's chat and waits ≤600 s for the person's answers (status answered | pending | declined | cancelled | expired; on pending call `wait`). `draft` (the JSON so far) shows a long form building first. `cancel` withdraws. A person's side: list, get, answer, decline. Spec: docs/forms.md.
 
-Parameters: `answer`, `cancel`, `decline`, `form`, `get`, `list`, `note`, `timeout_s`, `values`, `wait`, `why`
+Parameters: `answer`, `cancel`, `decline`, `draft`, `form`, `get`, `list`, `note`, `timeout_s`, `values`, `wait`, `why`
 
 ### `broadcast_prompt`
 
@@ -1127,6 +1127,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::save_host_setup`
 - `commands::hosts::discard_host_setup`
 - `commands::hosts::run_host_setup_check`
+- `commands::hosts::install_agent`
+- `commands::hosts::agent_installs`
 - `commands::hosts::probe_ssh_alias`
 - `commands::hosts::remove_host`
 - `commands::hosts::merge_host`
@@ -1158,6 +1160,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hub::hub_disconnect`
 - `commands::hub::hub_connection`
 - `commands::hub::hub_retry_now`
+- `commands::hub::offline_local_sessions`
 - `commands::hub::hub_stranded_token`
 - `commands::hub::report_client_error`
 - `commands::onboarding::check_local_prereqs`

@@ -24,7 +24,17 @@ const KEY_MAX: usize = 64;
 
 pub const KINDS: &[&str] = &[
     "report", "steps", "guide", "callout", "facts", "choices", "form", "progress", "results",
-    "error", "setting",
+    "error", "setting", "wizard",
+];
+/// The app's wizards a `wizard` block may open in the chat (redesign 10.12):
+/// the ones in `src/lib/forms/wizards/` whose last button runs in the chat
+/// (`CHAT_WIZARD_IDS` in wizards.ts). `link_hub` stays in Settings › Hub.
+pub const CHAT_WIZARDS: &[&str] = &[
+    "add_host",
+    "add_project",
+    "get_started",
+    "new_session",
+    "pair_device",
 ];
 const TONES: &[&str] = &["info", "tip", "success", "warning", "danger"];
 pub const PROGRESS_STATES: &[&str] = &["running", "waiting", "done", "failed"];
@@ -173,6 +183,28 @@ pub enum BlockKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
+    /// One of the app's own wizards, opened in the chat as a form (redesign
+    /// 10.12): the spec is the app's (`src/lib/forms/wizards/<id>.json`),
+    /// never the block's, and nothing runs until the person presses its last
+    /// step's button.
+    Wizard {
+        wizard: ChatWizard,
+        /// Why the agent opens it, in one sentence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
+    },
+}
+
+/// A wizard a `wizard` block opens ([`CHAT_WIZARDS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum ChatWizard {
+    AddHost,
+    AddProject,
+    GetStarted,
+    NewSession,
+    PairDevice,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -410,6 +442,10 @@ pub fn check(v: &Value) -> Result<(), Vec<String>> {
                 p.num(o, "proposal", "", 1);
             }
             p.str(o, "note", "", false, 500);
+        }
+        "wizard" => {
+            p.one_of(o, "wizard", "", CHAT_WIZARDS, true);
+            p.str(o, "why", "", false, 500);
         }
         _ => unreachable!("kind is one of KINDS"),
     }

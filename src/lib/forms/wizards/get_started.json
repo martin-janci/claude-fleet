@@ -1,0 +1,79 @@
+{
+  "spec": "fleet.form/1",
+  "title": "Get started",
+  "intro": "Your first session in one go: a host, a project on it and an agent. Accounts, GitHub and the rest stay in the list.",
+  "submit": "Build my fleet",
+  "steps": [
+    {
+      "title": "Host",
+      "fields": [
+        {
+          "name": "host",
+          "type": "select",
+          "label": "Host",
+          "required": true,
+          "value": "local",
+          "options": [["local", "This machine"]],
+          "help": "Another machine joins from Hosts first."
+        }
+      ]
+    },
+    {
+      "title": "Project",
+      "fields": [
+        {
+          "name": "source",
+          "type": "select",
+          "label": "Project",
+          "required": true,
+          "value": "clone",
+          "options": [
+            ["existing", "One in the fleet"],
+            ["clone", "Clone a repository"],
+            ["folder", "Existing folder"]
+          ]
+        },
+        {
+          "name": "url",
+          "type": "text",
+          "label": "Repository",
+          "required": true,
+          "placeholder": "owner/repo or a git URL",
+          "when": { "field": "source", "eq": "clone" }
+        },
+        {
+          "name": "path",
+          "type": "text",
+          "label": "Folder on the host",
+          "required": true,
+          "placeholder": "~/projects/my-app",
+          "when": { "field": "source", "eq": "folder" }
+        }
+      ]
+    },
+    {
+      "title": "Project in the fleet",
+      "when": { "field": "source", "eq": "existing" },
+      "fields": [
+        { "name": "project", "type": "select", "label": "Project", "required": true, "options": [["1", "owner/repo"]] }
+      ]
+    },
+    {
+      "title": "Agent",
+      "fields": [
+        {
+          "name": "agent",
+          "type": "select",
+          "label": "Agent",
+          "required": true,
+          "value": "claude",
+          "options": [
+            ["claude", "Claude Code"],
+            ["codex", "Codex"]
+          ]
+        },
+        { "name": "label", "type": "text", "label": "Label", "max_len": 120, "help": "Empty takes the branch's name." }
+      ]
+    }
+  ]
+}

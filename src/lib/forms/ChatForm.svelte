@@ -5,6 +5,11 @@
   export type ChatFormOutcome =
     | { ok: true; summary?: string; starting?: string }
     | { ok: false; problems?: FieldProblem[]; error?: string };
+
+  /** How a card ended: kept by the caller so a re-drawn card stays one line. */
+  export type ChatFormEnded =
+    | { state: 'answered'; summary: string; starting: string | null }
+    | { state: 'declined'; note: string };
 </script>
 
 <script lang="ts">
@@ -16,6 +21,7 @@
   // to one line, and a Pulse says what is starting. Nothing runs until the
   // last step's button is pressed, and nothing here is a modal or an
   // overlay. An agent's own form is FormCard; this is the app's.
+  import { untrack } from 'svelte';
   import FormWizard from './FormWizard.svelte';
   import Loader from '../Loader.svelte';
   import { finishedSpec, partialSpec } from './partial_spec';
@@ -30,8 +36,11 @@
     why = null,
     sending = 'Sending…',
     initial = {},
+    building = false,
+    outcome = null,
     onsubmit,
     ondecline,
+    onended,
   }: {
     /** The whole spec, or null while `draft` is still being written. */
     spec?: FormSpec | null;
@@ -44,11 +53,17 @@
     why?: string | null;
     sending?: string;
     initial?: Values;
+    /** Still being written: `draft` stays a sketch even once it parses
+     *  (an agent's `ask { draft }`; its `ask { form }` opens the form). */
+    building?: boolean;
+    /** How it ended, when the card is drawn again after it did. */
+    outcome?: ChatFormEnded | null;
     onsubmit: (values: Values) => Promise<ChatFormOutcome>;
     ondecline?: (note: string) => void | Promise<void>;
+    onended?: (ended: ChatFormEnded) => void;
   } = $props();
 
-  const whole = $derived(spec ?? finishedSpec(draft));
+  const whole = $derived(spec ?? (building ? null : finishedSpec(draft)));
   const sketch = $derived(whole ? null : partialSpec(draft));
 
   let busy = $state(false);
@@ -56,9 +71,7 @@
   let problems = $state<FieldProblem[]>([]);
   let declining = $state(false);
   let note = $state('');
-  let ended = $state<{ state: 'answered'; summary: string; starting: string | null } | { state: 'declined'; note: string } | null>(
-    null,
-  );
+  let ended = $state<ChatFormEnded | null>(untrack(() => outcome));
   let wizard: { clearSecrets: () => void } | undefined = $state();
 
   /** The receipt line's summary, read as a decided form's would be. */
@@ -77,6 +90,7 @@
     wizard?.clearSecrets();
     if (r.ok) {
       ended = { state: 'answered', summary: r.summary ?? summaryOf(whole, values), starting: r.starting ?? null };
+      onended?.(ended);
       return;
     }
     if (r.problems?.length) problems = r.problems;
@@ -88,6 +102,7 @@
     await ondecline?.(note.trim());
     busy = false;
     ended = { state: 'declined', note: note.trim() };
+    onended?.(ended);
   }
 </script>
 

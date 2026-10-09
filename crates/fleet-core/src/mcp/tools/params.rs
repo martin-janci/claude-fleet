@@ -1132,9 +1132,13 @@ pub struct AskParams {
     /// A fleet.form/1 form for your own session's chat (docs/forms.md).
     #[serde(default)]
     pub form: Option<serde_json::Value>,
-    /// form: why you ask (≤500 chars).
+    /// form / draft: why you ask (≤500 chars).
     #[serde(default)]
     pub why: Option<String>,
+    /// The form's JSON as written so far (≤16 KiB): your chat draws it in
+    /// until `form` opens it. "" drops it.
+    #[serde(default)]
+    pub draft: Option<String>,
     /// Wait again on this pending form_id.
     #[serde(default)]
     pub wait: Option<String>,

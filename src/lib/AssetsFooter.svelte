@@ -121,6 +121,7 @@
       label={JOB[busy]}
       done={busy === 'apply' ? ($syncProgress?.done ?? null) : null}
       total={busy === 'apply' ? ($syncProgress?.total ?? null) : null}
+      transfer={busy === 'apply'}
     />
   {:else if $lastSyncRun}
     <span class="last" data-testid="assets-last-sync">

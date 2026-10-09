@@ -23,7 +23,10 @@
     { "name": "a guide fleet has", "block": { "spec": "fleet.ui/1", "kind": "guide", "page": "guide.cleanup" }, "problems": [] },
     { "name": "a settings change", "block": { "spec": "fleet.ui/1", "kind": "setting", "proposal": 42, "note": "Missions may start review runs without a press." }, "problems": [] },
 
-    { "name": "not a known kind", "block": { "spec": "fleet.ui/1", "kind": "chart" }, "problems": ["`kind` must be one of report, steps, guide, callout, facts, choices, form, progress, results, error, setting"] },
+    { "name": "a wizard", "block": { "spec": "fleet.ui/1", "kind": "wizard", "wizard": "add_project", "why": "You asked for the receipts repo on mercury." }, "problems": [] },
+    { "name": "a wizard the chat cannot run", "block": { "spec": "fleet.ui/1", "kind": "wizard", "wizard": "link_hub" }, "problems": ["`wizard` must be one of add_host, add_project, get_started, new_session, pair_device"] },
+    { "name": "a wizard without its id", "block": { "spec": "fleet.ui/1", "kind": "wizard" }, "problems": ["`wizard` is required"] },
+    { "name": "not a known kind", "block": { "spec": "fleet.ui/1", "kind": "chart" }, "problems": ["`kind` must be one of report, steps, guide, callout, facts, choices, form, progress, results, error, setting, wizard"] },
     { "name": "the wrong spec", "block": { "spec": "fleet.ui/2", "kind": "callout", "body": "x" }, "problems": ["`spec` must be \"fleet.ui/1\""] },
     { "name": "a callout with no body and a bad tone", "block": { "spec": "fleet.ui/1", "kind": "callout", "tone": "loud" }, "problems": ["`tone` must be one of info, tip, success, warning, danger", "`body` is required"] },
     { "name": "facts that are not pairs", "block": { "spec": "fleet.ui/1", "kind": "facts", "items": [ ["a"], { "a": 1 } ] }, "problems": ["item 1: must be [label, value]", "item 2: must be [label, value]"] },

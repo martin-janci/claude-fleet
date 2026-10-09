@@ -32,6 +32,7 @@
   import type { PickerItem } from './PickerList.svelte';
   import { sessions, sessionsAnswered, type SessionRow } from './sessions';
   import Loader from './Loader.svelte';
+  import { searchLoader } from './search_loader';
   import { projects } from './projects';
   import { hosts } from './hosts';
   import { requestAssetsView, requestHostsView } from './app_views';
@@ -131,12 +132,16 @@
   let tickets = $state<SwitcherTicket[]>([]);
   // Only the newest load lands (review r07).
   let ticketsSeq = 0;
+  // The ticket views are a step of the search while they load (9.12).
+  let ticketsLoading = $state(false);
   async function loadTickets() {
     const mine = ++ticketsSeq;
     if ($trackers.length === 0) {
       tickets = [];
+      ticketsLoading = false;
       return;
     }
+    ticketsLoading = true;
     const views: [string, string][] = [
       ['mine', 'My work'],
       ['sprint', 'Current sprint'],
@@ -144,6 +149,7 @@
     ];
     const answers = await Promise.all(views.map(([view]) => workTickets({ view, limit: 20 })));
     if (mine !== ticketsSeq) return;
+    ticketsLoading = false;
     const out: SwitcherTicket[] = [];
     answers.forEach((r, i) => {
       if (r.ok && Array.isArray(r.value)) {
@@ -176,6 +182,18 @@
     const more = names.length > 3 ? ` and ${names.length - 3} more` : '';
     return `Still hearing from ${shown}${more}`;
   });
+  // Step 9.12: the search's current step (the hosts it still hears from,
+  // then the ticket views), with the Dot wave while it is short and Comet
+  // trails once it has run long (`search_loader.ts`). One loader on the line.
+  const searchStep = $derived(stillHearing ?? (ticketsLoading ? 'Reading your tickets: My work, Current sprint, Recent' : null));
+  let searchSince = $state(0);
+  let searchNow = $state(0);
+  $effect(() => {
+    if (!open || !searchStep) return;
+    const t = setInterval(() => (searchNow = Date.now()), 500);
+    return () => clearInterval(t);
+  });
+  const searchMark = $derived(searchLoader(searchNow - searchSince));
   // Step 3.9: `>` commands, `#` tasks and tickets, `@` hosts.
   const prefix = $derived(splitPrefix(query));
   const lookupRow = $derived(
@@ -407,6 +425,7 @@
     lastUndo = null;
     open = true;
     seq++;
+    searchSince = searchNow = Date.now();
     void loadTickets();
     // Fresh picks for the NEXT open: this one's view is frozen.
     if (next === 'new') void loadProjectPicks();
@@ -964,10 +983,12 @@
         </div>
       {/if}
     </div>
-    {#if mode !== 'new' && stillHearing}
-      <div class="still-hearing" data-testid="switcher-still-hearing" role="status">
-        <Loader name="dot-wave" size={40} stage={false} />
-        <span>{stillHearing}</span>
+    {#if mode !== 'new' && searchStep}
+      <div class="still-hearing" data-testid="switcher-still-hearing" role="status" data-long={searchMark === 'comet-trails'}>
+        {#key searchMark}
+          <Loader name={searchMark} size={searchMark === 'comet-trails' ? 20 : 40} stage={false} />
+        {/key}
+        <span>{searchStep}</span>
       </div>
     {/if}
     <div class="hint">

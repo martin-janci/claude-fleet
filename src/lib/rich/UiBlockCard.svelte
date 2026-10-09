@@ -22,6 +22,8 @@
   import ReportCard from './ReportCard.svelte';
   import ResultsCard from './ResultsCard.svelte';
   import SettingCard from './SettingCard.svelte';
+  import WizardChatCard from '../forms/WizardChatCard.svelte';
+  import { WIZARDS } from '../forms/wizards';
 
   let { block, raw, sessionId = null }: { block: UiBlock; raw: string; sessionId?: number | null } = $props();
 
@@ -152,6 +154,14 @@
   <ErrorCard {block} onfill={fill} canFill={sessionId !== null} />
 {:else if block.kind === 'setting'}
   <SettingCard {block} />
+{:else if block.kind === 'wizard'}
+  <!-- Step 10.12: one of the app's wizards as a form; its last button runs
+       the wizard, and how it went fills the composer for the agent. -->
+  {#if sessionId !== null}
+    <WizardChatCard id={block.wizard} from="the agent" why={block.why ?? null} stateKey={key} report={fill} />
+  {:else}
+    <p class="card muted" data-testid="rich-wizard-off">{WIZARDS[block.wizard].spec.title}: opens in the live conversation.</p>
+  {/if}
 {/if}
 
 <style>

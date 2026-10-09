@@ -66,6 +66,11 @@ bullet for the area you are about to change.
   item that takes it (Usage's window and host); Usage → Work graph usage
   (`usage.work`, source `work.usage` over `UsageSummary::rows`) replaced
   the hand-built WorkUsage panel and the `work_usage` command.
+  A table row may carry `transfer: { column, percent }` (not a column):
+  `DataItem.svelte` draws the transfer loader beside that cell, the
+  Progress ring for a known `percent`, Data rain for `null`
+  (`transfer_loader.ts`, step 10.10); Settings › Updates' rows carry it
+  while an update is in flight (`src-tauri/src/commands/updates.rs`).
   P4d: layout L8 `embed` places catalog items in the desktop's own
   screens at a closed `Slot`; account usage (`account_usage { view }`,
   live source `accounts.usage` over `list_account_usage`) is drawn that
