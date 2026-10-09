@@ -188,6 +188,30 @@ fn a_push_a_permission_or_a_step_hard_to_undo_is_never_proposed() {
 }
 
 #[test]
+fn a_question_that_names_a_risky_action_asks_nothing() {
+    // "Yes, go ahead" names no push, but the question does: answering it
+    // pushes, so no option of it is proposed (F10).
+    for q in [
+        "Push the 3 commits to origin/main now?",
+        "Merge the PR into main?",
+        "Deploy the build to staging?",
+        "Delete the old worktree?",
+        "Approve the plan and start?",
+        "Run rm on the cache dir?",
+    ] {
+        let mut p = pending("input", &["Not yet", "Yes, go ahead"]);
+        p.question = Some(q.into());
+        assert!(risky_question(q), "{q}");
+        assert_eq!(session_input(4, None, &p), None, "{q}");
+    }
+    // An ordinary question still asks.
+    let p = pending("input", &["Not yet", "Yes, go ahead"]);
+    assert!(session_input(4, None, &p).is_some());
+    // "Approve" as an option is a person's too.
+    assert!(risky("Approve"));
+}
+
+#[test]
 fn the_ts_mirror_checks_the_same_words() {
     let ts = crate::repo_files::read("src/lib/quick_answer.ts");
     for w in RISKY_WORDS {

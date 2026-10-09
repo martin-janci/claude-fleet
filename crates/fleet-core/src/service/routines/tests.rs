@@ -719,6 +719,38 @@ async fn an_event_routine_with_nothing_to_fire_moves_its_cursor_on() {
     assert_eq!(runs_of(&f, r.id).len(), 1);
 }
 
+/// A pass reads the event routines before it fires anything; one turned
+/// off while earlier fires ran does not fire on that stale read.
+#[tokio::test]
+async fn an_event_routine_turned_off_during_a_pass_does_not_fire() {
+    let f = fx();
+    let mut i = input(&f);
+    i.trigger = "event".into();
+    i.cron = None;
+    i.event = Some("stuck".into());
+    let r = new_routine(&f, i);
+    let mine = {
+        let s = lock(&f.store).unwrap();
+        let mine = s
+            .upsert_session("mine", "mac", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.claim_if_unclaimed(mine, Some(f.ana)).unwrap();
+        mine
+    };
+    event(&f, mine, "stuck");
+    let read_by_the_pass = routine(&f, r.id);
+    set_enabled(&f.store, &person(&f.store, None, f.ana), r.id, false).unwrap();
+    tick::tick_event(&f.deps, &read_by_the_pass, OCT8)
+        .await
+        .unwrap();
+    assert!(runs_of(&f, r.id).is_empty());
+    // …and gave its lease back.
+    assert!(lock(&f.store)
+        .unwrap()
+        .take_routine_lease(r.id, OCT8)
+        .unwrap());
+}
+
 #[test]
 fn bad_routines_are_refused_with_the_reason() {
     let f = fx();
@@ -892,6 +924,28 @@ fn turning_a_routine_back_on_restarts_its_schedule_and_cursor() {
         skip_next(&f.store, &ana, m.id, true).unwrap_err().code,
         codes::E_INVALID_STATE
     );
+}
+
+/// A fire that is due but not yet ticked survives an edit that keeps the
+/// schedule, and a "turn on" of a routine that is already on.
+#[test]
+fn a_due_fire_survives_a_save_or_turn_on_that_keeps_the_schedule() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    due_at(&f, r.id, 1000);
+    assert_eq!(
+        set_enabled(&f.store, &ana, r.id, true).unwrap().next_run_at,
+        Some(1000)
+    );
+    let mut edited = input(&f);
+    edited.prompt = "Review my open PRs, oldest first.".into();
+    let saved = save(&f.store, &ana, Some(r.id), &edited).unwrap();
+    assert_eq!(saved.next_run_at, Some(1000));
+    // A new schedule starts from now.
+    edited.cron = Some("0 10 * * 1-5".into());
+    let moved = save(&f.store, &ana, Some(r.id), &edited).unwrap();
+    assert!(moved.next_run_at.unwrap() > 1000);
 }
 
 // Step 8.10: what a run came to.

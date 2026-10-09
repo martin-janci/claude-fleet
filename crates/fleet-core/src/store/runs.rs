@@ -386,9 +386,13 @@ pub const ROUTINE_BRANCH: &str = "SELECT 'routine' AS src, rr.id AS rid, 'routin
        r.name AS owner, rr.started_at AS started_at, rr.finished_at AS ended_at, \
        CASE WHEN rr.finished_at IS NOT NULL \
             THEN (rr.finished_at - rr.started_at) * 1000 END AS duration_ms, \
-       CASE rr.state WHEN 'done' THEN 'ok' WHEN 'failed' THEN 'failed' \
+       CASE rr.state \
+            WHEN 'done' THEN CASE rr.outcome WHEN 'needs_person' THEN 'needs_person' \
+                 WHEN 'nothing' THEN 'nothing_to_do' WHEN 'failed' THEN 'failed' ELSE 'ok' END \
+            WHEN 'failed' THEN 'failed' \
             WHEN 'skipped' THEN 'nothing_to_do' ELSE 'running' END AS outcome, \
-       CASE WHEN rr.state = 'failed' THEN COALESCE(rr.reason, 'failed') END AS error, \
+       CASE WHEN rr.state = 'failed' OR rr.outcome = 'failed' \
+            THEN COALESCE(rr.reason, 'failed') END AS error, \
        rr.cost_micros AS cost_micros, NULL AS model, r.host_alias AS host, \
        r.org_id AS org_id, NULL AS mission_id, rr.session_id AS s1, NULL AS s2, \
        rr.trigger || COALESCE(': ' || rr.reason, '') AS summary, \
@@ -407,7 +411,10 @@ fn branch_can_match(src: &str, f: &RunsFilter) -> bool {
         "orchestration" => (&["mission"], &["ok", "failed", "needs_person"]),
         "jev" => (&["jev"], &["ok", "failed", "needs_person", "nothing_to_do"]),
         "aux" => (super::AUX_ORIGINS, &["ok"]),
-        _ => (&["routine"], &["ok", "failed", "nothing_to_do", "running"]),
+        _ => (
+            &["routine"],
+            &["ok", "failed", "needs_person", "nothing_to_do", "running"],
+        ),
     };
     f.kind.as_deref().is_none_or(|k| kinds.contains(&k))
         && f.outcome.as_deref().is_none_or(|o| outcomes.contains(&o))

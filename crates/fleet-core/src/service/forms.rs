@@ -582,6 +582,13 @@ async fn sweep_secret_dirs_at(
         if waiting {
             continue;
         }
+        // An answer writing this form's secrets right now owns the
+        // directory: removing it under the answer would leave the files it
+        // writes next with no marker. Held across the removal, so an answer
+        // that starts meanwhile is refused (E_CONFLICT) rather than raced.
+        let Ok(_answering) = Answering::claim(&form_id) else {
+            continue;
+        };
         match remove_secret_dir(ssh, &host, &form_id).await {
             Ok(()) => {
                 backoff
@@ -1139,6 +1146,32 @@ mod tests {
                 .secrets_on_host
         );
         assert_eq!(sweep(&st, &fake).await, 0, "done once");
+    }
+
+    /// The sweep leaves alone a form that is being answered right now.
+    #[tokio::test]
+    async fn the_sweep_skips_a_form_while_it_is_answered() {
+        let (st, sid) = fixture();
+        let id = open(&st, sid, &spec(), None).unwrap().form_id;
+        {
+            let s = st.lock().unwrap();
+            s.mark_form_secrets_pending(&id).unwrap();
+            s.mark_session_killed(sid, 5).unwrap();
+        }
+        let fake = FakeSsh::new();
+        let answering = Answering::claim(&id).unwrap();
+        assert_eq!(sweep(&st, &fake).await, 0);
+        assert!(fake.calls().is_empty());
+        assert!(
+            st.lock()
+                .unwrap()
+                .form(&id)
+                .unwrap()
+                .unwrap()
+                .secrets_on_host
+        );
+        drop(answering);
+        assert_eq!(sweep(&st, &fake).await, 1);
     }
 
     #[tokio::test]

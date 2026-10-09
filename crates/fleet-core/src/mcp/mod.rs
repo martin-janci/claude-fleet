@@ -3160,6 +3160,41 @@ mod tests {
         );
     }
 
+    /// Review r04 K2: a per-host token's stream re-checks its token on every
+    /// beat too. Rotating a host's token, which is how an operator answers a
+    /// stolen one, ends a stream opened with the old token, as `agent/ws.rs`
+    /// already does for an agent connection.
+    #[tokio::test]
+    async fn a_rotated_host_tokens_stream_ends_at_the_next_heartbeat() {
+        use crate::events::BroadcastEventBus;
+        let bus = Arc::new(BroadcastEventBus::default());
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .upsert_host_token("laptop", "host-tok")
+            .unwrap();
+        let (addr, _state) = serve_events_app(
+            &bus,
+            std::time::Duration::from_millis(50),
+            CancellationToken::new(),
+            Arc::clone(&store),
+        )
+        .await;
+
+        // An unrelated beat first: the stream survives while the token holds.
+        let mut sse = SseConn::open(addr, Some("host-tok"), "").await;
+        sse.wait_for("event: ready").await;
+        sse.wait_for(":\n\n").await;
+
+        store
+            .lock()
+            .unwrap()
+            .upsert_host_token("laptop", "rotated-tok")
+            .unwrap();
+        sse.wait_for("\r\n0\r\n\r\n").await;
+    }
+
     /// Streams are capped per caller like the long-polling tools: the ninth
     /// concurrent one from the same token is refused, and told when to retry.
     #[tokio::test]

@@ -1495,13 +1495,19 @@ fn adopt(
     };
     let top = resolve_main_checkout(handle, &top)?;
     let origin = git_out(handle, &top, &["remote", "get-url", "origin"]).unwrap_or_default();
-    let (owner, repo) = parse_repo_url(&origin).unwrap_or_else(|| {
-        let name = std::path::Path::new(&top)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "repo".to_string());
-        ("local".to_string(), sanitize_basename(&name))
-    });
+    // `parse_repo_url` also takes a bare `owner/repo`, the clone form a
+    // person types; as an origin that is a relative path to another local
+    // repository, not GitHub.
+    let remote = origin.contains("://") || origin.contains('@');
+    let (owner, repo) = parse_repo_url(&origin)
+        .filter(|_| remote)
+        .unwrap_or_else(|| {
+            let name = std::path::Path::new(&top)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "repo".to_string());
+            ("local".to_string(), sanitize_basename(&name))
+        });
     Ok((top, owner, repo))
 }
 
@@ -2706,6 +2712,48 @@ mod tests {
         .unwrap();
         assert_eq!(row.project.repo, "loose-repo");
         assert_eq!(row.project.owner, "local");
+    }
+
+    /// An origin that is a relative path (`../mirror/widget` style, here
+    /// `mirror/widget`) is another local repo, not GitHub's mirror/widget.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn folder_with_a_relative_path_origin_is_not_taken_for_github() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("local-clone");
+        std::fs::create_dir_all(&path).unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["remote", "add", "origin", "mirror/widget"],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&path)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        let row = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: path.to_string_lossy().into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (row.project.owner.as_str(), row.project.repo.as_str()),
+            ("local", "local-clone")
+        );
     }
 
     #[cfg(unix)]

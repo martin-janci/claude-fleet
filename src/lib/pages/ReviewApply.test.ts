@@ -92,7 +92,20 @@ describe('the review page (review_apply)', () => {
     expect(screen.getByTestId('review-diff-playbooks.press_enter').textContent).toMatch(/Off\s*→\s*On/);
     expect(screen.getByTestId('review-row-work.recent_days').textContent).toContain('a shorter Recent list');
     expect(screen.getByTestId('review-row-work.recent_days').textContent).toContain('an agent (control API)');
-    expect(screen.getByTestId('review-apply-selected').textContent).toContain('(2)');
+    // AI never decides: an agent's proposals start unticked.
+    expect(screen.getByTestId('review-apply-selected').textContent).toContain('(0)');
+  });
+
+  it("never pre-ticks an agent's proposal; a person's own staged change stays ticked", async () => {
+    show('settings.review', [
+      proposal({ id: 1, key: 'orchestrator.max_level', value: '3', before: '1', current: '1', why: 'more autonomy' }),
+      proposal({ id: 2, key: 'work.recent_days', source: 'person', source_detail: undefined }),
+    ]);
+    expect((screen.getByTestId('review-tick-orchestrator.max_level') as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByTestId('review-tick-work.recent_days') as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByTestId('review-apply-selected').textContent).toContain('(1)');
+    await fireEvent.click(screen.getByTestId('review-apply-selected'));
+    await waitFor(() => expect(decided).toEqual([{ accept: [2], reject: [] }]));
   });
 
   it('leaves a value that moved since it was proposed unticked, and applies only what is ticked', async () => {
@@ -108,7 +121,9 @@ describe('the review page (review_apply)', () => {
     // playbooks.press_enter has not moved; shorten the list to the moved case:
     expect(screen.queryByTestId('review-moved-playbooks.press_enter')).toBeNull();
     expect((screen.getByTestId('review-tick-usage.enabled') as HTMLInputElement).checked).toBe(false);
-    await fireEvent.click(screen.getByTestId('review-tick-playbooks.press_enter'));
+    // Agent rows start unticked: the person ticks the one they want.
+    expect((screen.getByTestId('review-tick-work.recent_days') as HTMLInputElement).checked).toBe(false);
+    await fireEvent.click(screen.getByTestId('review-tick-work.recent_days'));
     await fireEvent.click(screen.getByTestId('review-apply-selected'));
     await waitFor(() => expect(decided).toEqual([{ accept: [1], reject: [] }]));
     await waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Proposed changes: applied 1'));
@@ -116,10 +131,13 @@ describe('the review page (review_apply)', () => {
 
   it('rejects what is ticked, and says which could not be decided', async () => {
     show('settings.review', [proposal({ id: 99 })]);
+    await fireEvent.click(screen.getByTestId('review-tick-work.recent_days'));
     await fireEvent.click(screen.getByTestId('review-apply-selected'));
     await waitFor(() =>
       expect(get(toasts).some((t) => t.kind === 'error' && t.message.includes('no longer waiting'))).toBe(true),
     );
+    // A decided round clears the ticks: the person ticks it again to reject.
+    await fireEvent.click(screen.getByTestId('review-tick-work.recent_days'));
     await fireEvent.click(screen.getByTestId('review-reject-selected'));
     await waitFor(() => expect(decided.at(-1)).toEqual({ accept: [], reject: [99] }));
   });
