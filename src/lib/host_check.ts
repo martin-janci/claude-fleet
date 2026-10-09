@@ -260,3 +260,16 @@ export async function runHostCheck(alias: string): Promise<Result<HostCheck>> {
   if (r.ok) hostChecks.update((m) => new Map(m).set(alias, r.value));
   return r;
 }
+
+/** The step text beside the Hex field while the host detail checks or
+ *  re-provisions a host (redesign step 4.13); `null` when neither runs. */
+export function checklistLoaderText(
+  alias: string,
+  checking: boolean,
+  provisioning: boolean,
+): string | null {
+  if (provisioning)
+    return `Re-provisioning ${alias}: writing fleet's hooks, skills and CLAUDE.md block…`;
+  if (checking) return `Checking ${alias}: tmux, hooks, agents and the guard…`;
+  return null;
+}

@@ -779,6 +779,20 @@ impl Store {
         Ok(())
     }
 
+    /// Record which agent runs in the session's pane (`sessions.agent`,
+    /// migration 121), for an agent other than the Claude Code a row starts
+    /// with. A shell row's agent follows its kind instead
+    /// ([`Store::set_session_kind`]). The column's `CHECK` refuses a value
+    /// outside [`crate::store::AGENTS`].
+    pub fn set_session_agent(&self, id: i64, agent: &str) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET agent = ?1 WHERE id = ?2",
+            rusqlite::params![agent, id],
+        )?;
+        self.emit_session(id)?;
+        Ok(())
+    }
+
     /// Mark a session as a review of `reviews_session_id` (or back to 'work' with
     /// None). Write-once at spawn_review time. Reconcile never touches these
     /// columns — they survive re-probe because upsert_session's ON CONFLICT clause
@@ -2031,6 +2045,43 @@ impl Store {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Per host, what the N5 host placement weighs (redesign step 4.11): the
+    /// live sessions there (ghosts excluded, as [`Self::unclaimed_counts_by_host`]
+    /// does), the sessions `project_id` started there since `since`, and
+    /// whether the project has a worktree row there.
+    pub fn host_placement_counts(
+        &self,
+        project_id: i64,
+        since: i64,
+    ) -> Result<std::collections::BTreeMap<String, (i64, i64, bool)>, crate::ipc_error::IpcError>
+    {
+        let mut out: std::collections::BTreeMap<String, (i64, i64, bool)> = Default::default();
+        let mut st = self.conn.prepare(
+            "SELECT host_alias, SUM(status != 'ghost'), \
+                    SUM(project_id = ?1 AND created_at >= ?2) \
+               FROM sessions GROUP BY host_alias",
+        )?;
+        let rows = st.query_map(rusqlite::params![project_id, since], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            ))
+        })?;
+        for row in rows {
+            let (host, live, recent) = row?;
+            out.insert(host, (live, recent, false));
+        }
+        let mut st = self
+            .conn
+            .prepare("SELECT DISTINCT host_alias FROM worktrees WHERE project_id = ?1")?;
+        let hosts = st.query_map([project_id], |r| r.get::<_, String>(0))?;
+        for h in hosts {
+            out.entry(h?).or_default().2 = true;
+        }
+        Ok(out)
     }
 
     /// The one live row on `host_alias` whose last-seen pane is `pane_id`.
@@ -3715,17 +3766,18 @@ mod tests {
         store.set_session_kind(id, "work", None).unwrap();
         assert_eq!(agent(), AGENT_CLAUDE);
         // A kind change that does not touch shell leaves a stored agent be.
-        store
-            .conn
-            .execute("UPDATE sessions SET agent = 'codex' WHERE id = ?1", [id])
-            .unwrap();
+        let before = store.get_session_by_id(id).unwrap().unwrap().row_version;
+        store.set_session_agent(id, AGENT_CODEX).unwrap();
+        let after = store.get_session_by_id(id).unwrap().unwrap().row_version;
+        assert!(after > before, "a client sees the agent change");
         store.set_session_kind(id, "review", None).unwrap();
-        assert_eq!(agent(), "codex");
+        assert_eq!(agent(), AGENT_CODEX);
+        store
+            .upsert_session("s", "alpha", None, None, 1, 3, "running", None)
+            .unwrap();
+        assert_eq!(agent(), AGENT_CODEX, "a re-probe keeps a Codex row Codex");
         // The column refuses a name migration 121 does not know.
-        assert!(store
-            .conn
-            .execute("UPDATE sessions SET agent = 'gemini' WHERE id = ?1", [id])
-            .is_err());
+        assert!(store.set_session_agent(id, "gemini").is_err());
     }
 
     #[test]

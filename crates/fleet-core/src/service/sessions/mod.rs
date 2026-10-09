@@ -31,6 +31,7 @@ mod review;
 pub mod seed;
 mod sharing;
 mod targeting;
+pub mod terminals;
 
 #[cfg(test)]
 mod fill_session_name_tests;
@@ -60,6 +61,7 @@ pub use self::restore::*;
 pub use self::review::*;
 pub use self::sharing::*;
 pub use self::targeting::*;
+pub use self::terminals::*;
 
 fn now_unix() -> i64 {
     std::time::SystemTime::now()

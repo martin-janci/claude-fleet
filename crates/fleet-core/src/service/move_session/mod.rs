@@ -1764,6 +1764,17 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
             ),
         ));
     }
+    // A move carries Claude Code's conversation state (`claude_state`);
+    // another agent's would be left behind on the source host.
+    if row.agent != crate::store::AGENT_CLAUDE {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            format!(
+                "only Claude Code sessions can move; this one runs {}",
+                row.agent
+            ),
+        ));
+    }
     let claude_id = row
         .claude_session_id
         .clone()
@@ -2813,6 +2824,7 @@ async fn move_session_inner(
     crate::validate::tmux_name(&tmux_name)?;
     let pane_cmd = crate::service::sessions::recreate_pane_command(
         "work",
+        crate::store::AGENT_CLAUDE,
         Some(&id),
         &tmux_name,
         &snap.launch,

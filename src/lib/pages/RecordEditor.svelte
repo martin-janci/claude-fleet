@@ -30,6 +30,8 @@
     itemLabel,
     itemsOf,
     needLine,
+    personSpendName,
+    type PersonSpend,
     recordValues,
     subLine,
     syncLine,
@@ -264,6 +266,25 @@
                       <span class="value" data-testid={`sync-count-${f.id}`}>Trading both ways</span>
                     {/if}
                   </div>
+                {:else if f.type === 'items' && f.item_label.type === 'person_spend'}
+                  <table class="by-person" aria-labelledby={`rf-${f.id}`}>
+                    <thead>
+                      <tr><th scope="col">Person</th><th scope="col">Today</th><th scope="col">7 days</th><th scope="col">Month</th></tr>
+                    </thead>
+                    <tbody>
+                      {#each itemsOf(f, record) as it, n (n)}
+                        {@const p = it as PersonSpend}
+                        <tr data-testid={`item-${f.id}`}>
+                          <td>{personSpendName(p)}</td>
+                          <td>{dollars(p.today_micros)}</td>
+                          <td>{dollars(p.week_micros)}</td>
+                          <td>{dollars(p.month_micros)}</td>
+                        </tr>
+                      {:else}
+                        <tr><td class="none" colspan="4">Nothing spent this month.</td></tr>
+                      {/each}
+                    </tbody>
+                  </table>
                 {:else if f.type === 'money_series'}
                   <div class="series">
                     <Chart
@@ -608,5 +629,27 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
+  }
+  .by-person {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+  .by-person th {
+    text-align: left;
+    font-weight: 500;
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+    border-bottom: 1px solid var(--border);
+    padding: 0.2rem 0.4rem;
+  }
+  .by-person td {
+    padding: 0.25rem 0.4rem;
+    border-bottom: 1px solid var(--border);
+    font-variant-numeric: tabular-nums;
+  }
+  .by-person th:not(:first-child),
+  .by-person td:not(:first-child) {
+    text-align: right;
   }
 </style>

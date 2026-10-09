@@ -345,6 +345,52 @@ pub struct ProposalView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_by: Option<String>,
     pub at: i64,
+    /// Jev's "may duplicate" (K4, `decide::duplicate`): an open task this
+    /// reader sees that the proposal may repeat. Only a live assist answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate: Option<DuplicateHint>,
+}
+
+/// The existing task a proposal may duplicate, as Jev proposed it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DuplicateHint {
+    pub item_id: i64,
+    /// `item:<id>`, the task page to open.
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub title: String,
+    /// Always `jev` today.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_pct: Option<u8>,
+    /// The recorded run, which a person's Merge or Keep both marks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<i64>,
+}
+
+/// The [`DuplicateHint`] proposal `item_id` carries: its `duplicate`
+/// proposal names an item of the graph, open, whose org `scope` sees.
+fn duplicate_hint(g: &Graph, scope: &OrgScope, item_id: i64) -> Option<DuplicateHint> {
+    let p = g
+        .item_proposals
+        .get(&item_id)?
+        .iter()
+        .find(|p| p.feature == crate::service::decide::Feature::Duplicate.as_str())?;
+    let target = crate::service::decide::duplicate::item_of(&p.value)?;
+    let v = g.items.get(&target)?;
+    if target == item_id || v.item.status_category == "done" || !scope.sees_org(g.item_org(v)) {
+        return None;
+    }
+    Some(DuplicateHint {
+        item_id: target,
+        task_id: format!("item:{target}"),
+        key: v.item.key.clone(),
+        title: v.item.title.clone(),
+        source: p.source.clone(),
+        confidence_pct: p.confidence_pct,
+        run_id: p.run_id,
+    })
 }
 
 /// A delegated job under a task. `result` is agent text.
@@ -685,6 +731,9 @@ pub(crate) struct Graph {
     pub(crate) rules: Vec<WorkRule>,
     /// `health.context_red_pct`: `needs_you` agrees with `list_sessions`.
     pub(crate) context_red_pct: f64,
+    /// What the fleet knows beyond the rows (step 2.6): `needs_you` counts a
+    /// Blocked session as `list_sessions` does.
+    pub(crate) facts: attention::Facts,
     /// Item ids with a live confirmed link whose session is presently
     /// working (native item status §2 rule 3) — one join for the whole
     /// page, looked up per task instead of queried per row. Fenced by the
@@ -931,6 +980,7 @@ impl Graph {
                 .collect(),
             rules: s.work_rules()?,
             context_red_pct: crate::service::health::context_red_pct(s),
+            facts: s.attention_facts(),
             working_session_items,
             hidden_sessions,
             hidden_links,
@@ -1576,7 +1626,7 @@ pub(crate) fn task_kind(item: Option<&ViewItem>) -> &'static str {
 
 /// Does this live session need a person (`list_sessions`' judgement)?
 fn needs_you_of(g: &Graph, row: Option<&SessionRow>) -> bool {
-    row.is_some_and(|r| attention::needs_attention_with(r, g.context_red_pct).is_some())
+    row.is_some_and(|r| attention::needs_attention_in(r, g.context_red_pct, &g.facts).is_some())
 }
 
 /// One session a task counts: the live session, else the participant it
@@ -3043,6 +3093,9 @@ fn native_work(
             // stays: its title and `why` are item data.
             proposed_by: c.proposed_by.clone().filter(|by| g.proposer_visible(by)),
             at: c.created_at,
+            duplicate: (c.proposal_state.as_deref() == Some("proposed"))
+                .then(|| duplicate_hint(g, scope, c.id))
+                .flatten(),
         };
         match c.proposal_state.as_deref() {
             Some("proposed") => {

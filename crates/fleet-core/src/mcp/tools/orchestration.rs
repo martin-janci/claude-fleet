@@ -1073,7 +1073,7 @@ impl FleetTools {
         mission_start {mission_id, step?}: take the next steps; retry \
         {item_id, note?}; mission_plan: ask the planner; card_decide \
         {card_id, ok, note?}; mission_grant {mission_id, level, hours?, \
-        budget_cents?, hosts?, max_parallel?}; mission_revoke; \
+        budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; \
         missions_pause_all. mission_release_note {mission_id}: a drafted \
         release note of a completed mission; today_brief {refresh?, org_id?, \
         since?}: Today's morning brief, drafted only on refresh. \
@@ -1330,10 +1330,11 @@ impl FleetTools {
                 }
                 None => caller.label(),
             };
-            return ok_json(
-                &crate::service::work::local::propose(&args, &self.store, &scope, &proposer)
-                    .map_err(to_mcp_err)?,
-            );
+            let made = crate::service::work::local::propose(&args, &self.store, &scope, &proposer)
+                .map_err(to_mcp_err)?;
+            // K4: whether it repeats an existing task (off by default).
+            crate::service::decide::duplicate::spawn_ask(&self.store, vec![made.id]);
+            return ok_json(&made);
         }
         if args.action == "propose_tree" {
             // `propose`'s proposer, through the same gate at the same reach:
@@ -1352,10 +1353,14 @@ impl FleetTools {
                 }
                 None => caller.label(),
             };
-            return ok_json(
-                &crate::service::work::local::propose_tree(&args, &self.store, &scope, &proposer)
-                    .map_err(to_mcp_err)?,
+            let made =
+                crate::service::work::local::propose_tree(&args, &self.store, &scope, &proposer)
+                    .map_err(to_mcp_err)?;
+            crate::service::decide::duplicate::spawn_ask(
+                &self.store,
+                made.iter().map(|r| r.id).collect(),
             );
+            return ok_json(&made);
         }
         // A person's decision on many proposals at once (orchestration O2),
         // and taking it back. Scoped callers are refused inside, before any

@@ -1,5 +1,8 @@
 <script lang="ts" module>
   import type { BranchDiff, ChangedFile, DiffRange, RepoTree } from './files';
+  import type { CommitDraft } from './history';
+  import type { Result } from './result';
+  import DraftField from './DraftField.svelte';
   import { fileIcon, folderIcon } from './fileicons';
   import Skeleton from './states/Skeleton.svelte';
 
@@ -70,6 +73,7 @@
     branch = null,
     selectedRange = null,
     onSelectRange,
+    draftCommit,
   }: {
     mode: 'changes' | 'tree' | 'history' | 'branches';
     changes: ChangedFile[];
@@ -90,10 +94,35 @@
     /** The range the selected row came from; null for a worktree row. */
     selectedRange?: DiffRange | null;
     onSelectRange?: (path: string, range: DiffRange, status: string) => void;
+    /** The new layout's commit message draft (redesign step 5.12): drafts
+     *  from the staged changes on the session's host. Absent, the plain
+     *  message box. */
+    draftCommit?: () => Promise<Result<CommitDraft>>;
   } = $props();
 
   let filter = $state('');
   let commitMsg = $state('');
+  let draft = $state<CommitDraft | null>(null);
+  let drafting = $state(false);
+  let draftError = $state<string | null>(null);
+
+  async function runDraft(): Promise<void> {
+    if (!draftCommit || drafting) return;
+    drafting = true;
+    draftError = null;
+    const r = await draftCommit();
+    drafting = false;
+    if (r.ok) {
+      draft = r.value;
+      commitMsg = r.value.message;
+    } else {
+      draftError = r.error.message;
+    }
+  }
+
+  function filesFrom(n: number): string {
+    return `from ${n} staged file${n === 1 ? '' : 's'}`;
+  }
   // Folder expand state — keyed by dir path. Plain object so $state proxies it.
   let expanded = $state<Record<string, boolean>>({});
 
@@ -262,17 +291,46 @@
   </div>
   {#if enableStaging && mode === 'changes'}
     <div class="commit-footer">
-      <textarea
-        bind:value={commitMsg}
-        placeholder="Commit message…"
-        rows={2}
-        disabled={writeBlocked !== null}
-        title={writeBlocked ?? ''}
-      ></textarea>
+      {#if draftCommit && writeBlocked === null}
+        <DraftField
+          bind:value={commitMsg}
+          label="Commit message"
+          model={draft?.model}
+          host={draft?.host_alias}
+          from={draft ? filesFrom(draft.files) : null}
+          busy={drafting}
+          rows={3}
+          placeholder="Commit message…"
+          onregenerate={draft ? runDraft : undefined}
+          onclear={() => (draft = null)}
+          testid="commit-draft"
+        />
+        {#if !drafting && commitMsg.trim() === ''}
+          <button
+            type="button"
+            class="draft"
+            data-testid="commit-draft-run"
+            disabled={stagedCount === 0}
+            title={stagedCount === 0 ? 'Stage files first' : 'Write a message from the staged changes'}
+            onclick={runDraft}>✎ Draft from staged changes</button
+          >
+        {/if}
+        {#if draftError}
+          <span class="draft-error" role="alert" data-testid="commit-draft-error">{draftError}</span>
+        {/if}
+      {:else}
+        <textarea
+          bind:value={commitMsg}
+          placeholder="Commit message…"
+          rows={2}
+          disabled={writeBlocked !== null}
+          title={writeBlocked ?? ''}
+        ></textarea>
+      {/if}
       <button
         disabled={writeBlocked !== null || stagedCount === 0 || commitMsg.trim() === ''}
         title={writeBlocked ?? ''}
-        onclick={() => { onCommit?.(commitMsg.trim()); commitMsg = ''; }}
+        onclick={() => { onCommit?.(commitMsg.trim()); commitMsg = ''; draft = null; }}
       >Commit {stagedCount} file{stagedCount === 1 ? '' : 's'}</button>
     </div>
   {/if}
@@ -472,6 +530,14 @@
     flex-direction: column;
     gap: 0.35rem;
     flex: 0 0 auto;
+  }
+  .commit-footer .draft {
+    align-self: flex-start;
+    font-size: 11px;
+  }
+  .commit-footer .draft-error {
+    font-size: 11px;
+    color: var(--danger);
   }
   .commit-footer textarea {
     background: var(--bg);

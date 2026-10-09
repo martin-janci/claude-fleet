@@ -11,7 +11,7 @@
 //! signal at all, since Wave-2 self-heal will eventually act on these.
 
 /// Cap on the stored activity string so a runaway pane line can't bloat a row.
-const ACTIVITY_MAX: usize = 200;
+pub(crate) const ACTIVITY_MAX: usize = 200;
 
 /// Stuck states detectable from the pane tail. Detection only — auto-remedy
 /// keystrokes are a deliberately-deferred follow-up (see plan self-review).
@@ -275,7 +275,7 @@ impl WaitingFor {
 
 /// Strip ANSI/VT escape sequences (CSI `ESC[…m`, OSC, and bare control chars)
 /// so pattern matching and the stored activity line see plain text.
-fn strip_ansi(s: &str) -> String {
+pub(crate) fn strip_ansi(s: &str) -> String {
     let bytes: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
@@ -441,7 +441,7 @@ fn is_live_repl_line(lower: &str) -> bool {
 
 /// Detect a stuck state from the (already ANSI-stripped) tail. First match wins,
 /// ordered most-specific first.
-fn detect_stuck(text: &str) -> Option<StuckKind> {
+pub(crate) fn detect_stuck(text: &str) -> Option<StuckKind> {
     let lower = text.to_lowercase();
 
     // OOM: Claude died. Only the LAST signal within the tail window counts,
@@ -611,13 +611,13 @@ impl Dialog {
 
 /// Cap on `PendingInput.question`'s length — a client turns this straight
 /// into UI, so a runaway pane read must not blow up the row or the wire.
-const PENDING_QUESTION_MAX: usize = 300;
+pub(crate) const PENDING_QUESTION_MAX: usize = 300;
 /// Cap on each `PendingOption.label`'s length.
-const PENDING_LABEL_MAX: usize = 200;
+pub(crate) const PENDING_LABEL_MAX: usize = 200;
 /// Cap on the number of options `PendingInput` carries.
-const PENDING_OPTIONS_MAX: usize = 16;
+pub(crate) const PENDING_OPTIONS_MAX: usize = 16;
 /// Cap on `PendingInput.detail`'s length.
-const PENDING_DETAIL_MAX: usize = 300;
+pub(crate) const PENDING_DETAIL_MAX: usize = 300;
 
 /// The tool call a permission dialog asks about: the last `⏺ Tool(args)` /
 /// `● Tool(args)` line above the dialog, without its bullet. Taken only when
@@ -653,7 +653,7 @@ fn clean_line(line: &str) -> &str {
 /// whether it carries the `❯`/`›` selection glyph. `None` for anything else
 /// (`1.5 GB`, `42 + x`, prose) — the one parser [`numbered_choice`] and the
 /// dialog's `options` both build on.
-fn parse_choice(line: &str) -> Option<(u8, &str, bool)> {
+pub(crate) fn parse_choice(line: &str) -> Option<(u8, &str, bool)> {
     let rest = line.trim_start_matches(['❯', '›']);
     let selected = rest.len() != line.len();
     let rest = rest.trim_start();

@@ -2,7 +2,7 @@ import { sidebarView } from './work_view';
 import { fireEvent, render, screen, within, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
-import { readPref } from './prefs';
+import { readPref, uiLayout } from './prefs';
 
 // Three sample projects. Sessions are attached per-test so we can verify
 // the new "hide projects without sessions" behavior.
@@ -64,7 +64,7 @@ import { buildSessionsByProject, buildRelatedCountById } from './sidebar_index';
 import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects, loadProjects } from './projects';
-import { sessions, loadSessions, showBgAgents, showRowDetails, sidebarGroupBy, resetTombstonesForTests, type SessionRow } from './sessions';
+import { sessions, loadSessions, showBgAgents, showFriendlyNames, showRowDetails, sidebarGroupBy, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectedSession, selectSession, selectSessionExplicitly } from './selection';
 import { sessionFocus, focusSession } from './session_focus';
 import { hosts, loadHosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
@@ -879,6 +879,8 @@ describe('Sidebar (sessions-grouped view)', () => {
     await tick(); await tick();
     addProjectRequest.set({});
     await tick(); await tick();
+    // Add project opens on From GitHub (redesign 6.11); this adds by URL.
+    await fireEvent.click(screen.getByTestId('add-mode-clone'));
     await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'newowner/fresh-repo' } });
     await fireEvent.click(screen.getByTestId('add-create'));
     await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
@@ -1970,7 +1972,8 @@ describe('Sidebar: a hub contract skew', () => {
     await tick(); await tick();
     addProjectRequest.set({});
     await tick(); await tick();
-    // A valid repository would enable Create anywhere else; the blocked hub holds it.
+    // A valid repository would enable Add anywhere else; the blocked hub holds it.
+    await fireEvent.click(screen.getByTestId('add-mode-clone'));
     await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'acme/widgets' } });
     expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(true);
     const why = screen.getByTestId('add-blocked');
@@ -3307,5 +3310,221 @@ describe('Sidebar accessibility (7.2)', () => {
     const projRows = await screen.findAllByTestId('proj-row');
     for (const r of projRows) expect(r.getAttribute('aria-expanded')).toBe('true');
     await expectAccessible(container);
+  });
+});
+
+describe('Shared with me (redesign step 5.8)', () => {
+  const REMOTE: HubStatus = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    configured_url: 'https://fleet.example.com',
+  };
+  afterEach(() => uiLayout.set('classic'));
+
+  function fleet() {
+    const mine = { ...sessionFor(1, 'dev-mine'), owner_person_id: 7 };
+    const watched = { ...sessionFor(2, 'dev-watched'), owner_person_id: 9 };
+    const driven = { ...sessionFor(null, 'dev-driven'), owner_person_id: 9 };
+    return { mine, watched, driven };
+  }
+
+  it('the New layout lifts shared sessions into their own group', async () => {
+    const { mine, watched, driven } = fleet();
+    mockBackend(fakeProjects, [mine, watched, driven]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(7, [
+      { session_id: watched.id, level: 'watch' },
+      { session_id: driven.id, level: 'drive' },
+    ]);
+    uiLayout.set('new');
+    render(Sidebar);
+    await tick(); await tick();
+    const group = await screen.findByTestId('shared-with-me');
+    expect(within(group).getByTestId('shared-with-me-toggle').textContent).toContain('Shared with me (2)');
+    const inGroup = within(group).getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+    expect(inGroup.some((t) => t.includes('dev-watched'))).toBe(true);
+    expect(inGroup.some((t) => t.includes('dev-driven'))).toBe(true);
+    // Each row shows once: the tree and Other sessions no longer hold them.
+    const all = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+    expect(all.filter((t) => t.includes('dev-watched'))).toHaveLength(1);
+    expect(all.filter((t) => t.includes('dev-driven'))).toHaveLength(1);
+    expect(all.some((t) => t.includes('dev-mine'))).toBe(true);
+    expect(within(group).queryByText(/dev-mine/)).toBeNull();
+    await fireEvent.click(within(group).getByTestId('shared-with-me-toggle'));
+    expect(within(group).queryAllByTestId('sess-row')).toHaveLength(0);
+  });
+
+  it('Classic keeps shared sessions where they were', async () => {
+    const { mine, watched, driven } = fleet();
+    mockBackend(fakeProjects, [mine, watched, driven]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(7, [{ session_id: watched.id, level: 'watch' }]);
+    render(Sidebar);
+    await tick(); await tick();
+    await screen.findAllByTestId('sess-row');
+    expect(screen.queryByTestId('shared-with-me')).toBeNull();
+  });
+});
+
+describe('Sidebar rows and the lost fold in the New layout (parity P8, H7, H8)', () => {
+  beforeEach(() => {
+    uiLayout.set('new');
+    sidebarGroupBy.set('project');
+    showFriendlyNames.set(true);
+  });
+  afterEach(() => {
+    uiLayout.set('classic');
+    showFriendlyNames.set(true);
+  });
+
+  function lostOn(host: string, n: number): SessionRow[] {
+    return Array.from({ length: n }, (_, i) => ({
+      ...sessionFor(1, `${host}-lost-${i}`),
+      host_alias: host,
+      lost_at: 50,
+      claude_session_id: `c-${host}-${i}`,
+      claude_status: 'blocked' as const,
+    }));
+  }
+
+  it('New layout: a mass loss folds into "12 stopped on trn" with Restore, and only the live row is in the tree', async () => {
+    const waiting = { ...sessionFor(2, 'dev-waiting'), claude_status: 'blocked' as const };
+    mockBackend(fakeProjects, [...lostOn('trn', 12), waiting]);
+    render(Sidebar);
+    await tick(); await tick();
+    const fold = screen.getByTestId('lost-fold');
+    expect(within(fold).getByTestId('lost-fold-toggle')).toHaveTextContent('12 stopped on trn');
+    expect(within(fold).getByTestId('lost-fold-restore')).toHaveTextContent('Restore');
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
+  });
+
+  it('New layout: the fold expands to its rows', async () => {
+    mockBackend(fakeProjects, lostOn('trn', 3));
+    render(Sidebar);
+    await tick(); await tick();
+    const toggle = screen.getByTestId('lost-fold-toggle');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryAllByTestId('sess-row')).toHaveLength(0);
+    await fireEvent.click(toggle);
+    await tick();
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    const rows = within(screen.getByTestId('lost-fold')).getAllByTestId('sess-row');
+    expect(rows.map((r) => r.textContent)).toEqual(
+      expect.arrayContaining([expect.stringContaining('trn-lost-0'), expect.stringContaining('trn-lost-2')]),
+    );
+  });
+
+  it('New layout: two lost rows are not a mass loss and stay where they are', async () => {
+    mockBackend(fakeProjects, lostOn('trn', 2));
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('lost-fold')).toBeNull();
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
+  });
+
+  it('New layout: Restore on the fold plans, confirms, then restores', async () => {
+    const lost = lostOn('trn', 3);
+    mockBackend(fakeProjects, lost);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    const calls: { dry_run: boolean; session_ids: number[] | null }[] = [];
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (c: string, x?: unknown) => {
+      if (c === 'restore_host_sessions') {
+        const a = (x as { args: { host_alias: string; dry_run: boolean; session_ids: number[] | null } }).args;
+        calls.push({ dry_run: a.dry_run, session_ids: a.session_ids });
+        return {
+          host_alias: a.host_alias,
+          dry_run: a.dry_run,
+          plan: lost.map((s) => ({
+            session_id: s.id,
+            tmux_name: s.tmux_name,
+            cwd: null,
+            claude_session_id: s.claude_session_id,
+            friendly_name: null,
+            action: 'restore',
+            reason: null,
+          })),
+          results: a.dry_run ? [] : lost.map((s) => ({ session_id: s.id, tmux_name: s.tmux_name, ok: true, error: null })),
+        };
+      }
+      return base(c, x);
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('lost-fold-restore'));
+    const confirm = await screen.findByTestId('lost-fold-confirm');
+    expect(screen.getByTestId('confirm-dialog')).toHaveTextContent('trn-lost-1');
+    expect(calls).toEqual([{ dry_run: true, session_ids: lost.map((s) => s.id) }]);
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]).toEqual({ dry_run: false, session_ids: lost.map((s) => s.id) });
+    await waitFor(() => expect(get(toasts).some((t) => t.message === 'Restored 3 of 3 sessions on trn.')).toBe(true));
+  });
+
+  it('New layout: a ghost row stays one line with an unbracketed host badge', async () => {
+    const ghost = { ...sessionFor(2, 'dev-ghost'), status: 'ghost', lost_at: 5 };
+    mockBackend(fakeProjects, [ghost]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('sess-row');
+    expect(row.querySelector('.sess-lines')).toBeNull();
+    expect(row.querySelector('.sess-details')).toBeNull();
+    expect(screen.getByTestId('host-badge').textContent).toBe('local');
+  });
+
+  it('New layout: the row shows the friendly name with the tmux name secondary', async () => {
+    const named = { ...sessionFor(1, 'dev-martin-janci-claude-fleet--fix-login'), friendly_name: 'Fix login' };
+    mockBackend(fakeProjects, [named]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('sess-row');
+    expect(row.querySelector('.sess-line1 .sess-name')).toHaveTextContent('Fix login');
+    const tmux = screen.getByTestId('sess-tmux-name');
+    expect(tmux).toHaveTextContent('dev-martin-janci-claude-fleet--fix-login');
+    expect(tmux.closest('[data-testid="sess-details"]')).not.toBeNull();
+  });
+
+  it('New layout: the Friendly names switch in ⋯ swaps the row to the tmux name and persists', async () => {
+    const named = { ...sessionFor(1, 'dev-martin-janci-claude-fleet--fix-login'), friendly_name: 'Fix login' };
+    mockBackend(fakeProjects, [named]);
+    render(Sidebar);
+    await tick(); await tick();
+    await openViewOptions();
+    const sw = within(screen.getByTestId('view-options')).getByTestId('friendly-name-toggle');
+    expect(sw).toHaveAttribute('aria-checked', 'true');
+    await fireEvent.click(sw);
+    await tick();
+    expect(sw).toHaveAttribute('aria-checked', 'false');
+    const row = screen.getByTestId('sess-row');
+    expect(row.querySelector('.sess-line1 .sess-name')).toHaveTextContent('dev-martin-janci-claude-fleet--fix-login');
+    expect(row).not.toHaveTextContent('Fix login');
+    expect(JSON.parse(localStorage.getItem('cf:pref:show-friendly-names')!)).toBe(false);
+    await fireEvent.click(sw);
+    await tick();
+    expect(sw).toHaveAttribute('aria-checked', 'true');
+    expect(row.querySelector('.sess-line1 .sess-name')).toHaveTextContent('Fix login');
+    expect(JSON.parse(localStorage.getItem('cf:pref:show-friendly-names')!)).toBe(true);
+  });
+
+  it('New layout: the Row details switch in ⋯ hides the second row line and persists', async () => {
+    mockBackend(fakeProjects, [{ ...sessionFor(1, 'dev-a'), started_at: Math.floor(Date.now() / 1000) - 60 }]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    await openViewOptions();
+    const pill = within(screen.getByTestId('view-options')).getByTestId('toggle-row-details');
+    expect(pill).toHaveAttribute('aria-checked', 'true');
+    await fireEvent.click(pill);
+    await tick();
+    expect(screen.queryByTestId('sess-details')).toBeNull();
+    expect(pill).toHaveAttribute('aria-checked', 'false');
+    expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(false);
+    await fireEvent.click(pill);
+    await tick();
+    expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    expect(pill).toHaveAttribute('aria-checked', 'true');
+    expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(true);
   });
 });

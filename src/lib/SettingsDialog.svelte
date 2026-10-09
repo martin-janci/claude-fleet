@@ -37,6 +37,9 @@
   import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
   import { pushError } from './toasts';
   import Modal from './Modal.svelte';
+  import WizardDialog from './forms/WizardDialog.svelte';
+  import { WIZARDS } from './forms/wizards';
+  import type { Values } from './forms/forms';
   import McpSettings from './McpSettings.svelte';
   import AppearanceSettings from './AppearanceSettings.svelte';
   import { loadHostTokens } from './host_actions';
@@ -169,8 +172,10 @@
   // client, but it owns no fleet either, and the backend refuses the same
   // panels. See `ownsTheFleet`.
   const ownsFleet = $derived(ownsTheFleet($hubStatus));
+  /** The URL the link wizard opens with: the configured hub's, to pair again. */
   let hubUrlDraft = $state('');
-  let hubCode = $state('');
+  /** The hub link wizard (step 10.12: one fleet.form/1 spec, `link_hub`). */
+  let hubLinking = $state(false);
   let hubAllowPlaintext = $state(false);
   /** Set only after the backend has refused plaintext *in words*: the opt-in
    *  is not a checkbox anyone can tick past without having read why. */
@@ -183,21 +188,25 @@
    *  see `hubStrandedToken`. Asked once, on open, and only while standalone. */
   let hubStranded = $state(false);
 
-  const hubPairable = $derived(
-    !hubBusy && hubUrlDraft.trim() !== '' && hubCode.trim() !== '',
-  );
+  function openHubLink() {
+    hubError = null;
+    hubPlaintextRefused = false;
+    hubAllowPlaintext = false;
+    hubLinking = true;
+  }
 
-  async function doPair() {
+  async function doPair(values: Values) {
     hubBusy = true;
     hubError = null;
-    const r = await hubPair(hubUrlDraft, hubCode, hubAllowPlaintext);
+    const r = await hubPair(String(values.url ?? ''), String(values.code ?? ''), hubAllowPlaintext);
     hubBusy = false;
     if (r.ok) {
       hubRestartNeeded = r.value.restart_required;
       hubPlaintextRefused = false;
-      // The code dies on first use; leaving it in the box invites a second
-      // attempt that can only fail.
-      hubCode = '';
+      hubUrlDraft = r.value.configured_url ?? String(values.url ?? '');
+      // The code dies on first use: the wizard closes with it rather than
+      // inviting a second attempt that can only fail.
+      hubLinking = false;
     } else {
       hubError = r.error.message;
       if (r.error.code === 'E_HUB_PLAINTEXT') hubPlaintextRefused = true;
@@ -640,49 +649,40 @@
 
       {#if !isRemote || hubRestartNeeded}
         <div class="mcp-field">
-          <span class="lbl">url</span>
-          <input
-            class="port base-input"
-            type="text"
-            spellcheck="false"
-            placeholder="https://fleet.example.com"
-            bind:value={hubUrlDraft}
-            disabled={hubBusy}
-            data-testid="hub-url"
-            aria-label="Hub URL" />
-        </div>
-        <div class="mcp-field">
-          <span class="lbl">code</span>
-          <input
-            class="port base-input"
-            type="text"
-            spellcheck="false"
-            placeholder="ABCD1234"
-            bind:value={hubCode}
-            disabled={hubBusy}
-            data-testid="hub-code"
-            aria-label="Pairing code" />
-          <button onclick={doPair} disabled={!hubPairable} data-testid="hub-pair">
-            {#if hubBusy}<Loader name="comet" size={12} class="btn-loader" />{/if}{hubBusy ? 'Pairing…' : 'Pair'}
+          <button onclick={openHubLink} disabled={hubBusy} data-testid="hub-link">
+            {$hubStatus.configured_url ? 'Pair again…' : 'Link to a hub…'}
           </button>
         </div>
       {/if}
 
-      {#if hubError}
+      {#if hubError && !hubLinking}
         <p class="err" role="alert" data-testid="hub-error">{hubError}</p>
       {/if}
-      {#if hubPlaintextRefused}
-        <!-- Only after the refusal, and only with the reason above it: the
-             opt-in is a decision someone makes having read what it costs,
-             not a box that was already there to be ticked past. -->
-        <label class="toggle">
-          <input
-            type="checkbox"
-            bind:checked={hubAllowPlaintext}
-            data-testid="hub-allow-plaintext" />
-          Send the client token in the clear anyway — this hop is already
-          private (a tunnel, a VPN, a container network)
-        </label>
+      {#if hubLinking}
+        <WizardDialog
+          wizard={WIZARDS.link_hub}
+          initial={{ url: hubUrlDraft }}
+          busy={hubBusy}
+          error={hubError}
+          errorTestid="hub-error"
+          run={(v) => void doPair(v)}
+          onclose={() => (hubLinking = false)}>
+          {#snippet extra()}
+            {#if hubPlaintextRefused}
+              <!-- Only after the refusal, and only with the reason above it: the
+                   opt-in is a decision someone makes having read what it costs,
+                   not a box that was already there to be ticked past. -->
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  bind:checked={hubAllowPlaintext}
+                  data-testid="hub-allow-plaintext" />
+                Send the client token in the clear anyway — this hop is already
+                private (a tunnel, a VPN, a container network)
+              </label>
+            {/if}
+          {/snippet}
+        </WizardDialog>
       {/if}
       {#if hubRestartNeeded}
         <p class="hook-desc" data-testid="hub-restart">

@@ -83,6 +83,8 @@ export interface Section {
   advanced?: boolean;
   /** A record's `count` / `money` fields shown as tiles. */
   tiles?: boolean;
+  /** Choice-set settings over the same options shown as one grid. */
+  matrix?: boolean;
   when?: Condition;
   items: Item[];
 }
@@ -191,7 +193,8 @@ export type KindDesc =
   | { type: 'path_map' }
   | { type: 'id_set' }
   | { type: 'price_map' }
-  | { type: 'text'; max: number };
+  | { type: 'text'; max: number }
+  | { type: 'time_range' };
 
 export type Unit =
   | 'none'
@@ -242,7 +245,9 @@ export async function loadDescriptors(): Promise<Result<Descriptor[]>> {
   return r;
 }
 
-export function fetchSource(ref: SourceRef): Promise<Result<unknown>> {
+export function fetchSource(ref: SourceRef, spec?: SourceSpec): Promise<Result<unknown>> {
+  // A live source has its own command, which routes to the hub (11.9b).
+  if (spec?.live) return invokeCmd<unknown>(spec.live.command);
   return invokeCmd<unknown>('fetch_page_source', { id: ref.id, params: ref.params ?? null });
 }
 

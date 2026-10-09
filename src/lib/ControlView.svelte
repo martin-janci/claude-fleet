@@ -2,11 +2,14 @@
   Control (Orbit Fleet redesign step 9.1, the MissionControl board): the New
   layout's rail item for the fleet agent. Chat is today's operator panel in
   the right column instead of a floating sheet; Today moved here from the
-  Inbox and keeps ⌘⇧T. The Views panel beside the chat is step 9.4.
+  Inbox and keeps ⌘⇧T. The Views panel beside the chat (step 9.4) shows Needs
+  you, the session in focus, Pull requests and Today without leaving Control.
 -->
 <script lang="ts">
   import AgentPanel from './AgentPanel.svelte';
   import TodayView from './TodayView.svelte';
+  import ControlViewsPanel from './ControlViewsPanel.svelte';
+  import { controlViews, setViewsOpen } from './control_views';
   import { controlTab, type ControlTab } from './control';
   import { shortcutLabel } from './shortcuts';
   import type { AgentContextInput } from './agent_context';
@@ -37,12 +40,26 @@
       {/each}
     </div>
     <span class="hint">talk to the fleet · it hands work to sessions and missions</span>
+    {#if !$controlViews.open}
+      <button
+        type="button"
+        class="btn btn--chip views-open"
+        data-testid="control-views-open"
+        title="Show the views beside the chat"
+        onclick={() => setViewsOpen(true)}>Views</button
+      >
+    {/if}
   </header>
-  <div class="body" role="tabpanel">
-    {#if $controlTab === 'today'}
-      <TodayView />
-    {:else}
-      <AgentPanel embedded {contextInput} />
+  <div class="split" class:with-views={$controlViews.open}>
+    <div class="body" role="tabpanel">
+      {#if $controlTab === 'today'}
+        <TodayView />
+      {:else}
+        <AgentPanel embedded {contextInput} />
+      {/if}
+    </div>
+    {#if $controlViews.open}
+      <ControlViewsPanel />
     {/if}
   </div>
 </section>
@@ -75,8 +92,20 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .body {
+  .views-open {
+    margin-left: auto;
+    flex: none;
+  }
+  .split {
     flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .split.with-views {
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+  }
+  .body {
     min-height: 0;
     overflow: auto;
   }

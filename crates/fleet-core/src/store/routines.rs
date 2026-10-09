@@ -103,7 +103,21 @@ pub struct RoutineRunRow {
     pub started_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<i64>,
+    /// What the run came to (migration 133, step 8.10): one of
+    /// [`ROUTINE_RUN_OUTCOMES`], `None` until something answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// Who answered it: `exit` | `rule` | `jev`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_source: Option<String>,
 }
+
+/// `routine_runs.outcome` (migration 133): every value its `CHECK` admits.
+pub const ROUTINE_RUN_OUTCOMES: [&str; 4] = ["did_work", "nothing", "failed", "needs_person"];
+
+/// `routine_runs.outcome_source`, weakest first: an answer never replaces
+/// a stronger one, so a failed exit wins over a rule and both over Jev.
+pub const ROUTINE_RUN_OUTCOME_SOURCES: [&str; 3] = ["jev", "rule", "exit"];
 
 /// A run to record.
 #[derive(Debug, Clone, Default)]
@@ -152,7 +166,8 @@ fn routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
 }
 
 const RUN_COLS: &str = "id, routine_id, trigger, trigger_ref, state, reason, session_id, \
-                        cost_micros, scheduled_for, started_at, finished_at";
+                        cost_micros, scheduled_for, started_at, finished_at, outcome, \
+                        outcome_source";
 
 fn run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRunRow> {
     Ok(RoutineRunRow {
@@ -167,6 +182,8 @@ fn run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRunRow> {
         scheduled_for: r.get(8)?,
         started_at: r.get(9)?,
         finished_at: r.get(10)?,
+        outcome: r.get(11)?,
+        outcome_source: r.get(12)?,
     })
 }
 
@@ -420,9 +437,12 @@ impl Store {
         let now = r.at;
         let finished = (r.state != "running").then_some(now);
         self.conn.execute(
+            // A run that failed before it started is `failed` from its exit
+            // (step 8.10); nothing later may say otherwise.
             "INSERT INTO routine_runs (routine_id, trigger, trigger_ref, state, reason, \
-               session_id, scheduled_for, started_at, finished_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+               session_id, scheduled_for, started_at, finished_at, outcome, outcome_source) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
+               CASE ?4 WHEN 'failed' THEN 'failed' END, CASE ?4 WHEN 'failed' THEN 'exit' END)",
             rusqlite::params![
                 r.routine_id,
                 r.trigger,
@@ -520,5 +540,59 @@ impl Store {
             rusqlite::params![state, reason, cost_micros, now, id],
         )?;
         Ok(())
+    }
+
+    /// Record what a finished run came to (migration 133, step 8.10).
+    /// Refuses a value outside [`ROUTINE_RUN_OUTCOMES`] /
+    /// [`ROUTINE_RUN_OUTCOME_SOURCES`], and never lets a weaker source
+    /// replace a stronger one's answer (a failed exit stands whatever Jev
+    /// says). Answers whether the row changed.
+    pub fn set_routine_run_outcome(
+        &self,
+        id: i64,
+        outcome: &str,
+        source: &str,
+    ) -> Result<bool, IpcError> {
+        if !ROUTINE_RUN_OUTCOMES.contains(&outcome) {
+            return Err(IpcError::new(
+                crate::ipc_error::codes::E_INVALID,
+                format!(
+                    "a run's outcome is one of {}, not {outcome:?}",
+                    ROUTINE_RUN_OUTCOMES.join(", ")
+                ),
+            ));
+        }
+        let Some(rank) = ROUTINE_RUN_OUTCOME_SOURCES
+            .iter()
+            .position(|s| *s == source)
+        else {
+            return Err(IpcError::new(
+                crate::ipc_error::codes::E_INVALID,
+                format!(
+                    "a run's outcome comes from one of {}, not {source:?}",
+                    ROUTINE_RUN_OUTCOME_SOURCES.join(", ")
+                ),
+            ));
+        };
+        let n = self.conn.execute(
+            "UPDATE routine_runs SET outcome = ?1, outcome_source = ?2 \
+             WHERE id = ?3 AND state <> 'running' \
+               AND (outcome IS NOT ?1 OR outcome_source IS NOT ?2) \
+               AND (CASE outcome_source WHEN 'jev' THEN 0 WHEN 'rule' THEN 1 \
+                    WHEN 'exit' THEN 2 ELSE -1 END) <= ?4",
+            rusqlite::params![outcome, source, id, rank as i64],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Finished runs nothing has answered yet, oldest first: what Jev's
+    /// routine_run_outcome use case reads once it is on.
+    pub fn routine_runs_without_outcome(&self, limit: i64) -> Result<Vec<RoutineRunRow>, IpcError> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {RUN_COLS} FROM routine_runs \
+             WHERE state = 'done' AND outcome IS NULL ORDER BY id LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map([limit], run)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }

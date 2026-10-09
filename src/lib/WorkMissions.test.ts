@@ -2,7 +2,7 @@
 // its detail with the lifecycle moves the state allows, a new task under its
 // root, and a refusal shown as text.
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -12,6 +12,8 @@ import { hosts } from './hosts';
 import { uiLayout } from './prefs';
 import {
   doneWhenRows,
+  finalMoveQuestion,
+  splitMoves,
   eventSentence,
   moveLabel,
   autonomyWords,
@@ -126,6 +128,68 @@ describe('WorkMissions', () => {
     await flush();
     expect(calls('set_mission_state')[0]).toEqual({ mission_id: 4, state: 'active', expected_version: 1 });
     expect(screen.getByTestId('mission-move-paused').textContent).toBe('Pause');
+  });
+
+  describe('the ⋯ menu for the moves that end a mission (parity P19)', () => {
+    async function openActive() {
+      current = mission({ state: 'active' });
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+    }
+
+    it('New: Pause stays a button; Complete, Mark failed and Cancel ask first from ⋯', async () => {
+      uiLayout.set('new');
+      try {
+        await openActive();
+        expect(screen.getByTestId('mission-move-paused').textContent).toBe('Pause');
+        for (const to of ['completed', 'failed', 'cancelled']) expect(screen.queryByTestId(`mission-move-${to}`)).toBeNull();
+        await fireEvent.click(screen.getByTestId('mission-more'));
+        expect(screen.getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['Complete…', 'Mark failed…', 'Cancel…']);
+        await fireEvent.click(screen.getByTestId('mission-menu-failed'));
+        expect(screen.queryByTestId('mission-more-menu')).toBeNull();
+        expect(screen.getByTestId('mission-move-confirm-row').textContent).toContain('Mark Payments v2 failed?');
+        expect(calls('set_mission_state')).toEqual([]);
+        await fireEvent.click(screen.getByTestId('mission-move-keep'));
+        expect(screen.queryByTestId('mission-move-confirm-row')).toBeNull();
+        await fireEvent.click(screen.getByTestId('mission-more'));
+        await fireEvent.click(screen.getByTestId('mission-menu-completed'));
+        await fireEvent.click(screen.getByTestId('mission-move-confirm'));
+        await flush();
+        expect(calls('set_mission_state')).toEqual([{ mission_id: 4, state: 'completed', expected_version: 1 }]);
+        expect(screen.queryByTestId('mission-more')).toBeNull();
+      } finally {
+        uiLayout.set('classic');
+      }
+    });
+
+    it('New: Esc closes the menu and a draft offers only Cancel in it', async () => {
+      uiLayout.set('new');
+      try {
+        render(WorkMissions);
+        await flush();
+        await fireEvent.click(screen.getByTestId('mission-row'));
+        await flush();
+        expect(screen.getByTestId('mission-move-active').textContent).toBe('Start');
+        await fireEvent.click(screen.getByTestId('mission-more'));
+        expect(screen.getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['Cancel…']);
+        await fireEvent.keyDown(screen.getByTestId('mission-more-menu'), { key: 'Escape' });
+        expect(screen.queryByTestId('mission-more-menu')).toBeNull();
+      } finally {
+        uiLayout.set('classic');
+      }
+    });
+
+    it('Classic keeps the flat buttons, with no ⋯', async () => {
+      uiLayout.set('classic');
+      await openActive();
+      expect(screen.queryByTestId('mission-more')).toBeNull();
+      expect(screen.getByTestId('mission-move-failed').textContent).toBe('Mark failed');
+      await fireEvent.click(screen.getByTestId('mission-move-cancelled'));
+      await flush();
+      expect(calls('set_mission_state')).toEqual([{ mission_id: 4, state: 'cancelled', expected_version: 1 }]);
+    });
   });
 
   it('adds a new task under the root and into the mission', async () => {
@@ -641,5 +705,90 @@ describe('missions helpers', () => {
     expect(eventSentence({ id: 4, at: 1, kind: 'dep_added', actor: 'fleet', work_item_id: 3, payload: { depends_on: 2 } })).toBe(
       'Task 3 waits for 2',
     );
+  });
+});
+
+describe('splitMoves and finalMoveQuestion (parity P19)', () => {
+  it('keeps Start, Pause and Resume inline and puts the ending moves in ⋯', () => {
+    expect(splitMoves('active')).toEqual({ inline: ['paused'], menu: ['completed', 'failed', 'cancelled'] });
+    expect(splitMoves('paused')).toEqual({ inline: ['active'], menu: ['completed', 'failed', 'cancelled'] });
+    expect(splitMoves('draft')).toEqual({ inline: ['active'], menu: ['cancelled'] });
+    expect(splitMoves('completed')).toEqual({ inline: [], menu: [] });
+    expect(finalMoveQuestion('X', 'cancelled')).toBe('Cancel X? It stops changing; its tasks stay.');
+  });
+});
+
+// Redesign step 9.12 (Missions part): Comet trails beside the mission's
+// current steps while it runs; none while it waits on a person.
+describe('WorkMissions comet trails', () => {
+  const detailWith = (plan: unknown, state = 'active') => ({
+    mission: mission({ state }),
+    items: [item(10, 'Payments v2'), item(11, 'Schema'), item(12, 'API')],
+    graph: {
+      nodes: [
+        { item_id: 11, state: 'running', wave: 1 },
+        { item_id: 12, state: 'ready', wave: 1 },
+      ],
+      waves: 1,
+    },
+    events: [],
+    may_change: true,
+    plan,
+  });
+  const loop = (over: Record<string, unknown> = {}) => ({
+    steps: [],
+    cards: [],
+    autonomy: { level: 1, grant: null },
+    cost_micros: 0,
+    counts: { total: 2, open: 1 },
+    ...over,
+  });
+
+  /** Past the loaders' 400 ms delay, so an absent loader is really absent. */
+  const pastDelay = () => new Promise((r) => setTimeout(r, 450));
+
+  async function open(detail: unknown) {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_missions') return [(detail as { mission: Mission }).mission];
+      if (cmd === 'work_mission') return detail;
+      return null;
+    });
+    render(WorkMissions);
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    await pastDelay();
+  }
+
+  beforeEach(() => uiLayout.set('new'));
+  afterEach(() => uiLayout.set('classic'));
+
+  it('draws trails beside the running step only', async () => {
+    await open(detailWith(loop()));
+    const trails = await vi.waitFor(() => screen.getAllByTestId('mission-trails'));
+    expect(trails).toHaveLength(1);
+    expect(trails[0].closest('[data-testid="mission-node"]')?.getAttribute('data-state')).toBe('running');
+  });
+
+  it('stops while the mission waits on a person', async () => {
+    await open(
+      detailWith(
+        loop({ cards: [{ id: 1, mission_id: 4, decision_id: 'd', source: 'loop', kind: 'confirm', state: 'open', created_at: 1 }] }),
+      ),
+    );
+    expect(screen.queryByTestId('mission-trails')).toBeNull();
+  });
+
+  it('stops on an ask step, a paused mission and in Classic', async () => {
+    await open(detailWith(loop({ steps: [{ kind: 'ask', reason: 'Which repo?', auto: false }] })));
+    expect(screen.queryByTestId('mission-trails')).toBeNull();
+    document.body.innerHTML = '';
+    await open(detailWith(loop(), 'paused'));
+    expect(screen.queryByTestId('mission-trails')).toBeNull();
+    document.body.innerHTML = '';
+    uiLayout.set('classic');
+    await open(detailWith(loop()));
+    expect(screen.queryByTestId('mission-trails')).toBeNull();
   });
 });

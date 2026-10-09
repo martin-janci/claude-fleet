@@ -96,6 +96,7 @@ mapfile -t touched < <(git diff --name-only "$base" -- crates src src-tauri docs
 
 next=$((base_max + 1))
 moved=0
+changed=()
 for f in "${added[@]}"; do
   [[ "$f" =~ ^([0-9]+)_(.*)$ ]]
   old=$((10#${BASH_REMATCH[1]})); topic=${BASH_REMATCH[2]}
@@ -121,6 +122,7 @@ for f in "${added[@]}"; do
   # Doc comments: only the lines this branch added, never main's own.
   for t in "${touched[@]}"; do
     [[ -f "$t" ]] || continue
+    before="$(git hash-object "$t")"
     git show "$base:$t" > "$t.renumber-base" 2>/dev/null || : > "$t.renumber-base"
     OLD=$old NEW=$new BASEF="$t.renumber-base" perl -i -ne '
       BEGIN { open my $b, "<", $ENV{BASEF}; %seen = map { $_ => 1 } <$b>; }
@@ -131,12 +133,15 @@ for f in "${added[@]}"; do
       print;
     ' "$t"
     rm -f "$t.renumber-base"
+    if [[ "$(git hash-object "$t")" != "$before" ]]; then changed+=("$t"); fi
   done
 done
 
 [[ $dry == 1 ]] && exit 0
 if [[ $moved == 1 ]]; then
-  git add -A "$DIR" "$SCHEMA" "${touched[@]}" 2>/dev/null || git add -A "$DIR" "$SCHEMA"
+  # Only what this script edited: staging a file the merge left in conflict
+  # would mark it resolved with its markers still in.
+  git add -A "$DIR" "$SCHEMA" ${changed[@]+"${changed[@]}"}
 fi
 
 # 3. What is left for a look by hand.

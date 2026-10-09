@@ -345,7 +345,10 @@ pub fn spawn_account_usage_tick(
 ) -> tokio::task::JoinHandle<()> {
     let poller = Arc::new(AccountUsagePoller::new());
     // The last-known usage from before a restart, before the first poll.
-    account_usage_poll::restore_usage(&store, &cache);
+    let restored = account_usage_poll::restore_usage(&store, &cache);
+    // …and the limits in it, for `needs_attention`'s `account_limit` before
+    // the first poll answers (step 2.6).
+    bus.attention_seeded(&[], &restored);
     crate::rt::spawn(async move {
         let mut ticker = tokio::time::interval(USAGE_POLL_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

@@ -170,6 +170,35 @@ agent holding a host token can name another pane on its host, as everywhere
 else in the control API. The file mode (0600, in the session's own home) is
 the protection for the values, not the token.
 
+## Wizards are forms too
+
+The app's own wizards are the same format (redesign step 10.12): each one
+is a fleet.form/1 spec in `src/lib/forms/wizards/<id>.json`, listed in
+`src/lib/forms/wizards.ts` with its "Sending…" words and its loader. The one
+spec renders two ways:
+
+- **As a dialog**, `WizardDialog.svelte`: the spec's title and intro, the
+  steps, Cancel. Settings › Hub's *Link to a hub…* is `link_hub`.
+- **In the chat**, `ChatForm.svelte`: a card Control or the app writes into
+  the conversation. While the spec is still being written it draws in (a
+  small Atom, what is being read, each field once its name, type and label
+  are whole; `partial_spec.ts`); once whole it is the wizard.
+
+Choices only known when a wizard opens (the fleet's hosts, an owner's
+repositories) replace the file's example options through `withChoices`; a
+choice left with none leaves the form with the option that led to it.
+`add_project` is a chat wizard only: 6.11's dialog keeps its GitHub browser,
+which a form cannot hold. Its run (`add_project_wizard.ts`) adds each
+repository in turn, stops at the first failure and says what was added, and
+never creates a repository on GitHub (that needs the dialog's confirmation).
+
+Either way nothing runs until the last step's button is pressed: the
+button carries a Comet while it runs, the card then shrinks to one line,
+and a Pulse says what is starting. Never a modal over the chat or a
+full-screen loader. What the button does belongs to the screen that opens
+the wizard; the spec is data only. fleet-core's
+`every_wizard_spec_is_valid` validates every file there.
+
 ## When to use it instead of AskUserQuestion
 
 When the person may not be at the terminal, or the input is several

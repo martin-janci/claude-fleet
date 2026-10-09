@@ -171,6 +171,8 @@ pub struct GrantMissionArgs {
     pub hosts: Option<Vec<String>>,
     #[serde(default)]
     pub max_parallel: Option<u32>,
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 /// `pause_all_missions`.
@@ -747,6 +749,7 @@ pub(crate) mod routed {
             budget_cents: args.budget_cents,
             hosts: args.hosts,
             max_parallel: args.max_parallel,
+            profile: args.profile,
             ..write("mission_grant", Some(args.mission_id))
         };
         match backend.hub() {

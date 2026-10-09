@@ -144,6 +144,32 @@ describe('NewSessionDialog', () => {
     expect((newSessionCall![1] as any).args.host_alias).toBe('mefistos');
   });
 
+  // Step 5.13: while the create runs, the new layout's dialog shows the
+  // Pulse on its worktree step; nothing shows in Classic.
+  it('new layout: the create in flight shows the Pulse on the worktree step', async () => {
+    uiLayout.set('new');
+    let finish!: () => void;
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockImplementation(async (args) => {
+      sessionsModule.creatingStart.set({ host_alias: args.host_alias, name: args.name, kind: 'work' });
+      await new Promise<void>((r) => (finish = r));
+      sessionsModule.creatingStart.set(null);
+      return { ok: false, error: { code: 'E_INVALID', message: 'stop here' } } as never;
+    });
+    try {
+      render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+      await tick();
+      await fireEvent.click(screen.getByText('Create'));
+      await tick();
+      const pulse = await screen.findByTestId('new-session-pulse');
+      expect(pulse.textContent).toContain('Setting up worktree · 1 of 3');
+      finish();
+      await vi.waitFor(() => expect(screen.queryByTestId('new-session-pulse')).toBeNull());
+    } finally {
+      spy.mockRestore();
+      uiLayout.set('classic');
+    }
+  });
+
   it('sends the picked model and effort for a Claude session, nothing for a shell', async () => {
     const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
       ok: false,
@@ -2093,5 +2119,84 @@ describe('NewSessionDialog in the New layout', () => {
     expect(screen.queryByTestId('agent-codex')).toBeNull();
     expect(screen.getByTestId('launch-profile')).toBeTruthy();
     expect(screen.queryByTestId('run-background')).toBeNull();
+  });
+});
+
+// Redesign step 4.11 (New layout): with no host the project's rule keeps,
+// Jev N5 may pre-select one of the online hosts under their limit, with the
+// shared ProposedBy chip; the start answers the proposal.
+describe('NewSessionDialog host placement', () => {
+  const calls = (cmd: string) => (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === cmd);
+  const active = () => document.querySelector(".host-pick[aria-pressed='true']")?.getAttribute('data-alias');
+
+  function answer(suggestion: unknown) {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'propose_host_placement') return suggestion;
+      if (cmd === 'list_host_worktrees') return { host_alias: 'mefistos', project_id: 1, cloned: true, worktrees: [remoteMain] };
+      if (cmd === 'check_account_headroom') return { pause_at_pct: 90, chosen: null, over: false, suggestion: null, logins: [] };
+      if (cmd === 'new_session') return { id: 1 };
+      if (cmd === 'record_host_placement') return true;
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+  }
+
+  beforeEach(() => uiLayout.set('new'));
+  afterEach(() => uiLayout.set('classic'));
+
+  it('pre-selects the proposed host with the chip, and the start answers it', async () => {
+    answer({ host_alias: 'mefistos', confidence_pct: 80, run_id: 7 });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('new-session-host-proposed')).toBeTruthy());
+    expect(active()).toBe('mefistos');
+    expect(screen.getByTestId('new-session-host-proposed').textContent).toContain('Proposed by Jev');
+    expect(screen.getByTestId('new-session-host-proposed').textContent).toContain('80%');
+    await vi.waitFor(() => expect(worktreeLabels()).toContain('main'));
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('record_host_placement')).toHaveLength(1));
+    expect((calls('new_session')[0][1] as any).args.host_alias).toBe('mefistos');
+    expect((calls('record_host_placement')[0][1] as any).args).toEqual({ project_id: 1, host_alias: 'mefistos' });
+  });
+
+  it('Change goes back to the host it had, and the start then corrects the proposal', async () => {
+    answer({ host_alias: 'mefistos', confidence_pct: 80, run_id: 7 });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('new-session-host-proposed')).toBeTruthy());
+    await fireEvent.click(screen.getByText('Change'));
+    expect(active()).toBe('local');
+    expect(screen.queryByTestId('new-session-host-proposed')).toBeNull();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('record_host_placement')).toHaveLength(1));
+    expect((calls('record_host_placement')[0][1] as any).args.host_alias).toBe('local');
+  });
+
+  it('a host the project already keeps is never asked about', async () => {
+    answer({ host_alias: 'mefistos', confidence_pct: 80 });
+    render(NewSessionDialog, { props: { project, initialHost: 'local', onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await tick();
+    expect(calls('propose_host_placement')).toHaveLength(0);
+    expect(active()).toBe('local');
+  });
+
+  it('below the floor, or in Classic, nothing is pre-selected', async () => {
+    answer({ host_alias: 'mefistos', confidence_pct: 30 });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(calls('propose_host_placement')).toHaveLength(1));
+    await tick();
+    expect(active()).toBe('local');
+    expect(screen.queryByTestId('new-session-host-proposed')).toBeNull();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));
+    expect(calls('record_host_placement')).toHaveLength(0);
+  });
+
+  it('the Classic layout never asks', async () => {
+    uiLayout.set('classic');
+    answer({ host_alias: 'mefistos', confidence_pct: 80 });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await tick();
+    expect(calls('propose_host_placement')).toHaveLength(0);
   });
 });

@@ -30,6 +30,7 @@
 //! too frequent for a row each.
 
 pub mod cron;
+pub mod outcome;
 pub mod tick;
 
 use crate::ipc_error::{codes, lock, IpcError};
@@ -102,7 +103,7 @@ pub struct RoutineInput {
 }
 
 /// `routines { action: get }`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutineDetail {
     pub routine: RoutineRow,
     /// Newest first, at most [`RUNS_SHOWN`].
@@ -111,6 +112,10 @@ pub struct RoutineDetail {
     /// Whether this caller may change it: the UI's buttons, not a fence.
     #[serde(default)]
     pub may_change: bool,
+    /// The account its runs bill, "runs as … on mac" (redesign 8.7);
+    /// `None` when its login is on no known account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<crate::service::account_limits::LoginAccount>,
 }
 
 fn not_found(id: i64) -> IpcError {
@@ -189,6 +194,12 @@ pub fn get(store: &Mutex<Store>, scope: &ViewScope, id: i64) -> Result<RoutineDe
     Ok(RoutineDetail {
         runs: s.routine_runs(id, RUNS_SHOWN)?,
         may_change: may_change_routine(&s, scope, &routine)?,
+        account: crate::service::account_limits::login_account(
+            &s,
+            &routine.host_alias,
+            routine.profile.as_deref(),
+            crate::store::now_unix(),
+        )?,
         routine,
     })
 }
