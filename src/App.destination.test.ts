@@ -193,6 +193,27 @@ describe('App: the destination store', () => {
     }
   });
 
+  it('review r08: New layout, a board card opens its task beside the board', async () => {
+    uiLayout.set('new');
+    try {
+      await withBoardBackend(async () => {
+        const { getAllByTestId, queryByTestId } = render(App);
+        workBoardOpen.set(true);
+        await waitFor(() => expect(queryByTestId('board-view')).not.toBeNull());
+        await waitFor(() => expect(getAllByTestId('work-board-card').length).toBe(2));
+        expect(queryByTestId('work-task-detail')).toBeNull();
+        const card = getAllByTestId('work-board-card').find((el) => el.textContent?.includes('Write notes'))!;
+        await fireEvent.click(card);
+        await waitFor(() => expect(queryByTestId('work-task-detail')).not.toBeNull());
+        // The board stays: the task opens in the inspector column beside it.
+        expect(queryByTestId('board-view')).not.toBeNull();
+        expect(get(destination)).toBe('board');
+      });
+    } finally {
+      uiLayout.set('classic');
+    }
+  });
+
   it('New layout: the board offers its one-time move hint, and not again once dismissed', async () => {
     uiLayout.set('new');
     resetHints();
@@ -371,6 +392,16 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     const { getByTestId } = render(App);
     await fireEvent.click(getByTestId('rail-settings'));
     expect(get(settingsOpen)).toBe(true);
+    settingsOpen.set(false);
+  });
+
+  it('review r08: Settings opens from the rail while the sidebar is collapsed', async () => {
+    uiLayout.set('new');
+    const { getByTestId, queryByTestId } = render(App);
+    await fireEvent.click(getByTestId('sidebar-collapse'));
+    await waitFor(() => expect(queryByTestId('sidebar-expand')).not.toBeNull());
+    await fireEvent.click(getByTestId('rail-settings'));
+    await waitFor(() => expect(document.querySelector('.settings-dialog')).not.toBeNull());
     settingsOpen.set(false);
   });
 
