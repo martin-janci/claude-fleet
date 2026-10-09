@@ -5,6 +5,7 @@
   import { unarchiveSession } from './tidy';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
+  import PaneUnreadableNotice from './PaneUnreadableNotice.svelte';
   import { hostByAlias } from './hosts';
   import { Screen, rowToRuns, runsKey, runStyleCss, type Run, type RowShift } from './ansi';
   import { pointInRect, dropPoint } from './geometry';
@@ -1491,6 +1492,10 @@
         Connection lost.
         <button onclick={reconnect}>Reconnect</button>
       </div>
+    {/if}
+    {#if myShell == null}
+      <!-- J8 (5.11): the rules could not read the agent's screen. -->
+      <PaneUnreadableNotice session={$selectedSession} />
     {/if}
     <div class="header" data-testid="terminal-header" use:hintAnchor={{ id: 'terminal-header' }}>
       <!-- One name policy: the header names the session the same way the
