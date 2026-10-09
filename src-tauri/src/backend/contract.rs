@@ -143,8 +143,8 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 /// would never clear and Blame would fail with an unknown tool.
 ///
 /// Raised to 12 for revision 12: the desktop routes the prompt queue, the
-/// branch and range diffs, presence, peer linking and `list_account_usage`
-/// to tools a revision-11 hub lacks.
+/// branch and range diffs, presence, peer linking and shell terminals to
+/// tools a revision-11 hub lacks.
 pub const MIN_HUB_CONTRACT: u32 = 12;
 
 /// The highest hub wire-contract revision this build understands. A hub

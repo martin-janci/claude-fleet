@@ -867,6 +867,20 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             base_files: vec![],
         }),
     );
+    let terms = fleet_core::service::sessions::ShellTerminalsResult {
+        session_id: 1,
+        host_alias: "trn".into(),
+        terminals: vec![fleet_core::service::sessions::ShellTerminal {
+            n: 1,
+            tmux_name: "fleet-dev-t1".into(),
+        }],
+        opened: Some(1),
+    };
+    put(
+        "ShellTerminalsResult.terminals",
+        wire_keys(&terms.terminals[0]),
+    );
+    put("ShellTerminalsResult", wire_keys(&terms));
     let mut usage = fleet_core::service::account_usage::AccountUsageSnapshot::never_fetched("a");
     usage.usage = Some(Default::default());
     usage.subscription = Some("max".into());

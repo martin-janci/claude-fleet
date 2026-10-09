@@ -649,6 +649,16 @@
       "source",
       "value"
     ],
+    "ShellTerminalsResult": [
+      "host_alias",
+      "opened",
+      "session_id",
+      "terminals"
+    ],
+    "ShellTerminalsResult.terminals": [
+      "n",
+      "tmux_name"
+    ],
     "TaskRow": [
       "created_at",
       "error",
