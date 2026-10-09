@@ -15,7 +15,7 @@ pub const HANDOFFS_KEEP: i64 = 500;
 pub const HANDOFF_PREVIEW_MAX: usize = 160;
 
 /// One receipt to write.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewHandoff {
     /// `session` | `mission` | `task` | `tree`.
     pub kind: &'static str,
@@ -26,6 +26,25 @@ pub struct NewHandoff {
     pub item_id: Option<i64>,
     pub item_ids: Vec<i64>,
     pub preview: Option<String>,
+}
+
+/// A kind the table's `CHECK` accepts (review r02: a derived `Default` left
+/// `kind` empty, which the insert refuses). Every caller still names its own
+/// kind; this only keeps `..Default::default()` from building a row that
+/// cannot be written.
+impl Default for NewHandoff {
+    fn default() -> Self {
+        NewHandoff {
+            kind: "session",
+            tool: String::new(),
+            session_id: None,
+            task_id: None,
+            mission_id: None,
+            item_id: None,
+            item_ids: Vec::new(),
+            preview: None,
+        }
+    }
 }
 
 /// A work item a receipt points at, as it is now.
@@ -194,6 +213,14 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review r02: a default receipt is one the table accepts.
+    #[test]
+    fn a_default_receipt_can_be_written() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_control_handoff(&NewHandoff::default(), 100)
+            .unwrap();
+    }
 
     #[test]
     fn a_preview_is_the_first_line_cut_short() {

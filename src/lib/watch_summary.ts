@@ -16,6 +16,9 @@ export interface WatchSummary {
   check: SummaryCheck;
   since: number;
   turns: number;
+  /** The window reaches back past the newest 40 turns, which are all the
+   *  summary covers. Absent from a hub that predates it. */
+  turns_capped?: boolean;
   model: string;
   host_alias: string;
   at: number;
@@ -30,6 +33,17 @@ export function sessionSummarySince(sessionId: number, since: number): Promise<R
 export function defaultSince(lastViewedAt: number | null | undefined, now: number): number {
   if (lastViewedAt && lastViewedAt < now && now - lastViewedAt <= 86_400) return lastViewedAt;
   return now - 3_600;
+}
+
+/** The turns a summary is drafted from, read from the transcript's tail
+ *  (`watch_summary::READ_TURNS`). */
+export const READ_TURNS = 40;
+
+/** "from 3 turns", or "from the last 40 turns" when the window reaches
+ *  back past what was read. */
+export function turnsLabel(s: Pick<WatchSummary, 'turns' | 'turns_capped'>): string {
+  if (s.turns_capped) return `from the last ${s.turns} turns`;
+  return `from ${s.turns} turn${s.turns === 1 ? '' : 's'}`;
 }
 
 /** "13:20": a unix time as local HH:MM. */

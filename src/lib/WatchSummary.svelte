@@ -9,7 +9,7 @@
   import { draftedBy } from './ai_proposal';
   import DraftedLabel from './DraftedLabel.svelte';
   import type { SessionRow } from './sessions';
-  import { checkLabel, clock, defaultSince, sessionSummarySince, type WatchSummary } from './watch_summary';
+  import { checkLabel, clock, defaultSince, sessionSummarySince, turnsLabel, type WatchSummary } from './watch_summary';
 
   let { session }: { session: Pick<SessionRow, 'id' | 'last_viewed_at'> } = $props();
 
@@ -52,7 +52,7 @@
   }
 
   const meta = $derived(
-    summary ? draftedBy(summary.model, summary.host_alias, `from ${summary.turns} turn${summary.turns === 1 ? '' : 's'}`) : '',
+    summary ? draftedBy(summary.model, summary.host_alias, turnsLabel(summary)) : '',
   );
 </script>
 

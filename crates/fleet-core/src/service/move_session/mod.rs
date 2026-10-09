@@ -1899,7 +1899,7 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
     .saturating_mul(1024 * 1024);
     let target_taken = target_rows.into_iter().map(|r| r.tmux_name).collect();
     Ok(Snapshot {
-        launch: crate::service::sessions::stored_launch(s, row.id),
+        launch: crate::service::sessions::stored_launch(s, row.id)?,
         claude_id,
         branch,
         project_id,
