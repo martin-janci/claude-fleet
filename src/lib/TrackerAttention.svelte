@@ -1,7 +1,7 @@
 <script lang="ts">
   // Work graph M12.4 / decision D22: a failing tracker (an expired token, a
   // refused credential) raises ONE Attention item per tracker in the
-  // attention strip — "Reconnect Jira (acme)" — which opens Settings → Work.
+  // attention strip — "Reconnect Jira (acme)" — which opens Settings → Trackers.
   // One failing because it keeps skipping items it cannot store (M13.1)
   // reads "Sync skipping items — Jira (acme)" instead.
   // A degraded tracker (rate limited, briefly unreachable) does not: the

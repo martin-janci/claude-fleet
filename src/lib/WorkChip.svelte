@@ -83,8 +83,8 @@
     // add instead of pretending there is none.
     if (unbound) {
       t += ownStatus
-        ? ` · the dot is fleet's own status; connect its tracker in Settings → Work to see ${workKey.key}'s too`
-        : ` · connect its tracker in Settings → Work to see ${workKey.key}'s status`;
+        ? ` · the dot is fleet's own status; connect its tracker in Settings → Trackers to see ${workKey.key}'s too`
+        : ` · connect its tracker in Settings → Trackers to see ${workKey.key}'s status`;
     }
     if (suggested && proposed) t = `${proposedByLabel('jev')} · ${t}`;
     if (suggested) t += ' · suggestion: Confirm (y) or Not this (n)';

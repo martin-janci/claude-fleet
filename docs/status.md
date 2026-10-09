@@ -6,6 +6,40 @@ owner, by feature area — with the spec or plan behind each. Moved out of
 a default flips, update its paragraph here; when a paragraph stops being true,
 delete it rather than adding a correction after it.
 
+The Orbit Fleet redesign (plan
+`docs/ux/2026-10-08-orbit-fleet-redesign/transition-plan.md`, parity
+contract `docs/redesign/parity.md`) is landing step by step, and its New
+layout is built but OFF by default: Settings → Appearance → Layout picks
+Classic or New (`ui.layout`, default `classic`, `src/lib/prefs.ts`). New has
+a rail (`src/lib/rail.ts`: Control, Inbox, Sessions, Work, Automation,
+Accounts, Toolkit, Settings), the session inspector, and Get started with a
+first-run tour (10.5). Control is the operator's place: its Chat and Today
+tabs, the Views panel (9.4, 9.5), confirmations as cards (9.2), "Sent to a
+session" and "Sent to a mission" receipts (9.3, migration 140), tasks in
+Control (9.6) and the Library (9.7, `library_items`, migration 143, the
+`library` tool). Classic stays until step 13.1, and step 7.5 (parity
+sign-off) waits on every 0.5.4 row of the parity contract reading *Both*
+and the owner using New for a week. The redesign's backend is not behind
+the switch: M2's session facts (`sessions.agent`, `origin`,
+`last_viewed_at`, `turn_outcome`; migrations 121, 124, 125, 129) and
+account usage history (122), the Hosts page's probe facts (123), token use
+(126), the cost of fleet's own `claude -p` runs (127), every PR a session's
+branch has had (`pull_requests`, 128), cost per account (130), prompts
+queued for a busy session (133), the agent CLIs a host has (134) and the
+add-host wizard's state (135). The hub contract is revision 13
+(`CONTRACT_REVISION`, `crates/fleet-core/src/wire_contract.rs`):
+revisions 11 to 13 add tools a revision-10 hub does not serve, so the
+desktop and its hub are upgraded together.
+
+Sessions can run OpenAI's Codex CLI as well as Claude Code (redesign 12.2,
+`agent_adapter::CodexCli`, `sessions.agent` from migration 121):
+`new_session { agent: "codex" }` refuses a login profile, restart,
+recreate and repair resume the row as Codex, and its rollout feeds the
+Conversation tab. The New session dialog offers Codex only on a host that
+has it on its PATH (12.4b, migration 134). `move_session` refuses a
+non-Claude row, because only Claude's state is carried, and `agy` stays
+refused.
+
 Iterations 1–4a are landed (multi-host, accounts, cross-host sessions, prompt
 transfer, async/events rework), plus the MCP control API, background sessions,
 the background reconcile tick, fleet_health roll-up, and the persistent session
@@ -110,7 +144,9 @@ Work graph M9.1 / M9.2 are landed: the Today view (`work { action: today }`,
 Details' empty state and ⌘⇧T, a plain-text Copy standup) and the ticket
 context card (`work { action: card }`, acceptance criteria from the cache,
 Insert into composer with the hub-fenced `composer_text` — never sent).
-M9.7 (the operator's starts and kills always confirmed; refused on a hub),
+M9.7 (the operator's starts and kills always confirmed; on a hub they wait,
+`E_CONFIRM_REQUIRED`, for the owner's paired device to answer through
+`mcp_confirms` / `answer_mcp_confirm`, redesign 9.2),
 M9.3 (agent-written handover on demand, `work_link { action: handover }`)
 and M9.6 (multi-repo start, `work_link start { project_ids }`) are landed
 too. Write-back (D3), dead-session summaries (D10) and webhooks (D13) were
@@ -223,7 +259,10 @@ work-link | status-map` (`service/decide/bench/`: BM25, leakage guard, time
 split, calibration, the test map's acceptance lines, D39 `--export-unlinked`
 / `--labels`) with the `claude -p haiku` baseline (D33,
 `service/decide/haiku.rs`: a named host of the SAME org only, prompt on
-stdin). J1 has no live adapter: it waits on its acceptance lines.
+stdin). J1's live adapter is built, off (`decide.jev.work_link`,
+`service/decide/work_link.rs`, redesign 6.8): in assist it pre-selects a
+suggestion shown as "Proposed by Jev" (rule R12), and moving it past shadow
+waits on its acceptance lines.
 Their diagnostics are built too (evidence, never an acceptance line):
 `--perturb` (dataset C, `bench/perturb.rs`; J3 in `status_map_robust.rs`,
 J1 in `work_link_robust.rs`), J3's paired languages (dataset B, `pair` ids,
@@ -243,7 +282,17 @@ Five more use cases, K1–K5, were accepted by the owner on 2026-10-07 (test
 map §5): K1 `start_project` next, K5 with the picker's phase 2, K2 and K3 as
 shadow slots in Mode B and the mission loop, K4 last. K1 is built, off
 (`decide.jev.start_project`, `service/decide/start_project.rs`): the start
-popover pre-selects Jev's repository in assist; K2–K5 are not built.
+popover pre-selects Jev's repository in assist. K2 (`decide.jev.control_route`,
+which mission or session a Control message is about, redesign 9.9), K3
+(`decide.jev.mission_triage`, a stuck mission's outcome and next step, 9.10),
+K4 (`decide.jev.duplicate`, a proposed task that may repeat one, 6.9) and K5
+(`decide.jev.work_placement`, a new task's group, 6.9) are built too, all
+off. So are N3 `sibling_repos` (3.12), N5 `host_placement` (4.11), J5
+`quick_answer` (10.9), N4 / J10 `adopt_target` / `restore_target` (Lost and
+found, 4.12), N1 `related_session` (6.9), J9 `summary_check` (11.11), J2
+`turn_outcome` (5.11) and N6 `routine_run_outcome` (8.10), each with its
+own `decide.jev.<name>` mode in `service/decide/` (N4 and J10 share
+`lost_target.rs`).
 
 Task → session (spec `docs/superpowers/specs/2026-10-06-task-to-session-flow-design.md`,
 recommendations TS1–TS14 accepted 2026-10-07): A0, A1, A2 and C0 are landed, A3 in part.
@@ -307,8 +356,7 @@ mission_repo | mission_item | mission_delete }` (`service/work/missions.rs`)
 fence by the mission's org first, then its owner or the org's members (only
 an org admin changes one); per-host and peer tokens are refused. Seven routed
 desktop commands (`commands/missions.rs`) back the Work view's Missions tab.
-Projects carry no org, so the repo allow-list is not org-checked yet. The
-phone does not show missions yet. O2 is built: `work_item_deps` and
+Projects carry no org, so the repo allow-list is not org-checked yet. O2 is built: `work_item_deps` and
 `work_items.held_at` (migration 116), drawn by `work_link { dep | hold }`
 (cycles and cross-org edges refused in the store, `store/item_deps.rs`);
 `service/work/graph.rs` derives each member's state (ready, waiting,
@@ -352,7 +400,7 @@ proposes a resolve task for a conflict (`integrate.rs`). What the loop does by
 itself is the least of the mission's level, `orchestrator.max_level`
 (default 1: a person presses every step) and a person's grant
 (`work_link { mission_grant }`: level, hours, budget, hosts, and the login
-`profile` its runs bill); brakes pause the mission on a spent budget or no
+`profile` its runs bill, migration 137); brakes pause the mission on a spent budget or no
 progress, a run on an account at or past `accounts.pause_at` waits (one
 `account_limit` event says why) until the account is back under it, and
 `missions_pause_all` pauses
@@ -367,6 +415,23 @@ by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell
 prefilter that asks the hub only about those commands and lets the command
 run when the hub does not answer. Hosts get it on re-provisioning
 (`provision_stale`); branch protection on the remote stays the backstop.
+In the New layout, Jev K3 (off) proposes a stuck mission's outcome and next
+step, and Control shows a "Sent to a mission" receipt for what the operator
+handed over (`control_handoffs`, migration 140, redesign 9.3).
+
+Routines are landed (`service/routines/`, migrations 131 and 139, redesign
+8.5 to 8.10): a saved prompt that starts a session on a cron schedule, on a
+fleet event or when a person presses Run now. The scheduler stops on
+`automation.paused`, a fire past the routine's day budget is skipped, a run
+past its run budget fails and pauses the routine, and a run whose account
+is at or past `accounts.pause_at` is skipped (8.7). Each finished run
+records what it came to (8.10; Jev N6 is off), and a failed run shows in
+the Inbox. `runs` (8.3, migration 141) lists tasks, missions, Jev,
+`claude -p` and routine runs in one list. Start rules (8.11,
+`service/start_rules.rs`, migration 144) send a task key pattern to a
+project, and optionally a host, before Jev K1 is asked; after five starts
+of the same prefix in the same project, the start preview offers the rule.
+The New layout's Automation screen holds Routines, Rules, Runs and Agents.
 
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,
@@ -404,10 +469,10 @@ resolve on a conflict, and an overview of every link with Clean up stale.
 Symlinks sync as links (their target, never followed; not on a Windows
 desktop). Not yet: a filesystem watcher, a three-way merge editor.
 
-Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
+Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. The app's own wizards (New session, Add host, Pair a device, Add project, Link to a hub) are fleet.form/1 specs too, shown as a dialog or in the chat (redesign 10.12, `src/lib/forms/wizards/`, `docs/forms.md` → *Wizards are forms too*). Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
 
-PR shepherd, steps 1 and 3 of 5, are built and do nothing until a person
-grants a rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
+PR shepherd, steps 1 and 3 of 5 and the control-API half of step 2, are
+built and do nothing until a person grants a rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
 migrations 136 (`pr_shepherd_rules`, `pr_shepherd_episodes`) and 145
 (`pr_shepherd_merges`),
 `service/pr_shepherd/` on the reconcile tick (loop `pr_shepherd`, stopped by
@@ -416,9 +481,11 @@ reads each session's `pr_evidence` and, once per conflict / behind / red CI
 on a pushed commit, records a `pr_shepherd` timeline event (`watch`) or also
 asks the session's own Claude to fix it (`nudge`). At `merge` it also merges
 a PR GitHub confirms green right before the merge, one per project every
-180 s, with `--match-head-commit`. Rules are granted only with `fleet-hub
-shepherd grant | revoke | pause-all | status`. Not built: the control API and
-Inbox card (step 2), Jev `pr_triage`, the UI.
+180 s, with `--match-head-commit`. Rules are granted with `fleet-hub
+shepherd grant | revoke | pause-all | status` or the `pr_shepherd`
+control-API tool (`mcp/tools/pr_shepherd.rs`), served only to the hub
+owner's own device; a write needs a trusted full device. Not built: step
+2's Inbox card, Jev `pr_triage` (step 4), the UI (step 5).
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with
@@ -467,7 +534,10 @@ itself (`org_admin::Authority`: the hub owner's device for the fleet, an
 org admin's for that org; `check` refuses the rest). Team sharing is a grant
 to an org (`session_grants.org_id`), reaching only members whose
 `shares_since` is not after the grant. No admin reads a member's private
-session.
+session. A grant's level is `watch`, `answer` (may also answer the dialog
+on the session's pane; migration 142, redesign 11.7a) or `drive`. An org's
+spend is also kept per person (`usage_daily_person`, migration 138,
+redesign 11.8), shown all or nothing.
 
 Host identity and health (#354) is landed, per
 `docs/superpowers/plans/2026-09-27-host-identity-health.md`: migrations
@@ -518,7 +588,10 @@ Hub↔hub federation (cycle 3) is landed: two `fleet-hub` daemons link with
 `fleet-hub pair --mode peer` / `peer add|list|remove`, a dialer supervisor
 and a `peer_exchange` listener carry messages both ways by fleet address,
 and `fleet_health.peer_links_down` reports a link in trouble, per
-`docs/superpowers/specs/2026-09-24-hub-federation-design.md`.
+`docs/superpowers/specs/2026-09-24-hub-federation-design.md`. Since
+contract revision 12 the desktop links and unlinks a peer through the
+hub's `link_peer` / `unlink_peer` tools (redesign 11.5), and each link's
+traffic is recorded for the Federation page (migration 132).
 
 Application updates: design
 `docs/superpowers/specs/2026-09-28-update-channel-design.md` (with

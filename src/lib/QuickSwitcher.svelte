@@ -736,7 +736,7 @@
     if (r.error.code === 'E_NOTFOUND' && site) {
       push({
         kind: 'info',
-        message: `${site} is not connected — connect it in Settings → Work to look up its tickets.`,
+        message: `${site} is not connected — connect it in Settings → Trackers to look up its tickets.`,
         action: { label: 'Settings', run: () => settingsOpen.set(true) },
       });
       return;

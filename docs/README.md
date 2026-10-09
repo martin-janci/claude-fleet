@@ -6,13 +6,19 @@ A Tauri 2 desktop app for managing long-lived Claude Code sessions in tmux acros
 - **[Concepts](concepts.md)** — sessions, hosts, projects, Control API, the terminal.
 - **[Fleet v obrazoch](fleet-v-obrazoch.md)** — diagrams (in Slovak): standalone desktop, with a hub, with a phone, and how they compare.
 - **[Conversation view](conversation-view.md)** — read a session's transcript and prompt it from the app, one of the Session tab's two views. **[Chat blocks](chat-blocks.md)**: the cards an agent's reply can hold (task reports, tutorials, guides, choices, forms).
+- **[Chat forms](forms.md)** — a form an agent asks the person in the session's chat.
+- **[Claude accounts](accounts.md)** — which Claude login a session bills, and several logins on one host.
 - **[Work](work-graph.md)** — what each session is working on: tickets and trackers, detection, start and resume, handover, Today, tidy-up, orgs, and every `work.*` setting.
 - **[Troubleshooting](troubleshooting.md)** — common problems and fixes.
 - **[Windows](windows.md)** — the desktop as a client on Windows: what works, OpenSSH, hub-client mode.
 - **[Control API](control-api.md)** — enable the MCP control server; **[reference](control-api-reference.md)** (generated).
 - **[Voice relay](voice.md)** — talk to a remote session with `/voice` through the app's microphone.
+- **[Debug devices](debug-devices.md)** — phones, emulators and simulators attached to one host, used from every session that may see them.
+- **[Updates](updates.md)** — release tracks, what the hub decides and serves, and every `update.*` setting.
+- **[Settings reference](settings-reference.md)** (generated) — every setting with its default and meaning.
 - **[fleet-hub](hub.md)** — run the fleet headless as a daemon, without the desktop app.
 - **[Hub acceptance](hub-acceptance.md)** — the live acceptance record for the hub, paired clients, the agent and hub-client mode.
+- **[Writing a page](pages.md)** — the JSON page specs that Settings and other views are drawn from.
 - **[Releasing](RELEASING.md)** — versioning & changelog automation.
 - **[Buildkite builder](buildkite.md)** — the persistent builder that runs an agent's full verification (`scripts/verify.sh remote`), and how to set it up.
 

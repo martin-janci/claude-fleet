@@ -6955,7 +6955,7 @@
         "params": [],
         "report": false
       },
-      "empty": "No linked hubs. Ask the other fleet's owner for a link code (fleet-hub peer pair on their hub), then Link a hub.",
+      "empty": "No linked hubs. Ask the other fleet's owner for a link code (fleet-hub pair --mode peer --name <label> on their hub), then Link a hub.",
       "fields": [
         {
           "help": "The other fleet's id once it has answered, else its hub's address.",

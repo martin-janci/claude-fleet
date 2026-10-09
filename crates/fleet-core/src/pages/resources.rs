@@ -1106,7 +1106,7 @@ const PEER_STATES: &[(&str, &str)] = &[
 /// Orbit Fleet 11.5: this fleet's links to other fleets' hubs. Federation is
 /// hub to hub, so the desktop shows its hub's links (`list_peer_links`
 /// routes) and links a new hub through it with the one-time code that hub's
-/// owner minted (`fleet-hub peer pair` there).
+/// owner minted (`fleet-hub pair --mode peer --name <label>` there).
 const PEER_LINK: ResourceType = ResourceType {
     id: "peer_link",
     label: "Linked hub",
@@ -1116,7 +1116,7 @@ const PEER_LINK: ResourceType = ResourceType {
     id_field: "id",
     title_field: "title",
     color_field: None,
-    empty: "No linked hubs. Ask the other fleet's owner for a link code (fleet-hub peer pair on their hub), then Link a hub.",
+    empty: "No linked hubs. Ask the other fleet's owner for a link code (fleet-hub pair --mode peer --name <label> on their hub), then Link a hub.",
     fields: &[
         FieldSpec::new("title", "Fleet", "The other fleet's id once it has answered, else its hub's address.", FieldKind::Text { max: 256 }),
         FieldSpec::new("state", "State", "How the last exchange went.", FieldKind::Choice { options: PEER_STATES }).badge(Badge::Label),
