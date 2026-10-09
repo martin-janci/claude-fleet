@@ -203,6 +203,12 @@ pub fn token(
     if regenerate {
         s.set_setting(mcp::SETTING_TOKEN, &mcp::generate_token())
             .map_err(|e| e.to_string())?;
+        // A running hub keeps the token it started with (docs/hub.md), so
+        // the old one stays valid until it restarts (review r04).
+        out::error(
+            "note: a new master token is saved; a running hub still accepts the old one \
+             until it restarts. Restart the hub now.",
+        );
     }
     // The write paths of `token` are the other place a fresh database can
     // be minted into; give it its personal owner here too (see `init`).
