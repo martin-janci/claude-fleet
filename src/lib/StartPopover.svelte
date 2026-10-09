@@ -4,7 +4,7 @@
   // each conflict with its choice, before anything is made. Every change of
   // a choice re-reads the preview, so what Start does is what is shown.
   // Ticket text (the brief) renders as text.
-  import { onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { sessions, type SessionRow } from './sessions';
   import { selectSessionExplicitly } from './selection';
@@ -104,6 +104,11 @@
     clearTimeout(timer);
     timer = setTimeout(() => void readNow(), debounceMs);
   }
+  // Closed mid-debounce: no preview read for a popover that is gone.
+  onDestroy(() => {
+    clearTimeout(timer);
+    seq++;
+  });
   async function readNow() {
     const mine = ++seq;
     reading = true;

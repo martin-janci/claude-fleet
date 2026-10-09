@@ -374,11 +374,19 @@ impl Store {
         Ok(())
     }
 
-    /// The scheduler moved on: the next fire, and `skip_next` spent.
-    pub fn advance_routine(&self, id: i64, next_run_at: Option<i64>) -> Result<(), IpcError> {
+    /// The scheduler moved on: the next fire, and `skip_next` cleared when
+    /// this fire spent it. A Skip next set while the fire ran stays for the
+    /// next one (review r06 F3).
+    pub fn advance_routine(
+        &self,
+        id: i64,
+        next_run_at: Option<i64>,
+        skip_spent: bool,
+    ) -> Result<(), IpcError> {
         self.conn.execute(
-            "UPDATE routines SET next_run_at = ?1, skip_next = 0 WHERE id = ?2",
-            rusqlite::params![next_run_at, id],
+            "UPDATE routines SET next_run_at = ?1, \
+               skip_next = CASE WHEN ?3 THEN 0 ELSE skip_next END WHERE id = ?2",
+            rusqlite::params![next_run_at, id, skip_spent],
         )?;
         Ok(())
     }

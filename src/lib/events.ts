@@ -178,6 +178,17 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
   let timer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
 
+  // One throwing subscriber must not drop the rest of the batch: every
+  // handler call is its own unit, so a timeline bug cannot cost the work and
+  // grant frames that share its flush.
+  const deliver = (call: () => void) => {
+    try {
+      call();
+    } catch (e) {
+      console.error('[events] row-event handler failed', e);
+    }
+  };
+
   const flush = () => {
     timer = null;
     if (disposed) {
@@ -204,15 +215,15 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     for (const ev of batch) {
       switch (ev.name) {
         case 'session:created':
-          handlers.onSessionCreated?.(ev.payload);
+          deliver(() => handlers.onSessionCreated?.(ev.payload));
           sessionEvents.push({ type: 'created', row: ev.payload });
           break;
         case 'session:updated':
-          handlers.onSessionUpdated?.(ev.payload);
+          deliver(() => handlers.onSessionUpdated?.(ev.payload));
           sessionEvents.push({ type: 'updated', row: ev.payload });
           break;
         case 'session:killed':
-          handlers.onSessionKilled?.(ev.payload);
+          deliver(() => handlers.onSessionKilled?.(ev.payload));
           sessionEvents.push({ type: 'killed', id: ev.payload.id });
           break;
         case 'session:event':
@@ -222,11 +233,11 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
           conversationsChangedIds.push(ev.payload.session_id);
           break;
         case 'host:added':
-          handlers.onHostAdded?.(ev.payload);
+          deliver(() => handlers.onHostAdded?.(ev.payload));
           hostEvents.push({ type: 'added', row: ev.payload });
           break;
         case 'host:probed':
-          handlers.onHostProbed?.(ev.payload);
+          deliver(() => handlers.onHostProbed?.(ev.payload));
           hostEvents.push({ type: 'probed', row: ev.payload });
           break;
         // A probe that found the host exactly as it was. Carries the two
@@ -236,23 +247,23 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
           hostEvents.push({ type: 'pinged', ...ev.payload });
           break;
         case 'host:removed':
-          handlers.onHostRemoved?.(ev.payload);
+          deliver(() => handlers.onHostRemoved?.(ev.payload));
           hostEvents.push({ type: 'removed', alias: ev.payload.alias });
           break;
         case 'account:upserted':
-          handlers.onAccountUpserted?.(ev.payload);
+          deliver(() => handlers.onAccountUpserted?.(ev.payload));
           accountRows.push(ev.payload);
           break;
         case 'project:updated':
-          handlers.onProjectUpdated?.(ev.payload);
+          deliver(() => handlers.onProjectUpdated?.(ev.payload));
           projectEvents.push({ type: 'project_updated', row: ev.payload });
           break;
         case 'worktree:updated':
-          handlers.onWorktreeUpdated?.(ev.payload);
+          deliver(() => handlers.onWorktreeUpdated?.(ev.payload));
           projectEvents.push({ type: 'worktree_updated', row: ev.payload });
           break;
         case 'worktree:removed':
-          handlers.onWorktreeRemoved?.(ev.payload);
+          deliver(() => handlers.onWorktreeRemoved?.(ev.payload));
           projectEvents.push({ type: 'worktree_removed', id: ev.payload.id });
           break;
         case 'task:updated':
@@ -262,19 +273,19 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
           accountUsageEvents.push(ev.payload);
           break;
         case 'asset_inventory:updated':
-          handlers.onAssetInventoryUpdated?.(ev.payload);
+          deliver(() => handlers.onAssetInventoryUpdated?.(ev.payload));
           break;
         case 'asset_inventory:cleared':
-          handlers.onAssetInventoryCleared?.(ev.payload);
+          deliver(() => handlers.onAssetInventoryCleared?.(ev.payload));
           break;
         case 'catalog:loaded':
-          handlers.onCatalogLoaded?.(ev.payload);
+          deliver(() => handlers.onCatalogLoaded?.(ev.payload));
           break;
         case 'sync:progress':
-          handlers.onSyncProgress?.(ev.payload);
+          deliver(() => handlers.onSyncProgress?.(ev.payload));
           break;
         case 'move:progress':
-          handlers.onMoveProgress?.(ev.payload);
+          deliver(() => handlers.onMoveProgress?.(ev.payload));
           break;
         case 'work:item':
           workEvents.push({ type: 'item', row: ev.payload });
@@ -317,21 +328,21 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
         }
       }
     }
-    if (sessionEvents.length > 0) handlers.onSessionEvents?.(sessionEvents);
-    if (hostEvents.length > 0) handlers.onHostEvents?.(hostEvents);
-    if (accountRows.length > 0) handlers.onAccountEvents?.(accountRows);
-    if (projectEvents.length > 0) handlers.onProjectEvents?.(projectEvents);
-    if (taskEvents.length > 0) handlers.onTaskEvents?.(taskEvents);
-    if (accountUsageEvents.length > 0) handlers.onAccountUsageEvents?.(accountUsageEvents);
-    if (timelineEvents.length > 0) handlers.onTimelineEvents?.(timelineEvents);
-    if (conversationsChangedIds.length > 0) handlers.onConversationsChanged?.(conversationsChangedIds);
-    if (workEvents.length > 0) handlers.onWorkEvents?.(workEvents);
-    if (workChanges.length > 0) handlers.onWorkChanged?.(workChanges);
-    if (settingsKeys.length > 0) handlers.onSettingsChanged?.(settingsKeys);
-    if (updateChanges.length > 0) handlers.onUpdateChanged?.(updateChanges);
-    if (downloadIds.length > 0) handlers.onDownloadsChanged?.(downloadIds);
-    if (localWorkspaceIds.length > 0) handlers.onLocalWorkspacesChanged?.(localWorkspaceIds);
-    if (grantChanges.length > 0) handlers.onGrantChanged?.(grantChanges);
+    if (sessionEvents.length > 0) deliver(() => handlers.onSessionEvents?.(sessionEvents));
+    if (hostEvents.length > 0) deliver(() => handlers.onHostEvents?.(hostEvents));
+    if (accountRows.length > 0) deliver(() => handlers.onAccountEvents?.(accountRows));
+    if (projectEvents.length > 0) deliver(() => handlers.onProjectEvents?.(projectEvents));
+    if (taskEvents.length > 0) deliver(() => handlers.onTaskEvents?.(taskEvents));
+    if (accountUsageEvents.length > 0) deliver(() => handlers.onAccountUsageEvents?.(accountUsageEvents));
+    if (timelineEvents.length > 0) deliver(() => handlers.onTimelineEvents?.(timelineEvents));
+    if (conversationsChangedIds.length > 0) deliver(() => handlers.onConversationsChanged?.(conversationsChangedIds));
+    if (workEvents.length > 0) deliver(() => handlers.onWorkEvents?.(workEvents));
+    if (workChanges.length > 0) deliver(() => handlers.onWorkChanged?.(workChanges));
+    if (settingsKeys.length > 0) deliver(() => handlers.onSettingsChanged?.(settingsKeys));
+    if (updateChanges.length > 0) deliver(() => handlers.onUpdateChanged?.(updateChanges));
+    if (downloadIds.length > 0) deliver(() => handlers.onDownloadsChanged?.(downloadIds));
+    if (localWorkspaceIds.length > 0) deliver(() => handlers.onLocalWorkspacesChanged?.(localWorkspaceIds));
+    if (grantChanges.length > 0) deliver(() => handlers.onGrantChanged?.(grantChanges));
   };
 
   const enqueue = (ev: Queued) => {
@@ -388,7 +399,9 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
   };
   // Register all listeners concurrently — each `listen` is its own IPC
   // round-trip; awaiting them serially needlessly delayed event flow on mount.
-  const unlisteners = await Promise.all([
+  // allSettled, so a `listen` that rejects does not strand the ones that
+  // already registered: they are removed before the error propagates.
+  const settled = await Promise.allSettled([
     sub('session:created', wanted.session),
     sub('session:updated', wanted.session),
     sub('session:killed', wanted.session),
@@ -419,6 +432,12 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('local_workspace:changed', wanted.localWorkspacesChanged),
     sub('grant:changed', wanted.grantChanged),
   ]);
+  const unlisteners = settled.map((r) => (r.status === 'fulfilled' ? r.value : null));
+  const failed = settled.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+  if (failed) {
+    for (const u of unlisteners) u?.();
+    throw failed.reason;
+  }
   return () => {
     disposed = true;
     queue = [];

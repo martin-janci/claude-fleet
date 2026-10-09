@@ -1075,8 +1075,8 @@ derive from them.
   urgent first: `waiting` (blocked on a dialog), `stuck` (`stuck_kind` says
   which), `host_down` (the session's host was pinged and did not answer),
   `account_limit` (its account's 5-hour or weekly window is used up and the
-  session is not working), `no_credentials` (its account's login is missing,
-  expired or rejected, and the session is not working), `stop_failed` (the
+  session is not working), `no_credentials` (its account's login has
+  expired or its token was rejected, and the session is not working), `stop_failed` (the
   last turn ended in an API error; re-prompt),
   `failed` (a pane-less agent reported failure), `context_full` (context at or
   past `health.context_red_pct`), `stale_working` (the demotion above),

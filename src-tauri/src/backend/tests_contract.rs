@@ -707,6 +707,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             session_id: Some(4),
             session_name: Some("demo".into()),
             org_id: Some(2),
+            owner_person_id: Some(1),
             path: "/w/.claude-fleet-attachments/a.pdf".into(),
             name: "a.pdf".into(),
             size: Some(3),

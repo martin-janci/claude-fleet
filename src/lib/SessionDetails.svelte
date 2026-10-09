@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import {
     sessions,
     hasNoPane,
@@ -272,8 +272,11 @@
     });
     if (!ok) return;
     copied = true;
-    setTimeout(() => (copied = false), 1500);
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copied = false), 1500);
   }
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => clearTimeout(copiedTimer));
 
   let renameInput: HTMLInputElement | undefined = $state();
 

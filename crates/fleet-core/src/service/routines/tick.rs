@@ -113,15 +113,27 @@ pub async fn fire(
     scheduled_for: Option<i64>,
     now: i64,
 ) -> Result<RoutineRunRow, IpcError> {
-    let owner = {
+    let (owner, _starting) = {
         let s = lock(&deps.store)?;
         if let Some(why) = refusal(&s, r, now)? {
             return record_skip(&s, r, trigger, trigger_ref, scheduled_for, &why, now);
         }
-        match r.owner_person_id {
+        // Its run row is written only once the session exists, so a second
+        // fire while this one spawns (Run now during a scheduled fire, a
+        // double click) would pass `routine_run_open` too: the claim is
+        // taken under the same lock as the check (review r06 F1).
+        let starting = match claim_start(&deps.store, r) {
+            Some(c) => c,
+            None => {
+                let why = "its last run is still starting";
+                return record_skip(&s, r, trigger, trigger_ref, scheduled_for, why, now);
+            }
+        };
+        let owner = match r.owner_person_id {
             Some(p) => Some(p),
             None => s.personal_owner_id()?,
-        }
+        };
+        (owner, starting)
     };
     let spawned = deps.spawn.spawn(session_args(r, owner)).await;
     let s = lock(&deps.store)?;
@@ -149,6 +161,19 @@ pub async fn fire(
         scheduled_for,
         at: now,
     })
+}
+
+/// The `overlap: skip` routines whose run is between its check and its row.
+static STARTING: crate::rt::KeySet = std::sync::Mutex::new(None);
+
+/// A skip routine's claim on starting its one run, or `None` when another
+/// fire of it is already starting. A routine whose runs may overlap claims
+/// nothing.
+fn claim_start(store: &Arc<Mutex<Store>>, r: &RoutineRow) -> Option<Option<crate::rt::KeyedClaim>> {
+    if r.overlap != "skip" {
+        return Some(None);
+    }
+    crate::rt::claim(&STARTING, Arc::as_ptr(store) as usize, r.id.to_string()).map(Some)
 }
 
 /// Why `r` may not start a run now, in words: its last run is still open
@@ -303,7 +328,12 @@ async fn tick_cron(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError> {
             .map(|_| ())
     };
     let s = lock(&deps.store)?;
-    s.advance_routine(id, super::next_fire_of(&r, now))?;
+    // The routine as it is now: a person may have changed its schedule or
+    // set Skip next while it fired, and the next fire follows what they
+    // saved, not what this pass read (review r06 F3).
+    if let Some(cur) = s.get_routine(id)? {
+        s.advance_routine(id, super::next_fire_of(&cur, now), r.skip_next)?;
+    }
     s.release_routine_lease(id)?;
     res
 }
@@ -343,12 +373,16 @@ async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<(), IpcErro
     };
     let mut res = Ok(());
     for reference in fires {
-        let busy = {
-            let s = lock(&deps.store)?;
-            refusal(&s, r, now)?.is_some()
-        };
-        if busy {
-            continue;
+        // An error here ends the pass, not the lease: it is released below,
+        // so the routine is not held for the lease's two minutes.
+        let busy = lock(&deps.store).and_then(|s| refusal(&s, r, now).map(|w| w.is_some()));
+        match busy {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(e) => {
+                res = Err(e);
+                break;
+            }
         }
         if let Err(e) = fire(deps, r, "event", Some(&reference), None, now).await {
             res = Err(e);
@@ -413,11 +447,10 @@ pub fn spawn_routine_tick(
     crate::rt::spawn(async move {
         let mut every = tokio::time::interval(TICK_EVERY);
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                _ = token.cancelled() => return,
-                _ = every.tick() => tick_once(&deps, crate::store::now_unix()).await,
-            }
-        }
+        // A pass that panics is logged and the next tick runs (review r06 F7).
+        crate::service::tick::run_cancellable_tick(every, token, || {
+            tick_once(&deps, crate::store::now_unix())
+        })
+        .await;
     })
 }
