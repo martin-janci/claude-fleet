@@ -414,6 +414,22 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "agent_installs",
+            "agent_installs",
+            json!({ "alias": "trn" }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::hosts::routed::agent_installs(
+                    b,
+                    fleet_core::service::agent_install::AgentInstallsArgs {
+                        alias: Some("trn".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "list_hosts",
             "list_hosts",
             json!({}),
@@ -3456,6 +3472,25 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             TASK_PAYLOAD,
             Box::new(|b, s, _| {
                 block_on(commands::tasks::routed::cancel_task(b, 11, s)).map(|_| ())
+            }),
+        ),
+        (
+            "install_agent",
+            "install_agent",
+            json!({ "alias": "trn", "hub_url": null, "version": null }),
+            r#"{"id":1,"host_alias":"trn","version":"0.6.0","state":"running","step":"target","started_at":1}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::hosts::routed::install_agent(
+                    b,
+                    fleet_core::service::agent_install::InstallAgentArgs {
+                        alias: "trn".into(),
+                        hub_url: None,
+                        version: None,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
             }),
         ),
         (
