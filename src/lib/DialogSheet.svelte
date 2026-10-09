@@ -27,6 +27,8 @@
     confirmTestid,
     errorTestid,
     confirmTitle = null,
+    danger = false,
+    cancelTestid = 'sheet-cancel',
     secondary,
     children,
   }: {
@@ -48,6 +50,9 @@
     errorTestid?: string;
     /** Why the verb is off, as its tooltip (a gate's reason). */
     confirmTitle?: string | null;
+    /** The verb destroys something (Force kill): drawn in the danger fill. */
+    danger?: boolean;
+    cancelTestid?: string;
     /** A quiet action at the footer's start (e.g. "Start fresh instead"). */
     secondary?: Snippet;
     children: Snippet;
@@ -71,10 +76,11 @@
 
     <footer>
       <div class="secondary">{#if secondary}{@render secondary()}{/if}</div>
-      <button type="button" class="btn" onclick={onclose} disabled={busy} data-testid="sheet-cancel">Cancel</button>
+      <button type="button" class="btn" onclick={onclose} disabled={busy} data-testid={cancelTestid}>Cancel</button>
       <button
         type="button"
         class="btn btn--primary"
+        class:sheet-danger={danger}
         data-testid={confirmTestid}
         title={confirmTitle ?? ''}
         disabled={!canConfirm || busy}
@@ -158,5 +164,14 @@
   }
   .secondary {
     flex: 1;
+  }
+  /* Dialogs board, Force kill: the one red verb. */
+  footer .sheet-danger {
+    border-color: var(--danger-fill);
+    background: var(--danger-fill);
+    color: var(--on-danger);
+  }
+  footer .sheet-danger:hover:not(:disabled) {
+    background: color-mix(in srgb, #000 12%, var(--danger-fill));
   }
 </style>

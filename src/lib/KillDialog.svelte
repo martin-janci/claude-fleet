@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, type Snippet } from 'svelte';
-  import Modal from './Modal.svelte';
+  import DialogSheet from './DialogSheet.svelte';
   import { pushError } from './toasts';
   import type { SessionRow } from './sessions';
   import { FILES_SHOWN, checkWork, cleanUp, cleanUpBlocked, workLine, type WorkCheck } from './kill_check';
@@ -50,17 +50,29 @@
 
   const checking = $derived(targets.some((t) => (checks[t.id]?.state ?? 'checking') === 'checking'));
   const dirty = $derived(targets.filter((t) => checks[t.id]?.state === 'dirty'));
-  const unknown = $derived(targets.filter((t) => checks[t.id]?.state === 'unknown'));
   const cleanable = $derived(targets.filter((t) => cleanUpBlocked(t) === null));
   const n = $derived(targets.length);
   const many = $derived(n !== 1);
   const nameOf = (t: SessionRow) => t.friendly_name || t.tmux_name;
 
-  const title = $derived(
-    mode === 'cleanup'
-      ? `Clean up ${many ? `${n} sessions` : 'session'}?`
-      : `Kill ${many ? `${n} sessions` : 'session'}?`,
-  );
+  const title = $derived.by(() => {
+    const what = many ? `${n} sessions` : n === 1 ? `“${nameOf(targets[0])}”` : 'sessions';
+    return mode === 'cleanup' ? `Clean up ${what}?` : `Force kill ${what}?`;
+  });
+  /** The one plain sentence (Dialogs board): what is lost, in words. */
+  const lead = $derived.by(() => {
+    if (n === 0) return 'None of the selected sessions can be killed from here.';
+    if (checking) return 'Checking each worktree for work not yet saved.';
+    if (dirty.length === 1) {
+      const c = checks[dirty[0].id];
+      return `${c?.state === 'dirty' ? workLine(c) : 'Unsaved work'} in ${nameOf(dirty[0])} will be lost. This can't be undone.`;
+    }
+    if (dirty.length > 1) return `Unsaved work in ${dirty.length} sessions will be lost. This can't be undone.`;
+    return `This ends ${many ? `${n} sessions` : 'the session'} and any agent running in it. This can't be undone.`;
+  });
+  const MARK: Record<WorkCheck['state'], string> = { clean: '✓', dirty: '!', unknown: '?', checking: '…' };
+  /** Name the host only when the targets are on more than one. */
+  const hostsDiffer = $derived(new Set(targets.map((t) => t.host_alias)).size > 1);
 
   async function doCleanUp() {
     if (busy || cleanable.length === 0) return;
@@ -80,91 +92,88 @@
   }
 </script>
 
-<Modal {title} onclose={oncancel} width="460px" testid="kill-dialog">
-  <div class="body">
-    {#if n === 0}
-      <!-- the caller's notes say why -->
-    {:else if !many}
-      <p>
-        Kill ends <code>{targets[0].tmux_name}</code> on <code>{targets[0].host_alias}</code> and loses any running agent
-        state. Clean up first commits and pushes the work, then removes the worktree.
-      </p>
-    {:else}
-      <p>
-        Kill ends {n} sessions and loses any running agent state. Clean up first commits and pushes each one's work, then
-        removes its worktree.
-      </p>
-    {/if}
-
-    {#if checking}
-      <p class="muted" data-testid="kill-checking">Checking for work not yet saved…</p>
-    {:else if dirty.length > 0}
-      <ul class="dirty" data-testid="kill-dirty">
-        {#each dirty as t (t.id)}
-          {@const c = checks[t.id]}
-          {#if c?.state === 'dirty'}
-            <li data-testid="kill-dirty-row">
-              <span class="who">{nameOf(t)} on {t.host_alias}</span>: {workLine(c)}
+<!-- Dialogs board, Force kill: every target on its own line, clean (✓) or
+     not (!), then Clean up beside the red verb. -->
+<DialogSheet
+  {title}
+  {lead}
+  verb={many ? `Force kill ${n}` : 'Force kill'}
+  danger
+  onconfirm={onkill}
+  onclose={oncancel}
+  canConfirm={n > 0}
+  {busy}
+  width="460px"
+  testid="kill-dialog"
+  confirmTestid={confirmTestId}
+  cancelTestid="confirm-cancel"
+>
+  {#if n > 0}
+    <ul class="targets" data-testid="kill-targets">
+      {#each targets as t (t.id)}
+        {@const c = checks[t.id] ?? { state: 'checking' }}
+        <li
+          class="target"
+          data-state={c.state}
+          data-testid={c.state === 'dirty' ? 'kill-dirty-row' : c.state === 'clean' ? 'kill-clean-row' : 'kill-target-row'}
+        >
+          <span class="mark" aria-hidden="true">{MARK[c.state]}</span>
+          <span class="what">
+            <span class="who">{nameOf(t)}{#if hostsDiffer}<span class="host"> · {t.host_alias}</span>{/if}</span>
+            {#if c.state === 'dirty'}
+              <span class="line warn">{workLine(c)}</span>
               {#if c.files.length > 0}
                 <ul class="files">
                   {#each c.files.slice(0, FILES_SHOWN) as f (f.path)}<li><code>{f.status}</code> {f.path}</li>{/each}
                   {#if c.files.length > FILES_SHOWN}<li class="muted">+{c.files.length - FILES_SHOWN} more</li>{/if}
                 </ul>
               {/if}
-            </li>
-          {/if}
-        {/each}
-      </ul>
-    {:else if unknown.length === 0 && n > 0}
-      <p class="muted" data-testid="kill-clean">Nothing uncommitted or unpushed.</p>
+            {:else if c.state === 'clean'}
+              <span class="line muted" data-testid="kill-clean">clean · pushed</span>
+            {:else if c.state === 'unknown'}
+              <span class="line muted" data-testid="kill-unknown">Couldn't check: {c.why}</span>
+            {:else}
+              <span class="line muted">checking…</span>
+            {/if}
+          </span>
+        </li>
+      {/each}
+    </ul>
+    {#if checking}
+      <p class="field-note" data-testid="kill-checking">Checking for work not yet saved…</p>
     {/if}
-    {#if !checking && unknown.length > 0}
-      <p class="muted" data-testid="kill-unknown">
-        Couldn't check {unknown.length === 1 ? nameOf(unknown[0]) : `${unknown.length} sessions`}{#if unknown.length === 1 && checks[unknown[0].id]?.state === 'unknown'}: {(checks[unknown[0].id] as { why: string }).why}{/if}.
-      </p>
-    {/if}
-    {#if notes}<p class="muted">{@render notes()}</p>{/if}
-  </div>
-  <div class="actions">
-    <button onclick={oncancel} disabled={busy} data-autofocus data-testid="confirm-cancel">Cancel</button>
-    <button
-      class:primary={mode === 'cleanup' || dirty.length > 0}
-      onclick={() => void doCleanUp()}
-      disabled={busy || checking || cleanable.length === 0}
-      title={cleanable.length === 0 && n > 0 ? (cleanUpBlocked(targets[0]) ?? '') : ''}
-      data-testid="kill-cleanup">Clean up{many && cleanable.length > 0 ? ` (${cleanable.length})` : ''}</button
-    >
-    <button class="danger" onclick={onkill} disabled={busy || n === 0} data-testid={confirmTestId}
-      >{many ? 'Kill all' : 'Kill'}</button
-    >
-  </div>
-</Modal>
+    <p class="field-note">Clean up keeps the work: Claude commits and pushes, then removes the worktree.</p>
+  {/if}
+  {#if notes}<p class="field-note">{@render notes()}</p>{/if}
+  <button
+    type="button"
+    class="btn cleanup {mode === 'cleanup' || dirty.length > 0 ? 'btn--primary' : 'btn--quiet is-bounded'}"
+    onclick={() => void doCleanUp()}
+    disabled={busy || checking || cleanable.length === 0}
+    title={cleanable.length === 0 && n > 0 ? (cleanUpBlocked(targets[0]) ?? '') : ''}
+    data-testid="kill-cleanup"
+    >Clean up (commits and pushes first){many && cleanable.length > 0 ? ` · ${cleanable.length}` : ''}</button
+  >
+</DialogSheet>
 
 <style>
-  .body { font-size: var(--text-xs); line-height: 1.4; }
-  .body p { margin: 0 0 var(--space-2); }
-  .body :global(code) {
+  .targets { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+  .target { display: flex; gap: var(--space-2); align-items: flex-start; font-size: var(--text-sm); }
+  .mark { width: 1rem; flex: none; text-align: center; font-weight: 600; color: var(--fg-muted); }
+  .target[data-state='clean'] .mark { color: var(--status-done); }
+  .target[data-state='dirty'] .mark { color: var(--status-failed); }
+  .what { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+  .who { font-weight: 500; overflow-wrap: anywhere; }
+  .host { color: var(--fg-muted); font-weight: 400; }
+  .line { font-size: var(--text-xs); }
+  .warn { color: var(--status-waiting); }
+  .muted { color: var(--fg-muted); }
+  .files { margin: var(--space-1) 0 0; padding: 0; list-style: none; font-size: var(--text-xs); }
+  .files :global(code) {
     font-family: var(--font-mono);
     background: var(--bg-pane);
-    padding: 0.1rem 0.3rem;
+    padding: 0 0.3rem;
     border-radius: var(--radius-xs);
   }
-  .muted { color: var(--fg-muted); }
-  .dirty { margin: 0 0 var(--space-2); padding-left: var(--space-4); }
-  .dirty .who { font-weight: 600; }
-  .files { margin: var(--space-1) 0 0; padding-left: var(--space-3); list-style: none; font-size: var(--text-xs); }
-  .actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-3); }
-  .actions button {
-    font-size: var(--text-xs);
-    padding: 0.3rem 0.8rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-  }
-  .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .actions button.primary { border-color: var(--accent); }
-  .actions button.danger { color: var(--danger); border-color: var(--danger); }
-  .actions button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+  .cleanup { width: 100%; }
 </style>

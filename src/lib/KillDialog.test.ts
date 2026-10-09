@@ -105,6 +105,31 @@ describe('KillDialog', () => {
     expect(screen.getByTestId('kill-unknown').textContent).toContain('not a repository');
   });
 
+  // Dialogs board: every target on its own line, ✓ clean or ! not, and the
+  // verb is the red Force kill with the count.
+  it('lists every target as clean or not, and names the loss in the lead', async () => {
+    inspections['api--fix'] = dirty;
+    inspections['api--done'] = clean;
+    const onkill = vi.fn();
+    render(KillDialog, {
+      targets: [session('mac', 'api--fix', { id: 1 }), session('mac', 'api--done', { id: 2 })],
+      onkill,
+      oncleaned: vi.fn(),
+      oncancel: vi.fn(),
+    });
+    await flush();
+    expect(screen.getByRole('dialog', { name: 'Force kill 2 sessions?' })).toBeTruthy();
+    const rows = screen.getByTestId('kill-targets').querySelectorAll('li.target');
+    expect([...rows].map((r) => r.getAttribute('data-state'))).toEqual(['dirty', 'clean']);
+    expect(screen.getByTestId('kill-clean-row').textContent).toContain('clean · pushed');
+    expect(screen.getByTestId('kill-dialog').textContent).toContain('in api--fix will be lost');
+    const verb = screen.getByTestId('confirm-kill');
+    expect(verb.textContent).toBe('Force kill 2');
+    expect(verb.classList.contains('sheet-danger')).toBe(true);
+    await fireEvent.click(verb);
+    expect(onkill).toHaveBeenCalledOnce();
+  });
+
   it('words the summary', () => {
     expect(workLine({ state: 'dirty', files: [{ status: 'M', path: 'a' }], unpushed: 0, branch: null })).toBe('1 uncommitted file');
     expect(workLine({ state: 'dirty', files: [], unpushed: 1, branch: null })).toBe('1 commit not pushed');
