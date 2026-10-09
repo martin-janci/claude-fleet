@@ -89,7 +89,7 @@ fn visible_with(scope: &ViewScope, row: &LibraryItemRow, sess: Option<&SessionRo
     match sess {
         Some(sess) => scope.may_own(sess),
         // The session is gone: its org still fences the row, and the owner
-        // recorded with it (migration 147) is the person half. Without that
+        // recorded with it (migration 148) is the person half. Without that
         // half every person in the org saw the file (review r04 F3).
         None => {
             scope.org.sees_session_org_only(&row.host_alias, row.org_id)

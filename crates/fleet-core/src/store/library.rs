@@ -22,7 +22,7 @@ pub struct LibraryItemRow {
     #[serde(skip)]
     pub org_id: Option<i64>,
     /// Whose file it is: the session's owner when it was placed (migration
-    /// 147), what the scope check reads once the session row is gone.
+    /// 148), what the scope check reads once the session row is gone.
     /// Never on the wire.
     #[serde(skip)]
     pub owner_person_id: Option<i64>,

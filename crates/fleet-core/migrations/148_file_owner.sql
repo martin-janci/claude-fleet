@@ -20,4 +20,4 @@ UPDATE downloads
    SET owner_person_id = (SELECT owner_person_id FROM sessions
                            WHERE sessions.id = downloads.session_id)
  WHERE session_id IS NOT NULL;
-INSERT OR IGNORE INTO schema_version (version) VALUES (147);
+INSERT OR IGNORE INTO schema_version (version) VALUES (148);

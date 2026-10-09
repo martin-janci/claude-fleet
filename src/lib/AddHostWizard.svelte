@@ -78,6 +78,14 @@
   });
 
   function pickAlias(a: string) {
+    // Another host: the last one's checks and account no longer apply
+    // (r18-A7), and a check still running for it is dropped.
+    if (a !== sshAlias) {
+      pass++;
+      running = null;
+      checks = [];
+      answers = { ...answers, account: undefined };
+    }
     sshAlias = a;
     if (!aliasEdited) alias = a;
   }
