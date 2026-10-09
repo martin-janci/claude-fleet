@@ -151,8 +151,11 @@ impl FleetTools {
 
     #[tool(description = "Send a prompt as a new turn when the session is \
         idle: typed now if it is, else kept and typed once its turn ends \
-        (never into a dialog). Marked untrusted unless raw=true (master \
-        only). Returns { session_id, delivered, queued_id }.")]
+        (never into a dialog). Send later: not_before (unix secs) holds it \
+        until then, until_limit_reset while the account is at its limit, \
+        skip_if_archived drops it if the session is archived first. Marked \
+        untrusted unless raw=true (master only). Returns { session_id, \
+        delivered, queued_id }.")]
     pub(super) async fn queue_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -181,6 +184,9 @@ impl FleetTools {
             sessions::QueuePromptArgs {
                 session_id: row.id,
                 prompt,
+                not_before: p.not_before,
+                until_limit_reset: p.until_limit_reset,
+                skip_if_archived: p.skip_if_archived,
             },
             &self.store,
             &self.ssh,

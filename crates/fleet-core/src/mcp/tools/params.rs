@@ -359,6 +359,15 @@ pub struct QueuePromptParams {
     /// Operator only: the nonce a person approved.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+    /// Send later: not typed before this unix second.
+    #[serde(default)]
+    pub not_before: Option<i64>,
+    /// Hold it while the session's account is at or past accounts.pause_at.
+    #[serde(default)]
+    pub until_limit_reset: bool,
+    /// Drop it instead if the session is archived before it goes out.
+    #[serde(default)]
+    pub skip_if_archived: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

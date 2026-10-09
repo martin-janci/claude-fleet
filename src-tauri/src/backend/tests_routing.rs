@@ -3300,6 +3300,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     fleet_core::service::sessions::QueuePromptArgs {
                         session_id: 7,
                         prompt: "rebase on main".into(),
+                        ..Default::default()
                     },
                     s,
                     h,
