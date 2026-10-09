@@ -1832,16 +1832,15 @@ pub async fn restart_session(
         let gone_cwd = gone_pane_cwd(&s, row.as_ref(), &args.host_alias, &args.name)?;
         match row {
             Some(r) => {
-                if switch.is_some() {
-                    if r.kind == "shell"
+                if switch.is_some()
+                    && (r.kind == "shell"
                         || crate::store::has_no_pane(&r.kind)
-                        || r.agent != crate::store::AGENT_CLAUDE
-                    {
-                        return Err(IpcError::new(
-                            codes::E_INVALID,
-                            "a credential profile applies to Claude sessions only",
-                        ));
-                    }
+                        || r.agent != crate::store::AGENT_CLAUDE)
+                {
+                    return Err(IpcError::new(
+                        codes::E_INVALID,
+                        "a credential profile applies to Claude sessions only",
+                    ));
                 }
                 // The new profile is launched from memory and stored only
                 // once the relaunch succeeded ([`relaunch_recording_login`]):
