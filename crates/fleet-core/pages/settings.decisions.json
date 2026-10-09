@@ -109,6 +109,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.routine_run_outcome",
+          "hint": "Keeps runs with nothing to do out of the Inbox. Sends the run's last reply only for organisations that allow reply text."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
         },
         {

@@ -2201,6 +2201,46 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Reading whether a routine run did work, found nothing to do or needs you, from the end of its screen. Shadow only records; assist sets the outcome, so a run with nothing to do stays out of the Inbox. A failed exit or a rule wins. Sends reply text only for organisations that allow it.",
+      "key": "decide.jev.routine_run_outcome",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: routine run outcome",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: set the outcome"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -3613,6 +3653,11 @@
             {
               "hint": "Proposes a stuck mission's outcome and next step; you still choose. It never completes a mission or sets Verified.",
               "key": "decide.jev.mission_triage",
+              "type": "field"
+            },
+            {
+              "hint": "Keeps runs with nothing to do out of the Inbox. Sends the run's last reply only for organisations that allow reply text.",
+              "key": "decide.jev.routine_run_outcome",
               "type": "field"
             },
             {

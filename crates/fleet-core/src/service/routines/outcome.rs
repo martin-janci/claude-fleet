@@ -13,8 +13,9 @@
 //!   or a wedged REPL is `needs_person`; a pull request is `did_work`.
 //! - **jev**: the rest (a turn that ended with neither), read from the pane
 //!   tail by the routine_run_outcome use case, which shares J2's reading
-//!   (step 5.11) and is off until its setting is. Until it answers the run
-//!   has no outcome and shows as it does today.
+//!   (step 5.11) and is off until its setting is
+//!   (`service::decide::routine_run_outcome`). Until it answers the run has
+//!   no outcome and shows as it does today.
 //!
 //! A `nothing` answer marks the run's session seen, so its finished turn
 //! does not land in the Inbox as unread (`done_unread`, step 2.3).
@@ -106,7 +107,8 @@ pub fn rule_outcome(
 
 /// Record `outcome` from `source` for `run`, unless a stronger source
 /// already answered. A `nothing` that lands marks the run's session seen,
-/// so it stays out of the Inbox. Answers whether the run changed.
+/// so it stays out of the Inbox; an exit or rule answer that replaces
+/// Jev's marks Jev's decision run. Answers whether the run changed.
 pub fn record(
     s: &Store,
     run: &RoutineRunRow,
@@ -115,6 +117,13 @@ pub fn record(
     now: i64,
 ) -> Result<bool, IpcError> {
     let changed = s.set_routine_run_outcome(run.id, outcome.as_str(), source.as_str())?;
+    // The exit or a rule replaced Jev's answer: that is its follow-up.
+    if changed
+        && source != OutcomeSource::Jev
+        && run.outcome_source.as_deref() == Some(OutcomeSource::Jev.as_str())
+    {
+        crate::service::decide::routine_run_outcome::record_rule(s, run.id, outcome.as_str(), now)?;
+    }
     if changed && outcome == RunOutcome::Nothing {
         if let Some(sid) = run.session_id {
             s.touch_session_viewed(sid, now)?;

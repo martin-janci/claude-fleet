@@ -595,4 +595,20 @@ impl Store {
         let rows = stmt.query_map([limit], run)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+
+    /// Finished runs nothing has answered yet that finished at `since` or
+    /// later, newest first: the runs whose screen Jev can still read.
+    pub fn recent_routine_runs_without_outcome(
+        &self,
+        since: i64,
+        limit: i64,
+    ) -> Result<Vec<RoutineRunRow>, IpcError> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {RUN_COLS} FROM routine_runs \
+             WHERE state = 'done' AND outcome IS NULL AND finished_at >= ?1 \
+             ORDER BY finished_at DESC, id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![since, limit], run)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
 }

@@ -58,6 +58,9 @@ mod quick_answer_tests;
 pub mod related_session;
 #[cfg(test)]
 mod related_session_tests;
+pub mod routine_run_outcome;
+#[cfg(test)]
+mod routine_run_outcome_tests;
 pub mod sibling_repos;
 #[cfg(test)]
 mod sibling_repos_tests;
@@ -143,6 +146,9 @@ pub enum Feature {
     TurnOutcome,
     /// A stuck mission's outcome and next step (K3, redesign 9.10).
     MissionTriage,
+    /// What a finished routine run came to when its exit and the rules say
+    /// nothing, from the pane tail (N6, redesign step 8.10).
+    RoutineRunOutcome,
 }
 
 impl Feature {
@@ -162,6 +168,7 @@ impl Feature {
         Feature::SummaryCheck,
         Feature::TurnOutcome,
         Feature::MissionTriage,
+        Feature::RoutineRunOutcome,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -181,6 +188,7 @@ impl Feature {
             Feature::SummaryCheck => "summary_check",
             Feature::TurnOutcome => "turn_outcome",
             Feature::MissionTriage => "mission_triage",
+            Feature::RoutineRunOutcome => "routine_run_outcome",
         }
     }
 
@@ -206,15 +214,16 @@ impl Feature {
             Feature::SummaryCheck => settings::DECIDE_JEV_SUMMARY_CHECK,
             Feature::TurnOutcome => settings::DECIDE_JEV_TURN_OUTCOME,
             Feature::MissionTriage => settings::DECIDE_JEV_MISSION_TRIAGE,
+            Feature::RoutineRunOutcome => settings::DECIDE_JEV_ROUTINE_RUN_OUTCOME,
         }
     }
 
     /// Whether this feature sends Claude's reply text (a pane tail): then
     /// the org's SECOND consent (D48, the org's `decide.jev.reply_consent` row, or
     /// `decide.jev.unassigned_reply` for no org) is required on top of
-    /// D31's. Only J2.
+    /// D31's. J2 and N6, which read the same screen.
     pub fn sends_reply_text(self) -> bool {
-        matches!(self, Feature::TurnOutcome)
+        matches!(self, Feature::TurnOutcome | Feature::RoutineRunOutcome)
     }
 }
 
