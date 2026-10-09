@@ -118,7 +118,7 @@ describe('ShareSheet', () => {
       screen.getByTestId('share-level').querySelectorAll('option'),
       (o) => (o as HTMLOptionElement).value,
     );
-    expect(levels).toEqual(['watch', 'drive']);
+    expect(levels).toEqual(['watch', 'answer', 'drive']);
   });
 
   it('shares with an ORG by name, and revokes an org grant by its name', async () => {
@@ -189,6 +189,17 @@ describe('ShareSheet', () => {
     mockedNarrow.mockResolvedValue({ ok: true, value: null });
     render(ShareSheet);
     await settle();
+    await fireEvent.click(screen.getByTestId('share-narrow'));
+    await settle();
+    expect(mockedNarrow).toHaveBeenCalledWith(42, 'bea');
+  });
+
+  it('narrows an answer grant to watch too (Orbit Fleet 11.7)', async () => {
+    mockedList.mockResolvedValue({ ok: true, value: [grant({ level: 'answer' })] });
+    mockedNarrow.mockResolvedValue({ ok: true, value: null });
+    render(ShareSheet);
+    await settle();
+    expect(screen.getByTestId('share-grant-level').textContent).toBe('answer');
     await fireEvent.click(screen.getByTestId('share-narrow'));
     await settle();
     expect(mockedNarrow).toHaveBeenCalledWith(42, 'bea');

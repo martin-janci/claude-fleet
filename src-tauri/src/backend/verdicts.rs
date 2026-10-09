@@ -921,6 +921,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("list_tasks", Verdict::Routed { tool: "list_tasks" }),
     // Orbit Fleet 8.3: the Automation screen's Runs list.
     ("list_runs", Verdict::Routed { tool: "runs" }),
+    // Orbit Fleet 8.6: the Automation screen's Routines and the Inbox's failed runs.
+    ("routines", Verdict::Routed { tool: "routines" }),
     // ── tasks ───────────────────────────────────────────────────────────────
     (
         "cancel_task",

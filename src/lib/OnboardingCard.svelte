@@ -16,6 +16,11 @@
     type StepId,
   } from './onboarding';
   import { hubStatus, hubBlock, ownsTheFleet } from './hub';
+  import { uiLayout } from './prefs';
+  import { selectSessionExplicitly } from './selection';
+  import WizardDialog from './forms/WizardDialog.svelte';
+  import { newSessionWizard, startNewSession } from './forms/new_session_wizard';
+  import type { FieldProblem, Values } from './forms/forms';
 
   // Parent supplies actions that open existing dialogs.
   let { onaddhost, onnewsession }: { onaddhost: () => void; onnewsession: () => void } =
@@ -78,7 +83,11 @@
       return;
     }
     if (id === 'session') {
-      onnewsession();
+      // Redesign step 10.12: in the New layout Get started's first session
+      // is the New session wizard (project, host and agent in one place);
+      // Classic keeps the project picker and ⌘N's dialog.
+      if ($uiLayout === 'new') wizardOpen = true;
+      else onnewsession();
       return;
     }
     busy = id;
@@ -108,6 +117,30 @@
     } finally {
       busy = null;
     }
+  }
+
+  let wizardOpen = $state(false);
+  let wizardBusy = $state(false);
+  let wizardError = $state<string | null>(null);
+  let wizardProblems = $state<FieldProblem[]>([]);
+  const wizard = $derived(
+    newSessionWizard({ projects: $projects.map((p) => p.project), hosts: visibleHosts }),
+  );
+
+  async function startFromWizard(values: Values) {
+    wizardBusy = true;
+    wizardError = null;
+    wizardProblems = [];
+    const r = await startNewSession(values);
+    wizardBusy = false;
+    if (!r.ok) {
+      wizardError = r.error ?? null;
+      wizardProblems = r.problems ?? [];
+      return;
+    }
+    wizardOpen = false;
+    // Its view shows the Pulse until the agent is up (5.13).
+    selectSessionExplicitly(r.row);
   }
 
   function dismiss() {
@@ -171,6 +204,16 @@
     {/if}
   {/if}
 </div>
+
+{#if wizardOpen}
+  <WizardDialog
+    {wizard}
+    busy={wizardBusy}
+    error={wizardError}
+    problems={wizardProblems}
+    run={(v) => void startFromWizard(v)}
+    onclose={() => (wizardOpen = false)} />
+{/if}
 
 <style>
   .card {

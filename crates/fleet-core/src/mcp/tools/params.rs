@@ -1237,7 +1237,7 @@ pub struct UpdateAdminParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RoutinesParams {
-    /// list | get | runs | save | delete | set_enabled | skip_next | run_now.
+    /// list | get | runs | failing | save | delete | set_enabled | skip_next | run_now.
     pub action: String,
     /// Every action but list, and save of a change.
     #[serde(default)]
@@ -1281,8 +1281,8 @@ pub struct SessionShareParams {
     /// Or an org.
     #[serde(default)]
     pub org: Option<String>,
-    /// watch (read it) or drive (also prompt it). Nothing else — "own" is
-    /// not a grantable level.
+    /// watch (read it), answer (also answer its dialogs) or drive (also
+    /// prompt it). Nothing else — "own" is not a grantable level.
     pub level: String,
 }
 

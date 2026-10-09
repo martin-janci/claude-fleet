@@ -84,7 +84,7 @@
   let person = $state('');
   /** Who the draft share is for: a person, or an org (phase D). */
   let kind = $state<'person' | 'org'>('person');
-  let level = $state<'watch' | 'drive'>('watch');
+  let level = $state<'watch' | 'answer' | 'drive'>('watch');
   /** Which person's grant is one click from being revoked. Revoking is not
    *  destructive the way a kill is, but it is invisible to the person it
    *  happens to, so it gets the same two-step the rest of the app uses. */
@@ -256,6 +256,7 @@
           />
           <select data-testid="share-level" aria-label="Level" bind:value={level} disabled={busy}>
             <option value="watch">watch — read only</option>
+            <option value="answer">answer — can answer its questions</option>
             <option value="drive">drive — can send prompts</option>
           </select>
           <button
@@ -312,7 +313,7 @@
                     >
                   </span>
                 {:else}
-                  {#if g.level === 'drive'}
+                  {#if g.level === 'drive' || g.level === 'answer'}
                     <!-- Narrow, never widen: there is no control here that
                          raises a level, because there is no tool that does
                          (spec §4.3 invariant 3). Widening is a revoke and a
