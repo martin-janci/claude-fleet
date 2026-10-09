@@ -177,7 +177,7 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 
 | Setting | Default | Range | What it does |
 |---|---|---|---|
-| `update.track` | `stable` | `stable` / `beta` / `nightly` | Which releases the hub follows for its fleet. |
+| `update.track` | `stable` | `stable` / `beta` / `nightly` / `dev` | Which releases the hub follows for its fleet: stable, beta (release candidates too), nightly (main, at most every two hours) or dev (every green push to main). |
 | `update.hub.mode` | `notify` | `manual` / `notify` / `automatic` | manual: only a pinned version; notify: offer the update; automatic: install it at the next quiet point. |
 | `update.agent.mode` | `notify` | `manual` / `notify` / `automatic` | The same choice for fleet-agent on hosts the hub cannot reach. |
 | `update.desktop.mode` | `notify` | `manual` / `notify` / `automatic` | The same choice for the desktop app. |

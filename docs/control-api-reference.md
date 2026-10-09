@@ -797,9 +797,15 @@ Parameters: `id`
 
 ### `update_admin`
 
-Update admin, master only: pin a version (below installed = rollback), unpin, refresh the channel, rollout_* in waves, or one org's policy (set_policy / clear_policy). E_INVALID, E_CONFLICT, E_UPDATE_UNVERIFIED.
+Update admin, master only: pin a version (below installed = rollback), unpin, update_now, refresh the channel, rollout_* in waves, or an org's policy (set_policy / clear_policy). E_INVALID, E_CONFLICT, E_UPDATE_UNVERIFIED.
 
 Parameters: `action`, `component`, `halt_failure_ratio`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `target`, `version`, `waves`, `window`
+
+### `update_policy`
+
+An org's update policy from a person's device: list, set or clear its mode, floor, window and pin per component. The hub owner's device for any org, an org admin's for theirs. E_FORBIDDEN, E_INVALID.
+
+Parameters: `action`, `component`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `version`, `window`
 
 ### `update_status`
 

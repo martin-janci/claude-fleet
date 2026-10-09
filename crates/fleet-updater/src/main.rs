@@ -170,7 +170,13 @@ async fn real_main(cmd: &str, standalone: bool) -> Result<ExitCode, String> {
         let track = match env("FLEET_UPDATER_TRACK").as_deref() {
             None | Some("stable") => Track::Stable,
             Some("beta") => Track::Beta,
-            Some(t) => return Err(format!("FLEET_UPDATER_TRACK={t}: stable or beta")),
+            Some("nightly") => Track::Nightly,
+            Some("dev") => Track::Dev,
+            Some(t) => {
+                return Err(format!(
+                    "FLEET_UPDATER_TRACK={t}: stable, beta, nightly or dev"
+                ))
+            }
         };
         let mode = match env("FLEET_UPDATER_MODE").as_deref() {
             None | Some("notify") => Mode::Notify,
@@ -244,13 +250,21 @@ async fn real_main(cmd: &str, standalone: bool) -> Result<ExitCode, String> {
             _ => ExitCode::SUCCESS,
         });
     }
+    // `update_admin update_now` on the hub drops this in its data dir: the
+    // next pass starts at once instead of after `wait`.
+    let trigger = data_mount.join(common::UPDATE_NOW_FILE);
+    common::take_trigger(&trigger);
     loop {
         let (o, wait) = u.tick().await;
         if o != Outcome::Nothing {
             log!("{o:?}; next pass in {} s", wait.as_secs());
         }
         tokio::select! {
-            _ = tokio::time::sleep(wait) => {}
+            poked = common::sleep_or_poked(&trigger, wait) => {
+                if poked {
+                    log!("the hub asked for an update now");
+                }
+            }
             _ = shutdown() => {
                 log!("stopping");
                 return Ok(ExitCode::SUCCESS);

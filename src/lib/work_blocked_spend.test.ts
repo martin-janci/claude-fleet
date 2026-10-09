@@ -110,12 +110,14 @@ describe('where it shows', () => {
     render(TaskList);
     await flush();
     const row = screen.getAllByTestId('task-row').find((r) => r.textContent?.includes('Pair the phone'))!;
-    expect(within(row).getByTestId('task-row-blocked').textContent).toContain('Needs you');
-    expect(within(row).getByTestId('task-row-blocked-reason').textContent).toBe('Blocked on TASK-212');
-    expect(within(row).getByTestId('task-row-spend').textContent).toBe('$8.51');
+    // The shared WorkTaskRow: the dot reads Needs you, the line names the
+    // dependency, the cost chip carries the spend.
+    expect(within(row).getByRole('img', { name: 'Needs you' })).toBeTruthy();
+    expect(within(row).getByTestId('work-task-line').textContent).toContain('Blocked on TASK-212');
+    expect(within(row).getByTestId('work-task-cost').textContent).toBe('$8.51');
     const other = screen.getAllByTestId('task-row').find((r) => r.textContent?.includes('Pairing protocol'))!;
-    expect(within(other).queryByTestId('task-row-blocked')).toBeNull();
-    expect(within(other).queryByTestId('task-row-spend')).toBeNull();
+    expect(within(other).getByTestId('work-task-line').textContent).not.toContain('Blocked');
+    expect(within(other).queryByTestId('work-task-cost')).toBeNull();
   });
 
   it("the board's card", async () => {

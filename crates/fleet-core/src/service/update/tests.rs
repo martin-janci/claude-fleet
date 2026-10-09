@@ -728,6 +728,9 @@ fn nightly_is_a_track_once_it_is_published() {
     let s = Store::open_in_memory().unwrap();
     s.set_setting(settings::UPDATE_TRACK, "nightly").unwrap();
     assert_eq!(track(&s), Track::Nightly);
+    settings::validate(settings::UPDATE_TRACK, "dev").unwrap();
+    s.set_setting(settings::UPDATE_TRACK, "dev").unwrap();
+    assert_eq!(track(&s), Track::Dev);
     // Anything else stored reads as the default.
     s.set_setting(settings::UPDATE_TRACK, "hourly").unwrap();
     assert_eq!(track(&s), Track::Stable);
@@ -1592,6 +1595,7 @@ async fn an_orgs_policy_overrides_the_fleets_for_its_targets_only() {
             mode: Some("manual".into()),
             ..Default::default()
         },
+        "operator",
         NOW,
     )
     .unwrap();
@@ -1607,6 +1611,7 @@ async fn an_orgs_policy_overrides_the_fleets_for_its_targets_only() {
             minimum: Some("0.3.4".into()),
             ..Default::default()
         },
+        "operator",
         NOW,
     )
     .unwrap();
@@ -1630,6 +1635,7 @@ async fn an_orgs_policy_overrides_the_fleets_for_its_targets_only() {
             pin_version: Some("0.3.3".into()),
             ..Default::default()
         },
+        "operator",
         NOW,
     )
     .unwrap();
@@ -1689,6 +1695,7 @@ async fn an_orgs_window_and_an_agent_host_in_it() {
             window: Some("02:00-05:00".into()),
             ..Default::default()
         },
+        "operator",
         NOW,
     )
     .unwrap();
@@ -1715,8 +1722,11 @@ async fn an_org_policy_is_validated() {
         .add_org("acme", None, false)
         .unwrap()
         .id;
-    let bad =
-        |c: &str, i: OrgPolicyInput| set_org_policy(&store, acme, c, i, NOW).unwrap_err().code;
+    let bad = |c: &str, i: OrgPolicyInput| {
+        set_org_policy(&store, acme, c, i, "operator", NOW)
+            .unwrap_err()
+            .code
+    };
     assert_eq!(bad("desktop", OrgPolicyInput::default()), codes::E_INVALID);
     assert_eq!(
         bad(
@@ -1776,6 +1786,7 @@ async fn an_org_policy_is_validated() {
             mode: Some("manual".into()),
             ..Default::default()
         },
+        "operator",
         NOW,
     )
     .unwrap_err();
@@ -1789,6 +1800,7 @@ async fn an_org_policy_is_validated() {
             window: Some(String::new()),
             ..Default::default()
         },
+        "operator",
         NOW,
     )
     .unwrap();
@@ -1917,4 +1929,74 @@ async fn the_mirror_serves_only_what_a_signed_manifest_lists() {
     assert_eq!(mirror::prune(&lock(&store).unwrap(), &k, NOW), 1);
     assert!(path.exists());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── update now ──
+
+#[tokio::test]
+async fn update_now_pins_as_required_and_names_the_agents_to_wake() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    {
+        let s = lock(&store).unwrap();
+        for a in ["box1", "box2", "sshbox"] {
+            s.insert_host(a, None).unwrap();
+        }
+        s.set_host_transport("box1", "agent").unwrap();
+        s.set_host_transport("box2", "agent").unwrap();
+    }
+    // Under notify, 0.3.4 is only offered…
+    let d = check(
+        &store,
+        &client(1, TokenMode::Full, None),
+        &desktop_req("0.3.3"),
+        &k,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(d.status, Status::UpdateAvailable);
+    // …until the operator says now: the recommended release, required.
+    let r = update_now(&store, "desktop", "", None, &k, NOW).unwrap();
+    assert_eq!((r.pin.version.as_str(), r.pin.mandatory), ("0.3.4", true));
+    assert!(r.agents.is_empty());
+    let d = check(
+        &store,
+        &client(1, TokenMode::Full, None),
+        &desktop_req("0.3.3"),
+        &k,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        (d.status, d.reason.code),
+        (
+            Status::UpdateRequired,
+            fleet_update::wire::ReasonCode::Pinned
+        )
+    );
+    assert!(d.next_check_secs <= PINNED_RECHECK_SECS);
+    // Once there, nothing more to do and the usual interval.
+    let d = check(
+        &store,
+        &client(1, TokenMode::Full, None),
+        &desktop_req("0.3.4"),
+        &k,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(d.status, Status::UpToDate);
+
+    // Agents: every agent host, or the one named; never an SSH host.
+    let r = update_now(&store, "agent", "", Some("0.3.4"), &k, NOW).unwrap();
+    assert_eq!(r.agents, ["box1", "box2"]);
+    let r = update_now(&store, "agent", "agent:box2", None, &k, NOW).unwrap();
+    assert_eq!(r.agents, ["box2"]);
+
+    // Only a release the channel offers.
+    let e = update_now(&store, "desktop", "", Some("0.9.9"), &k, NOW).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    let empty = Mutex::new(Store::open_in_memory().unwrap());
+    let e = update_now(&empty, "desktop", "", None, &k, NOW).unwrap_err();
+    assert_eq!(e.code, codes::E_UPDATE_UNVERIFIED);
 }

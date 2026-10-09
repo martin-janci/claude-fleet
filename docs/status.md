@@ -771,12 +771,12 @@ release since. `FLEET_UPDATE_E2E_KEYS`
 `scripts/updater-e2e.sh` sign with. **S2b is landed:** `nightly.yml` cuts a nightly of
 a green `main` commit (`scripts/cut-nightly.sh`: scripts/release.sh's own
 commit on top of it, never pushed to a branch, only its tag) and dispatches
-the same `release.yml` / `hub-image.yml` at it — per push at most every two
-hours `X.Y.Z-dev.N.g<sha>` (hub and tarballs; `release-assets.sh
-has-desktop` is false), once a day `X.Y.Z-dev.N.desktop.g<sha>` with the
-desktop bundles (owner's §13.3 answer). `update.track` offers `nightly`;
+the same `release.yml` / `hub-image.yml` at it — every green push, desktop
+bundles included, as `X.Y.Z-dev.N.g<sha>`. Each one is listed on the `dev`
+track at once and on `nightly` when that has not moved for two hours
+(`NIGHTLY_EVERY_SECS`). `update.track` offers `nightly` and `dev`;
 Git mode scans past releases without the caller's artifact, and the hub
-keeps 20 manifests. Pruned to the newest 12 + 3. §13 question 7 waits on
+keeps 20 manifests. Pruned to the newest 15 plus whatever `nightly.json` lists. §13 question 7 waits on
 the owner (2 is answered: a signed amendment).
 
 **S8 is landed:** fleet-mobile's release sends `repository_dispatch`
@@ -796,15 +796,19 @@ the halt ratio, `fleet_health` `rollout_paused`; `update_status.rollouts`);
 the maintenance window (`update.window`, UTC, holds only `automatic`
 components); per-org policy (migration 152 `update_org_policy`,
 `update_admin set_policy` / `clear_policy`: an org's mode, floor, window and
-pin for its clients and agent hosts; master only, an org owner cannot set
-its own yet); the artifact mirror (`update.mirror`, OFF by default;
-`GET /update/artifact/<sha256>`, `target.mirror`); and the binary target
+pin for its clients and agent hosts; the master for any org, an org admin
+for their own through `update_policy`); the artifact mirror (`update.mirror`,
+OFF by default; `GET /update/artifact/<sha256>`, `target.mirror`, used by the
+agent, the bare hub, the desktop and the Android app, each falling back to
+GitHub); update now (`update_admin update_now`: pins the component, wakes
+the hub's updater through `<data_dir>/update-now` and pokes agent hosts'
+`fleet-agent-update.path`, decisions re-checked every two minutes while
+pinned); and the binary target
 (`fleet_updater::binary`, now a library too): `fleet-agent update` with
 `install --auto-update`'s timer, and `fleet-hub update apply` / `pair` with
 `deploy/hub/fleet-hub-update.{service,timer}` for a hub without Docker. The
 binary loop is tested against a pretend machine (`binary::tests`); it has not
-run against a real systemd yet. The desktop and the phone do not use the
-mirror.
+run against a real systemd yet.
 
 Debug devices' first slice is landed (`docs/debug-devices.md`): per-host
 inventory of Android phones, emulators and AVDs, iOS simulators and paired

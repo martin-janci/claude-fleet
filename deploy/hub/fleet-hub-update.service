@@ -2,10 +2,10 @@
 # `fleet-hub update apply` from a timer. docs/updates.md → "A hub without
 # Docker".
 #
-#   sudo cp fleet-hub-update.service fleet-hub-update.timer /etc/systemd/system/
+#   sudo cp fleet-hub-update.service fleet-hub-update.timer fleet-hub-update.path /etc/systemd/system/
 #   fleet-hub pair --name updater --mode updater        # as the hub's user
 #   sudo fleet-hub update pair '<the URL it printed>'
-#   sudo systemctl daemon-reload && sudo systemctl enable --now fleet-hub-update.timer
+#   sudo systemctl daemon-reload && sudo systemctl enable --now fleet-hub-update.timer fleet-hub-update.path
 #
 # It runs as root: it writes /usr/local/lib/fleet-hub and /usr/local/bin/fleet-hub
 # and restarts fleet-hub.service. The hub's healthcheck and backups run as

@@ -959,19 +959,23 @@ fn loop_applies_card(kind: &str, auto_level: i64) -> bool {
     }
 }
 
-/// The missions with a planner call in flight in this process.
-static PLANNING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<i64>>> =
+/// The missions with a planner call in flight in this process, keyed by the
+/// store they live in as well as their id: two stores in one process (the
+/// test suite's, run in parallel) hand out the same mission ids, and one
+/// test's slot must not refuse another's planner.
+static PLANNING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<(usize, i64)>>> =
     std::sync::LazyLock::new(Default::default);
 
 /// Holds a mission's planner slot while its call runs (review r01): a
 /// person's `mission_plan` and the loop's own call, or two presses, do not
 /// ask the planner twice at once and card its answer twice.
-struct PlannerSlot(i64);
+struct PlannerSlot((usize, i64));
 
 impl PlannerSlot {
-    fn take(m: &MissionRow) -> Result<Self, IpcError> {
+    fn take(deps: &Deps, m: &MissionRow) -> Result<Self, IpcError> {
+        let key = (Arc::as_ptr(&deps.store) as usize, m.id);
         let mut running = PLANNING.lock().unwrap_or_else(|e| e.into_inner());
-        if !running.insert(m.id) {
+        if !running.insert(key) {
             return Err(IpcError::new(
                 codes::E_EXISTS,
                 format!(
@@ -980,7 +984,7 @@ impl PlannerSlot {
                 ),
             ));
         }
-        Ok(Self(m.id))
+        Ok(Self(key))
     }
 }
 
@@ -1000,7 +1004,7 @@ pub async fn run_planner(
     why: &str,
     actor: &Actor,
 ) -> Result<PlanOutcome, IpcError> {
-    let _slot = PlannerSlot::take(m)?;
+    let _slot = PlannerSlot::take(deps, m)?;
     let now = now_unix();
     let (host, prompt, model, auto_level, accept_created) = {
         let s = lock(&deps.store)?;

@@ -7552,5 +7552,15 @@ fn update_routes_are_the_only_contract_exemption() {
             codes::E_INTERNAL,
             "only the update routes: {err:?}"
         );
+        // The artifact mirror: its own route only, never another GET.
+        let dest = std::env::temp_dir().join("fleet-not-written");
+        for path in [
+            "/downloads/3",
+            "/update/artifact/short",
+            "/update/artifact/../../x",
+        ] {
+            let err = block_on(hub.fetch_update_artifact(path, &dest, 10)).unwrap_err();
+            assert_eq!(err.code, codes::E_INTERNAL, "{path}: {err:?}");
+        }
     }
 }

@@ -1039,6 +1039,39 @@ impl HubBackend {
         }
     }
 
+    /// The hub's artifact mirror (`GET /update/artifact/<sha256>`, S9): a
+    /// release file into `dest`, for an update this desktop installs. Like
+    /// [`Self::post_update`], outside the contract gate — a skewed desktop is
+    /// the one that must update — and only that route. The bytes are trusted
+    /// by the caller's own sha256 check against the signed manifest.
+    pub async fn fetch_update_artifact(
+        &self,
+        path: &str,
+        dest: &std::path::Path,
+        max: u64,
+    ) -> Result<u64, IpcError> {
+        let sha = path.strip_prefix("/update/artifact/").unwrap_or_default();
+        if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(IpcError::new(
+                codes::E_INTERNAL,
+                format!("{path} is not a mirror path"),
+            ));
+        }
+        if let Some(refused) = self.unavailable_error("update_check") {
+            return Err(refused);
+        }
+        let url = format!("{}{path}", self.cfg.base_url);
+        self.transport
+            .get_to_file(&url, &self.cfg.token, dest, max)
+            .await
+            .map_err(|e| {
+                IpcError::new(
+                    codes::E_HUB_UNREACHABLE,
+                    format!("the hub's mirror: {}", self.redact(&e)),
+                )
+            })
+    }
+
     /// `commands::tasks::list_tasks`.
     pub async fn list_tasks(
         &self,

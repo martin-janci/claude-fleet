@@ -814,7 +814,10 @@ Index by area (names only; see the reference for details):
   pins; a read any client may make, but a per-host or org-bound token sees
   its own row only) and `update_admin` (master token only: `pin` a version
   for a component or one target, where a pin below installed is a rollback;
-  `unpin`; `refresh` to re-read the signed channel now). `update_status {
+  `unpin`; `update_now` to install at once; `refresh` to re-read the signed
+  channel now), and `update_policy` (a person's device: `list`, `set` or
+  `clear` the update policy of the org it administers — an org admin's own
+  org, or any org from the hub owner's device). `update_status {
   target }` answers for one target (`client:<id>`, `agent:<alias>`,
   `hub:self`) with its whole decision — status, reason code, the release it
   would be offered and whether it is mandatory — the dashboard's "why"; a
@@ -829,7 +832,8 @@ Index by area (names only; see the reference for details):
   phase, a pin or the verified channel changes; a client re-reads
   `update_status`. It never reaches a per-host token or an org-bound
   client. The update wire itself, `POST /update/check` and
-  `/update/report`, is not a tool: see `docs/updates.md`.
+  `/update/report` (and `GET /update/artifact/<sha256>`, the mirror), is
+  not a tool: see `docs/updates.md`.
 - **File downloads** — `send_file` (`{ session_id, path, note? }`) copies a
   file from a session's host to the machine that owns the fleet (the hub),
   for the person's phone and desktop: absolute or relative to the session's
