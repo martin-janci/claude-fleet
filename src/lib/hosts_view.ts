@@ -306,6 +306,42 @@ export interface HostRowInfo {
   attention: HostAttention | null;
 }
 
+/** Every host's row facts: its session counts and its one attention mark.
+ *  Shared by the Hosts view and the Accounts & hosts page, which draw the
+ *  same table. */
+export function hostRowInfos(args: {
+  hosts: readonly HostRow[];
+  sessions: readonly SessionRow[];
+  tokens: ReadonlyMap<string, unknown>;
+  tokensLoaded: boolean;
+  hookOf: (alias: string, hasToken: boolean) => HookHealth;
+  newestClaude: string | null;
+  now: number;
+  versionMaxAgeSecs: number;
+  diskLowPct: number;
+  hubVersion: string | null;
+}): Map<string, HostRowInfo> {
+  const m = new Map<string, HostRowInfo>();
+  for (const h of args.hosts) {
+    const counts = sessionCounts(h.alias, args.sessions);
+    const hasToken = args.tokens.has(h.alias);
+    const attention = hostAttention({
+      host: h,
+      hasToken,
+      tokensLoaded: args.tokensLoaded,
+      hook: args.hookOf(h.alias, hasToken),
+      sessionCount: counts.total,
+      newestClaude: args.newestClaude,
+      now: args.now,
+      versionMaxAgeSecs: args.versionMaxAgeSecs,
+      diskLowPct: args.diskLowPct,
+      hubVersion: args.hubVersion,
+    });
+    m.set(h.alias, { counts, attention });
+  }
+  return m;
+}
+
 // ── host health (host identity & health, task 3) ──
 
 export interface DiskMeter {

@@ -9,6 +9,7 @@ import type { HostRow } from './hosts';
 import type { SessionRow } from './sessions';
 import type { AccountUsage, AccountUsageSnapshot } from './account_usage_store';
 import type { UsageWindowKind } from './account_usage';
+import type { AttentionFacts, AttentionLimit } from './attention';
 import { invokeCmd, type Result } from './result';
 
 /** Mirrors `store::UsageSnapshotRow`. */
@@ -145,4 +146,73 @@ export async function loadUsageHistory(
   return invokeCmd<UsageSnapshotRow[]>('account_usage_history', {
     args: { account_uuid: accountUuid, since },
   });
+}
+
+// ── the overview (Accounts board: "Accounts & hosts") ──
+
+/** The account new sessions on this machine use: the local host's own
+ *  login. `null` when there is no local host or it is not logged in. */
+export function defaultAccountUuid(hosts: readonly HostRow[]): string | null {
+  return hosts.find((h) => h.alias === 'local')?.account_uuid ?? null;
+}
+
+/** The newest usage reading across `list`, for "usage refreshed 1 min ago". */
+export function usageRefreshedAt(list: readonly AccountSummary[]): number | null {
+  let at: number | null = null;
+  for (const a of list) {
+    const t = a.usage?.fetched_at ?? null;
+    if (t !== null && (at === null || t > at)) at = t;
+  }
+  return at;
+}
+
+/** The limit an account is at, while it has not reset (`attention_facts`). */
+export function limitOf(uuid: string, facts: AttentionFacts | null | undefined, now: number): AttentionLimit | null {
+  const l = facts?.limited_accounts?.[uuid];
+  if (!l) return null;
+  return l.resets_at == null || l.resets_at > now ? l : null;
+}
+
+/** The account's sessions its limit pauses: the live ones that are not
+ *  working, as `attention.ts` puts them in "Paused · limit". */
+export function pausedSessions(a: AccountSummary, facts: AttentionFacts | null | undefined, now: number): SessionRow[] {
+  if (!limitOf(a.uuid, facts, now)) return [];
+  return a.sessions.filter((s) => s.status !== 'ghost' && s.lost_at === null && s.claude_status !== 'working');
+}
+
+/** Percent left of an account's tighter window, `null` with no reading. */
+function headroom(a: AccountSummary): number | null {
+  const u = a.usage?.usage;
+  const used = [u?.five_hour?.utilization, u?.seven_day?.utilization].filter(
+    (x): x is number => typeof x === 'number' && Number.isFinite(x),
+  );
+  return used.length === 0 ? null : 100 - Math.max(...used);
+}
+
+/**
+ * Where a limited account's paused sessions would most likely go: another
+ * account, not itself at a limit, logged in on a host one of them runs on,
+ * with the most room left. Only a name for the button: the switch itself
+ * asks each session's host (`moveToHeadroom`).
+ */
+export function switchCandidate(
+  limited: AccountSummary,
+  paused: readonly SessionRow[],
+  list: readonly AccountSummary[],
+  facts: AttentionFacts | null | undefined,
+  now: number,
+): AccountSummary | null {
+  const hostsOf = new Set(paused.map((s) => s.host_alias));
+  let best: AccountSummary | null = null;
+  let bestRoom = -1;
+  for (const a of list) {
+    if (a.uuid === limited.uuid || limitOf(a.uuid, facts, now)) continue;
+    if (!a.logins.some((l) => hostsOf.has(l.host))) continue;
+    const room = headroom(a) ?? 0;
+    if (best === null || room > bestRoom) {
+      best = a;
+      bestRoom = room;
+    }
+  }
+  return best;
 }

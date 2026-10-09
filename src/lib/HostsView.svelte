@@ -28,11 +28,9 @@
     endpointOutage,
     filterGroups,
     groupHostsByAccount,
-    hostAttention,
+    hostRowInfos,
     newestClaudeVersion,
-    sessionCounts,
     sharedWith,
-    type HostRowInfo,
   } from './hosts_view';
   import AddHostWizard from './AddHostWizard.svelte';
   import HostsList from './HostsList.svelte';
@@ -118,26 +116,20 @@
     if (r.ok && r.value?.version) hubVersion = r.value.version;
   });
 
-  const rowInfo = $derived.by(() => {
-    const m = new Map<string, HostRowInfo>();
-    for (const h of $hosts) {
-      const counts = sessionCounts(h.alias, $sessions);
-      const attention = hostAttention({
-        host: h,
-        hasToken: $hostTokens.has(h.alias),
-        tokensLoaded: $hostTokensLoaded,
-        hook: hookHealth(h.alias, $hostTokens.has(h.alias), $sessions),
-        sessionCount: counts.total,
-        newestClaude,
-        now,
-        versionMaxAgeSecs: versionMaxAge,
-        diskLowPct,
-        hubVersion,
-      });
-      m.set(h.alias, { counts, attention });
-    }
-    return m;
-  });
+  const rowInfo = $derived(
+    hostRowInfos({
+      hosts: $hosts,
+      sessions: $sessions,
+      tokens: $hostTokens,
+      tokensLoaded: $hostTokensLoaded,
+      hookOf: (alias, hasToken) => hookHealth(alias, hasToken, $sessions),
+      newestClaude,
+      now,
+      versionMaxAgeSecs: versionMaxAge,
+      diskLowPct,
+      hubVersion,
+    }),
+  );
 
   /** Accounts at least one host is logged in to: the ones the view shows. */
   const linkedUuids = $derived(allGroups.map((g) => g.accountUuid).filter((u): u is string => !!u));
@@ -211,7 +203,10 @@
   }
 
   function moveInDetail(delta: number | 'home' | 'end') {
-    const rows = Array.from(detailEl?.querySelectorAll<HTMLElement>('[data-nav-row]') ?? []);
+    // Rows on a hidden tab of the detail (Orbit Fleet 4.7 tabs) are skipped.
+    const rows = Array.from(detailEl?.querySelectorAll<HTMLElement>('[data-nav-row]') ?? []).filter(
+      (r) => !r.closest('[hidden]'),
+    );
     if (rows.length === 0) return;
     const i = rows.indexOf(document.activeElement as HTMLElement);
     let next: number;

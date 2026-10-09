@@ -1,13 +1,15 @@
 <script lang="ts">
-  // The Accounts page (Orbit Fleet redesign step 4.1, the Accounts board):
-  // a list of every Claude account on the left, the picked one's detail on
-  // the right — plan, the 5-hour and weekly windows with their reset times
+  // The Accounts & hosts page (Orbit Fleet redesign step 4.1, the Accounts
+  // board). It opens on the overview: every Claude account as a card with
+  // its 5-hour and weekly windows, its sessions and, at a limit, its paused
+  // sessions and a switch to another account; the hosts table below. A card
+  // opens the account's detail — plan, the windows with their reset times
   // and history, the hosts and login profiles signed in to it, and the
   // sessions running on it. Usage comes from the same snapshots the Hosts
   // view shows (`account_usage_store`); history from `account_usage_history`.
-  import { accounts } from './accounts';
+  import { accounts, accountByUuid } from './accounts';
   import { hosts } from './hosts';
-  import { sessions } from './sessions';
+  import { restartSession, sessions, type SessionRow } from './sessions';
   import { accountUsage, refreshAccountUsage } from './account_usage_store';
   import {
     checkedAgo,
@@ -23,21 +25,43 @@
   } from './account_usage';
   import {
     accountSummaries,
+    defaultAccountUuid,
     historyPoints,
     HISTORY_SPAN_SECS,
+    limitOf,
     loadUsageHistory,
+    pausedSessions,
     peakUsed,
     sparkPath,
+    switchCandidate,
+    usageRefreshedAt,
     type AccountSummary,
     type UsageSnapshotRow,
   } from './accounts_page';
-  import { displayName } from './attention';
+  import { displayName, type AttentionLimit } from './attention';
+  import { attentionFacts } from './attention_facts';
   import { showFriendlyNames } from './sessions';
   import { selectSessionExplicitly } from './selection';
-  import { pushError } from './toasts';
+  import { push, pushError } from './toasts';
   import { accountsPageRequest } from './account_pill';
-  import { requestHostsView } from './app_views';
-  import { untrack } from 'svelte';
+  import { requestHostsView, requestNewSessionOnHost } from './app_views';
+  import { moveToHeadroom, resetText } from './account_limits';
+  import { hubStatus, hubBlock, hubActionBlocked, ownsTheFleet } from './hub';
+  import { hubConnection } from './hub_connection';
+  import { bulkTargets, sessionBlocked } from './share';
+  import { hostRowInfos, newestClaudeVersion } from './hosts_view';
+  import { tableOrder } from './hosts_table';
+  import { hookHealth } from './hook_health';
+  import { hostTokens, hostTokensLoaded, loadHostTokens } from './host_actions';
+  import { attentionIdleMinutes } from './notify';
+  import { fleetSettings, SETTING_KEYS, settingInt, settingSecs } from './fleet_settings';
+  import { healthCheck } from './ipc';
+  import HostsTable from './HostsTable.svelte';
+  import AddHostWizard from './AddHostWizard.svelte';
+  import LimitActions from './LimitActions.svelte';
+  import Meter from './kit/Meter.svelte';
+  import StatusDot from './kit/StatusDot.svelte';
+  import { onMount, untrack } from 'svelte';
 
   let {
     clock = () => Math.floor(Date.now() / 1000),
@@ -57,12 +81,16 @@
 
   const list = $derived(accountSummaries($accounts, $hosts, $sessions, $accountUsage));
   let picked = $state<string | null>(null);
+  /** The page opens on the overview; a card (or a pill elsewhere) opens one
+   *  account's detail, and "← Accounts & hosts" goes back. */
+  let detailOpen = $state(false);
   // A pill elsewhere (step 4.3) asked for one account: show it, then clear
   // the request so a later visit keeps whatever was picked by hand.
   $effect(() => {
     const req = $accountsPageRequest;
     if (req === null) return;
     picked = req;
+    detailOpen = true;
     accountsPageRequest.set(null);
   });
   // Nothing picked yet: the first account. A pick that names an account the
@@ -145,6 +173,154 @@
     };
   }
 
+  // ── the overview (Accounts board) ──
+
+  const defaultUuid = $derived(defaultAccountUuid($hosts));
+  const refreshedAt = $derived(usageRefreshedAt(list));
+  const countLine = $derived(
+    [
+      `${list.length} ${list.length === 1 ? 'account' : 'accounts'}`,
+      `${$hosts.length} ${$hosts.length === 1 ? 'host' : 'hosts'}`,
+      refreshedAt !== null ? checkedAgo(refreshedAt, now).replace('checked', 'usage refreshed') : null,
+    ]
+      .filter(Boolean)
+      .join(' · '),
+  );
+  /** Accounts a host is logged in to: the ones a usage refresh can read. */
+  const linked = $derived(list.filter((a) => a.logins.length > 0).map((a) => a.uuid));
+  const refreshAllBlocked = $derived(hubBlock('refresh_account_usage', $hubStatus));
+  const addHostBlocked = $derived(hubBlock('add_host', $hubStatus));
+  let showAddHost = $state(false);
+
+  async function refreshAll() {
+    if (refreshAllBlocked !== null || refreshing) return;
+    refreshing = true;
+    const r = await Promise.all(linked.map((u) => refreshAccountUsage(u)));
+    refreshing = false;
+    const failed = r.find((x) => !x.ok);
+    if (failed && !failed.ok) pushError(failed.error, 'Usage refresh failed');
+  }
+
+  function openDetail(uuid: string) {
+    picked = uuid;
+    detailOpen = true;
+  }
+
+  /** A card's click opens its detail, unless it landed on one of the card's
+   *  own controls (Show, Switch, a paused session). */
+  function onCardClick(e: MouseEvent, uuid: string) {
+    if ((e.target as HTMLElement | null)?.closest('button, a, input, select')) return;
+    openDetail(uuid);
+  }
+
+  /** Which limited cards show their paused sessions. */
+  let pausedOpen = $state<Set<string>>(new Set());
+  function togglePaused(uuid: string) {
+    const next = new Set(pausedOpen);
+    if (next.has(uuid)) next.delete(uuid);
+    else next.add(uuid);
+    pausedOpen = next;
+  }
+
+  const accountName = (uuid: string) => list.find((a) => a.uuid === uuid)?.label ?? uuid.slice(0, 8);
+
+  /**
+   * "Switch to <account>" (step 4.4's bulk Switch account, from the card):
+   * each paused session this person may restart resumes under the login on
+   * its host with the most headroom; the rest stay as they are. The same
+   * `moveToHeadroom` the sidebar's select mode runs.
+   */
+  let switching = $state<string | null>(null);
+  const restartHubBlocked = $derived(hubActionBlocked('restart_session', $hubStatus, $hubConnection));
+  function switchBlocked(paused: readonly SessionRow[]): string | null {
+    if (restartHubBlocked !== null) return restartHubBlocked;
+    return paused.length > 0 && bulkTargets(paused, 'restart_session', $sessionBlocked).length === 0
+      ? 'None of these sessions is yours to restart.'
+      : null;
+  }
+  async function switchPaused(a: AccountSummary, paused: readonly SessionRow[]) {
+    if (switching !== null || switchBlocked(paused) !== null) return;
+    switching = a.uuid;
+    const r = await moveToHeadroom(bulkTargets(paused, 'restart_session', $sessionBlocked), restartSession);
+    switching = null;
+    const parts = [
+      r.moved > 0 ? `Switched ${r.moved} session${r.moved === 1 ? '' : 's'}` : 'Nothing switched',
+      r.stayed > 0 ? `${r.stayed} still under the line` : '',
+      r.nowhere > 0 ? `${r.nowhere} with no other login that has room` : '',
+      r.failed > 0 ? `${r.failed} failed` : '',
+    ].filter(Boolean);
+    push({ message: parts.join(' · '), kind: r.failed > 0 ? 'error' : r.moved > 0 ? 'success' : 'info' });
+  }
+
+  /** A card's window line: "75% left · resets 14:20", or at the limit
+   *  "Limit reached · resets Fri 11:00". */
+  function cardWindowText(w: WindowView, limit: AttentionLimit | null): string {
+    if (limit) return limit.resets_at !== null ? `Limit reached · resets ${resetText(limit.resets_at)}` : 'Limit reached';
+    if (w.unknown) return '? left';
+    if (w.left === null) return 'no reading yet';
+    return w.resetShort ? `${w.left}% left · ${w.resetShort}` : `${w.left}% left`;
+  }
+
+  /** The kit Meter's level for a window's severity. */
+  function meterLevel(level: string): 'ok' | 'warn' | 'crit' {
+    return level === 'caution' ? 'warn' : level === 'low' || level === 'limit' ? 'crit' : 'ok';
+  }
+
+  /** The card's health dot: at a limit, low, fine, or no reading. */
+  function cardState(a: AccountSummary, five: WindowView, week: WindowView): 'failed' | 'waiting' | 'done' | 'idle' {
+    if (limitOf(a.uuid, $attentionFacts, now)) return 'failed';
+    if (five.left === null && week.left === null) return 'idle';
+    if ([five.level, week.level].some((l) => l === 'low' || l === 'limit' || l === 'caution')) return 'waiting';
+    return 'done';
+  }
+
+  // The hosts table, as the Hosts view draws it.
+  const versionMaxAge = $derived(settingSecs($fleetSettings, SETTING_KEYS.healthVersionMaxAgeSecs));
+  const diskLowPct = $derived(settingInt($fleetSettings, SETTING_KEYS.healthDiskLowPct));
+  const newestClaude = $derived(newestClaudeVersion($hosts, now, versionMaxAge));
+  let hubVersion = $state<string | null>(null);
+  const tableHosts = $derived(tableOrder($hosts));
+  const rowInfo = $derived(
+    hostRowInfos({
+      hosts: $hosts,
+      sessions: $sessions,
+      tokens: $hostTokens,
+      tokensLoaded: $hostTokensLoaded,
+      hookOf: (alias, hasToken) => hookHealth(alias, hasToken, $sessions),
+      newestClaude,
+      now,
+      versionMaxAgeSecs: versionMaxAge,
+      diskLowPct,
+      hubVersion,
+    }),
+  );
+  let selectedHost = $state<string | null>(null);
+  let tableEl = $state<HTMLElement>();
+
+  onMount(() => {
+    void healthCheck().then((r) => {
+      if (r.ok && r.value?.version) hubVersion = r.value.version;
+    });
+    // `list_host_tokens` is local-only in remote mode, as in the Hosts view.
+    if (ownsTheFleet($hubStatus) && !$hostTokensLoaded) void loadHostTokens();
+  });
+
+  /** The table's keys (the Hosts view's, the few that apply here): move,
+   *  and Enter opens the host in the Hosts view. */
+  function onTableKeydown(e: KeyboardEvent) {
+    if (e.target !== tableEl || e.metaKey || e.ctrlKey || e.altKey) return;
+    const i = tableHosts.findIndex((h) => h.alias === selectedHost);
+    if (e.key === 'ArrowDown' || e.key === 'j' || e.key === 'ArrowUp' || e.key === 'k') {
+      e.preventDefault();
+      const d = e.key === 'ArrowDown' || e.key === 'j' ? 1 : -1;
+      const next = tableHosts[Math.min(tableHosts.length - 1, Math.max(0, i + d))];
+      if (next) selectedHost = next.alias;
+    } else if ((e.key === 'Enter' || e.key === 'ArrowRight') && selectedHost) {
+      e.preventDefault();
+      requestHostsView(selectedHost);
+    }
+  }
+
   const SPARK_W = 240;
   const SPARK_H = 36;
 
@@ -160,23 +336,157 @@
   }
 </script>
 
-<section class="accounts" data-testid="accounts-page" aria-label="Accounts">
+<section class="accounts" data-testid="accounts-page" aria-label="Accounts and hosts">
   <header class="head">
-    <h2>Accounts</h2>
-    <span class="sub" data-testid="accounts-count">
-      {list.length} {list.length === 1 ? 'account' : 'accounts'}
-    </span>
+    {#if detailOpen && list.length > 0}
+      <button type="button" class="btn" data-testid="accounts-back" onclick={() => (detailOpen = false)}
+        >← Accounts &amp; hosts</button
+      >
+    {/if}
+    <h2>Accounts &amp; hosts</h2>
+    <span class="sub" data-testid="accounts-count">{countLine}</span>
+    <span class="grow"></span>
+    <button
+      type="button"
+      class="btn"
+      data-testid="accounts-refresh"
+      disabled={refreshing || refreshAllBlocked !== null || linked.length === 0}
+      title={refreshAllBlocked ?? 'Read every account’s usage again'}
+      onclick={refreshAll}>Refresh</button
+    >
+    <button
+      type="button"
+      class="btn"
+      data-testid="accounts-add-host"
+      disabled={addHostBlocked !== null}
+      title={addHostBlocked ?? ''}
+      onclick={() => (showAddHost = true)}>+ Add host</button
+    >
     <!-- Review r08: the rail item is "Accounts & hosts", and Classic's Hosts
          tab was always in view; the Hosts view is one click from here. -->
-    <button type="button" class="btn-quiet hosts-link" data-testid="accounts-all-hosts" onclick={() => requestHostsView()}
+    <button type="button" class="btn" data-testid="accounts-all-hosts" onclick={() => requestHostsView()}
       >All hosts ›</button
     >
   </header>
 
-  {#if list.length === 0}
-    <p class="empty" data-testid="accounts-empty">
-      No Claude account yet. An account appears here once a host is logged in to it.
-    </p>
+  {#if !detailOpen || list.length === 0}
+    <div class="overview" data-testid="accounts-overview">
+      <h3 class="section-label">Claude accounts</h3>
+      {#if list.length === 0}
+        <p class="empty" data-testid="accounts-empty">
+          No Claude account yet. An account appears here once a host is logged in to it.
+        </p>
+      {:else}
+        <ul class="grid" aria-label="Claude accounts">
+          {#each list as a (a.uuid)}
+            {@const five = windowView(a, '5h')}
+            {@const week = windowView(a, 'weekly')}
+            {@const limit = limitOf(a.uuid, $attentionFacts, now)}
+            {@const paused = pausedSessions(a, $attentionFacts, now)}
+            {@const other = limit ? switchCandidate(a, paused, list, $attentionFacts, now) : null}
+            <!-- The card's title is its keyboard way in; a click anywhere
+                 else on it opens the detail too. -->
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+            <li
+              class="ocard"
+              class:limited={limit !== null}
+              data-account={a.uuid}
+              data-testid="account-card"
+              onclick={(e) => onCardClick(e, a.uuid)}
+            >
+              <div class="card-head">
+                <StatusDot state={cardState(a, five, week)} label={null} />
+                <button type="button" class="title" data-testid="account-card-open" onclick={() => openDetail(a.uuid)}
+                  >{a.label}</button
+                >
+                <span class="grow"></span>
+                {#if a.plan || a.uuid === defaultUuid}
+                  <span class="tag" data-testid="account-card-tag"
+                    >{[a.plan, a.uuid === defaultUuid ? 'default' : null].filter(Boolean).join(' · ')}</span
+                  >
+                {/if}
+              </div>
+              {#each [five, week] as w (w.kind)}
+                {@const atLimit = limit !== null && (limit.window === 'five_hour') === (w.kind === '5h')}
+                <div class="oline" data-level={atLimit ? 'limit' : w.level} data-testid="account-card-{w.kind}">
+                  <span class="w-title">{w.title}</span>
+                  <span class="w-val">{cardWindowText(w, atLimit ? limit : null)}</span>
+                </div>
+                <Meter
+                  value={atLimit ? 1 : (w.left ?? 0) / 100}
+                  level={atLimit ? 'crit' : meterLevel(w.level)}
+                  label="{a.label} {w.title} left"
+                />
+              {/each}
+              <div class="ofoot">
+                <span class="meta">
+                  {a.sessions.length} {a.sessions.length === 1 ? 'session' : 'sessions'}
+                  {#if paused.length > 0}
+                    ·
+                    <button
+                      type="button"
+                      class="link"
+                      aria-expanded={pausedOpen.has(a.uuid)}
+                      data-testid="account-paused-show"
+                      onclick={() => togglePaused(a.uuid)}
+                      >{paused.length} paused {paused.length === 1 ? 'session' : 'sessions'} → {pausedOpen.has(a.uuid)
+                        ? 'Hide'
+                        : 'Show'}</button
+                    >
+                  {/if}
+                </span>
+                {#if paused.length > 0}
+                  <button
+                    type="button"
+                    class="btn"
+                    data-testid="account-switch"
+                    disabled={switching !== null || switchBlocked(paused) !== null}
+                    title={switchBlocked(paused) ??
+                      'Resume each paused session under the login on its host with the most room left'}
+                    onclick={() => void switchPaused(a, paused)}
+                    >{switching === a.uuid ? 'Switching…' : other ? `Switch to ${other.label}` : 'Switch account'}</button
+                  >
+                {/if}
+              </div>
+              {#if paused.length > 0 && pausedOpen.has(a.uuid)}
+                <ul class="paused" data-testid="account-paused-list">
+                  {#each paused as p (p.id)}
+                    <li>
+                      <button type="button" class="link" onclick={() => selectSessionExplicitly(p)}
+                        >{displayName(p, $showFriendlyNames)}</button
+                      >
+                      <span class="sub">Paused · {limit?.window === 'five_hour' ? '5-hour' : 'weekly'} limit · {p.host_alias}</span>
+                      <LimitActions sess={p} resetsAt={limit?.resets_at ?? null} {accountName} />
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+
+      <h3 class="section-label">Hosts</h3>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="table-wrap" onkeydown={onTableKeydown}>
+        <HostsTable
+          hosts={tableHosts}
+          {rowInfo}
+          sessions={$sessions}
+          accountByUuid={$accountByUuid}
+          {newestClaude}
+          selectedAlias={selectedHost}
+          {now}
+          idleSecs={$attentionIdleMinutes * 60}
+          bind:tableEl
+          onselect={(alias) => {
+            selectedHost = alias;
+            tableEl?.focus();
+          }}
+          onopen={(alias) => requestHostsView(alias)}
+        />
+      </div>
+    </div>
   {:else}
     <div class="split">
       <ul class="list" role="listbox" aria-label="Claude accounts" tabindex="-1" onkeydown={onListKeydown}>
@@ -337,6 +647,11 @@
   {/if}
 </section>
 
+{#if showAddHost}
+  <!-- The add-host wizard (4.9), as the Hosts view opens it. -->
+  <AddHostWizard onClose={() => (showAddHost = false)} onNewSession={requestNewSessionOnHost} />
+{/if}
+
 <style>
   .accounts {
     display: flex;
@@ -353,19 +668,104 @@
     padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--border);
   }
-  .hosts-link {
-    margin-left: auto;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg);
-    border-radius: var(--radius-sm);
-    padding: 0 var(--space-2);
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
+  .grow {
+    flex: 1;
   }
-  .hosts-link:hover {
+  .overview {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding: var(--space-3) var(--space-4) var(--space-4);
+  }
+  .section-label {
+    margin: var(--space-2) 0;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--fg-muted);
+  }
+  .grid {
+    list-style: none;
+    margin: 0 0 var(--space-4);
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: var(--space-3);
+  }
+  .ocard {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-pane);
+    cursor: pointer;
+    min-width: 0;
+  }
+  .ocard:hover {
     border-color: var(--accent);
+  }
+  .ocard.limited {
+    border-color: color-mix(in srgb, var(--usage-crit) 55%, transparent);
+  }
+  .title {
+    border: none;
+    background: none;
+    padding: 0;
+    font: inherit;
+    font-weight: 600;
+    color: var(--fg);
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .title:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: var(--ring-offset);
+  }
+  .tag {
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+    padding: 0 var(--space-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+  .oline {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    margin-top: var(--space-1);
+  }
+  .ofoot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+    flex-wrap: wrap;
+  }
+  .paused {
+    list-style: none;
+    margin: var(--space-1) 0 0;
+    padding: var(--space-2) 0 0;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .paused li {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    align-items: flex-start;
+  }
+  .table-wrap {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
   }
   h2 {
     margin: 0;
