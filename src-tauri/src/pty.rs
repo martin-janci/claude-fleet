@@ -1968,7 +1968,12 @@ mod tests {
         new.note("first output");
         let stale = drain_open(&state, ID, Some(old_gen)).unwrap();
         assert_eq!(
-            (stale.data.as_str(), stale.bytes, stale.eof, stale.overflowed),
+            (
+                stale.data.as_str(),
+                stale.bytes,
+                stale.eof,
+                stale.overflowed
+            ),
             ("", 0, false, false)
         );
         let current = drain_open(&state, ID, Some(new.generation)).unwrap();
