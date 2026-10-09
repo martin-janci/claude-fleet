@@ -189,7 +189,9 @@ where
         let Some(next) = s.next_deferred_prompt(session_id)? else {
             return Ok(None);
         };
-        if !s.claim_deferred_prompt(next.id, now_unix())? {
+        // One prompt per idle moment, whichever path (Stop hook or the
+        // reconcile backstop) gets there first.
+        if !s.claim_deferred_prompt_in(next.id, now_unix(), row.idle_since)? {
             return Ok(None);
         }
         (row, next)
@@ -428,6 +430,46 @@ mod tests {
             assert!(none.is_none());
         }
         assert_eq!(sent, ["one", "two", "three"]);
+    }
+
+    /// Review r06: the Stop hook's delivery and the reconcile backstop both
+    /// see the same idle moment; only the first types a prompt in it.
+    #[tokio::test]
+    async fn one_idle_moment_takes_one_prompt_whichever_path_comes_first() {
+        let (store, id) = store_with("working");
+        for p in ["one", "two"] {
+            queue_prompt_with(args(id, p), &store, |_, _| async { panic!("working") })
+                .await
+                .unwrap();
+        }
+        let idle_at = |at: i64| {
+            set_status(&store, id, "idle");
+            store
+                .lock()
+                .unwrap()
+                .conn_ref()
+                .execute(
+                    "UPDATE sessions SET idle_since = ?2 WHERE id = ?1",
+                    rusqlite::params![id, at],
+                )
+                .unwrap();
+        };
+        idle_at(now_unix() - 5);
+        let first = deliver_due_with(&store, id, |_, _| async { Ok(()) })
+            .await
+            .unwrap();
+        assert_eq!(first.map(|r| r.body).as_deref(), Some("one"));
+        // The other path, same moment (the status still reads idle).
+        let second = deliver_due_with(&store, id, |_, _| async { panic!("typed twice") })
+            .await
+            .unwrap();
+        assert!(second.is_none());
+        // The next idle moment carries the next prompt.
+        idle_at(now_unix() + 5);
+        let next = deliver_due_with(&store, id, |_, _| async { Ok(()) })
+            .await
+            .unwrap();
+        assert_eq!(next.map(|r| r.body).as_deref(), Some("two"));
     }
 
     #[tokio::test]

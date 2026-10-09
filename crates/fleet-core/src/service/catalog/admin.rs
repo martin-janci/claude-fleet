@@ -359,7 +359,7 @@ fn json<T: Serialize>(v: T) -> Result<serde_json::Value, IpcError> {
 pub async fn run(
     call: AdminCall,
     catalog: Option<&CatalogRow>,
-    store: &Mutex<Store>,
+    store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
     reg: &Arc<CancellationRegistry>,
 ) -> Result<serde_json::Value, IpcError> {
@@ -372,6 +372,37 @@ pub async fn run(
     };
     // A per-catalog call naming a catalog other than personal (R10, R21).
     let named = catalog.filter(|r| r.org_id.is_some() && call.is_per_catalog());
+    let target = match named {
+        Some(row) => CatalogTarget::Row(row),
+        None => CatalogTarget::Personal,
+    };
+    match call {
+        AdminCall::ImportHost(a) => {
+            let token = lock(store)?.get_setting(crate::mcp::SETTING_TOKEN)?;
+            json(super::import_host_into(target, a, store, ssh, token.as_deref()).await?)
+        }
+        AdminCall::PlanSync(a) => json(sync::plan_sync(a, store, ssh).await?),
+        AdminCall::ApplySync(a) => json(sync::apply_sync(a, store, ssh, reg).await?),
+        AdminCall::DriftDiff(a) => json(drift_diff::drift_diff(target, a, store, ssh).await?),
+        // Everything else reads or writes the checkout and the store with
+        // sync git and directory walks: off the async workers (review r06),
+        // as `ensure_fresh_blocking` does.
+        call => {
+            let named = named.cloned();
+            let store = Arc::clone(store);
+            tokio::task::spawn_blocking(move || run_sync(call, named.as_ref(), &store))
+                .await
+                .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("catalog call: {e}")))?
+        }
+    }
+}
+
+/// [`run`]'s calls that make no network round trip, on a blocking thread.
+fn run_sync(
+    call: AdminCall,
+    named: Option<&CatalogRow>,
+    store: &Mutex<Store>,
+) -> Result<serde_json::Value, IpcError> {
     let target = match named {
         Some(row) => CatalogTarget::Row(row),
         None => CatalogTarget::Personal,
@@ -428,12 +459,6 @@ pub async fn run(
         AdminCall::WriteLayer(a) => json(author::write_layer_in(target, &a.layer, store)?),
         AdminCall::DeleteLayer(a) => json(author::delete_layer_in(target, &a.name, store)?),
         AdminCall::Inventory => json(super::inventory(store)?),
-        AdminCall::ImportHost(a) => {
-            let token = lock(store)?.get_setting(crate::mcp::SETTING_TOKEN)?;
-            json(super::import_host_into(target, a, store, ssh, token.as_deref()).await?)
-        }
-        AdminCall::PlanSync(a) => json(sync::plan_sync(a, store, ssh).await?),
-        AdminCall::ApplySync(a) => json(sync::apply_sync(a, store, ssh, reg).await?),
         AdminCall::LastSync => json(sync::last_sync(store)?),
         AdminCall::ListSecrets => json(lock(store)?.list_secrets()?),
         AdminCall::SetSecret(a) => {
@@ -457,7 +482,6 @@ pub async fn run(
         AdminCall::Push => json(author::push_in(target, store)?),
         AdminCall::RepoStatus => json(author::repo_status_in(target, store)?),
         AdminCall::AssetHistory(a) => json(author::asset_history_in(target, a, store)?),
-        AdminCall::DriftDiff(a) => json(drift_diff::drift_diff(target, a, store, ssh).await?),
         AdminCall::Template(a) => {
             check_name(&a.name)?;
             json(author::template(a.kind, &a.name))
@@ -473,6 +497,13 @@ pub async fn run(
         AdminCall::RemoveCatalog(a) => json(catalogs::remove_catalog(&a.name, store)?),
         AdminCall::AdmitCatalog(a) => json(catalogs::admit(&a.host_alias, &a.catalog, store)?),
         AdminCall::UnadmitCatalog(a) => json(catalogs::unadmit(&a.host_alias, &a.catalog, store)?),
+        AdminCall::ImportHost(_)
+        | AdminCall::PlanSync(_)
+        | AdminCall::ApplySync(_)
+        | AdminCall::DriftDiff(_) => Err(IpcError::new(
+            codes::E_INTERNAL,
+            "a network catalog call reached the blocking path",
+        )),
     }
 }
 
@@ -716,7 +747,7 @@ mod tests {
     /// the others lost nothing.
     #[tokio::test]
     async fn hostile_names_and_paths_are_refused_before_any_effect() {
-        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let ssh = Arc::new(SshClient::new());
         let reg = CancellationRegistry::new();
         let asset_ref = |name: &str| AssetRef {
@@ -879,7 +910,7 @@ mod tests {
     async fn an_authoring_call_waits_for_an_apply_and_a_read_does_not() {
         use std::time::Duration;
         let _g = super::super::lock_registry_for_test();
-        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let ssh = Arc::new(SshClient::new());
         let reg = CancellationRegistry::new();
         let commit = || AdminCall::CommitPending(CommitPendingArgs::default());

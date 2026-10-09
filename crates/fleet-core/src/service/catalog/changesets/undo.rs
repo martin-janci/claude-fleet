@@ -64,20 +64,29 @@ use crate::store::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Undo card `id` and answer it as it now stands.
-pub async fn undo(id: i64, store: &Mutex<Store>) -> Result<ChangesetView, IpcError> {
+pub async fn undo(id: i64, store: &Arc<Mutex<Store>>) -> Result<ChangesetView, IpcError> {
     let busy = APPLY_LOCK.lock().await;
     undo_held(&busy, id, store).await
 }
 
-/// [`undo`] for a caller already holding [`APPLY_LOCK`].
+/// [`undo`] for a caller already holding [`APPLY_LOCK`]. The undo is sync
+/// git and directory walks from end to end: it runs on a blocking thread
+/// (review r06), the caller's lock held across it.
 pub async fn undo_held(
     _busy: &ApplyGuard,
     id: i64,
-    store: &Mutex<Store>,
+    store: &Arc<Mutex<Store>>,
 ) -> Result<ChangesetView, IpcError> {
+    let store = Arc::clone(store);
+    tokio::task::spawn_blocking(move || undo_blocking(id, &store))
+        .await
+        .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("undo card {id}: {e}")))?
+}
+
+fn undo_blocking(id: i64, store: &Mutex<Store>) -> Result<ChangesetView, IpcError> {
     let (card, items) = super::card(id, store)?;
     refuse_unless_undoable(&card, &items)?;
     let touched = applied_catalogs(&items);
@@ -824,7 +833,7 @@ mod tests {
     #[test]
     fn the_undo_dismiss_and_reject_futures_are_send() {
         fn is_send<T: Send>(_: &T) {}
-        let check = |store: &Mutex<Store>| {
+        let check = |store: &Arc<Mutex<Store>>| {
             is_send(&undo(1, store));
             is_send(&dismiss(1, store));
             is_send(&reject_items(1, &[], store));
@@ -1030,6 +1039,7 @@ mod tests {
     async fn a_hide_only_card_has_nothing_to_undo() {
         let _g = lock_registry_for_test();
         let (store, _) = store_with_personal();
+        let store = Arc::new(store);
         let id = {
             let s = store.lock().unwrap();
             let card = s

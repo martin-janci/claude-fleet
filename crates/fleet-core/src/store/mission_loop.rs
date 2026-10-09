@@ -239,17 +239,22 @@ impl Store {
 
     /// Take the mission for one tick, until `now + MISSION_LEASE_SECS`.
     /// `false`: another tick (the hub's or a desktop's on the same store)
-    /// holds it.
+    /// holds it. The wake the tick answers is spent: `next_wake_at` goes
+    /// back to unset, so a [`Self::wake_mission`] while the tick runs lands
+    /// and [`Self::release_mission_lease`] keeps it (review r01/r06). A
+    /// lease a crashed tick left expires with the mission still due.
     pub fn take_mission_lease(&self, mission_id: i64, now: i64) -> Result<bool, IpcError> {
         Ok(self.conn.execute(
-            "UPDATE orchestration_projects SET lease_until = ?1 \
+            "UPDATE orchestration_projects SET lease_until = ?1, next_wake_at = NULL \
              WHERE id = ?2 AND (lease_until IS NULL OR lease_until < ?3)",
             rusqlite::params![now + MISSION_LEASE_SECS, mission_id, now],
         )? == 1)
     }
 
     /// Give the lease back and say when to look next (`None`: only when
-    /// something wakes it).
+    /// something wakes it). A wake that landed while the tick held the
+    /// lease is kept when it is sooner: the tick may have read the mission
+    /// before what woke it happened.
     pub fn release_mission_lease(
         &self,
         mission_id: i64,
@@ -257,7 +262,10 @@ impl Store {
         snapshot_at: Option<i64>,
     ) -> Result<(), IpcError> {
         self.conn.execute(
-            "UPDATE orchestration_projects SET lease_until = NULL, next_wake_at = ?1, \
+            "UPDATE orchestration_projects SET lease_until = NULL, \
+               next_wake_at = CASE WHEN next_wake_at IS NULL THEN ?1 \
+                 WHEN ?1 IS NULL THEN next_wake_at \
+                 ELSE MIN(next_wake_at, ?1) END, \
                last_snapshot_at = COALESCE(?2, last_snapshot_at) \
              WHERE id = ?3",
             rusqlite::params![next_wake_at, snapshot_at, mission_id],

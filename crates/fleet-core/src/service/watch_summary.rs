@@ -81,6 +81,12 @@ pub struct WatchSummary {
     pub since: i64,
     /// Turns in the window.
     pub turns: u32,
+    /// The window reaches back past the newest [`READ_TURNS`] turns, so
+    /// [`Self::turns`] and the summary cover only those (review r01).
+    /// Additive: absent (false) on an older hub, and an older client ignores
+    /// it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub turns_capped: bool,
     /// Where it ran; empty when nothing ran.
     #[serde(default)]
     pub model: String,
@@ -264,6 +270,7 @@ pub async fn summarize_excerpt(
         check: Check::Off,
         since,
         turns,
+        turns_capped: false,
         model: String::new(),
         host_alias: String::new(),
         at: crate::store::now_unix(),
@@ -348,7 +355,19 @@ pub async fn summarize_since(
     )
     .await?;
     let (excerpt, turns) = excerpt_since(&conv.turns, since);
-    summarize_excerpt(store, ssh.as_ref(), decide, &p, since, &excerpt, turns).await
+    let mut out =
+        summarize_excerpt(store, ssh.as_ref(), decide, &p, since, &excerpt, turns).await?;
+    out.turns_capped = window_capped(&conv.turns, conv.truncated, since);
+    Ok(out)
+}
+
+/// PURE: whether the read dropped turns that fall in the window: the read
+/// was cut short and its oldest turn is already inside the window.
+pub fn window_capped(turns: &[ConvTurn], truncated: bool, since: i64) -> bool {
+    truncated
+        && turns
+            .first()
+            .is_some_and(|t| turn_time(t).is_some_and(|at| at >= since))
 }
 
 #[cfg(test)]

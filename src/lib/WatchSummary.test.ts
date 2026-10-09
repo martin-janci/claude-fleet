@@ -71,6 +71,16 @@ describe('WatchSummary', () => {
     expect(screen.queryByTestId('watch-summary-text')).toBeNull();
   });
 
+  it('says the summary covers only the last turns when the window reaches past them', async () => {
+    vi.mocked(invoke).mockResolvedValue({ ...ok, turns: 40, turns_capped: true });
+    render(WatchSummary, { session });
+    await fireEvent.click(screen.getByTestId('watch-summary-run'));
+    await flush();
+    expect(screen.getByTestId('watch-summary-meta').textContent).toBe(
+      'by haiku on mercury · from the last 40 turns · checked against the transcript by Jev',
+    );
+  });
+
   it('says when the check hid the summary', async () => {
     vi.mocked(invoke).mockResolvedValue({ ...ok, text: null, check: 'failed' });
     render(WatchSummary, { session });
