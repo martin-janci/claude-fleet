@@ -493,6 +493,40 @@ async fn the_owners_trusted_phone_administers_hosts_and_trackers_only() {
         .unwrap_err();
     assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
     assert!(call(Caller::master(), "list_orgs").await.is_ok());
+
+    // Review r04 S1: the phone sends the secret itself; a reference that
+    // makes the hub read its own file or environment, a private network
+    // and an extra CA stay the master's.
+    let with = |c: Caller, extra: serde_json::Value| {
+        let t = t.clone();
+        let mut v = serde_json::json!({ "action": "set_credential", "tracker_id": 1 });
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let args = serde_json::from_value(v).unwrap();
+        async move { t.work_admin(Extension(c), Parameters(args)).await }
+    };
+    for extra in [
+        serde_json::json!({ "auth_kind": "token", "credential_ref": "env:PATH" }),
+        serde_json::json!({ "auth_kind": "basic", "username": "x",
+                            "credential_ref": "file:/root/.ssh/id_ed25519" }),
+        serde_json::json!({ "settings": { "allow_private_network": true } }),
+        serde_json::json!({ "settings": { "extra_ca": "-----BEGIN CERTIFICATE-----" } }),
+    ] {
+        let e = with(phone.clone(), extra.clone()).await.unwrap_err();
+        assert!(
+            e.message.starts_with("E_FORBIDDEN"),
+            "{extra}: {}",
+            e.message
+        );
+        let master = with(Caller::master(), extra.clone()).await;
+        assert!(
+            master
+                .as_ref()
+                .map_or_else(|e| !e.message.starts_with("E_FORBIDDEN"), |_| true),
+            "{extra}: the master keeps it"
+        );
+    }
 }
 
 #[test]
@@ -1144,6 +1178,46 @@ fn peer_exchange_bodies_never_reach_the_persisted_audit_trail() {
         !events.iter().any(|e| e.kind == "mcp_call"),
         "peer_exchange must not persist an audit row: {events:?}"
     );
+}
+
+/// Review r04 S2/S3: a catalog secret nested in `catalog_admin`'s `args`
+/// and `link_peer`'s one-time code never reach the persisted audit row.
+#[test]
+fn nested_secrets_and_peer_codes_never_reach_the_persisted_audit_trail() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    for (tool, args) in [
+        (
+            "catalog_admin",
+            serde_json::json!({ "action": "set_secret",
+                                "args": { "name": "FOO", "value": "sk-unique-r04" } }),
+        ),
+        (
+            "link_peer",
+            serde_json::json!({ "url": "https://b.example", "code": "ABCD2345R04" }),
+        ),
+    ] {
+        persist_audit(&store, tool, args.as_object(), &Caller::master());
+    }
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    let rows: Vec<_> = events.iter().filter(|e| e.kind == "mcp_call").collect();
+    assert_eq!(rows.len(), 2, "{events:?}");
+    for e in rows {
+        let d = format!("{e:?}");
+        assert!(
+            !d.contains("sk-unique-r04") && !d.contains("ABCD2345R04"),
+            "{d}"
+        );
+    }
 }
 
 /// G1 (review): `persist_audit` runs BEFORE `enforce_mode` in `call_tool`
@@ -9815,6 +9889,12 @@ fn one_chip(text: &str) -> Vec<crate::service::quick_replies::QuickReply> {
 async fn quick_replies_set_is_refused_to_agent_tokens_and_reads_stay_open() {
     let (tools, store) = quick_replies_tools();
     for caller in [
+        // Review r04 F4: a second person's device and an org-bound one.
+        another_person(client_caller("colleague", TokenMode::Full)),
+        org_bound(another_person(client_caller(
+            "acme-laptop",
+            TokenMode::Full,
+        ))),
         host_caller("mefistos", TokenMode::Full),
         client_caller(
             crate::service::operator::OPERATOR_CLIENT_NAME,
