@@ -267,7 +267,7 @@ pub mod codes {
     /// plain `http://` without the opt-in, a URL that does not parse. The app
     /// then owns nothing and refuses every fleet command with this code and
     /// the reason, rather than quietly managing the hub's fleet itself. The
-    /// fix is in Settings → Hub: pair again, or Disconnect.
+    /// fix is in Settings → Hub & sync: pair again, or Disconnect.
     pub const E_HUB_UNAVAILABLE: &str = "E_HUB_UNAVAILABLE";
     /// Remote (hub-client) mode: the hub's `/events` hello frame named a
     /// wire-contract revision outside the range this build reads
