@@ -32,7 +32,7 @@
   import CopyButton from './CopyButton.svelte';
   import ReplyActions from './ReplyActions.svelte';
   import ForkSheet from './ForkSheet.svelte';
-  import { finalizeBranchSlug } from './branch-slug';
+  import { suggestedForkName } from './reply_actions';
   import {
     findMatches,
     turnIndex,
@@ -1928,13 +1928,6 @@
     forkOpen = true;
   }
 
-  /** `fork-of-<branch>`, slugified for use as a new worktree's name — the
-   *  branch/worktree's name when this session has one, else its tmux name,
-   *  which is what a `main`-checkout session forks from. */
-  function suggestedForkName(s: SessionRow): string {
-    const base = s.friendly_name?.trim() || s.tmux_name;
-    return finalizeBranchSlug(`fork-of-${base}`) || 'fork';
-  }
 </script>
 
 <div class="conversation-panel" data-testid="conversation-panel" bind:this={root}>

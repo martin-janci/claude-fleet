@@ -1200,7 +1200,13 @@ describe('SessionDetails action hierarchy (redesign 1.5)', () => {
     expect(primaries[0]).toBe(screen.getByTestId('send-prompt-from-details'));
     const ids = (group: string) =>
       Array.from(screen.getByTestId(group).querySelectorAll('button')).map((el) => el.getAttribute('data-testid'));
-    expect(ids('actions-steer')).toEqual(['send-prompt-from-details', 'open-review', 'restart-from-details']);
+    expect(ids('actions-steer')).toEqual([
+      'send-prompt-from-details',
+      'open-review',
+      'switch-account-from-details',
+      'change-model-from-details',
+      'restart-from-details',
+    ]);
     expect(ids('actions-place')).toEqual(
       expect.arrayContaining(['recreate-from-details', 'label-from-details', 'rename-from-details']),
     );
