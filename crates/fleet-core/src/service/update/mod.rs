@@ -95,6 +95,7 @@ pub fn track(store: &Store) -> Track {
     match settings::get_string(store, settings::UPDATE_TRACK).as_str() {
         "beta" => Track::Beta,
         "nightly" => Track::Nightly,
+        "dev" => Track::Dev,
         _ => Track::Stable,
     }
 }
@@ -435,6 +436,11 @@ fn decide_for(
         if let Some(t) = d.target.as_mut() {
             t.mirror = t.artifact.content().map(|(sha, _)| mirror::path_for(sha));
         }
+    }
+    // An operator's pin the target has not reached yet (`update_now`
+    // above all): ask again within minutes, not hours.
+    if d.reason.code == fleet_update::ReasonCode::Pinned && d.target.is_some() {
+        d.next_check_secs = d.next_check_secs.min(PINNED_RECHECK_SECS);
     }
     Ok(d)
 }
@@ -1186,6 +1192,7 @@ pub fn set_org_policy(
     org_id: i64,
     component: &str,
     input: OrgPolicyInput,
+    set_by: &str,
     now: i64,
 ) -> Result<UpdateOrgPolicyRow, IpcError> {
     let c = parse_component(component)?;
@@ -1244,7 +1251,7 @@ pub fn set_org_policy(
         pin_version,
         pin_mandatory: input.pin_mandatory,
         reason: input.reason,
-        set_by: "operator".into(),
+        set_by: set_by.into(),
         set_at: now,
     };
     s.set_update_org_policy(&row)?;
@@ -1262,6 +1269,104 @@ pub fn clear_org_policy(
     let removed = lock(store)?.clear_update_org_policy(org_id, c.as_str())?;
     decisions_may_have_changed();
     Ok(removed)
+}
+
+/// How soon a target with an operator's pin to install asks again.
+pub const PINNED_RECHECK_SECS: u64 = 120;
+
+/// The file a hub's own updater watches (`<data_dir>/update-now`): written by
+/// `update_now` for the hub, it wakes `fleet-updater` (which polls it) and
+/// `fleet-hub-update.path` (which starts one `fleet-hub update apply`).
+pub const UPDATE_NOW_FILE: &str = "update-now";
+
+/// The shell line that pokes an agent host's updater: the agent's own unit
+/// has `RuntimeDirectory=fleet-agent`, and `fleet-agent-update.path` starts a
+/// pass when `update-now` appears there. Prints `poked` or why not.
+pub const AGENT_POKE_SCRIPT: &str = "d=\"${RUNTIME_DIRECTORY:-}\"; \
+    if [ -n \"$d\" ] && [ -d \"$d\" ]; then : > \"$d/update-now\" && echo poked; \
+    else echo 'no update trigger: re-run fleet-agent install --auto-update'; fi";
+
+/// What `update_now` set, and whom the caller should wake.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateNow {
+    pub pin: UpdateDesiredRow,
+    /// Agent hosts to poke (`AGENT_POKE_SCRIPT`); empty for other components.
+    pub agents: Vec<String>,
+    /// The hub's own updater was woken (`<data_dir>/update-now`).
+    pub hub_woken: bool,
+}
+
+/// `update_admin { action: update_now, component, target?, version? }`: install
+/// now, whatever the mode. A mandatory pin to `version` (default: the
+/// channel's recommended release) for the component or one target — a person
+/// is still asked on a desktop or a phone, which show it as required — then
+/// every updater that can be woken is: the hub's own through its trigger
+/// file, and the agents, whose hosts the caller pokes (they need the SSH
+/// layer, which this module does not hold).
+pub fn update_now(
+    store: &Mutex<Store>,
+    component: &str,
+    target: &str,
+    version: Option<&str>,
+    keys: &TrustedKeys,
+    now: i64,
+) -> Result<UpdateNow, IpcError> {
+    let c = parse_component(component)?;
+    let v = {
+        let s = lock(store)?;
+        let cached = load_cached(&s, track(&s), keys, now).ok_or_else(|| {
+            IpcError::new(
+                codes::E_UPDATE_UNVERIFIED,
+                "no verified release channel yet: refresh it first",
+            )
+        })?;
+        let v = match version {
+            Some(v) => Version::parse(v)
+                .map_err(|e| IpcError::new(codes::E_INVALID, format!("version {v:?}: {e}")))?,
+            None => cached.channel.doc.recommended.clone(),
+        };
+        if !(cached.channel.doc.permits(c, &v) && cached.manifests.verified.contains_key(&v)) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "{v} is not a release the verified channel offers {}",
+                    c.as_str()
+                ),
+            ));
+        }
+        v
+    };
+    let pin = pin(
+        store,
+        c.as_str(),
+        target,
+        &v.to_string(),
+        true,
+        Some("update now".into()),
+        now,
+    )?;
+    let agents = if c == Component::Agent {
+        match target.strip_prefix("agent:") {
+            Some(alias) => vec![alias.to_string()],
+            None => lock(store)?.agent_host_aliases()?,
+        }
+    } else {
+        Vec::new()
+    };
+    let hub_woken = c == Component::Hub && wake_hub_updater();
+    Ok(UpdateNow {
+        pin,
+        agents,
+        hub_woken,
+    })
+}
+
+/// Write `<data_dir>/update-now`; false when this process has no data dir.
+pub fn wake_hub_updater() -> bool {
+    match mirror::data_dir() {
+        Some(d) => std::fs::write(d.join(UPDATE_NOW_FILE), b"").is_ok(),
+        None => false,
+    }
 }
 
 /// `update_admin { action: rollout_start }`: `version` must be a release the

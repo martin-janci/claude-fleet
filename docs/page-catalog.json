@@ -3364,7 +3364,8 @@
         "options": [
           "stable",
           "beta",
-          "nightly"
+          "nightly",
+          "dev"
         ],
         "type": "choice"
       },
