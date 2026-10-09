@@ -882,7 +882,7 @@
         title={reviewBlocked ?? ''}
         data-testid="open-review"
   >
-        🔍 Review…
+        Review…
       </button>
       <button
         class="btn btn--quiet is-bounded"
@@ -891,7 +891,7 @@
         title={shareBlocked ?? 'Share this session with one person — watch or drive, revocable, and never a terminal'}
         data-testid="share-from-details"
   >
-        👥 Share…
+        Share…
       </button>
       {#if moveBackOrigin}
         <button
@@ -946,7 +946,7 @@
           title={setFriendlyNameBlocked ?? ''}
           data-testid="label-from-details"
     >
-          🏷 Edit label
+          Rename
         </button>
         <!-- An external row runs outside fleet: the label (local fleet
              metadata) is the only thing fleet can change about it. -->
@@ -958,7 +958,7 @@
             title={renameBlocked ?? ''}
             data-testid="rename-from-details"
       >
-            ✎ Rename tmux session
+            Rename tmux session
           </button>
           <button
             class="menu-item"
@@ -977,7 +977,7 @@
               title={repairBlocked ?? 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it'}
               data-testid="repair-from-details"
         >
-              🩹 Repair workspace…
+              Repair workspace…
             </button>
           {/if}
           <button
@@ -987,7 +987,7 @@
             title={recreateBlocked ?? ''}
             data-testid="recreate-from-details"
       >
-            ♻ Recreate…
+            Recreate…
           </button>
           {#if canMove}
             <button
@@ -1024,7 +1024,7 @@
                 title={inspectSafeKillBlocked ?? ''}
                 data-testid="safe-kill-from-details"
           >
-                ⏏ Safe remove…
+                Safe remove…
               </button>
             {/if}
             <button

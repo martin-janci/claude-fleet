@@ -27,7 +27,7 @@
   </header>
   {#if left > 0}
     <p class="lead">
-      Scan it with the claude-fleet app on the device, or open the link there. The code works once and expires in
+      Scan it with the Orbit Fleet app on the device, or open the link there. The code works once and expires in
       <strong data-testid="pairing-left">{clock(left)}</strong>; a hub restart voids it.
     </p>
     {#if rects.length}

@@ -646,7 +646,7 @@ describe('SessionDetails actions for pane-less rows (external read-only, inactiv
     'kill-from-details',
   ];
 
-  it('an external row shows no action except Edit label, and no tmux attach command', async () => {
+  it('an external row shows no action except Rename, and no tmux attach command', async () => {
     const ext = {
       ...sampleSession,
       id: 21,
