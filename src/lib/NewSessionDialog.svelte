@@ -150,6 +150,9 @@
     ),
   );
   $effect(() => {
+    // Jev's proposed host is not a pick: it is remembered once the person
+    // starts on it (`answerHostProposal`), not merely for being shown.
+    if (hostProposed?.value === chosenHost) return;
     writePref('last-host', chosenHost);
   });
 
@@ -191,6 +194,7 @@
   /** Jev N5's follow-up: the host a person started on answers the proposal
    *  they were shown (best effort; local-only, off by default). */
   function answerHostProposal(host: string) {
+    writePref('last-host', host);
     if (hostProposalShown) void recordHostPlacement(project.project.id, host);
   }
 
@@ -993,13 +997,14 @@
   $effect(() => {
     const id = ticket?.id;
     const host = chosenHost;
-    void projectId;
+    const pid = projectId;
     siblingAsk = null;
     alsoTouched = false;
     if (id == null || !host) return;
-    void previewStartWork({ item_id: id, project_id: projectId, host_alias: host, with_brief: true }).then((r) => {
-      // A hub with nothing to preview answers no preview at all.
-      if (ticket?.id !== id || chosenHost !== host || !r.ok || !r.value) return;
+    void previewStartWork({ item_id: id, project_id: pid, host_alias: host, with_brief: true }).then((r) => {
+      // A hub with nothing to preview answers no preview at all; an answer
+      // for a ticket, host or project left behind is not this one's.
+      if (ticket?.id !== id || chosenHost !== host || projectId !== pid || !r.ok || !r.value) return;
       siblingAsk = siblingProposal(r.value);
     });
   });

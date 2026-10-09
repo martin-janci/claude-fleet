@@ -69,4 +69,15 @@ describe('session_viewed', () => {
     doc.fire();
     expect(touch).toHaveBeenCalledTimes(1);
   });
+
+  it('waits while another page covers the session', () => {
+    const selected = writable<SessionRow | null>(null);
+    const shown = writable(false);
+    const touch = vi.fn();
+    trackViewedSession(selected, touch, fakeDoc() as unknown as Document, shown);
+    selected.set(row({ last_stop_at: 200 }));
+    expect(touch).not.toHaveBeenCalled();
+    shown.set(true);
+    expect(touch).toHaveBeenCalledTimes(1);
+  });
 });

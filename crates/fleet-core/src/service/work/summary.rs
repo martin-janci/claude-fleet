@@ -444,7 +444,15 @@ pub async fn summarize(
             }
             env.result
         }
-        // No envelope (a cut reply, an older `claude`): the text itself.
+        // An envelope the output cap cut: its text is JSON, not a summary.
+        None if text.trim_start().starts_with("{\"type\"") => {
+            book(store, &p, None);
+            return Err(IpcError::new(
+                codes::E_CLAUDE_CLI,
+                "the summary run failed: its answer was longer than the output cap",
+            ));
+        }
+        // No envelope (an older `claude`): the text itself.
         None => {
             book(store, &p, None);
             text

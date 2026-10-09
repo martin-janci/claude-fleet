@@ -20,9 +20,13 @@ const WALL_CLOCK: Duration = Duration::from_secs(120);
 /// A status or diff answer, at most.
 const MAX_OUTPUT: usize = 8 * 1024 * 1024;
 
+/// Every path here is a file name a person picked, never a pattern:
+/// `GIT_LITERAL_PATHSPECS` keeps `pages/[id].tsx` from also matching
+/// `pages/i.tsx` in a commit, discard or diff (as `catalog::repo` does).
 fn script(root: &str, body: &str) -> String {
     format!(
-        "{prologue}git rev-parse --git-dir >/dev/null 2>&1 || {{ printf '@@FLEET-ERR@@ notgit\\n'; exit 4; }}\n\
+        "{prologue}export GIT_LITERAL_PATHSPECS=1\n\
+         git rev-parse --git-dir >/dev/null 2>&1 || {{ printf '@@FLEET-ERR@@ notgit\\n'; exit 4; }}\n\
          f=$(mktemp) || exit 5\ntrap 'rm -f -- \"$f\"' EXIT\ncat > \"$f\"\n{body}",
         prologue = prologue(root)
     )

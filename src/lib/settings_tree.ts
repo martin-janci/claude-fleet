@@ -239,6 +239,8 @@ const LEGACY_SECTIONS: Record<string, string> = {
   composer: 'sessions',
   diagnostics: 'error-reports',
   mcp: 'control-api',
+  // The "Jev degraded" pill (`decide_health.DECIDE_SECTION`).
+  decide: 'decisions',
 };
 
 /** Resolve an `openSettingsAt` request (a leaf id, a page id or an old

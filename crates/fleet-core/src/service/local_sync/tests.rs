@@ -974,6 +974,39 @@ async fn commit_takes_exactly_the_chosen_files_and_discard_comes_back_to_the_fol
     assert_eq!(e.code, codes::E_INVALID_STATE);
 }
 
+#[tokio::test]
+async fn a_bracketed_name_is_a_name_not_a_pattern() {
+    let f = fixture();
+    let row = f.enable().await;
+    write(&f.local, "pages/[id].tsx", "route\n");
+    write(&f.local, "pages/i.tsx", "other\n");
+    handoff::commit(
+        &f.engine,
+        CommitLocalWorkspaceArgs {
+            id: row.id,
+            message: "Pages".into(),
+            paths: vec!["pages/[id].tsx".into(), "pages/i.tsx".into()],
+        },
+    )
+    .await
+    .unwrap();
+    write(&f.local, "pages/[id].tsx", "route edited\n");
+    write(&f.local, "pages/i.tsx", "other edited\n");
+    f.pass(row.id).await;
+    // As a pattern, `pages/[id].tsx` also matches `pages/i.tsx`.
+    let d = handoff::diff(
+        &f.engine,
+        LocalWorkspacePathArgs {
+            id: row.id,
+            path: "pages/[id].tsx".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(d.diff.contains("+route edited"), "{}", d.diff);
+    assert!(!d.diff.contains("other"), "{}", d.diff);
+}
+
 async fn conflicted(f: &Fixture) -> LocalWorkspaceRow {
     let row = f.enable().await;
     write(&f.local, "README.md", "local version\n");

@@ -72,7 +72,11 @@ export type SessionAgent = 'claude' | 'codex' | 'agy' | 'shell';
 /** The agent a row runs, reading an older hub's missing field as Claude
  *  Code (a shell row there still says `kind: 'shell'`). */
 export function sessionAgent(row: Pick<SessionRow, 'agent' | 'kind'>): SessionAgent {
-  return row.agent ?? (row.kind === 'shell' ? 'shell' : 'claude');
+  // Kind wins for a shell: the desktop reads a hub's rows through the Rust
+  // `SessionRow`, whose serde default fills `agent: "claude"` when an older
+  // hub sends none, so a shell row would otherwise read as Claude Code.
+  if (row.kind === 'shell') return 'shell';
+  return row.agent ?? 'claude';
 }
 
 export interface SessionRow {

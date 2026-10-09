@@ -179,6 +179,19 @@ describe('toasts', () => {
     expect(get(toastCountdowns)).toEqual({});
   });
 
+  it('the pointer leaving does not resume a toast focus still holds', () => {
+    vi.useFakeTimers();
+    const id = push({ message: 'Moved to next' });
+    holdToast(id, 'focus');
+    holdToast(id, 'pointer');
+    releaseToast(id, 'pointer');
+    vi.advanceTimersByTime(INFO_TIMEOUT_MS * 3);
+    expect(get(toasts).map((t) => t.id)).toEqual([id]);
+    releaseToast(id, 'focus');
+    vi.advanceTimersByTime(INFO_TIMEOUT_MS);
+    expect(get(toasts)).toHaveLength(0);
+  });
+
   it('an auto-dismissing toast shows its countdown bar; a sticky one has none', async () => {
     push({ message: 'Archived 4 sessions' });
     push({ kind: 'error', code: 'E_X', message: 'boom' });
