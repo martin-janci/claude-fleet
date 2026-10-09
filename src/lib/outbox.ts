@@ -31,6 +31,7 @@ import { sessionIdActionBlocked } from './share';
 import { sendPrompt, sessions } from './sessions';
 import { markNeedsReattach, type Attachment } from './attachments';
 import { withAttachments, tooLong } from './attach_prompt';
+import { recordAttachments } from './library';
 import { carriedCount, normalizePrompt, type Conversation } from './conversation';
 
 export type OutboxState = 'waiting' | 'sending' | 'sent' | 'queued' | 'received' | 'failed';
@@ -456,10 +457,14 @@ export const outbox = createOutbox({
   // position, so the `get()` defaults are what is wanted — and a row the
   // client can no longer see fails closed (`UNKNOWN_SESSION_REASON`).
   blocked: (id) => sessionIdActionBlocked(id, 'send_prompt'),
-  upload: (host, tmux, localPaths) =>
-    invokeCmd<string[]>('upload_attachments', {
+  upload: async (host, tmux, localPaths) => {
+    const r = await invokeCmd<string[]>('upload_attachments', {
       args: { host_alias: host, session_name: tmux, local_paths: localPaths },
-    }),
+    });
+    // Control's Library (9.7) lists what was put on the host.
+    if (r.ok) recordAttachments(host, tmux, r.value);
+    return r;
+  },
   row: (id) => get(sessions).find((s) => s.id === id),
 });
 
