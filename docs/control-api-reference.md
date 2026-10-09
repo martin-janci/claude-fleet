@@ -93,6 +93,12 @@ What the agent handed on, newest first: prompts and tasks sent to sessions, new 
 
 Parameters: `limit`
 
+### `control_route`
+
+Where a message just sent in Control goes (propose {text}), or record the person's pick (follow {run_id, chosen}).
+
+Parameters: `action`, `chosen`, `run_id`, `text`
+
 ### `debug_devices`
 
 Phones, emulators and simulators on any fleet host, used from any session that may see them; commands run on the device's host. run: one adb / simctl / devicectl command. install copies the app from your host. screenshot answers an image. A claim keeps others off (E_CONFLICT); use extends it.
@@ -194,6 +200,12 @@ Parameters: `alias`, `hub_url`, `version`
 Kill a session: a tmux session, or a background agent row (`bg:<uuid>`, kind `bg`) via `claude stop`; an inactive one (claude_status `stopped`) is removed from the list instead. Rows of kind `external` (Claude running outside fleet) are refused with E_INVALID_STATE: close them where they run. For disposable or already-pushed work you want gone NOW; prefer safe_kill_session when the worktree may hold unpushed work. Returns the killed id. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
 
 Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
+
+### `library`
+
+Library: files a person put on a host (Upload or a prompt's attachment). list {session_id?, host_alias?, limit?}: {items}; add {kind: upload|attachment, session_id, files: [{path, name?, size?}]} records files already on the session's host; remove {id} drops a row, never the file. Downloads: list_downloads. E_NOTFOUND, E_INVALID.
+
+Parameters: `action`, `files`, `host_alias`, `id`, `kind`, `limit`, `session_id`
 
 ### `link_peer`
 
@@ -753,6 +765,12 @@ Spawn a review session: a new Claude session in the source session's worktree, s
 
 Parameters: `confirm_nonce`, `prompt`, `source_session_id`
 
+### `start_rules`
+
+Start rules: a task key pattern (PD-*) that names the project, and optionally the host, a start lands in, before the key's history and Jev. Fleet offers one after five identical starts. list: offers, active and dismissed rules; save {rule, rule_id?}: the whole rule, active; accept {rule_id}: an offer, replacing the pattern's other rule; dismiss {rule_id}: never offered again; delete {rule_id}. E_NOTFOUND, E_INVALID, E_EXISTS.
+
+Parameters: `action`, `rule`, `rule_id`
+
 ### `touch_session_viewed`
 
 Mark a session viewed now: the turns it has finished read as seen. Returns the row.
@@ -1011,6 +1029,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::quick_replies::quick_replies`
 - `commands::quick_replies::set_quick_replies`
 - `commands::downloads::list_downloads`
+- `commands::library::list_library`
+- `commands::library::add_library_items`
+- `commands::library::remove_library_item`
 - `commands::downloads::send_file`
 - `commands::downloads::remove_download`
 - `commands::downloads::save_download`
@@ -1047,6 +1068,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::debug_device_logs`
 - `commands::debug_devices::debug_device_screenshot`
 - `commands::prs::list_pull_requests`
+- `commands::start_rules::start_rules`
 - `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
@@ -1116,6 +1138,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::control_handoffs`
 - `commands::operator::ensure_operator`
 - `commands::operator::operator_status`
+- `commands::operator::control_route_propose`
+- `commands::operator::control_route_follow`
 - `commands::hub::hub_status`
 - `commands::hub::hub_pair`
 - `commands::hub::hub_disconnect`

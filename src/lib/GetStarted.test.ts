@@ -6,7 +6,9 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import GetStarted from './GetStarted.svelte';
-import { getStartedFolded, getStartedItems, type GetStartedInputs } from './get_started';
+import { buildingFirstFleet, getStartedFolded, getStartedItems, type GetStartedInputs } from './get_started';
+import { creatingStart, startedIds } from './sessions';
+import { resetStarting } from './session_starting';
 import { hosts, type HostRow } from './hosts';
 import { accounts, type AccountRow } from './accounts';
 import { sessions, type SessionRow } from './sessions';
@@ -51,6 +53,7 @@ beforeEach(() => {
   hostsViewRequest.set(null);
   switcherRequest.set(null);
   destination.set('session');
+  resetStarting();
 });
 
 describe('getStartedItems', () => {
@@ -125,5 +128,45 @@ describe('GetStarted', () => {
     expect(screen.getByTestId('get-started-count')).toBeTruthy();
     await fireEvent.click(screen.getByTestId('get-started-hide'));
     expect(get(onboardingDismissed)).toBe(true);
+  });
+});
+
+// Step 10.10: the Galaxy while the first fleet is built.
+describe('Galaxy while the first fleet is built', () => {
+  it('only while a start is in flight and no other session is up', () => {
+    const none = new Set<number>();
+    expect(buildingFirstFleet({ workSessionIds: [], starting: none, creating: false })).toBe(false);
+    expect(buildingFirstFleet({ workSessionIds: [], starting: none, creating: true })).toBe(true);
+    expect(buildingFirstFleet({ workSessionIds: [4], starting: new Set([4]), creating: false })).toBe(true);
+    expect(buildingFirstFleet({ workSessionIds: [3, 4], starting: new Set([4]), creating: false })).toBe(false);
+    expect(buildingFirstFleet({ workSessionIds: [3], starting: none, creating: true })).toBe(false);
+  });
+
+  it('shows the Galaxy while the first session starts, and drops it once its agent is up', async () => {
+    vi.useFakeTimers();
+    try {
+      creatingStart.set({ host_alias: 'mac', name: '', kind: 'work' });
+      render(GetStarted);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(screen.getByTestId('get-started-building').textContent).toContain('Building your fleet');
+      expect(screen.getByTestId('get-started-galaxy').getAttribute('data-loader')).toBe('galaxy');
+      creatingStart.set(null);
+      sessions.set([{ id: 4, kind: 'work', claude_status: null } as SessionRow]);
+      startedIds.set(new Set([4]));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(screen.getByTestId('get-started-building')).toBeTruthy();
+      sessions.set([{ id: 4, kind: 'work', claude_status: 'idle' } as SessionRow]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(screen.queryByTestId('get-started-building')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a fleet with a session up starts its next one without the Galaxy', async () => {
+    sessions.set([{ id: 1, kind: 'work', claude_status: 'idle' } as SessionRow]);
+    creatingStart.set({ host_alias: 'mac', name: '', kind: 'work' });
+    render(GetStarted);
+    expect(screen.queryByTestId('get-started-building')).toBeNull();
   });
 });

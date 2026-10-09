@@ -544,6 +544,7 @@ Code: `service/decide/duplicate.rs`, `duplicate_hint` in
 | `decide.jev.adopt_target` | `off` | `off` / `shadow` / `assist` | Prefilling the project when you adopt a pane fleet did not start. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.restore_target` | `off` | `off` / `shadow` / `assist` | Prefilling the project when you restore a conversation found on a host. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.duplicate` | `off` | `off` / `shadow` / `assist` | Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.control_route` | `off` | `off` / `shadow` / `assist` | Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.summary_check` | `off` | `off` / `shadow` / `assist` | Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |

@@ -28,6 +28,7 @@ mod hosts_accounts;
 mod item_deps;
 mod item_verify;
 mod layers;
+mod library;
 mod local_workspaces;
 mod mission_loop;
 mod nl_census;
@@ -55,6 +56,7 @@ mod schema;
 mod session_grants;
 mod sessions;
 mod setting_review;
+mod start_rules;
 mod task_report;
 mod tasks;
 #[cfg(test)]
@@ -116,6 +118,7 @@ pub use item_verify::{
     VERIFY_NOTE_MAX_CHARS,
 };
 pub use layers::HostLayerRow;
+pub use library::{LibraryItemRow, NewLibraryItem, KEEP as LIBRARY_KEEP};
 pub(crate) use local_workspaces::paths_overlap;
 pub use local_workspaces::{
     BaseEntry, FileStat, LocalActivityRow, LocalConflictRow, LocalPassWrite, LocalWorkspaceRow,
@@ -182,6 +185,7 @@ pub use setting_review::{
     NewSettingProposal, SettingAuditRow, SettingProposalRow, DECIDED_PROPOSAL_KEEP_SECS,
     SETTING_AUDIT_KEEP,
 };
+pub use start_rules::{StartRuleRow, START_RULE_STATES};
 pub use task_report::{
     EvidenceCommit, EvidenceFile, TaskEvidence, TaskReport, EVIDENCE_COMMITS_MAX,
     EVIDENCE_FILES_MAX, REPORT_ENTRY_MAX_CHARS, REPORT_LIST_MAX, REPORT_OUTCOMES,

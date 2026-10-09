@@ -79,6 +79,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.control_route",
+          "hint": "Says which mission or session a message in Control is about; you can change it. A short message gets a question instead."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.summary_check",
           "hint": "Checks a watcher's summary of a session against its transcript; in assist a summary it cannot confirm is not shown."
         },

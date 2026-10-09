@@ -86,3 +86,15 @@ export async function enabledRoutineCount(): Promise<number | null> {
   if (!r.ok || !Array.isArray(r.value)) return null;
   return r.value.filter((x) => x.enabled).length;
 }
+
+/**
+ * Whether the first fleet is being built (step 10.10): a session start is
+ * in flight (its create command, or a row whose agent is not up yet) and no
+ * work session is up besides the ones starting. Get started shows the Galaxy
+ * for exactly as long; a fleet that already has a running session starts
+ * its next one under the Pulse sequence alone.
+ */
+export function buildingFirstFleet(i: { workSessionIds: readonly number[]; starting: ReadonlySet<number>; creating: boolean }): boolean {
+  if (!i.creating && i.starting.size === 0) return false;
+  return i.workSessionIds.every((id) => i.starting.has(id));
+}

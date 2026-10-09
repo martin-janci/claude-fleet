@@ -3622,6 +3622,24 @@
     },
     {
       "default_widget": "select",
+      "key": "decide.jev.control_route",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: Control routing",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
       "key": "decide.jev.summary_check",
       "kind": {
         "options": [

@@ -7,6 +7,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Button from './kit/Button.svelte';
+  import Loader from './Loader.svelte';
+  import { creatingStart, startingSessions } from './session_starting';
   import { hosts } from './hosts';
   import { accounts } from './accounts';
   import { sessions, hasNoPane } from './sessions';
@@ -23,6 +25,7 @@
   import { openRoutines } from './routines';
   import { sidebarView } from './work_view';
   import {
+    buildingFirstFleet,
     doneCount,
     enabledRoutineCount,
     getStartedFolded,
@@ -72,6 +75,14 @@
     }),
   );
   const done = $derived(doneCount(items));
+  // Step 10.10: the Galaxy while the first session of the fleet starts.
+  const building = $derived(
+    buildingFirstFleet({
+      workSessionIds: $sessions.filter((s) => !hasNoPane(s)).map((s) => s.id),
+      starting: $startingSessions,
+      creating: $creatingStart?.kind === 'work',
+    }),
+  );
   const all = $derived(done === items.length);
 
   function open(id: GetStartedId) {
@@ -119,6 +130,12 @@
   </div>
   {#if !$getStartedFolded}
     <div class="bar" aria-hidden="true"><span style="width:{(done / items.length) * 100}%"></span></div>
+    {#if building}
+      <div class="building" data-testid="get-started-building">
+        <Loader name="galaxy" size={120} label="Building your fleet" testid="get-started-galaxy" />
+        <span class="meta">Building your fleet · starting your first session</span>
+      </div>
+    {/if}
     {#if all}
       <p class="all" data-testid="get-started-all">Your fleet is set up.</p>
     {:else}
@@ -234,6 +251,13 @@
   }
   .row.next .mark {
     color: var(--accent);
+  }
+  .building {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 14px 4px;
   }
   .all {
     margin: 10px 14px 14px;
