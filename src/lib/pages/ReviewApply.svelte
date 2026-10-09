@@ -2,9 +2,10 @@
   // Layout L6 `review_apply` (declarative pages P5, design §4–5): what an
   // agent proposed, grouped by the page each setting lives on, as now →
   // proposed with who and why. A person ticks rows and applies or rejects
-  // them; nothing is written before that. A row is left unticked when its
-  // value moved since it was proposed, or when the setting needs
-  // confirming — then Apply asks first.
+  // them; nothing is written before that. A row is left unticked when an
+  // agent proposed it (AI never decides: a person ticks it), when its value
+  // moved since it was proposed, or when the setting needs confirming —
+  // then Apply asks first.
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import { push, pushError } from '../toasts';
   import { ago } from './resources';
@@ -31,10 +32,14 @@
   const moved = (p: SettingProposal) => p.current !== p.before;
   const confirmed = (p: SettingProposal) => descs.get(p.key)?.danger.level === 'confirm';
 
-  /** Ticked by default unless it moved or needs confirming; the person's
-   *  own ticks override. */
+  /** An agent's proposal: never pre-ticked, so one "Apply selected" press
+   *  cannot apply what no person chose (transition plan, "Where AI never
+   *  decides"; design-system/ai.md). */
+  const byAgent = (p: SettingProposal) => p.source === 'agent';
+  /** Ticked by default unless an agent proposed it, it moved, or it needs
+   *  confirming; the person's own ticks override. */
   let ticks = $state<Record<number, boolean>>({});
-  const ticked = (p: SettingProposal) => ticks[p.id] ?? !(moved(p) || confirmed(p));
+  const ticked = (p: SettingProposal) => ticks[p.id] ?? !(byAgent(p) || moved(p) || confirmed(p));
   const selected = $derived(proposals.filter(ticked));
 
   const groups = $derived.by(() => {

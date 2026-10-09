@@ -33,6 +33,7 @@
   import { sessionBlocked } from './share';
   import ProposedBy from './ProposedBy.svelte';
   import { quickOrder, quickProposal } from './quick_answer';
+  import { untrack } from 'svelte';
   import type { SessionRow } from './sessions';
   import { uiLayout } from './prefs';
   import QuestionCard from './kit/QuestionCard.svelte';
@@ -106,19 +107,35 @@
   const isChecked = (o: AnswerOption) => (o.checked === true) !== toggled.has(o.n);
 
   // J5 quick answer (redesign step 10.9): Jev's likely option goes first,
-  // never on a permission, a multi-select or a risky option
-  // (quick_answer.ts). The numbers follow the shown order; each option still
-  // sends its own key. "Keep the order" puts them back for this question.
+  // never on a permission, a multi-select, a question that names a risky
+  // action or a risky option (quick_answer.ts). The numbers follow the shown
+  // order; each option still sends its own key. "Keep the order" puts them
+  // back for this question.
+  //
+  // Never in `compact` (the sidebar): it has no room for "Proposed by Jev"
+  // and "Keep the order", and a reorder nobody is told about is AI deciding.
+  // Never late: once a question has been drawn in the pane's order, a
+  // proposal that arrives afterwards does not move it — a digit the person
+  // already read as one option must not come to mean another.
   let keepOrder = $state(false);
+  /** The question this card first drew, and whether it drew it reordered. */
+  let drawn = $state<{ id: string; reordered: boolean } | null>(null);
   $effect(() => {
     void identity;
     keepOrder = false;
   });
-  const order = $derived(
-    view.multi || keepOrder
-      ? { shown: view.options, proposed: null }
-      : quickOrder(view.options, quickProposal(session), view.kind),
+  const paneOrder = $derived({ shown: view.options, proposed: null, primary: null });
+  const proposedOrder = $derived(
+    view.multi || compact ? paneOrder : quickOrder(view.options, quickProposal(session), view.kind, view.question),
   );
+  $effect(() => {
+    const id = identity;
+    untrack(() => {
+      if (drawn?.id !== id) drawn = { id, reordered: proposedOrder.proposed !== null };
+    });
+  });
+  const lateProposal = $derived(drawn?.id === identity && !drawn.reordered);
+  const order = $derived(keepOrder || lateProposal ? paneOrder : proposedOrder);
 
   /** Why a multi-select's boxes cannot be toggled from here right now: with
    *  the cursor in the free-text row, a digit is typed into that box. */
@@ -217,7 +234,7 @@
           label: o.label,
           // Reordered by the quick answer, the number is the shown place.
           kbd: order.proposed ? String(i + 1) : (o.key ?? undefined),
-          primary: order.proposed === o || undefined,
+          primary: order.primary === o || undefined,
           disabled: optionDisabled(o),
           title: writeBlocked ?? optionTitle(o),
           checked: view.multi ? isChecked(o) : undefined,
