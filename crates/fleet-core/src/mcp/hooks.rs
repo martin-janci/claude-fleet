@@ -242,6 +242,9 @@ pub async fn handle_hook(
             if let Some(id) = crate::service::hooks::work_link_subject(&state.store, &payload, &ctx)
             {
                 crate::service::decide::work_link::spawn_ask(&state.store, id);
+                // N1 (redesign 6.9): another of this person's sessions on the
+                // same work, asked the same way.
+                crate::service::decide::related_session::spawn_ask(&state.store, id);
             }
             // Mail, then the classification nudge (work graph M4.6) when it
             // fires and fits: see `prompt_submit_context`.

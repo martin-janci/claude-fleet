@@ -963,6 +963,19 @@ impl Graph {
         for e in s.item_deps(&item_ids)? {
             deps.entry(e.item_id).or_default().push(e.depends_on);
         }
+        let placements: HashMap<String, Placement> = s
+            .work_placements()?
+            .into_iter()
+            .map(|p| (p.task_id.clone(), p))
+            .collect();
+        let rules = s.work_rules()?;
+        // K5: a `work_placement` proposal names its group by label here.
+        let item_proposals = crate::service::decide::work_placement::label_proposals(
+            s,
+            item_proposals,
+            &placements,
+            &rules,
+        )?;
         Ok(Graph {
             now: crate::service::catalog::now_secs(),
             items,
@@ -973,12 +986,8 @@ impl Graph {
             trackers: s.list_trackers()?.into_iter().map(|t| (t.id, t)).collect(),
             orgs: s.list_orgs()?,
             projects: s.list_projects()?.into_iter().map(|p| (p.id, p)).collect(),
-            placements: s
-                .work_placements()?
-                .into_iter()
-                .map(|p| (p.task_id.clone(), p))
-                .collect(),
-            rules: s.work_rules()?,
+            placements,
+            rules,
             context_red_pct: crate::service::health::context_red_pct(s),
             facts: s.attention_facts(),
             working_session_items,

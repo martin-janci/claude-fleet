@@ -79,6 +79,16 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.work_placement",
+          "hint": "Proposes a group for a new task nothing placed; you still place it."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.related_session",
+          "hint": "Marks another of your sessions that works on the same thing; nothing is stopped or merged."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.control_route",
           "hint": "Says which mission or session a message in Control is about; you can change it. A short message gets a question instead."
         },

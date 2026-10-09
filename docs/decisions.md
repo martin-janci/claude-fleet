@@ -581,6 +581,65 @@ none, nothing is asked. A proposal accepted at once (a planner card with
 Code: `service/decide/duplicate.rs`, `duplicate_hint` in
 `service/work/view.rs`; card K4 in the test map.
 
+## `work_placement` — the group of a task nobody placed (K5)
+
+When a person creates a standalone task (`work_link { action: create }`
+with no parent), and `decide.jev.work_placement` is on, Jev is asked one
+Choice: which of the groups people use in the Work view the task belongs
+in, or `none` / `unsure`. The groups are the labels of people's
+placements, most used first, then the enabled rules' groups, at most 20;
+with none in use, or when a person or a rule already placed the task,
+nothing is asked. A subtask sits under its parent and is never asked about.
+
+- **What is sent.** The task's title and key, redacted; each group's label.
+- **What is recorded.** Subject `work_item` `<id>`; each option is `g` and
+  12 hex digits of an HMAC of the label under the local fingerprint key, so
+  no label is ever recorded.
+- **Shadow.** Asked off the creating call's path and only recorded, with
+  `none` as the baseline (today such a task sits in no group of a person's).
+- **Assist.** A usable answer (at least 50%, a group) stays on the task as
+  its `work_placement` proposal. The Work view reads it back with the
+  label (a proposal whose group is no longer in use is dropped), and in the
+  New layout the task's Group line shows *Jev proposes “X” · Proposed by
+  Jev · N%* with **Place in X**. Jev never places a task and never writes a
+  rule.
+- **Asked once.** A decided run about the same task and input is never
+  asked again.
+- **Follow-up.** A person's placement of the task marks the run
+  `confirmed` (the same group) or `corrected` (another). A shadow answer
+  nobody saw is never marked.
+
+Code: `service/decide/work_placement.rs`, `label_proposals` in the Work
+view's graph, `record_place` in `service/work/structure.rs`; card K5 in
+the test map.
+
+## `related_session` — another session on the same work (N1)
+
+On a person's prompt in a session's current conversation (after three
+turns, with a kept first prompt; never the operator), when
+`decide.jev.related_session` is on, Jev is asked one Choice: which of the
+same person's other live sessions in the same org works on the same thing,
+or `none`. Another person's session is never a candidate (its prompts are
+theirs), nor is one sharing this session's worktree (Related sessions lists
+those already); at most 8, most recently active first. With none, nothing
+is asked.
+
+- **What is sent.** Each session's first prompt, cut to 400 characters and
+  redacted. No name, host or path. Options are `s<id>` and `none`.
+- **Shadow.** Asked off the hook's path and only recorded, with `none` as
+  the baseline (nothing notices this today).
+- **Assist.** A usable answer (at least 50%, a session) stays on the row as
+  its `related_session` proposal: in the New layout, its Details list the
+  other session under Related sessions as *Same work? · Proposed by Jev ·
+  N%*. Nothing is stopped, merged or moved.
+- **Asked once per input.** A new candidate (another session starts) is a
+  new input; the same input reuses the decided run.
+- **Follow-up.** None yet: no person's act answers it until Tidy-up's
+  Duplicates offers one. A shadow answer is never marked.
+
+Code: `service/decide/related_session.rs`, called beside `work_link` in the
+prompt hook (`mcp/hooks.rs`); card N1 in the redesign plan.
+
 ## Settings
 
 <!-- BEGIN GENERATED: settings decide. -->
@@ -597,6 +656,8 @@ Code: `service/decide/duplicate.rs`, `duplicate_hint` in
 | `decide.jev.adopt_target` | `off` | `off` / `shadow` / `assist` | Prefilling the project when you adopt a pane fleet did not start. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.restore_target` | `off` | `off` / `shadow` / `assist` | Prefilling the project when you restore a conversation found on a host. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.duplicate` | `off` | `off` / `shadow` / `assist` | Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.work_placement` | `off` | `off` / `shadow` / `assist` | Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.related_session` | `off` | `off` / `shadow` / `assist` | Noticing another of your sessions working on the same thing. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.control_route` | `off` | `off` / `shadow` / `assist` | Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.summary_check` | `off` | `off` / `shadow` / `assist` | Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support. Experimental. |
 | `decide.jev.turn_outcome` | `off` | `off` / `shadow` / `assist` | Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it. Experimental. |
