@@ -398,6 +398,11 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::Routed { tool: "work_link" },
     ),
     ("pause_all_missions", Verdict::Routed { tool: "work_link" }),
+    (
+        "mission_release_note",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("today_brief", Verdict::Routed { tool: "work_link" }),
     // Work graph M3.1: trackers and their credentials are fleet
     // administration. The hub's `work_admin` is master-only, and a paired
     // desktop is a client, never the master (review C17).
@@ -725,6 +730,11 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "remove_download",
         },
     ),
+    // Control's Library (9.7) is indexed on the machine that owns the
+    // fleet, the hub when paired, beside the downloads; one tool by action.
+    ("list_library", Verdict::Routed { tool: "library" }),
+    ("add_library_items", Verdict::Routed { tool: "library" }),
+    ("remove_library_item", Verdict::Routed { tool: "library" }),
     // Saving reads the row through `list_downloads` (refusing a file that
     // is not ready or not this client's), then streams the bytes from the
     // hub's `GET /downloads/<id>` into the file this machine's save dialog
@@ -921,6 +931,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("list_tasks", Verdict::Routed { tool: "list_tasks" }),
     // Orbit Fleet 8.3: the Automation screen's Runs list.
     ("list_runs", Verdict::Routed { tool: "runs" }),
+    // Orbit Fleet 8.6: the Automation screen's Routines and the Inbox's failed runs.
+    ("routines", Verdict::Routed { tool: "routines" }),
     // ── tasks ───────────────────────────────────────────────────────────────
     (
         "cancel_task",

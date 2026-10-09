@@ -11,6 +11,7 @@ import { installErrorReporting } from './lib/error_report';
 import { selectedSession } from './lib/selection';
 import { trackViewedSession } from './lib/session_viewed';
 import { trackPresence } from './lib/presence';
+import { trackFailingRoutines } from './lib/routines';
 import { startTraySync } from './lib/tray_state';
 import { currentPopout } from './lib/terminal_popout';
 import TerminalPopout from './lib/TerminalPopout.svelte';
@@ -29,6 +30,7 @@ if (popout) {
   trackViewedSession(selectedSession);
   // Who else has the open session on screen (redesign 11.7b); a hub feature.
   trackPresence(selectedSession);
+  trackFailingRoutines();
   // The tray and menu-bar icon follows the fleet (redesign 3.17).
   startTraySync();
   app = mount(App, { target });

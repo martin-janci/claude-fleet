@@ -216,6 +216,55 @@ pub fn runs(
     s.routine_runs(id, limit.unwrap_or(RUNS_SHOWN).clamp(1, RUNS_MAX))
 }
 
+/// A routine whose newest run failed, as the Inbox shows it (redesign 8.6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FailingRoutine {
+    pub routine: RoutineRow,
+    pub run: RoutineRunRow,
+    /// Whether this caller may Retry or Pause it: the UI's buttons.
+    #[serde(default)]
+    pub may_change: bool,
+}
+
+/// Whether a run failed: its state, or what it came to (8.10).
+fn run_failed(r: &RoutineRunRow) -> bool {
+    r.state == "failed" || r.outcome.as_deref() == Some("failed")
+}
+
+/// `routines { action: failing }`: each routine this caller may read whose
+/// newest run failed, newest failure first. A newer run (Retry) takes it
+/// out, and so does a person switching it off after the failure (Pause);
+/// a routine the scheduler paused, over its budget, stays, since that
+/// pause is news too.
+pub fn failing(store: &Mutex<Store>, scope: &ViewScope) -> Result<Vec<FailingRoutine>, IpcError> {
+    let s = lock(store)?;
+    let mut out = Vec::new();
+    for r in s.list_routines()? {
+        if !sees_routine(&s, scope, &r)? {
+            continue;
+        }
+        let Some(run) = s.routine_runs(r.id, 1)?.into_iter().next() else {
+            continue;
+        };
+        if !run_failed(&run) {
+            continue;
+        }
+        let failed_at = run.finished_at.unwrap_or(run.started_at);
+        if !r.enabled && r.paused_reason.is_none() && r.updated_at >= failed_at {
+            continue;
+        }
+        out.push(FailingRoutine {
+            may_change: may_change_routine(&s, scope, &r)?,
+            routine: r,
+            run,
+        });
+    }
+    out.sort_by_key(|f| {
+        std::cmp::Reverse((f.run.finished_at.unwrap_or(f.run.started_at), f.run.id))
+    });
+    Ok(out)
+}
+
 /// The fields `input` writes, checked; and the routine's org, its host's.
 fn check(
     s: &Store,

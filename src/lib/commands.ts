@@ -200,7 +200,7 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
       if (!s || !v) return;
       // Asked here too (the sweep wants the gate where the write is), so a
       // refusal is a toast before the pane is read; sendAnswer asks again.
-      const why = hubActionBlocked('send_prompt', get(hubStatus), get(hubConnection)) ?? sessionActionBlocked(s, 'send_prompt');
+      const why = hubActionBlocked('send_prompt', get(hubStatus), get(hubConnection)) ?? sessionActionBlocked(s, 'answer_dialog');
       if (why !== null) {
         push({ kind: 'info', message: why });
         return;

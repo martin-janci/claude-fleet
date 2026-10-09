@@ -1,7 +1,7 @@
 <!--
   Control's Views panel (Orbit Fleet redesign step 9.4, boards MissionControl
   and MCViews): the column beside the chat. A strip of views (Needs you, the
-  session in focus, Pull requests, Library once 9.7 lands, Today briefing),
+  session in focus, Pull requests, Library (step 9.7), Today briefing),
   "+" to turn them on and off and reorder them, ⤢ to open the view where it
   lives, ✕ to close the column. Tasks, Missions, Hosts and usage are links to
   where they live, not copies. A session opened from Needs you shows its
@@ -18,6 +18,7 @@
   import type { SessionRow } from './sessions';
   import WorkPrs from './WorkPrs.svelte';
   import TodayView from './TodayView.svelte';
+  import LibraryView from './LibraryView.svelte';
   import ConversationPanel from './ConversationPanel.svelte';
   import ControlMissions from './ControlMissions.svelte';
   import {
@@ -43,6 +44,9 @@
   const fromDef = $derived(from ? CONTROL_VIEWS.find((v) => v.id === from) : undefined);
 
   const landed = CONTROL_VIEWS.filter((v) => v.landed);
+
+  /** The views that live somewhere else too; the Library lives only here. */
+  const HAS_PLACE: ReadonlySet<ControlViewId> = new Set(['needs-you', 'session', 'prs', 'today']);
 
   /** ⤢: the view's own place. */
   function expand(id: ControlViewId) {
@@ -118,6 +122,7 @@
       title="Open {activeDef.label} where it lives"
       aria-label="Open {activeDef.label} where it lives"
       data-testid="control-views-expand"
+      disabled={!HAS_PLACE.has(active)}
       onclick={() => expand(active)}>⤢</button
     >
     <button
@@ -213,6 +218,8 @@
       {/if}
     {:else if active === 'prs'}
       <WorkPrs />
+    {:else if active === 'library'}
+      <LibraryView />
     {:else if active === 'today'}
       <TodayView />
     {/if}

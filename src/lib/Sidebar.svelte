@@ -18,6 +18,8 @@
   import { describePurge, purgeHostsForProject } from './purge';
   import { groupRows, isFlatGroupBy } from './row_groups';
   import { inboxRows, notWaiting, notWaitingText } from './inbox';
+  import RoutineFailures from './automation/RoutineFailures.svelte';
+  import { failingCount } from './routines';
   import { sessionMatchesSearch } from './search';
   import { sessionFocus } from './session_focus';
   import { type ProjectRow } from './projects';
@@ -29,6 +31,7 @@
   import AddProjectDialog from './AddProjectDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
   import OnboardingCard from './OnboardingCard.svelte';
+  import FirstRun from './FirstRun.svelte';
   import { hostFilter, effectiveHostFilter, hosts } from './hosts';
   import { bulkTargets, sessionBlocked, sessionIdBlocked } from './share';
   import { moveToHeadroom } from './account_limits';
@@ -960,6 +963,7 @@
       : [],
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
+  const inboxNeeding = $derived(inboxList.length + $failingCount);
   // Redesign step 7.4: a row whose state moves it to another group is a new
   // element there; snapshot every row's place before the groups re-render so
   // the new one slides from where the old one was (motion_catalog.slideIn).
@@ -1430,13 +1434,15 @@
        first, then one line for everything else and the way to it. -->
   <div class="scroller inbox" data-testid="inbox">
     <div class="section-header inbox-head" data-testid="inbox-head">
-      {inboxList.length === 0 ? 'Nothing needs you' : `${inboxList.length} need${inboxList.length === 1 ? 's' : ''} you`}
+      {inboxNeeding === 0 ? 'Nothing needs you' : `${inboxNeeding} need${inboxNeeding === 1 ? 's' : ''} you`}
     </div>
     <div class="tree" role="tree" aria-label="Needs you">
       {#each inboxList as sess (sess.id)}
         {@render sessionRow(sess)}
       {/each}
     </div>
+    <!-- Redesign 8.6: routines whose newest run failed, with Fix, Retry, Pause. -->
+    <RoutineFailures />
     <div class="inbox-rest" data-testid="inbox-rest">
       {#if inboxRestText}<span class="muted">Not waiting · {inboxRestText}</span>{/if}
       <button
@@ -1449,7 +1455,8 @@
   </div>
   {:else}
   <div class="scroller">
-    {#if !$onboardingDismissed}
+    <!-- The New layout shows Get started in the corner instead (10.5). -->
+    {#if !$onboardingDismissed && $uiLayout !== 'new'}
       <OnboardingCard onaddhost={openAddHost} onnewsession={openNewSession} />
     {/if}
     {#snippet pastRow(key: string, l: WorkLink)}
@@ -1962,6 +1969,11 @@
   </ConfirmDialog>
 {/if}
 
+{#if $uiLayout === 'new'}
+  <!-- Redesign 10.5: the first-run tour and Get started, where the
+       onboarding card was mounted; both float above the layout. -->
+  <FirstRun mac={isMac} />
+{/if}
 {#if $settingsOpen}
   <SettingsDialog onClose={() => settingsOpen.set(false)} />
 {/if}

@@ -952,3 +952,50 @@ fn an_outcome_outside_the_list_is_refused() {
         codes::E_INVALID
     );
 }
+
+#[tokio::test]
+async fn a_failed_run_is_in_the_inbox_until_retried_or_paused() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let bo = person(&f.store, None, f.bo);
+    assert!(failing(&f.store, &ana).unwrap().is_empty());
+
+    f.fake.fail.store(true, Ordering::SeqCst);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    let inbox = failing(&f.store, &ana).unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!((inbox[0].routine.id, inbox[0].run.id), (r.id, run.id));
+    assert!(inbox[0].may_change);
+    // Another person's routine is not their Inbox's.
+    assert!(failing(&f.store, &bo).unwrap().is_empty());
+
+    // Retry: a newer run that starts takes it out.
+    f.fake.fail.store(false, Ordering::SeqCst);
+    run_now(&f.deps, &ana, r.id, OCT8 + 60).await.unwrap();
+    assert!(failing(&f.store, &ana).unwrap().is_empty());
+
+    // Pause: a person switching it off after a failure takes it out.
+    let other = new_routine(&f, input(&f));
+    f.fake.fail.store(true, Ordering::SeqCst);
+    run_now(&f.deps, &ana, other.id, OCT8).await.unwrap();
+    assert_eq!(failing(&f.store, &ana).unwrap().len(), 1);
+    set_enabled(&f.store, &ana, other.id, false).unwrap();
+    assert!(failing(&f.store, &ana).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_routine_the_scheduler_paused_over_budget_stays_in_the_inbox() {
+    let f = fx();
+    let mut i = input(&f);
+    i.budget_run_micros = Some(1_000_000);
+    let r = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    spend(&f, run.session_id.unwrap(), 1_200_000);
+    tick_once(&f.deps, OCT8 + 40).await;
+    assert!(!routine(&f, r.id).enabled);
+    let inbox = failing(&f.store, &ana).unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert!(inbox[0].routine.paused_reason.is_some());
+}

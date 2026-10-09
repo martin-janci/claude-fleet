@@ -103,6 +103,23 @@ describe('sessionActionBlocked', () => {
     for (const a of OWN) expect(sessionActionBlocked(row(), a, 'watch', remote)).not.toBeNull();
   });
 
+  it('an answer grantee may read and answer the dialog, and nothing wider (Orbit Fleet 11.7)', () => {
+    for (const a of READ) expect(sessionActionBlocked(row(), a, 'answer', remote)).toBeNull();
+    expect(sessionActionBlocked(row(), 'answer_dialog', 'answer', remote)).toBeNull();
+    for (const a of DRIVE) {
+      const why = sessionActionBlocked(row(), a, 'answer', remote);
+      expect(why, a).toMatch(/shared with you to answer/i);
+      expect(why).toMatch(/needs drive/i);
+    }
+    for (const a of OWN) expect(sessionActionBlocked(row(), a, 'answer', remote)).not.toBeNull();
+  });
+
+  it('answering needs answer or wider: watch is refused, drive and own are not', () => {
+    expect(sessionActionBlocked(row(), 'answer_dialog', 'watch', remote)).toMatch(/needs answer or drive/i);
+    expect(sessionActionBlocked(row(), 'answer_dialog', 'drive', remote)).toBeNull();
+    expect(sessionActionBlocked(row(), 'answer_dialog', 'own', remote)).toBeNull();
+  });
+
   it('never says "not yours" when the truth is that the hub is unreachable', () => {
     const why = sessionActionBlocked(row(), 'kill_session', null, unavailable);
     expect(why).toContain('no stored token');
