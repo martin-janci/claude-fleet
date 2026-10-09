@@ -220,7 +220,10 @@ pub fn question_for(text: &str, targets: &[Target]) -> JevRequest {
 
 /// The targets `scope` may see, in the order they are offered: active
 /// missions (newest first), then running sessions other than Control's
-/// own agent (most recently active first), [`MAX_TARGETS`] in all.
+/// own agent (most recently active first), [`MAX_TARGETS`] in all. Neither
+/// kind starves the other (review r01): missions take at most half the
+/// slots while there are sessions to fill the rest, and either kind takes
+/// the slots the other leaves empty.
 pub fn targets(s: &Store, scope: &ViewScope) -> Result<Vec<Target>, IpcError> {
     let mut out = Vec::new();
     let mut missions = s.list_missions()?;
@@ -249,6 +252,10 @@ pub fn targets(s: &Store, scope: &ViewScope) -> Result<Vec<Target>, IpcError> {
             && !matches!(scope.sees_session_row(r), Visibility::None)
     });
     sessions.sort_by_key(|r| std::cmp::Reverse(r.last_activity_at));
+    let missions_kept = out
+        .len()
+        .min(MAX_TARGETS - sessions.len().min(MAX_TARGETS / 2));
+    out.truncate(missions_kept);
     for r in sessions {
         let project = r
             .project_id
@@ -390,7 +397,19 @@ pub async fn propose(ctx: &DecideCtx, scope: &ViewScope, text: &str) -> ControlR
 /// question). Marks run `run_id` `confirmed` when it is the model's answer,
 /// else `corrected` to it. Only an assist run of this feature that nobody
 /// has decided yet is marked; returns whether one was.
-pub fn follow(s: &Store, run_id: i64, chosen: &str, now: i64) -> Result<bool, IpcError> {
+///
+/// `scope` must be able to see the run (review r04): `runs { list }`'s rule
+/// for a run about no session ([`crate::service::runs::reach`]: the whole
+/// fleet's reader), or else every target the run offered, which is what
+/// [`targets`] gave the person who sent the message. A run another caller
+/// cannot see is answered like one that is not there.
+pub fn follow(
+    s: &Store,
+    scope: &ViewScope,
+    run_id: i64,
+    chosen: &str,
+    now: i64,
+) -> Result<bool, IpcError> {
     let Some(r) = s.get_decision_run(run_id)? else {
         return Ok(false);
     };
@@ -419,6 +438,9 @@ pub fn follow(s: &Store, run_id: i64, chosen: &str, now: i64) -> Result<bool, Ip
             })
         })
         .collect();
+    if !sees_offered(s, scope, &offered)? {
+        return Ok(false);
+    }
     if !known_option(chosen, &offered) {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -430,4 +452,19 @@ pub fn follow(s: &Store, run_id: i64, chosen: &str, now: i64) -> Result<bool, Ip
     } else {
         s.set_decision_followup(r.id, "corrected", Some(chosen), now)
     }
+}
+
+/// Whether `scope` sees a run that offered `offered` (see [`follow`]).
+fn sees_offered(s: &Store, scope: &ViewScope, offered: &[Target]) -> Result<bool, IpcError> {
+    use crate::store::RunsReach;
+    let (sessions, missions) = match crate::service::runs::reach(s, scope)? {
+        RunsReach::All | RunsReach::Scoped { spend: true, .. } => return Ok(true),
+        RunsReach::Scoped {
+            sessions, missions, ..
+        } => (sessions, missions),
+    };
+    Ok(offered.iter().all(|t| match t.kind {
+        TargetKind::Mission => missions.contains(&t.id),
+        TargetKind::Session => sessions.contains(&t.id),
+    }))
 }

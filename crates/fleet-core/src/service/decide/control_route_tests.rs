@@ -226,7 +226,7 @@ async fn shadow_records_and_shows_nothing() {
     assert_eq!(runs[0].mode, "shadow");
     // Nobody saw it: a follow-up never marks it.
     let s = w.store.lock().unwrap();
-    assert!(!follow(&s, runs[0].id, &w.m(), NOON).unwrap());
+    assert!(!follow(&s, &scope(), runs[0].id, &w.m(), NOON).unwrap());
 }
 
 #[tokio::test]
@@ -253,10 +253,10 @@ async fn change_corrects_and_keeping_confirms_once() {
     let kept = propose(&ctx, &scope(), MESSAGE).await.run_id.unwrap();
     let changed = propose(&ctx, &scope(), MESSAGE).await.run_id.unwrap();
     let s = w.store.lock().unwrap();
-    assert!(follow(&s, kept, &w.m(), NOON).unwrap());
-    assert!(follow(&s, changed, &w.s(), NOON).unwrap());
+    assert!(follow(&s, &scope(), kept, &w.m(), NOON).unwrap());
+    assert!(follow(&s, &scope(), changed, &w.s(), NOON).unwrap());
     // Decided once: a second follow-up changes nothing.
-    assert!(!follow(&s, changed, CONTROL, NOON).unwrap());
+    assert!(!follow(&s, &scope(), changed, CONTROL, NOON).unwrap());
     let kept = s.get_decision_run(kept).unwrap().unwrap();
     let changed = s.get_decision_run(changed).unwrap().unwrap();
     assert_eq!(kept.followup.as_deref(), Some("confirmed"));
@@ -274,7 +274,7 @@ async fn a_follow_up_names_one_of_the_messages_targets() {
         .run_id
         .unwrap();
     let s = w.store.lock().unwrap();
-    let e = follow(&s, run, "s999", NOON).unwrap_err();
+    let e = follow(&s, &scope(), run, "s999", NOON).unwrap_err();
     assert_eq!(e.code, "E_INVALID");
 }
 
@@ -346,4 +346,64 @@ fn only_consenting_orgs_targets_are_asked_about() {
     let asked = consenting(&s, &[t(1, Some(yes)), t(2, Some(no)), t(3, None)]);
     let ids: Vec<i64> = asked.iter().map(|t| t.id).collect();
     assert_eq!(ids, vec![1, 3]);
+}
+
+/// Review r01: eight or more active missions do not hide every session.
+#[test]
+fn many_missions_leave_room_for_the_sessions() {
+    let w = world();
+    let s = w.store.lock().unwrap();
+    for n in 0..10 {
+        let m = s
+            .create_mission(
+                &NewMission {
+                    name: Box::leak(format!("m{n}").into_boxed_str()),
+                    goal: "g",
+                    ..Default::default()
+                },
+                "test",
+            )
+            .unwrap();
+        s.set_mission_state(m.id, None, "active", "test").unwrap();
+    }
+    let t = targets(&s, &scope()).unwrap();
+    assert_eq!(t.len(), MAX_TARGETS);
+    assert!(
+        t.iter().any(|t| t.option() == w.s()),
+        "the running session is still offered: {:?}",
+        t.iter().map(Target::option).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        t.iter().filter(|t| t.kind == TargetKind::Mission).count(),
+        MAX_TARGETS - 1
+    );
+}
+
+/// Review r04: a follow-up on a run the caller cannot see marks nothing.
+#[tokio::test]
+async fn a_run_the_caller_cannot_see_is_not_followed() {
+    let w = world();
+    w.on("assist");
+    let fake = Fake::answering(vec![says(&w.m(), 0.9)]);
+    let run = propose(&w.ctx(&fake), &scope(), MESSAGE)
+        .await
+        .run_id
+        .unwrap();
+    let s = w.store.lock().unwrap();
+    let stranger = s.create_person("eve", None).unwrap().id;
+    let eve = ViewScope::for_caller(
+        crate::service::orgs::OrgScope::All,
+        Some(stranger),
+        Default::default(),
+        None,
+        None,
+        false,
+        Default::default(),
+    );
+    assert!(!follow(&s, &eve, run, &w.m(), NOON).unwrap());
+    assert!(s.get_decision_run(run).unwrap().unwrap().followup.is_none());
+    assert!(
+        follow(&s, &scope(), run, &w.m(), NOON).unwrap(),
+        "its sender's reader still can"
+    );
 }
