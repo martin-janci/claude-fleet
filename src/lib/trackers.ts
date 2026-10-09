@@ -101,6 +101,8 @@ export interface WorkItemRow {
   resolution?: string | null;
   parent_id?: number | null;
   assignees?: string[];
+  /** The date the work is due, `YYYY-MM-DD` (absent from an older hub). */
+  due_at?: string | null;
   iteration?: string | null;
   updated_ext?: number | null;
   status_changed_at?: number | null;

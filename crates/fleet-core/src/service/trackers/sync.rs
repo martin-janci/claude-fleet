@@ -913,6 +913,9 @@ pub fn to_write(s: WorkItemSnapshot) -> TrackerItemWrite {
         iteration: s.iteration.map(|i| cap(i, FIELD_MAX_CHARS)),
         iteration_active: s.iteration_active,
         versions: cap_list(s.versions, FIELD_MAX_CHARS),
+        due_at: s
+            .due_at
+            .filter(|d| crate::store::parse_due_date(d).is_some()),
         updated_ext: s.updated,
         description: s.description,
         description_chars: s.description_chars,

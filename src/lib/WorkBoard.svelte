@@ -22,7 +22,7 @@
   // opens the edit dialog: title, description, status, assignees.
   import { onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
-  import { onWorkChangedDebounced, setWorkStatus } from './work';
+  import { onWorkChangedDebounced, ownerDueChip, setWorkStatus } from './work';
   import {
     openTask,
     readErrorText,
@@ -339,6 +339,7 @@
   {@const refusal = boardMoveRefusal(t)}
   {@const live = boardLiveSession(t)}
   {@const err = cardErrors.get(t.task_id)}
+  {@const owner = ownerDueChip(t)}
   <li role="listitem">
     <button
       class="card"
@@ -367,6 +368,14 @@
         {#if n.children.length > 0}<span>{n.children.length} subtask{n.children.length === 1 ? '' : 's'}</span>{/if}
         {#if (t.open_proposals ?? 0) > 0}<span class="prop">{t.open_proposals} to review</span>{/if}
       </span>
+      {#if owner}
+        <span
+          class="owner"
+          class:overdue={owner.overdue}
+          title={owner.overdue ? `Overdue since ${t.due_at}` : t.due_at ? `Due ${t.due_at}` : undefined}
+          data-testid="work-board-owner">{owner.text}</span
+        >
+      {/if}
       {#if live}
         <span class="live" data-testid="work-board-live">● {live.host ? `${live.name} · ${live.host}` : live.name}</span>
       {/if}
@@ -594,6 +603,19 @@
   }
   .prop {
     color: var(--accent);
+  }
+  .owner {
+    align-self: flex-start;
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    background: var(--chip-bg, color-mix(in srgb, currentColor 10%, transparent));
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+    white-space: nowrap;
+  }
+  .owner.overdue {
+    background: var(--failed-soft);
+    color: var(--status-failed);
   }
   .live {
     font-size: var(--text-2xs);

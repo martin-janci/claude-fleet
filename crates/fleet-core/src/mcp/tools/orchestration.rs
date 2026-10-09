@@ -1117,9 +1117,9 @@ impl FleetTools {
         a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
         kill when dirty). set_status {item_id, status}: a person's status for \
-        work with no ticket. edit {item_id, title?, notes?, assignees?}: a \
-        person edits work with no ticket. create {title, parent?, notes?}: a task or \
-        subtask. propose {parent, title, why?}: a subtask a person accepts \
+        work with no ticket. edit {item_id, title?, notes?, assignees?, \
+        due_at?}: a person edits work with no ticket. create {title, parent?, \
+        notes?, assignees?, due_at?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts \
         or rejects {item_id, no session_id}. bucket_add|bucket_remove \
         {bucket_id, item_id}: sprint/release. mission_save {mission, \
         mission_id?, item_id?: root}; mission_state {mission_id, status}; \
@@ -1603,7 +1603,7 @@ impl FleetTools {
             );
         }
         if args.action == "edit" {
-            // Task editing: a local item's title, notes and assignees. The
+            // Task editing: a local item's title, notes, assignees and due date. The
             // ORG fence is inside `edit_local_item` (an item outside the
             // scope answers as an unknown id, a tracker's ticket is
             // `E_INVALID`); the PERSON fence is the rename half's and

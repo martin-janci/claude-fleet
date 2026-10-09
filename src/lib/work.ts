@@ -548,22 +548,70 @@ export async function setWorkStatus(itemId: number, status: WorkItemStatus): Pro
 }
 
 /** A person's edit of a native item: each field left out stays as it is;
- *  `notes: ''` and `assignees: []` clear them. A tracker's ticket is
+ *  `notes: ''`, `assignees: []` and `due_at: ''` clear them. A tracker's ticket is
  *  refused, `E_INVALID`, naming it: its text is its tracker's. */
 export async function editWorkItem(
   itemId: number,
-  edit: { title?: string; notes?: string; assignees?: string[] },
+  edit: WorkItemEdit,
 ): Promise<Result<WorkItemRow>> {
   const args: Record<string, unknown> = { item_id: itemId };
   if (edit.title !== undefined) args.title = edit.title.trim();
   if (edit.notes !== undefined) args.notes = edit.notes;
   if (edit.assignees !== undefined) args.assignees = edit.assignees;
+  if (edit.due_at !== undefined) args.due_at = edit.due_at;
   const r = await invokeCmd<WorkItemRow>('edit_work_item', { args });
   if (r.ok) {
     if (edit.title !== undefined) patchWorkItemTitle(itemId, r.value.title);
     bumpWorkChanged();
   }
   return r;
+}
+
+/** What a person may change on a native item (`editWorkItem`). */
+export interface WorkItemEdit {
+  title?: string;
+  notes?: string;
+  assignees?: string[];
+  /** `YYYY-MM-DD`; `''` clears. */
+  due_at?: string;
+}
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** A due date (`YYYY-MM-DD`) as the Board card says it, against `now`'s
+ *  local calendar day: "Today", "Tomorrow", a weekday within the coming
+ *  week ("Fri"), else the day and month ("Oct 23"). A past date is
+ *  `overdue`. `null` for no date or one that does not parse. */
+export function dueLabel(due: string | null | undefined, now: Date = new Date()): { text: string; overdue: boolean } | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(due ?? '');
+  if (!m) return null;
+  const day = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  if (day.getMonth() !== Number(m[2]) - 1) return null;
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const days = Math.round((day.getTime() - today.getTime()) / 86_400_000);
+  const date = `${MONTHS[day.getMonth()]} ${day.getDate()}`;
+  if (days < 0) return { text: date, overdue: true };
+  if (days === 0) return { text: 'Today', overdue: false };
+  if (days === 1) return { text: 'Tomorrow', overdue: false };
+  if (days < 7) return { text: WEEKDAYS[day.getDay()], overdue: false };
+  return { text: date, overdue: false };
+}
+
+/** The Board card's owner-and-due chip ("You · Fri"): the first assignee
+ *  ("You" when the task is the viewer's), then the due date. `null` when
+ *  the task names neither. */
+export function ownerDueChip(
+  t: { assignees?: string[] | null; mine?: boolean | null; due_at?: string | null },
+  now: Date = new Date(),
+): { text: string; overdue: boolean } | null {
+  const first = t.assignees?.find((a) => a.trim() !== '');
+  const who = t.mine ? 'You' : (first ?? null);
+  const due = dueLabel(t.due_at, now);
+  if (who === null && due === null) return null;
+  const extra = !t.mine && (t.assignees?.length ?? 0) > 1 ? ` +${(t.assignees?.length ?? 1) - 1}` : '';
+  const parts = [who !== null ? `${who}${extra}` : null, due?.text ?? null].filter((x): x is string => x !== null);
+  return { text: parts.join(' · '), overdue: due?.overdue ?? false };
 }
 
 /** Assignees typed as one line: split on commas, trimmed, empty ones and

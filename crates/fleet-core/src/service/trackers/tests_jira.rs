@@ -1036,3 +1036,21 @@ async fn a_via_host_tracker_is_read_through_curl_on_its_host() {
         Err(TransportError::Refused(_))
     ));
 }
+
+#[test]
+fn the_due_date_is_asked_for_and_read_as_a_calendar_date() {
+    let f = FakeTransport::new();
+    let j = jira(&f);
+    assert!(j.fields().iter().any(|x| x == "duedate"));
+    let issue = |due: Value| {
+        json!({ "id": "10101", "key": "ABC-101",
+                "fields": { "summary": "S", "duedate": due,
+                            "status": { "name": "To Do", "statusCategory": { "key": "new" } } } })
+    };
+    let due = |v: Value| j.snapshot(&issue(v)).unwrap().due_at;
+    assert_eq!(due(json!("2026-10-16")).as_deref(), Some("2026-10-16"));
+    assert_eq!(due(Value::Null), None);
+    // Third-party text that is not a date is dropped, not stored.
+    assert_eq!(due(json!("next Friday")), None);
+    assert_eq!(due(json!("2026-02-30")), None);
+}

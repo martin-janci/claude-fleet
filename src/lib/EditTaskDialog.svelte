@@ -10,11 +10,12 @@
     parseAssignees,
     setWorkStatus,
     workTitleError,
+    type WorkItemEdit,
     type WorkItemStatus,
   } from './work';
   import { readErrorText, workTask, type TaskDetail } from './work_view';
 
-  // Edit a task written in Fleet: its title, notes, status and assignees.
+  // Edit a task written in Fleet: its title, notes, status, assignees and due date.
   // Reads the task itself (the board and the lists hold no notes), and
   // writes only what changed: `edit_work_item` for the text, then
   // `set_work_status` for the status, both Routed, so a paired desktop
@@ -45,6 +46,7 @@
   let notes = $state('');
   let status = $state<WorkItemStatus>('todo');
   let assignees = $state('');
+  let due = $state('');
   let busy = $state(false);
   let failure = $state<string | null>(null);
 
@@ -53,7 +55,7 @@
   }
 
   // What the form started from: only a changed field is written.
-  let initial = { title: '', notes: '', status: 'todo' as WorkItemStatus, assignees: [] as string[] };
+  let initial = { title: '', notes: '', status: 'todo' as WorkItemStatus, assignees: [] as string[], due: '' };
 
   async function load() {
     const r = await workTask(untrack(() => taskId));
@@ -72,11 +74,13 @@
       notes: d.notes ?? '',
       status: statusOf(d.task.status_category),
       assignees: d.task.assignees ?? [],
+      due: d.task.due_at ?? '',
     };
     title = initial.title;
     notes = initial.notes;
     status = initial.status;
     assignees = initial.assignees.join(', ');
+    due = initial.due;
   }
   void load();
 
@@ -92,11 +96,12 @@
 
   const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
   const changes = $derived.by(() => {
-    const edit: { title?: string; notes?: string; assignees?: string[] } = {};
+    const edit: WorkItemEdit = {};
     if (title.trim() !== initial.title) edit.title = title;
     if (!notesLocked && notes.trim() !== initial.notes.trim()) edit.notes = notes;
     const people = parseAssignees(assignees);
     if (!sameList(people, initial.assignees)) edit.assignees = people;
+    if (due !== initial.due) edit.due_at = due;
     return { edit, status: status !== initial.status ? status : null };
   });
   const dirty = $derived(Object.keys(changes.edit).length > 0 || changes.status !== null);
@@ -116,7 +121,13 @@
         failure = readErrorText(r.error);
         return;
       }
-      initial = { ...initial, title: r.value.title, notes: r.value.notes ?? '', assignees: r.value.assignees ?? [] };
+      initial = {
+        ...initial,
+        title: r.value.title,
+        notes: r.value.notes ?? '',
+        assignees: r.value.assignees ?? [],
+        due: r.value.due_at ?? '',
+      };
     }
     if (nextStatus !== null) {
       const r = await setWorkStatus(itemId, nextStatus);
@@ -188,6 +199,10 @@
             autocomplete="off"
             data-testid="edit-task-assignees"
           />
+        </label>
+        <label class="field">
+          <span>Due</span>
+          <input type="date" bind:value={due} data-testid="edit-task-due" />
         </label>
       </div>
       {#if blocked}<p class="err" data-testid="edit-task-blocked">{blocked}</p>{/if}

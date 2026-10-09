@@ -1141,6 +1141,8 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                         parent: Some("item:5".into()),
                         project_id: Some(3),
                         notes: Some("v1".into()),
+                        assignees: None,
+                        due_at: None,
                     },
                     s,
                 ))
@@ -1172,7 +1174,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             "work_link",
             json!({ "session_id": null, "action": "edit", "key": null, "item_id": 9,
                     "link_id": null, "source": null, "title": "Fix login",
-                    "notes": "", "assignees": ["Ana"] }),
+                    "notes": "", "assignees": ["Ana"], "due_at": "2026-10-16" }),
             NATIVE_ITEM_PAYLOAD,
             Box::new(|b, s, _| {
                 block_on(commands::work::routed::edit_work_item(
@@ -1182,6 +1184,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                         title: Some("Fix login".into()),
                         notes: Some(String::new()),
                         assignees: Some(vec!["Ana".into()]),
+                        due_at: Some("2026-10-16".into()),
                     },
                     s,
                 ))

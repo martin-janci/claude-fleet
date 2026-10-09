@@ -116,6 +116,16 @@ pub(crate) fn fix_versions(v: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The `duedate` field → the due date, `YYYY-MM-DD`. Cloud and Data Center
+/// both send a bare date string (or null); anything not a calendar date is
+/// dropped rather than stored as third-party text.
+pub(crate) fn due_date(v: &Value) -> Option<String> {
+    v.as_str()
+        .map(str::trim)
+        .filter(|d| crate::store::parse_due_date(d).is_some())
+        .map(str::to_string)
+}
+
 /// The sprint field's value → (the current sprint's name, it is active). An
 /// active sprint wins; else the newest future one; closed ones are history.
 pub(crate) fn current_sprint(v: &Value) -> (Option<String>, bool) {

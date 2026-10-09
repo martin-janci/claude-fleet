@@ -8,7 +8,7 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import EditTaskDialog from './EditTaskDialog.svelte';
-import { parseAssignees } from './work';
+import { dueLabel, ownerDueChip, parseAssignees } from './work';
 import type { TaskDetail, WorkTask } from './work_view';
 
 const task = (over: Partial<WorkTask> = {}): WorkTask => ({
@@ -54,6 +54,34 @@ describe('parseAssignees', () => {
   });
 });
 
+describe('dueLabel / ownerDueChip', () => {
+  // Thursday 2026-10-15, mid-afternoon local time.
+  const now = new Date(2026, 9, 15, 15, 30);
+  it('says today, tomorrow, a weekday this week, else the date; a past date is overdue', () => {
+    expect(dueLabel('2026-10-15', now)).toEqual({ text: 'Today', overdue: false });
+    expect(dueLabel('2026-10-16', now)).toEqual({ text: 'Tomorrow', overdue: false });
+    expect(dueLabel('2026-10-20', now)).toEqual({ text: 'Tue', overdue: false });
+    expect(dueLabel('2026-10-22', now)).toEqual({ text: 'Oct 22', overdue: false });
+    expect(dueLabel('2026-10-02', now)).toEqual({ text: 'Oct 2', overdue: true });
+    expect(dueLabel(null, now)).toBeNull();
+    expect(dueLabel('2026-02-30', now)).toBeNull();
+    expect(dueLabel('soon', now)).toBeNull();
+  });
+  it('names the owner ("You" for my ticket) and the due date', () => {
+    expect(ownerDueChip({ assignees: ['Dana Dev'], mine: true, due_at: '2026-10-17' }, now)).toEqual({
+      text: 'You · Sat',
+      overdue: false,
+    });
+    expect(ownerDueChip({ assignees: ['Ana', 'Bo'], due_at: '2026-10-01' }, now)).toEqual({
+      text: 'Ana +1 · Oct 1',
+      overdue: true,
+    });
+    expect(ownerDueChip({ assignees: ['Ana'] }, now)).toEqual({ text: 'Ana', overdue: false });
+    expect(ownerDueChip({ due_at: '2026-10-16' }, now)).toEqual({ text: 'Tomorrow', overdue: false });
+    expect(ownerDueChip({ assignees: [] }, now)).toBeNull();
+  });
+});
+
 describe('EditTaskDialog', () => {
   it('prefills the task and writes only the fields that changed', async () => {
     answer({ task: task(), notes: 'old' });
@@ -79,6 +107,30 @@ describe('EditTaskDialog', () => {
       ['edit_work_item', { args: { item_id: 9, notes: 'new notes', assignees: ['Ana', 'Bo'] } }],
     ]);
     expect(calls('set_work_status')).toEqual([['set_work_status', { args: { item_id: 9, status: 'in_progress' } }]]);
+  });
+
+  it('sets, then clears, a due date', async () => {
+    answer({ task: task({ due_at: '2026-10-16' }), notes: null });
+    const onclose = vi.fn();
+    render(EditTaskDialog, { props: { taskId: 'item:9', onclose } });
+    await waitFor(() => expect(screen.getByTestId('edit-task-due')).toBeTruthy());
+    const due = screen.getByTestId('edit-task-due') as HTMLInputElement;
+    expect(due.value).toBe('2026-10-16');
+    await type('edit-task-due', '2026-10-23');
+    await fireEvent.click(screen.getByTestId('edit-task-submit'));
+    await waitFor(() => expect(onclose).toHaveBeenCalled());
+    expect(calls('edit_work_item')).toEqual([['edit_work_item', { args: { item_id: 9, due_at: '2026-10-23' } }]]);
+  });
+
+  it('clears a due date with an empty value', async () => {
+    answer({ task: task({ due_at: '2026-10-16' }), notes: null });
+    const onclose = vi.fn();
+    render(EditTaskDialog, { props: { taskId: 'item:9', onclose } });
+    await waitFor(() => expect(screen.getByTestId('edit-task-due')).toBeTruthy());
+    await type('edit-task-due', '');
+    await fireEvent.click(screen.getByTestId('edit-task-submit'));
+    await waitFor(() => expect(onclose).toHaveBeenCalled());
+    expect(calls('edit_work_item')).toEqual([['edit_work_item', { args: { item_id: 9, due_at: '' } }]]);
   });
 
   it('sends a status change alone, and refuses an empty title', async () => {

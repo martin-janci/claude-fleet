@@ -108,6 +108,27 @@ describe('WorkBoard', () => {
     );
   });
 
+  it('says who has each card and when it is due ("You · Fri"); an overdue date is marked', async () => {
+    const ymd = (d: Date) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const day = (offset: number) => {
+      const d = new Date();
+      d.setDate(d.getDate() + offset);
+      return d;
+    };
+    const p = page();
+    p.tasks[0] = { ...p.tasks[0], assignees: ['Ana'], mine: false, due_at: ymd(day(1)) };
+    p.tasks[1] = { ...p.tasks[1], assignees: ['Dana Dev'], mine: true, due_at: ymd(day(-3)) };
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => (cmd === 'work_tree' ? p : null));
+    render(WorkBoard);
+    await flush();
+    const owner = (title: string) => card(title).querySelector('[data-testid="work-board-owner"]') as HTMLElement;
+    expect(owner('Write notes').textContent).toBe('Ana · Tomorrow');
+    expect(owner('Write notes').classList.contains('overdue')).toBe(false);
+    expect(owner('Login fails').textContent).toMatch(/^You · [A-Z][a-z]{2} \d{1,2}$/);
+    expect(owner('Login fails').classList.contains('overdue')).toBe(true);
+  });
+
   it('dragging a native card to Doing sets its status and moves it at once', async () => {
     const elementFromPoint = vi.fn();
     Object.defineProperty(document, 'elementFromPoint', { value: elementFromPoint, configurable: true });

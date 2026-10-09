@@ -221,9 +221,12 @@ pub struct WorkLinkArgs {
     /// create/propose/edit: notes (edit: "" clears).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
-    /// edit: display names ([] clears).
+    /// Display names ([] clears).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignees: Option<Vec<String>>,
+    /// Due date, YYYY-MM-DD ("" clears).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
     /// propose: the reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,

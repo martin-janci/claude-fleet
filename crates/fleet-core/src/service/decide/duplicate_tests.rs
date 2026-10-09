@@ -184,6 +184,7 @@ fn row(id: i64, title: &str) -> WorkItemRow {
         proposal_why: None,
         held_at: None,
         done_when: vec![],
+        due_at: None,
     }
 }
 

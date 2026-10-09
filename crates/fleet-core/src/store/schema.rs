@@ -704,6 +704,16 @@ fn hosts_has_last_reachable_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// already_applied guard of migration 154.
+fn work_items_has_due_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'due_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// already_applied guard of migration 148.
 fn downloads_has_owner(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1721,6 +1731,12 @@ const MIGRATIONS: &[Migration] = &[
         152,
         include_str!("../../migrations/152_update_org_policy.sql"),
     ),
+    // Orbit Fleet M15 (G1.7): a task's due date. 153 is another branch's.
+    Migration {
+        version: 154,
+        sql: include_str!("../../migrations/154_work_item_due.sql"),
+        already_applied: Some(work_items_has_due_at),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

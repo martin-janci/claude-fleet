@@ -252,6 +252,7 @@ fn a_person_edits_a_local_items_title_notes_and_assignees() {
                 title: Some(" Fix the login "),
                 notes: Some(" new notes "),
                 assignees: Some(&people),
+                due_at: None,
             },
         )
         .unwrap()
@@ -351,4 +352,77 @@ fn an_edit_leaves_a_trackers_ticket_alone() {
         s.edit_local_item(999_999, &ItemEdit::default()).unwrap(),
         None
     );
+}
+
+#[test]
+fn a_person_sets_changes_and_clears_a_due_date() {
+    let s = Store::open_in_memory().unwrap();
+    let t = s
+        .create_native_item(&native("Rotate NAS password"))
+        .unwrap();
+    assert_eq!(t.due_at, None);
+    fn due(d: &str) -> ItemEdit<'_> {
+        ItemEdit {
+            due_at: Some(d),
+            ..ItemEdit::default()
+        }
+    }
+    let e = s
+        .edit_local_item(t.id, &due(" 2026-10-16 "))
+        .unwrap()
+        .unwrap();
+    assert_eq!(e.due_at.as_deref(), Some("2026-10-16"));
+    assert!(e.updated_at >= t.updated_at);
+    // Read back through every column reader, not only the edit's answer.
+    assert_eq!(
+        s.get_work_item(t.id).unwrap().unwrap().due_at.as_deref(),
+        Some("2026-10-16")
+    );
+    // Leaving it out keeps it; editing the title alone does not clear it.
+    let e = s
+        .edit_local_item(
+            t.id,
+            &ItemEdit {
+                title: Some("Rotate the NAS password"),
+                ..ItemEdit::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(e.due_at.as_deref(), Some("2026-10-16"));
+    let e = s.edit_local_item(t.id, &due("")).unwrap().unwrap();
+    assert_eq!(e.due_at, None);
+}
+
+#[test]
+fn a_due_date_that_is_not_a_calendar_day_is_refused_and_writes_nothing() {
+    let s = Store::open_in_memory().unwrap();
+    let t = s.create_native_item(&native("Ship it")).unwrap();
+    for bad in [
+        "tomorrow",
+        "2026-02-29",
+        "2026-04-31",
+        "2026-13-01",
+        "2026-10-16T09:00",
+        "26-10-16",
+        "2026-1-16",
+        "+026-10-16",
+    ] {
+        let e = s
+            .edit_local_item(
+                t.id,
+                &ItemEdit {
+                    title: Some("Renamed"),
+                    due_at: Some(bad),
+                    ..ItemEdit::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{bad}");
+        assert!(e.message.contains("YYYY-MM-DD"), "{}", e.message);
+    }
+    let row = s.get_work_item(t.id).unwrap().unwrap();
+    assert_eq!((row.title.as_str(), row.due_at), ("Ship it", None));
+    assert_eq!(parse_due_date("2028-02-29"), Some((2028, 2, 29)));
+    assert_eq!(parse_due_date("2100-02-29"), None);
 }

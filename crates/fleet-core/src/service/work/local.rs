@@ -322,7 +322,7 @@ pub fn rename_local_item(
         .ok_or_else(|| orgs::not_found("work item", id))
 }
 
-/// `work_link { action: edit, item_id, title?, notes?, assignees? }`: a
+/// `work_link { action: edit, item_id, title?, notes?, assignees?, due_at? }`: a
 /// person edits a local item (task editing). The same fences as
 /// [`rename_local_item`]: a tracker's ticket is `E_INVALID` (its tracker
 /// owns its text), and an item outside the scope answers as an unknown id.
@@ -334,10 +334,14 @@ pub fn edit_local_item(
     let id = args
         .item_id
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "edit needs item_id"))?;
-    if args.title.is_none() && args.notes.is_none() && args.assignees.is_none() {
+    if args.title.is_none()
+        && args.notes.is_none()
+        && args.assignees.is_none()
+        && args.due_at.is_none()
+    {
         return Err(IpcError::new(
             codes::E_INVALID,
-            "edit needs title, notes or assignees",
+            "edit needs title, notes, assignees or due_at",
         ));
     }
     let s = lock(store)?;
@@ -365,6 +369,7 @@ pub fn edit_local_item(
             title: args.title.as_deref(),
             notes: args.notes.as_deref(),
             assignees: args.assignees.as_deref(),
+            due_at: args.due_at.as_deref(),
         },
     )?
     .ok_or_else(|| orgs::not_found("work item", id))
@@ -400,8 +405,9 @@ fn visible_parent(s: &Store, scope: &OrgScope, id: i64) -> Result<(), IpcError> 
     }
 }
 
-/// `work_link { action: create, title, parent?, project_id?, notes? }`
-/// (shared work context, design 2026-09-29). A standalone task needs an
+/// `work_link { action: create, title, parent?, project_id?, notes?,
+/// assignees?, due_at? }` (shared work context, design 2026-09-29; the owner
+/// and due date, Orbit Fleet M15). A standalone task needs an
 /// unscoped caller (a new item has no links, and a scoped caller sees a
 /// local item only through its links); a subtask needs a parent the caller
 /// sees.
@@ -415,6 +421,14 @@ pub fn create_task(
         .as_deref()
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "create needs title"))?;
     let parent = parent_id(args)?;
+    // Checked before anything is written: a bad date or name refuses the
+    // whole create rather than leave a task without them.
+    if let Some(a) = args.assignees.as_deref() {
+        crate::store::validate_assignees(a)?;
+    }
+    if let Some(d) = args.due_at.as_deref() {
+        crate::store::validate_due_date(d)?;
+    }
     let s = lock(store)?;
     match parent {
         // This is the org boundary, not a privacy fence: a standalone task has
@@ -433,12 +447,24 @@ pub fn create_task(
         Some(p) if !scope.is_all() => visible_parent(&s, scope, p)?,
         _ => {}
     }
-    s.create_native_item(&crate::store::NativeItem {
+    let item = s.create_native_item(&crate::store::NativeItem {
         title,
         parent_id: parent,
         project_id: args.project_id,
         notes: args.notes.as_deref(),
-    })
+    })?;
+    if args.assignees.is_none() && args.due_at.is_none() {
+        return Ok(item);
+    }
+    s.edit_local_item(
+        item.id,
+        &crate::store::ItemEdit {
+            assignees: args.assignees.as_deref(),
+            due_at: args.due_at.as_deref(),
+            ..Default::default()
+        },
+    )?
+    .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work item vanished after create"))
 }
 
 /// `work_link { action: propose, parent, title, notes?, why? }`: a subtask
@@ -599,3 +625,114 @@ fn required_title(args: &WorkLinkArgs) -> Result<String, IpcError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod due_tests {
+    use super::*;
+
+    fn args(action: &str) -> WorkLinkArgs {
+        WorkLinkArgs {
+            action: action.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_task_is_created_with_its_owner_and_due_date_and_edited_to_another() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let t = create_task(
+            &WorkLinkArgs {
+                title: Some("Rotate NAS sudo password".into()),
+                assignees: Some(vec!["Ana".into()]),
+                due_at: Some("2026-10-16".into()),
+                ..args("create")
+            },
+            &store,
+            &OrgScope::All,
+        )
+        .unwrap();
+        assert_eq!(
+            (t.assignees.clone(), t.due_at.as_deref()),
+            (vec!["Ana".to_string()], Some("2026-10-16"))
+        );
+        let e = edit_local_item(
+            &WorkLinkArgs {
+                item_id: Some(t.id),
+                due_at: Some("2026-10-23".into()),
+                ..args("edit")
+            },
+            &store,
+            &OrgScope::All,
+        )
+        .unwrap();
+        assert_eq!(
+            (e.assignees, e.due_at.as_deref()),
+            (vec!["Ana".to_string()], Some("2026-10-23"))
+        );
+    }
+
+    #[test]
+    fn a_bad_due_date_refuses_the_create_and_writes_no_task() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let before = lock(&store).unwrap().local_work_items().unwrap().len();
+        let e = create_task(
+            &WorkLinkArgs {
+                title: Some("Ship".into()),
+                due_at: Some("Friday".into()),
+                ..args("create")
+            },
+            &store,
+            &OrgScope::All,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert_eq!(
+            lock(&store).unwrap().local_work_items().unwrap().len(),
+            before
+        );
+    }
+
+    #[test]
+    fn a_trackers_ticket_keeps_its_trackers_due_date() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let id = {
+            let s = lock(&store).unwrap();
+            let t = s
+                .add_tracker("jira", "Acme", "https://acme.atlassian.net")
+                .unwrap();
+            s.upsert_tracker_item(
+                t.id,
+                &crate::store::TrackerItemWrite {
+                    external_id: "1".into(),
+                    key: Some("ABC-1".into()),
+                    title: "Ticket".into(),
+                    status_name: "To Do".into(),
+                    status_category: "todo".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+        };
+        let e = edit_local_item(
+            &WorkLinkArgs {
+                item_id: Some(id),
+                due_at: Some("2026-10-16".into()),
+                ..args("edit")
+            },
+            &store,
+            &OrgScope::All,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert_eq!(
+            lock(&store)
+                .unwrap()
+                .get_work_item(id)
+                .unwrap()
+                .unwrap()
+                .due_at,
+            None
+        );
+    }
+}

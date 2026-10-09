@@ -218,6 +218,12 @@ pub struct CreateWorkTaskArgs {
     pub project_id: Option<i64>,
     #[serde(default)]
     pub notes: Option<String>,
+    /// Display names.
+    #[serde(default)]
+    pub assignees: Option<Vec<String>>,
+    /// `YYYY-MM-DD`.
+    #[serde(default)]
+    pub due_at: Option<String>,
 }
 
 /// A person's decision on an agent's proposal.
@@ -254,6 +260,9 @@ pub struct EditWorkItemArgs {
     /// `[]` clears.
     #[serde(default)]
     pub assignees: Option<Vec<String>>,
+    /// `YYYY-MM-DD`; `""` clears.
+    #[serde(default)]
+    pub due_at: Option<String>,
 }
 
 #[tauri::command]
@@ -653,6 +662,8 @@ pub(crate) mod routed {
             parent: args.parent,
             project_id: args.project_id,
             notes: args.notes,
+            assignees: args.assignees,
+            due_at: args.due_at,
             ..Default::default()
         };
         match backend.hub() {
@@ -700,6 +711,7 @@ pub(crate) mod routed {
             title: args.title,
             notes: args.notes,
             assignees: args.assignees,
+            due_at: args.due_at,
             ..Default::default()
         };
         match backend.hub() {
