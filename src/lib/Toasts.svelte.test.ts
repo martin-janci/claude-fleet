@@ -195,3 +195,34 @@ describe('long-job toast', () => {
     expect(screen.queryByRole('progressbar')).toBeNull();
   });
 });
+
+// Toasts board: a second, quieter line under the fact, and a quiet second
+// button after the verb ("Add rule" · "Not now").
+describe('toast second line and second button', () => {
+  it('draws the sub line under the message', async () => {
+    render(Toasts);
+    push({ kind: 'success', message: 'Archived 4 sessions', sub: 'freed 2.1 GB' });
+    await tick();
+    expect(screen.getByTestId('toast-sub').textContent).toBe('freed 2.1 GB');
+    expect(screen.getByTestId('toast').textContent).toContain('Archived 4 sessions');
+  });
+
+  it('runs the secondary action, not the primary, and dismisses once', async () => {
+    render(Toasts);
+    const primary = vi.fn();
+    const secondary = vi.fn();
+    push({ message: 'Add a rule?', action: { label: 'Add rule', run: primary }, secondary: { label: 'Not now', run: secondary } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('toast-secondary'));
+    expect(secondary).toHaveBeenCalledOnce();
+    expect(primary).not.toHaveBeenCalled();
+    expect(get(toasts)).toHaveLength(0);
+  });
+
+  it('never shows a secondary button without a primary one', async () => {
+    render(Toasts);
+    push({ message: 'lonely', secondary: { label: 'Not now', run: vi.fn() } });
+    await tick();
+    expect(screen.queryByTestId('toast-secondary')).toBeNull();
+  });
+});
