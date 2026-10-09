@@ -49,6 +49,7 @@ mod messaging;
 mod orchestration;
 mod params;
 mod peer;
+mod pr_shepherd;
 mod presence;
 mod present;
 mod prs;
@@ -377,6 +378,7 @@ impl FleetTools {
             + Self::forms_router()
             + Self::devices_router()
             + Self::prs_router()
+            + Self::pr_shepherd_router()
             + Self::routines_router()
             + Self::start_rules_router()
             + Self::presence_router()

@@ -18,8 +18,8 @@ import { destination } from './destination';
 import { hostsViewRequest, settingsOpen, settingsSection } from './app_views';
 import { switcherRequest } from './switcher_request';
 import { onboardingDismissed } from './onboarding';
-import { routinesDialogOpen, routinesRequest } from './routines';
-import { sidebarView } from './work_view';
+import { routinesRequest } from './routines';
+import { automationTab } from './automation';
 
 // Redesign step 10.5: Get started's six rows, what ticks them and where
 // each one goes.
@@ -115,9 +115,8 @@ describe('GetStarted', () => {
     expect(get(settingsSection)).toBe('devices');
     expect(get(settingsOpen)).toBe(true);
     await fireEvent.click(screen.getByTestId('get-started-routine'));
-    expect(get(sidebarView)).toBe('inbox');
-    expect(get(destination)).toBe('session');
-    expect(get(routinesDialogOpen)).toBe(true);
+    expect(get(destination)).toBe('automation');
+    expect(get(automationTab)).toBe('routines');
     expect(get(routinesRequest)?.template).toBe('morning-pr-sweep');
   });
 

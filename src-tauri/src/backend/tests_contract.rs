@@ -949,6 +949,48 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             preview: Some("p".into()),
         }),
     );
+    // Revision 13.
+    put(
+        "ControlRoute",
+        wire_keys(&fleet_core::service::decide::control_route::ControlRoute {
+            outcome: "proposed".into(),
+            target: Some("m1".into()),
+            proposal: None,
+            targets: vec![],
+            run_id: Some(1),
+        }),
+    );
+    put(
+        "LostTarget",
+        wire_keys(&fleet_core::service::decide::lost_target::LostTarget {
+            project_id: Some(1),
+            source: Some("rule".into()),
+            reason: Some("r".into()),
+            confidence_pct: Some(90),
+            run_id: Some(1),
+            unsure: false,
+        }),
+    );
+    put(
+        "PlacedTranscript",
+        wire_keys(&fleet_core::service::sessions::PlacedTranscript {
+            project_id: 1,
+            tmux_name: "fleet-dev".into(),
+            copied: true,
+        }),
+    );
+    put(
+        "WatchSummary",
+        wire_keys(&fleet_core::service::watch_summary::WatchSummary {
+            text: Some("Fixed the flake.".into()),
+            check: fleet_core::service::decide::summary_check::Check::Passed,
+            since: 1,
+            turns: 2,
+            model: "haiku".into(),
+            host_alias: "mefistos".into(),
+            at: 3,
+        }),
+    );
     let mut usage = fleet_core::service::account_usage::AccountUsageSnapshot::never_fetched("a");
     usage.usage = Some(Default::default());
     usage.subscription = Some("max".into());

@@ -40,6 +40,9 @@
   import PrResult from './PrResult.svelte';
   import { assessRow, hasReading } from './evidence';
   import SessionTasks from './SessionTasks.svelte';
+  import ProposedBy from './ProposedBy.svelte';
+  import { proposalFor } from './proposals';
+  import { uiLayout } from './prefs';
   import Timeline from './Timeline.svelte';
   import { push, pushError } from './toasts';
   import { copyText } from './clipboard';
@@ -202,6 +205,18 @@
             s.worktree_key === session.worktree_key,
         ),
   );
+
+  // N1 (redesign 6.9): another of this person's sessions Jev says works on
+  // the same thing, when it is not listed above already. New layout only;
+  // nothing is stopped or merged.
+  const relatedProposal = $derived($uiLayout === 'new' ? proposalFor(session, 'related_session') : null);
+  const proposedRelated = $derived.by(() => {
+    const m = /^s(\d+)$/.exec(relatedProposal?.value ?? '');
+    if (!m) return null;
+    const id = Number(m[1]);
+    if (related.some((r) => r.id === id)) return null;
+    return $sessions.find((s) => s.id === id && s.id !== session.id) ?? null;
+  });
 
   // Local-only for v0.2 (Phase 4 will branch on host_alias for remote attach).
   const attachCommand = $derived(`tmux attach -t ${session.tmux_name}`);
@@ -764,10 +779,23 @@
   <SessionTasks {session} />
   <LocalWorkspaceCard {session} />
 
-  {#if related.length > 0}
+  {#if related.length > 0 || proposedRelated}
     <section class="related" data-testid="related-sessions">
-      <h3>Related sessions ({related.length})</h3>
+      <h3>Related sessions ({related.length + (proposedRelated ? 1 : 0)})</h3>
       <ul class="related-list">
+        {#if proposedRelated}
+          {@const r = proposedRelated}
+          <li class="proposed" data-testid="related-proposed">
+            <button class="related-row" data-testid="related-proposed-row" onclick={() => selectSessionExplicitly(r)}>
+              <span class="host-badge">[{r.host_alias}]</span>
+              <span class="account">Same work?</span>
+              <span class="status-word" data-status={r.status}>{sessionStatusWord(r)}</span>
+              <span class="sess-name">{r.tmux_name}</span>
+              <span class="age">{formatRelative(r.last_activity_at)}</span>
+            </button>
+            <ProposedBy proposal={relatedProposal} field="related_session" testid="related-proposed-by" />
+          </li>
+        {/if}
         {#each related as r (r.id)}
           <li>
             <button

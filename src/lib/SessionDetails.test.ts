@@ -33,6 +33,7 @@ import { hubConnection } from './hub_connection';
 import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
 import { shareSheetFor } from './share';
 import { expectAccessible } from './a11y_check';
+import { uiLayout } from './prefs';
 
 const sampleSession = {
   id: 1,
@@ -169,6 +170,38 @@ describe('SessionDetails', () => {
     const rows = await screen.findAllByTestId('related-row');
     expect(rows).toHaveLength(1);
     expect(rows[0].textContent).toContain('dev-sib');
+  });
+
+  describe('N1: Jev proposes a session on the same work (redesign 6.9)', () => {
+    const me = { ...sampleSession, id: 1, project_id: 1, worktree_id: 10, worktree_key: 'main', proposals: [{ feature: 'related_session', value: 's3', source: 'jev' as const, confidence_pct: 81 }] };
+    const twin = { ...sampleSession, id: 3, tmux_name: 'dev-twin', host_alias: 'mefistos', project_id: 2, worktree_id: 20, worktree_key: 'fix' };
+
+    it('lists it under Related sessions in the New layout', async () => {
+      uiLayout.set('new');
+      sessions.set([me, twin]);
+      render(SessionDetails, { props: { session: me } });
+      await tick();
+      expect(screen.getByTestId('related-sessions').textContent).toContain('Related sessions (1)');
+      expect(screen.getByTestId('related-proposed-row').textContent).toContain('dev-twin');
+      expect(screen.getByTestId('related-proposed-row').textContent).toContain('Same work?');
+      expect(screen.getByTestId('related-proposed-by').textContent).toContain('81%');
+      uiLayout.set('classic');
+    });
+
+    it('shows nothing in the classic layout, or when the session is not in the list', async () => {
+      uiLayout.set('classic');
+      sessions.set([me, twin]);
+      const { unmount } = render(SessionDetails, { props: { session: me } });
+      await tick();
+      expect(screen.queryByTestId('related-sessions')).toBeNull();
+      unmount();
+      uiLayout.set('new');
+      sessions.set([me]);
+      render(SessionDetails, { props: { session: me } });
+      await tick();
+      expect(screen.queryByTestId('related-proposed')).toBeNull();
+      uiLayout.set('classic');
+    });
   });
 
   it('hides Related panel when session has no siblings', async () => {

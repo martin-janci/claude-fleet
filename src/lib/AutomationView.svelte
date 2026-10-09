@@ -5,13 +5,16 @@
   last ran and runs next; Runs lists every run (8.3), each linked to its
   session; Agents names the three agents fleet runs itself. The head says
   today's spend and holds Pause all (`automation.paused`). Routines a person
-  writes (8.6) join the Routines tab above the built-in ones.
+  writes (8.6, RoutinesPanel) come first in the Routines tab, above the
+  built-in ones; Rules holds the start rules (8.11, StartRules).
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import Tabs from './kit/Tabs.svelte';
   import Button from './kit/Button.svelte';
   import Loader from './Loader.svelte';
+  import RoutinesPanel from './automation/RoutinesPanel.svelte';
+  import StartRules from './StartRules.svelte';
   import { fleetSettings, loadFleetSettings } from './fleet_settings';
   import { listRuns, outcomeLabel, type RunRow } from './runs';
   import { goTo } from './destination';
@@ -107,6 +110,7 @@
       onselect={(id) => automationTab.set(id as AutomationTab)}
       tabs={[
         { id: 'routines', label: 'Routines', count: auto?.loops.length },
+        { id: 'rules', label: 'Rules' },
         { id: 'runs', label: 'Runs', count: runs ? runsTotal : undefined },
         { id: 'agents', label: 'Agents', count: 3 },
       ]}
@@ -130,6 +134,10 @@
 
   {#if !auto && !error}
     <div class="loading"><Loader name="orbit" size={32} label="Loading automation" /></div>
+  {:else if $automationTab === 'rules'}
+    <div class="body" role="tabpanel" aria-label="Rules" data-testid="automation-rules">
+      <StartRules />
+    </div>
   {:else if $automationTab === 'runs'}
     <div class="body" role="tabpanel" aria-label="Runs" data-testid="automation-runs">
       {#if runs && runs.length === 0}
@@ -173,6 +181,8 @@
     </div>
   {:else if auto}
     <div class="body" role="tabpanel" aria-label="Routines" data-testid="automation-routines">
+      <h2>Yours</h2>
+      <div class="yours" data-testid="automation-routines-yours"><RoutinesPanel /></div>
       <h2>Built in <span class="meta">{auto.loops.length}</span></h2>
       <p class="hint">Fleet's own loops. Pause all stops the ones that act on their own; the rest only observe.</p>
       {#if auto.loops.length === 0}
@@ -217,4 +227,5 @@
   .when { width: 5.5em; flex: none; }
   .num { font-variant-numeric: tabular-nums; flex: none; }
   .state { flex: none; }
+  .yours { flex: none; min-height: 320px; display: flex; flex-direction: column; }
 </style>

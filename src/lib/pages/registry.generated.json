@@ -1966,6 +1966,86 @@
         "level": "none"
       },
       "default": "off",
+      "help": "Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests.",
+      "key": "decide.jev.work_placement",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: task group",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Noticing another of your sessions working on the same thing. Shadow only records; assist suggests.",
+      "key": "decide.jev.related_session",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: related session",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
       "help": "Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests.",
       "key": "decide.jev.control_route",
       "kind": {
@@ -2041,6 +2121,86 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it.",
+      "key": "decide.jev.turn_outcome",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: turn outcome",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: set the state"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Proposing a stuck mission's outcome and next step. Never completes a mission or sets Verified. Shadow only records; assist suggests.",
+      "key": "decide.jev.mission_triage",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: mission triage",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -2053,6 +2213,28 @@
         "type": "bool"
       },
       "label": "Jev: send unassigned",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "network"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "confirm",
+        "message": "Claude's reply text from sessions outside every organisation will be sent to TypeSafe too."
+      },
+      "default": "false",
+      "help": "Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all.",
+      "key": "decide.jev.unassigned_reply",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Jev: send unassigned replies",
       "modified": false,
       "restart": "none",
       "tags": [
@@ -3404,6 +3586,16 @@
               "type": "field"
             },
             {
+              "hint": "Proposes a group for a new task nothing placed; you still place it.",
+              "key": "decide.jev.work_placement",
+              "type": "field"
+            },
+            {
+              "hint": "Marks another of your sessions that works on the same thing; nothing is stopped or merged.",
+              "key": "decide.jev.related_session",
+              "type": "field"
+            },
+            {
               "hint": "Says which mission or session a message in Control is about; you can change it. A short message gets a question instead.",
               "key": "decide.jev.control_route",
               "type": "field"
@@ -3414,7 +3606,21 @@
               "type": "field"
             },
             {
+              "hint": "Sends Claude's last reply, redacted, only for organisations that allow reply text. Hooks always win.",
+              "key": "decide.jev.turn_outcome",
+              "type": "field"
+            },
+            {
+              "hint": "Proposes a stuck mission's outcome and next step; you still choose. It never completes a mission or sets Verified.",
+              "key": "decide.jev.mission_triage",
+              "type": "field"
+            },
+            {
               "key": "decide.jev.unassigned",
+              "type": "field"
+            },
+            {
+              "key": "decide.jev.unassigned_reply",
               "type": "field"
             }
           ],
@@ -3866,6 +4072,10 @@
             },
             {
               "key": "jev_allowed",
+              "type": "field"
+            },
+            {
+              "key": "jev_reply_allowed",
               "type": "field"
             }
           ],
@@ -5202,6 +5412,20 @@
           "help": "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
           "id": "jev_allowed",
           "label": "Allow Jev (decision model) for this organisation's work",
+          "on_off": true,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "sends replies to Jev",
+            "when": "true"
+          },
+          "confirm": "The end of this org's sessions' screens (Claude's reply text, redacted) will be sent to TypeSafe when Decisions (Jev) and its turn outcome use case are on.",
+          "default": false,
+          "edit": "jev_reply",
+          "help": "On top of Jev above: let the end of this org's sessions' screens — Claude's last reply, redacted, code replaced by placeholders, a few lines — go to TypeSafe's decision model, so Jev can tell a finished turn from a question when hooks say nothing. Off by default (D48).",
+          "id": "jev_reply_allowed",
+          "label": "Also allow Claude's reply text (turn outcome)",
           "on_off": true,
           "type": "bool"
         },

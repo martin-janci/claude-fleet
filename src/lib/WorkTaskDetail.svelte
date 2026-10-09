@@ -40,6 +40,8 @@
   import WorkOrgDialog from './WorkOrgDialog.svelte';
   import WorkRuleEditor from './WorkRuleEditor.svelte';
   import TaskWorkSections from './TaskWorkSections.svelte';
+  import ProposedBy from './ProposedBy.svelte';
+  import { proposalFor } from './proposals';
   import WorkButton from './WorkButton.svelte';
   import { uiLayout } from './prefs';
   import {
@@ -47,6 +49,7 @@
     groupSourceText,
     occurrenceKind,
     orgSourceText,
+    placeWork,
     placementNote,
     readErrorText,
     ruleDraftFor,
@@ -124,6 +127,25 @@
     if (now && now !== id && (detail?.aliases ?? []).includes(id)) selectedTaskId.set(now);
     // Picked without its links (a subtask, a review row): its live session opens now.
     if (now) taskLinksLoaded(now, detail?.task.sessions ?? []);
+  }
+
+  // K5 (redesign 6.9): the group Jev proposes for a task no person and no
+  // rule placed. A proposal only; a person's click places it.
+  const groupProposal = $derived.by(() => {
+    const t = detail?.task;
+    if (!t || $uiLayout !== 'new') return null;
+    if (t.group?.source === 'manual' || t.group?.source === 'rule') return null;
+    return proposalFor(t, 'work_placement');
+  });
+  let placingProposed = $state(false);
+  async function placeProposed(label: string) {
+    const t = detail?.task;
+    if (!t || placingProposed) return;
+    placingProposed = true;
+    const r = await placeWork(t.task_id, label, t.placement_version ?? 0);
+    placingProposed = false;
+    if (r.ok) placed(r.value, null);
+    else actionError = readErrorText(r.error);
   }
 
   // A placement saved: show the task and its placement line as the hub
@@ -397,6 +419,20 @@
         <dd data-testid="work-task-group">
           <strong>{task.group?.source === 'none' ? 'No group' : task.group?.label}</strong> — {groupSourceText(task.group, task, ruleName)}
           <div class="muted small" data-testid="work-task-group-note">{placementNote(task.group, task)}</div>
+          {#if groupProposal}
+            <div class="group-proposal" data-testid="work-task-group-proposal">
+              <span>Jev proposes “{groupProposal.value}”</span>
+              <ProposedBy proposal={groupProposal} field="work_placement" testid="work-task-group-proposed-by" />
+              <button
+                class="btn btn--quiet"
+                type="button"
+                data-testid="work-task-group-proposal-place"
+                disabled={placeBlocked !== null || placingProposed}
+                title={placeBlocked ?? `Put this task in “${groupProposal.value}”`}
+                onclick={() => groupProposal && void placeProposed(groupProposal.value)}>Place in {groupProposal.value}</button
+              >
+            </div>
+          {/if}
           {#if detail?.placement}
             <div class="muted small" data-testid="work-task-placement">
               Placed{#if detail.placement.updated_by}&nbsp;by {detail.placement.updated_by}{/if}{#if detail.placement.updated_at}&nbsp;{timeAgo(detail.placement.updated_at)}{/if}{#if detail.placement.note}: “{detail.placement.note}”{/if}
@@ -668,6 +704,14 @@
     border-left: 2px solid var(--border);
     padding-left: 0.5rem;
     color: var(--fg-muted);
+  }
+  .group-proposal {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    font-size: 12px;
   }
   .prov {
     margin: 0.2rem 0;
