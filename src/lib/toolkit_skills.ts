@@ -1,16 +1,24 @@
 // Toolkit (Orbit Fleet redesign step 3.16, board Toolkit): the home for
-// today's Assets workspace. Two tabs: Skills, the catalog's skills as a host
-// matrix with drift per host, and Assets, the full workspace (layers and
-// changesets) unchanged.
+// today's Assets workspace. Its own nav column (UX audit 2026-10-09, A2):
+// Skills, MCP servers and Hooks, each the catalog's assets of that kind as a
+// host matrix with drift per host, and the Assets catalog, the full
+// workspace (layers and changesets) unchanged.
 import { writable } from 'svelte/store';
-import { hostOrderOf, catalogOf, type AssetListing, type AssetSummary, type HostState } from './assets';
+import { hostOrderOf, catalogOf, type AssetKind, type AssetListing, type AssetSummary, type HostState } from './assets';
 import { AGENT_LABELS } from './row_groups';
 import { keyOf } from './assets_workspace';
 import { readPref, writePref } from './prefs';
 
-export type ToolkitTab = 'skills' | 'assets';
+export type ToolkitTab = 'skills' | 'mcp' | 'hooks' | 'assets';
 
-const isToolkitTab = (v: unknown): v is ToolkitTab => v === 'skills' || v === 'assets';
+const isToolkitTab = (v: unknown): v is ToolkitTab => v === 'skills' || v === 'mcp' || v === 'hooks' || v === 'assets';
+
+/** The asset kind each matrix page lists. */
+export const TOOLKIT_KIND: Record<Exclude<ToolkitTab, 'assets'>, AssetKind> = {
+  skills: 'skill',
+  mcp: 'mcp_server',
+  hooks: 'hook',
+};
 
 /** The tab Toolkit shows; the rail reopens the last one, the old Assets
  *  entry points (tab, sidebar, quick switcher) ask for `assets`. */
@@ -94,10 +102,10 @@ function cellOf(host: string, version: string, states: HostState[]): SkillCell {
 
 const OUT_OF_SYNC: ReadonlySet<SkillCellState> = new Set(['behind', 'edited', 'drifted', 'missing']);
 
-/** The catalog's skills as rows of a host matrix. */
-export function skillMatrix(listing: AssetListing | null): SkillMatrix {
+/** The catalog's skills (or another kind's assets) as rows of a host matrix. */
+export function skillMatrix(listing: AssetListing | null, kind: AssetKind = 'skill'): SkillMatrix {
   const skills = (listing?.assets ?? [])
-    .filter((a) => a.kind === 'skill')
+    .filter((a) => a.kind === kind)
     .sort((a, b) => a.name.localeCompare(b.name) || catalogOf(a).localeCompare(catalogOf(b)));
   const hosts = hostOrderOf(skills.flatMap((a) => a.hosts.map((h) => h.host_alias)));
   const rows = skills.map((a: AssetSummary): SkillRow => {

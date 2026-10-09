@@ -55,7 +55,7 @@ describe('Toolkit (step 3.16)', () => {
     const { getByTestId, findByRole } = render(Toolkit, { visible: true });
     await fireEvent.click(getByTestId('toolkit-sync'));
     expect(get(toolkitTab)).toBe('assets');
-    expect(getByTestId('toolkit').querySelector('[role="tabpanel"][aria-label="Assets"]')).not.toBeNull();
+    expect(getByTestId('toolkit').querySelector('[role="region"][aria-label="Assets catalog"]')).not.toBeNull();
     toolkitTab.set('skills');
     await fireEvent.click(await findByRole('button', { name: 'Edit steward' }));
     expect(get(toolkitTab)).toBe('assets');
@@ -70,8 +70,26 @@ describe('Toolkit (step 3.16)', () => {
     catalog.set(null);
     const { getByTestId, getByRole } = render(Toolkit, { visible: true });
     expect(getByTestId('toolkit-skills-empty')).toBeTruthy();
-    await fireEvent.click(getByRole('button', { name: 'Open Assets' }));
+    await fireEvent.click(getByRole('button', { name: 'Open the Assets catalog' }));
     expect(get(toolkitTab)).toBe('assets');
+  });
+
+  it('has its own nav: MCP servers and Hooks list their kind, and the rest links out (UX audit 2026-10-09, A2)', async () => {
+    const { getByTestId, findByTestId } = render(Toolkit, { visible: true });
+    const nav = getByTestId('toolkit-tabs');
+    expect(Array.from(nav.querySelectorAll('button')).map((b) => b.textContent?.replace(/\d.*$/, '').trim())).toEqual([
+      'Skills',
+      'MCP servers',
+      'Hooks',
+      'Assets catalog',
+      'Prompts & snippets ↗',
+      'Downloads…',
+    ]);
+    await fireEvent.click(nav.querySelector('[data-tab="mcp"]')!);
+    expect(get(toolkitTab)).toBe('mcp');
+    expect((await findByTestId('toolkit-mcp-summary')).textContent).toMatch(/0\s+MCP servers/);
+    expect(nav.querySelector('[data-tab="mcp"]')!.getAttribute('aria-current')).toBe('page');
+    toolkitTab.set('skills');
   });
 
   it('passes the axe and audit checks', async () => {
