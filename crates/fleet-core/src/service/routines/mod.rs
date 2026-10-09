@@ -455,7 +455,20 @@ pub fn save(
             } else {
                 before.event_cursor
             };
-            s.update_routine(id, &f, next_fire(&f, now), cursor)?
+            // The same schedule, still on: a fire already due waits for the
+            // tick instead of being moved past (an edit to the prompt must
+            // not drop it).
+            let same_schedule = before.enabled
+                && f.enabled
+                && before.trigger == f.trigger
+                && before.cron == f.cron
+                && before.utc_offset_min == f.utc_offset_min;
+            let next = if same_schedule && before.next_run_at.is_some() {
+                before.next_run_at
+            } else {
+                next_fire(&f, now)
+            };
+            s.update_routine(id, &f, next, cursor)?
                 .ok_or_else(|| not_found(id))
         }
     }
@@ -483,7 +496,12 @@ pub fn set_enabled(
     if enabled && !r.enabled && r.trigger == "event" {
         s.set_routine_event_cursor(id, s.latest_session_event_id()?)?;
     }
-    let next = if enabled { next_fire_of(&r, now) } else { None };
+    // Already on: keep the schedule as it is, a due fire included.
+    let next = match (enabled, r.enabled) {
+        (false, _) => None,
+        (true, true) if r.next_run_at.is_some() => r.next_run_at,
+        (true, _) => next_fire_of(&r, now),
+    };
     s.set_routine_enabled(id, enabled, None, next)?
         .ok_or_else(|| not_found(id))
 }

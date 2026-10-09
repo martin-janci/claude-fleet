@@ -69,18 +69,22 @@ pub struct AgentInstallsArgs {
     pub alias: Option<String>,
 }
 
-/// The release tarball's target triple for `uname -s`/`uname -m`.
+/// The release tarball's target triple for `uname -s`/`uname -m`: the
+/// first line that reads as one, since `bash -lc` prints whatever a chatty
+/// login profile says around the answer.
 pub fn target_for(uname: &str) -> Option<&'static str> {
-    let mut it = uname.split_whitespace();
-    let (os, arch) = (it.next()?, it.next()?);
-    if os != "Linux" {
-        return None;
-    }
-    match arch {
-        "x86_64" | "amd64" => Some("x86_64-unknown-linux-gnu"),
-        "aarch64" | "arm64" => Some("aarch64-unknown-linux-gnu"),
-        _ => None,
-    }
+    uname.lines().find_map(|line| {
+        let mut it = line.split_whitespace();
+        let (os, arch) = (it.next()?, it.next()?);
+        if os != "Linux" || it.next().is_some() {
+            return None;
+        }
+        match arch {
+            "x86_64" | "amd64" => Some("x86_64-unknown-linux-gnu"),
+            "aarch64" | "arm64" => Some("aarch64-unknown-linux-gnu"),
+            _ => None,
+        }
+    })
 }
 
 /// The release base URL for `version`.
@@ -313,6 +317,16 @@ pub fn start(
     Ok(row)
 }
 
+/// At process start: every job still `running` was run by a process that is
+/// gone (a job lives in the process that started it), so none of them may
+/// hold off a new install for [`STALE_AFTER_SECS`].
+pub fn fail_interrupted(store: &Store) -> Result<usize, IpcError> {
+    Ok(store.fail_stale_agent_installs(
+        crate::store::now_unix() + 1,
+        "interrupted: the hub stopped while it ran; start it again",
+    )?)
+}
+
 /// The jobs, newest first; one left running by a process that is gone is
 /// failed on the way out.
 pub fn list(store: &Mutex<Store>, alias: Option<&str>) -> Result<Vec<AgentInstallRow>, IpcError> {
@@ -483,6 +497,36 @@ mod tests {
         assert_eq!(target_for("Darwin arm64"), None);
         assert_eq!(target_for("Linux riscv64"), None);
         assert_eq!(target_for(""), None);
+        // A login profile that prints before the answer.
+        assert_eq!(
+            target_for("Welcome to mercury\nLast login: today\nLinux x86_64\n"),
+            Some("x86_64-unknown-linux-gnu")
+        );
+    }
+
+    /// A job a previous hub process left `running` no longer blocks a new
+    /// install once the hub starts again (not only after 30 min and a list).
+    #[tokio::test]
+    async fn a_job_left_running_by_a_stopped_hub_does_not_block_a_new_one() {
+        let store = store_with_ssh_host();
+        let old = {
+            let s = store.lock().unwrap();
+            s.set_setting(crate::mcp::SETTING_TOKEN, "tok").unwrap();
+            s.insert_agent_install("mercury", "0.5.4").unwrap().id
+        };
+        let args = InstallAgentArgs {
+            alias: "mercury".into(),
+            hub_url: Some("https://fleet.example.com".into()),
+            version: Some("0.5.4".into()),
+        };
+        assert_eq!(
+            plan(&store, &args).err().map(|e| e.code).as_deref(),
+            Some(codes::E_CONFLICT)
+        );
+        assert_eq!(fail_interrupted(&store.lock().unwrap()).unwrap(), 1);
+        assert!(plan(&store, &args).is_ok());
+        let s = store.lock().unwrap();
+        assert_eq!(s.agent_install(old).unwrap().unwrap().state, "failed");
     }
 
     #[test]

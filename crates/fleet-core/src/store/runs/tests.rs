@@ -730,6 +730,49 @@ fn a_routines_fires_are_runs_linked_to_their_sessions() {
     assert_eq!(list(&fx, scoped(vec![routine])).1, 3);
 }
 
+/// A done fire reads what its outcome pass judged (migration 139): a run
+/// that needs a person is not "ok", and one that found nothing is quiet.
+#[test]
+fn a_done_fire_shows_its_judged_outcome() {
+    let fx = fixture();
+    with_routine(&fx);
+    fx.s.conn
+        .execute(
+            "INSERT INTO routine_runs (routine_id, trigger, state, session_id, started_at, \
+               finished_at, outcome, outcome_source) \
+             SELECT routine_id, 'cron', 'done', session_id, 40, 100, 'needs_person', 'rule' \
+             FROM routine_runs WHERE id = 1",
+            [],
+        )
+        .unwrap();
+    fx.s.conn
+        .execute(
+            "UPDATE routine_runs SET outcome = 'nothing', outcome_source = 'rule' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+    let (rows, _) = list(
+        &fx,
+        RunsFilter {
+            kind: Some("routine".into()),
+            ..Default::default()
+        },
+    );
+    let outcome = |id: &str| rows.iter().find(|r| r.id == id).unwrap().outcome.clone();
+    assert_eq!(outcome("routine:4"), "needs_person");
+    assert_eq!(outcome("routine:1"), "nothing_to_do");
+    let (rows, total) = list(
+        &fx,
+        RunsFilter {
+            kind: Some("routine".into()),
+            outcome: Some("needs_person".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(ids(&rows), ["routine:4"]);
+    assert_eq!(total, 1);
+}
+
 #[test]
 fn every_aux_origin_is_a_kind_a_filter_finds() {
     let fx = fixture();

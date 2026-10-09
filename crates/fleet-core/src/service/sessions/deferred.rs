@@ -116,7 +116,9 @@ where
             format!("session {} has no agent to prompt", row.id),
         ));
     }
-    if matches!(row.status.as_str(), "dead" | "stopped") {
+    // A row is `running` or `ghost` (lost or killed): a prompt queued for a
+    // ghost would wait forever, neither typed nor failed.
+    if row.status != "running" {
         return Err(IpcError::new(
             codes::E_INVALID_STATE,
             format!("session {} is not running", row.id),
@@ -496,6 +498,27 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_prompt_for_a_lost_or_killed_session_is_refused_not_queued() {
+        let (store, id) = store_with("working");
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute("UPDATE sessions SET status = 'ghost' WHERE id = ?1", [id])
+            .unwrap();
+        let e = queue_prompt_with(args(id, "later"), &store, |_, _| async { Ok(()) })
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID_STATE);
+        assert!(store
+            .lock()
+            .unwrap()
+            .next_deferred_prompt(id)
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

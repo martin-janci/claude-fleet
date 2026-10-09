@@ -512,8 +512,11 @@ fn file_body(path: &str) -> String {
 /// final file shows only its target's name, so only the directory is
 /// confined.
 fn untracked_diff_body(path: &str) -> String {
+    // A file HEAD has is not untracked: an empty `diff HEAD` means it reads
+    // as committed (say, staged and then reverted), not as all added.
     format!(
         "f=\"$root\"/{quoted}\n{confine}\
+         if [ -n \"$(git -C \"$root\" ls-tree --name-only HEAD -- {quoted} 2>/dev/null)\" ]; then exit 0; fi\n\
          git -C \"$root\" diff --no-index -- /dev/null {quoted} || true",
         quoted = quote(path),
         confine = confine(false),
@@ -1494,6 +1497,34 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&diff.stdout).contains("+fresh"),
             "{diff:?}"
+        );
+    }
+
+    /// A committed file whose change was staged and then reverted in the
+    /// worktree has an empty `diff HEAD`; the fallback must not then show
+    /// it as all added.
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_then_reverted_file_is_not_shown_as_all_added() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git_fixture::git(dir, &["init", "-q"]);
+        git_fixture::commit_file(dir, "a.txt", "a\n", "first");
+        std::fs::write(dir.join("a.txt"), "b\n").unwrap();
+        git_fixture::git(dir, &["add", "a.txt"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        let out = git_fixture::run_body(dir, &untracked_diff_body("a.txt"));
+        assert!(out.status.success(), "{out:?}");
+        assert!(out.stdout.is_empty(), "{out:?}");
+        // A repo with no commit yet still shows a staged file as added.
+        let fresh = tempfile::tempdir().unwrap();
+        git_fixture::git(fresh.path(), &["init", "-q"]);
+        std::fs::write(fresh.path().join("n.txt"), "n\n").unwrap();
+        git_fixture::git(fresh.path(), &["add", "n.txt"]);
+        let out = git_fixture::run_body(fresh.path(), &untracked_diff_body("n.txt"));
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("+n"),
+            "{out:?}"
         );
     }
 
