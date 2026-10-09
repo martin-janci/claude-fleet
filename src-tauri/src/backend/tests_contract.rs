@@ -987,6 +987,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             check: fleet_core::service::decide::summary_check::Check::Passed,
             since: 1,
             turns: 2,
+            turns_capped: false,
             model: "haiku".into(),
             host_alias: "mefistos".into(),
             at: 3,

@@ -73,6 +73,37 @@ fn booked(store: &Mutex<Store>) -> Vec<crate::store::AuxUsageRow> {
         .unwrap()
 }
 
+/// Review r01: a window that reaches past the turns read says so; one whose
+/// start is inside what was read, or a read that dropped nothing, does not.
+#[test]
+fn a_window_past_the_turns_read_is_capped() {
+    let turns = vec![
+        turn("2026-10-08T13:25:00Z", "a", "b"),
+        turn("2026-10-08T13:30:00Z", "c", "d"),
+    ];
+    assert!(window_capped(&turns, true, T1320));
+    assert!(!window_capped(&turns, false, T1320), "nothing was dropped");
+    assert!(
+        !window_capped(&turns, true, T1320 + 360),
+        "the oldest read is before the window"
+    );
+    let shape = serde_json::to_value(WatchSummary {
+        text: None,
+        check: Check::Off,
+        since: 0,
+        turns: 0,
+        turns_capped: false,
+        model: String::new(),
+        host_alias: String::new(),
+        at: 0,
+    })
+    .unwrap();
+    assert!(
+        shape.get("turns_capped").is_none(),
+        "absent unless capped: {shape}"
+    );
+}
+
 #[test]
 fn the_excerpt_is_the_turns_since_the_time() {
     let turns = vec![
