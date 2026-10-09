@@ -1074,7 +1074,9 @@ impl FleetTools {
         {item_id, note?}; mission_plan: ask the planner; card_decide \
         {card_id, ok, note?}; mission_grant {mission_id, level, hours?, \
         budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; \
-        missions_pause_all. \
+        missions_pause_all. mission_release_note {mission_id}: a drafted \
+        release note of a completed mission; today_brief {refresh?, org_id?, \
+        since?}: Today's morning brief, drafted only on refresh. \
         Work view: \
         primary:false links a secondary; expected_* guard (E_CONFLICT).")]
     pub(super) async fn work_link(
@@ -1628,6 +1630,12 @@ impl FleetTools {
                 "mission_revoke" => {
                     ok_json(&orch::revoke(&args, &self.store, &view_scope).map_err(to_mcp_err)?)
                 }
+                // Redesign 9.11: an LLM draft, on demand.
+                "mission_release_note" => ok_json(
+                    &orch::drafts::release_note(&args, &self.mission_deps(), &view_scope)
+                        .await
+                        .map_err(to_mcp_err)?,
+                ),
                 other => Err(mcp_err(
                     "E_INVALID",
                     format!("unknown work_link action {other:?}"),
@@ -1652,6 +1660,21 @@ impl FleetTools {
             let view_scope = self.view_scope(&caller)?;
             return ok_json(
                 &crate::service::work::orchestrate::decide_card(
+                    &args,
+                    &self.mission_deps(),
+                    &view_scope,
+                )
+                .await
+                .map_err(to_mcp_err)?,
+            );
+        }
+        // Redesign 9.11: Today's morning brief, a person's, on their own
+        // view of today; drafted only when they ask for a refresh.
+        if args.action == "today_brief" {
+            mission_caller(&caller)?;
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::orchestrate::drafts::brief(
                     &args,
                     &self.mission_deps(),
                     &view_scope,

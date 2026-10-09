@@ -60,7 +60,7 @@
 // and on `hub_verdicts.test.ts` (holding hand-written literals accountable to a
 // single table).
 import { describe, it, expect } from 'vitest';
-import { SESSION_ACTIONS, sessionTierOf, type SessionAction } from './share';
+import { SESSION_ACTIONS, sessionTierOf, type SessionAction, type SessionTier } from './share';
 
 /** Every `.svelte` and `.ts` source under `src/`, keyed by its path relative to
  *  this module — `./Foo.svelte` for a sibling in `src/lib/`, `../Foo.svelte` for
@@ -174,7 +174,7 @@ const WRITE_ACTIONS: readonly SessionAction[] = SESSION_ACTIONS.filter(
   (a) => sessionTierOf(a) !== 'watch',
 );
 const WRITES = new Set<string>(WRITE_ACTIONS);
-const TIER_RANK: Record<'watch' | 'drive' | 'own', number> = { watch: 1, drive: 2, own: 3 };
+const TIER_RANK: Record<SessionTier, number> = { watch: 1, answer: 2, drive: 3, own: 4 };
 
 /**
  * The three modules that ARE the predicates rather than users of them:
@@ -574,7 +574,41 @@ function deriveWriters(): { byAction: Map<SessionAction, Set<string>>; home: Map
   return { byAction, home };
 }
 
-const { byAction: DERIVED, home: WRITER_HOME } = deriveWriters();
+/**
+ * Writers that invoke a command at a NARROWER tier than the command's own row,
+ * because of the arguments they send (Orbit Fleet 11.7). `send_prompt` is
+ * `drive`, but `send_prompt` with an empty prompt and one key is what the hub
+ * admits at `answer`: a key-only writer is recorded as writing its own
+ * action. Pinned to the body that makes it true, so a writer that grows a
+ * prompt argument goes back to being a `send_prompt` writer.
+ */
+const KEY_ONLY_WRITERS: readonly {
+  writer: string;
+  file: string;
+  from: SessionAction;
+  to: SessionAction;
+  pins: readonly string[];
+}[] = [
+  {
+    writer: 'answerDialog',
+    file: './sessions.ts',
+    from: 'send_prompt',
+    to: 'answer_dialog',
+    pins: ["args: { host_alias: hostAlias, tmux_name: tmuxName, prompt: '', keys: key },"],
+  },
+];
+
+function narrowedWriters(derived: ReturnType<typeof deriveWriters>): ReturnType<typeof deriveWriters> {
+  for (const k of KEY_ONLY_WRITERS) {
+    derived.byAction.get(k.from)?.delete(k.writer);
+    let set = derived.byAction.get(k.to);
+    if (!set) derived.byAction.set(k.to, (set = new Set()));
+    set.add(k.writer);
+  }
+  return derived;
+}
+
+const { byAction: DERIVED, home: WRITER_HOME } = narrowedWriters(deriveWriters());
 
 /**
  * Second-order writers: a store function that reaches a `SESSION_TIER` command
@@ -1208,6 +1242,19 @@ describe('every write to a session has an access answer in reach', () => {
   });
 });
 
+describe('a key-only writer is held to the answer gate, and only while it is key-only', () => {
+  it('every KEY_ONLY_WRITERS entry still sends no prompt text', () => {
+    for (const k of KEY_ONLY_WRITERS) {
+      const src = RAW_SOURCES[k.file];
+      expect(src, `${k.file} is gone`).toBeTruthy();
+      expect(src.includes(`export async function ${k.writer}(`), `${k.file} lost ${k.writer}`).toBe(true);
+      for (const pin of k.pins) expect(src.includes(pin), `${k.writer} no longer sends ${pin}`).toBe(true);
+      expect(DERIVED.get(k.to)?.has(k.writer), `${k.writer} writes ${k.to}`).toBe(true);
+      expect(DERIVED.get(k.from)?.has(k.writer) ?? false, `${k.writer} is not a ${k.from} writer`).toBe(false);
+    }
+  });
+});
+
 describe('the call-site exemptions are real and stay real', () => {
   const entries = Object.entries(EXEMPT_SITES).flatMap(([file, list]) =>
     list.map((e) => [file, e] as const),
@@ -1285,6 +1332,45 @@ interface HalfExemption {
 }
 
 const EXEMPT_HALF: Record<string, HalfExemption> = {
+  './answer_send.ts': {
+    actions: ['send_prompt'],
+    why:
+      'Orbit Fleet 11.7: the answer card and ⌘K Approve press a dialog key through `answerDialog`, ' +
+      'which is `send_prompt` with no prompt. The HUB half has to name the routed command, ' +
+      '`send_prompt`, because that is what `hub.ts` knows; the ACCESS half is `answer_dialog`, ' +
+      'the narrower tier the hub admits for a key alone, so an `answer` grantee is not refused ' +
+      'a write its grant allows. Any prompt text stays `send_prompt` at `drive`.',
+    pins: [
+      { file: './answer_send.ts', needle: "sessionActionBlocked(session, 'answer_dialog')" },
+      { file: './sessions.ts', needle: "prompt: '', keys: key" },
+    ],
+  },
+  './commands.ts': {
+    actions: ['send_prompt'],
+    why:
+      'Orbit Fleet 11.7: the answer card and ⌘K Approve press a dialog key through `answerDialog`, ' +
+      'which is `send_prompt` with no prompt. The HUB half has to name the routed command, ' +
+      '`send_prompt`, because that is what `hub.ts` knows; the ACCESS half is `answer_dialog`, ' +
+      'the narrower tier the hub admits for a key alone, so an `answer` grantee is not refused ' +
+      'a write its grant allows. Any prompt text stays `send_prompt` at `drive`.',
+    pins: [
+      { file: './commands.ts', needle: "sessionActionBlocked(s, 'answer_dialog')" },
+      { file: './sessions.ts', needle: "prompt: '', keys: key" },
+    ],
+  },
+  './AnswerPrompt.svelte': {
+    actions: ['send_prompt'],
+    why:
+      'Orbit Fleet 11.7: the answer card and ⌘K Approve press a dialog key through `answerDialog`, ' +
+      'which is `send_prompt` with no prompt. The HUB half has to name the routed command, ' +
+      '`send_prompt`, because that is what `hub.ts` knows; the ACCESS half is `answer_dialog`, ' +
+      'the narrower tier the hub admits for a key alone, so an `answer` grantee is not refused ' +
+      'a write its grant allows. Any prompt text stays `send_prompt` at `drive`.',
+    pins: [
+      { file: './AnswerPrompt.svelte', needle: "$sessionBlocked(session, 'answer_dialog')" },
+      { file: './sessions.ts', needle: "prompt: '', keys: key" },
+    ],
+  },
   './moveEligibility.ts': {
     actions: ['move_session'],
     why:

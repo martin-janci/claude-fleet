@@ -2401,6 +2401,7 @@ fn router_sum_serves_every_tool() {
         include_str!("routines.rs"),
         include_str!("start_rules.rs"),
         include_str!("presence.rs"),
+        include_str!("library.rs"),
         include_str!("runs.rs"),
     ]
     .iter()
@@ -10155,7 +10156,8 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // `resolve_row_and_gate` with `Reach::Drive` — spelled as its own helper
     // because `to_addr` can name the same row by address.
     ("send_message", &["Drive"]),
-    ("send_prompt", &["Drive"]),
+    // A key alone is `answer` (Orbit Fleet 11.7); a prompt is `drive`.
+    ("send_prompt", &["Answer", "Drive"]),
     ("queue_prompt", &["Drive"]),
     ("queued_prompts", &["Drive"]),
     ("session_conversations", &["Read"]),
@@ -10350,6 +10352,17 @@ pub(super) const NO_PER_ROW_GATE: &[(&str, &str)] = &[
          the session each row came out of — the same `own` tier `send_file` \
          gates one row with. A `session_id` this caller does not own matches \
          no row rather than refusing, so it is no existence oracle either",
+    ),
+    (
+        "library",
+        "`list` is a FILTER, the same shape as `list_downloads`: the page is \
+         cut by `service::library::visible`, which asks `ViewScope::may_own` \
+         on each row's session, so a `session_id` this caller does not own \
+         matches nothing. `add` names one row and its gate is in the service, \
+         not a threaded Reach: `service::library::add` takes the session only \
+         when `may_own` holds (the `own` tier `send_file` is at) and answers \
+         `E_NOTFOUND` otherwise; `only_the_owner_sees_or_adds_a_sessions_files` \
+         and the session matrix hold it",
     ),
     (
         "runs",
@@ -10617,7 +10630,7 @@ fn tool_blocks() -> std::collections::BTreeMap<String, String> {
 
 /// The reaches one span of handler source threads.
 fn reaches_in(code: &str) -> Vec<String> {
-    let mut found: Vec<String> = ["Read", "Drive", "Own"]
+    let mut found: Vec<String> = ["Read", "Answer", "Drive", "Own"]
         .iter()
         .filter(|r| code.contains(&format!("Reach::{r}")))
         .map(|r| (*r).to_string())
@@ -11266,6 +11279,18 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "pauses the missions the caller may change; answers their ids",
     ),
     (
+        "work_link",
+        "mission_release_note",
+        "drafts a completed mission's release note for whoever may change \
+         the mission; text comes back, nothing is written to a session",
+    ),
+    (
+        "work_link",
+        "today_brief",
+        "the caller's own morning brief over their scoped view of today; \
+         drafted only on refresh, written to no session",
+    ),
+    (
         "work",
         "purge_impact",
         "answers keys only (`PurgeImpact { keys }`), never a session row",
@@ -11875,7 +11900,7 @@ fn the_reaches_the_desktop_decided_are_the_ones_the_hub_enforces() {
     assert_eq!(reach_of("rewind_conversation"), vec!["Own"]);
     // `request_work_handover` types into the pane like
     // `send_message { deliver, submit }`: both `drive`.
-    assert_eq!(reach_of("send_prompt"), vec!["Drive"]);
+    assert_eq!(reach_of("send_prompt"), vec!["Answer", "Drive"]);
     // The per-session work-graph writes — `set_primary_work`,
     // `decide_work_batch`, `reconsider_work_link`, `ack_work_link` — all
     // ride `work_link`'s drive arm.

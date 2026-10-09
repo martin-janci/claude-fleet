@@ -12,6 +12,7 @@ pub mod health;
 pub mod history;
 pub mod hosts;
 pub mod hub;
+pub mod library;
 pub mod local_workspaces;
 pub mod mcp;
 pub mod missions;

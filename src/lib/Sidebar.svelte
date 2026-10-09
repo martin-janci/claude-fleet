@@ -31,6 +31,7 @@
   import AddProjectDialog from './AddProjectDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
   import OnboardingCard from './OnboardingCard.svelte';
+  import FirstRun from './FirstRun.svelte';
   import { hostFilter, effectiveHostFilter, hosts } from './hosts';
   import { bulkTargets, sessionBlocked, sessionIdBlocked } from './share';
   import { moveToHeadroom } from './account_limits';
@@ -1454,7 +1455,8 @@
   </div>
   {:else}
   <div class="scroller">
-    {#if !$onboardingDismissed}
+    <!-- The New layout shows Get started in the corner instead (10.5). -->
+    {#if !$onboardingDismissed && $uiLayout !== 'new'}
       <OnboardingCard onaddhost={openAddHost} onnewsession={openNewSession} />
     {/if}
     {#snippet pastRow(key: string, l: WorkLink)}
@@ -1967,6 +1969,11 @@
   </ConfirmDialog>
 {/if}
 
+{#if $uiLayout === 'new'}
+  <!-- Redesign 10.5: the first-run tour and Get started, where the
+       onboarding card was mounted; both float above the layout. -->
+  <FirstRun mac={isMac} />
+{/if}
 {#if $settingsOpen}
   <SettingsDialog onClose={() => settingsOpen.set(false)} />
 {/if}

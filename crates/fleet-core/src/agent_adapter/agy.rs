@@ -125,8 +125,8 @@ impl AgentAdapter for Agy {
 
     /// With an id: resume it, else continue the cwd's newest conversation
     /// (which starts a fresh one when the workspace has none). Without one:
-    /// continue. agy has no way to start a conversation under a given id,
-    /// so a minted id that agy never saw falls through to `--continue`.
+    /// continue. A new session starts through
+    /// [`AgentAdapter::start_command`] instead.
     /// `launch.profile` is a Claude credential profile and does not apply:
     /// agy keeps its login in `~/.gemini`. `tmux_name` is unused, as agy
     /// takes no session name.
@@ -154,18 +154,21 @@ impl AgentAdapter for Agy {
         crate::validate::claude_session_id(id).is_ok()
     }
 
-    /// A placeholder agy has never seen: agy allocates its own ids, so the
-    /// first launch under this falls through to `--continue`. Reading the
-    /// real id back (agy's `cache/last_conversations.json` maps a workspace
-    /// to its newest conversation) is left to the routing that stores it.
+    /// None: agy allocates its own ids and has no flag to start under one
+    /// fleet chose, so a new session starts fresh and a later relaunch
+    /// continues the cwd's newest conversation, as Codex does.
     fn mint_conversation_id(&self) -> Option<String> {
-        Some(uuid::Uuid::new_v4().to_string())
+        None
     }
 
-    /// Unused while [`AgentAdapter::mint_conversation_id`] mints a
-    /// placeholder: the no-id launch line.
-    fn start_command(&self, tmux_name: &str, launch: &ClaudeLaunch) -> String {
-        self.launch_command(None, tmux_name, launch)
+    /// A fresh conversation: `--continue` would pick up whatever the cwd
+    /// ran last.
+    fn start_command(&self, _tmux_name: &str, launch: &ClaudeLaunch) -> String {
+        format!(
+            "{}agy{}; exec ${{SHELL:-/bin/zsh}} -l",
+            crate::tmux::VOICE_PATH_PREFIX,
+            Self::flags(launch)
+        )
     }
 
     fn models(&self) -> &'static [PickerOption] {

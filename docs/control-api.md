@@ -309,10 +309,10 @@ Index by area (names only; see the reference for details):
   agent's own session, idempotent), `operator_status` (why it cannot work,
   if it cannot).
 - **Sharing & ownership** (multi-user M1) — `session_share` (give one
-  person `watch` or `drive` on a session you own — or, with `org` instead of
+  person `watch`, `answer` or `drive` on a session you own — or, with `org` instead of
   `person`, an org you are a member of: its members and admins as of now,
   never a later joiner or a viewer), `session_unshare` (take it
-  back), `session_narrow` (`drive` → `watch`; there is deliberately no tool
+  back), `session_narrow` (`drive` or `answer` → `watch`; there is deliberately no tool
   that raises a grant — widen by revoking and sharing again),
   `session_access` (who holds a live grant on your session), `my_grants`
   (who *you* are on this fleet and every live grant to you, which is what a
@@ -325,6 +325,11 @@ Index by area (names only; see the reference for details):
   claim is `fleet-hub session claim <id> --person <name>`, beside
   `fleet-hub session unclaimed`. Sharing never confers a terminal: a
   terminal is this machine's own SSH, which no revoke could reach.
+  `answer` (Orbit Fleet 11.7) sits between the two: it reads like `watch`
+  and may also answer the dialog on the pane — `send_prompt` with an empty
+  `prompt` and one of `keys` Enter, Escape, Tab or a digit the dialog
+  numbers, accepted only while a fresh read of the pane shows a dialog. Any
+  prompt text, and `C-c`, still need `drive`.
 - **Presence** (redesign 11.7b) — `session_presence` (`session_id`,
   `leaving?`): say you have a session open, again every `heartbeat_secs`
   (20), and once with `leaving: true` when you close it; the answer is who
@@ -818,6 +823,18 @@ Index by area (names only; see the reference for details):
   bytes are `GET /downloads/<id>` (bearer, not a tool result). Events:
   `download:changed { id }`, ids only, never on a host- or org-bound
   stream. See `docs/hub.md` → *File downloads*.
+- **Library** — `library`, by `action` (Orbit Fleet 9.7): the files a
+  person put on a host, by Control's Library Upload… or as a prompt's
+  attachment (`library_items`). `list { session_id?, host_alias?, limit? }`
+  answers `{ items }`, newest first; `add { kind: upload | attachment,
+  session_id, files: [{ path, name?, size? }] }` records files already on
+  the session's host (the desktop puts them there over its own ssh), taking
+  the host, session name and org from the session's row; `remove { id }`
+  drops a row and never the file. A row names a path on the owner's host,
+  so it is the downloads' `own` tier: a grantee or another person sees an
+  empty page and `add` answers `E_NOTFOUND`. Never served to a per-host
+  token. The Library lists downloads and repos beside these from
+  `list_downloads` and the sessions it already has.
 - **Routines** — `routines`, by `action` (Orbit Fleet 8.5): a person's
   saved prompt that starts a session on a cron schedule (`trigger: cron`,
   five fields read at the `utc_offset_min` the device had when it was
@@ -1002,7 +1019,7 @@ Index by area (names only; see the reference for details):
   `set_member { org, person | person_id, role: admin|member|viewer }` (adds,
   or changes a role; a new name becomes a person), `remove_member { org,
   person, keep_grants }` (revokes what was shared with them on the org's
-  sessions unless `keep_grants`), `member_grants` (`{ watch, drive }`
+  sessions unless `keep_grants`), `member_grants` (`{ watch, answer, drive }`
   counts), `revoke_member_grants` and `narrow_member_grants` — downward
   only. An org admin never changes their own membership or the hub owner's.
   Hub owner only: `set_hub_org { org }` (no org: none), and `update_org`'s

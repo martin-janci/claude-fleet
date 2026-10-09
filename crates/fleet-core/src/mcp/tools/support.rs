@@ -209,8 +209,8 @@ pub(super) fn require_move_hosts(
 
 /// How deep into a session one call reaches (multi-user M1, task T7).
 ///
-/// **Three levels, two of them grantable.** `watch` and `drive` are what a
-/// grant can carry; [`Reach::Own`] is a TIER, not a third level anybody can
+/// **Four levels, three of them grantable.** `watch`, `answer` (Orbit Fleet
+/// 11.7) and `drive` are what a grant can carry; [`Reach::Own`] is a TIER, not a third level anybody can
 /// be given (spec §4.3, *What a grant may and may not do*, invariant 5).
 /// **That invariant holds the one authoritative list of the operations the
 /// tier covers; it is cited here and deliberately not restated** — revision 4
@@ -242,6 +242,10 @@ pub(super) enum Reach {
     /// Read the row, its transcript, its history, its worktree — the
     /// substance of a `watch` grant.
     Read,
+    /// Answer the dialog on the session's pane: one key, and only the keys
+    /// `send_prompt` admits for it. The owner, a `drive` grantee and an
+    /// `answer` grantee ([`crate::service::view_scope::ViewScope::may_answer`]).
+    Answer,
     /// Make the session's machine do work: a pane write, a row write, a
     /// task, a tmux command. The owner and a `drive` grantee.
     Drive,
@@ -256,6 +260,7 @@ impl Reach {
     fn needed(self) -> &'static str {
         match self {
             Reach::Read => "watch",
+            Reach::Answer => "answer",
             Reach::Drive => "drive",
             Reach::Own => "ownership (no grant confers it)",
         }
@@ -391,6 +396,7 @@ fn person_sees(
         // Visibility IS the read level: a caller who sees the row sees its
         // content (the two-armed `Visibility` above has no middle value).
         Reach::Read => true,
+        Reach::Answer => scope.may_answer(row),
         Reach::Drive => scope.may_drive(row),
         Reach::Own => scope.may_own(row),
     };
@@ -432,6 +438,7 @@ pub(super) fn reaches_row(
     }
     Ok(match reach {
         Reach::Read => true,
+        Reach::Answer => scope.may_answer(row),
         Reach::Drive => scope.may_drive(row),
         Reach::Own => scope.may_own(row),
     })
@@ -2434,6 +2441,7 @@ pub(super) fn task_visible_at(
             // No equivalent for `own`: a pane proof is never ownership,
             // and a per-host token is never an owner.
             (Some(row), Reach::Own) => scope.may_own(row),
+            (Some(row), Reach::Answer) => scope.may_answer(row),
             (Some(_), Reach::Read) | (None, _) => false,
         };
         if !ok {
