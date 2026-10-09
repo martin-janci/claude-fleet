@@ -1992,15 +1992,17 @@
     /* Below the app's modals (z-index 20); above terminal content. */
     z-index: 18;
   }
+  /* The menu is app chrome, not terminal: it follows the theme like every
+     other menu (SessionRowMenu), while the grid under it stays dark. */
   .ctx-menu {
     position: fixed;
     z-index: 19;
     min-width: 150px;
-    background: #1c1c1c;
-    border: 1px solid #3a3a3a;
+    background: var(--bg);
+    border: 1px solid var(--border);
     border-radius: var(--radius-md);
     padding: 4px;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-pop);
     display: flex;
     flex-direction: column;
   }
@@ -2008,12 +2010,16 @@
     text-align: left;
     background: none;
     border: none;
-    color: #e8e8e8;
+    color: var(--fg);
     padding: 6px 10px;
     border-radius: var(--radius-sm);
     font: inherit;
     cursor: pointer;
   }
-  .ctx-menu button:hover:not(:disabled) { background: #2d6cdf; }
-  .ctx-menu button:disabled { color: #666; cursor: default; }
+  .ctx-menu button:hover:not(:disabled) { background: var(--accent-soft); }
+  .ctx-menu button:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
+  }
+  .ctx-menu button:disabled { color: var(--fg-muted); cursor: default; }
 </style>

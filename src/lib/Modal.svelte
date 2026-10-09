@@ -159,7 +159,7 @@
     box-shadow: var(--shadow-pop);
   }
   .modal::backdrop {
-    background: rgba(0, 0, 0, 0.4);
+    background: var(--scrim);
   }
   /* jsdom / engines without top-layer support: emulate the overlay so the
      box is still centered over a dimmed page. */

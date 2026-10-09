@@ -768,6 +768,77 @@ is asked.
 Code: `service/decide/related_session.rs`, called beside `work_link` in the
 prompt hook (`mcp/hooks.rs`); card N1 in the redesign plan.
 
+## `control_route` — where a message typed in Control goes (K2)
+
+After a person sends a message in Control's chat, and
+`decide.jev.control_route` is on, Jev is asked one Choice: which of the
+active missions (newest first) or running sessions (most recently active
+first, never Control's own agent) the message is about, `control` (a
+request for Control itself) or `unsure`; at most 8 targets, only those the
+person may see. With no target, nothing is asked. The answer appears under
+the message as a receipt: *For "Hub federation v2" · Proposed by Jev ·
+Change*.
+
+- **Asked after the send, never before.** The message has already reached
+  Control's agent; nothing moves, forwards or holds it. The receipt only
+  says what it is about.
+- **Rule first.** A slash command is never routed. A message of fewer than
+  4 words ("yes", "do it") is never sent to Jev and nothing is recorded:
+  in `assist` Control asks where it goes instead, with the same targets and
+  nothing pre-selected.
+- **What is sent.** The message's first 1,000 characters, each mission's
+  name and the first 200 characters of its goal, and each session's name
+  and project, redacted. Control's messages belong to no org, so they
+  follow `decide.jev.unassigned`.
+- **Shadow.** Recorded only, with `control` as the baseline (today nothing
+  routes a message: it stays with Control).
+- **Assist.** A usable answer (at least 50%) naming a target becomes the
+  receipt; `unsure`, a weak answer or a failed call becomes the question;
+  `control` shows nothing.
+- **What is recorded.** Subject `control_message` `msg:<HMAC>` (16 hex
+  digits of an HMAC of the message and the time, under the local
+  fingerprint key; the message is never stored); options are `m<id>`,
+  `s<id>`, `control` and `unsure`.
+- **Follow-up.** Opening the proposed target marks the run `confirmed`;
+  *Change*, or an answer to the question, marks it `corrected` to the
+  pick. Only an assist run nobody has decided yet is marked; a shadow
+  answer is never marked.
+
+Code: `service/decide/control_route.rs` (`propose`, `follow`), the desktop
+commands `control_route_propose` / `control_route_follow` in
+`src-tauri/src/commands/operator.rs` (routed to the hub when paired);
+card K2 in the test map (there called `operator_thread`), step 9.9 of the
+redesign's transition plan.
+
+## `summary_check` — a watcher's summary checked against its transcript (J9)
+
+A person watching a session (a share at the Read level, or its owner in
+Details › Facts) can press *Summarise* for a "Since 13:20" summary, which
+one `claude -p` on the session's host drafts from the turns since then
+(`service/watch_summary.rs`). With `decide.jev.summary_check` on, right
+after each draft and before it shows, Jev is asked one yes/no question
+(a Noul): is every statement in the summary supported by the transcript
+excerpt — nothing invented, nothing contradicted, nothing claimed finished
+that the transcript does not show finished. The summary waits for the
+answer.
+
+- **What is sent.** The summary and the newest 80,000 bytes of the
+  excerpt it was written from, redacted. The summary itself runs only for
+  a session whose org consented (`decide.jev.unassigned` for no org);
+  otherwise it is refused with `E_FORBIDDEN` and nothing runs.
+- **Off.** Nothing is asked; the summary shows, marked unchecked.
+- **Shadow.** Recorded only, with no baseline; the summary shows, marked
+  unchecked.
+- **Assist.** The summary shows only when the answer is at or above 0.5.
+  A lower answer hides it, and so does no answer at all (a fallback):
+  a summary that could not be checked is not shown.
+- **What is recorded.** Subject `session` `<id>`, one run per draft.
+- **Follow-up.** None: nothing a person does marks the run.
+
+Code: `service/decide/summary_check.rs` (`check`, `verdict`), called from
+`service/watch_summary.rs`; card J9 in the test map, step 11.11 of the
+redesign's transition plan.
+
 ## Settings
 
 <!-- BEGIN GENERATED: settings decide. -->
@@ -808,9 +879,11 @@ set` (below), which send `set_setting` to the running hub with the master
 token — the hub checks each value and audits the change; a paired desktop
 shows them read-only there.
 
-`decide.jev.work_link` has no live path yet (decision D32: J1 is measured
-offline only, until it passes its acceptance lines), so Settings shows it
-read-only, with whatever value it holds; the benchmark does not need it.
+`decide.jev.work_link` has a live path (see
+[`work_link`](#work_link--the-work-item-of-a-session-no-rule-could-link-j1)
+above) and is set like any other mode, but stays `off` by default: leave it
+`off` or `shadow` until the benchmark's J1 acceptance lines pass (decision
+D32). The benchmark does not need it.
 
 ## The command line (hub)
 

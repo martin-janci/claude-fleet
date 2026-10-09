@@ -7,6 +7,7 @@
 //
 // The New layout only: Classic keeps its row-only classification, so its
 // Needs you count does not move until the layout switch.
+import { stable } from './stable_store';
 import { derived, type Readable } from 'svelte/store';
 import type { HostRow } from './hosts';
 import { hosts } from './hosts';
@@ -51,10 +52,14 @@ export function attentionFactsFrom(
 /** The facts the stores hold now, or `undefined` in the Classic layout. The
  *  classifier re-checks a limit's reset against its own clock, so a limit
  *  that resets between two usage reads stops blocking on time. */
-export const attentionFacts: Readable<AttentionFacts | undefined> = derived(
-  [hosts, accountUsage, uiLayout],
-  ([$hosts, $usage, $layout]) =>
+// `stable`: every host ping rebuilt equal facts, and every row re-ranked
+// (review r16). The facts are a few short lists, so comparing their JSON is
+// cheaper than one re-rank.
+export const attentionFacts: Readable<AttentionFacts | undefined> = stable(
+  derived([hosts, accountUsage, uiLayout], ([$hosts, $usage, $layout]) =>
     $layout === 'new' ? attentionFactsFrom($hosts, $usage, Math.floor(Date.now() / 1000)) : undefined,
+  ),
+  (a, b) => JSON.stringify(a) === JSON.stringify(b),
 );
 
 /** The reason line of a Blocked row (step 2.4), as the Main board words it:
