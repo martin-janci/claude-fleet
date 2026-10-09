@@ -6,6 +6,7 @@
   you, the session in focus, Pull requests and Today without leaving Control.
 -->
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   import AgentPanel from './AgentPanel.svelte';
   import TodayView from './TodayView.svelte';
   import ControlViewsPanel from './ControlViewsPanel.svelte';
@@ -25,7 +26,7 @@
 <section class="control" aria-label="Control" data-testid="control-view">
   <header class="head">
     <h2 class="title">Control</h2>
-    <div class="btn-group" role="tablist" aria-label="Control" data-testid="control-tabs">
+    <div class="btn-group" role="tablist" aria-label="Control" data-testid="control-tabs" use:tablistKeys>
       {#each TABS as t (t.id)}
         <button
           type="button"

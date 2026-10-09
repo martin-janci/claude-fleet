@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   import { onWorkChangedDebounced } from './work';
   // The Work view's tree (work graph M14), shown in the sidebar in place of
   // the Sessions tree: organisation → group → task → every session of the
@@ -580,7 +581,7 @@
              review as a count after them (a tablist holds only tabs). Review
              is part of Tasks; the board is a Work view of its own, not an
              overlay toggled from the layout chips. -->
-        <div class="tabs" role="tablist" aria-label="Work view">
+        <div class="tabs" role="tablist" aria-label="Work view" use:tablistKeys>
           <button
             class="btn btn--chip btn--toggle"
             role="tab"
@@ -628,7 +629,7 @@
           >
         {/if}
       {:else}
-        <div class="tabs" role="tablist" aria-label="Work view">
+        <div class="tabs" role="tablist" aria-label="Work view" use:tablistKeys>
           <button
             class="btn btn--chip btn--toggle"
             role="tab"
