@@ -55,7 +55,7 @@
       {#if $controlTab === 'today'}
         <TodayView />
       {:else}
-        <AgentPanel embedded {contextInput} />
+        <AgentPanel {contextInput} />
       {/if}
     </div>
     {#if $controlViews.open}

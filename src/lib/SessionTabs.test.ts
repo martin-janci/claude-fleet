@@ -1,6 +1,5 @@
 // Redesign step 5.1: the agent tab is named and marked from the session's
-// agent; ⌘J stays its chord. Classic's `subtab-terminal` is untouched
-// (App.test.ts).
+// agent; ⌘J stays its chord (App.test.ts › App: the Conversation tab).
 import { render, screen } from '@testing-library/svelte';
 import { describe, it, expect } from 'vitest';
 import SessionTabs from './SessionTabs.svelte';

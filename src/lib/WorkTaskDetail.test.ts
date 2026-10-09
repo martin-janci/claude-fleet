@@ -87,6 +87,15 @@ async function flush() {
   for (let i = 0; i < 10; i++) await tick();
 }
 
+/** The task page's action bar: one WorkButton (redesign 6.6). */
+const bar = () => document.querySelector('.wb--bar') as HTMLElement;
+async function fromMenu(testid: string) {
+  await fireEvent.click(within(bar()).getByTestId('work-button-menu'));
+  await flush();
+  await fireEvent.click(within(bar()).getAllByTestId(testid)[0]);
+  await flush();
+}
+
 describe('WorkTaskDetail', () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
@@ -209,7 +218,7 @@ describe('WorkTaskDetail', () => {
     expect(screen.getByTestId('work-task-group').textContent).toContain('most recent session (acme/api)');
   });
 
-  it('Open, Continue (resume last) and Start new', async () => {
+  it('the action bar opens the live session; ▾ continues the last conversation and starts new', async () => {
     handlers.resume_work = () => session('mefistos', 'resumed', { id: 11 });
     handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
     handlers.preview_start_work = () => ({
@@ -225,15 +234,18 @@ describe('WorkTaskDetail', () => {
     });
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-open'));
+    await fireEvent.click(within(bar()).getByTestId('work-button-primary'));
     expect(get(selectedSession)?.id).toBe(7);
-    await fireEvent.click(screen.getByTestId('work-task-continue'));
+    await fromMenu('work-button-continue');
     await flush();
     expect(calls('resume_work')[0]).toEqual({ key: 'ABC-12', mode: 'last', link_id: 41, host_alias: null, brief: null });
     expect(get(selectedSession)?.id).toBe(11);
-    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await fromMenu('work-button-start-new');
     await flush();
     expect(calls('preview_start_work')[0]).toEqual({ item_id: 12, with_brief: true });
+    // Start new… always asks where: the popover, then Start.
+    await fireEvent.click(screen.getByTestId('start-popover-go'));
+    await flush();
     expect(calls('start_work')[0]).toEqual({ item_id: 12, with_brief: true, project_id: 3, host_alias: 'mefistos' });
     expect(get(selectedSession)?.id).toBe(12);
   });
@@ -269,7 +281,7 @@ describe('WorkTaskDetail', () => {
         : preview();
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await fromMenu('work-button-start-new');
     await flush();
     const pop = screen.getByTestId('start-popover');
     expect(pop.textContent).toContain('This task is done.');
@@ -318,11 +330,11 @@ describe('WorkTaskDetail', () => {
         : { ...base, plan: null, missing: 'project', suggested_project: { project_id: 4, confidence_pct: 88, run_id: 5 } };
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await fromMenu('work-button-start-new');
     await flush();
     await flush();
     expect((screen.getByTestId('start-popover-project') as HTMLSelectElement).value).toBe('4');
-    expect(screen.getByTestId('start-popover-suggested').textContent).toContain('Proposed by Jev (88%)');
+    expect(screen.getByTestId('start-popover-suggested').textContent).toMatch(/Proposed by Jev\s+88%/);
     // The pre-selection is read back with its host and plan; nothing starts by itself.
     expect(calls('preview_start_work').at(-1)).toEqual({ item_id: 12, with_brief: true, project_id: 4 });
     expect(calls('start_work')).toHaveLength(0);
@@ -338,7 +350,7 @@ describe('WorkTaskDetail', () => {
     };
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await fromMenu('work-button-start-new');
     await flush();
     expect(calls('start_work')[0]).toEqual({ item_id: 12, with_brief: true });
     expect(get(selectedSession)?.id).toBe(12);
@@ -359,7 +371,7 @@ describe('WorkTaskDetail', () => {
     });
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await fromMenu('work-button-start-new');
     await flush();
     expect(screen.getByTestId('start-popover-go').textContent).toContain('Start parallel');
     expect(screen.getByTestId('start-popover-open-live')).toBeTruthy();
@@ -598,10 +610,10 @@ describe('WorkTaskDetail', () => {
     };
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-continue'));
+    await fromMenu('work-button-continue');
     await flush();
-    expect(screen.getByTestId('work-task-action-error').textContent).toContain('is live in api');
-    await fireEvent.click(screen.getByTestId('work-task-open-existing'));
+    expect(screen.getByTestId('work-button-error').textContent).toContain('is live in api');
+    await fireEvent.click(screen.getByTestId('work-button-open-existing'));
     expect(get(selectedSession)?.id).toBe(7);
   });
 
@@ -611,9 +623,9 @@ describe('WorkTaskDetail', () => {
     };
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-continue'));
+    await fromMenu('work-button-continue');
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-open-existing'));
+    await fireEvent.click(screen.getByTestId('work-button-open-existing'));
     expect(get(selectedSession)?.id).toBe(9);
   });
 

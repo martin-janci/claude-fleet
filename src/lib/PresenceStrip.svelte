@@ -1,6 +1,6 @@
 <script lang="ts">
   // Who else is looking at the open session (redesign 11.7b), drawn in the
-  // New layout's session header: one initial per person, the name and device
+  // session header: one initial per person, the name and device
   // on hover, and "+N" past three. Nothing when nobody else is there.
   import { othersLooking, presence, viewerTitle } from './presence';
 

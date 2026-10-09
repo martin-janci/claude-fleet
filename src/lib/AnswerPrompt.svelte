@@ -34,7 +34,6 @@
   import ProposedBy from './ProposedBy.svelte';
   import { quickOrder, quickProposal } from './quick_answer';
   import type { SessionRow } from './sessions';
-  import { uiLayout } from './prefs';
   import QuestionCard from './kit/QuestionCard.svelte';
   import type { Answer } from './kit/status';
   import {
@@ -54,7 +53,7 @@
     /** A single choice went through (redesign 5.9): the Conversation moves
      *  on to the next session that needs you. `label` is the choice. */
     onAnswered?: (label: string) => void;
-    /** "Answer in your own words…" (New layout): the dialog is dismissed
+    /** "Answer in your own words…": the dialog is dismissed
      *  first, then this puts the caret where the words go. */
     onOwnWords?: () => void;
   }
@@ -205,9 +204,7 @@
     choose(o);
   }
 
-  // The New layout draws the one approval card (kit QuestionCard, redesign
-  // 5.9) from the same choices, gates and sends as the classic card below.
-  const isNew = $derived($uiLayout === 'new');
+  // The one approval card (kit QuestionCard, redesign 5.9).
   const optionDisabled = (o: AnswerOption) =>
     busy || writeBlocked !== null || o.key === null || (view.multi && (toggleBlocked !== null || terminalOnly(o)));
   const answers = $derived<Answer[]>(
@@ -247,7 +244,7 @@
 
 <svelte:window onkeydown={onWindowKeydown} />
 
-{#if isNew}
+
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="answer-new" data-testid="answer-card" data-kind={view.kind} data-layout="new" onclick={(e) => e.stopPropagation()}>
   <QuestionCard
@@ -311,86 +308,6 @@
     {#if errorMsg}<p class="err" role="status" data-testid="answer-error">{errorMsg}</p>{/if}
   </QuestionCard>
 </div>
-{:else}
-<div class="answer" class:compact data-testid="answer-card" data-kind={view.kind} role="group"
-  aria-label={view.kind === 'permission' ? 'Permission request' : 'Question from Claude'}>
-  {#if view.question}
-    <p class="question" data-testid="answer-question">{view.question}</p>
-  {:else}
-    <p class="question muted" data-testid="answer-question">
-      Claude is waiting for one of these{view.kind === 'permission' ? ' (permission)' : ''}.
-    </p>
-  {/if}
-  {#if sent !== null}
-    <p class="sent" role="status" data-testid="answer-sent">✓ Sent: {sent} · <button
-        type="button"
-        class="linkish"
-        data-testid="answer-again"
-        title="The dialog is still on screen — the key may not have registered"
-        onclick={(e) => mine(e, () => (sent = null))}>Choose again</button></p>
-  {:else}
-  <div class="options">
-    {#each order.shown as o, i (o.n)}
-      <button
-        type="button"
-        class="btn btn--chip option"
-        class:sticky={isSticky(o)}
-        data-testid="answer-option"
-        data-n={o.n}
-        data-selected={o.selected || undefined}
-        data-sticky={isSticky(o) || undefined}
-        data-checked={(view.multi && isChecked(o)) || undefined}
-        role={view.multi ? 'checkbox' : undefined}
-        aria-checked={view.multi ? isChecked(o) : undefined}
-        disabled={busy || writeBlocked !== null || o.key === null || (view.multi && (toggleBlocked !== null || terminalOnly(o)))}
-        title={writeBlocked ?? optionTitle(o)}
-        onclick={(e) => mine(e, () => choose(o))}
-      ><span class="ordinal" aria-hidden="true">{order.proposed ? i + 1 : o.n}</span>{#if view.multi}<span class="box" aria-hidden="true">{isChecked(o) ? '✔' : ''}</span>{/if}<span class="label">{o.label}</span></button>
-    {/each}
-  </div>
-  {#if order.proposed && !compact}
-    <ProposedBy
-      proposal={quickProposal(session)}
-      field="quick_answer"
-      changeLabel="Keep the order"
-      testid="answer-proposed"
-      onchange={() => (keepOrder = true)} />
-  {/if}
-  {#if view.multi}
-    <div class="multi">
-      <button
-        type="button"
-        class="btn btn--chip continue"
-        data-testid="answer-continue"
-        disabled={busy || writeBlocked !== null}
-        title={writeBlocked ?? 'Keep these ticks and go on (Tab) — Claude asks you to confirm next'}
-        onclick={(e) => mine(e, () => void press(MULTI_CONTINUE_KEY, continueLabel()))}>Continue →</button>
-      {#if !compact}<span class="hint">Tick every answer that applies, then continue.</span>{/if}
-    </div>
-  {/if}
-  {#if !compact}
-    <div class="secondary">
-      <button
-        type="button"
-        class="btn btn--chip btn--quiet"
-        data-testid="answer-esc"
-        disabled={busy || writeBlocked !== null}
-        title={writeBlocked ?? 'Dismiss the dialog (Escape)'}
-        onclick={(e) => mine(e, () => void press('Escape', 'Dismissed'))}>Esc — dismiss</button>
-      {#if onOpenTerminal}
-        <button
-          type="button"
-          class="btn btn--chip btn--quiet"
-          data-testid="answer-open-terminal"
-          onclick={(e) => mine(e, () => onOpenTerminal?.())}>Open terminal</button>
-      {/if}
-    </div>
-  {/if}
-  {/if}
-  {#if staleMsg}<p class="stale" role="status" data-testid="answer-stale">{staleMsg}</p>{/if}
-  {#if errorMsg}<p class="err" role="status" data-testid="answer-error">{errorMsg}</p>{/if}
-</div>
-{/if}
 
 <style>
   .answer-new {
@@ -400,70 +317,6 @@
   .answer-new .stale,
   .answer-new .err {
     font-size: 12px;
-  }
-  .answer {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    margin: 0.35rem 0 0.6rem;
-    padding: 0.5rem 0.75rem;
-    border: 1px solid var(--usage-warn);
-    border-left-width: 3px;
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--usage-warn) 10%, var(--bg-pane));
-    font-size: 0.8rem;
-  }
-  .question {
-    margin: 0;
-    font-weight: 600;
-    line-height: 1.35;
-  }
-  .question.muted {
-    font-weight: 500;
-    opacity: 0.8;
-  }
-  .options {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.35rem;
-  }
-  .option {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    max-width: 100%;
-  }
-  .option .label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ordinal {
-    flex: none;
-    min-width: 1.15em;
-    padding: 0 0.15em;
-    border-radius: 3px;
-    background: color-mix(in srgb, currentColor 16%, transparent);
-    font-variant-numeric: tabular-nums;
-    text-align: center;
-  }
-  .option[data-selected] {
-    border-color: var(--usage-warn);
-  }
-  .box {
-    flex: none;
-    width: 0.95em;
-    height: 0.95em;
-    line-height: 0.95em;
-    border: 1px solid currentColor;
-    border-radius: 2px;
-    font-size: 0.85em;
-    text-align: center;
-    opacity: 0.8;
-  }
-  .option[data-checked] .box {
-    opacity: 1;
-    background: color-mix(in srgb, var(--usage-warn) 45%, transparent);
   }
   .multi {
     display: flex;
@@ -477,11 +330,6 @@
   }
   .hint {
     opacity: 0.75;
-  }
-  /* The one choice that changes what Claude asks next time reads differently
-     from the ones that only answer today. */
-  .option.sticky .ordinal {
-    background: color-mix(in srgb, var(--usage-warn) 45%, transparent);
   }
   .sent {
     margin: 0;
@@ -511,19 +359,4 @@
     color: var(--danger);
   }
 
-  /* Sidebar density: the choices are the whole point there. */
-  .answer.compact {
-    gap: 0.3rem;
-    margin: 0.2rem 0 0;
-    padding: 0.3rem 0.4rem;
-    font-size: 11px;
-  }
-  .answer.compact .question {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .answer.compact .option .label {
-    max-width: 12rem;
-  }
 </style>

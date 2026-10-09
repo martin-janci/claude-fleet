@@ -1,5 +1,4 @@
-// Redesign step 3.1: one destination store owns the right column. Classic
-// shows exactly what it showed with the old overlay flags, never two
+// Redesign step 3.1: one destination store owns the right column: never two
 // overlays at once, and the terminal underneath stays mounted through every
 // overlay round trip.
 import { render, fireEvent, waitFor } from '@testing-library/svelte';
@@ -13,16 +12,13 @@ import { workBoardOpen, requestHostsView, settingsOpen, requestAssetsView, short
 import { toolkitTab } from './lib/toolkit_skills';
 import { sidebarView } from './lib/work_view';
 import { destination } from './lib/destination';
-import { uiLayout } from './lib/prefs';
 import { controlTab } from './lib/control';
-import { todayOpen } from './lib/today';
-import { sessionActionRequest } from './lib/session_actions';
 import { link, task } from './lib/work_view_fixture';
 import type { WorkTreePage } from './lib/work_view';
 import { activeHintId, hintDef, markSeen, resetHints } from './lib/hints';
 import { onboardingWelcomed } from './lib/onboarding';
 
-const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-overlay', 'accounts-overlay', 'control-overlay'];
+const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-view', 'accounts-overlay', 'control-overlay'];
 
 beforeEach(() => {
   onboardingDismissed.set(true);
@@ -30,11 +26,9 @@ beforeEach(() => {
 });
 afterEach(() => {
   destination.set('session');
-  uiLayout.set('classic');
   sidebarView.set('sessions');
   settingsOpen.set(false);
   controlTab.set('chat');
-  todayOpen.set(false);
 });
 
 function terminalSlot(container: HTMLElement): Element {
@@ -49,68 +43,55 @@ function openOverlays(container: HTMLElement): string[] {
 
 describe('App: the destination store', () => {
   it('starts on the Session tab', () => {
-    const { getByTestId } = render(App);
+    const { container, getByTestId } = render(App);
     expect(get(destination)).toBe('session');
-    expect(getByTestId('tab-session').classList.contains('active')).toBe(true);
+    expect(openOverlays(container)).toEqual([]);
+    expect(getByTestId('rail-sessions').getAttribute('aria-current')).toBe('page');
   });
 
   it('keeps the terminal mounted, and one overlay at most, through every overlay', async () => {
     const { container, getByTestId } = render(App);
     const term = terminalSlot(container);
 
-    await fireEvent.click(getByTestId('tab-assets'));
+    await fireEvent.click(getByTestId('stab-assets'));
     expect(openOverlays(container)).toEqual(['assets-overlay']);
 
-    await fireEvent.click(getByTestId('tab-hosts'));
-    expect(get(destination)).toBe('hosts');
+    requestHostsView();
+    await waitFor(() => expect(get(destination)).toBe('hosts'));
     expect(openOverlays(container)).toEqual(['hosts-overlay']);
 
     workBoardOpen.set(true);
-    await waitFor(() => expect(openOverlays(container)).toEqual(['board-overlay']));
-    expect(getByTestId('tab-session').classList.contains('active')).toBe(false);
+    await waitFor(() => expect(openOverlays(container)).toEqual(['board-view']));
 
-    await fireEvent.click(getByTestId('tab-session'));
+    await fireEvent.click(getByTestId('rail-accounts'));
+    expect(openOverlays(container)).toEqual(['accounts-overlay']);
+    await fireEvent.click(getByTestId('rail-sessions'));
     expect(get(destination)).toBe('session');
     expect(openOverlays(container)).toEqual([]);
     expect(terminalSlot(container)).toBe(term);
   });
 
-  it('Esc on the board returns to the Session tab', async () => {
-    const { container } = render(App);
-    workBoardOpen.set(true);
-    await waitFor(() => expect(openOverlays(container)).toEqual(['board-overlay']));
-    await fireEvent.keyDown(document.body, { key: 'Escape' });
-    expect(get(destination)).toBe('session');
-    expect(get(workBoardOpen)).toBe(false);
-  });
-
   it('a Hosts request from outside App replaces the open overlay', async () => {
     const { container, getByTestId } = render(App);
-    await fireEvent.click(getByTestId('tab-assets'));
+    await fireEvent.click(getByTestId('stab-assets'));
     requestHostsView();
     await waitFor(() => expect(openOverlays(container)).toEqual(['hosts-overlay']));
     expect(get(destination)).toBe('hosts');
   });
 
-  it('New layout: the board is a Work view, with no close and no Esc', async () => {
-    uiLayout.set('new');
-    try {
-      const { container, queryByTestId } = render(App);
-      workBoardOpen.set(true);
-      await waitFor(() => expect(queryByTestId('board-view')).not.toBeNull());
-      expect(queryByTestId('board-overlay')).toBeNull();
-      expect(queryByTestId('work-board-close')).toBeNull();
-      await fireEvent.keyDown(document.body, { key: 'Escape' });
-      expect(get(destination)).toBe('board');
-      // The terminal stays mounted under it, as under every destination.
-      expect(container.querySelector('.right-body > .view-slot:not(.overlay)')).not.toBeNull();
-    } finally {
-      uiLayout.set('classic');
-    }
+  it('the board is a Work view, with no close and no Esc', async () => {
+    const { container, queryByTestId } = render(App);
+    workBoardOpen.set(true);
+    await waitFor(() => expect(queryByTestId('board-view')).not.toBeNull());
+    expect(queryByTestId('work-board-close')).toBeNull();
+    await fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(get(destination)).toBe('board');
+    // The terminal stays mounted under it, as under every destination.
+    expect(container.querySelector('.right-body > .view-slot:not(.overlay)')).not.toBeNull();
   });
 
-  // The board under New is the same `WorkBoard` as Classic (parity P3, P26):
-  // these drive it through App, with a native and a tracker card served.
+  // The board (parity P3, P26), driven through App, with a native and a
+  // tracker card served.
   const boardPage = (): WorkTreePage => ({
     tasks: [
       task({
@@ -158,41 +139,35 @@ describe('App: the destination store', () => {
     }
   }
 
-  it('New layout: on the board, ← → move a focused native card across columns and e opens its edit dialog', async () => {
-    uiLayout.set('new');
-    try {
-      await withBoardBackend(async () => {
-        const { getByTestId, queryByTestId, getAllByTestId } = render(App);
-        workBoardOpen.set(true);
-        await waitFor(() => expect(queryByTestId('board-view')).not.toBeNull());
-        const card = (title: string) =>
-          getAllByTestId('work-board-card').find((el) => el.textContent?.includes(title)) as HTMLElement;
-        const col = (c: string) => getByTestId(`work-board-column-${c}`);
-        await waitFor(() => expect(col('todo').textContent).toContain('Write notes'));
-        const sets = () => vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'set_work_status');
-        const before = sets().length;
+  it('on the board, ← → move a focused native card across columns and e opens its edit dialog', async () => {
+    await withBoardBackend(async () => {
+      const { getByTestId, queryByTestId, getAllByTestId } = render(App);
+      workBoardOpen.set(true);
+      await waitFor(() => expect(queryByTestId('board-view')).not.toBeNull());
+      const card = (title: string) =>
+        getAllByTestId('work-board-card').find((el) => el.textContent?.includes(title)) as HTMLElement;
+      const col = (c: string) => getByTestId(`work-board-column-${c}`);
+      await waitFor(() => expect(col('todo').textContent).toContain('Write notes'));
+      const sets = () => vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'set_work_status');
+      const before = sets().length;
 
-        await fireEvent.keyDown(card('Write notes'), { key: 'ArrowRight' });
-        await waitFor(() => expect(col('doing').textContent).toContain('Write notes'));
-        expect(sets().slice(before)[0][1]).toEqual({ args: { item_id: 1, status: 'in_progress' } });
+      await fireEvent.keyDown(card('Write notes'), { key: 'ArrowRight' });
+      await waitFor(() => expect(col('doing').textContent).toContain('Write notes'));
+      expect(sets().slice(before)[0][1]).toEqual({ args: { item_id: 1, status: 'in_progress' } });
 
-        await fireEvent.keyDown(card('Write notes'), { key: 'ArrowLeft' });
-        await waitFor(() => expect(col('todo').textContent).toContain('Write notes'));
-        expect(sets().slice(before)[1][1]).toEqual({ args: { item_id: 1, status: 'todo' } });
+      await fireEvent.keyDown(card('Write notes'), { key: 'ArrowLeft' });
+      await waitFor(() => expect(col('todo').textContent).toContain('Write notes'));
+      expect(sets().slice(before)[1][1]).toEqual({ args: { item_id: 1, status: 'todo' } });
 
-        // e on a tracker card opens nothing; on a native card, the edit dialog.
-        await fireEvent.keyDown(card('Login fails'), { key: 'e' });
-        expect(queryByTestId('edit-task-dialog')).toBeNull();
-        await fireEvent.keyDown(card('Write notes'), { key: 'e' });
-        await waitFor(() => expect(queryByTestId('edit-task-dialog')).not.toBeNull());
-      });
-    } finally {
-      uiLayout.set('classic');
-    }
+      // e on a tracker card opens nothing; on a native card, the edit dialog.
+      await fireEvent.keyDown(card('Login fails'), { key: 'e' });
+      expect(queryByTestId('edit-task-dialog')).toBeNull();
+      await fireEvent.keyDown(card('Write notes'), { key: 'e' });
+      await waitFor(() => expect(queryByTestId('edit-task-dialog')).not.toBeNull());
+    });
   });
 
-  it('New layout: the board offers its one-time move hint, and not again once dismissed', async () => {
-    uiLayout.set('new');
+  it('the board offers its one-time move hint, and not again once dismissed', async () => {
     resetHints();
     const welcomed = get(onboardingWelcomed);
     onboardingWelcomed.set(true);
@@ -211,28 +186,13 @@ describe('App: the destination store', () => {
     } finally {
       resetHints();
       onboardingWelcomed.set(welcomed);
-      uiLayout.set('classic');
     }
   });
 
-  it('a row action shows the Details pane it runs in', async () => {
-    const { getByTestId, queryByTestId } = render(App);
-    await fireEvent.click(getByTestId('center-collapse'));
-    expect(queryByTestId('center-expand')).not.toBeNull();
-    sessionActionRequest.set({ sessionId: 1, action: 'details', seq: 1 });
-    await waitFor(() => expect(queryByTestId('center-expand')).toBeNull());
-    sessionActionRequest.set(null);
-  });
 });
 
 describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
-  it('Classic shows no rail', () => {
-    const { queryByTestId } = render(App);
-    expect(queryByTestId('rail')).toBeNull();
-  });
-
-  it('New shows the landed items in the manual order, Settings last', () => {
-    uiLayout.set('new');
+  it('the rail shows the landed items in the manual order, Settings last', () => {
     const { getByTestId } = render(App);
     const ids = Array.from(getByTestId('rail').querySelectorAll('[data-testid^="rail-"]'), (e) =>
       e.getAttribute('data-testid'),
@@ -242,10 +202,9 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
   });
 
   it('Accounts opens as one more overlay over a mounted terminal, and Esc leaves it', async () => {
-    uiLayout.set('new');
     const { container, getByTestId } = render(App);
     const term = terminalSlot(container);
-    // The New layout's tab bar has no Hosts tab (step 3.5): ⌘I and the rail.
+    // The tab bar has no Hosts tab (step 3.5): ⌘I and the rail.
     requestHostsView();
     await waitFor(() => expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page'));
     await fireEvent.click(getByTestId('rail-accounts'));
@@ -258,7 +217,6 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
   });
 
   it('Toolkit (step 3.16) is the Assets screen, from the rail and from every old entry point', async () => {
-    uiLayout.set('new');
     toolkitTab.set('skills');
     const { container, getByTestId } = render(App);
     const term = terminalSlot(container);
@@ -276,18 +234,7 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     expect(getByTestId('toolkit')).toBeTruthy();
   });
 
-  it('Classic keeps the Assets overlay without Toolkit', async () => {
-    const { getByTestId, queryByTestId } = render(App);
-    await fireEvent.click(getByTestId('tab-assets'));
-    expect(getByTestId('assets-overlay')).toBeTruthy();
-    expect(queryByTestId('toolkit')).toBeNull();
-  });
-
-  it('the New status bar ends on Shortcuts (step 3.17), with the rest unchanged; Classic has none', async () => {
-    const classic = render(App);
-    expect(classic.queryByTestId('footer-shortcuts')).toBeNull();
-    classic.unmount();
-    uiLayout.set('new');
+  it('the status bar ends on Shortcuts (step 3.17), with the rest unchanged', async () => {
     const { getByTestId } = render(App);
     await fireEvent.click(getByTestId('footer-shortcuts'));
     expect(get(shortcutSheetOpen)).toBe(true);
@@ -295,7 +242,6 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
   });
 
   it('Work and Sessions pick the sidebar tree and leave a fleet page', async () => {
-    uiLayout.set('new');
     const { getByTestId } = render(App);
     await fireEvent.click(getByTestId('rail-accounts'));
     await fireEvent.click(getByTestId('rail-work'));
@@ -307,8 +253,7 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     expect(getByTestId('rail-sessions').getAttribute('aria-current')).toBe('page');
   });
 
-  it('Inbox (step 3.3) shows the Inbox list, with no Today tab since 9.1; Classic reads it as Sessions', async () => {
-    uiLayout.set('new');
+  it('Inbox (step 3.3) shows the Inbox list, with no Today tab since 9.1', async () => {
     const { getByTestId, queryByTestId } = render(App);
     await fireEvent.click(getByTestId('rail-accounts'));
     await fireEvent.click(getByTestId('rail-inbox'));
@@ -323,37 +268,22 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     expect(get(sidebarView)).toBe('sessions');
     expect(queryByTestId('inbox')).toBeNull();
     expect(getByTestId('sidebar-view-sessions').textContent).toContain('All sessions');
-    // Classic has no Inbox: it falls back to the Sessions list.
-    sidebarView.set('inbox');
-    uiLayout.set('classic');
-    await waitFor(() => expect(get(sidebarView)).toBe('sessions'));
   });
 
   it('Settings opens the Settings dialog', async () => {
-    uiLayout.set('new');
     const { getByTestId } = render(App);
     await fireEvent.click(getByTestId('rail-settings'));
     expect(get(settingsOpen)).toBe(true);
     settingsOpen.set(false);
   });
 
-  it('switching back to Classic leaves Accounts and hides the rail', async () => {
-    uiLayout.set('new');
-    const { container, getByTestId, queryByTestId } = render(App);
-    await fireEvent.click(getByTestId('rail-accounts'));
-    uiLayout.set('classic');
-    await waitFor(() => expect(openOverlays(container)).toEqual([]));
-    expect(queryByTestId('rail')).toBeNull();
-    expect(get(destination)).toBe('session');
-  });
 });
 
 describe('App: Control (step 9.1)', () => {
   it('the rail opens Control over a mounted terminal, with the agent in place of its sheet', async () => {
-    uiLayout.set('new');
     const { container, getByTestId, queryByTestId } = render(App);
     const term = terminalSlot(container);
-    // The New layout has no floating agent button: the rail is the way in.
+    // No floating agent button: the rail is the way in.
     expect(container.querySelector('.agent-fab')).toBeNull();
     await fireEvent.click(getByTestId('rail-control'));
     expect(openOverlays(container)).toEqual(['control-overlay']);
@@ -367,7 +297,6 @@ describe('App: Control (step 9.1)', () => {
   });
 
   it('⌘E opens and closes Control; ⌘⇧T opens its Today tab', async () => {
-    uiLayout.set('new');
     const { container, getByTestId } = render(App);
     await fireEvent.keyDown(window, { key: 'e', metaKey: true });
     expect(get(destination)).toBe('control');
@@ -375,8 +304,6 @@ describe('App: Control (step 9.1)', () => {
     await fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true });
     expect(get(controlTab)).toBe('today');
     await waitFor(() => expect(getByTestId('control-tab-today').getAttribute('aria-selected')).toBe('true'));
-    // Today moved here: the column no longer opens Today over Details.
-    expect(get(todayOpen)).toBe(false);
     await fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true });
     expect(get(destination)).toBe('session');
     await fireEvent.keyDown(window, { key: 'e', metaKey: true });
@@ -385,14 +312,4 @@ describe('App: Control (step 9.1)', () => {
     expect(openOverlays(container)).toEqual([]);
   });
 
-  it('Classic keeps ⌘⇧T over Details, and switching to Classic leaves Control', async () => {
-    uiLayout.set('new');
-    const { container, getByTestId } = render(App);
-    await fireEvent.click(getByTestId('rail-control'));
-    uiLayout.set('classic');
-    await waitFor(() => expect(openOverlays(container)).toEqual([]));
-    await fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true });
-    expect(get(todayOpen)).toBe(true);
-    expect(get(destination)).toBe('session');
-  });
 });

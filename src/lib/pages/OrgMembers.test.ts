@@ -1,13 +1,12 @@
 // Redesign 11.7c: an admin sees that a member's private sessions exist, as a
-// count beside their name, never which ones. New layout only.
+// count beside their name, never which ones.
 import { render, screen } from '@testing-library/svelte';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import OrgMembers from './OrgMembers.svelte';
 import { memberSessionsWord, type OrgMember } from '../orgs';
-import { uiLayout } from '../prefs';
 import type { ResourceRecord } from './resources';
 
 const members: OrgMember[] = [
@@ -28,8 +27,6 @@ function mount(list: OrgMember[] = members) {
   });
 }
 
-afterEach(() => uiLayout.set('classic'));
-
 describe('OrgMembers: sessions (11.7c)', () => {
   it('words the counts, and a private one as existing only', () => {
     expect(memberSessionsWord({})).toBe('—');
@@ -39,7 +36,6 @@ describe('OrgMembers: sessions (11.7c)', () => {
   });
 
   it('the New layout shows each member’s sessions; private ones say why', () => {
-    uiLayout.set('new');
     mount();
     const cells = screen.getAllByTestId('member-sessions');
     expect(cells.map((c) => c.textContent)).toEqual(['6 live', '1 live, private', '—']);
@@ -47,11 +43,7 @@ describe('OrgMembers: sessions (11.7c)', () => {
     expect(cells[0].getAttribute('title')).toBeNull();
   });
 
-  it('Classic, or an older hub that sends no counts, shows no column', () => {
-    const { unmount } = mount();
-    expect(screen.queryByTestId('member-sessions')).toBeNull();
-    unmount();
-    uiLayout.set('new');
+  it('an older hub that sends no counts shows no column', () => {
     mount(members.map(({ person_id, name, role }) => ({ person_id, name, role })));
     expect(screen.queryByTestId('member-sessions')).toBeNull();
   });

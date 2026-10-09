@@ -43,6 +43,12 @@ describe('AppRail', () => {
     await fireEvent.click(getByTestId('rail-work'));
     expect(onselect).toHaveBeenCalledWith('work');
   });
+
+  it('anchors the agent hint on Control, where the floating button used to be (13.1)', async () => {
+    const { anchorEl } = await import('./hints');
+    const { getByTestId } = render(AppRail, { isMac: true, onselect: () => {} });
+    expect(anchorEl('agent-fab')).toBe(getByTestId('rail-control'));
+  });
 });
 
 describe('AppRail accessibility (7.2)', () => {

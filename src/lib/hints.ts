@@ -62,9 +62,11 @@ export const HINTS: HintDef[] = [
     placement: 'top',
   },
   {
+    // Kept as `agent-fab` so a dismissal stored before 13.1 still holds; it
+    // anchors on the rail's Control item since the floating button went.
     id: 'agent-fab',
     text: 'Ask the agent to drive the fleet — it can do anything this app can.',
-    placement: 'left',
+    placement: 'right',
   },
 ];
 

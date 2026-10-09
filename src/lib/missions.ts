@@ -335,11 +335,11 @@ export function moveLabel(from: string, to: string): string {
   return MOVE_LABEL[to] ?? to;
 }
 
-/** The moves that end a mission. In the New layout they sit in the ⋯ menu
+/** The moves that end a mission. They sit in the ⋯ menu
  *  beside Edit and Pause, each behind a confirm (redesign parity row P19). */
 export const FINAL_MOVES: readonly string[] = ['completed', 'failed', 'cancelled'];
 
-/** A state's moves split for the New layout: Start, Pause and Resume stay
+/** A state's moves split for the mission header: Start, Pause and Resume stay
  *  buttons; Complete, Mark failed and Cancel go to the ⋯ menu. */
 export function splitMoves(state: string): { inline: string[]; menu: string[] } {
   const all = MISSION_MOVES[state] ?? [];

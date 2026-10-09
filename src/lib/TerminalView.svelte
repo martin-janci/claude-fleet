@@ -28,7 +28,6 @@
   import { hubStatus, ownsTheFleet } from './hub';
   import { accessOf, noAttachReason } from './access';
   import { sessionBlocked } from './share';
-  import { uiLayout } from './prefs';
   import { matchShortcut } from './shortcuts';
   import {
     shellTerminals,
@@ -134,10 +133,9 @@
   const termNoAttachWhy = $derived(noAttachReason(termAccess, $hubStatus));
 
   // ── Shell terminals (step 5.3) ──────────────────────────────────────
-  // The strip is the new layout's (ground rule: behind `ui.layout` until
-  // 7.5); the classic pane is the agent's terminal, exactly as before.
+  // The strip of the session's terminals, beside the agent's own pane.
   const showStrip = $derived(
-    isRoot && $uiLayout === 'new' && termOwned && !!$selectedSession && !hasNoPane($selectedSession),
+    isRoot && termOwned && !!$selectedSession && !hasNoPane($selectedSession),
   );
   /** The session's open terminals, by number. */
   let shells: number[] = $state([]);

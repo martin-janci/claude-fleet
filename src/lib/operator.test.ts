@@ -5,13 +5,9 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 
 import { get } from 'svelte/store';
 import {
-  agentPanelOpen,
   operatorState,
   operatorSession,
   operatorRow,
-  openAgent,
-  closeAgent,
-  toggleAgent,
   restartOperator,
   replaceOperator,
   ensureAgent,
@@ -38,26 +34,23 @@ const row = (over = {}) =>
 beforeEach(() => {
   invoke.mockReset();
   operatorError.set(null);
-  agentPanelOpen.set(false);
   operatorState.set('unknown');
   operatorSession.set(null);
   sessions.set([]);
 });
 
-describe('openAgent', () => {
-  it('opens the panel, wakes the agent, and ends ready', async () => {
+describe('ensureAgent: waking the agent', () => {
+  it('wakes the agent and ends ready', async () => {
     invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'absent' });
     invoke.mockResolvedValueOnce({ id: 7, tmux_name: 'fleet-operator', host_alias: 'local' });
-    await openAgent();
-    expect(get(agentPanelOpen)).toBe(true);
+    await ensureAgent();
     expect(get(operatorState)).toBe('ready');
     expect(get(operatorSession)?.id).toBe(7);
   });
 
   it('a blocked agent does not get woken, and the reason survives', async () => {
     invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'no_mcp' });
-    await openAgent();
-    expect(get(agentPanelOpen)).toBe(true);
+    await ensureAgent();
     expect(get(operatorState)).toBe('no_mcp');
     // Only the status call — ensure_operator must not run when the control
     // API is off: it would create a session that cannot reach any tool.
@@ -73,7 +66,7 @@ describe('openAgent', () => {
       fallback: 'oci',
     });
     invoke.mockResolvedValueOnce({ id: 9, tmux_name: 'fleet-operator', host_alias: 'oci' });
-    await openAgent();
+    await ensureAgent();
     expect(invoke).toHaveBeenNthCalledWith(2, 'ensure_operator', undefined);
     expect(get(operatorState)).toBe('ready');
     expect(get(operatorSession)?.host_alias).toBe('oci');
@@ -88,7 +81,7 @@ describe('openAgent', () => {
       host: 'mefistos',
       fallback: null,
     });
-    await openAgent();
+    await ensureAgent();
     expect(get(operatorState)).toBe('host_down');
     expect(invoke).toHaveBeenCalledTimes(1);
   });
@@ -102,7 +95,7 @@ describe('openAgent', () => {
       fallback: 'oci',
     });
     invoke.mockRejectedValueOnce({ code: 'E_SSH', message: 'oci went away too' });
-    await openAgent();
+    await ensureAgent();
     expect(get(operatorState)).toBe('host_down');
   });
 
@@ -112,7 +105,7 @@ describe('openAgent', () => {
       session: { id: 3, tmux_name: 'fleet-operator', host_alias: 'local' },
       blocked: null,
     });
-    await openAgent();
+    await ensureAgent();
     expect(get(operatorState)).toBe('ready');
     expect(invoke).toHaveBeenCalledTimes(1);
   });
@@ -183,7 +176,7 @@ describe('operatorHost', () => {
       blocked: 'no_host',
       host: 'mefistos',
     });
-    await openAgent();
+    await ensureAgent();
     expect(get(operatorState)).toBe('no_host');
     expect(get(operatorHost)).toBe('mefistos');
     // An older hub answers without the field.
@@ -265,8 +258,6 @@ describe('replaceOperator (token_revoked, step 9.1)', () => {
     expect(invoke.mock.calls[0][1]).toEqual({ args: { host_alias: 'local', name: 'fleet-operator' } });
     expect(get(operatorState)).toBe('ready');
     expect(get(operatorSession)?.id).toBe(8);
-    // The sheet stays as it was: Control replaces the agent without it.
-    expect(get(agentPanelOpen)).toBe(false);
   });
 
   it('a failed kill says why and starts nothing', async () => {
@@ -282,45 +273,15 @@ describe('replaceOperator (token_revoked, step 9.1)', () => {
 });
 
 describe('ensureAgent (Control, step 9.1)', () => {
-  it('wakes the agent without opening the sheet', async () => {
+  it('wakes the agent', async () => {
     invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'absent' });
     invoke.mockResolvedValueOnce(row());
     await ensureAgent();
     expect(get(operatorState)).toBe('ready');
-    expect(get(agentPanelOpen)).toBe(false);
   });
 });
 
-describe('closing the panel', () => {
-  // The panel is `position: fixed` over the bottom-right corner of every
-  // view. Before this, `agentPanelOpen` was written `true` in one place and
-  // `false` nowhere in production code — the first press pinned the sheet
-  // for the life of the process.
-  it('toggleAgent closes an open panel without touching the backend', async () => {
-    agentPanelOpen.set(true);
-    await toggleAgent();
-    expect(get(agentPanelOpen)).toBe(false);
-    expect(invoke).not.toHaveBeenCalled();
-  });
-
-  it('toggleAgent opens a closed panel', async () => {
-    invoke.mockResolvedValueOnce({ ready: true, session: row(), blocked: null });
-    await toggleAgent();
-    expect(get(agentPanelOpen)).toBe(true);
-    expect(invoke).toHaveBeenCalledWith('operator_status', undefined);
-  });
-
-  it('closeAgent leaves the agent itself alone — the panel is a window, not the session', () => {
-    agentPanelOpen.set(true);
-    operatorState.set('ready');
-    closeAgent();
-    expect(get(agentPanelOpen)).toBe(false);
-    expect(get(operatorState)).toBe('ready');
-    expect(invoke).not.toHaveBeenCalled();
-  });
-});
-
-describe('openAgent re-entrancy', () => {
+describe('ensureAgent re-entrancy', () => {
   // Two overlapping presses each minted a token and revoked the other's, and
   // because the DB write and the `.mcp.json` write are separately ordered the
   // host could end up on a token the database had revoked — every call 401s
@@ -333,8 +294,8 @@ describe('openAgent re-entrancy', () => {
     invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'absent' });
     invoke.mockResolvedValueOnce(row());
 
-    const first = openAgent();
-    const second = openAgent();
+    const first = ensureAgent();
+    const second = ensureAgent();
     expect(second).toBe(first);
     releaseStatus({ ready: false, session: null, blocked: 'absent' });
     await Promise.all([first, second]);
@@ -344,40 +305,10 @@ describe('openAgent re-entrancy', () => {
     expect(get(operatorState)).toBe('ready');
   });
 
-  it('a joiner opens the panel too — closing mid-birth must not wedge the button', async () => {
-    // Opening is what EVERY caller wants, whether it starts the birth or
-    // joins one already running. With `agentPanelOpen.set(true)` inside the
-    // work function only, a press after closing mid-birth returned the
-    // in-flight promise (already past that line) and the sheet stayed shut
-    // until the birth resolved — the button doing nothing, visibly.
-    let releaseEnsure: (v: unknown) => void = () => {};
-    invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'absent' });
-    invoke.mockImplementationOnce(
-      () => new Promise((res) => { releaseEnsure = res; }),
-    );
-
-    const birth = openAgent();
-    await vi.waitFor(() => expect(get(operatorState)).toBe('waking'));
-
-    closeAgent();
-    expect(get(agentPanelOpen)).toBe(false);
-
-    // Press again while the birth is STILL in flight.
-    const joined = openAgent();
-    expect(joined).toBe(birth);
-    expect(get(agentPanelOpen)).toBe(true);
-
-    releaseEnsure(row());
-    await Promise.all([birth, joined]);
-    expect(get(agentPanelOpen)).toBe(true);
-    expect(invoke.mock.calls.filter((c) => c[0] === 'ensure_operator')).toHaveLength(1);
-  });
-
   it('a later press is a fresh call, not the stale promise', async () => {
     invoke.mockResolvedValue({ ready: true, session: row(), blocked: null });
-    await openAgent();
-    agentPanelOpen.set(false);
-    await openAgent();
+    await ensureAgent();
+    await ensureAgent();
     expect(invoke.mock.calls.filter((c) => c[0] === 'operator_status')).toHaveLength(2);
   });
 });

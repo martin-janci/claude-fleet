@@ -11,14 +11,12 @@ import { hostChecks } from './host_check';
 import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
 import { NOW, host } from './hosts_fixture';
-import { uiLayout } from './prefs';
 
 const inv = mockedInvoke as unknown as ReturnType<typeof vi.fn>;
 let guardInstalled = false;
 
 beforeEach(() => {
   guardInstalled = false;
-  uiLayout.set('classic');
   hostChecks.set(new Map());
   hubStatus.set({ ...STANDALONE });
   hubConnection.set({ state: 'standalone' });
@@ -111,7 +109,6 @@ describe('HostDetail: health checklist', () => {
   });
 
   it('New shows the Hex field with its own step text while checking and re-provisioning', async () => {
-    uiLayout.set('new');
     const gates: Array<() => void> = [];
     const real = inv.getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
     inv.mockImplementation(async (cmd: string, payload?: unknown) => {
@@ -137,17 +134,4 @@ describe('HostDetail: health checklist', () => {
     await waitFor(() => expect(screen.queryByTestId('detail-check-live')).toBeNull());
   });
 
-  it('Classic shows no loader while checking', async () => {
-    let release!: () => void;
-    const real = inv.getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
-    inv.mockImplementation(async (cmd: string, payload?: unknown) => {
-      if (cmd === 'check_host') await new Promise<void>((r) => (release = r));
-      return real(cmd, payload);
-    });
-    mount();
-    await fireEvent.click(screen.getByTestId('detail-run-checks'));
-    await waitFor(() => expect(screen.getByTestId('detail-run-checks').textContent).toBe('checking…'));
-    expect(screen.queryByTestId('detail-check-live')).toBeNull();
-    release();
-  });
 });

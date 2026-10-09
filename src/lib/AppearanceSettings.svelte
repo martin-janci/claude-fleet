@@ -1,19 +1,15 @@
 <script lang="ts">
-  // Settings → Appearance (redesign step 0.3): the layout switch, the
-  // theme picker, (3.6) row density and (0.6) Motion. Hand-written, not a
-  // generated page, because all four are per-device prefs in localStorage
+  // Settings → Appearance (redesign step 0.3): the theme picker, (3.6) row
+  // density and (0.6) Motion; step 13.1 removed the Classic/New layout
+  // switch. Hand-written, not a
+  // generated page, because all three are per-device prefs in localStorage
   // rather than fleet settings. Copy
   // follows the Settings board of the Orbit Fleet canvas. This is the one
   // theme picker: step 1.4 removed the sidebar's "theme: …" line.
   import SegmentedControl from './SegmentedControl.svelte';
-  import { uiDensity, uiLayout, type UiDensity, type UiLayout } from './prefs';
+  import { uiDensity, type UiDensity } from './prefs';
   import { applyTheme, theme, type Theme } from './theme';
   import { motionPref, type MotionPref } from './motion';
-
-  const layouts = [
-    { id: 'new', label: 'New' },
-    { id: 'classic', label: 'Classic' },
-  ] as const satisfies readonly { id: UiLayout; label: string }[];
 
   const densities = [
     { id: 'compact', label: 'Compact' },
@@ -37,21 +33,6 @@
 <section class="block" data-testid="appearance-section">
   <div class="section-header">
     <h4>Appearance</h4>
-  </div>
-  <div class="pref">
-    <div class="pref-text">
-      <span class="lbl">Layout</span>
-      <p class="hook-desc">
-        New uses the rail, the left list with filters and grouping, and the
-        inspector. Classic keeps 0.5.3's layout for this release only.
-      </p>
-    </div>
-    <SegmentedControl
-      options={layouts}
-      value={$uiLayout}
-      label="Layout"
-      testidPrefix="appearance-layout-"
-      onchange={(id) => uiLayout.set(id)} />
   </div>
   <div class="pref">
     <div class="pref-text">

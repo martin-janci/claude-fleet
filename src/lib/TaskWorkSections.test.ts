@@ -1,7 +1,7 @@
 // The task page's shared-work sections (design 2026-09-29 §4): notes,
 // subtasks, proposals, jobs and agent steps — text as text.
-import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { render, screen, fireEvent, within } from '@testing-library/svelte';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -9,7 +9,6 @@ import { invoke } from '@tauri-apps/api/core';
 import TaskWorkSections from './TaskWorkSections.svelte';
 import { task } from './work_view_fixture';
 import type { TaskDetail } from './work_view';
-import { uiLayout } from './prefs';
 
 const detail: TaskDetail = {
   task: task({ task_id: 'item:110', item_id: 110, key: 'OM-110' }),
@@ -65,11 +64,16 @@ describe('TaskWorkSections', () => {
     expect(calls('reject_work_proposal')[0][1]).toEqual({ args: { item_id: 44 } });
   });
 
-  it('starts a subtask and adds one under this task', async () => {
+  it('starts a subtask through its split button and adds one under this task', async () => {
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      // An older hub with no start preview: the button starts at once.
+      if (cmd === 'preview_start_work') throw { code: 'E_INVALID', message: 'unknown work_link action preview_start' };
+      return { id: 1, title: 'x', source: 'local' };
+    });
     render(TaskWorkSections, { detail });
-    await fireEvent.click(screen.getByTestId('task-subtask-start'));
+    await fireEvent.click(within(screen.getByTestId('task-subtasks')).getByTestId('work-button-primary'));
     await flush();
-    expect(calls('start_work')[0][1]).toEqual({ args: { item_id: 41, project_id: 3 } });
+    expect(calls('start_work')[0][1]).toMatchObject({ args: { item_id: 41, project_id: 3 } });
     await fireEvent.click(screen.getByTestId('task-add-subtask'));
     const input = screen.getByLabelText('Subtask title') as HTMLInputElement;
     await fireEvent.input(input, { target: { value: 'Follow-up' } });
@@ -111,7 +115,6 @@ describe('TaskWorkSections', () => {
     };
 
     it('shows May duplicate with Merge and Keep both in the New layout', async () => {
-      uiLayout.set('new');
       render(TaskWorkSections, { detail: dupDetail });
       const dup = screen.getByTestId('task-proposal-duplicate');
       expect(dup.textContent).toContain('May duplicate TASK-36');
@@ -123,31 +126,17 @@ describe('TaskWorkSections', () => {
       await fireEvent.click(screen.getByTestId('task-proposal-keep-both'));
       await flush();
       expect(calls('accept_work_proposal')[0][1]).toEqual({ args: { item_id: 44 } });
-      uiLayout.set('classic');
-    });
-
-    it('keeps Accept and Reject, and no hint, in the classic layout', () => {
-      uiLayout.set('classic');
-      render(TaskWorkSections, { detail: dupDetail });
-      expect(screen.queryByTestId('task-proposal-duplicate')).toBeNull();
-      expect(screen.getByTestId('task-proposal-accept')).toBeTruthy();
-      expect(screen.getByTestId('task-proposal-reject')).toBeTruthy();
     });
 
     it('shows Accept and Reject when Jev flagged nothing', () => {
-      uiLayout.set('new');
       render(TaskWorkSections, { detail });
       expect(screen.queryByTestId('task-proposal-duplicate')).toBeNull();
       expect(screen.getByTestId('task-proposal-accept')).toBeTruthy();
-      uiLayout.set('classic');
     });
   });
 });
 
 describe('TaskWorkSections in the New layout', () => {
-  beforeEach(() => uiLayout.set('new'));
-  afterEach(() => uiLayout.set('classic'));
-
   it('+ Add subtask adds one under this task', async () => {
     render(TaskWorkSections, { detail, part: 'work' });
     await flush();

@@ -44,7 +44,6 @@
   import { inventory } from './assets';
   import { provisionHost } from './mcp';
   import { CHECK_GLYPH, checklistLoaderText, checklistRows, hostChecks, needsReprovision, runHostCheck } from './host_check';
-  import { uiLayout } from './prefs';
   import Loader from './Loader.svelte';
 
   let {
@@ -107,7 +106,7 @@
   const provisionBlocked = $derived(hubBlock('provision_hosts', $hubStatus));
   const reprovisionAdvised = $derived(needsReprovision(checklist, host));
   // Orbit Fleet 4.13: the Hex field beside what is running, Layout: New only.
-  const liveText = $derived($uiLayout === 'new' ? checklistLoaderText(host.alias, checking, provisioning) : null);
+  const liveText = $derived(checklistLoaderText(host.alias, checking, provisioning));
 
   async function runChecks() {
     if (checkBlocked !== null || checking) return;

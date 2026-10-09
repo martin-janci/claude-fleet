@@ -2,14 +2,13 @@
 // its detail with the lifecycle moves the state allows, a new task under its
 // root, and a refusal shown as text.
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkMissions from './WorkMissions.svelte';
 import { hosts } from './hosts';
-import { uiLayout } from './prefs';
 import {
   doneWhenRows,
   finalMoveQuestion,
@@ -68,6 +67,10 @@ const item = (id: number, title: string) => ({
   created_at: 1,
   updated_at: 1,
 });
+
+// An import switches the view to Graph and the choice is kept (a pref), so
+// every test starts on List.
+beforeEach(() => localStorage.removeItem('cf:pref:work.missions.view'));
 
 describe('WorkMissions', () => {
   let current: Mission;
@@ -140,56 +143,37 @@ describe('WorkMissions', () => {
     }
 
     it('New: Pause stays a button; Complete, Mark failed and Cancel ask first from ⋯', async () => {
-      uiLayout.set('new');
-      try {
-        await openActive();
-        expect(screen.getByTestId('mission-move-paused').textContent).toBe('Pause');
-        for (const to of ['completed', 'failed', 'cancelled']) expect(screen.queryByTestId(`mission-move-${to}`)).toBeNull();
-        await fireEvent.click(screen.getByTestId('mission-more'));
-        expect(screen.getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['Complete…', 'Mark failed…', 'Cancel…']);
-        await fireEvent.click(screen.getByTestId('mission-menu-failed'));
-        expect(screen.queryByTestId('mission-more-menu')).toBeNull();
-        expect(screen.getByTestId('mission-move-confirm-row').textContent).toContain('Mark Payments v2 failed?');
-        expect(calls('set_mission_state')).toEqual([]);
-        await fireEvent.click(screen.getByTestId('mission-move-keep'));
-        expect(screen.queryByTestId('mission-move-confirm-row')).toBeNull();
-        await fireEvent.click(screen.getByTestId('mission-more'));
-        await fireEvent.click(screen.getByTestId('mission-menu-completed'));
-        await fireEvent.click(screen.getByTestId('mission-move-confirm'));
-        await flush();
-        expect(calls('set_mission_state')).toEqual([{ mission_id: 4, state: 'completed', expected_version: 1 }]);
-        expect(screen.queryByTestId('mission-more')).toBeNull();
-      } finally {
-        uiLayout.set('classic');
-      }
+      await openActive();
+      expect(screen.getByTestId('mission-move-paused').textContent).toBe('Pause');
+      for (const to of ['completed', 'failed', 'cancelled']) expect(screen.queryByTestId(`mission-move-${to}`)).toBeNull();
+      await fireEvent.click(screen.getByTestId('mission-more'));
+      expect(screen.getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['Complete…', 'Mark failed…', 'Cancel…']);
+      await fireEvent.click(screen.getByTestId('mission-menu-failed'));
+      expect(screen.queryByTestId('mission-more-menu')).toBeNull();
+      expect(screen.getByTestId('mission-move-confirm-row').textContent).toContain('Mark Payments v2 failed?');
+      expect(calls('set_mission_state')).toEqual([]);
+      await fireEvent.click(screen.getByTestId('mission-move-keep'));
+      expect(screen.queryByTestId('mission-move-confirm-row')).toBeNull();
+      await fireEvent.click(screen.getByTestId('mission-more'));
+      await fireEvent.click(screen.getByTestId('mission-menu-completed'));
+      await fireEvent.click(screen.getByTestId('mission-move-confirm'));
+      await flush();
+      expect(calls('set_mission_state')).toEqual([{ mission_id: 4, state: 'completed', expected_version: 1 }]);
+      expect(screen.queryByTestId('mission-more')).toBeNull();
     });
 
     it('New: Esc closes the menu and a draft offers only Cancel in it', async () => {
-      uiLayout.set('new');
-      try {
-        render(WorkMissions);
-        await flush();
-        await fireEvent.click(screen.getByTestId('mission-row'));
-        await flush();
-        expect(screen.getByTestId('mission-move-active').textContent).toBe('Start');
-        await fireEvent.click(screen.getByTestId('mission-more'));
-        expect(screen.getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['Cancel…']);
-        await fireEvent.keyDown(screen.getByTestId('mission-more-menu'), { key: 'Escape' });
-        expect(screen.queryByTestId('mission-more-menu')).toBeNull();
-      } finally {
-        uiLayout.set('classic');
-      }
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      expect(screen.getByTestId('mission-move-active').textContent).toBe('Start');
+      await fireEvent.click(screen.getByTestId('mission-more'));
+      expect(screen.getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['Cancel…']);
+      await fireEvent.keyDown(screen.getByTestId('mission-more-menu'), { key: 'Escape' });
+      expect(screen.queryByTestId('mission-more-menu')).toBeNull();
     });
 
-    it('Classic keeps the flat buttons, with no ⋯', async () => {
-      uiLayout.set('classic');
-      await openActive();
-      expect(screen.queryByTestId('mission-more')).toBeNull();
-      expect(screen.getByTestId('mission-move-failed').textContent).toBe('Mark failed');
-      await fireEvent.click(screen.getByTestId('mission-move-cancelled'));
-      await flush();
-      expect(calls('set_mission_state')).toEqual([{ mission_id: 4, state: 'cancelled', expected_version: 1 }]);
-    });
   });
 
   it('adds a new task under the root and into the mission', async () => {
@@ -268,34 +252,22 @@ describe('WorkMissions', () => {
       await flush();
     }
 
-    it('stays out of the Classic layout', async () => {
-      uiLayout.set('classic');
-      await open();
-      expect(screen.queryByTestId('mission-view-graph')).toBeNull();
-      expect(screen.getAllByTestId('mission-wave')).toHaveLength(3);
-    });
-
     it('draws lanes × waves with progress and the critical path in the New layout', async () => {
-      uiLayout.set('new');
-      try {
-        await open();
-        await fireEvent.click(screen.getByTestId('mission-view-graph'));
-        await flush();
-        expect(screen.queryAllByTestId('mission-wave')).toHaveLength(0);
-        expect(screen.getByTestId('mission-graph-progress').textContent).toBe('1 of 4 done · 25%');
-        expect(screen.getAllByTestId('mission-graph-wave')).toHaveLength(3);
-        expect(screen.getAllByTestId('mission-graph-node')).toHaveLength(4);
-        expect(screen.getByTestId('mission-graph-critical').textContent).toContain('2 tasks');
-        const api = screen.getAllByTestId('mission-graph-node').find((n) => n.textContent?.includes('API'))!;
-        expect(api.getAttribute('aria-label')).toContain('on the critical path');
-        await fireEvent.click(screen.getAllByTestId('mission-graph-node').find((n) => n.textContent?.includes('UI'))!);
-        expect(screen.getByTestId('mission-graph-chosen').textContent).toContain('waits for API');
-        await fireEvent.click(screen.getByTestId('mission-view-list'));
-        await flush();
-        expect(screen.getAllByTestId('mission-wave')).toHaveLength(3);
-      } finally {
-        uiLayout.set('classic');
-      }
+      await open();
+      await fireEvent.click(screen.getByTestId('mission-view-graph'));
+      await flush();
+      expect(screen.queryAllByTestId('mission-wave')).toHaveLength(0);
+      expect(screen.getByTestId('mission-graph-progress').textContent).toBe('1 of 4 done · 25%');
+      expect(screen.getAllByTestId('mission-graph-wave')).toHaveLength(3);
+      expect(screen.getAllByTestId('mission-graph-node')).toHaveLength(4);
+      expect(screen.getByTestId('mission-graph-critical').textContent).toContain('2 tasks');
+      const api = screen.getAllByTestId('mission-graph-node').find((n) => n.textContent?.includes('API'))!;
+      expect(api.getAttribute('aria-label')).toContain('on the critical path');
+      await fireEvent.click(screen.getAllByTestId('mission-graph-node').find((n) => n.textContent?.includes('UI'))!);
+      expect(screen.getByTestId('mission-graph-chosen').textContent).toContain('waits for API');
+      await fireEvent.click(screen.getByTestId('mission-view-list'));
+      await flush();
+      expect(screen.getAllByTestId('mission-wave')).toHaveLength(3);
     });
   });
 
@@ -761,9 +733,6 @@ describe('WorkMissions comet trails', () => {
     await pastDelay();
   }
 
-  beforeEach(() => uiLayout.set('new'));
-  afterEach(() => uiLayout.set('classic'));
-
   it('draws trails beside the running step only', async () => {
     await open(detailWith(loop()));
     const trails = await vi.waitFor(() => screen.getAllByTestId('mission-trails'));
@@ -780,15 +749,11 @@ describe('WorkMissions comet trails', () => {
     expect(screen.queryByTestId('mission-trails')).toBeNull();
   });
 
-  it('stops on an ask step, a paused mission and in Classic', async () => {
+  it('stops on an ask step and a paused mission', async () => {
     await open(detailWith(loop({ steps: [{ kind: 'ask', reason: 'Which repo?', auto: false }] })));
     expect(screen.queryByTestId('mission-trails')).toBeNull();
     document.body.innerHTML = '';
     await open(detailWith(loop(), 'paused'));
-    expect(screen.queryByTestId('mission-trails')).toBeNull();
-    document.body.innerHTML = '';
-    uiLayout.set('classic');
-    await open(detailWith(loop()));
     expect(screen.queryByTestId('mission-trails')).toBeNull();
   });
 });

@@ -20,9 +20,7 @@
     showFriendlyNames,
     showRowDetails,
     sidebarGroupBy,
-    type SidebarGroupBy,
   } from './sessions';
-  import SegmentedControl from './SegmentedControl.svelte';
   import { diskMeter } from './hosts_view';
   import { hosts, hostFilter, effectiveHostFilter } from './hosts';
   import { hintAnchor } from './hints';
@@ -31,8 +29,7 @@
   import Attention from './Attention.svelte';
   import ScopeAttention from './ScopeAttention.svelte';
   import { scopes, scopeSelectorShown, scopeFilter, effectiveScope, UNASSIGNED } from './orgs';
-  import { scopeChordLabel, workViewChordLabel } from './app_views';
-  import { uiLayout } from './prefs';
+  import { workViewChordLabel } from './app_views';
   import { detectMac } from './terminal_keys';
   import LinkReview from './LinkReview.svelte';
   import TidyReview from './TidyReview.svelte';
@@ -66,7 +63,6 @@
   import { clearWorkFilterPatch, sessionFacets, type SessionFacetId } from './filter_facets';
 
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
-  const scopeTitle = `Organisation scope (${scopeChordLabel(isMac)})`;
   const workViewChord = workViewChordLabel(isMac);
 
   let {
@@ -119,7 +115,7 @@
     /** Archive into the work's Done, with Undo (step 1.7). */
     onBulkArchive?: () => void;
     /** Move each selected session past the line to the login on its host
-     *  with the most headroom (step 4.4; the New layout only). */
+     *  with the most headroom (step 4.4). */
     onBulkMoveAccount?: () => void;
     bulkMoveAccountBlocked?: string | null;
     bulkArchiveBlocked?: string | null;
@@ -127,25 +123,6 @@
     clearSelected: () => void;
   } = $props();
   const sessionsList = $derived(listView !== 'work');
-  // Redesign step 3.7: the New layout draws the shared Filters section.
-  const newLayout = $derived($uiLayout === 'new');
-
-  // Work keeps its own test id and toggles back to Project when pressed
-  // again, as it did before it became a SegmentedControl.
-  const GROUP_BY_OPTIONS: readonly { id: SidebarGroupBy; label: string; title?: string; testid?: string }[] = [
-    { id: 'project', label: 'Project' },
-    {
-      id: 'work',
-      label: 'Work',
-      title: 'Group sessions by work: a ticket key (ABC-123) in a tag, branch or worktree name',
-      testid: 'group-by-toggle',
-    },
-    // Redesign step 3.6: the flat groupings, after Project and Work.
-    { id: 'state', label: 'State' },
-    { id: 'host', label: 'Host' },
-    { id: 'agent', label: 'Agent' },
-  ];
-
   // ── Work filters (work graph M10.4) ──
   // Their group in the panel shows once there is work to filter (a tracker,
   // a linked session), in group-by-work, or while one is on.
@@ -188,10 +165,10 @@
   );
   // The strip and the badge carry what the panel holds: search and Needs
   // you show their state in their own controls already. (The empty state
-  // names them all.) In the New layout Needs you is in the panel, so it
+  // names them all.) Needs you is in the panel, so it
   // joins the strip.
   const stripFacets = $derived(
-    facets.filter((f) => f.id !== 'search' && (newLayout || f.id !== 'needs-you')),
+    facets.filter((f) => f.id !== 'search'),
   );
   const panelCount = $derived(stripFacets.length);
 
@@ -269,7 +246,6 @@
 <svelte:window onpointerdown={onWindowPointer} onkeydown={onWindowKey} />
 
 {#snippet panelSections()}
-        {#if newLayout}
           <section>
             <h3>Quick</h3>
             <div class="chips">
@@ -284,10 +260,9 @@
               >
             </div>
           </section>
-        {/if}
         <section>
           <h3>Scope</h3>
-          {#if newLayout && $scopeSelectorShown}
+          {#if $scopeSelectorShown}
             <FilterChipGroup
               label="Organisation"
               value={$effectiveScope}
@@ -431,38 +406,22 @@
           aria-label="View options"
           aria-haspopup="true"
           aria-expanded={optionsOpen}
-          title={newLayout ? 'View options: names, details, select' : 'View options: names, details, grouping'}
+          title="View options: names, details, select"
           onclick={() => (optionsOpen = !optionsOpen)}
         >⋯</button>
         {#if optionsOpen}
           <div class="menu" role="group" aria-label="View options" data-testid="view-options">
-            {#if newLayout}
-              <button
-                type="button"
-                class="switch-row"
-                role="switch"
-                aria-checked={selectMode}
-                data-testid="select-mode"
-                title="Select several sessions (or shift/cmd-click rows) for bulk actions"
-                onclick={() => toggleSelectMode()}
-              >
-                <span>Select several</span><span class="switch" aria-hidden="true"></span>
-              </button>
-            {:else}
-            <span class="menu-label">Group by</span>
-            <div class="group-by">
-              <SegmentedControl
-                label="Group by"
-                testidPrefix="group-by-"
-                value={$sidebarGroupBy}
-                options={GROUP_BY_OPTIONS}
-                onchange={(id) =>
-                  id === 'work'
-                    ? sidebarGroupBy.update((v) => (v === 'work' ? 'project' : 'work'))
-                    : sidebarGroupBy.set(id)}
-              />
-            </div>
-            {/if}
+            <button
+              type="button"
+              class="switch-row"
+              role="switch"
+              aria-checked={selectMode}
+              data-testid="select-mode"
+              title="Select several sessions (or shift/cmd-click rows) for bulk actions"
+              onclick={() => toggleSelectMode()}
+            >
+              <span>Select several</span><span class="switch" aria-hidden="true"></span>
+            </button>
             <button
               type="button"
               class="switch-row"
@@ -515,7 +474,7 @@
           data-testid="sidebar-view-sessions"
           title={`Sessions (${workViewChord})`}
           onclick={() => sidebarView.set('sessions')}
-          >{$uiLayout === 'new' ? 'All sessions' : 'Sessions'}{#if !sessionsList && needsYouCount > 0}<span
+          >All sessions{#if !sessionsList && needsYouCount > 0}<span
               class="tab-badge hot"
               data-testid="sessions-tab-needs-you"
               title="{needsYouCount} waiting on you">{needsYouCount}</span
@@ -560,8 +519,8 @@
     {/if}
   </div>
 
-  {#if sessionsList && newLayout}
-    <!-- The New layout (step 3.7): one row while closed, the same shape as
+  {#if sessionsList}
+    <!-- Step 3.7: one row while closed, the same shape as
          the Work view's; Needs you and the organisation join the panel. -->
     <FiltersSection
       {search}
@@ -588,100 +547,6 @@
       panel={panelSections}
     />
     <ActiveFilters facets={stripFacets} onclear={clearFacet} onclearall={clearAll} emptyFocus={() => filtersBtn} />
-  {:else if sessionsList}
-    <!-- R1: what to look for, and where the rest of the filters are. -->
-    <div class="row">
-      {#if $scopeSelectorShown}
-        <!-- Work graph M5: the org scope — a view, never a boundary here. Only
-             with two or more scopes, so a one-company fleet sees no chrome. -->
-        <select
-          class="scope"
-          data-testid="scope-select"
-          aria-label="Organisation scope"
-          title={scopeTitle}
-          value={$effectiveScope}
-          onchange={(e) => scopeFilter.set((e.currentTarget as HTMLSelectElement).value)}
-        >
-          <option value="all">All</option>
-          {#each $scopes as sc (sc.id)}
-            <option value={sc.id}>{sc.label}</option>
-          {/each}
-          <option value={UNASSIGNED}>Unassigned</option>
-        </select>
-      {/if}
-      <input
-        class="search"
-        type="search"
-        placeholder="Search sessions, projects…"
-        aria-label="Search sessions"
-        bind:value={search}
-        data-testid="sidebar-search"
-      />
-      <button
-        bind:this={filtersBtn}
-        class="btn btn--quiet is-bounded filters-btn"
-        class:has-active={panelCount > 0}
-        data-testid="filters-open"
-        aria-expanded={panelOpen}
-        aria-controls="sidebar-filter-panel"
-        aria-label={panelCount > 0 ? `Filters, ${panelCount} active` : 'Filters'}
-        title="Filter by machine, time, work and more"
-        onclick={() => (panelOpen = !panelOpen)}
-        use:hintAnchor={{ id: 'host-filter', when: visibleHosts.length >= 2 }}
-      >
-        <span aria-hidden="true">⏷</span> Filters{#if panelCount > 0}<span class="badge">{panelCount}</span>{/if}
-      </button>
-    </div>
-
-    <!-- R2: the one-click filter and the mode that act on this list. -->
-    <div class="row r2">
-      <!-- One triage pill (P13/P27): the ranked queue replaces the old
-           stuck-only and needs-attention pills, which ordered rows two
-           different ways. -->
-      <button
-        class="btn btn--chip btn--toggle triage-pill"
-        class:hot={needsYouCount > 0}
-        data-testid="needs-you-filter"
-        aria-pressed={needsYouOnly}
-        title="Counts what is waiting on you now: blocked, stuck, failed, lost, safe-remove pending/failed. Toggling also shows sessions idle > {$attentionIdleMinutes} min."
-        onclick={() => (needsYouOnly = !needsYouOnly)}
-      >
-        <!-- At zero there is nothing to warn about: the ⚠ and the count were
-             permanent chrome that read as an alert. The pill stays so the
-             filter remains reachable. -->
-        {#if needsYouCount > 0}<span aria-hidden="true">⚠</span> Needs you <span class="count">{needsYouCount}</span>{:else}Needs you{/if}
-      </button>
-      <button
-        class="btn btn--chip btn--toggle"
-        data-testid="select-mode"
-        aria-pressed={selectMode}
-        title="Select several sessions (or shift/cmd-click rows) for bulk actions"
-        onclick={() => toggleSelectMode()}
-      >Select</button>
-      <span class="spacer"></span>
-      {@render viewOptions()}
-    </div>
-
-    <ActiveFilters facets={stripFacets} onclear={clearFacet} onclearall={clearAll} emptyFocus={() => filtersBtn} />
-
-    {#if panelOpen}
-      <div
-        class="panel"
-        id="sidebar-filter-panel"
-        role="group"
-        aria-label="Filters"
-        data-testid="filter-panel"
-      >
-        {@render panelSections()}
-        <div class="panel-foot">
-          {#if panelCount > 0}
-            <button type="button" class="btn btn--quiet" data-testid="wf-clear" onclick={clearAll}>Clear all</button>
-          {/if}
-          <span class="spacer"></span>
-          <button type="button" class="btn btn--quiet is-bounded" data-testid="filters-done" onclick={closePanel}>Done</button>
-        </div>
-      </div>
-    {/if}
   {/if}
 
   <Attention />
@@ -726,7 +591,7 @@
           onclick={() => onBulkArchive()}
         >Archive</button>
       {/if}
-      {#if onBulkMoveAccount && $uiLayout === 'new'}
+      {#if onBulkMoveAccount}
         <button
           class="btn btn--chip"
           data-testid="bulk-move-account"
@@ -824,50 +689,6 @@
     background: var(--danger-fill);
     color: var(--on-danger);
   }
-  .search {
-    flex: 1;
-    min-width: 0;
-    height: var(--control-h-lg);
-    font-size: var(--control-font);
-    padding: 0 8px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--fg);
-    border-radius: var(--radius-sm);
-  }
-  .search::placeholder {
-    color: var(--fg-muted);
-  }
-  .scope {
-    flex: 0 1 auto;
-    max-width: 7.5rem;
-    height: var(--control-h-lg);
-    font-size: var(--control-font);
-    padding: 0 4px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--fg);
-    border-radius: var(--radius-sm);
-  }
-  .filters-btn {
-    height: var(--control-h-lg);
-    gap: 4px;
-  }
-  .filters-btn.has-active {
-    border-color: var(--accent);
-    color: var(--control-fg);
-  }
-  .badge {
-    min-width: 16px;
-    height: 16px;
-    padding: 0 4px;
-    border-radius: var(--radius-pill);
-    background: var(--accent);
-    color: var(--accent-fg);
-    font-size: var(--control-font-sm);
-    line-height: 16px;
-    font-weight: 600;
-  }
   .triage-pill.hot {
     color: var(--usage-crit);
     border-color: color-mix(in srgb, var(--usage-crit) 55%, transparent);
@@ -898,44 +719,12 @@
     background: var(--bg);
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
   }
-  .menu-label,
   .fgroup-label {
     font-size: var(--control-font-sm);
     font-weight: 600;
     color: var(--fg-muted);
   }
-  .group-by {
-    margin-bottom: 4px;
-  }
 
-  .panel {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    max-height: 50vh;
-    overflow-y: auto;
-    padding: 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    background: var(--bg);
-  }
-  .panel section {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .panel h3 {
-    margin: 0;
-    font-size: var(--control-font-sm);
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--fg-muted);
-  }
-  .panel section + section {
-    border-top: 1px solid var(--border);
-    padding-top: 8px;
-  }
   .fgroup {
     display: flex;
     flex-direction: column;
@@ -945,13 +734,6 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
-  }
-  .panel-foot {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    border-top: 1px solid var(--border);
-    padding-top: 6px;
   }
 
   .bulk-bar {

@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 import * as sessionsModule from './sessions';
 
@@ -13,7 +13,6 @@ import { hosts } from './hosts';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
-import { uiLayout } from './prefs';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -144,10 +143,9 @@ describe('NewSessionDialog', () => {
     expect((newSessionCall![1] as any).args.host_alias).toBe('mefistos');
   });
 
-  // Step 5.13: while the create runs, the new layout's dialog shows the
-  // Pulse on its worktree step; nothing shows in Classic.
+  // Step 5.13: while the create runs, the dialog shows the Pulse on its
+  // worktree step.
   it('new layout: the create in flight shows the Pulse on the worktree step', async () => {
-    uiLayout.set('new');
     let finish!: () => void;
     const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockImplementation(async (args) => {
       sessionsModule.creatingStart.set({ host_alias: args.host_alias, name: args.name, kind: 'work' });
@@ -166,7 +164,6 @@ describe('NewSessionDialog', () => {
       await vi.waitFor(() => expect(screen.queryByTestId('new-session-pulse')).toBeNull());
     } finally {
       spy.mockRestore();
-      uiLayout.set('classic');
     }
   });
 
@@ -1822,8 +1819,6 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
 
   it("New layout: Jev's proposed sibling is pre-ticked with the chip, and Untick clears it (3.12 N3)", async () => {
     const { projects } = await import('./projects');
-    const { uiLayout } = await import('./prefs');
-    uiLayout.set('new');
     projects.set([
       project as never,
       { project: { ...project.project, id: 2, repo: 'web', base_path: '/r/web' }, worktrees: [] } as never,
@@ -1851,17 +1846,8 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
       expect(also.checked).toBe(false);
       expect(screen.queryByTestId('ticket-also-in-proposed')).toBeNull();
     } finally {
-      uiLayout.set('classic');
       projects.set([]);
     }
-  });
-
-  it('Classic asks no sibling proposal (3.12 N3)', async () => {
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async () => null);
-    render(NewSessionDialog, { props: { project, ticket, onCreate: () => {}, onCancel: () => {} } });
-    await tick();
-    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls.some((c) => c[0] === 'preview_start_work')).toBe(false);
   });
 
   it('forgets ticked repos when the ticket changes, and never starts in one not shown (M9.6)', async () => {
@@ -1967,10 +1953,10 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
 });
 
 describe('NewSessionDialog accessibility (7.2)', () => {
-  it('passes the axe and audit checks; the type picker is a named group of toggles', async () => {
+  it('passes the axe and audit checks; the agent picker is a named group of toggles', async () => {
     const { container } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
-    const group = screen.getByRole('group', { name: 'Type' });
+    const group = screen.getByRole('group', { name: 'Agent' });
     expect(group.querySelectorAll('[aria-pressed="true"]')).toHaveLength(1);
     await expectAccessible(container);
   });
@@ -2049,7 +2035,6 @@ describe('NewSessionDialog in the New layout', () => {
   const calls = (cmd: string) => (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === cmd);
 
   beforeEach(() => {
-    uiLayout.set('new');
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd === 'check_account_headroom') return logins;
       if (cmd === 'new_session') return { id: 1 };
@@ -2058,7 +2043,6 @@ describe('NewSessionDialog in the New layout', () => {
       return null;
     });
   });
-  afterEach(() => uiLayout.set('classic'));
 
   it('offers Claude Code and Shell, with Codex and Agy shown as coming', async () => {
     const { container } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
@@ -2111,15 +2095,6 @@ describe('NewSessionDialog in the New layout', () => {
     await vi.waitFor(() => expect(onCancel).toHaveBeenCalled());
   });
 
-  it('the Classic layout keeps Type, the profile field and no Run row', async () => {
-    uiLayout.set('classic');
-    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
-    await tick();
-    expect(screen.getByTestId('kind-work').textContent?.trim()).toBe('Claude');
-    expect(screen.queryByTestId('agent-codex')).toBeNull();
-    expect(screen.getByTestId('launch-profile')).toBeTruthy();
-    expect(screen.queryByTestId('run-background')).toBeNull();
-  });
 });
 
 // Redesign step 4.11 (New layout): with no host the project's rule keeps,
@@ -2140,9 +2115,6 @@ describe('NewSessionDialog host placement', () => {
       return null;
     });
   }
-
-  beforeEach(() => uiLayout.set('new'));
-  afterEach(() => uiLayout.set('classic'));
 
   it('pre-selects the proposed host with the chip, and the start answers it', async () => {
     answer({ host_alias: 'mefistos', confidence_pct: 80, run_id: 7 });
@@ -2179,7 +2151,7 @@ describe('NewSessionDialog host placement', () => {
     expect(active()).toBe('local');
   });
 
-  it('below the floor, or in Classic, nothing is pre-selected', async () => {
+  it('below the floor, nothing is pre-selected', async () => {
     answer({ host_alias: 'mefistos', confidence_pct: 30 });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await vi.waitFor(() => expect(calls('propose_host_placement')).toHaveLength(1));
@@ -2191,12 +2163,4 @@ describe('NewSessionDialog host placement', () => {
     expect(calls('record_host_placement')).toHaveLength(0);
   });
 
-  it('the Classic layout never asks', async () => {
-    uiLayout.set('classic');
-    answer({ host_alias: 'mefistos', confidence_pct: 80 });
-    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
-    await tick();
-    await tick();
-    expect(calls('propose_host_placement')).toHaveLength(0);
-  });
 });

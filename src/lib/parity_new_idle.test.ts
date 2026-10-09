@@ -1,4 +1,4 @@
-// Parity P9 (docs/redesign/parity.md): the idle-too-long nudge, under the New
+// Parity P9 (docs/redesign/archive/parity.md): the idle-too-long nudge, under the New
 // layout. 0.5.4's Needs you filter also showed sessions idle past the
 // threshold; in New the toggle moved into the Filters panel (step 3.7), and
 // the row must still come through it, shown by the filter but not counted in
@@ -11,7 +11,6 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => null) }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 
 import Sidebar from './Sidebar.svelte';
-import { uiLayout } from './prefs';
 import { projects, type ProjectTreeRow } from './projects';
 import { sessions, showBgAgents, showRowDetails, resetTombstonesForTests, type SessionRow } from './sessions';
 import { hosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
@@ -69,10 +68,8 @@ beforeEach(() => {
   hubConnection.set({ state: 'standalone' });
   resetAccessForTests();
   onboardingDismissed.set(true);
-  uiLayout.set('new');
 });
 afterEach(() => {
-  uiLayout.set('classic');
   projects.set([]);
   sessions.set([]);
 });

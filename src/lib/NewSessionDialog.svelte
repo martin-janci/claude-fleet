@@ -7,7 +7,7 @@
   import { selectSessionExplicitly } from './selection';
   import { newBgSession, newSessionAbortable, sessions, type SessionRow } from './sessions';
   import { defaultHost, hosts, isPickableHost } from './hosts';
-  import { readPref, writePref, uiLayout } from './prefs';
+  import { readPref, writePref } from './prefs';
   import { MODEL_OPTIONS, LAUNCH_EFFORT_OPTIONS } from './conversation';
   import { slugifyBranch, finalizeBranchSlug } from './branch-slug';
   import { generateName, nameWords, tmuxNameSuffix } from './names';
@@ -77,7 +77,7 @@
      *  dialog stays open only if something needs a person. */
     autostart?: boolean;
     /** What chose `project` (redesign 3.12, K1): shown as the shared chip
-     *  in the New layout; Change re-opens the picker for another one. */
+     *  in the dialog; Change re-opens the picker for another one. */
     proposal?: ProposalLike | null;
     /** Unix seconds for the host chips' usage wording; injectable for tests. */
     clock?: () => number;
@@ -148,7 +148,7 @@
     writePref('last-host', chosenHost);
   });
 
-  // Jev N5 host placement (redesign step 4.11, New layout): with no host
+  // Jev N5 host placement (redesign step 4.11): with no host
   // the project's rule keeps (the one the dialog was opened on, or the one
   // remembered for this project), the decision model may propose one of the
   // online hosts under their limit. Off by default; a hub client is refused
@@ -161,7 +161,7 @@
   let hostProposalShown = false;
   let hostBeforeProposal: string | null = null;
   onMount(() => {
-    if (hostByRule || autostart || $uiLayout !== 'new') return;
+    if (hostByRule || autostart) return;
     void proposeHostPlacement(project.project.id).then((r) => {
       if (destroyed || hostPicked || !r.ok || !r.value) return;
       const p = hostProposal(r.value);
@@ -239,18 +239,16 @@
     limitAsk = null;
     void submit();
   }
-  // Redesign step 4.5 (New layout): the login is picked from the host's
+  // Redesign step 4.5: the login is picked from the host's
   // logins with their live usage, defaulting to the one with the most
   // headroom until the person picks; "Other profile…" brings back the free
   // name field (a new profile still asks for its /login in the pane).
-  const newLayout = $derived($uiLayout === 'new');
   const OTHER_PROFILE = '\u0000other';
   let hostLogins = $state<HostLogin[] | null>(null);
   let pickedLogin = false;
   let otherProfile = $state(false);
   $effect(() => {
     const host = chosenHost;
-    if (!newLayout) return;
     untrack(() => {
       hostLogins = null;
       pickedLogin = false;
@@ -278,7 +276,7 @@
   let runBackground = $state(false);
   let bgPrompt = $state('');
   const bgSessionBlocked = $derived(hubActionBlocked('new_bg_session', $hubStatus, $hubConnection));
-  const asBackground = $derived(newLayout && runBackground && chosenKind === 'work' && !ticket);
+  const asBackground = $derived(runBackground && chosenKind === 'work' && !ticket);
   async function submitBackground() {
     if (bgSessionBlocked !== null) return;
     if (!bgPrompt.trim()) {
@@ -875,7 +873,7 @@
     alsoIn = on ? [...alsoIn.filter((x) => x !== id), id] : alsoIn.filter((x) => x !== id);
   }
 
-  // Redesign 3.12 (N3): in the New layout the start preview may carry Jev's
+  // Redesign 3.12 (N3): the start preview may carry Jev's
   // proposed sibling; it pre-ticks only while the person has not touched
   // the boxes, and the ProposedBy chip says why. Asked once per ticket,
   // project and host.
@@ -887,9 +885,10 @@
     void projectId;
     siblingAsk = null;
     alsoTouched = false;
-    if (untrack(() => $uiLayout) !== 'new' || id == null || !host) return;
+    if (id == null || !host) return;
     void previewStartWork({ item_id: id, project_id: projectId, host_alias: host, with_brief: true }).then((r) => {
-      if (ticket?.id !== id || chosenHost !== host || !r.ok) return;
+      // A hub with nothing to preview answers no preview at all.
+      if (ticket?.id !== id || chosenHost !== host || !r.ok || !r.value) return;
       siblingAsk = siblingProposal(r.value);
     });
   });
@@ -1146,7 +1145,6 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="dialog" onkeydown={onKeydown}>
   <h3>New session — {owner}/{repo}</h3>
-  {#if $uiLayout === 'new'}
     <ProposedBy
       {proposal}
       field="project"
@@ -1156,7 +1154,6 @@
         openNewSessionPicker(initialHost, ticket);
       }}
     />
-  {/if}
 
   <div class="fields">
     <label for="friendly-name">Name</label>
@@ -1259,7 +1256,6 @@
       <ResumeDialog workKey={plannedKey} onclose={() => (resumeOpen = false)} onresumed={onCancel} />
     {/if}
 
-    {#if newLayout}
       <!-- A group, not a labelable control: it is named by aria-labelledby. -->
       <span class="field-label" id="kind-picker-label">Agent</span>
       <div class="kind-row" id="kind-picker" role="group" aria-labelledby="kind-picker-label" data-testid="agent-picker">
@@ -1288,30 +1284,6 @@
           Agy <span class="soon">coming</span>
         </button>
       </div>
-    {:else}
-      <!-- A group, not a labelable control: it is named by aria-labelledby. -->
-      <span class="field-label" id="kind-picker-label">Type</span>
-      <div class="kind-row" id="kind-picker" role="group" aria-labelledby="kind-picker-label">
-        <button
-          class="kind-pick"
-          class:active={chosenKind === 'work'}
-          aria-pressed={chosenKind === 'work'}
-          data-testid="kind-work"
-          onclick={() => onPickKind('work')}
-        >
-          Claude
-        </button>
-        <button
-          class="kind-pick"
-          class:active={chosenKind === 'shell'}
-          aria-pressed={chosenKind === 'shell'}
-          data-testid="kind-shell"
-          onclick={() => onPickKind('shell')}
-        >
-          Shell
-        </button>
-      </div>
-    {/if}
 
     {#if chosenKind === 'work' && !ticket && !asBackground}
       <div class="launch-row">
@@ -1333,7 +1305,7 @@
             {/each}
           </select>
         </div>
-        {#if newLayout && hostLogins && hostLogins.length > 0 && !otherProfile}
+        {#if hostLogins && hostLogins.length > 0 && !otherProfile}
           <div class="launch-field">
             <label for="launch-account">Account</label>
             <select
@@ -1371,7 +1343,7 @@
       </div>
     {/if}
 
-    {#if newLayout && chosenKind === 'work' && !ticket}
+    {#if chosenKind === 'work' && !ticket}
       <span class="field-label" id="run-picker-label">Run</span>
       <div class="kind-row" id="run-picker" role="group" aria-labelledby="run-picker-label">
         <button
@@ -1425,7 +1397,7 @@
         nameOverride = null;
       }}
     />
-    {#if $uiLayout === 'new' && hostProposed && hostProposed.value === chosenHost}
+    {#if hostProposed && hostProposed.value === chosenHost}
       <ProposedBy
         proposal={hostProposed}
         field="host"
@@ -1487,7 +1459,7 @@
     {#if error}
       <p class="err">{error}</p>
     {/if}
-    {#if newLayout && busy && $creatingStart}
+    {#if busy && $creatingStart}
       <!-- Redesign step 5.13: the create's worktree and tmux steps run
            while it is in flight; the dialog then closes into the same Pulse
            in the new session's conversation, on its agent step. -->

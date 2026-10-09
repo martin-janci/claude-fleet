@@ -2,7 +2,7 @@ import { sidebarView } from './work_view';
 import { fireEvent, render, screen, within, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
-import { readPref, uiLayout } from './prefs';
+import { readPref } from './prefs';
 
 // Three sample projects. Sessions are attached per-test so we can verify
 // the new "hide projects without sessions" behavior.
@@ -94,6 +94,22 @@ async function openViewOptions() {
     await fireEvent.click(screen.getByTestId('view-options-open'));
     await tick();
   }
+}
+
+/** The Needs you pill, in the Filters panel (step 3.7). */
+async function needsYouPill(): Promise<HTMLElement> {
+  await openFilters();
+  return screen.getByTestId('needs-you-filter');
+}
+/** The Select several switch, in the ⋯ view-options menu. */
+async function selectModeSwitch(): Promise<HTMLElement> {
+  await openViewOptions();
+  return screen.getByTestId('select-mode');
+}
+/** Pick a grouping in the list head's Group select. */
+async function groupBy(id: string) {
+  await fireEvent.change(screen.getByTestId('group-select'), { target: { value: id } });
+  await tick();
 }
 
 function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof sessionFor>[]) {
@@ -1315,7 +1331,10 @@ describe('Sidebar triage (W2 Track D)', () => {
     await tick(); await tick();
     const cards = screen.getAllByTestId('answer-card');
     expect(cards).toHaveLength(1);
-    expect(screen.getAllByTestId('answer-option').map((o) => o.getAttribute('data-n'))).toEqual(['1', '2']);
+    const opts = screen.getAllByTestId('answer-option');
+    expect(opts).toHaveLength(2);
+    expect(opts[0].textContent).toMatch(/1.*Yes/);
+    expect(opts[1].textContent).toMatch(/2.*No/);
     // Sidebar density: the choices only — Escape and Open terminal live on
     // the full card in the Conversation panel.
     expect(screen.queryByTestId('answer-esc')).toBeNull();
@@ -1393,7 +1412,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     mockBackend(fakeProjects, [stuck, fine]);
     render(Sidebar);
     await tick(); await tick();
-    const pill = screen.getByTestId('needs-you-filter');
+    const pill = await needsYouPill();
     expect(pill).toHaveTextContent('Needs you 1');
     expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
     await fireEvent.click(pill);
@@ -1415,7 +1434,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     render(Sidebar);
     await tick(); await tick();
     // Needs you would hide the healthy row; the focus shows it anyway.
-    await fireEvent.click(screen.getByTestId('needs-you-filter'));
+    await fireEvent.click(await needsYouPill());
     hostFilter.set('elsewhere');
     focusSession(fine.id, 'dev-fine');
     await tick(); await tick();
@@ -1444,7 +1463,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     mockBackend(fakeProjects, [fine]);
     render(Sidebar);
     await tick(); await tick();
-    const pill = screen.getByTestId('needs-you-filter');
+    const pill = await needsYouPill();
     expect(pill).toBeTruthy();
     expect(pill.textContent?.trim()).toBe('Needs you');
     expect(pill.textContent).not.toContain('⚠');
@@ -1461,7 +1480,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     mockBackend(fakeProjects, [stuck, externalStuck]);
     render(Sidebar);
     await tick(); await tick();
-    const pill = screen.getByTestId('needs-you-filter');
+    const pill = await needsYouPill();
     expect(pill).toHaveTextContent('Needs you 1');
   });
 
@@ -1474,7 +1493,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     mockBackend(fakeProjects, [stuck, sk, ghost, failed, fine]);
     render(Sidebar);
     await tick(); await tick();
-    const pill = screen.getByTestId('needs-you-filter');
+    const pill = await needsYouPill();
     // Redesign 0.4: the safe-kill and ghost rows (Paused) stay in the queue
     // but leave the count; stuck and failed still raise it.
     expect(pill).toHaveTextContent('Needs you 2');
@@ -1579,7 +1598,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     render(Sidebar);
     await tick(); await tick();
     expect(screen.queryAllByTestId('select-box')).toHaveLength(0);
-    await fireEvent.click(screen.getByTestId('select-mode'));
+    await fireEvent.click(await selectModeSwitch());
     await tick();
     const box = screen.getByTestId('select-box');
     await fireEvent.click(box);
@@ -1865,7 +1884,7 @@ describe('Outside fleet group', () => {
     await tick();
     expect(screen.queryByTestId('bulk-bar')).toBeNull();
 
-    await fireEvent.click(screen.getByTestId('select-mode'));
+    await fireEvent.click(await selectModeSwitch());
     await tick();
     expect(extRow.querySelector('[data-testid="select-box"]')).toBeNull();
     await fireEvent.click(extRow);
@@ -1982,7 +2001,6 @@ describe('Sidebar: a hub contract skew', () => {
   });
 });
 
-
 describe('Sidebar — group by work (roadmap M1)', () => {
   // A worktree whose branch names a ticket, on project 1.
   const workProjects = [
@@ -2023,9 +2041,7 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     render(Sidebar);
     await tick(); await tick();
 
-    await openViewOptions();
-    await fireEvent.click(screen.getByTestId('group-by-toggle'));
-    await tick();
+    await groupBy('work');
 
     const workRows = await screen.findAllByTestId('work-row');
     expect(workRows).toHaveLength(1);
@@ -2161,6 +2177,10 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     sidebarGroupBy.set('work');
     render(Sidebar);
     await tick(); await tick();
+    // A shared row sits in Shared with me (5.8); focused, it is back in its
+    // group, under the header this test is about.
+    focusSession(theirs.id, 'dev-theirs');
+    await tick(); await tick();
     const button = (await screen.findAllByTestId('name-work-group'))[0] as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(button.getAttribute('title')).toMatch(/watch is read-only/i);
@@ -2173,7 +2193,7 @@ describe('Sidebar — group by work (roadmap M1)', () => {
   // NEITHER half — `unarchive_session_work` is `drive` and ROUTES, so both
   // apply. Asked per row, because one group's Done can hold rows of more than
   // one owner.
-  it('work mode: the archived chip is per row, and a watcher cannot un-archive', async () => {
+  it('work mode: the archived chip is per row, and a watched row offers none', async () => {
     const REMOTE: HubStatus = {
       ...STANDALONE,
       remote: true,
@@ -2195,21 +2215,16 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     await tick(); await tick();
     await fireEvent.click(await screen.findByTestId('work-done'));
     await tick();
+    // The watched row is not in this Done: it sits in Shared with me (5.8),
+    // which offers no un-archive at all.
     const rows = screen.getAllByTestId('archived-session');
-    expect(rows).toHaveLength(2);
-    const byName = (name: string) =>
-      rows.find((r) => r.textContent?.includes(name))!;
-    // The positive control: the owner's own row keeps its chip.
-    const ownChip = within(byName('dev-mine')).getByTestId('archived-chip') as HTMLButtonElement;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent('dev-mine');
+    expect(within(screen.getByTestId('shared-with-me')).getByText(/dev-theirs/)).toBeTruthy();
+    expect(within(screen.getByTestId('shared-with-me')).queryByTestId('archived-chip')).toBeNull();
+    // The owner's own row keeps its chip, and it sends.
+    const ownChip = within(rows[0]).getByTestId('archived-chip') as HTMLButtonElement;
     expect(ownChip.disabled).toBe(false);
-    // The watched row's chip carries the reason and sends nothing.
-    const theirChip = within(byName('dev-theirs')).getByTestId('archived-chip') as HTMLButtonElement;
-    expect(theirChip.disabled).toBe(true);
-    expect(theirChip.title).toMatch(/watch is read-only/i);
-    await fireEvent.click(theirChip);
-    await tick();
-    expect(mockedInvoke).not.toHaveBeenCalledWith('unarchive_session_work', expect.anything());
-    // …and the owner's does send.
     await fireEvent.click(ownChip);
     await waitFor(() =>
       expect(mockedInvoke).toHaveBeenCalledWith('unarchive_session_work', {
@@ -2565,7 +2580,7 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     expect(names()[0]).toContain('dev-b');
     expect(mockedInvoke).toHaveBeenCalledWith('work_tickets', { args: { view: 'mine', limit: 200 } });
     // Needs-you on top: nothing of mine needs me.
-    await fireEvent.click(screen.getByTestId('needs-you-filter'));
+    await fireEvent.click(await needsYouPill());
     await tick();
     expect(names()).toHaveLength(0);
   });
@@ -2833,7 +2848,7 @@ describe('Sidebar filters: one set of rules for every section', () => {
     mockBackend(fakeProjects, [a, b]);
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('select-mode'));
+    await fireEvent.click(await selectModeSwitch());
     await tick();
     for (const box of screen.getAllByTestId('select-box')) await fireEvent.click(box);
     await tick();
@@ -2863,7 +2878,7 @@ describe('Sidebar filters: one set of rules for every section', () => {
     sidebarGroupBy.set('work');
     render(Sidebar);
     await screen.findByTestId('past-work-group');
-    await fireEvent.click(screen.getByTestId('needs-you-filter'));
+    await fireEvent.click(await needsYouPill());
     await tick();
     expect(screen.queryByTestId('past-work-group')).toBeNull();
     expect(names()).toHaveLength(1);
@@ -2928,7 +2943,7 @@ describe('bulk actions and a shared session', () => {
     render(Sidebar);
     await tick(); await tick();
 
-    await fireEvent.click(screen.getByTestId('select-mode'));
+    await fireEvent.click(await selectModeSwitch());
     await tick();
     for (const box of screen.getAllByTestId('select-box')) await fireEvent.click(box);
     await tick();
@@ -3047,7 +3062,7 @@ describe('Sidebar: a mass loss folds into one row (redesign 1.1)', () => {
     expect(within(fold).getByTestId('lost-fold-restore')).toHaveTextContent('Restore');
     // Only the live waiting session is in the tree and in the count.
     expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
-    expect(screen.getByTestId('needs-you-filter')).toHaveTextContent('Needs you 1');
+    expect(await needsYouPill()).toHaveTextContent('Needs you 1');
   });
 
   it('the fold expands to its rows, so every stopped session is still one click away', async () => {
@@ -3126,17 +3141,15 @@ describe('Group by state, host or agent (redesign step 3.6)', () => {
     ];
   }
 
-  it('the menu offers State, Host and Agent after Project and Work', async () => {
+  it('the Group select offers State, Host and Agent after Project and Work', async () => {
     mockBackend(fakeProjects, fleet());
     render(Sidebar);
     await tick(); await tick();
-    await openViewOptions();
-    const group = screen.getByRole('group', { name: 'Group by' });
-    expect(within(group).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual([
+    const select = screen.getByTestId('group-select') as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.textContent?.trim())).toEqual([
       'Project', 'Work', 'State', 'Host', 'Agent',
     ]);
-    await fireEvent.click(screen.getByTestId('group-by-host'));
-    await tick();
+    await groupBy('host');
     expect(get(sidebarGroupBy)).toBe('host');
     const isStr = (v: unknown): v is string => typeof v === 'string';
     expect(readPref('sidebar.group', 'unset', isStr)).toBe('host');
@@ -3217,7 +3230,7 @@ describe('List keys (redesign step 3.8)', () => {
 
     await fireEvent.keyDown(document.activeElement!, { key: 'x' });
     await tick();
-    await fireEvent.click(screen.getByText('Select'));
+    await fireEvent.click(await selectModeSwitch());
     await tick();
     const row = screen.getAllByTestId('sess-row')[0];
     await fireEvent.keyDown(row, { key: 'Enter' });
@@ -3320,7 +3333,6 @@ describe('Shared with me (redesign step 5.8)', () => {
     url: 'https://fleet.example.com',
     configured_url: 'https://fleet.example.com',
   };
-  afterEach(() => uiLayout.set('classic'));
 
   function fleet() {
     const mine = { ...sessionFor(1, 'dev-mine'), owner_person_id: 7 };
@@ -3338,7 +3350,6 @@ describe('Shared with me (redesign step 5.8)', () => {
       { session_id: watched.id, level: 'watch' },
       { session_id: driven.id, level: 'drive' },
     ]);
-    uiLayout.set('new');
     render(Sidebar);
     await tick(); await tick();
     const group = await screen.findByTestId('shared-with-me');
@@ -3355,28 +3366,14 @@ describe('Shared with me (redesign step 5.8)', () => {
     await fireEvent.click(within(group).getByTestId('shared-with-me-toggle'));
     expect(within(group).queryAllByTestId('sess-row')).toHaveLength(0);
   });
-
-  it('Classic keeps shared sessions where they were', async () => {
-    const { mine, watched, driven } = fleet();
-    mockBackend(fakeProjects, [mine, watched, driven]);
-    hubStatus.set(REMOTE);
-    hubConnection.set({ state: 'connected' });
-    setMyGrants(7, [{ session_id: watched.id, level: 'watch' }]);
-    render(Sidebar);
-    await tick(); await tick();
-    await screen.findAllByTestId('sess-row');
-    expect(screen.queryByTestId('shared-with-me')).toBeNull();
-  });
 });
 
 describe('Sidebar rows and the lost fold in the New layout (parity P8, H7, H8)', () => {
   beforeEach(() => {
-    uiLayout.set('new');
     sidebarGroupBy.set('project');
     showFriendlyNames.set(true);
   });
   afterEach(() => {
-    uiLayout.set('classic');
     showFriendlyNames.set(true);
   });
 

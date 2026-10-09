@@ -19,7 +19,6 @@
   import { get } from 'svelte/store';
   import ResumeButton from './ResumeButton.svelte';
   import Loader from './Loader.svelte';
-  import { uiLayout } from './prefs';
   import {
     applyItems,
     applyTidy,
@@ -434,7 +433,7 @@
         {notMine === 1 ? 'it is' : 'they are'}. Tidying one is the owner's to do.
       </p>
     {/if}
-    {#if busy && $uiLayout === 'new'}
+    {#if busy}
       <!-- Redesign step 5.13: the safe kills check each worktree before it
            goes, so the scan gets the manual's Hex field over the list. -->
       <div class="tidy-scan" data-testid="tidy-scan">

@@ -17,7 +17,6 @@ import { accountsPageRequest } from './account_pill';
 import { destination } from './destination';
 import { hosts } from './hosts';
 import { sessions, type SessionRow } from './sessions';
-import { uiLayout } from './prefs';
 import { recentSessions } from './quick_switcher';
 import { clearSelection } from './selection';
 import { hubStatus, STANDALONE } from './hub';
@@ -52,7 +51,6 @@ beforeEach(() => {
   resetAccessForTests();
 });
 afterEach(() => {
-  uiLayout.set('classic');
   destination.set('session');
   accountsPageRequest.set(null);
 });
@@ -104,13 +102,7 @@ function rowProps(sess: SessionRow) {
 describe('the session row', () => {
   const row = session('mefistos', 'dev-a', { id: 7, account_uuid: ADMIN.uuid });
 
-  it('Classic shows no account pill', () => {
-    render(SessionRowItem, { props: rowProps(row) });
-    expect(screen.queryByTestId('account-pill')).toBeNull();
-  });
-
   it('New shows it, and its click does not select the row', async () => {
-    uiLayout.set('new');
     const props = rowProps(row);
     render(SessionRowItem, { props });
     const pill = screen.getByTestId('account-pill');
@@ -121,7 +113,6 @@ describe('the session row', () => {
   });
 
   it('a row with no account has none', () => {
-    uiLayout.set('new');
     render(SessionRowItem, { props: rowProps({ ...row, account_uuid: null }) });
     expect(screen.queryByTestId('account-pill')).toBeNull();
   });
@@ -142,14 +133,7 @@ describe('the palette row', () => {
     await tick();
   }
 
-  it('Classic shows no account pill', async () => {
-    render(QuickSwitcher);
-    await openSwitcher();
-    expect(screen.queryAllByTestId('switcher-account-pill')).toHaveLength(0);
-  });
-
   it('New shows one per session row; a click opens the account and closes the palette', async () => {
-    uiLayout.set('new');
     render(QuickSwitcher);
     await openSwitcher();
     const pills = screen.getAllByTestId('switcher-account-pill');

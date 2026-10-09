@@ -10,7 +10,6 @@
   import { selectSessionExplicitly } from './selection';
   import { decideWorkProposal } from './work';
   import { readErrorText } from './work_view';
-  import { uiLayout } from './prefs';
   import ProposedBy from './ProposedBy.svelte';
   import { startWork, type StartWorkArgs } from './trackers';
   import {
@@ -55,8 +54,6 @@
   // project chosen no longer carries it, so it is kept here for the hint.
   // svelte-ignore state_referenced_locally
   const suggested = suggestedProjectId(initial);
-  // svelte-ignore state_referenced_locally
-  const suggestedPct = initial.suggested_project?.confidence_pct ?? null;
   // svelte-ignore state_referenced_locally
   const suggestedProposal = projectProposal(initial);
   let branch = $state('');
@@ -209,7 +206,6 @@
     </select>
   </label>
   {#if suggested != null && choice.project_id === suggested}
-    {#if $uiLayout === 'new'}
       <ProposedBy
         proposal={suggestedProposal}
         field="project"
@@ -219,11 +215,6 @@
           root?.querySelector<HTMLElement>('[data-field="project"]')?.focus();
         }}
       />
-    {:else}
-      <span class="hint" data-testid="start-popover-suggested"
-        >Proposed by Jev{suggestedPct != null ? ` (${suggestedPct}%)` : ''}: check it before you start.</span
-      >
-    {/if}
   {/if}
 
   <label class="field">

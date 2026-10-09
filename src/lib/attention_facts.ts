@@ -4,16 +4,12 @@
 // through `AttentionOptions.facts` to put a live session in one of the three
 // Blocked buckets. Mirrors `attention::Facts::from_fleet` in fleet-core; the
 // shared fixture (`attention_states.json`) checks both classifiers agree.
-//
-// The New layout only: Classic keeps its row-only classification, so its
-// Needs you count does not move until the layout switch.
 import { derived, type Readable } from 'svelte/store';
 import type { HostRow } from './hosts';
 import { hosts } from './hosts';
 import type { AccountUsageSnapshot, UsageStatus } from './account_usage_store';
 import { accountUsage } from './account_usage_store';
 import type { AttentionFacts, AttentionLimit } from './attention';
-import { uiLayout } from './prefs';
 
 /** Login states that need a person to sign in again; an expired access
  *  token refreshes by itself. */
@@ -42,13 +38,11 @@ export function attentionFactsFrom(
   return { down_hosts, limited_accounts, uncredentialed_accounts };
 }
 
-/** The facts the stores hold now, or `undefined` in the Classic layout. The
+/** The facts the stores hold now. The
  *  classifier re-checks a limit's reset against its own clock, so a limit
  *  that resets between two usage reads stops blocking on time. */
-export const attentionFacts: Readable<AttentionFacts | undefined> = derived(
-  [hosts, accountUsage, uiLayout],
-  ([$hosts, $usage, $layout]) =>
-    $layout === 'new' ? attentionFactsFrom($hosts, $usage, Math.floor(Date.now() / 1000)) : undefined,
+export const attentionFacts: Readable<AttentionFacts> = derived([hosts, accountUsage], ([$hosts, $usage]) =>
+  attentionFactsFrom($hosts, $usage, Math.floor(Date.now() / 1000)),
 );
 
 /** The reason line of a Blocked row (step 2.4), as the Main board words it:

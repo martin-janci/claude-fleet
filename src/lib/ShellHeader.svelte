@@ -1,7 +1,6 @@
-<!-- The new layout's 44 px header (redesign step 3.17, Main board): the
-     Orbit mark and name, the ⌘K command field, the account pills (health
-     dot, name, both windows), and Automation with Pause all. Classic has no
-     header; this renders only under ui.layout = new. -->
+<!-- The 44 px header (redesign step 3.17, Main board): the Orbit mark and
+     name, the ⌘K command field, the account pills (health dot, name, both
+     windows), and Automation with Pause all. -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import AppHeader from './kit/AppHeader.svelte';

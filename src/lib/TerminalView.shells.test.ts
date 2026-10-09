@@ -15,7 +15,6 @@ import TerminalView from './TerminalView.svelte';
 import { sessions, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectSession, clearSelection } from './selection';
 import { clearToasts } from './toasts';
-import { uiLayout } from './prefs';
 import { nextTerminalTab, shellTerminalName, terminalPtyId } from './terminals';
 
 const row = {
@@ -83,22 +82,10 @@ beforeEach(() => {
 
 afterEach(() => {
   clearSelection();
-  uiLayout.set('classic');
 });
 
 describe('shell terminals strip (step 5.3)', () => {
-  it('the classic layout keeps the agent terminal alone, with no strip and no list call', async () => {
-    uiLayout.set('classic');
-    render(TerminalView);
-    selectSession(row);
-    await settle();
-    expect(screen.queryByTestId('terminal-strip')).toBeNull();
-    expect(calls('shell_terminals')).toHaveLength(0);
-    expect(calls('pty_open').map((c) => args(c).id)).toEqual(['agent']);
-  });
-
   it('+ New opens a terminal and attaches it under its own pty id; the agent tab goes back', async () => {
-    uiLayout.set('new');
     render(TerminalView);
     selectSession(row);
     await settle();
@@ -121,7 +108,6 @@ describe('shell terminals strip (step 5.3)', () => {
   });
 
   it('Split shows the agent and the picked shell side by side, each on its own pty', async () => {
-    uiLayout.set('new');
     open = [2];
     render(TerminalView);
     selectSession(row);
@@ -136,7 +122,6 @@ describe('shell terminals strip (step 5.3)', () => {
   });
 
   it('closing a terminal lets go of it first and never stops the session', async () => {
-    uiLayout.set('new');
     open = [1];
     render(TerminalView);
     selectSession(row);
@@ -152,7 +137,6 @@ describe('shell terminals strip (step 5.3)', () => {
   });
 
   it('Ctrl+Alt+T opens a terminal and Ctrl+` walks the tabs, neither reaching the pty', async () => {
-    uiLayout.set('new');
     render(TerminalView);
     selectSession(row);
     await settle();

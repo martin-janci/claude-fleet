@@ -1,6 +1,5 @@
-// Redesign step 3.5: the New layout's session header and one tab bar, and
-// the inspector (Classic's Details pane, moved beside the session) on
-// ⌥⌘B / Ctrl+Alt+B. Classic keeps its tabs and its center pane.
+// Redesign step 3.5: the session header and one tab bar, and the inspector
+// (0.5.x's Details pane, moved beside the session) on ⌥⌘B / Ctrl+Alt+B.
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
@@ -11,7 +10,7 @@ import { clearSelection, selectSession } from './lib/selection';
 import { hostFilter } from './lib/hosts';
 import { settingsOpen } from './lib/app_views';
 import { destination } from './lib/destination';
-import { uiLayout } from './lib/prefs';
+import { sessionActionRequest } from './lib/session_actions';
 import { detectMac } from './lib/terminal_keys';
 import type { SessionRow } from './lib/sessions';
 import { session } from './lib/hosts_fixture';
@@ -54,7 +53,6 @@ afterEach(() => {
   inv.mockImplementation(original!);
   clearSelection();
   destination.set('session');
-  uiLayout.set('classic');
 });
 
 async function mountApp() {
@@ -70,18 +68,14 @@ const inspectorChord = () =>
     : { key: 'b', code: 'KeyB', ctrlKey: true, altKey: true });
 
 describe('App: session tabs and the inspector (step 3.5)', () => {
-  it('New layout: no session fills the right column with Details, and the tabs wait', async () => {
-    uiLayout.set('new');
+  it('no session fills the right column with Details, and the tabs wait', async () => {
     await mountApp();
     expect(screen.getByTestId('details-view')).toBeTruthy();
     expect(screen.queryByTestId('inspector')).toBeNull();
-    expect(screen.queryByTestId('center-collapse')).toBeNull();
-    expect(screen.queryByTestId('tab-session')).toBeNull();
     expect((screen.getByTestId('stab-conversation') as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('a selected session gets its header, the agent tab and the inspector beside it', async () => {
-    uiLayout.set('new');
     await mountApp();
     selectSession(rows[0]);
     await waitFor(() => expect(screen.getByTestId('inspector')).toBeTruthy());
@@ -94,7 +88,6 @@ describe('App: session tabs and the inspector (step 3.5)', () => {
   });
 
   it('the Details tab takes the column and the inspector steps aside', async () => {
-    uiLayout.set('new');
     await mountApp();
     selectSession(rows[0]);
     await screen.findByTestId('inspector');
@@ -109,7 +102,6 @@ describe('App: session tabs and the inspector (step 3.5)', () => {
   });
 
   it('Open in VS Code: the header button and its chord open the selected session (step 5.5)', async () => {
-    uiLayout.set('new');
     await mountApp();
     selectSession(rows[0]);
     const btn = (await screen.findByTestId('open-in-editor')) as HTMLButtonElement;
@@ -125,7 +117,6 @@ describe('App: session tabs and the inspector (step 3.5)', () => {
   });
 
   it('the inspector chord and the header button toggle it, and it is remembered', async () => {
-    uiLayout.set('new');
     await mountApp();
     selectSession(rows[0]);
     await screen.findByTestId('inspector');
@@ -138,14 +129,14 @@ describe('App: session tabs and the inspector (step 3.5)', () => {
     expect(localStorage.getItem('cf:pref:layout.inspector')).toBe('true');
   });
 
-  it('Classic keeps its tabs and its center Details pane; the chord folds the pane', async () => {
+  it('a row action opens the inspector it runs in', async () => {
     await mountApp();
     selectSession(rows[0]);
-    await screen.findByTestId('tab-session');
-    expect(screen.queryByTestId('session-tabs')).toBeNull();
-    expect(screen.queryByTestId('inspector')).toBeNull();
-    expect(screen.getByTestId('center-collapse')).toBeTruthy();
+    await screen.findByTestId('inspector');
     await inspectorChord();
-    await waitFor(() => expect(screen.queryByTestId('center-expand')).not.toBeNull());
+    await waitFor(() => expect(screen.queryByTestId('inspector')).toBeNull());
+    sessionActionRequest.set({ sessionId: rows[0].id, action: 'details', seq: 1 });
+    await waitFor(() => expect(screen.getByTestId('inspector')).toBeTruthy());
+    sessionActionRequest.set(null);
   });
 });

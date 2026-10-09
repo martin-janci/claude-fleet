@@ -4,8 +4,7 @@
   // at a time so each row lands as its answer comes back. Every step change
   // is saved on the backend, so closing the wizard — or the app — keeps what
   // was entered, and the next "+ Add host" offers to continue it. Nothing is
-  // installed: the checks only read. The Layout: Classic picker
-  // (AddHostPicker) stays as it was.
+  // installed: the checks only read.
   import { onMount } from 'svelte';
   import { discoverHosts, addHost, type SshHost } from './hosts';
   import { probeSshAliasAbortable } from './accounts';

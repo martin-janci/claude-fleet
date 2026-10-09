@@ -1,5 +1,5 @@
 <!--
-  The New layout's rail (Orbit Fleet redesign step 3.2, design manual's Rail
+  The rail (Orbit Fleet redesign step 3.2, design manual's Rail
   component). The order and which items show live in `rail.ts`; this file
   draws them and says which one is current. Every title names its shortcut,
   and the shortcuts themselves stay where they were (`shortcuts.ts`).
@@ -11,6 +11,7 @@
   import { currentRailItem, visibleRailItems, type RailId, type RailItem } from './rail';
   import { shortcutLabel } from './shortcuts';
   import { inboxCount } from './inbox';
+  import { hintAnchor } from './hints';
 
   interface Props {
     isMac: boolean;
@@ -64,6 +65,7 @@
     title={title(item)}
     onclick={() => onselect(item.id)}
     data-testid="rail-{item.id}"
+    use:hintAnchor={{ id: 'agent-fab', when: item.id === 'control' }}
   >
     {@render icon(item.id)}
     <span>{item.label}</span>

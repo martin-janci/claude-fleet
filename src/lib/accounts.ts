@@ -71,7 +71,7 @@ export function applyAccountEvents(rows_: readonly AccountRow[]): void {
 
 // No removeAccount — backend never deletes accounts in iter 4a.
 
-// Used by AddHostPicker to preview probe results without persisting.
+// Used by AddHostWizard to preview probe results without persisting.
 export interface ProbePreview {
   reachable: boolean;
   claude_version: string | null;

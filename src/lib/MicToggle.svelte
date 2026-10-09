@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { SessionRow } from './sessions';
   import { voiceState, claimVoice, releaseVoice, voiceSupported } from './voice';
-  import { uiLayout } from './prefs';
   import Loader from './Loader.svelte';
   let { session, transport }: { session: SessionRow; transport: 'ssh' | 'agent' } = $props();
   const mine = $derived($voiceState.sessionId === session.id);
@@ -24,13 +23,13 @@
 <button class="mic" class:on data-testid="mic-toggle" disabled={!voiceSupported(transport)} {title} onclick={toggle}>
   🎤{#if mine && $voiceState.state === 'capturing'}<span class="live" data-testid="mic-live"></span>{/if}
 </button>
-{#if $uiLayout === 'new' && mine && $voiceState.state === 'capturing'}
+{#if mine && $voiceState.state === 'capturing'}
   <!-- Redesign 5.14 (LoadersInFlows, Chat · Voice input): the Sonar
        follows the mic level while it records… -->
   <span class="voice-loader" data-testid="mic-listening" role="status" style:--level={$voiceState.level ?? 0}
     ><span class="sonar"><Loader name="sonar" size={24} /></span>Listening</span
   >
-{:else if $uiLayout === 'new' && mine && $voiceState.transcribing}
+{:else if mine && $voiceState.transcribing}
   <!-- …and turns into a Dot wave while Claude Code transcribes. -->
   <span class="voice-loader" data-testid="mic-transcribing" role="status"
     ><Loader name="dot-wave" size={24} />Transcribing</span

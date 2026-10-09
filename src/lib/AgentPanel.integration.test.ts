@@ -1,9 +1,9 @@
 // AgentPanel.test.ts mocks ConversationPanel down to a stub, which proves
 // AgentPanel's own frame but nothing about what happens when the two
 // components are actually stacked. This file mounts the REAL
-// ConversationPanel underneath AgentPanel — the arrangement App.svelte uses
-// — to prove that exactly one composer reaches the page and that it is
-// ConversationPanel's own, so everything the sheet sends goes through the
+// ConversationPanel underneath AgentPanel — the arrangement Control's chat
+// uses — to prove that exactly one composer reaches the page and that it is
+// ConversationPanel's own, so everything the panel sends goes through the
 // send path that owns the panel's live state.
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -28,8 +28,7 @@ vi.mock('./sessions', async () => {
 });
 
 import AgentPanel from './AgentPanel.svelte';
-import { get } from 'svelte/store';
-import { agentPanelOpen, operatorState, operatorSession } from './operator';
+import { operatorState, operatorSession } from './operator';
 import { sessionConversation, sessionActivity, listConversations, toolDetail } from './conversation';
 import { sendPrompt, sessions, applySessionEvents, type SessionRow } from './sessions';
 import { outbox } from './outbox';
@@ -85,6 +84,10 @@ function row(over: Partial<SessionRow> = {}): SessionRow {
 
 beforeEach(() => {
   invoke.mockReset();
+  // The panel wakes the agent on mount (Control, 9.1): it is there already.
+  invoke.mockImplementation(async (cmd: string) =>
+    cmd === 'operator_status' ? { ready: true, session: row(), blocked: null } : null,
+  );
   mockedConv.mockReset();
   mockedConv.mockReturnValue(
     Promise.resolve({ ok: true, value: { truncated: false, context: null, events: [], turns: [] } }),
@@ -95,7 +98,6 @@ beforeEach(() => {
   mockedList.mockResolvedValue({ ok: true, value: [] });
   mockedDetail.mockReset();
   mockedSend.mockReset();
-  agentPanelOpen.set(true);
   outbox.resetForTests();
   operatorState.set('ready');
   operatorSession.set(row());
@@ -352,12 +354,6 @@ describe('the sheet feeds the one composer its live state', () => {
     expect(mockedSend.mock.calls[0][2]).toBe('');
   });
 
-  it('closes on Escape from inside the composer, where a window-level handler would not', async () => {
-    render(AgentPanel);
-    await settle();
-    await fireEvent.keyDown(screen.getByPlaceholderText(/send a prompt/i), { key: 'Escape' });
-    expect(get(agentPanelOpen)).toBe(false);
-  });
 });
 
 // Work graph M9: operator commands fill the operator's composer, never send.

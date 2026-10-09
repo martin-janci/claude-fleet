@@ -24,7 +24,6 @@ import type { DecisionProposal } from './proposals';
 import { acceptCommandRow, sessions, type SessionEvent, type SessionRow } from './sessions';
 import { bumpWorkChanged, workChanged, type WorkChangeKind, type WorkEvidence } from './work';
 import { pickTask, selectedTaskId, taskFocused, type TaskSessionLink } from './selection';
-import { todayOpen } from './today';
 import { trackerStateBadge } from './trackers';
 import { knownProviderShort } from './tracker_health';
 import { classify, type TriageBucket } from './attention';
@@ -1273,9 +1272,8 @@ export function groupSessionLinks<T extends Pick<WorkTaskLink, 'state' | 'primar
 // Stores
 
 /** Which tree the sidebar shows. */
-/** `inbox` is the New layout's Inbox (redesign step 3.3): the Sessions list
- *  narrowed to what needs you. Classic has no Inbox, and reads it as
- *  `sessions`. */
+/** `inbox` is the Inbox (redesign step 3.3): the Sessions list narrowed to
+ *  what needs you. */
 export type SidebarView = 'sessions' | 'work' | 'inbox';
 const isSidebarView = (v: unknown): v is SidebarView => v === 'sessions' || v === 'work' || v === 'inbox';
 export const sidebarView = writable<SidebarView>(readPref('sidebar.view', 'sessions', isSidebarView));
@@ -1358,7 +1356,6 @@ workViewKey.subscribe((k) => {
  *  (`pickTask`). Pass the task's session links when the caller has them. */
 export function openTask(taskId: string, links?: readonly TaskSessionLink[]): void {
   pickTask(taskId, links);
-  todayOpen.set(false);
 }
 
 /** A request to scroll the Work tree to a task (and load its section). */

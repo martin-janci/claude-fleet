@@ -16,7 +16,6 @@
   } from './conversation';
   import CopyButton from './CopyButton.svelte';
   import Loader from './Loader.svelte';
-  import { uiLayout } from './prefs';
   import Icon, { type IconName } from './Icon.svelte';
   import { lineDiff, splitPath, parseNumbered, parseTodos, parseFileList, inputField, detailKind } from './tool_view';
 
@@ -87,7 +86,7 @@
   const target = $derived(shortTarget(line.target) ?? argsOf(line.summary));
   const elapsed = $derived(toolDurationMs(line.at, line.ended_at, line.done || !live ? null : nowMs));
   const noResult = $derived(!line.done && !live);
-  // Redesign 5.14 (LoadersInFlows, Chat · Agent tool calls), New layout: a
+  // Redesign 5.14 (LoadersInFlows, Chat · Agent tool calls): a
   // Comet only on the call that is running; a finished call goes still.
   const running = $derived(!line.done && live);
   const duration = $derived(
@@ -176,11 +175,9 @@
 
 {#snippet row()}
   <span class="chev" aria-hidden="true"></span>
-  {#if $uiLayout === 'new'}
     <span class="state" data-testid="conv-tool-state" data-state={running ? 'running' : line.done && !line.error ? 'done' : 'still'}
       >{#if running}<Loader name="comet" size={12} />{:else if line.done && !line.error}<span class="tick" aria-hidden="true">✓</span>{/if}</span
     >
-  {/if}
   <span class="ticon"><Icon name={icon} size={13} /></span>
   <span class="verb">{verb}</span>
   {#if target}<span class="target" title={line.summary}>{target}</span>{/if}

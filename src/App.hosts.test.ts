@@ -13,7 +13,8 @@ import { clearSelection, selectSession, selectedSession } from './lib/selection'
 import { hostFilter } from './lib/hosts';
 import { addProjectRequest, hostsViewOpen, settingsOpen } from './lib/app_views';
 import { clearNewSessionRequest, requestNewSession } from './lib/new_session_request';
-import { agentPanelOpen, operatorState } from './lib/operator';
+import { operatorState } from './lib/operator';
+import { destination } from './lib/destination';
 import type { SessionRow } from './lib/sessions';
 import type { AccountUsageSnapshot } from './lib/account_usage_store';
 import { clock } from './lib/account_usage';
@@ -51,8 +52,8 @@ beforeEach(async () => {
   clearSelection();
   hostFilter.set('all');
   settingsOpen.set(false);
-  agentPanelOpen.set(false);
   operatorState.set('unknown');
+  destination.set('session');
   localStorage.clear();
   rows = [
     session('mefistos', 'dev-mef', { project_id: null }),
@@ -119,6 +120,19 @@ async function openSession(s: SessionRow): Promise<HTMLElement> {
 }
 
 const hostsView = () => screen.queryByTestId('hosts-view');
+/** With no session selected the view opens on the Hosts table (4.6); Enter
+ *  opens the selected host in the list-and-detail. */
+async function openList() {
+  await fireEvent.keyDown(screen.getByTestId('hosts-table'), { key: 'Enter' });
+  await tick();
+  await tick();
+}
+async function openHostFromTable(alias: string) {
+  const row = screen.getAllByTestId('hosts-table-row').find((r) => r.dataset.alias === alias)!;
+  await fireEvent.click(row);
+  await tick();
+  await openList();
+}
 const cmdI = (el: Element | Window = document.activeElement ?? document.body) =>
   fireEvent.keyDown(el, { key: 'i', metaKey: true });
 
@@ -132,8 +146,8 @@ describe('App: the Hosts view', () => {
     await tick();
     expect(hostsView()).not.toBeNull();
     expect(get(hostsViewOpen)).toBe(true);
-    expect(screen.getByTestId('tab-hosts').getAttribute('aria-selected')).toBe('true');
-    expect(screen.getByTestId('tab-session').getAttribute('aria-selected')).toBe('false');
+    expect(screen.getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
+    expect(screen.getByTestId('stab-conversation').getAttribute('aria-selected')).toBe('false');
     // ⌘I again, from inside the view.
     await cmdI(screen.getByTestId('hosts-list'));
     await tick();
@@ -141,9 +155,9 @@ describe('App: the Hosts view', () => {
     expect(writes()).toBe(before);
   });
 
-  it('Ctrl+Shift+H toggles Hosts on non-mac, and the tab names that chord', async () => {
+  it('Ctrl+Shift+H toggles Hosts on non-mac, and the rail item names that chord', async () => {
     await mountApp();
-    expect(screen.getByTestId('tab-hosts').textContent).toContain('Ctrl+Shift+H');
+    expect(screen.getByTestId('rail-accounts').title).toContain('Ctrl+Shift+H');
     await fireEvent.keyDown(window, { key: 'H', ctrlKey: true, shiftKey: true });
     await tick();
     expect(hostsView()).not.toBeNull();
@@ -152,7 +166,7 @@ describe('App: the Hosts view', () => {
     expect(hostsView()).toBeNull();
   });
 
-  it('Esc in the view closes it and restores focus to the terminal', async () => {
+  it('Esc in the view steps back to the table, then closes it and restores focus to the terminal', async () => {
     await mountApp();
     const grid = await openSession(rows[0]);
     await cmdI(grid);
@@ -160,6 +174,11 @@ describe('App: the Hosts view', () => {
     const list = screen.getByTestId('hosts-list');
     expect(document.activeElement).toBe(list);
     await fireEvent.keyDown(list, { key: 'Escape' });
+    await tick();
+    await tick();
+    const table = screen.getByTestId('hosts-table');
+    expect(hostsView()).not.toBeNull();
+    await fireEvent.keyDown(table, { key: 'Escape' });
     await tick();
     await tick();
     expect(hostsView()).toBeNull();
@@ -170,6 +189,7 @@ describe('App: the Hosts view', () => {
     await mountApp();
     await cmdI(window);
     await tick();
+    await openList();
     const filter = screen.getByTestId('hosts-filter');
     filter.focus();
     await fireEvent.input(filter, { target: { value: 'mef' } });
@@ -190,7 +210,7 @@ describe('App: the Hosts view', () => {
     expect(hostsView()).not.toBeNull();
     // Covered, not removed.
     expect(grid.isConnected).toBe(true);
-    await fireEvent.click(screen.getByTestId('tab-session'));
+    await fireEvent.click(screen.getByTestId('rail-sessions'));
     await tick();
     expect(hostsView()).toBeNull();
     expect(screen.getByTestId('terminal-host')).toBe(grid);
@@ -226,11 +246,9 @@ describe('App: the Hosts view', () => {
     await mountApp();
     await cmdI(window);
     await tick();
-    // No session selected: the view picks its own default; go to trn.
+    // No session selected: the view opens on the table; open trn from it.
+    await openHostFromTable('claude-fleet-trn');
     const list = screen.getByTestId('hosts-list');
-    const target = screen.getAllByTestId('host-row').find((r) => r.dataset.alias === 'claude-fleet-trn')!;
-    await fireEvent.click(target);
-    await tick();
     expect(list.getAttribute('aria-activedescendant')).toContain('claude-fleet-trn');
     await fireEvent.click(within(screen.getByTestId('host-detail')).getByTestId('detail-session'));
     await tick();
@@ -256,17 +274,13 @@ describe('App: the Hosts view', () => {
     expect(screen.getByTestId('host-detail').dataset.alias).toBe('mefistos');
   });
 
-  it('the Hosts tab is never disabled, even with no session selected; Session leaves the view', async () => {
+  it('Hosts opens with no session selected; the Sessions rail item leaves the view', async () => {
     await mountApp();
-    const tab = screen.getByTestId('tab-hosts') as HTMLButtonElement;
-    expect(tab.disabled).toBe(false);
-    expect((screen.getByTestId('tab-files') as HTMLButtonElement).disabled).toBe(true);
-    await fireEvent.click(tab);
+    expect((screen.getByTestId('stab-files') as HTMLButtonElement).disabled).toBe(true);
+    await cmdI(window);
     await tick();
     expect(hostsView()).not.toBeNull();
-    const sessionTab = screen.getByTestId('tab-session') as HTMLButtonElement;
-    expect(sessionTab.disabled).toBe(false);
-    await fireEvent.click(sessionTab);
+    await fireEvent.click(screen.getByTestId('rail-sessions'));
     await tick();
     expect(hostsView()).toBeNull();
   });
@@ -275,19 +289,19 @@ describe('App: the Hosts view', () => {
     await mountApp();
     const grid = await openSession(rows[0]);
     const selected = (id: string) => screen.getByTestId(id).getAttribute('aria-selected');
-    await fireEvent.click(screen.getByTestId('tab-files'));
+    await fireEvent.click(screen.getByTestId('stab-files'));
     await tick();
-    expect(selected('tab-files')).toBe('true');
+    expect(selected('stab-files')).toBe('true');
     await cmdI(grid);
     await tick();
     expect(hostsView()).not.toBeNull();
-    expect(selected('tab-files')).toBe('false');
-    expect(selected('tab-hosts')).toBe('true');
-    await fireEvent.click(screen.getByTestId('tab-files'));
+    expect(selected('stab-files')).toBe('false');
+    expect(screen.getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
+    await fireEvent.click(screen.getByTestId('stab-files'));
     await tick();
     expect(hostsView()).toBeNull();
-    expect(selected('tab-files')).toBe('true');
-    expect(selected('tab-hosts')).toBe('false');
+    expect(selected('stab-files')).toBe('true');
+    expect(screen.getByTestId('rail-accounts').getAttribute('aria-current')).toBeNull();
   });
 
   it('s filters the sidebar to the host and closes the Hosts overlay', async () => {
@@ -310,9 +324,7 @@ describe('App: the Hosts view', () => {
     await waitFor(() => expect(screen.getByTestId('sidebar-expand')).toBeTruthy());
     await cmdI(window);
     await tick();
-    const mef = screen.getAllByTestId('host-row').find((r) => r.dataset.alias === 'mefistos')!;
-    await fireEvent.click(mef);
-    await tick();
+    await openHostFromTable('mefistos');
 
     await fireEvent.click(within(screen.getByTestId('host-detail')).getByTestId('detail-view-sessions'));
     await tick();
@@ -394,30 +406,28 @@ describe('App: the Hosts view', () => {
     expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
   });
 
-  it('⌘E TOGGLES the agent panel — the sheet covers every view, so it must close', async () => {
+  it('⌘E toggles Control\'s agent chat, so it never stays pinned over a view', async () => {
     const routed = inv.getMockImplementation() as (cmd: string, ...rest: unknown[]) => Promise<unknown>;
     inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
       if (cmd === 'operator_status') return { ready: true, session: null, blocked: null };
       return routed(cmd, ...rest);
     });
     await mountApp();
-    expect(screen.queryByRole('dialog', { name: 'Agent' })).toBeNull();
+    expect(screen.queryByTestId('control-agent')).toBeNull();
     await fireEvent.keyDown(window, { key: 'e', metaKey: true });
     await tick();
-    expect(get(agentPanelOpen)).toBe(true);
-    expect(screen.getByRole('dialog', { name: 'Agent' })).toBeTruthy();
+    expect(get(destination)).toBe('control');
+    expect(screen.getByTestId('control-agent')).toBeTruthy();
     expect(get(settingsOpen)).toBe(false);
 
-    // Press again: closed. Before this, `agentPanelOpen` was written `false`
-    // nowhere in production code and the sheet stayed pinned over the
-    // bottom-right corner of every view for the life of the process.
+    // Press again: back where it was.
     await fireEvent.keyDown(window, { key: 'e', metaKey: true });
     await tick();
-    expect(get(agentPanelOpen)).toBe(false);
-    expect(screen.queryByRole('dialog', { name: 'Agent' })).toBeNull();
+    expect(get(destination)).not.toBe('control');
+    expect(screen.queryByTestId('control-agent')).toBeNull();
   });
 
-  it('Escape closes the agent panel from the page behind it', async () => {
+  it('Escape leaves the agent chat from the page behind it', async () => {
     const routed = inv.getMockImplementation() as (cmd: string, ...rest: unknown[]) => Promise<unknown>;
     inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
       if (cmd === 'operator_status') return { ready: true, session: null, blocked: null };
@@ -426,10 +436,10 @@ describe('App: the Hosts view', () => {
     await mountApp();
     await fireEvent.keyDown(window, { key: 'e', metaKey: true });
     await tick();
-    expect(get(agentPanelOpen)).toBe(true);
+    expect(get(destination)).toBe('control');
     await fireEvent.keyDown(document.body, { key: 'Escape' });
     await tick();
-    expect(get(agentPanelOpen)).toBe(false);
+    expect(get(destination)).not.toBe('control');
   });
 
   it('Settings → Open Hosts closes Settings and opens the view', async () => {

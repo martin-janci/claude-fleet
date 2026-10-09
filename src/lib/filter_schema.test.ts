@@ -14,7 +14,6 @@ import { sessions, sidebarGroupBy, showBgAgents, showFriendlyNames, showRowDetai
 import { projects, type ProjectTreeRow } from './projects';
 import { orgs, scopeFilter } from './orgs';
 import { trackers } from './trackers';
-import { uiLayout } from './prefs';
 import { DEFAULT_WORK_FILTERS, workFilters } from './work_filters';
 import { activeWorkViewId, workLayout, workViewFilters } from './work_view';
 import { sessionFacets, workFacets } from './filter_facets';
@@ -84,7 +83,6 @@ function expectUnderHeading(panel: HTMLElement, testid: string, heading: string)
 }
 
 beforeEach(() => {
-  uiLayout.set('new');
   vi.mocked(invoke).mockReset();
   vi.mocked(invoke).mockImplementation(async (cmd: string) => (cmd === 'work_views' ? [] : null));
   sessions.set([]);
@@ -100,7 +98,6 @@ beforeEach(() => {
   workLayout.set('list');
 });
 afterEach(() => {
-  uiLayout.set('classic');
 });
 
 describe('the filter schema', () => {
@@ -152,7 +149,7 @@ describe('Sessions: the Filters section (New layout)', () => {
     for (const id of ['sidebar-search', 'filters-open', 'group-select', 'view-options-open']) {
       expect(within(rowEl).getByTestId(id)).toBeTruthy();
     }
-    // Classic's second row (Needs you, Select) is not drawn.
+    // There is no second row: Needs you is in the panel, Select in ⋯.
     expect(screen.queryByTestId('needs-you-filter')).toBeNull();
     expect(screen.queryByTestId('scope-select')).toBeNull();
   });

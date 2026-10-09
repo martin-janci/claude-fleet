@@ -32,7 +32,6 @@ import {
 } from './hosts_fixture';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
-import { uiLayout } from './prefs';
 
 const inv = mockedInvoke as unknown as ReturnType<typeof vi.fn>;
 const calls = (cmd: string) => inv.mock.calls.filter((c) => c[0] === cmd);
@@ -81,7 +80,6 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
-  uiLayout.set('classic');
 });
 
 function mount(props: Partial<{ preselect: string | null; clock: () => number }> = {}) {
@@ -93,6 +91,14 @@ function mount(props: Partial<{ preselect: string | null; clock: () => number }>
 }
 
 const list = () => screen.getByTestId('hosts-list');
+const hostsTable = () => screen.getByTestId('hosts-table');
+/** The view opens on the Hosts table (4.6); Enter opens the selected host
+ *  in the list-and-detail. */
+const openList = async () => {
+  await fireEvent.keyDown(hostsTable(), { key: 'Enter' });
+  await tick();
+  await tick();
+};
 const detail = () => screen.getByTestId('host-detail');
 const selected = () => list().getAttribute('aria-activedescendant');
 const detailAlias = () => detail().dataset.alias;
@@ -106,6 +112,7 @@ describe('HostsView: list', () => {
   it('groups by account in a stable order with local under mj-janci@users.noreply.github.com', async () => {
     mount();
     await tick();
+    await openList();
     const groups = screen.getAllByTestId('hosts-group');
     expect(groups.map((g) => within(g).getByTestId('group-label').textContent)).toEqual([
       'admin-janci@users.noreply.github.com',
@@ -136,6 +143,7 @@ describe('HostsView: list', () => {
     });
     mount();
     await tick();
+    await openList();
     const labels = screen.getAllByTestId('hosts-group').map((g) => within(g).getByTestId('group-label').textContent);
     expect(labels).toEqual(['admin-janci@users.noreply.github.com', 'm-janci@users.noreply.github.com', 'mj-janci@users.noreply.github.com', 'No Claude account']);
     expect(rowAliases().at(-1)).toBe('aaa-nas');
@@ -144,6 +152,7 @@ describe('HostsView: list', () => {
   it('group header shows the tier, both mini bars with % left and reset, and a freshness mark', async () => {
     mount();
     await tick();
+    await openList();
     const header = screen.getAllByTestId('hosts-group-header')[0];
     expect(within(header).getByTestId('group-tier').textContent).toBe('max');
     expect(within(header).getByTestId('group-usage-5h').textContent).toMatch(/91% left\s*· resets 15:10/);
@@ -158,6 +167,7 @@ describe('HostsView: list', () => {
   it('an offline host row says offline, and rows show session counts', async () => {
     mount();
     await tick();
+    await openList();
     const htz = screen.getAllByTestId('host-row').find((r) => r.dataset.alias === 'claude-fleet-htz')!;
     expect(within(htz).getByTestId('host-offline').textContent).toBe('offline');
     expect(htz.textContent).toContain('○');
@@ -170,6 +180,7 @@ describe('HostsView: list', () => {
     hosts.set(fleetHosts().map((h) => (h.alias === 'claude-fleet-oci' ? { ...h, claude_version: '2.1.140' } : h)));
     mount();
     await waitFor(() => expect(get(hostTokensLoaded)).toBe(true));
+    await openList();
     const marks = screen.getAllByTestId('host-attention');
     expect(marks).toHaveLength(1);
     expect(marks[0].dataset.kind).toBe('claude_old');
@@ -183,6 +194,7 @@ describe('HostsView: list', () => {
   it('header counts hosts and online hosts', async () => {
     mount();
     await tick();
+    await openList();
     expect(screen.getByTestId('hosts-summary').textContent).toBe('5 · 4 online');
     expect(screen.getByTestId('hosts-view').textContent).toContain('usage every 5 min');
   });
@@ -196,6 +208,7 @@ describe('HostsView: selection and keyboard', () => {
     a.unmount();
     mount();
     await tick();
+    await openList();
     // claude-fleet-htz is offline: the first host needing attention.
     expect(detailAlias()).toBe('claude-fleet-htz');
   });
@@ -204,7 +217,9 @@ describe('HostsView: selection and keyboard', () => {
     hosts.set(fleetHosts().map((h) => ({ ...h, reachable: true })));
     mount();
     await tick();
-    expect(detailAlias()).toBe('claude-fleet-oci');
+    await openList();
+    // The first in the table's order, which puts local first.
+    expect(detailAlias()).toBe('local');
   });
 
   it('focuses the list with aria-activedescendant on the selected row', async () => {
@@ -234,7 +249,7 @@ describe('HostsView: selection and keyboard', () => {
     expect(detailAlias()).toBe('claude-fleet-oci');
   });
 
-  it('Enter and → focus the detail; ← and Esc return to the list; Esc in the list closes', async () => {
+  it('Enter and → focus the detail; ← and Esc return to the list', async () => {
     const v = mount({ preselect: 'mefistos' });
     await tick();
     await key(list(), 'Enter');
@@ -246,8 +261,6 @@ describe('HostsView: selection and keyboard', () => {
     await key(detail(), 'Escape');
     expect(document.activeElement).toBe(list());
     expect(v.onClose).not.toHaveBeenCalled();
-    await key(list(), 'Escape');
-    expect(v.onClose).toHaveBeenCalledTimes(1);
   });
 
   it('↑↓ in the detail move between session rows, and a session row selects the session', async () => {
@@ -322,9 +335,9 @@ describe('HostsView: selection and keyboard', () => {
   it('? toggles the legend', async () => {
     mount();
     await tick();
-    await key(list(), '?');
+    await key(hostsTable(), '?');
     expect(screen.getByTestId('hosts-legend').textContent).toContain("view this host's sessions (closes Hosts)");
-    await key(list(), '?');
+    await key(hostsTable(), '?');
     expect(screen.queryByTestId('hosts-legend')).toBeNull();
     await fireEvent.click(screen.getByTestId('hosts-legend-toggle'));
     expect(screen.getByTestId('hosts-legend')).toBeInTheDocument();
@@ -345,6 +358,7 @@ describe('HostsView: selection and keyboard', () => {
     let t = NOW;
     const v = mount({ clock: () => t });
     await tick();
+    await openList();
     const mark = () => screen.getAllByTestId('group-freshness')[0].textContent;
     expect(mark()).toBe('2m');
     t = NOW + 10 * MIN;
@@ -736,7 +750,7 @@ describe('HostsView: detail sections', () => {
     expect(within(d).getByTestId('detail-hooks').textContent).toMatch(/last event 5m ago/);
   });
 
-  it('+ Add host opens the host picker', async () => {
+  it('+ Add host opens the wizard, which reads the SSH config for hosts', async () => {
     mount();
     await tick();
     await fireEvent.click(screen.getByTestId('hosts-add'));
@@ -821,13 +835,13 @@ describe('HostsView: a hub contract skew', () => {
     hubConnection.set({ state: 'standalone' });
   });
 
-  it('the detail pane shows the connection banner’s sentence instead of "No hosts yet"', async () => {
+  it('the empty table shows the connection banner’s sentence instead of "No hosts yet"', async () => {
     hosts.set([]);
     hubStatus.set(remote);
     hubConnection.set({ state: 'hub_too_old', hub_contract: 1, min_contract: 3 });
     mount();
     await tick();
-    const empty = screen.getByTestId('hosts-detail-empty');
+    const empty = screen.getByTestId('hosts-table-empty');
     expect(empty.textContent).not.toContain('No hosts yet');
     expect(empty.textContent?.toLowerCase()).toContain('update the hub');
   });
@@ -836,7 +850,7 @@ describe('HostsView: a hub contract skew', () => {
     hosts.set([]);
     mount();
     await tick();
-    expect(screen.getByTestId('hosts-detail-empty').textContent).toContain('No hosts yet');
+    expect(screen.getByTestId('hosts-table-empty').textContent).toContain('No hosts yet');
   });
 
   // M2: a skew discovered mid-session (the hub was compatible at load time,
@@ -849,6 +863,7 @@ describe('HostsView: a hub contract skew', () => {
     hubConnection.set({ state: 'hub_too_new', hub_contract: 9, max_contract: 3 });
     mount();
     await tick();
+    await openList();
     const filter = screen.getByTestId('hosts-filter') as HTMLInputElement;
     await fireEvent.input(filter, { target: { value: 'zzz-no-such-host' } });
     await tick();
@@ -856,24 +871,15 @@ describe('HostsView: a hub contract skew', () => {
   });
 });
 
-// Orbit Fleet 4.6: under Layout: New the view opens on the Hosts table
-// (Accounts board → Hosts). Classic keeps the grouped list, unchanged.
-describe('HostsView: the Hosts table (Layout: New)', () => {
+// Orbit Fleet 4.6: the view opens on the Hosts table (Accounts board →
+// Hosts); Open shows the grouped list beside the detail.
+describe('HostsView: the Hosts table', () => {
   const table = () => screen.getByTestId('hosts-table');
   const tableAliases = () => screen.getAllByTestId('hosts-table-row').map((r) => r.dataset.alias);
   const cell = (alias: string, id: string) =>
     within(screen.getAllByTestId('hosts-table-row').find((r) => r.dataset.alias === alias)!).getByTestId(id);
 
-  it('Classic never shows the table', async () => {
-    uiLayout.set('classic');
-    mount();
-    await tick();
-    expect(screen.queryByTestId('hosts-table')).toBeNull();
-    expect(list()).toBeTruthy();
-  });
-
   it('opens on a flat table: local first, every host once, the board columns filled', async () => {
-    uiLayout.set('new');
     hosts.update((hs) =>
       hs.map((h) =>
         h.alias === 'mefistos'
@@ -896,7 +902,6 @@ describe('HostsView: the Hosts table (Layout: New)', () => {
   });
 
   it('Open shows the detail; Esc goes back to the table, and Esc there closes', async () => {
-    uiLayout.set('new');
     const v = mount();
     await tick();
     const row = screen.getAllByTestId('hosts-table-row').find((r) => r.dataset.alias === 'mefistos')!;
@@ -915,8 +920,7 @@ describe('HostsView: the Hosts table (Layout: New)', () => {
     expect(v.onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('New layout: Restore on a lost session works from the detail Open shows', async () => {
-    uiLayout.set('new');
+  it('Restore on a lost session works from the detail Open shows', async () => {
     const lost = [
       session('mefistos', 'mef-lost-a', { lost_at: NOW - 10 * MIN, claude_session_id: 'c-a' }),
       session('mefistos', 'mef-lost-b', { lost_at: NOW - 10 * MIN, claude_session_id: 'c-b' }),
@@ -969,7 +973,6 @@ describe('HostsView: the Hosts table (Layout: New)', () => {
   });
 
   it('j/k and Home move the table selection, Enter opens it, and n/s still act on it', async () => {
-    uiLayout.set('new');
     const v = mount();
     await tick();
     // The offline host needs attention, so it is selected, and it sorts last.
@@ -988,8 +991,7 @@ describe('HostsView: the Hosts table (Layout: New)', () => {
     expect(table()).toBeTruthy();
   });
 
-  it('+ Add host opens the add-host wizard; Classic keeps the picker (4.9)', async () => {
-    uiLayout.set('new');
+  it('+ Add host opens the add-host wizard (4.9)', async () => {
     mount();
     await tick();
     await fireEvent.click(screen.getByTestId('hosts-add'));
@@ -999,7 +1001,6 @@ describe('HostsView: the Hosts table (Layout: New)', () => {
   });
 
   it('a preselected host opens straight in its detail', async () => {
-    uiLayout.set('new');
     mount({ preselect: 'mefistos' });
     await tick();
     expect(detailAlias()).toBe('mefistos');

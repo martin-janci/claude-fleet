@@ -3,7 +3,7 @@
      order with their number keys. Nothing is pre-selected: an answer is
      primary only when the consumer says so, never as the AI's pick.
      Redesign 5.9 makes it the one approval card: `AnswerPrompt` draws every
-     agent dialog through it in the New layout, in the Conversation and, as
+     agent dialog through it, in the Conversation and, as
      `compact`, on a session row. -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
