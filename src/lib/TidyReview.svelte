@@ -20,6 +20,7 @@
   import ResumeButton from './ResumeButton.svelte';
   import Loader from './Loader.svelte';
   import { uiLayout } from './prefs';
+  import { proposedByLabel } from './ai_proposal';
   import {
     applyItems,
     applyTidy,
@@ -42,6 +43,7 @@
     TIDY_CHOICE_LABELS,
     KEEP_DAYS,
     tidyEvidence,
+    JEV_REASONS,
     type TidyApplyItem,
     type TidyCandidate,
     type TidyChoice,
@@ -60,8 +62,11 @@
 
   // The sidebar's scope (work graph M5) narrows the view, like every other
   // list: a candidate shows when its session is in the chosen scope.
+  // Jev's reasons (6.9, Tidy › Duplicates) are New-layout only.
   const candidates = $derived(
-    inScope($tidyReport.candidates, $sessions, $effectiveScope, $scopeOf),
+    inScope($tidyReport.candidates, $sessions, $effectiveScope, $scopeOf).filter(
+      (c) => $uiLayout === 'new' || !JEV_REASONS.has(c.reason),
+    ),
   );
   // A request from the Today view's Stale section (M10.4) narrows the sheet
   // to those sessions until "Show all"; the pill's own opening shows all.
@@ -128,6 +133,12 @@
 
   function rowName(c: TidyCandidate): string {
     return c.label || c.tmux_name;
+  }
+
+  /** The kept session of a `same_work` pair, by its sidebar name. */
+  function sameAsName(id: number): string {
+    const row = $sessions.find((r) => r.id === id);
+    return row ? row.friendly_name || row.tmux_name : `session ${id}`;
   }
 
   async function openSheet(requested: number[] = []) {
@@ -486,6 +497,10 @@
           {:else}
             <span class="meta" data-testid="tidy-evidence">{tidyEvidence(c)}</span>
           {/if}
+          {#if c.reason === 'same_work' && c.same_as != null}
+            <span class="meta" data-testid="tidy-same-work">same work as {sameAsName(c.same_as)}</span>
+            <span class="jev" data-testid="tidy-same-work-by">{proposedByLabel('jev')}</span>
+          {/if}
           {#if (c.secondary ?? []).length > 0}
             <span class="meta">also: {(c.secondary ?? []).map(tidyReasonLabel).join(', ')}</span>
           {/if}
@@ -636,6 +651,20 @@
   }
   .meta {
     color: var(--fg-muted);
+  }
+  /* Jev's mark on a `same_work` row (6.9), as ProposedBy draws it. */
+  .jev {
+    font-size: 11px;
+    line-height: 16px;
+    font-weight: 500;
+    color: var(--accent);
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    background: var(--accent-soft);
+    white-space: nowrap;
+  }
+  .jev::before {
+    content: '\2726 ';
   }
   .warn {
     color: var(--usage-warn);

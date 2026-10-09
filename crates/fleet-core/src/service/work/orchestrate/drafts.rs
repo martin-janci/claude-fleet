@@ -262,17 +262,21 @@ fn reader_key(scope: &ViewScope) -> String {
 static BRIEFS: LazyLock<Mutex<HashMap<String, Brief>>> = LazyLock::new(Default::default);
 
 /// One booked run: the origin, where, and what it cost.
-struct Run<'a> {
-    origin: &'static str,
-    host: &'a str,
-    model: &'a str,
-    mission_id: Option<i64>,
-    org_id: Option<i64>,
+pub(super) struct Run<'a> {
+    pub origin: &'static str,
+    pub host: &'a str,
+    pub model: &'a str,
+    pub mission_id: Option<i64>,
+    pub org_id: Option<i64>,
 }
 
 /// Run `prompt` on `run.host` and book it. The store is not locked across
 /// the call.
-async fn run_draft(deps: &Deps, run: &Run<'_>, prompt: &str) -> Result<(String, bool), IpcError> {
+pub(super) async fn run_draft(
+    deps: &Deps,
+    run: &Run<'_>,
+    prompt: &str,
+) -> Result<(String, bool), IpcError> {
     let _slot = HostSlot::take(run.host)?;
     let script = planner::planner_script(run.model, prompt);
     let out = crate::ssh::run_shell_bounded(

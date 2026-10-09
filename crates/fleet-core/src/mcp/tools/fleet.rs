@@ -301,9 +301,11 @@ impl FleetTools {
         agent-token <alias>` on the hub). Returns the host row.")]
     pub(super) async fn add_host(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<hosts::AddHostArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("add_host", &add_host_audit_detail(&args));
+        owner_device_admin(&caller, "adding a host")?;
         let row = hosts::add_host(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -317,9 +319,11 @@ impl FleetTools {
         Defaults: this hub's public URL and version. Hub only.")]
     pub(super) async fn install_agent(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<agent_install::InstallAgentArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("install_agent", &format!("alias={}", args.alias));
+        owner_device_admin(&caller, "installing fleet-agent")?;
         let ssh: Arc<dyn crate::ssh::SshExec> = self.ssh.clone();
         let row = agent_install::start(
             Arc::clone(&self.store),
@@ -1323,6 +1327,28 @@ pub(super) fn org_admin_writer(caller: &Caller) -> Result<(), McpError> {
         format!(
             "this device may read the company's orgs, devices and people; to change them, \
              the hub's operator trusts it (a full device): fleet-hub client trust {}",
+            caller.client.as_ref().map_or("<name>", |c| c.name.as_str())
+        ),
+        None,
+    ))
+}
+
+/// Fleet administration from the owner's phone (Martin, 2026-10-08:
+/// "Owner's phone"; trackers "Allow on phone"): `add_host`,
+/// `install_agent` and `work_admin`'s tracker actions. Their
+/// `Access::Person` row already made the caller the master or the hub
+/// owner's own device bound to no org; a device must also be trusted and
+/// `full`, as for `org_admin`. Credentials it sends are stored on the hub
+/// and never answered back.
+pub(super) fn owner_device_admin(caller: &Caller, what: &str) -> Result<(), McpError> {
+    if caller.is_master() || (caller.is_trusted_client() && caller.mode == TokenMode::Full) {
+        return Ok(());
+    }
+    Err(mcp_err(
+        "E_FORBIDDEN",
+        format!(
+            "{what} from a device needs the hub's operator to trust it (a full device): \
+             fleet-hub client trust {}",
             caller.client.as_ref().map_or("<name>", |c| c.name.as_str())
         ),
         None,

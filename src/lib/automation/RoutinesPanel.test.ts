@@ -8,7 +8,10 @@ import RoutinesPanel from './RoutinesPanel.svelte';
 import RoutineFailures from './RoutineFailures.svelte';
 import { hosts } from '../hosts';
 import { projects } from '../projects';
-import { failing, routinesDialogOpen, type RoutineRow, type RoutineRunRow } from '../routines';
+import { get } from 'svelte/store';
+import { destination } from '../destination';
+import { automationTab } from '../automation';
+import { failing, type RoutineRow, type RoutineRunRow } from '../routines';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -57,7 +60,6 @@ beforeEach(() => {
   hosts.set([{ alias: 'mac', hidden: false } as never]);
   projects.set([{ project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', system: false }, worktrees: [] } as never]);
   failing.set([]);
-  routinesDialogOpen.set(false);
   route();
 });
 
@@ -74,6 +76,18 @@ describe('Routines (8.6)', () => {
     await waitFor(() => expect(argsOf('run_now')).toEqual({ action: 'run_now', routine_id: 3 }));
     await fireEvent.click(screen.getByTestId('routine-run-pause'));
     await waitFor(() => expect(argsOf('set_enabled')).toEqual({ action: 'set_enabled', routine_id: 3, enabled: false }));
+  });
+
+  it("marks a run outcome Jev read from the screen, and only that one (8.10)", async () => {
+    const quiet: RoutineRunRow = { ...ok, id: 4, outcome: 'nothing', outcome_source: 'jev' };
+    route([sweep], [quiet, { ...ok, outcome_source: 'rule' }]);
+    render(RoutinesPanel);
+    const runs = await screen.findAllByTestId('routine-run');
+    expect(runs[0].textContent).toContain('Nothing to do');
+    const tags = screen.getAllByTestId('routine-run-jev');
+    expect(tags).toHaveLength(1);
+    expect(runs[0].contains(tags[0])).toBe(true);
+    expect(tags[0].getAttribute('title')).toMatch(/last screen/);
   });
 
   it('starts a new routine from the Morning PR sweep template and saves it whole', async () => {
@@ -123,9 +137,12 @@ describe('the Inbox block', () => {
     expect(screen.getByTestId('routine-failure-pause')).toBeInTheDocument();
     await fireEvent.click(screen.getByTestId('routine-failure-retry'));
     await waitFor(() => expect(argsOf('run_now')).toEqual({ action: 'run_now', routine_id: 3 }));
-    // Fix on a run with no session opens the routine's definition.
+    // Fix on a run with no session opens the routine's definition, in
+    // Automation's Routines tab (8.4).
     await fireEvent.click(screen.getByTestId('routine-failure-fix'));
-    expect(await screen.findByTestId('routines-dialog')).toBeInTheDocument();
+    expect(get(destination)).toBe('automation');
+    expect(get(automationTab)).toBe('routines');
+    render(RoutinesPanel);
     expect(await screen.findByTestId('routine-definition')).toBeInTheDocument();
   });
 

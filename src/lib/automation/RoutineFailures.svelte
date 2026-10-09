@@ -3,10 +3,9 @@
   // whose newest run failed, under the sessions that need you, with Fix
   // (open its session, or its definition when it never started one), Retry
   // (run it now) and Pause. Either Retry or Pause takes it out; its count is
-  // part of the Needs you badge (`failingCount`). It also mounts the Routines
-  // dialog until 8.4's Automation screen hosts the panel itself.
+  // part of the Needs you badge (`failingCount`). A routine's name opens it
+  // in Automation's Routines tab (8.4).
   import { onMount } from 'svelte';
-  import RoutinesDialog from './RoutinesDialog.svelte';
   import { shortAge } from '../session_status';
   import { push, pushError } from '../toasts';
   import {
@@ -56,7 +55,7 @@
           {#if f.routine.paused_reason}<span class="line">{f.routine.paused_reason}</span>{/if}
           {#if f.may_change}
             <span class="actions">
-              <button type="button" class="btn btn--chip" data-testid="routine-failure-fix" onclick={() => fixRoutine(f)}>Fix…</button>
+              <button type="button" class="btn btn--chip" data-testid="routine-failure-fix" onclick={() => fixRoutine(f)}>Fix</button>
               <button type="button" class="btn btn--chip" data-testid="routine-failure-retry" disabled={busy === f.routine.id} onclick={() => retry(f)}
                 >Retry</button
               >
@@ -72,8 +71,6 @@
     {/each}
   </div>
 {/if}
-
-<RoutinesDialog />
 
 <style>
   .failures { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px; }

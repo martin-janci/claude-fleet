@@ -3327,6 +3327,24 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Redesign 9.10: B's mission is not stuck, so whoever sees it gets an
+    // empty card; triage changes nothing either way.
+    m.row(
+        "work_link",
+        "mission_triage",
+        move |_, _| json!({ "action": "mission_triage", "mission_id": mission_b }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's mission"),
+                _ => is_ok(who, a, "mission_triage"),
+            }
+        },
+    )
+    .await;
     // Last of the loop's rows: it pauses B's mission for the rows after.
     m.row(
         "work_link",
@@ -5126,22 +5144,26 @@ async fn a_per_host_token_still_cannot_read_another_hosts_tickets_in_its_org() {
 /// host token never reaches org admin.
 #[test]
 fn nobody_but_the_master_administers_orgs() {
-    for who in [
-        Who::ClientFull,
-        Who::ClientReadonly,
-        Who::HostA,
-        Who::HostNone,
-    ] {
+    for who in [Who::ClientReadonly, Who::HostA, Who::HostNone] {
         assert!(
-            enforce_admin(&who.caller(), "work_admin").is_err(),
+            enforce_admin(&who.caller(), "work_admin").is_err()
+                || !crate::mcp::guard::access_allows(&who.caller(), "work_admin")
+                || enforce_mode(&who.caller(), "work_admin").is_err(),
             "{who:?}"
         );
     }
     assert!(enforce_admin(&Caller::master(), "work_admin").is_ok());
-    assert!(!present::visible_to(
-        &Who::ClientFull.caller(),
-        "work_admin"
-    ));
+    // Contract 13: the owner's own full device passes the gate for its
+    // trackers; `work_admin` itself refuses it every org action (and every
+    // action until it is trusted), which the matrix's work_admin rows prove
+    // for the untrusted fixture.
+    assert!(present::visible_to(&Who::ClientFull.caller(), "work_admin"));
+    for name in crate::service::trackers::admin::AdminAction::NAMES {
+        let action = crate::service::trackers::admin::AdminAction::parse(name).unwrap();
+        if name.contains("org") {
+            assert!(!action.is_tracker_action(), "{name}");
+        }
+    }
     assert!(!present::visible_to(&Who::HostA.caller(), "work_admin"));
     let _ = OrgScope::All;
 }

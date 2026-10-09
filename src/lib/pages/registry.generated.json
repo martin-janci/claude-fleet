@@ -1966,6 +1966,86 @@
         "level": "none"
       },
       "default": "off",
+      "help": "Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests.",
+      "key": "decide.jev.work_placement",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: task group",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Noticing another of your sessions working on the same thing. Shadow only records; assist suggests.",
+      "key": "decide.jev.related_session",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: related session",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
       "help": "Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests.",
       "key": "decide.jev.control_route",
       "kind": {
@@ -2070,6 +2150,86 @@
         [
           "assist",
           "Assist: set the state"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Proposing a stuck mission's outcome and next step. Never completes a mission or sets Verified. Shadow only records; assist suggests.",
+      "key": "decide.jev.mission_triage",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: mission triage",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Reading whether a routine run did work, found nothing to do or needs you, from the end of its screen. Shadow only records; assist sets the outcome, so a run with nothing to do stays out of the Inbox. A failed exit or a rule wins. Sends reply text only for organisations that allow it.",
+      "key": "decide.jev.routine_run_outcome",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: routine run outcome",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: set the outcome"
         ]
       ],
       "restart": "none",
@@ -3466,6 +3626,16 @@
               "type": "field"
             },
             {
+              "hint": "Proposes a group for a new task nothing placed; you still place it.",
+              "key": "decide.jev.work_placement",
+              "type": "field"
+            },
+            {
+              "hint": "Marks another of your sessions that works on the same thing; nothing is stopped or merged.",
+              "key": "decide.jev.related_session",
+              "type": "field"
+            },
+            {
               "hint": "Says which mission or session a message in Control is about; you can change it. A short message gets a question instead.",
               "key": "decide.jev.control_route",
               "type": "field"
@@ -3478,6 +3648,16 @@
             {
               "hint": "Sends Claude's last reply, redacted, only for organisations that allow reply text. Hooks always win.",
               "key": "decide.jev.turn_outcome",
+              "type": "field"
+            },
+            {
+              "hint": "Proposes a stuck mission's outcome and next step; you still choose. It never completes a mission or sets Verified.",
+              "key": "decide.jev.mission_triage",
+              "type": "field"
+            },
+            {
+              "hint": "Keeps runs with nothing to do out of the Inbox. Sends the run's last reply only for organisations that allow reply text.",
+              "key": "decide.jev.routine_run_outcome",
               "type": "field"
             },
             {

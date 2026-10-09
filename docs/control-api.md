@@ -641,7 +641,8 @@ Index by area (names only; see the reference for details):
   Lifecycle (roadmap M7): `work { action: "tidy" }` returns the tidy-up
   candidates — each with `session_id`, `link_id`, a primary `reason`
   (`done_idle` | `pr_merged_idle` | `not_planned` | `duplicate_worktree` |
-  `ghost_expiring`), `secondary` reasons, the preselected `action`
+  `same_work` | `ghost_expiring` | `idle_unlinked`; `same_work` carries
+  `same_as`, the session kept), `secondary` reasons, the preselected `action`
   (`safe_kill` | `kill` | `archive` | `resume_or_expire`), a preview (host,
   branch, key, item status, PR, idle time) and `auto` (auto-tidy would act
   on it) — plus the policy (`auto_tidy`, `auto_reasons`, `done_days`,
@@ -929,6 +930,13 @@ Index by area (names only; see the reference for details):
   mission's rows need the mission, a routine's fires the routine, and runs that belong to no session or
   mission need whole-fleet spend. A person's, never served to a per-host
   token.
+- **PR shepherd** — `pr_shepherd`, the standing rules that let fleet look
+  after a project's PRs (`docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
+  `status` (rules, recent episodes and merges), `grant { project_id, level:
+  watch|nudge|merge, hours?, recipes? }`, `revoke { project_id }`,
+  `pause_all`. Served only to the hub owner's own paired device, never to
+  the master an agent holds (the operator has `fleet-hub shepherd`); a write
+  needs a trusted full device.
 - **Chat forms** — `ask`. Chat forms: open a `fleet.form/1` form in your own session's chat and wait for a person's answers; the person's side lists, gets, answers and declines. See `docs/forms.md`.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a

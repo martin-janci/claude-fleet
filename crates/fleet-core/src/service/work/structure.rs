@@ -225,6 +225,21 @@ pub fn place(
         expected,
         by,
     )?;
+    // K5's follow-up: a person's placement confirms or corrects Jev's
+    // proposed group. Never fails the placement.
+    if let (Some(item_id), Some(label)) = (task.item_id, group.as_deref()) {
+        if let Err(e) = crate::service::decide::work_placement::record_place(
+            &s,
+            item_id,
+            label,
+            crate::service::catalog::now_secs(),
+        ) {
+            tracing::warn!(
+                "[decide] work_placement follow-up not recorded: {}",
+                e.message
+            );
+        }
+    }
     drop(s);
     // Only the placement changed: patch it into the graph already loaded
     // rather than reading every item, link and session again.

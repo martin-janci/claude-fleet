@@ -9,6 +9,8 @@ import { derived, get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { sessions } from './sessions';
 import { selectSessionExplicitly } from './selection';
+import { goTo } from './destination';
+import { automationTab } from './automation';
 
 export type RoutineTrigger = 'cron' | 'event' | 'manual';
 export type RoutineOverlap = 'skip' | 'parallel';
@@ -150,13 +152,11 @@ export type RoutineTab = 'runs' | 'definition' | 'limits';
 
 export const routinesRequest = writable<RoutinesRequest | null>(null);
 
-/** Whether the Routines show as a dialog. Until 8.4's Automation screen
- *  hosts the panel, the Inbox's routines block opens it this way. */
-export const routinesDialogOpen = writable(false);
-
+/** Open the Routines: Automation's Routines tab (8.4), on `r`'s routine. */
 export function openRoutines(r: Omit<RoutinesRequest, 'at'> = {}): void {
   routinesRequest.set({ ...r, at: Date.now() });
-  routinesDialogOpen.set(true);
+  automationTab.set('routines');
+  goTo('automation');
 }
 
 /**
@@ -233,6 +233,14 @@ export function runWords(run: Pick<RoutineRunRow, 'state' | 'outcome' | 'reason'
   if (run.outcome === 'needs_person') return 'Needs you';
   if (run.outcome === 'nothing') return 'Nothing to do';
   return 'Done';
+}
+
+/** Who read a run's outcome, when it was Jev (step 8.10): its answer is a
+ *  reading of the run's last screen, which the exit and the rules override.
+ *  `undefined` for the exit and the rules, which say it themselves. */
+export function runSourceHint(run: Pick<RoutineRunRow, 'outcome' | 'outcome_source'>): string | undefined {
+  if (run.outcome_source !== 'jev' || !run.outcome) return undefined;
+  return "Jev read this from the run's last screen. Open the run's session to check it.";
 }
 
 /** `$0.38` from micro-dollars. */

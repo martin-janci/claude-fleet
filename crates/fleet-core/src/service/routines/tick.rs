@@ -8,6 +8,7 @@
 use super::{record_skip, usd, EVENTS};
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{lock, IpcError};
+use crate::service::decide::routine_run_outcome::{self, PaneReader, TmuxPanes};
 use crate::service::sessions::NewSessionArgs;
 use crate::ssh::SshClient;
 use crate::store::{NewRoutineRun, RoutineRow, RoutineRunRow, SessionOrigin, SessionRow, Store};
@@ -26,6 +27,11 @@ pub const EVENTS_PER_PASS: i64 = 50;
 #[async_trait::async_trait]
 pub trait Spawn: Send + Sync {
     async fn spawn(&self, args: NewSessionArgs) -> Result<SessionRow, IpcError>;
+    /// Reads a run's screen for Jev's outcome (step 8.10); `None` where no
+    /// pane can be read (tests).
+    fn panes(&self) -> Option<Arc<dyn PaneReader>> {
+        None
+    }
 }
 
 /// [`Spawn`] through `service::sessions::new_session`.
@@ -39,6 +45,11 @@ pub struct LiveSpawn {
 impl Spawn for LiveSpawn {
     async fn spawn(&self, args: NewSessionArgs) -> Result<SessionRow, IpcError> {
         crate::service::sessions::new_session(args, &self.store, &self.ssh, &self.reg).await
+    }
+    fn panes(&self) -> Option<Arc<dyn PaneReader>> {
+        Some(Arc::new(TmuxPanes {
+            ssh: Arc::clone(&self.ssh),
+        }))
     }
 }
 
@@ -378,6 +389,10 @@ pub async fn tick_once(deps: &Deps, now: i64) {
             tracing::warn!(routine = r.id, error = %e.message, "[routines] event fire failed");
             failed = Some(format!("routine {}: {}", r.id, e.message));
         }
+    }
+    // Jev reads what the runs that just finished came to, off this path.
+    if let Some(panes) = deps.spawn.panes() {
+        routine_run_outcome::spawn_pass(&deps.store, panes, now);
     }
     crate::service::loops::report("routines", failed.map_or(Ok(()), Err), next);
 }

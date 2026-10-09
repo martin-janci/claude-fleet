@@ -24,6 +24,7 @@ function route() {
   invoke.mockImplementation(async (cmd: string, a?: { key?: string; value?: string }) => {
     if (cmd === 'health_check') return { version: 'x', db_ready: true, schema_version: 1, loops: LOOPS, automation_paused: paused };
     if (cmd === 'list_runs') return { runs: RUNS, total: RUNS.length };
+    if (cmd === 'start_rules') return [];
     if (cmd === 'get_fleet_settings') return { 'automation.paused': String(paused) };
     if (cmd === 'set_fleet_setting') {
       paused = a?.value === 'true';
@@ -59,6 +60,14 @@ describe('Automation (redesign step 8.4)', () => {
     expect(rows[0].textContent).toContain('$0.38');
     expect(rows[1].textContent).toContain('Failed: gh token expired');
     expect(screen.getAllByTestId('automation-run-session')).toHaveLength(1);
+  });
+
+  it('the Rules tab holds the start rules (8.11)', async () => {
+    render(AutomationView);
+    automationTab.set('rules');
+    expect(await screen.findByTestId('automation-rules')).toBeInTheDocument();
+    expect(await screen.findByTestId('start-rules')).toBeInTheDocument();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('start_rules', { args: { action: 'list' } }));
   });
 
   it('names the three built-in agents', async () => {

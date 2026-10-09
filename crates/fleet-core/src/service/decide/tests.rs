@@ -165,7 +165,7 @@ impl World {
 #[test]
 fn with_the_defaults_the_gate_refuses_everything() {
     let w = world();
-    for f in Feature::ALL {
+    for &f in Feature::ALL {
         for org in [None, Some(w.org)] {
             assert_eq!(w.gate(f, org), Err(Fallback::FlagOff), "{f:?} {org:?}");
         }
@@ -930,7 +930,7 @@ fn the_fallback_vocabulary_is_the_stores() {
             "{f} not in the CHECK"
         );
     }
-    for f in Feature::ALL {
+    for &f in Feature::ALL {
         assert_eq!(Feature::parse(f.as_str()), Some(f));
         let spec = settings::spec(f.setting_key()).unwrap();
         assert_eq!(spec.default, "off");

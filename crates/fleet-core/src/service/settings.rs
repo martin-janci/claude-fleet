@@ -553,6 +553,12 @@ pub const DECIDE_JEV_RESTORE_TARGET: &str = "decide.jev.restore_target";
 /// `duplicate`'s mode (flagging a proposed task that may duplicate an
 /// existing one, K4).
 pub const DECIDE_JEV_DUPLICATE: &str = "decide.jev.duplicate";
+/// `work_placement`'s mode (proposing a Work-view group for a task nobody
+/// placed, K5).
+pub const DECIDE_JEV_WORK_PLACEMENT: &str = "decide.jev.work_placement";
+/// `related_session`'s mode (noticing another session of the same person
+/// on the same work, N1).
+pub const DECIDE_JEV_RELATED_SESSION: &str = "decide.jev.related_session";
 /// `control_route`'s mode (K2: where a message typed in Control goes,
 /// redesign step 9.9).
 pub const DECIDE_JEV_CONTROL_ROUTE: &str = "decide.jev.control_route";
@@ -562,6 +568,13 @@ pub const DECIDE_JEV_SUMMARY_CHECK: &str = "decide.jev.summary_check";
 /// `turn_outcome`'s mode (J2: what a turn came to when hooks said nothing,
 /// read from the pane tail). Needs the reply-text consent (D48) on top.
 pub const DECIDE_JEV_TURN_OUTCOME: &str = "decide.jev.turn_outcome";
+/// `mission_triage`'s mode (K3: a stuck mission's outcome and next step,
+/// redesign step 9.10).
+pub const DECIDE_JEV_MISSION_TRIAGE: &str = "decide.jev.mission_triage";
+/// `routine_run_outcome`'s mode (N6: what a finished routine run came to
+/// when its exit and the rules say nothing, read from the pane tail). Needs
+/// the reply-text consent (D48) on top.
+pub const DECIDE_JEV_ROUTINE_RUN_OUTCOME: &str = "decide.jev.routine_run_outcome";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -1377,6 +1390,24 @@ pub const SPECS: &[Spec] = &[
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
     Spec::new(
+        DECIDE_JEV_WORK_PLACEMENT,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: task group",
+        "Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_RELATED_SESSION,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: related session",
+        "Noticing another of your sessions working on the same thing. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
         DECIDE_JEV_CONTROL_ROUTE,
         "off",
         Kind::Choice(DECIDE_MODES),
@@ -1403,6 +1434,24 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: set the state")]),
+    Spec::new(
+        DECIDE_JEV_MISSION_TRIAGE,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: mission triage",
+        "Proposing a stuck mission's outcome and next step. Never completes a mission or sets Verified. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_ROUTINE_RUN_OUTCOME,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: routine run outcome",
+        "Reading whether a routine run did work, found nothing to do or needs you, from the end of its screen. Shadow only records; assist sets the outcome, so a run with nothing to do stays out of the Inbox. A failed exit or a rule wins. Sends reply text only for organisations that allow it.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: set the outcome")]),
     Spec::new(
         DECIDE_JEV_UNASSIGNED,
         "false",
@@ -2656,11 +2705,16 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_START_PROJECT, None), "off");
         assert_eq!(resolve(DECIDE_JEV_SIBLING_REPOS, None), "off");
         assert_eq!(resolve(DECIDE_JEV_DUPLICATE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_WORK_PLACEMENT, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_RELATED_SESSION, None), "off");
         assert_eq!(resolve(DECIDE_JEV_CONTROL_ROUTE, None), "off");
         assert_eq!(resolve(DECIDE_JEV_SUMMARY_CHECK, None), "off");
         assert_eq!(resolve(DECIDE_JEV_TURN_OUTCOME, None), "off");
         assert_eq!(resolve(DECIDE_JEV_UNASSIGNED_REPLY, None), "false");
         assert!(validate(DECIDE_JEV_TURN_OUTCOME, "auto").is_err());
+        assert_eq!(resolve(DECIDE_JEV_MISSION_TRIAGE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_ROUTINE_RUN_OUTCOME, None), "off");
+        assert!(validate(DECIDE_JEV_ROUTINE_RUN_OUTCOME, "auto").is_err());
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "assist").is_ok());
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_HOST_PLACEMENT, None), "off");
