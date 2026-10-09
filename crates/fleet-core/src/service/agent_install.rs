@@ -353,14 +353,14 @@ async fn run(
     )
     .await
     .map_err(|e| fail("could not reach the host over SSH", e))?;
-    // ssh's own failures (exit 255: down, key refused) come back Ok with an
-    // empty stdout; say so rather than "no release for \"\"" (r18-A5).
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        return Err(format!(
-            "could not reach the host over SSH: {}",
-            err.lines().next().unwrap_or("").trim()
-        ));
+        let why = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("no answer");
+        return Err(format!("could not reach the host over SSH: {}", why.trim()));
     }
     let uname = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let target = target_for(&uname).ok_or_else(|| {
@@ -731,16 +731,14 @@ mod tests {
         assert!(s.agent_installs(None, 9).unwrap().is_empty());
     }
 
-    /// r18-A5: ssh's own failure is not reported as an unknown platform.
     #[tokio::test]
-    async fn an_unreachable_host_is_named_as_such() {
+    async fn an_unreachable_host_says_so() {
         let store = store_with_ssh_host();
         let fake = crate::ssh_fake::FakeSsh::new();
         fake.set_default(crate::ssh_fake::Reply::fail(
             255,
-            "ssh: connect to host mercury port 22: Connection refused\n",
+            "ssh: connect to host box port 22: Connection refused\n",
         ));
-        let ssh: Arc<dyn SshExec> = Arc::new(fake);
         let p = plan(
             &store,
             &InstallAgentArgs {
@@ -758,7 +756,7 @@ mod tests {
             .id;
         let err = run(
             &store,
-            &*ssh,
+            &fake,
             &AgentRegistry::new(),
             id,
             &p,

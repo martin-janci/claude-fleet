@@ -141,13 +141,13 @@
 </Modal>
 
 <style>
-  .body { font-size: 0.85rem; line-height: 1.4; }
+  .body { font-size: var(--text-xs); line-height: 1.4; }
   .body p { margin: 0 0 var(--space-2); }
   .body :global(code) {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     background: var(--bg-pane);
     padding: 0.1rem 0.3rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
   }
   .muted { color: var(--fg-muted); }
   .dirty { margin: 0 0 var(--space-2); padding-left: var(--space-4); }
@@ -155,12 +155,12 @@
   .files { margin: var(--space-1) 0 0; padding-left: var(--space-3); list-style: none; font-size: var(--text-xs); }
   .actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-3); }
   .actions button {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.8rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .actions button:disabled { opacity: 0.5; cursor: not-allowed; }

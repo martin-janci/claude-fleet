@@ -86,7 +86,7 @@
   .count,
   .meta,
   .hint {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .actions {
@@ -97,10 +97,10 @@
   button {
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.55rem;
   }
   button:hover:not(:disabled) { color: var(--fg); }

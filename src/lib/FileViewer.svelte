@@ -380,7 +380,7 @@
   .empty,
   .hint {
     color: var(--fg-muted);
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.6rem 0.8rem;
     margin: 0;
   }
@@ -400,7 +400,7 @@
     flex: 1 1 auto;
     min-width: 0;
     font-family: var(--mono, ui-monospace, monospace);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -415,10 +415,10 @@
   .act {
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.15rem 0.55rem;
     white-space: nowrap;
   }
@@ -433,10 +433,10 @@
     margin-left: 0.5rem;
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.15rem 0.55rem;
     white-space: nowrap;
   }
@@ -446,10 +446,10 @@
   .blame-toggle {
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.15rem 0.55rem;
   }
   .blame-toggle.active {
@@ -469,7 +469,7 @@
     text-overflow: ellipsis;
     color: var(--fg-muted);
     border-right: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     user-select: none;
   }
   .blame.first {
@@ -487,14 +487,14 @@
     border: 1px solid var(--border);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.15rem 0.55rem;
   }
   .toggle button:first-child {
-    border-radius: 4px 0 0 4px;
+    border-radius: var(--radius-sm) 0 0 var(--radius-sm);
   }
   .toggle button:last-child {
-    border-radius: 0 4px 4px 0;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
     border-left: none;
   }
   .toggle button.active {
@@ -513,7 +513,7 @@
   }
   .file {
     font-family: var(--mono, ui-monospace, monospace);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 1.5;
     white-space: pre;
   }

@@ -85,7 +85,7 @@
   }
   h4 {
     margin: 0 0 0.3rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     font-weight: 600;
   }
@@ -95,16 +95,16 @@
     justify-content: space-between;
     gap: 1rem;
     padding: 0.15rem 0;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   dt { color: var(--fg); }
   dd { margin: 0; flex-shrink: 0; }
   kbd {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.05rem 0.35rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
   }
 </style>

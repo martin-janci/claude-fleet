@@ -80,6 +80,17 @@ describe('downloads', () => {
     expect(invoke).toHaveBeenCalledWith('list_downloads', { args: {} });
   });
 
+  it('a copy requested while an older list is in flight survives that list (review r07)', async () => {
+    let release!: (v: unknown) => void;
+    invoke.mockImplementationOnce(() => new Promise((r) => (release = r)));
+    const p = loadDownloads();
+    invoke.mockResolvedValueOnce(row(9, 'fetching'));
+    await sendFile(4, 'out/a.pdf');
+    release(list([row(1, 'ready')]));
+    await p;
+    expect(get(downloads).map((d) => d.id).sort()).toEqual([1, 9]);
+  });
+
   it('sends a file with its session and path', async () => {
     invoke.mockResolvedValueOnce(row(9, 'fetching'));
     await sendFile(4, 'out/a.pdf');

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   import { onWorkChangedDebounced } from './work';
   // The Work view's tree (work graph M14), shown in the sidebar in place of
   // the Sessions tree: organisation → group → task → every session of the
@@ -361,8 +362,12 @@
     applySection(k, p.tasks, p.next_cursor ?? null, more);
   }
 
+  let reviewSeq = 0;
   async function loadReviewCount() {
+    // Only the newest count lands (review r07).
+    const mine = ++reviewSeq;
     const r = await workReview({ limit: 1 });
+    if (mine !== reviewSeq) return;
     reviewTotal = r.ok && r.value && typeof r.value.total === 'number' ? r.value.total : null;
   }
 
@@ -580,7 +585,7 @@
              review as a count after them (a tablist holds only tabs). Review
              is part of Tasks; the board is a Work view of its own, not an
              overlay toggled from the layout chips. -->
-        <div class="tabs" role="tablist" aria-label="Work view">
+        <div class="tabs" role="tablist" aria-label="Work view" use:tablistKeys>
           <button
             class="btn btn--chip btn--toggle"
             role="tab"
@@ -628,7 +633,7 @@
           >
         {/if}
       {:else}
-        <div class="tabs" role="tablist" aria-label="Work view">
+        <div class="tabs" role="tablist" aria-label="Work view" use:tablistKeys>
           <button
             class="btn btn--chip btn--toggle"
             role="tab"
@@ -929,7 +934,7 @@
     background: var(--accent-soft);
     color: var(--fg);
     font: inherit;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-weight: 600;
     cursor: pointer;
     align-self: center;
@@ -947,14 +952,14 @@
     margin: 0.25rem 0.5rem;
     border-radius: var(--radius-sm);
     background: var(--accent-soft);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .work-tree {
     display: flex;
     flex-direction: column;
     flex: 1 1 auto;
     min-height: 0;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .work-header {
     flex: 0 0 auto;
@@ -1009,7 +1014,7 @@
     font: inherit;
     text-align: left;
     padding: 0.2rem 0.3rem;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .org-head:hover,
@@ -1040,7 +1045,7 @@
   }
   .caret {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     width: 0.7rem;
     transition: transform var(--dur-fast) ease;
   }
@@ -1055,17 +1060,17 @@
   .count {
     margin-left: auto;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .source {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .tasks {
     padding-left: 0.6rem;
   }
   .task {
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     margin: 0.1rem 0;
   }
   .task.selected {
@@ -1075,9 +1080,9 @@
     box-shadow: inset 2px 0 0 var(--accent);
   }
   .tbadge {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     padding: 0 0.2rem;
     color: var(--fg-muted);
     flex: 0 0 auto;
@@ -1104,7 +1109,7 @@
   }
   .needs {
     color: var(--usage-crit);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .review {
     font-weight: 700;
@@ -1116,7 +1121,7 @@
     gap: 0 0.4rem;
     padding-left: 1.6rem;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   /* Each fact wraps as a whole in a narrow sidebar, never mid-phrase. */
   .task-meta > span {
@@ -1129,7 +1134,7 @@
     padding-left: 1.4rem;
   }
   .occ {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     padding: 0.1rem 0.3rem;
     border: 1px solid transparent;
   }
@@ -1162,7 +1167,7 @@
   .ended,
   .sr {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .occ.more {
     color: var(--fg-muted);
@@ -1204,7 +1209,7 @@
   }
   .refresh-error {
     margin: 0.2rem 0.4rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--usage-warn);
   }
   .error {

@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/svelte';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import JobChip from './JobChip.svelte';
 
 describe('JobChip', () => {
@@ -21,4 +21,20 @@ describe('JobChip', () => {
     render(JobChip, { label: 'Syncing', done: 0, total: 0 });
     expect(screen.queryByRole('progressbar')).toBeNull();
   });
+
+  // Review r12: the kit's 16 px Orbit, not a CSS ⟳ spinner, so it waits
+  // 400 ms and follows the app's Motion setting.
+  it('marks the job with the 16 px Orbit after 400 ms', async () => {
+    vi.useFakeTimers();
+    render(JobChip, { label: 'Scanning hosts' });
+    const chip = screen.getByTestId('assets-job');
+    expect(chip.textContent).not.toContain('⟳');
+    expect(screen.getByTestId('assets-job-mark-pending')).toBeTruthy();
+    await vi.advanceTimersByTimeAsync(400);
+    const mark = screen.getByTestId('assets-job-mark');
+    expect(mark.getAttribute('data-loader')).toBe('orbit');
+    expect(mark.style.width).toBe('16px');
+  });
 });
+
+afterEach(() => vi.useRealTimers());

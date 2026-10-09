@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
   import NotificationList from './NotificationList.svelte';
@@ -80,7 +81,7 @@
 </script>
 
 <Modal title={tab === 'downloads' ? 'Downloads' : 'Notifications'} {onclose} width="560px" testid="downloads-sheet">
-  <div class="tabs" role="tablist">
+  <div class="tabs" role="tablist" aria-label="Downloads and notifications" use:tablistKeys>
     <button type="button" role="tab" aria-selected={tab === 'downloads'} data-testid="tab-downloads" onclick={() => (tab = 'downloads')}>Downloads</button>
     <button type="button" role="tab" aria-selected={tab === 'notifications'} data-testid="tab-notifications" onclick={() => (tab = 'notifications')}
       >Notifications{$unreadNotices > 0 ? ` (${$unreadNotices})` : ''}</button
@@ -186,7 +187,7 @@
     color: var(--fg-muted);
     cursor: pointer;
     font: inherit;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.6rem;
   }
   .tabs button[aria-selected='true'] {
@@ -201,10 +202,10 @@
   .bar button {
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.55rem;
   }
   .bar button:disabled { opacity: 0.5; cursor: default; }
@@ -246,7 +247,7 @@
   .meta,
   .note,
   .state {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .err {
@@ -260,10 +261,10 @@
   .actions button {
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.55rem;
   }
   .actions button:hover {
@@ -274,7 +275,7 @@
     border-color: var(--accent, var(--border));
   }
   .hint {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
 </style>

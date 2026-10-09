@@ -186,14 +186,14 @@
   .mgraph { display: flex; flex-direction: column; gap: 8px; }
   .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
   .progress { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
-  .progress .line { font-size: 13px; font-weight: 500; color: var(--fg); }
+  .progress .line { font-size: var(--text-sm); font-weight: 500; color: var(--fg); }
   /* The design system's Meter (of-meter). */
   .meter { height: 4px; border-radius: var(--radius-pill); background: var(--track); overflow: hidden; }
   .meter span { display: block; height: 100%; border-radius: var(--radius-pill); background: var(--status-done); }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 auto; }
   /* The design system's StatusChip (of-chip). */
   .chip {
-    height: 20px; padding: 0 6px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 500;
+    height: 20px; padding: 0 6px; border-radius: var(--radius-sm); font-size: var(--text-2xs); font-weight: 500;
     display: inline-flex; align-items: center; gap: 4px; background: var(--chip-bg); color: var(--fg-2); white-space: nowrap;
   }
   .chip.t-done { background: var(--done-soft); color: var(--status-done); }
@@ -201,16 +201,16 @@
   .chip.t-proposed { background: var(--waiting-soft); color: var(--status-waiting); }
   .chip.t-running, .chip.t-doing, .chip.t-verifying { color: var(--status-working); }
   .chip.crit { background: var(--accent-soft); color: var(--fg); }
-  .lanes { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+  .lanes { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-xs); }
   .muted { color: var(--fg-muted); }
-  .small { font-size: 11px; }
-  .empty { font-size: 13px; }
+  .small { font-size: var(--text-2xs); }
+  .empty { font-size: var(--text-sm); }
 
   .scroll { overflow: auto; max-height: 60vh; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-pane); }
   .canvas { position: relative; }
   .wave-head {
     position: absolute; top: 0; height: 28px; display: flex; align-items: center; justify-content: center; gap: 6px;
-    font-size: 11px; font-weight: 600; color: var(--fg-2); border-bottom: 1px solid var(--border);
+    font-size: var(--text-2xs); font-weight: 600; color: var(--fg-2); border-bottom: 1px solid var(--border);
   }
   .lane { position: absolute; left: 0; right: 0; box-sizing: border-box; border-bottom: 1px solid var(--border); }
   .lane.alt { background: var(--bg-sunk); }
@@ -218,7 +218,7 @@
     height: 100%; display: flex; flex-direction: column; justify-content: center; gap: 2px;
     padding: 0 10px; box-sizing: border-box; border-right: 1px solid var(--border);
   }
-  .lane-name { font-size: 12px; font-weight: 500; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 112px; }
+  .lane-name { font-size: var(--text-xs); font-weight: 500; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 112px; }
   .edges { position: absolute; inset: 0; pointer-events: none; }
   .edge { fill: none; stroke: var(--fg-muted); stroke-width: 1.25; stroke-dasharray: 3 3; opacity: 0.7; }
   .edge.met { stroke: var(--status-done); stroke-dasharray: none; opacity: 0.5; }
@@ -240,17 +240,17 @@
   .node.t-waiting { border-left: 3px solid var(--status-waiting); background: var(--waiting-faint); }
   .node.t-failed { border-left: 3px solid var(--status-failed); }
   .node.t-idle { border-left: 3px solid var(--status-idle); }
-  .glyph { font-size: 12px; width: 12px; text-align: center; flex: none; }
+  .glyph { font-size: var(--text-xs); width: 12px; text-align: center; flex: none; }
   .node.t-done .glyph { color: var(--status-done); }
   .node.t-working .glyph { color: var(--status-working); }
   .node.t-waiting .glyph { color: var(--status-waiting); }
   .node.t-failed .glyph { color: var(--status-failed); }
   .node.t-idle .glyph { color: var(--status-idle); }
   .text { display: flex; flex-direction: column; min-width: 0; }
-  .text .title { font-size: 12px; line-height: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .text .sub { font-size: 11px; line-height: 14px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .text .title { font-size: var(--text-xs); line-height: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .text .sub { font-size: var(--text-2xs); line-height: 14px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  .chosen { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 12px; padding: 6px 2px; }
+  .chosen { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: var(--text-xs); padding: 6px 2px; }
   .chosen .title { font-weight: 500; }
 
   .node, .edge { transition: opacity var(--dur-fast) ease; }

@@ -91,12 +91,12 @@
 </Modal>
 
 <style>
-  .muted { color: var(--fg-muted); font-size: 12px; margin: 0 0 8px; }
-  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--fg-muted); }
-  textarea { font: inherit; padding: 6px; border: 1px solid var(--border); background: var(--bg-pane); color: var(--fg); border-radius: 4px; resize: vertical; }
+  .muted { color: var(--fg-muted); font-size: var(--text-xs); margin: 0 0 8px; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-xs); color: var(--fg-muted); }
+  textarea { font: inherit; padding: 6px; border: 1px solid var(--border); background: var(--bg-pane); color: var(--fg); border-radius: var(--radius-sm); resize: vertical; }
   .error { color: var(--usage-crit); }
   .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
-  .actions button { font-size: 0.85rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: 4px; cursor: pointer; }
+  .actions button { font-size: var(--text-xs); padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: var(--radius-sm); cursor: pointer; }
   .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
   .actions button.primary { border-color: var(--accent); }
 </style>

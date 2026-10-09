@@ -95,11 +95,11 @@
 {/if}
 
 <style>
-  .tier { color: var(--fg-muted); font-size: 11px; }
+  .tier { color: var(--fg-muted); font-size: var(--text-2xs); }
   .fresh {
     margin-left: auto;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
@@ -108,7 +108,7 @@
     display: flex;
     align-items: center;
     gap: 0.35rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     min-width: 0;
@@ -118,20 +118,20 @@
   .mini-left.muted { color: var(--fg-muted); font-weight: 400; }
   .mini-reset { color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; }
   .chip-usage {
-    font-family: system-ui, sans-serif;
-    font-size: 11px;
+    font-family: var(--font-sans);
+    font-size: var(--text-2xs);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
   .selected-line {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     font-variant-numeric: tabular-nums;
   }
   .warning {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--usage-crit);
   }
   .usage-seg {

@@ -2032,8 +2032,8 @@
     border: 1px solid var(--border);
     color: var(--fg-muted);
     padding: 0.25rem 0.5rem;
-    border-radius: 5px;
-    font-size: 0.9rem;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
     line-height: 1;
     cursor: pointer;
     min-width: var(--control-h);
@@ -2046,7 +2046,7 @@
   .icon-btn:disabled { opacity: 0.6; cursor: progress; }
   .icon-btn.small {
     padding: 0.1rem 0.35rem;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     min-width: var(--control-h);
     border-color: transparent;
   }
@@ -2067,9 +2067,9 @@
     align-items: center;
     gap: 0.35rem;
     font-weight: 500;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.4rem;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
     user-select: none;
   }
@@ -2082,7 +2082,7 @@
   }
   .caret {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     width: 0.7rem;
     text-align: center;
     transition: transform var(--dur-fast) ease;
@@ -2124,7 +2124,7 @@
   .work-title {
     margin-left: 0.4rem;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -2133,7 +2133,7 @@
     align-items: center;
     gap: 0.3rem;
     padding: 0.1rem 0.5rem 0.1rem 1.6rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     cursor: pointer;
   }
@@ -2143,7 +2143,7 @@
     opacity: 0.6;
   }
   .work-reopened {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--accent);
     white-space: nowrap;
   }
@@ -2155,10 +2155,10 @@
     position: absolute;
     right: 0.5rem;
     top: 0.15rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0 0.3rem;
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--bg);
     color: var(--fg-muted);
     cursor: pointer;
@@ -2169,7 +2169,7 @@
     align-items: center;
     gap: 0.4rem;
     padding: 0.15rem 0.5rem 0.15rem 1.6rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     opacity: 0.85;
   }
@@ -2187,33 +2187,33 @@
     text-overflow: ellipsis;
   }
   .past-note {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     white-space: nowrap;
   }
   .past-purged {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--danger);
   }
   .purge-work {
     margin: 0.5rem 0 0;
   }
   .work-pr {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     white-space: nowrap;
   }
   .count {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     padding: 0.05rem 0.4rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: color-mix(in srgb, var(--fg) 10%, transparent);
     min-width: 1.4rem;
     text-align: center;
   }
 
-  .empty { color: var(--fg-muted); font-size: 0.85rem; padding: 0.5rem 0.4rem; }
+  .empty { color: var(--fg-muted); font-size: var(--text-xs); padding: 0.5rem 0.4rem; }
   .archived-row {
     display: flex;
     align-items: center;
@@ -2242,7 +2242,7 @@
   .unclaimed-note {
     margin: 0 0 0.25rem;
     padding: 0 0.4rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 1.4;
     color: var(--fg-muted);
   }
@@ -2252,11 +2252,11 @@
     justify-content: space-between;
     gap: 0.5rem;
     padding: 0.5rem 0.6rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .inbox-rest .muted { color: var(--fg-muted); }
   .section-header {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -2274,7 +2274,7 @@
   }
   .section-toggle .caret {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     width: 0.7rem;
     text-align: center;
     transition: transform var(--dur-fast) ease;
@@ -2300,12 +2300,12 @@
   .new-btn {
     flex: 1;
     text-align: left;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.4rem 0.6rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .new-btn:hover { border-color: var(--accent); background: var(--bg-pane); }

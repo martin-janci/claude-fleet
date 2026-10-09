@@ -2180,6 +2180,32 @@ describe('NewSessionDialog in the New layout', () => {
     expect((calls('new_session')[0][1] as any).args.profile).toBe('spare');
   });
 
+  // Review r05 A4: a login belongs to its host, so moving to a host whose
+  // logins have no reading must not carry the last host's profile into Create.
+  it('a host change drops the last host\'s login', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, a?: any) => {
+      if (cmd === 'check_account_headroom') {
+        return a?.args?.host_alias === 'mefistos'
+          ? { ...logins, logins: [{ profile: null, account_uuid: 'acc-mef', used_pct: null }] }
+          : logins;
+      }
+      if (cmd === 'list_host_worktrees') return { host_alias: 'mefistos', project_id: 1, cloned: true, worktrees: [remoteMain] };
+      if (cmd === 'new_session') return { id: 1 };
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect((screen.getByTestId('launch-account') as HTMLSelectElement).value).toBe('spare'));
+    const mef = Array.from(document.querySelectorAll('.host-pick')).find((p) => (p as HTMLElement).dataset.alias === 'mefistos') as HTMLButtonElement;
+    await fireEvent.click(mef);
+    await vi.waitFor(() => expect(calls('check_account_headroom').length).toBeGreaterThanOrEqual(2));
+    await vi.waitFor(() => expect((screen.getByTestId('launch-account') as HTMLSelectElement).value).toBe(''));
+    await vi.waitFor(() => expect(worktreeLabels()).toContain('main'));
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));
+    expect((calls('new_session')[0][1] as any).args.profile).toBeNull();
+  });
+
   it('a pick sticks, and Other profile brings back the name field', async () => {
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());

@@ -23,6 +23,7 @@
     proposal = null,
     initial = {},
     sending = 'Sending…',
+    buttonLoader = true,
     onsubmit,
     onunplaced,
     oncancel,
@@ -39,6 +40,9 @@
     initial?: Values;
     /** The last button while `busy`, after a Comet (step 10.12). */
     sending?: string;
+    /** The Comet in the submit button while sending; off when the host
+     *  draws the flow's own loader (one loader per screen, review r12). */
+    buttonLoader?: boolean;
     onsubmit: (values: Values) => void;
     /** Server problems whose field is on no visible step (nowhere to show them). */
     onunplaced?: (problems: FieldProblem[]) => void;
@@ -300,7 +304,7 @@
     {/if}
     {#if last}
       <button type="button" class="primary" data-testid="form-submit" disabled={off || !ready} onclick={submit}>
-        {#if busy && sent}<Loader name="comet" size={12} class="btn-loader" />{sending}{:else}{spec.submit ?? 'Submit'}{/if}
+        {#if busy && sent}{#if buttonLoader}<Loader name="comet" size={12} class="btn-loader" />{/if}{sending}{:else}{spec.submit ?? 'Submit'}{/if}
       </button>
     {:else}
       <button type="button" class="primary" data-testid="form-next" disabled={off || !ready} onclick={() => (index += 1)}>Next</button>
@@ -310,20 +314,20 @@
 
 <style>
   .wizard { display: flex; flex-direction: column; gap: 0.6rem; }
-  .count { font-size: 11px; color: var(--fg-muted); }
-  h6 { margin: 0; font-size: 0.9rem; }
-  .intro { margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
+  .count { font-size: var(--text-2xs); color: var(--fg-muted); }
+  h6 { margin: 0; font-size: var(--text-sm); }
+  .intro { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); }
   .field { display: flex; flex-direction: column; gap: 0.2rem; }
-  label, .label { font-size: 0.82rem; }
+  label, .label { font-size: var(--text-2xs); }
   .check { display: flex; gap: 0.35rem; align-items: flex-start; }
-  input:not([type='checkbox']), select, textarea { font: inherit; font-size: 0.82rem; padding: 0.25rem 0.4rem; }
-  .help { font-size: 11px; color: var(--fg-muted); }
-  .err { font-size: 11px; color: var(--usage-crit); }
+  input:not([type='checkbox']), select, textarea { font: inherit; font-size: var(--text-2xs); padding: 0.25rem 0.4rem; }
+  .help { font-size: var(--text-2xs); color: var(--fg-muted); }
+  .err { font-size: var(--text-2xs); color: var(--usage-crit); }
   .row { display: flex; gap: 0.4rem; justify-content: flex-end; }
   .row .cancel { margin-right: auto; }
   .options { display: flex; flex-direction: column; gap: 0.15rem; }
-  .opt { display: flex; gap: 0.45rem; align-items: center; text-align: left; font: inherit; font-size: 0.82rem; padding: 0.25rem 0.4rem; border: 1px solid transparent; border-radius: 4px; background: none; color: inherit; cursor: pointer; }
+  .opt { display: flex; gap: 0.45rem; align-items: center; text-align: left; font: inherit; font-size: var(--text-2xs); padding: 0.25rem 0.4rem; border: 1px solid transparent; border-radius: var(--radius-sm); background: none; color: inherit; cursor: pointer; }
   .opt:hover:not(:disabled) { background: var(--bg-hover); }
   .opt.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
-  .kbd { font-size: 11px; line-height: 1; padding: 0.1rem 0.3rem; border: 1px solid var(--border); border-radius: 3px; color: var(--fg-muted); }
+  .kbd { font-size: var(--text-2xs); line-height: 1; padding: 0.1rem 0.3rem; border: 1px solid var(--border); border-radius: var(--radius-xs); color: var(--fg-muted); }
 </style>

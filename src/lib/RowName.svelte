@@ -28,9 +28,9 @@
   .nm { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .nm b { font-weight: 560; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .nm b.strong { font-weight: 600; }
-  .why { color: var(--fg-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .why { color: var(--fg-muted); font-size: var(--text-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .kico {
     display: grid; place-items: center; width: 16px; height: 16px; border-radius: var(--radius-sm);
-    background: var(--control-bg-active); color: var(--control-fg-quiet); font-family: var(--mono); font-size: 11px; font-weight: 700;
+    background: var(--control-bg-active); color: var(--control-fg-quiet); font-family: var(--mono); font-size: var(--text-2xs); font-weight: 700;
   }
 </style>

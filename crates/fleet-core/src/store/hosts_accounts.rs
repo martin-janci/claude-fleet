@@ -776,6 +776,11 @@ impl Store {
             rusqlite::params![from, into],
         )?;
         tx.execute("DELETE FROM host_tokens WHERE host_alias = ?1", [from])?;
+        // Routines follow the host to its new name (review r02).
+        tx.execute(
+            "UPDATE routines SET host_alias = ?2 WHERE host_alias = ?1",
+            [from, into],
+        )?;
         // Asset inventory (migrations 030/031): `into`'s own scan wins a
         // clash on (harness, kind, name); the rest move.
         tx.execute(
@@ -927,6 +932,13 @@ impl Store {
         tx.execute(
             "DELETE FROM update_desired WHERE target = 'agent:' || ?1",
             rusqlite::params![alias],
+        )?;
+        // A routine that starts its sessions here can no longer fire; it
+        // stops with the reason (review r02).
+        tx.execute(
+            "UPDATE routines SET enabled = 0, paused_reason = ?2, next_run_at = NULL, \
+               updated_at = ?3 WHERE host_alias = ?1 AND enabled = 1",
+            rusqlite::params![alias, super::routines::PAUSED_HOST_REMOVED, now_unix()],
         )?;
         tx.commit()?;
         for killed in orphan_killed {

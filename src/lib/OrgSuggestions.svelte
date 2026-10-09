@@ -57,7 +57,7 @@
     gap: 0.25rem;
   }
   .hint {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     margin-left: 0.35rem;
   }
