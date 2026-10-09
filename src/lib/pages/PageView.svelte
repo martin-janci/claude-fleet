@@ -15,6 +15,9 @@
   import ReviewApply from './ReviewApply.svelte';
   import GuideReview from './GuideReview.svelte';
   import PageActionButton from './PageActionButton.svelte';
+  import Button from '../kit/Button.svelte';
+  import { SettingDrafts } from './drafts.svelte';
+  import { setFleetSetting, type SettingKey } from '../fleet_settings';
   import AccountsUsage from './usage/AccountsUsage.svelte';
   import type { SettingProposal } from './review';
   import type { ResourceType } from './resources';
@@ -81,6 +84,11 @@
   } = $props();
 
   const proposalOf = $derived(new Map(proposals.map((p) => [p.key, p])));
+  /** G1.5: the typed values not saved yet, written together by the Save
+   *  bar. A read-only page stages nothing. */
+  const drafts = new SettingDrafts();
+  const saveDrafts = () =>
+    void drafts.save((key, value) => setFleetSetting(key as SettingKey, value));
   /** Bumped after a page action ran: every data item re-reads. */
   let dataTick = $state(0);
 
@@ -256,6 +264,14 @@
     {/if}
   {/each}
   {/if}
+
+  {#if drafts.count > 0}
+    <div class="save-bar" role="region" aria-label="Unsaved changes" data-testid="page-save-bar">
+      <span class="save-count" data-testid="page-save-count">{drafts.count} {drafts.count === 1 ? 'change' : 'changes'}</span>
+      <Button variant="quiet" disabled={drafts.saving} testid="page-discard" onclick={() => drafts.discard()}>Discard</Button>
+      <Button variant="primary" busy={drafts.saving} busyLabel="Saving" testid="page-save" onclick={saveDrafts}>Save</Button>
+    </div>
+  {/if}
 </div>
 
 {#snippet sectionBody(section: Section)}
@@ -278,6 +294,8 @@
             hint={item.hint}
             highlighted={focusKey === item.key}
             proposal={proposalOf.get(item.key)}
+            drafts={readonly ? undefined : drafts}
+            {remote}
             {readonly} />
         {/if}
       {:else if item.type === 'notice'}
@@ -433,6 +451,23 @@
   }
   .steps button:focus-visible {
     outline: var(--ring-w) solid var(--ring);
+  }
+  .save-bar {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+    padding: var(--space-2) 0;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .save-count {
+    flex: 1 1 auto;
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
   }
   .guide-nav {
     display: flex;

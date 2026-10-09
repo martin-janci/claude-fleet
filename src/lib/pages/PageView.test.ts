@@ -15,6 +15,8 @@ import { fleetSettings, SETTING_DEFAULTS } from '../fleet_settings';
 import { allDescriptors, bundle, registryRouter } from './testing';
 import type { Page } from './pages';
 import { expectAccessible } from '../a11y_check';
+import { get } from 'svelte/store';
+import { toasts, runToastAction } from '../toasts';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 const descs = new Map(allDescriptors.map((d) => [d.key, d]));
@@ -100,6 +102,7 @@ describe('PageView — fields', () => {
     expect(input.value).toBe('24');
     input.value = '2';
     await fireEvent.change(input);
+    await fireEvent.click(screen.getByTestId('page-save'));
     await waitFor(() =>
       expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'gc.bg_idle_secs', value: '7200' }),
     );
@@ -116,9 +119,13 @@ describe('PageView — fields', () => {
     expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.anything());
     move.value = '999999';
     await fireEvent.change(move);
+    await fireEvent.click(screen.getByTestId('page-save'));
     expect(
       await screen.findByText(/move.max_transcript_mb must be an integer between 1 and 4096/),
     ).toBeTruthy();
+    // Refused: the typed value stays staged, so nothing typed is lost.
+    expect(screen.getByTestId('page-save-count').textContent).toBe('1 change');
+    expect(move.value).toBe('999999');
   });
 
   it('asks before a dangerous change, and cancel sends nothing', async () => {
@@ -154,10 +161,104 @@ describe('PageView — fields', () => {
     show('settings.work', { 'work.recent_days': '30' });
     expect(screen.getByTestId('setting-row-work.recent_days').classList.contains('modified')).toBe(true);
     expect(screen.getByTestId('page-modified-count').textContent).toContain('1 changed');
+    expect(screen.getByTestId('setting-changed-work.recent_days').textContent).toBe('changed from 14 days');
     await fireEvent.click(screen.getByTestId('setting-reset-work.recent_days'));
+    expect(control('work.recent_days').value).toBe('14');
+    await fireEvent.click(screen.getByTestId('page-save'));
     await waitFor(() =>
       expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'work.recent_days', value: '14' }),
     );
+  });
+
+  it('batches typed values: N changes, Discard puts them back, Save writes them all', async () => {
+    show('settings.automation', { 'gc.enabled': 'true' });
+    expect(screen.queryByTestId('page-save-bar')).toBeNull();
+    const idle = control('gc.bg_idle_secs');
+    idle.value = '2';
+    await fireEvent.change(idle);
+    const lost = control('gc.external_lost_ttl_secs');
+    const lostBefore = lost.value;
+    lost.value = String(Number(lostBefore) + 1);
+    await fireEvent.change(lost);
+    expect(screen.getByTestId('page-save-count').textContent).toBe('2 changes');
+    expect(screen.getByTestId('setting-unsaved-gc.bg_idle_secs')).toBeTruthy();
+    expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.anything());
+
+    // Typing the stored value back is no change.
+    lost.value = lostBefore;
+    await fireEvent.change(lost);
+    expect(screen.getByTestId('page-save-count').textContent).toBe('1 change');
+
+    await fireEvent.click(screen.getByTestId('page-discard'));
+    expect(screen.queryByTestId('page-save-bar')).toBeNull();
+    expect(control('gc.bg_idle_secs').value).toBe('24');
+    expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.anything());
+
+    const i2 = control('gc.bg_idle_secs');
+    i2.value = '3';
+    await fireEvent.change(i2);
+    await fireEvent.click(screen.getByTestId('page-save'));
+    await waitFor(() => expect(screen.queryByTestId('page-save-bar')).toBeNull());
+    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'gc.bg_idle_secs', value: '10800' });
+  });
+
+  it('a switch saves at once, and its toast puts the old value back', async () => {
+    toasts.set([]);
+    show('settings.work');
+    await fireEvent.click(control('work.evidence_snippets'));
+    const before = descs.get('work.evidence_snippets')!.value;
+    const next = before === 'true' ? 'false' : 'true';
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'work.evidence_snippets', value: next }),
+    );
+    expect(screen.queryByTestId('page-save-bar')).toBeNull();
+    const toast = get(toasts).at(-1)!;
+    expect(toast.action?.label).toBe('Undo');
+    runToastAction(toast.id);
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'work.evidence_snippets', value: before }),
+    );
+  });
+
+  it('says where each value lives: this device, the hub, or an org that overrides it', async () => {
+    const own = new Map(descs);
+    own.set('work.summary_model', {
+      ...descs.get('work.summary_model')!,
+      scope: 'org',
+      org_values: [{ org_id: 3, org: '32bit', value: 'opus' }],
+    });
+    const { unmount } = render(PageView, {
+      props: { page: pageOf('settings.work'), pages: bundle.pages, descs: own, values: defaults, sources: bundle.sources, onnavigate: () => {} },
+    });
+    expect(screen.getByTestId('setting-scope-pill-work.recent_days').textContent).toBe('this device');
+    expect(screen.getByTestId('setting-scope-work.recent_days').textContent).toContain('default');
+    expect(screen.getByTestId('setting-scope-pill-work.summary_model').textContent).toBe('org 32bit');
+    expect(screen.getByTestId('setting-scope-work.summary_model').textContent).toContain('overrides the fleet');
+    expect(screen.getByTestId('setting-scope-pill-work.summary_model').getAttribute('title')).toContain('32bit: opus');
+    unmount();
+    render(PageView, {
+      props: { page: pageOf('settings.work'), pages: bundle.pages, descs: own, values: defaults, sources: bundle.sources, remote: true, onnavigate: () => {} },
+    });
+    expect(screen.getByTestId('setting-scope-pill-work.recent_days').textContent).toBe('hub');
+    expect(screen.getByTestId('setting-scope-work.summary_model').textContent).toContain('overrides the hub');
+  });
+
+  it('a read-only page stages nothing and offers no Reset', async () => {
+    render(PageView, {
+      props: {
+        page: pageOf('settings.work'),
+        pages: bundle.pages,
+        descs,
+        values: { ...defaults, 'work.recent_days': '30' },
+        sources: bundle.sources,
+        readonly: true,
+        remote: true,
+        onnavigate: () => {},
+      },
+    });
+    expect(screen.getByTestId('setting-changed-work.recent_days').textContent).toBe('changed from 14 days');
+    expect(screen.queryByTestId('setting-reset-work.recent_days')).toBeNull();
+    expect(screen.queryByTestId('page-save-bar')).toBeNull();
   });
 
   it('shows a key another subsystem owns read-only, with where to change it', () => {
