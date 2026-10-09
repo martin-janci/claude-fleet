@@ -321,7 +321,7 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 Administer the company: orgs (work_admin's org actions), devices (list, pair_device → code + QR, revoke, trust, bind, hand over, grant a catalog), people and members (roles, a member's grants). Hub owner's device: all; an org admin's: their org. Changes need a trusted full device, never locking out the one in use.
 
-Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `host_alias`, `isolate_sessions`, `jev`, `keep_grants`, `key`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path_prefix`, `person`, `person_id`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
+Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `host_alias`, `isolate_sessions`, `jev`, `jev_reply`, `keep_grants`, `key`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path_prefix`, `person`, `person_id`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
 
 ### `pair_client`
 
@@ -799,7 +799,7 @@ Parameters: `action`, `before_event`, `bucket_id`, `cursor`, `filters`, `host_al
 
 Trackers, orgs, retention, usage counts, sprints and releases; see action. Never returns a secret.
 
-Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket_id`, `carry`, `carry_to`, `color`, `confirm_nonce`, `credential_ref`, `days`, `ends_at`, `expected_version`, `external_id`, `goal`, `host_alias`, `isolate_sessions`, `jev`, `kind`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `shipped_ref`, `site_url`, `starts_at`, `state`, `tracker_id`, `transport`, `username`
+Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket_id`, `carry`, `carry_to`, `color`, `confirm_nonce`, `credential_ref`, `days`, `ends_at`, `expected_version`, `external_id`, `goal`, `host_alias`, `isolate_sessions`, `jev`, `jev_reply`, `kind`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `shipped_ref`, `site_url`, `starts_at`, `state`, `tracker_id`, `transport`, `username`
 
 ### `work_link`
 

@@ -34,6 +34,7 @@ use clap::Subcommand;
 use fleet_core::service::decide::bench::perturb::Perturbation;
 use fleet_core::service::decide::bench::status_map as sm;
 use fleet_core::service::decide::bench::status_map_robust as robust;
+use fleet_core::service::decide::bench::turn_outcome as to;
 use fleet_core::service::decide::bench::work_link::{
     self as wl, BenchOptions, Provider, Shape, Split,
 };
@@ -187,6 +188,40 @@ pub enum BenchCmd {
         /// on test.
         #[arg(long)]
         question_set: bool,
+        /// The database jev runs are gated by and recorded in, instead of
+        /// the hub's (only read with --provider jev).
+        #[arg(long, value_name = "FILE")]
+        db: Option<PathBuf>,
+        /// Print JSON instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Card J2: what a turn came to when hooks said nothing. Cases are
+    /// captured pane tails (--labels FILE, one JSON line each: pane_tail,
+    /// label = finished | asked | stuck | working, optional id) or the
+    /// built-in synthetic set (--fixture, 24 tails, LLM-written, D43).
+    /// Reports coverage, accuracy and `asked` precision / recall per
+    /// provider, and card J2's acceptance (asked precision >= 0.9, recall
+    /// >= 0.8, judged from 50 labeled asked cases).
+    ///
+    /// Offline unless --provider jev. No pane text is printed.
+    TurnOutcome {
+        /// The labeled pane tails (JSON lines).
+        #[arg(long, value_name = "FILE", conflicts_with = "fixture")]
+        labels: Option<PathBuf>,
+        /// Use the built-in synthetic set.
+        #[arg(long)]
+        fixture: bool,
+        /// A provider to run: rule (the pane rules), qmark (ends with ?),
+        /// jev (repeat it). [default: rule and qmark]. jev sends each tail,
+        /// redacted, to TypeSafe through the envelope's gate: a case has no
+        /// org, so decide.jev.unassigned AND decide.jev.unassigned_reply
+        /// (D48) must be on.
+        #[arg(long = "provider", value_parser = ["rule", "qmark", "jev"])]
+        providers: Vec<String>,
+        /// Jev calls at most in this run. [default: 500]
+        #[arg(long)]
+        max_calls: Option<usize>,
         /// The database jev runs are gated by and recorded in, instead of
         /// the hub's (only read with --provider jev).
         #[arg(long, value_name = "FILE")]
@@ -463,7 +498,81 @@ pub async fn run(
             }
             Ok(ExitCode::SUCCESS)
         }
+        BenchCmd::TurnOutcome {
+            labels,
+            fixture,
+            providers,
+            max_calls,
+            db,
+            json,
+        } => {
+            let all = turn_outcome(
+                labels.as_deref(),
+                fixture,
+                &providers,
+                max_calls,
+                db.as_deref(),
+                opts,
+                env,
+            )
+            .await?;
+            if json {
+                out::line(&serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?);
+            } else {
+                for l in to::lines(&all) {
+                    out::line(&l);
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
+}
+
+/// `decide bench turn-outcome`: the labeled tails (or the built-in set)
+/// through the providers. Only `--provider jev` opens a database — for
+/// writing, as the envelope records every call.
+async fn turn_outcome(
+    labels: Option<&Path>,
+    fixture: bool,
+    providers: &[String],
+    max_calls: Option<usize>,
+    db: Option<&Path>,
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+) -> Result<Vec<to::Metrics>, String> {
+    let text = match (labels, fixture) {
+        (Some(f), _) => std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?,
+        (None, true) => to::FIXTURE.to_string(),
+        (None, false) => return Err("give --labels FILE or --fixture".into()),
+    };
+    let cases = to::parse_labels(&text)?;
+    let mut ps: Vec<to::Provider> = providers
+        .iter()
+        .map(|p| to::Provider::parse(p).ok_or_else(|| format!("unknown provider {p}")))
+        .collect::<Result<_, _>>()?;
+    if ps.is_empty() {
+        ps = vec![to::Provider::Rule, to::Provider::Qmark];
+    }
+    ps.dedup();
+    let mut all = Vec::with_capacity(ps.len());
+    for p in ps {
+        let answers = if p == to::Provider::Jev {
+            let path = db_path(db, opts, env)?;
+            let store = Store::open_with_bus(&path, Arc::new(fleet_core::events::NoopEventBus))
+                .map_err(|e| format!("open {}: {e}", path.display()))?;
+            let max = max_calls.unwrap_or(to::DEFAULT_MAX_CALLS);
+            out::error(&format!(
+                "jev: asking only when decide.jev.unassigned and decide.jev.unassigned_reply \
+                 pass the gate, at most {max} calls; each call is recorded in decision_runs"
+            ));
+            let ctx = DecideCtx::jev(Arc::new(Mutex::new(store)));
+            to::run_jev(&ctx, &cases, max).await
+        } else {
+            cases.iter().map(|c| to::offline(p, &c.pane_tail)).collect()
+        };
+        all.push(to::metrics(p, &cases, &answers));
+    }
+    Ok(all)
 }
 
 fn parse_wl_perturb(v: &[String]) -> Result<Vec<Perturbation>, String> {
@@ -811,6 +920,37 @@ mod tests {
         let mut all = vec!["t"];
         all.extend_from_slice(args);
         T::try_parse_from(all).map(|t| t.cmd)
+    }
+
+    #[tokio::test]
+    async fn turn_outcome_runs_the_baselines_on_the_fixture_offline() {
+        let Ok(BenchCmd::TurnOutcome {
+            fixture, providers, ..
+        }) = parse(&["turn-outcome", "--fixture"])
+        else {
+            panic!("parses");
+        };
+        let env = HashMap::new();
+        let all = turn_outcome(
+            None,
+            fixture,
+            &providers,
+            None,
+            None,
+            &HubOptions::default(),
+            &env,
+        )
+        .await
+        .unwrap();
+        let names: Vec<&str> = all.iter().map(|m| m.provider.as_str()).collect();
+        assert_eq!(names, ["rule", "qmark"]);
+        assert_eq!(all[1].asked_recall, Some(0.667));
+        assert!(
+            turn_outcome(None, false, &[], None, None, &HubOptions::default(), &env)
+                .await
+                .is_err()
+        );
+        assert!(parse(&["turn-outcome", "--fixture", "--provider", "haiku"]).is_err());
     }
 
     #[test]

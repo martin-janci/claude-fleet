@@ -1254,6 +1254,8 @@ const LAST_EVENT_KINDS: Record<string, (d: string | null) => string | null> = {
   compact_done: () => '/compact',
   compact_started: () => 'compacting',
   stop_failure: (d) => humanError(d).head,
+  // J8 (step 5.11): the pane rules read nothing at a turn's end.
+  pane_unreadable: () => 'screen not read',
   notification: (d) => (d && PERMISSION_KINDS.has(d) ? 'permission asked' : null),
   conversation_started: (d) => (d === 'resume' ? '/resume' : d === 'clear' ? '/clear' : null),
 };

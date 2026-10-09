@@ -45,6 +45,10 @@ pub struct UpdateOrgArgs {
     /// model calls (`orgs.jev_allowed`).
     #[serde(default)]
     pub jev: Option<String>,
+    /// Jev evaluation (D48): `on` | `off`, the org's second consent, to
+    /// reply text (the org's `decide.jev.reply_consent` row, J2 `turn_outcome`).
+    #[serde(default)]
+    pub jev_reply: Option<String>,
     /// D31 (work graph M14): the org's bound devices also see unassigned
     /// work and sessions.
     #[serde(default)]
@@ -145,6 +149,7 @@ pub async fn update_org(
                 isolate_sessions: args.isolate_sessions,
                 auto_tidy: args.auto_tidy,
                 jev: args.jev,
+                jev_reply: args.jev_reply,
                 bound_sees_unassigned: args.bound_sees_unassigned,
                 owns_hub: args.owns_hub,
                 admins_see_unclaimed: args.admins_see_unclaimed,

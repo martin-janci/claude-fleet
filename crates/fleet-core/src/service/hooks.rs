@@ -1223,6 +1223,10 @@ fn apply_stop_hook(
     if steps_backstop {
         crate::service::work::harvest::spawn_harvest_steps(store, ssh, row_id, &session_id);
     }
+    // J2 (step 5.11): the Stop said the turn ended, not how. When the
+    // feature is on, Jev reads the screen off this path; any later hook
+    // overrides it.
+    crate::service::decide::turn_outcome::spawn_after_stop(store, ssh, row_id);
     // The turn is over: a prompt queued while it ran goes in now (step 5.10).
     crate::service::sessions::deferred::spawn_deliver_after_stop(store, ssh, row_id);
     spawn_refresh_context(store, ssh, row_id);
@@ -1268,6 +1272,19 @@ fn apply_prompt_submit_hook(
         let touch = payload.prompt.as_deref().is_none_or(|p| {
             crate::service::work::detect::loop_guard(p, row.last_prompt.as_deref(), &[]).is_none()
         });
+        // J2: a person answering the turn that ended (the row idle after
+        // its Stop) confirms Jev's `asked`.
+        if touch && row.claude_status.as_deref() == Some("idle") {
+            if let Err(e) = crate::service::decide::turn_outcome::record_prompt(
+                s,
+                row.id,
+                row.turn_seq,
+                crate::store::now_unix(),
+            ) {
+                tracing::debug!(error = %e.message, "[decide] turn_outcome follow-up not recorded");
+                s.ensure_in_tx()?;
+            }
+        }
         s.record_prompt_submit_hook_for_row_with(row.id, touch)?;
         // What Claude Code submits itself (a `<task-notification>`, a slash
         // command's echo) is neither the first prompt nor evidence: the
@@ -1465,6 +1482,23 @@ fn apply_notification_hook(
             return Ok(());
         };
         remember_transcript_path(s, row.id, payload, session_id)?;
+        // J2: a hook speaking about the turn that ended (the row still idle
+        // after its Stop) settles Jev's answer about it — and the write
+        // below clears that answer: hooks always win.
+        if row.claude_status.as_deref() == Some("idle") {
+            if let Some(said) = crate::service::decide::turn_outcome::hook_word(status, stuck) {
+                if let Err(e) = crate::service::decide::turn_outcome::record_hook(
+                    s,
+                    row.id,
+                    row.turn_seq,
+                    said,
+                    crate::store::now_unix(),
+                ) {
+                    tracing::debug!(error = %e.message, "[decide] turn_outcome follow-up not recorded");
+                    s.ensure_in_tx()?;
+                }
+            }
+        }
         if let Some(row) = s.record_notification_hook_for_row(row.id, status, stuck)? {
             best_effort_event_for(s, row.id, Some(session_id), "notification", Some(kind))?;
         }
