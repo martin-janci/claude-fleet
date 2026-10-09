@@ -6,9 +6,11 @@
 // screen that opens the wizard: the spec is data only.
 import type { LoaderName } from '../loader-kit.generated';
 import type { FormSpec } from './forms';
+import addHost from './wizards/add_host.json';
 import linkHub from './wizards/link_hub.json';
+import pairDevice from './wizards/pair_device.json';
 
-export type WizardId = 'link_hub';
+export type WizardId = 'add_host' | 'link_hub' | 'pair_device';
 
 export interface Wizard {
   id: WizardId;
@@ -21,5 +23,27 @@ export interface Wizard {
 }
 
 export const WIZARDS: Record<WizardId, Wizard> = {
+  add_host: { id: 'add_host', spec: addHost as FormSpec, sending: 'Checking…', loader: 'sonar' },
   link_hub: { id: 'link_hub', spec: linkHub as FormSpec, sending: 'Pairing…', loader: 'counter-orbit' },
+  pair_device: { id: 'pair_device', spec: pairDevice as FormSpec, sending: 'Pairing…', loader: 'halo' },
 };
+
+/**
+ * The wizard with one select's options replaced by what is only known when
+ * it opens (the hosts in ~/.ssh/config, the hub's orgs). The spec on disk
+ * carries a placeholder so it validates on its own. No options at all drops
+ * the field, as nothing could be chosen; a default that is no longer offered
+ * is dropped with it. The registry row is never changed.
+ */
+export function withChoices(wizard: Wizard, field: string, options: [string, string][]): Wizard {
+  const steps = wizard.spec.steps.map((step) => ({
+    ...step,
+    fields: step.fields.flatMap((f) => {
+      if (f.name !== field) return [f];
+      if (options.length === 0) return [];
+      const keep = f.value !== undefined && options.some(([v]) => v === f.value);
+      return [{ ...f, options, value: keep ? f.value : undefined }];
+    }),
+  }));
+  return { ...wizard, spec: { ...wizard.spec, steps } };
+}

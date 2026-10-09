@@ -178,7 +178,8 @@ is a fleet.form/1 spec in `src/lib/forms/wizards/<id>.json`, listed in
 spec renders two ways:
 
 - **As a dialog**, `WizardDialog.svelte`: the spec's title and intro, the
-  steps, Cancel. Settings › Hub's *Link to a hub…* is `link_hub`.
+  steps, Cancel. Settings › Hub's *Link to a hub…* is `link_hub`; in the
+  New layout, Settings › Devices' *Pair a device* is `pair_device`.
 - **In the chat**, `ChatForm.svelte`: a card Control or the app writes into
   the conversation. While the spec is still being written it draws in (a
   small Atom, what is being read, each field once its name, type and label
@@ -190,6 +191,17 @@ and a Pulse says what is starting. Never a modal over the chat or a
 full-screen loader. What the button does belongs to the screen that opens
 the wizard; the spec is data only. fleet-core's
 `every_wizard_spec_is_valid` validates every file there.
+
+Options known only when the wizard opens (the hosts in `~/.ssh/config`, the
+hub's orgs) are filled by `withChoices(wizard, field, options)`; the file
+carries a placeholder so it validates alone, and no options drops the
+field. A wizard whose button does more than one call keeps it in a run
+module beside its spec: `add_host_run.ts` runs the guided wizard's checks
+in order (Sonar while each waits), refuses a host SSH cannot reach, then
+adds it; `pair_device_run.ts` calls `pair_device`, whose code and QR
+PairingResult shows with its Halo. The guided Add host wizard (4.9), with
+its drafts and per-step checks, stays the Hosts page's; `add_host` is the
+same flow in one step, for the chat and Get started.
 
 ## When to use it instead of AskUserQuestion
 
