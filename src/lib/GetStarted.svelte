@@ -1,0 +1,202 @@
+<!--
+  Get started (Orbit Fleet redesign step 10.5, board Tour): the six things
+  that make a working fleet, floating in the New layout's bottom-right
+  corner instead of the sidebar's onboarding card. "–" folds it to its
+  title line; ✕ hides it until Settings → Setup guide replays it.
+-->
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import Button from './kit/Button.svelte';
+  import { hosts } from './hosts';
+  import { accounts } from './accounts';
+  import { sessions, hasNoPane } from './sessions';
+  import { trackers, loadTrackers } from './trackers';
+  import { devices, loadDevices } from './devices';
+  import { goTo } from './destination';
+  import { openSettingsAt, requestHostsView } from './app_views';
+  import { openNewSessionPicker } from './switcher_request';
+  import { onboardingDismissed } from './onboarding';
+  import { openRoutines } from './routines';
+  import { sidebarView } from './work_view';
+  import {
+    doneCount,
+    enabledRoutineCount,
+    getStartedFolded,
+    getStartedItems,
+    type GetStartedId,
+  } from './get_started';
+
+  let routines = $state<number | null>(null);
+
+  onMount(() => {
+    if ($trackers.length === 0) void loadTrackers();
+    if ($devices.length === 0) void loadDevices();
+    void enabledRoutineCount().then((n) => (routines = n));
+  });
+
+  const items = $derived(
+    getStartedItems({
+      visibleHostCount: $hosts.filter((h) => !h.hidden).length,
+      accountCount: $accounts.length,
+      workSessionCount: $sessions.filter((s) => !hasNoPane(s)).length,
+      githubConnected: $trackers.some((t) => t.provider === 'github' && t.state === 'ok'),
+      otherDeviceCount: $devices.filter((d) => !d.this_device).length,
+      enabledRoutineCount: routines,
+    }),
+  );
+  const done = $derived(doneCount(items));
+  const all = $derived(done === items.length);
+
+  function open(id: GetStartedId) {
+    switch (id) {
+      case 'host':
+        return requestHostsView();
+      case 'account':
+        return goTo('accounts');
+      case 'session':
+        return openNewSessionPicker();
+      case 'github':
+        return openSettingsAt('trackers');
+      case 'phone':
+        return openSettingsAt('devices');
+      case 'routine':
+        // The Routines open from the Inbox, on the first template (8.6).
+        sidebarView.set('inbox');
+        goTo('session');
+        return openRoutines({ template: 'morning-pr-sweep' });
+    }
+  }
+</script>
+
+<section class="panel" aria-label="Get started" data-testid="get-started">
+  <div class="top">
+    <strong class="grow">Get started</strong>
+    <span class="meta tnum" data-testid="get-started-count">{done} of {items.length}</span>
+    <Button
+      variant="quiet"
+      size="sm"
+      label={$getStartedFolded ? 'Unfold Get started' : 'Fold Get started'}
+      onclick={() => getStartedFolded.update((f) => !f)}
+      testid="get-started-fold">{$getStartedFolded ? '+' : '–'}</Button
+    >
+    <Button
+      variant="quiet"
+      size="sm"
+      label="Hide Get started"
+      title="Hide it; Settings → Appearance → Setup guide brings it back"
+      onclick={() => onboardingDismissed.set(true)}
+      testid="get-started-hide">✕</Button
+    >
+  </div>
+  {#if !$getStartedFolded}
+    <div class="bar" aria-hidden="true"><span style="width:{(done / items.length) * 100}%"></span></div>
+    {#if all}
+      <p class="all" data-testid="get-started-all">Your fleet is set up.</p>
+    {:else}
+      <ul class="rows">
+        {#each items as item (item.id)}
+          <li>
+            <button
+              type="button"
+              class="row"
+              class:next={item.next}
+              class:done={item.done}
+              data-testid="get-started-{item.id}"
+              onclick={() => open(item.id)}
+            >
+              <span class="mark" aria-hidden="true">{item.done ? '✓' : '○'}</span>
+              <span class="label grow">{item.label}</span>
+              {#if item.next}<span class="meta">{item.minutes} min ›</span>{/if}
+            </button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  {/if}
+</section>
+
+<style>
+  .panel {
+    position: fixed;
+    right: 20px;
+    bottom: 40px;
+    z-index: 800;
+    width: 300px;
+    background: var(--bg-raise);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 16px 50px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+    color: var(--fg);
+    font-size: var(--text-sm);
+  }
+  .top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 14px;
+  }
+  .grow {
+    flex: 1 1 auto;
+  }
+  .meta {
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+  }
+  .bar {
+    margin: 0 14px;
+    height: 4px;
+    border-radius: 3px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .bar > span {
+    display: block;
+    height: 100%;
+    background: var(--status-done);
+    transition: width var(--dur-base);
+  }
+  .rows {
+    list-style: none;
+    margin: 0;
+    padding: 8px 6px;
+    display: flex;
+    flex-direction: column;
+  }
+  .row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+    padding: 5px 8px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: var(--fg);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .row:hover {
+    background: var(--bg-hover);
+  }
+  .row .mark {
+    color: var(--fg-muted);
+  }
+  .row.done .mark {
+    color: var(--status-done);
+  }
+  .row.done .label {
+    color: var(--fg-muted);
+    text-decoration: line-through;
+  }
+  .row.next {
+    background: var(--accent-soft);
+  }
+  .row.next .mark {
+    color: var(--accent);
+  }
+  .all {
+    margin: 10px 14px 14px;
+  }
+</style>
