@@ -17,7 +17,7 @@
 //!     --signer-sha256 HEX --mobile-accepts MIN,MAX --out FILE
 //! fleet-release channel-amend --track T --channel FILE --amendment FILE --amendment-url URL
 //!     [--now UNIX] [--expires-days N] --out FILE
-//! fleet-release verify --keys-file FILE --kind manifest|channel [--track T]
+//! fleet-release verify --keys-file FILE --kind manifest|channel|amendment [--track T]
 //!     --file FILE --sig FILE.minisig
 //! ```
 //!
@@ -411,6 +411,14 @@ fn verify(o: &Opts) -> Result<String, String> {
                 if ch.fresh { "fresh" } else { "STALE" }
             ))
         }
-        other => Err(format!("--kind must be manifest | channel, got {other:?}")),
+        "amendment" => {
+            keys.verify(&bytes, &sig).map_err(|e| e.to_string())?;
+            let a: fleet_update::manifest::Amendment = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("{file} is not an amendment: {e}"))?;
+            Ok(format!("{file}: a verified amendment of {}", a.version))
+        }
+        other => Err(format!(
+            "--kind must be manifest | channel | amendment, got {other:?}"
+        )),
     }
 }

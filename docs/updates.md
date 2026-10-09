@@ -163,6 +163,21 @@ so the hub knows what each desktop runs before it ever asks. A desktop
 never installs an older build by itself: a `rollback` decision is shown,
 not applied.
 
+## The phone
+
+A phone is always paired, so its hub decides for it, as for a desktop
+(`client:<id>`, `update.mobile.mode`: `manual` or `notify`; a phone never
+installs silently). Its build comes from fleet-mobile's own release, which
+runs after this one, so it reaches the manifest as a signed **amendment**:
+`android-amendment.yml` signs it with the release key and lists it beside
+the release on every track. An amendment can only add a component the
+release does not have; the hub verifies it on every read, like the rest of
+its cache, and a release without one offers a phone nothing. The phone
+checks the APK's sha256 against the decision and its signing certificate
+against its own before handing it to Android's installer, which asks the
+person to confirm. See fleet-mobile's
+`docs/superpowers/specs/2026-09-28-mobile-update-adapter.md`.
+
 ## fleet-updater: the Docker hub updates itself
 
 `fleet-updater` is a small sidecar for the compose deployment

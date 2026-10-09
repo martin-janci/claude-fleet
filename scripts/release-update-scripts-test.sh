@@ -147,6 +147,28 @@ check "a nightly lands on nightly" chan nightly
 check "nightly lists it as current" test "$(json "$t/nightly.json" 'd["current"]')" = "$nv"
 check "and beta did not move" test "$(git -C "$t/remote.git" show update-channels:beta.json)" = "$before_beta"
 
+# The phone's amendment (android-amendment.yml, design §4 / §13.2): signed,
+# kept on the channel branch, listed on every track that carries the release.
+"$FLEET_RELEASE" amendment --version "$v" \
+  --apk-url "https://github.com/o/fleet-mobile/releases/download/v$v/fleet-mobile-$v.apk" \
+  --sha256 "$(printf 'apk' | sha256sum | cut -d' ' -f1)" --size 3 --version-code 41 \
+  --signer-sha256 "$(printf 'cert' | sha256sum | cut -d' ' -f1)" --mobile-accepts 0,14 \
+  --out "$t/android.json" >/dev/null 2>&1
+before_nightly="$(git -C "$t/remote.git" show update-channels:nightly.json)"
+uc amend "v$v" "$t/android.json"
+chan stable
+check "an amendment is listed on stable" test "$(json "$t/stable.json" '[r for r in d["releases"] if r["version"]=="'"$v"'"][0]["amendments"][0]["component"]')" = android
+chan beta
+check "and on beta, which carries the release too" test "$(json "$t/beta.json" 'len([r for r in d["releases"] if r.get("amendments")])')" = 1
+check "but not on nightly, which does not" test "$(git -C "$t/remote.git" show update-channels:nightly.json)" = "$before_nightly"
+git -C "$t/remote.git" show "update-channels:amendments/$v/android.json" >"$t/am.json"
+git -C "$t/remote.git" show "update-channels:amendments/$v/android.json.minisig" >"$t/am.json.minisig"
+check "the amendment is signed by the release key" \
+  "$FLEET_RELEASE" verify --keys-file "$t/pubkeys" --kind amendment --file "$t/am.json" --sig "$t/am.json.minisig"
+check "and its sha256 is the one the channel lists" test "$(sha256sum "$t/am.json" | cut -d' ' -f1)" = \
+  "$(json "$t/stable.json" '[r for r in d["releases"] if r["version"]=="'"$v"'"][0]["amendments"][0]["manifest_sha256"]')"
+check "a release no track carries cannot be amended" bash -c "! (cd '$t/repo' && REPO=o/r '$here/update-channels.sh' amend v9.9.9 '$t/android.json' >/dev/null 2>&1)"
+
 seq="$(json "$t/stable.json" 'd["sequence"]')"
 uc edit stable minimum "$v" hub
 chan stable

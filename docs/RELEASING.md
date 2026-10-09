@@ -124,6 +124,20 @@ and the app reports that version in its Settings screen.
 - **versionCode** is fleet-mobile's release-workflow run number, so it only
   grows; `versionName` is the tag without the `v`.
 - **iOS** is not released: there is no signing identity for it yet.
+- **Its place in the update manifest** (update design §4, S8; owner's answer
+  to §13.2). fleet-mobile's release publishes a versioned
+  `fleet-mobile-<v>.apk` with a `SHA256SUMS`, then sends this repository a
+  `repository_dispatch` (`android-release`) with the APK's URL, sha256, size,
+  versionCode, its signing certificate's sha256 and the phone's contract
+  window. `android-amendment.yml` turns that into a signed amendment —
+  `amendments/<v>/android.json` + `.minisig` on the `update-channels`
+  branch, adding the `android` component to that release — and lists it on
+  every track that carries the release (`scripts/update-channels.sh amend`).
+  Hubs then offer the APK to paired phones. The dispatch needs a token that
+  can trigger workflows here: the fine-grained token in fleet-mobile's
+  `FLEET_DISPATCH_TOKEN` secret (Actions: write on claude-fleet only). Without
+  it the APK still ships; phones are just not offered it until someone runs
+  `android-amendment.yml` by hand with the same fields.
 
 ## Upgrading into the work graph
 
