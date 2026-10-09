@@ -822,7 +822,9 @@
       <p class="mcp-blurb">
         When a session becomes stuck (auth menu, trust prompt, reconnect,
         out of memory, press Enter) fleet announces it for screen readers and,
-        optionally, shows a toast and an OS notification.
+        optionally, shows a toast and an OS notification. With OS notifications
+        on, the hub's Notifications page decides which other states reach this
+        desktop (and which make a sound) while the window is in the background.
       </p>
       <label class="toggle">
         <input type="checkbox" bind:checked={$notifyStuckToast} data-testid="notify-toast" />
@@ -839,7 +841,7 @@
               if ($notifyStuckOs) notifyStuckOs.set(false);
               else void enableOsNotifications();
             }} />
-          OS notification on stuck transitions
+          OS notifications
         </label>
         <span class="status status-{permission === 'granted' ? 'on' : permission === 'denied' ? 'off' : 'neutral'}" data-testid="notify-permission">
           {permission}
