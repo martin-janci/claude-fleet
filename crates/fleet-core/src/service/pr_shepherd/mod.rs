@@ -91,6 +91,8 @@ pub struct Candidate {
     pub host_alias: String,
     pub tmux_name: String,
     pub project_id: i64,
+    /// The session's org, for Jev's consent (step 4).
+    pub org_id: Option<i64>,
     pub pr_url: Option<String>,
     pub evidence: PrEvidence,
     /// A live tmux session with a pane fleet can type into.
@@ -116,6 +118,7 @@ impl Candidate {
             host_alias: r.host_alias.clone(),
             tmux_name: r.tmux_name.clone(),
             project_id,
+            org_id: r.org_id,
             pr_url: r.pr_url.clone(),
             evidence,
             live: r.status == "running" && !crate::store::has_no_pane(&r.kind),
@@ -144,6 +147,9 @@ pub struct Planned {
     pub pr_url: Option<String>,
     pub condition: Condition,
     pub action: Action,
+    /// For Jev's `pr_triage` (step 4), asked once the episode is recorded.
+    pub org_id: Option<i64>,
+    pub evidence: PrEvidence,
 }
 
 /// What the planner needs besides the candidates, read under one lock.
@@ -230,6 +236,8 @@ pub fn plan(
             pr_url: c.pr_url.clone(),
             condition,
             action,
+            org_id: c.org_id,
+            evidence: c.evidence.clone(),
         });
     }
     out
@@ -270,6 +278,17 @@ pub trait ShepherdExec: Send + Sync {
         pr_url: &str,
         head_oid: &str,
     ) -> Result<MergeOutcome, IpcError>;
+
+    /// A new episode was recorded: Jev's `pr_triage` (step 4) may ask what
+    /// it needs, in shadow. Must not hold up the tick. Default: nothing.
+    async fn triage(
+        &self,
+        _session_id: i64,
+        _org_id: Option<i64>,
+        _condition: Condition,
+        _evidence: &PrEvidence,
+    ) {
+    }
 }
 
 /// Production executor: skip an attached pane (as `press_enter` does), else
@@ -281,6 +300,35 @@ pub struct RealShepherdExec {
 
 #[async_trait::async_trait]
 impl ShepherdExec for RealShepherdExec {
+    async fn triage(
+        &self,
+        session_id: i64,
+        org_id: Option<i64>,
+        condition: Condition,
+        evidence: &PrEvidence,
+    ) {
+        let off = match self.store.lock() {
+            Ok(s) => {
+                crate::service::decide::FeatureMode::of(
+                    &s,
+                    crate::service::decide::Feature::PrTriage,
+                ) == crate::service::decide::FeatureMode::Off
+            }
+            Err(_) => true,
+        };
+        if off {
+            return;
+        }
+        let ctx = crate::service::decide::DecideCtx::jev(Arc::clone(&self.store));
+        let evidence = evidence.clone();
+        crate::rt::spawn(async move {
+            crate::service::decide::pr_triage::triage(
+                &ctx, session_id, org_id, condition, &evidence,
+            )
+            .await;
+        });
+    }
+
     async fn nudge(
         &self,
         host_alias: &str,
@@ -447,24 +495,33 @@ pub async fn run_with(store: &Mutex<Store>, exec: &dyn ShepherdExec, now: i64) -
             outcome = %outcome,
             "[pr_shepherd] episode"
         );
-        let Ok(s) = store.lock() else {
-            continue;
+        let fresh = {
+            let Ok(s) = store.lock() else {
+                continue;
+            };
+            match s.record_shepherd_episode(&ShepherdEpisodeRow {
+                session_id: p.session_id,
+                head_oid: p.head_oid,
+                condition: p.condition.as_str().to_string(),
+                pr_url: p.pr_url,
+                at: now,
+                outcome,
+            }) {
+                Ok(fresh) => fresh,
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = p.session_id,
+                        error = %e,
+                        "[pr_shepherd] recording the episode failed"
+                    );
+                    false
+                }
+            }
         };
-        match s.record_shepherd_episode(&ShepherdEpisodeRow {
-            session_id: p.session_id,
-            head_oid: p.head_oid,
-            condition: p.condition.as_str().to_string(),
-            pr_url: p.pr_url,
-            at: now,
-            outcome,
-        }) {
-            Ok(true) => recorded += 1,
-            Ok(false) => {}
-            Err(e) => tracing::warn!(
-                session_id = p.session_id,
-                error = %e,
-                "[pr_shepherd] recording the episode failed"
-            ),
+        if fresh {
+            recorded += 1;
+            exec.triage(p.session_id, p.org_id, p.condition, &p.evidence)
+                .await;
         }
     }
     for m in merges {

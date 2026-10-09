@@ -129,7 +129,12 @@
   .mi:hover:not(:disabled),
   .mi:focus-visible {
     background: var(--accent-soft);
-    outline: none;
+  }
+  /* The tint alone is ~1.1:1 on the menu: keyboard focus keeps the ring,
+     inset so the menu's edge does not clip it (review r11). */
+  .mi:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
   }
   .mi:disabled {
     color: var(--fg-muted);

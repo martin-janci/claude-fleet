@@ -20,6 +20,8 @@ import { sessionActionRequest } from './lib/session_actions';
 import { link, task } from './lib/work_view_fixture';
 import type { WorkTreePage } from './lib/work_view';
 import { activeHintId, hintDef, markSeen, resetHints } from './lib/hints';
+import { selectSessionExplicitly } from './lib/selection';
+import { session } from './lib/hosts_fixture';
 import { onboardingWelcomed } from './lib/onboarding';
 
 const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-overlay', 'accounts-overlay', 'control-overlay', 'automation-overlay'];
@@ -191,6 +193,27 @@ describe('App: the destination store', () => {
     }
   });
 
+  it('review r08: New layout, a board card opens its task beside the board', async () => {
+    uiLayout.set('new');
+    try {
+      await withBoardBackend(async () => {
+        const { getAllByTestId, queryByTestId } = render(App);
+        workBoardOpen.set(true);
+        await waitFor(() => expect(queryByTestId('board-view')).not.toBeNull());
+        await waitFor(() => expect(getAllByTestId('work-board-card').length).toBe(2));
+        expect(queryByTestId('work-task-detail')).toBeNull();
+        const card = getAllByTestId('work-board-card').find((el) => el.textContent?.includes('Write notes'))!;
+        await fireEvent.click(card);
+        await waitFor(() => expect(queryByTestId('work-task-detail')).not.toBeNull());
+        // The board stays: the task opens in the inspector column beside it.
+        expect(queryByTestId('board-view')).not.toBeNull();
+        expect(get(destination)).toBe('board');
+      });
+    } finally {
+      uiLayout.set('classic');
+    }
+  });
+
   it('New layout: the board offers its one-time move hint, and not again once dismissed', async () => {
     uiLayout.set('new');
     resetHints();
@@ -279,6 +302,19 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     expect(terminalSlot(container)).toBe(term);
   });
 
+  it('opening a session leaves every fleet page for it (review r07)', async () => {
+    uiLayout.set('new');
+    const { container, getByTestId } = render(App);
+    const row = session('mefistos', 'dev-open');
+    for (const page of ['accounts', 'control', 'automation']) {
+      await fireEvent.click(getByTestId(`rail-${page}`));
+      expect(openOverlays(container)).toEqual([`${page}-overlay`]);
+      selectSessionExplicitly(row);
+      await waitFor(() => expect(openOverlays(container)).toEqual([]));
+      expect(get(destination)).toBe('session');
+    }
+  });
+
   it('Toolkit (step 3.16) is the Assets screen, from the rail and from every old entry point', async () => {
     uiLayout.set('new');
     toolkitTab.set('skills');
@@ -356,6 +392,16 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     const { getByTestId } = render(App);
     await fireEvent.click(getByTestId('rail-settings'));
     expect(get(settingsOpen)).toBe(true);
+    settingsOpen.set(false);
+  });
+
+  it('review r08: Settings opens from the rail while the sidebar is collapsed', async () => {
+    uiLayout.set('new');
+    const { getByTestId, queryByTestId } = render(App);
+    await fireEvent.click(getByTestId('sidebar-collapse'));
+    await waitFor(() => expect(queryByTestId('sidebar-expand')).not.toBeNull());
+    await fireEvent.click(getByTestId('rail-settings'));
+    await waitFor(() => expect(document.querySelector('.settings-dialog')).not.toBeNull());
     settingsOpen.set(false);
   });
 

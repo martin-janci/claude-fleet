@@ -687,7 +687,7 @@
       {/if}
       {#if hubRestartNeeded}
         <p class="hook-desc" data-testid="hub-restart">
-          Saved. <strong>Restart claude-fleet to apply it</strong> — which
+          Saved. <strong>Restart Orbit Fleet to apply it</strong> — which
           fleet this app is a window onto is decided once, at startup, so that
           half the app can never be talking to a hub while the other half
           talks to the local database.
@@ -822,7 +822,9 @@
       <p class="mcp-blurb">
         When a session becomes stuck (auth menu, trust prompt, reconnect,
         out of memory, press Enter) fleet announces it for screen readers and,
-        optionally, shows a toast and an OS notification.
+        optionally, shows a toast and an OS notification. With OS notifications
+        on, the hub's Notifications page decides which other states reach this
+        desktop (and which make a sound) while the window is in the background.
       </p>
       <label class="toggle">
         <input type="checkbox" bind:checked={$notifyStuckToast} data-testid="notify-toast" />
@@ -839,7 +841,7 @@
               if ($notifyStuckOs) notifyStuckOs.set(false);
               else void enableOsNotifications();
             }} />
-          OS notification on stuck transitions
+          OS notifications
         </label>
         <span class="status status-{permission === 'granted' ? 'on' : permission === 'denied' ? 'off' : 'neutral'}" data-testid="notify-permission">
           {permission}
@@ -848,7 +850,7 @@
       {#if permission === 'unsupported'}
         <p class="hook-desc">This webview does not expose the Notification API; toasts and the live region still work.</p>
       {:else if permission === 'denied'}
-        <p class="hook-desc">Notifications were denied at the OS level; allow them for claude-fleet in your system settings.</p>
+        <p class="hook-desc">Notifications were denied at the OS level; allow them for Orbit Fleet (listed as claude-fleet) in your system settings.</p>
       {/if}
       <div class="mcp-field">
         <span class="lbl">Idle</span>

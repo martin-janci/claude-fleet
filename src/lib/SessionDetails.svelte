@@ -154,16 +154,13 @@
   const hostRow = $derived($hostByAlias.get(session.host_alias) ?? null);
   // A session under a login profile bills that profile's account, not the
   // host's (docs/accounts.md); it has none until the host reports the
-  // profile logged in.
-  const accountRow = $derived(
-    session.claude_profile
-      ? session.account_uuid
-        ? ($accountByUuid.get(session.account_uuid) ?? null)
-        : null
-      : hostRow?.account_uuid
-        ? ($accountByUuid.get(hostRow.account_uuid) ?? null)
-        : null,
+  // profile logged in. Any other session shows the account it runs on (the
+  // host's login when reconcile saw it; reconcile keeps it when the host's
+  // login changes later), and the host's only before it has one.
+  const accountUuid = $derived(
+    session.claude_profile ? session.account_uuid : (session.account_uuid ?? hostRow?.account_uuid ?? null),
   );
+  const accountRow = $derived(accountUuid ? ($accountByUuid.get(accountUuid) ?? null) : null);
 
   // Switch the session to another login: a restart that resumes the same
   // conversation under it ('' = the host's own login).
@@ -178,6 +175,19 @@
   let loginPick = $state<string | null>(null);
   const loginTarget = $derived(loginPick ?? session.claude_profile ?? '');
   let confirmingSwitch = $state(false);
+  // The pane is not keyed by session: a login picked (or a switch being
+  // confirmed) on one session must not carry over to the next one selected,
+  // where Switch would restart it under that pick (review r07).
+  let pickFor = untrack(() => session.id);
+  $effect.pre(() => {
+    const id = session.id;
+    untrack(() => {
+      if (id === pickFor) return;
+      pickFor = id;
+      loginPick = null;
+      confirmingSwitch = false;
+    });
+  });
   async function onSwitchLogin() {
     confirmingSwitch = false;
     if (restartBlocked !== null) return;
@@ -882,7 +892,7 @@
         title={reviewBlocked ?? ''}
         data-testid="open-review"
   >
-        🔍 Review…
+        Review…
       </button>
       <button
         class="btn btn--quiet is-bounded"
@@ -891,7 +901,7 @@
         title={shareBlocked ?? 'Share this session with one person — watch or drive, revocable, and never a terminal'}
         data-testid="share-from-details"
   >
-        👥 Share…
+        Share…
       </button>
       {#if moveBackOrigin}
         <button
@@ -946,7 +956,7 @@
           title={setFriendlyNameBlocked ?? ''}
           data-testid="label-from-details"
     >
-          🏷 Edit label
+          Rename
         </button>
         <!-- An external row runs outside fleet: the label (local fleet
              metadata) is the only thing fleet can change about it. -->
@@ -958,7 +968,7 @@
             title={renameBlocked ?? ''}
             data-testid="rename-from-details"
       >
-            ✎ Rename tmux session
+            Rename tmux session
           </button>
           <button
             class="menu-item"
@@ -977,7 +987,7 @@
               title={repairBlocked ?? 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it'}
               data-testid="repair-from-details"
         >
-              🩹 Repair workspace…
+              Repair workspace…
             </button>
           {/if}
           <button
@@ -987,7 +997,7 @@
             title={recreateBlocked ?? ''}
             data-testid="recreate-from-details"
       >
-            ♻ Recreate…
+            Recreate…
           </button>
           {#if canMove}
             <button
@@ -1024,7 +1034,7 @@
                 title={inspectSafeKillBlocked ?? ''}
                 data-testid="safe-kill-from-details"
           >
-                ⏏ Safe remove…
+                Safe remove…
               </button>
             {/if}
             <button
@@ -1280,6 +1290,7 @@
     border-radius: 4px;
     outline: none;
   }
+  .title-input:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
   .sub { display: flex; gap: 0.5rem; align-items: center; font-size: 11px; flex-wrap: wrap; }
   .friendly { margin: 0; font-size: 0.85rem; color: var(--fg-muted); }
   .chip {

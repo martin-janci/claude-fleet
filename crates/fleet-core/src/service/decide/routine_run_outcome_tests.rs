@@ -201,6 +201,33 @@ fn pair(o: &str, src: &str) -> (Option<String>, Option<String>) {
 }
 
 #[tokio::test]
+async fn a_run_behind_five_skipped_ones_is_still_read() {
+    let w = world();
+    w.on("assist");
+    {
+        let s = w.store.lock().unwrap();
+        let routine = s.get_routine_run(w.run).unwrap().unwrap().routine_id;
+        // Five newer runs this pass skips: none has a session to read.
+        for _ in 0..PER_PASS {
+            let r = s
+                .insert_routine_run(&NewRoutineRun {
+                    routine_id: routine,
+                    trigger: "run_now",
+                    state: "running",
+                    at: NOW - 300,
+                    ..Default::default()
+                })
+                .unwrap()
+                .id;
+            s.finish_routine_run(r, "done", None, 0, NOW - 30).unwrap();
+        }
+    }
+    let p = w.pending();
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0].run.id, w.run);
+}
+
+#[tokio::test]
 async fn with_the_defaults_nothing_is_read_or_asked() {
     let w = world();
     assert!(w.pending().is_empty());

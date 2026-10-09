@@ -282,17 +282,22 @@ Five more use cases, K1–K5, were accepted by the owner on 2026-10-07 (test
 map §5): K1 `start_project` next, K5 with the picker's phase 2, K2 and K3 as
 shadow slots in Mode B and the mission loop, K4 last. K1 is built, off
 (`decide.jev.start_project`, `service/decide/start_project.rs`): the start
-popover pre-selects Jev's repository in assist. K2 (`decide.jev.control_route`,
-which mission or session a Control message is about, redesign 9.9), K3
-(`decide.jev.mission_triage`, a stuck mission's outcome and next step, 9.10),
-K4 (`decide.jev.duplicate`, a proposed task that may repeat one, 6.9) and K5
-(`decide.jev.work_placement`, a new task's group, 6.9) are built too, all
-off. So are N3 `sibling_repos` (3.12), N5 `host_placement` (4.11), J5
-`quick_answer` (10.9), N4 / J10 `adopt_target` / `restore_target` (Lost and
-found, 4.12), N1 `related_session` (6.9), J9 `summary_check` (11.11), J2
-`turn_outcome` (5.11) and N6 `routine_run_outcome` (8.10), each with its
-own `decide.jev.<name>` mode in `service/decide/` (N4 and J10 share
-`lost_target.rs`).
+popover pre-selects Jev's repository in assist. K2 `control_route`, K3
+`mission_triage`, K4 `duplicate` and K5 `work_placement` are built with the
+redesign, each off, as are the redesign's other use cases (next paragraph).
+
+The redesign (see the top of this file; New becomes the default layout at
+step 7.6, parity audit `docs/redesign/parity-audit-7.5.md`) builds its AI
+use cases OFF (`decide.jev.*`, each `off` by
+default, guide `docs/decisions.md`): `sibling_repos`, `host_placement`,
+`quick_answer`, `adopt_target` / `restore_target`, `turn_outcome`,
+`duplicate`, `related_session`, `work_placement`, `routine_run_outcome`,
+`control_route`, `mission_triage`, `summary_check` and the PR shepherd's
+`pr_triage`. The ones that send
+Claude's reply text (`turn_outcome`, `routine_run_outcome`) also need the
+org's reply-text consent (D48), off by default. The notifications matrix and quiet hours (`notify.*`, 11.9) are
+on: the phone and the desktop (while its window is in the background, and
+only with OS notifications on for the desktop column) follow them.
 
 Task → session (spec `docs/superpowers/specs/2026-10-06-task-to-session-flow-design.md`,
 recommendations TS1–TS14 accepted 2026-10-07): A0, A1, A2 and C0 are landed, A3 in part.
@@ -471,8 +476,8 @@ desktop). Not yet: a filesystem watcher, a three-way merge editor.
 
 Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. The app's own wizards (New session, Add host, Pair a device, Add project, Link to a hub) are fleet.form/1 specs too, shown as a dialog or in the chat (redesign 10.12, `src/lib/forms/wizards/`, `docs/forms.md` → *Wizards are forms too*). Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
 
-PR shepherd, steps 1 and 3 of 5 and the control-API half of step 2, are
-built and do nothing until a person grants a rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
+PR shepherd, steps 1 to 4 of 5 (step 2 without its Inbox card), are built and do nothing until a person
+grants a rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
 migrations 136 (`pr_shepherd_rules`, `pr_shepherd_episodes`) and 145
 (`pr_shepherd_merges`),
 `service/pr_shepherd/` on the reconcile tick (loop `pr_shepherd`, stopped by
@@ -482,10 +487,11 @@ on a pushed commit, records a `pr_shepherd` timeline event (`watch`) or also
 asks the session's own Claude to fix it (`nudge`). At `merge` it also merges
 a PR GitHub confirms green right before the merge, one per project every
 180 s, with `--match-head-commit`. Rules are granted with `fleet-hub
-shepherd grant | revoke | pause-all | status` or the `pr_shepherd`
-control-API tool (`mcp/tools/pr_shepherd.rs`), served only to the hub
-owner's own device; a write needs a trusted full device. Not built: step
-2's Inbox card, Jev `pr_triage` (step 4), the UI (step 5).
+shepherd grant | revoke | pause-all | status` or the control API's
+`pr_shepherd` tool, which is served only to the owner's own paired device.
+Jev's `pr_triage` (`decide.jev.pr_triage`, off by default) records in
+shadow what each new episode most likely needs. Not built: the Inbox
+card, the UI.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

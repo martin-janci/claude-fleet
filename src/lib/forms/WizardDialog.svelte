@@ -3,7 +3,8 @@
   // wizards.ts, the same one ChatForm shows in the conversation. The title
   // and intro are the spec's; the fields, Back / Next and the last button are
   // FormWizard's, with Cancel at the row's start. While the last step runs
-  // the button carries a Comet and the wizard's own loader sits in the body;
+  // the button says what it is doing and the wizard's own loader sits in the
+  // body: one loader per screen, so no Comet in the button (review r12);
   // the screen that opened it decides what the button does (`run`) and closes
   // it on success. `extra` is that screen's own line under the fields (a
   // follow-up the backend asked for, such as the hub's plaintext opt-in).
@@ -48,6 +49,7 @@
       {busy}
       {initial}
       sending={wizard.sending}
+      buttonLoader={false}
       serverProblems={problems}
       onsubmit={run}
       oncancel={onclose} />

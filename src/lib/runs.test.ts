@@ -37,10 +37,10 @@ describe('listRuns', () => {
 
 describe('outcomeLabel', () => {
   it('says each outcome in plain words', () => {
-    expect(outcomeLabel({ outcome: 'ok' })).toBe('OK');
-    expect(outcomeLabel({ outcome: 'needs_person' })).toBe('Needs person');
+    expect(outcomeLabel({ outcome: 'ok' })).toBe('Done');
+    expect(outcomeLabel({ outcome: 'needs_person' })).toBe('Needs you');
     expect(outcomeLabel({ outcome: 'nothing_to_do' })).toBe('Nothing to do');
-    expect(outcomeLabel({ outcome: 'running' })).toBe('Running');
+    expect(outcomeLabel({ outcome: 'running' })).toBe('Working');
   });
 
   it('carries a failure its error', () => {
