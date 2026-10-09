@@ -88,6 +88,11 @@ Every field has `name` (`[a-z][a-z0-9_]*`, ≤ 40 chars, unique across the
 A `required` bool means "must be on" (a consent box). A `required`
 multiselect needs at least one value. A `value` must be valid for its
 field (an option value, inside min/max, …).
+The agent never decides for the person: on the desktop and the phone a
+`required` bool starts unticked whatever its `value`, and a bool, or a
+select or multiselect option, whose label names a risky step (the quick-answer
+`RISKY_WORDS`: push, approve, allow, deploy, production, …) does not start
+chosen.
 
 ### Conditions
 
