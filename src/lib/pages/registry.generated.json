@@ -2466,6 +2466,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -2506,6 +2507,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
