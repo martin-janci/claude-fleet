@@ -179,8 +179,8 @@ describe('TrackerAttention', () => {
     await tick();
     const items = screen.getAllByTestId('tracker-attention-item');
     expect(items.map((b) => b.textContent?.trim())).toEqual([
-      '⚠ Reconnect Jira (acme) →',
-      '⚠ Reconnect ops (Linear) →',
+      'Reconnect Jira (acme) →',
+      'Reconnect ops (Linear) →',
     ]);
     expect(items[0].getAttribute('title')).toContain('token has expired');
     await fireEvent.click(items[0]);
@@ -198,7 +198,7 @@ describe('TrackerAttention', () => {
     render(TrackerAttention);
     await tick();
     const [item] = screen.getAllByTestId('tracker-attention-item');
-    expect(item.textContent?.trim()).toBe('⚠ Sync skipping items — Jira (acme) →');
+    expect(item.textContent?.trim()).toBe('Sync skipping items — Jira (acme) →');
     await fireEvent.click(item);
     expect(get(settingsSection)).toBe('settings.trackers');
   });

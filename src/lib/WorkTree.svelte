@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   import { tablistKeys } from './tablist_keys';
   import { onWorkChangedDebounced } from './work';
   // The Work view's tree (work graph M14), shown in the sidebar in place of
@@ -709,7 +710,7 @@
         title="Placement rules"
         aria-label="Placement rules"
         data-testid="work-rules-open"
-        onclick={() => (rulesOpen = true)}>⚙</button
+        onclick={() => (rulesOpen = true)}><Icon name="settings" size={14} /></button
       >
       <!-- Refresh is the sidebar's ↻ (it re-reads this view too), and
            collapse is the sidebar's ‹: one of each. -->

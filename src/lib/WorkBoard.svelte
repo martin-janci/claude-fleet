@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   // The task board (sprints design 2026-09-28 §6c): every task the Work
   // view's filters match, from one `work_tree` read (archived on, so Done
   // has its rows; the status filter off, since the columns are the status).
@@ -16,7 +17,7 @@
   // The drag is pointer events, not HTML5 drag and drop: the window takes
   // OS file drops (`dragDropEnabled`), which on Windows swallows the
   // webview's own. ← / → on a focused card move it too. Tracker and agent
-  // text renders as text. A native card's ✎ (or E on the focused card)
+  // text renders as text. A native card's edit button (or E on the focused card)
   // opens the edit dialog: title, description, status, assignees.
   import { onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
@@ -358,7 +359,7 @@
         aria-label="Edit {displayTitle(t)}"
         disabled={editBlocked !== null}
         data-testid="work-board-card-edit"
-        onclick={() => (editing = t.task_id)}>✎</button
+        onclick={() => (editing = t.task_id)}><Icon name="edit" size={12} /></button
       >
     {/if}
     {#if err}<p class="card-err" role="alert" data-testid="work-board-card-error">{err}</p>{/if}
