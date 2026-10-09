@@ -195,7 +195,7 @@ fn a_brief_takes_only_its_own_orgs_sessions_from_a_mixed_group() {
         ..Default::default()
     });
     assert_eq!(
-        brief_target(&today, None),
+        brief_target(&today, None, |_, _| true),
         Some((Some(1), "mercury".to_string()))
     );
     let (one, _) = brief_prompt(&today, Some(1)).unwrap();
