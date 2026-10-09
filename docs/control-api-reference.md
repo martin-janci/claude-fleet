@@ -1011,6 +1011,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::federation::list_peer_links`
 - `commands::federation::link_peer_hub`
 - `commands::federation::unlink_peer_hub`
+- `commands::updates::list_update_targets`
 - `commands::debug_devices::list_debug_devices`
 - `commands::debug_devices::scan_debug_devices`
 - `commands::debug_devices::update_debug_device`
