@@ -358,9 +358,9 @@ jobs:
         include:
           - os: macos-latest
             args: --workspace --all-targets
-          # fleet-agent and fleet-hub are Unix-only (see rust-windows).
+          # fleet-agent, fleet-hub and fleet-updater are Unix-only (see rust-windows).
           - os: windows-latest
-            args: --workspace --exclude fleet-agent --exclude fleet-hub --all-targets
+            args: --workspace --exclude fleet-agent --exclude fleet-hub --exclude fleet-updater --all-targets
     runs-on: ${{ matrix.os }}
     steps:
       - run: git config --global core.autocrlf false

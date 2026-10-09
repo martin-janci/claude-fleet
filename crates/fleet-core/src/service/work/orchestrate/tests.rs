@@ -706,12 +706,15 @@ fn two_planner_runs_in_one_second_keep_both_answers_and_run_one_at_a_time() {
     );
     assert_ne!(first[0].decision_id, second[0].decision_id);
 
-    let slot = PlannerSlot::take(&fx.m).unwrap();
+    let slot = PlannerSlot::take(&fx.deps, &fx.m).unwrap();
     assert_eq!(
-        PlannerSlot::take(&fx.m).err().map(|e| e.code),
+        PlannerSlot::take(&fx.deps, &fx.m).err().map(|e| e.code),
         Some(codes::E_EXISTS.to_string()),
         "a second call waits for the first"
     );
     drop(slot);
-    assert!(PlannerSlot::take(&fx.m).is_ok(), "the slot is given back");
+    assert!(
+        PlannerSlot::take(&fx.deps, &fx.m).is_ok(),
+        "the slot is given back"
+    );
 }
