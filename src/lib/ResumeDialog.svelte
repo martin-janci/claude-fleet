@@ -11,6 +11,7 @@
   import DraftField from './DraftField.svelte';
   import { resumeWork, summarizePastWork, workResumePlan, type ResumeMode, type ResumePlan, type SummaryOutcome } from './work';
   import { plainUntrusted } from './tracker_health';
+  import { spliceSummary } from './resume_brief';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { uiLayout } from './prefs';
@@ -65,6 +66,25 @@
   let changed = $state('');
   let changedBy = $state<SummaryOutcome | null>(null);
   let changedBusy = $state(false);
+  /** The "What changed" text the brief was built with: an edit or a Clear
+   *  of the field is carried into the brief from it (review r15 F22). */
+  let briefSummary: string | null = null;
+  /** The brief no longer holds that text as written, so it was left alone. */
+  let changedStale = $state(false);
+  $effect(() => {
+    const next = changed;
+    untrack(() => {
+      if (briefSummary === null || next === briefSummary || mode !== 'brief') return;
+      const out = spliceSummary(brief, briefSummary, next);
+      if (out === null) {
+        changedStale = true;
+        return;
+      }
+      brief = out;
+      briefSummary = next;
+      changedStale = false;
+    });
+  });
   const changedBlocked = $derived(
     hubActionBlocked('summarize_past_work', $hubStatus, $hubConnection) ??
       $sessionIdBlocked(sessionId ?? null, 'summarize_past_work'),
@@ -119,6 +139,7 @@
   async function pickCandidate(id: number) {
     linkId = id;
     briefFor = null;
+    briefSummary = null;
     changed = '';
     changedBy = null;
     await loadPlan();
@@ -153,6 +174,8 @@
     if (r.ok) {
       brief = r.value.brief ?? '';
       briefFor = where;
+      briefSummary = changedBy && changed.trim() !== '' ? changed : null;
+      changedStale = false;
     } else {
       error = r.error.message;
     }
@@ -302,6 +325,11 @@
             onclear={() => (changedBy = null)}
             testid="resume-changed-draft"
           />
+          {#if changedStale}
+            <p class="muted" data-testid="resume-changed-stale">
+              The brief below was edited, so this change did not reach it. Edit the brief itself.
+            </p>
+          {/if}
         {:else}
           <button
             type="button"

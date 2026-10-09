@@ -16,6 +16,7 @@ import {
   NEVER_DECIDES,
   draftedBy,
   neverDecides,
+  neverDecidesField,
   preselect,
   proposedByLabel,
   type ProposalLike,
@@ -211,4 +212,19 @@ describe('the ai-pre token', () => {
     const controls = readFileSync('src/lib/controls.css', 'utf8');
     expect(controls).toMatch(/\.ai-pre\s*\{[^}]*var\(--ai-pre\)/);
   });
+});
+
+describe('neverDecidesField (review r15 F14)', () => {
+  it.each([
+    [{ name: 'prio', label: 'Priority' }],
+    [{ name: 'max_priority', label: 'Pick one' }],
+    [{ name: 'x', label: 'Task size' }],
+    [{ name: 'x', label: 'Who gets access?' }],
+    [{ name: 'x', label: 'Pick', help: 'Approve the push?' }],
+  ])('%o is a person’s call', (f) => expect(neverDecidesField(f)).toBe(true));
+
+  it.each([[{ name: 'env', label: 'Environment' }], [{ name: 'host', label: 'Which host?' }]])(
+    '%o may take a proposal',
+    (f) => expect(neverDecidesField(f)).toBe(false),
+  );
 });
