@@ -524,6 +524,15 @@ fn clear(
     Ok(Cleared { mode, key, cfg })
 }
 
+/// The org's consent to reply text (D48), for a feature that sends some
+/// only now and then. A store that cannot be read consents to nothing.
+pub fn reply_text_allowed(s: &Store, org_id: Option<i64>) -> bool {
+    match org_id {
+        Some(id) => s.org_jev_reply_allowed(id).unwrap_or(false),
+        None => settings::get_bool(s, settings::DECIDE_JEV_UNASSIGNED_REPLY),
+    }
+}
+
 /// The org's consent to `feature` (D31), and to reply text on top of it
 /// when the feature sends some (D48). A store that cannot be read
 /// consents to nothing.
