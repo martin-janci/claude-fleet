@@ -1196,3 +1196,49 @@ async fn auto_tidy_never_kills_an_idle_unlinked_session() {
     assert!(err.message.contains("auto-tidy never"), "{}", err.message);
     assert!(exec.calls().is_empty());
 }
+
+/// G1.9: a `safe_kill` candidate carries its own worktree's size as the host
+/// probe last measured it, which the sheet totals as "frees about …"; a
+/// tree the probe has not measured says nothing rather than 0.
+#[test]
+fn a_safe_kill_candidate_carries_its_worktrees_measured_size() {
+    // Its own host alias: the per-worktree sizes are process-wide.
+    const HOST: &str = "tidy-size-host";
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let measured = seed(&store, "measured", "done");
+    let unmeasured = seed(&store, "unmeasured", "done");
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host(HOST).unwrap();
+        s.update_host_probe(HOST, true, None, None, 1).unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET host_alias = ?1 WHERE id IN (?2, ?3)",
+                rusqlite::params![HOST, measured, unmeasured],
+            )
+            .unwrap();
+    }
+    crate::service::sessions::worktree_sizes::record(
+        HOST,
+        NOW,
+        [("/p/o/r/.worktrees/measured".to_string(), 2_200_000)],
+    );
+    let r = work_tidy(
+        &store,
+        &crate::service::view_scope::ViewScope::internal(),
+        NOW,
+    )
+    .unwrap();
+    let of = |id: i64| {
+        r.candidates
+            .iter()
+            .find(|c| c.session_id == id)
+            .expect("a done, idle session is a candidate")
+    };
+    assert_eq!(of(measured).action, TidyAction::SafeKill);
+    assert_eq!(of(measured).worktree_kb, Some(2_200_000));
+    assert_eq!(of(unmeasured).worktree_kb, None);
+    // On the wire only when known.
+    let wire = serde_json::to_value(of(unmeasured)).unwrap();
+    assert!(wire.get("worktree_kb").is_none(), "{wire}");
+}

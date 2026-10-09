@@ -222,9 +222,11 @@ pub(super) fn worktree_size_due(worktree_at: Option<i64>, now: i64) -> bool {
 }
 
 /// `du -sk` over fleet's worktrees on the host (not the projects' main
-/// checkouts), summed into one `wtkb=<kB>` line. Every path is quoted with
-/// [`crate::shell::quote`]; a leading `~/` becomes `"$HOME"/` so it still
-/// expands. `None` when the host has no worktrees to measure.
+/// checkouts): one `wtp=<index> <kB>` line per path it could measure (the
+/// index into `paths`; G1.9, the per-session size), then their sum as one
+/// `wtkb=<kB>` line. Every path is quoted with [`crate::shell::quote`]; a
+/// leading `~/` becomes `"$HOME"/` so it still expands. `None` when the
+/// host has no worktrees to measure.
 pub(super) fn worktree_size_script(paths: &[&str]) -> Option<String> {
     let quoted: Vec<String> = paths
         .iter()
@@ -238,9 +240,26 @@ pub(super) fn worktree_size_script(paths: &[&str]) -> Option<String> {
         return None;
     }
     Some(format!(
-        "du -sk -- {} 2>/dev/null | awk '{{s += $1}} END {{print \"wtkb=\" s + 0}}'",
+        "s=0; i=0; for p in {}; do k=$(du -sk -- \"$p\" 2>/dev/null | cut -f1); \
+         case \"$k\" in ''|*[!0-9]*) ;; *) printf 'wtp=%s %s\\n' \"$i\" \"$k\"; s=$((s + k));; esac; \
+         i=$((i + 1)); done; printf 'wtkb=%s\\n' \"$s\"",
         quoted.join(" ")
     ))
+}
+
+/// Parse [`worktree_size_script`]'s per-path lines: `(index, kB)` for every
+/// `wtp=` line whose index is below `n` (the number of paths asked about).
+pub(super) fn parse_worktree_sizes(stdout: &str, n: usize) -> Vec<(usize, i64)> {
+    stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("wtp="))
+        .filter_map(|rest| {
+            let (i, kb) = rest.trim().split_once(' ')?;
+            let i: usize = i.parse().ok()?;
+            let kb: i64 = kb.trim().parse().ok()?;
+            (i < n && kb >= 0).then_some((i, kb))
+        })
+        .collect()
 }
 
 /// Parse [`worktree_size_script`] output: the `wtkb=` line, else `None`.
@@ -1797,8 +1816,13 @@ pub(super) async fn probe_with_timeout(
     // Worktree size (Orbit Fleet 4.6): due once per interval, bounded on
     // its own, best-effort.
     if let (Ok(_), Some((shell, _, paths))) = (&probe.result, pr_probe) {
-        if worktree_size_due(probe.host.worktree_at, started_at) {
+        // Also due when this process has no per-worktree sizes for the host
+        // yet (G1.9): they live in memory only, so a restart measures once.
+        if worktree_size_due(probe.host.worktree_at, started_at)
+            || !super::worktree_sizes::known(&probe.host.alias)
+        {
             let names: Vec<&str> = paths.named.iter().map(|(p, _)| p.as_str()).collect();
+            let mut per_path = Vec::new();
             probe.worktree_kb = Some(match worktree_size_script(&names) {
                 None => Some(0),
                 Some(script) => tokio::time::timeout(
@@ -1808,8 +1832,15 @@ pub(super) async fn probe_with_timeout(
                 .await
                 .ok()
                 .and_then(Result::ok)
-                .and_then(|out| parse_worktree_size(&out)),
+                .and_then(|out| {
+                    per_path = parse_worktree_sizes(&out, names.len())
+                        .into_iter()
+                        .map(|(i, kb)| (names[i].to_string(), kb))
+                        .collect();
+                    parse_worktree_size(&out)
+                }),
             });
+            super::worktree_sizes::record(&probe.host.alias, started_at, per_path);
         }
     }
     // Codex conversations: Codex names its own, so each live Codex pane's

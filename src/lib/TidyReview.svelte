@@ -27,6 +27,7 @@
     defaultChoice,
     dismissReopened,
     formatIdle,
+    freedKb,
     groupByReason,
     newlyReopened,
     preselected,
@@ -55,6 +56,7 @@
   import { inScope } from './tidy';
   import { clearSessionFocus, focusSession } from './session_focus';
   import { windowHidden } from './window_hidden';
+  import { sizeText } from './hosts_table';
 
   /** How often the candidates are re-read (they change on the scale of hours). */
   const REFRESH_MS = 60_000;
@@ -125,6 +127,8 @@
   let focused = false;
 
   const tickedCount = $derived(allowed.filter((c) => ticked.has(c.session_id)).length);
+  /** "frees about 2.1 GB": the measured worktrees the ticked safe kills remove. */
+  const freed = $derived(freedKb(allowed, ticked, choice));
 
   function rowName(c: TidyCandidate): string {
     return c.label || c.tmux_name;
@@ -555,6 +559,9 @@
     {/each}
     </div>
     <div class="sheet-foot">
+      {#if tickedCount > 0 && freed !== null && freed > 0}
+        <span class="foot-meta" data-testid="tidy-frees">{tickedCount} selected · frees about {sizeText(freed)}</span>
+      {/if}
       <button
         class="btn btn--primary"
         data-testid="tidy-apply"
@@ -623,6 +630,11 @@
   .sheet-foot {
     justify-content: flex-end;
     padding-top: 0.2rem;
+  }
+  .foot-meta {
+    margin-right: auto;
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
   }
   .group-head {
     color: var(--fg-muted);

@@ -33,6 +33,7 @@ pub mod seed;
 mod sharing;
 mod targeting;
 pub mod terminals;
+pub mod worktree_sizes;
 
 #[cfg(test)]
 mod fill_session_name_tests;

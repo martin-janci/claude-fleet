@@ -3039,6 +3039,48 @@ fn the_worktree_size_script_quotes_every_path_and_sums_one_line() {
     assert_eq!(parse_worktree_size(""), None);
 }
 
+/// G1.9: the same `du` answers per worktree, by index, and the sum is the
+/// sum of what it measured. Runs the real script under `sh` on temp dirs.
+#[cfg(unix)]
+#[test]
+fn the_worktree_size_script_measures_each_path_by_index() {
+    use super::reconcile::{parse_worktree_size, parse_worktree_sizes, worktree_size_script};
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("wt a");
+    let b = dir.path().join("wt-b");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    std::fs::write(a.join("big"), vec![7u8; 300 * 1024]).unwrap();
+    std::fs::write(b.join("small"), b"x").unwrap();
+    let missing = dir.path().join("gone");
+    let paths = [
+        a.to_str().unwrap(),
+        missing.to_str().unwrap(),
+        b.to_str().unwrap(),
+    ];
+    let script = worktree_size_script(&paths).unwrap();
+    let out = crate::proc::std_command("sh")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&out.stdout);
+    let sizes = parse_worktree_sizes(&out, paths.len());
+    let by: std::collections::HashMap<usize, i64> = sizes.iter().copied().collect();
+    assert!(by[&0] >= 300, "{out}");
+    assert!(
+        !by.contains_key(&1),
+        "a missing path is not measured: {out}"
+    );
+    assert!(by[&2] < by[&0], "{out}");
+    assert_eq!(parse_worktree_size(&out), Some(by[&0] + by[&2]), "{out}");
+    // Lines that are not the script's, or out of range, are dropped.
+    assert_eq!(
+        parse_worktree_sizes("banner\nwtp=0 12\nwtp=9 5\nwtp=x 1\nwtp=1 -3\n", 2),
+        vec![(0, 12)]
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn the_worktree_size_script_measures_real_directories() {
