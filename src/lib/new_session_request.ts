@@ -25,6 +25,10 @@ export interface NewSessionRequest {
   /** What chose `project` (redesign 3.12, K1): a rule (earlier work on the
    *  key) or Jev. The dialog shows the shared chip with a Change link. */
   proposal?: ProposalLike | null;
+  /** Open with Run = In background (the sidebar's ⚡): one prompt field, no
+   *  pane. App's mount does not pass it as a prop yet, so the dialog reads it
+   *  off this request when it opens. */
+  background?: boolean;
 }
 
 export const newSessionRequest = writable<NewSessionRequest | null>(null);

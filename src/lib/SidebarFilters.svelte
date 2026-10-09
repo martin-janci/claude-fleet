@@ -21,6 +21,8 @@
     showFriendlyNames,
     showRowDetails,
     sidebarGroupBy,
+    sessionAgent,
+    type SessionAgent,
   } from './sessions';
   import { diskMeter } from './hosts_view';
   import { hosts, hostFilter, effectiveHostFilter } from './hosts';
@@ -62,6 +64,8 @@
     type WorkFilters,
   } from './work_filters';
   import { clearWorkFilterPatch, sessionFacets, type SessionFacetId } from './filter_facets';
+  import { agentFilter, type AgentFilter } from './session_owner';
+  import { AGENT_LABELS } from './row_groups';
 
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
   const workViewChord = workViewChordLabel(isMac);
@@ -144,6 +148,13 @@
   );
 
   // ── The summary strip and the panel ──
+  // Agent (Sessions board "Agent: any"): Any, then the agents the list has
+  // rows for, in the manual's order, plus the chosen one while it has none.
+  const agentChoices = $derived.by((): SessionAgent[] => {
+    const seen = new Set<SessionAgent>($sessions.map((s) => sessionAgent(s)));
+    if ($agentFilter !== 'all') seen.add($agentFilter);
+    return (Object.keys(AGENT_LABELS) as SessionAgent[]).filter((a) => seen.has(a));
+  });
   const visibleHosts = $derived($hosts.filter((h) => !h.hidden));
   const scopeLabel = $derived(
     $effectiveScope === UNASSIGNED ? 'Unassigned' : ($scopes.find((s) => s.id === $effectiveScope)?.label ?? $effectiveScope),
@@ -154,6 +165,8 @@
           scope: $scopeSelectorShown ? $effectiveScope : 'all',
           scopeLabel,
           host: $effectiveHostFilter,
+          agent: $agentFilter,
+          agentLabel: $agentFilter === 'all' ? undefined : AGENT_LABELS[$agentFilter],
           recency,
           search,
           needsYou: needsYouOnly,
@@ -188,6 +201,8 @@
         return scopeFilter.set('all');
       case 'host':
         return hostFilter.set('all');
+      case 'agent':
+        return agentFilter.set('all');
       case 'recency':
         recency = 'all';
         return;
@@ -293,6 +308,16 @@
               onchange={(id) => hostFilter.set(id)}
             />
           </nav>
+          <FilterChipGroup
+            label="Agent"
+            value={$agentFilter}
+            options={[
+              { id: 'all' as AgentFilter, label: 'Any' },
+              ...agentChoices.map((a) => ({ id: a as AgentFilter, label: AGENT_LABELS[a] })),
+            ]}
+            testidFor={(id) => `filter-agent-${id}`}
+            onchange={(id) => agentFilter.set(id)}
+          />
         </section>
         <section use:hintAnchor={{ id: 'recency-filter', when: $sessions.length > 0 }}>
           <h3>Time</h3>

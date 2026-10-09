@@ -17,7 +17,17 @@
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
-  import { groupRows, isFlatGroupBy } from './row_groups';
+  import {
+    AGENT_LABELS,
+    cappedRows,
+    doneToday,
+    FOLDED_BY_DEFAULT,
+    GROUP_CAP,
+    groupRows,
+    isFlatGroupBy,
+    moreLabel,
+  } from './row_groups';
+  import { agentFilter, agentMatches, ownerCounts, ownerTab, OWNER_TABS } from './session_owner';
   import { inboxRows, notWaiting, notWaitingText } from './inbox';
   import RoutineFailures from './automation/RoutineFailures.svelte';
   import { failingCount } from './routines';
@@ -101,6 +111,7 @@
     ciStatusLabel,
     countNeedsYou,
     countsTowardBadge,
+    jevOutcome,
     needsYou,
     severity,
     worstSeverityByProject,
@@ -111,7 +122,7 @@
   import { snapshotRows } from './motion_catalog';
   import { push, pushError } from './toasts';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
-  import { hubConnection, connectionBanner } from './hub_connection';
+  import { hubConnection, connectionBanner, isLost, lostSince } from './hub_connection';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import KillDialog from './KillDialog.svelte';
   import { archiveBlocked, archiveSessions, undoArchive } from './kill_check';
@@ -313,7 +324,10 @@
     // A mass loss's rows live in their fold row (redesign 1.1), not the tree.
     const folded = foldedIdSet;
     const unfolded: SessionPredicate = folded.size === 0 ? null : (s) => !folded.has(s.id);
-    return bothPredicates(unfolded, triagePredicate(workPredicate));
+    // The agent facet (Sessions board "Agent: any").
+    const agent = $agentFilter;
+    const ofAgent: SessionPredicate = agent === 'all' ? null : (s) => agentMatches(s, agent);
+    return bothPredicates(bothPredicates(unfolded, ofAgent), triagePredicate(workPredicate));
   });
   // ── Shared with me (redesign step 5.8) ──
   // The sessions someone shared with this person (watch or drive) leave the
@@ -324,9 +338,13 @@
     const a = $accessOf(s);
     return a === 'watch' || a === 'drive';
   }
-  const rowPredicate = $derived(
-    splitShared ? bothPredicates((s) => !isSharedWithMe(s), rowBase) : rowBase,
-  );
+  // The owner tabs (Sessions board "All · Mine · Shared"): Shared shows only
+  // that group, Mine everything but it. Past a focus, like every filter.
+  const tab = $derived(focus ? 'all' : $ownerTab);
+  const rowPredicate = $derived.by((): SessionPredicate => {
+    if (tab === 'shared') return () => false;
+    return splitShared ? bothPredicates((s) => !isSharedWithMe(s), rowBase) : rowBase;
+  });
 
   // What narrows the list, for the empty state (the chrome shows the same
   // facets as chips).
@@ -342,7 +360,7 @@
   // (a second grouping pass) is skipped.
   const anyArchivedSession = $derived($sessions.some((s) => s.work?.archived_at != null));
   const archivedHidden = $derived.by((): number => {
-    if (focus || workFilterView.archived) return 0;
+    if (focus || workFilterView.archived || tab === 'shared') return 0;
     const workMode = $sidebarGroupBy === 'work';
     // Past links always count as archived (see `pastFilterRow`); needs-you
     // lists live sessions only.
@@ -396,6 +414,8 @@
           scopeLabel:
             $effectiveScope === UNASSIGNED ? 'Unassigned' : $scopes.find((x) => x.id === $effectiveScope)?.label,
           host: $effectiveHostFilter,
+          agent: $agentFilter,
+          agentLabel: $agentFilter === 'all' ? undefined : AGENT_LABELS[$agentFilter],
           recency,
           search: searchQuery,
           needsYou: needsYouOnly,
@@ -412,6 +432,8 @@
     searchQuery = '';
     needsYouOnly = false;
     showBgAgents.set(true);
+    agentFilter.set('all');
+    ownerTab.set('all');
     workFilters.set({ ...DEFAULT_WORK_FILTERS });
   }
 
@@ -612,6 +634,7 @@
       next.delete(sess.project_id);
       collapsed = next;
     }
+    if (flatBy) openFlatGroupOf(sess.id);
     const workKey = workKeyed?.get(sess.id)?.key;
     if (workKey !== undefined && collapsedWork.has(workKey)) {
       const next = new Set(collapsedWork);
@@ -831,7 +854,7 @@
   });
   const pastOnlyGroups = $derived.by((): { key: string; links: WorkLink[] }[] => {
     // Needs you lists live sessions only: past work never waits on you.
-    if ($sidebarGroupBy !== 'work' || focus || needsYouOnly) return [];
+    if ($sidebarGroupBy !== 'work' || focus || needsYouOnly || tab === 'shared') return [];
     const live = new Set(workGroups.map((g) => g.key));
     const q = searchQuery.toLowerCase();
     const out: { key: string; links: WorkLink[] }[] = [];
@@ -935,7 +958,7 @@
   }
   const orphanSessions = $derived(orphansOf(treePredicate));
   const sharedWithMe = $derived.by((): SessionRow[] => {
-    if (!splitShared) return [];
+    if (!splitShared || tab === 'mine') return [];
     const q = viewSearch.toLowerCase();
     const base = rowBase;
     return $sessions.filter(
@@ -962,6 +985,38 @@
       : [],
   );
   let collapsedFlat: Set<string> = $state(new Set());
+  // Idle and Done start folded (FOLDED_BY_DEFAULT): these are the ones the
+  // person opened. A long group shows GROUP_CAP rows until its more row is
+  // pressed (Sessions board "4 more running ›").
+  let openedFlat: Set<string> = $state(new Set());
+  let uncappedFlat: Set<string> = $state(new Set());
+  function flatFolded(key: string): boolean {
+    return FOLDED_BY_DEFAULT.has(key) ? !openedFlat.has(key) : collapsedFlat.has(key);
+  }
+  function toggleFlat(key: string) {
+    if (FOLDED_BY_DEFAULT.has(key)) openedFlat = toggleIn(openedFlat, key);
+    else collapsedFlat = toggleIn(collapsedFlat, key);
+  }
+  /** Open the flat group that holds `id`, if it is folded. */
+  function openFlatGroupOf(id: number) {
+    const g = flatGroups.find((x) => x.rows.some((r) => r.id === id));
+    if (!g || !flatFolded(g.key)) return;
+    toggleFlat(g.key);
+  }
+
+  // ── Owner tabs (Sessions board): All · Mine · Shared ──
+  const ownerPool = $derived.by((): SessionRow[] => {
+    if (focus) return [];
+    const q = viewSearch.toLowerCase();
+    const base = rowBase;
+    return $sessions.filter(
+      (s) => s.kind !== 'external' && sessionVisible(s, viewHost, viewBg, base, viewScope) && sessionMatchesSearch(s, q),
+    );
+  });
+  const ownerCount = $derived(ownerCounts(ownerPool, (s) => splitShared && isSharedWithMe(s)));
+  // Only once something is shared with this person (a fleet of one has
+  // nothing to tell apart), or while a tab other than All is on.
+  const ownerTabsShown = $derived(!focus && (ownerCount.shared > 0 || $ownerTab !== 'all'));
 
   // ── Inbox (redesign step 3.3) ──
   // The rows the list would show under the same filters, narrowed to what
@@ -973,6 +1028,11 @@
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
   const inboxNeeding = $derived(inboxList.length + $failingCount);
+  // Main board "Needs you 4 · +1 proposed": rows in the Inbox only because
+  // Jev read a silent turn's end as a question or as stuck (J2). Counted
+  // apart, so the head says what a person or the pane said and what Jev
+  // proposes; the rows themselves carry "Proposed by Jev".
+  const inboxProposed = $derived(inboxList.filter((s) => jevOutcome(s) !== null).length);
   // The footer's row count (UX audit L4): what this list holds right now.
   const listCountText = $derived.by(() => {
     if ($sidebarView === 'work') return '';
@@ -1023,6 +1083,18 @@
   const listUnavailable = $derived(
     $hubStatus.unavailable !== null ? 'hub' : ($bootstrapError ?? refreshError) !== null ? 'load' : null,
   );
+
+  // States board "Hub unreachable": while the hub is lost (or configured but
+  // unusable) the rows on screen are the last ones it sent. They stay, greyed,
+  // and say so, rather than giving way to an empty state; each action that
+  // needs the hub is already disabled with its own reason.
+  const lastKnown = $derived.by((): string | null => {
+    const lost = isLost($hubConnection) || $hubStatus.unavailable !== null;
+    if (!lost || $sessions.length === 0) return null;
+    const at = $lostSince;
+    const when = at === null ? '' : ` at ${new Date(at).toTimeString().slice(0, 5)}`;
+    return `Last known${when} · actions that need the hub wait until it is back`;
+  });
 
   const hubSkewEmptyMessage = $derived(
     $hubConnection.state === 'hub_too_old' || $hubConnection.state === 'hub_too_new'
@@ -1316,7 +1388,25 @@
     }
   }
 
-  // --- New BG Session modal ---
+  // --- Background session (⚡) ---
+  // Dialogs board: the same dialog as New session, with Run = In background
+  // and its one prompt field. It needs a project row to open on (the run
+  // itself ignores it: a background session starts in the host's home
+  // folder), so it takes the open session's project, else the first one in
+  // the list. A fleet with no project yet keeps the small host-name-prompt
+  // dialog, which needs none.
+  function openBackground() {
+    const sel = $selectedSession;
+    const row =
+      (sel?.project_id != null ? $projects.find((p) => p.project.id === sel.project_id) : undefined) ??
+      filtered[0] ??
+      $projects[0];
+    if (!row) {
+      showBgModal = true;
+      return;
+    }
+    requestNewSession({ project: row, background: true });
+  }
   let showBgModal = $state(false);
   let bgModalHost = $state('local');
   let bgModalName = $state('');
@@ -1458,7 +1548,7 @@
       class="btn btn--quiet btn--icon"
       title="Launch a supervised Claude background session"
       aria-label="New background session"
-      onclick={() => (showBgModal = true)}
+      onclick={openBackground}
       data-testid="new-bg-session-btn"
       use:hintAnchor={{ id: 'bg-session', when: $sessions.some((s) => !hasNoPane(s)) && !$sessions.some((s) => s.kind === 'bg') }}
     ><Icon name="bolt" size={14} /></button>
@@ -1501,13 +1591,22 @@
   {:else if $sidebarView === 'inbox'}
   <!-- The Inbox (redesign step 3.3): only what raises the badge, worst
        first, then one line for everything else and the way to it. -->
-  <div class="scroller inbox" data-testid="inbox">
+  {#if lastKnown}
+    <p class="last-known" data-testid="inbox-last-known" role="status">{lastKnown}</p>
+  {/if}
+  <div class="scroller inbox" class:stale={lastKnown !== null} data-testid="inbox">
     <div class="section-header inbox-head" data-testid="inbox-head">
       {listUnavailable && inboxNeeding === 0
         ? 'Inbox'
         : inboxNeeding === 0
           ? 'Nothing needs you'
-          : `${inboxNeeding} need${inboxNeeding === 1 ? 's' : ''} you`}
+          : `${inboxNeeding - inboxProposed} need${inboxNeeding - inboxProposed === 1 ? 's' : ''} you`}
+      {#if inboxProposed > 0}<span
+          class="inbox-proposed"
+          data-testid="inbox-proposed"
+          title="Jev read the end of {inboxProposed === 1 ? 'this turn' : 'these turns'} as waiting on you; the row says so, and Not waiting puts it back"
+          >+{inboxProposed} proposed</span
+        >{/if}
     </div>
     {#if inboxNeeding === 0}
       {@render listState('inbox')}
@@ -1528,9 +1627,32 @@
         onclick={() => sidebarView.set('sessions')}>All sessions →</button
       >
     </div>
+    <!-- Main board: a mass loss stays one "12 stopped on trn · Restore" row
+         under the not-waiting line, here as in the Sessions list. -->
+    {#each lostFoldList as fold (fold.host)}
+      <LostFoldRow {fold} open={openFolds.has(fold.host)} ontoggle={() => toggleFold(fold.host)} row={foldSessionRow} />
+    {/each}
   </div>
   {:else}
-  <div class="scroller">
+  {#if ownerTabsShown}
+    <div class="owner-tabs" role="tablist" aria-label="Whose sessions" data-testid="owner-tabs">
+      {#each OWNER_TABS as t (t.id)}
+        <button
+          type="button"
+          role="tab"
+          class="owner-tab"
+          aria-selected={$ownerTab === t.id}
+          data-testid="owner-tab-{t.id}"
+          onclick={() => ownerTab.set(t.id)}
+          >{t.label}{#if t.id === 'all' || ownerCount[t.id] > 0}<span class="owner-count">{ownerCount[t.id]}</span>{/if}</button
+        >
+      {/each}
+    </div>
+  {/if}
+  {#if lastKnown}
+    <p class="last-known" data-testid="sessions-last-known" role="status">{lastKnown}</p>
+  {/if}
+  <div class="scroller" class:stale={lastKnown !== null} data-testid="sessions-scroller">
     {#snippet pastRow(key: string, l: WorkLink)}
       <div
         class="past-row"
@@ -1701,7 +1823,8 @@
     {#if flatBy && flatGroups.length > 0}
       <ul class="tree flat-groups" data-testid="flat-groups" data-group-by={flatBy} role="tree" aria-label="Sessions by {flatBy}">
         {#each flatGroups as g (g.key)}
-          {@const isCollapsed = collapsedFlat.has(g.key)}
+          {@const isCollapsed = flatFolded(g.key)}
+          {@const today = g.key === 'state:done' ? doneToday(g.rows, nowSec) : 0}
           <li class="proj" role="none">
             <div
               class="proj-row"
@@ -1711,18 +1834,19 @@
               aria-selected="false"
               tabindex="0"
               aria-expanded={!isCollapsed}
-              onclick={() => (collapsedFlat = toggleIn(collapsedFlat, g.key))}
+              onclick={() => toggleFlat(g.key)}
               onkeydown={(e) => {
                 if (!fromRowItself(e)) return;
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
-                  collapsedFlat = toggleIn(collapsedFlat, g.key);
+                  toggleFlat(g.key);
                 }
               }}
             >
               <span class="caret" class:collapsed={isCollapsed}>▾</span>
               <span class="label">{g.label}</span>
               <span class="count">{g.rows.length}</span>
+              {#if today > 0}<span class="today" data-testid="flat-group-today">{today} today</span>{/if}
             </div>
             {#if !isCollapsed}
               {@const offlineHost = flatBy === 'host' ? $hostByAlias.get(g.key) : undefined}
@@ -1734,12 +1858,23 @@
                   lastSeen={offlineHost.health_at ?? null}
                   sessions={g.rows.length}
                   ontry={() => void onRefresh()}
+                  onopen={() => requestHostsView(offlineHost.alias)}
                   trying={loading} />
               {/if}
+              {@const shown = uncappedFlat.has(g.key) ? g.rows : cappedRows(g.rows, GROUP_CAP, $selectedSession?.id ?? null)}
               <div role="group">
-                {#each g.rows as sess (sess.id)}
+                {#each shown as sess (sess.id)}
                   {@render sessionRow(sess)}
                 {/each}
+                {#if shown.length < g.rows.length}
+                  <button
+                    type="button"
+                    class="more-row"
+                    data-testid="flat-group-more"
+                    onclick={() => (uncappedFlat = toggleIn(uncappedFlat, g.key))}
+                    >{moreLabel(g, g.rows.length - shown.length)} <span aria-hidden="true">›</span></button
+                  >
+                {/if}
               </div>
             {/if}
           </li>
@@ -1825,6 +1960,14 @@
       </ul>
     {:else if listUnavailable && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
       {@render listState('sessions')}
+    {:else if tab === 'shared' && sharedWithMe.length === 0}
+      <EmptyState
+        kind="none"
+        testid="sidebar-empty"
+        title={listFacets.length > 0 ? `Nothing shared with you matches ${facetSentence(listFacets)}.` : 'Nothing is shared with you.'}
+        body="A session someone shares with you shows here, with what you may do in it."
+        actions={[{ label: 'All sessions', onclick: () => ownerTab.set('all'), primary: true, testid: 'sidebar-empty-all' }]}
+      />
     {:else if !loadError && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
       {#if !hubSkewEmptyMessage && listFacets.length > 0 && $projects.length > 0}
         <!-- Filters hide every row: say which, and offer the way back,
@@ -1899,7 +2042,7 @@
       </div>
     {/if}
 
-    {#if archivedHidden > 0 || ($workFilters.archived && !focus)}
+    {#if archivedHidden > 0 || ($workFilters.archived && !focus && tab !== 'shared')}
       <div class="archived-row" data-testid="archived-row">
         {#if $workFilters.archived}
           <span>Showing archived work</span>
@@ -1915,9 +2058,11 @@
       </div>
     {/if}
 
-    {#each lostFoldList as fold (fold.host)}
-      <LostFoldRow {fold} open={openFolds.has(fold.host)} ontoggle={() => toggleFold(fold.host)} row={foldSessionRow} />
-    {/each}
+    {#if tab !== 'shared'}
+      {#each lostFoldList as fold (fold.host)}
+        <LostFoldRow {fold} open={openFolds.has(fold.host)} ontoggle={() => toggleFold(fold.host)} row={foldSessionRow} />
+      {/each}
+    {/if}
 
     {#if outsideFleet.length > 0}
       <div class="orphan-section" data-testid="outside-fleet-section">
@@ -1940,7 +2085,7 @@
       </div>
     {/if}
 
-    {#if unclaimedTotal > 0}
+    {#if unclaimedTotal > 0 && tab !== 'shared'}
       <!-- A count, and nothing else. No caret, no toggle, no rows: there is
            deliberately no way to expand this, because there is nothing behind
            it — fleet serves a number for an unclaimed session and no metadata
@@ -2342,6 +2487,74 @@
     font-size: var(--text-2xs);
   }
   .inbox-rest .muted { color: var(--fg-muted); }
+  .inbox-proposed {
+    margin-left: 0.4rem;
+    text-transform: none;
+    letter-spacing: normal;
+    color: var(--fg-muted);
+  }
+  /* Owner tabs (Sessions board): "All 25 · Mine · Shared". */
+  .owner-tabs {
+    display: flex;
+    gap: 2px;
+    padding: 0.35rem 0.6rem 0;
+  }
+  .owner-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.15rem 0.5rem;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--fg-muted);
+    font: inherit;
+    font-size: var(--text-xs);
+    cursor: pointer;
+  }
+  .owner-tab:hover { color: var(--fg); }
+  .owner-tab[aria-selected='true'] {
+    color: var(--fg);
+    border-color: var(--border);
+    background: var(--bg-pane);
+  }
+  .owner-count {
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  /* A long group's "4 more running ›" and Done's "2 today". */
+  .more-row {
+    display: flex;
+    width: 100%;
+    justify-content: space-between;
+    padding: 0.2rem 0.5rem 0.2rem 1.6rem;
+    border: 0;
+    background: transparent;
+    color: var(--fg-muted);
+    font: inherit;
+    font-size: var(--text-2xs);
+    text-align: left;
+    cursor: pointer;
+  }
+  .more-row:hover { color: var(--fg); }
+  .today {
+    font-size: var(--text-2xs);
+    color: var(--accent);
+    white-space: nowrap;
+  }
+  /* States board "Hub unreachable": the last rows the hub sent, greyed. */
+  .last-known {
+    margin: 0.35rem 0.6rem 0;
+    padding: 0.25rem 0.5rem;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+  }
+  .scroller.stale :global([data-testid='sess-row']) {
+    opacity: 0.6;
+  }
   .section-header {
     font-size: var(--text-2xs);
     text-transform: uppercase;

@@ -37,6 +37,7 @@ export const SESSION_FILTER_SCHEMA: Record<SessionControlId, FilterControl> = {
   'needs-you': { label: 'Needs you', place: 'Quick', testid: 'needs-you-filter' },
   scope: { label: 'Organisation', place: 'Scope', testid: 'filter-scope', when: 'two or more organisations' },
   host: { label: 'Machine', place: 'Scope', testid: 'filter-host-all' },
+  agent: { label: 'Agent', place: 'Scope', testid: 'filter-agent-all' },
   recency: { label: 'Last active', place: 'Time', testid: 'recency-all' },
   'wf-tracker': { label: 'Tracker', place: 'Work', testid: 'wf-tracker-all', when: 'two or more trackers' },
   'wf-status': { label: 'Status', place: 'Work', testid: 'wf-status-all', when: 'there is work' },

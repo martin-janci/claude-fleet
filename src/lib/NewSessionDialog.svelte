@@ -51,6 +51,8 @@
   import DraftField from './DraftField.svelte';
   import { draftBrief, draftSource, previewStartWork, siblingProposal, type BriefDraft } from './start_preview';
   import { openNewSessionPicker } from './switcher_request';
+  import { newSessionRequest } from './new_session_request';
+  import { get } from 'svelte/store';
   import { agentChoices, keepAgent, type PickerAgent } from './agent_picker';
 
   let {
@@ -316,7 +318,17 @@
   }
   // "Run: in background" (step 4.5): a supervised background session, what
   // the sidebar's ⚡ dialog launches, which stays as it was.
-  let runBackground = $state(false);
+  // The sidebar's ⚡ opens this dialog with Run = In background; App's mount
+  // does not pass it as a prop yet, so it is read off the request.
+  let runBackground = $state(untrack(() => get(newSessionRequest)?.background === true));
+  // Advanced (tmux name, Run, cwd) starts folded, open for a background run.
+  let advancedOpen = $state(untrack(() => runBackground));
+  // "Start fresh instead" on the previous-work row.
+  let pastDismissed = $state(false);
+  function changeProject() {
+    onCancel();
+    openNewSessionPicker(initialHost, ticket);
+  }
   let bgPrompt = $state('');
   const bgSessionBlocked = $derived(hubActionBlocked('new_bg_session', $hubStatus, $hubConnection));
   const asBackground = $derived(runBackground && runsClaude && !ticket);
@@ -1253,45 +1265,114 @@
   }
 </script>
 
-<Modal label="New session" onclose={onCancel} width="520px">
+<Modal label={asBackground ? 'Background session' : 'New session'} onclose={onCancel} width="760px" maxWidth="min(94vw, 760px)">
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="dialog" onkeydown={onKeydown}>
-  <h3>New session — {owner}/{repo}</h3>
-    <ProposedBy
-      {proposal}
-      field="project"
-      testid="new-session-proposed"
-      onchange={() => {
-        onCancel();
-        openNewSessionPicker(initialHost, ticket);
-      }}
-    />
+  <!-- NewSession board: the project is a chip in the title, and Change goes
+       back to the picker; a background run says what it is instead (the
+       Dialogs board's "Background session"), since it ignores the project. -->
+  <header class="title-row">
+    {#if asBackground}
+      <h3 data-testid="new-session-title">Background session</h3>
+      <span class="title-note" data-testid="bg-title-note">Runs without a pane; you get the result in Inbox.</span>
+    {:else}
+      <h3 data-testid="new-session-title">
+        New session <span class="title-in">in</span>
+        <button
+          type="button"
+          class="project-chip"
+          data-testid="new-session-project"
+          title="{owner}/{repo} · pick another project"
+          onclick={changeProject}>{repo} <span aria-hidden="true">▾</span></button
+        >
+      </h3>
+      <ProposedBy
+        {proposal}
+        field="project"
+        testid="new-session-proposed"
+        onchange={changeProject}
+      />
+    {/if}
+  </header>
 
   <div class="fields">
-    <label for="friendly-name">Name</label>
-    <div class="name-row">
-      <input
-        id="friendly-name"
-        data-testid="friendly-name"
-        data-autofocus
-        value={friendlyName}
-        oninput={(e) => onFriendlyNameInput((e.target as HTMLInputElement).value)}
-        placeholder="blue sirius"
-        maxlength="80"
-      />
-      <button
-        type="button"
-        class="dice"
-        data-testid="reroll-name"
-        onclick={reroll}
-        title="Roll a new name (Ctrl/⌘+R)"
-        aria-label="Roll a new name"
-      ><Icon name="dice" size={14} /></button>
+    <div class="cell">
+      <label for="friendly-name">Name</label>
+      <div class="name-row">
+        <input
+          id="friendly-name"
+          data-testid="friendly-name"
+          data-autofocus
+          value={friendlyName}
+          oninput={(e) => onFriendlyNameInput((e.target as HTMLInputElement).value)}
+          placeholder="blue sirius"
+          maxlength="80"
+        />
+        <button
+          type="button"
+          class="dice"
+          data-testid="reroll-name"
+          onclick={reroll}
+          title="Roll a new name (Ctrl/⌘+R)"
+          aria-label="Roll a new name"
+        ><Icon name="dice" size={14} /></button>
+      </div>
     </div>
-    {#if plannedKey}
-      <p class="work-note" data-testid="work-note">
-        <span class="k">work</span> <code>{plannedKey}</code>
+
+    <div class="cell">
+      <!-- A group, not a labelable control: it is named by aria-labelledby. -->
+      <span class="field-label" id="kind-picker-label">Agent</span>
+      <div class="kind-row" id="kind-picker" role="group" aria-labelledby="kind-picker-label" data-testid="agent-picker">
+        <button
+          class="kind-pick"
+          class:active={runsClaude}
+          aria-pressed={runsClaude}
+          data-testid="kind-work"
+          onclick={() => onPickKind('work')}
+        >
+          Claude Code
+        </button>
+        <button
+          class="kind-pick"
+          class:active={chosenKind === 'shell'}
+          aria-pressed={chosenKind === 'shell'}
+          data-testid="kind-shell"
+          onclick={() => onPickKind('shell')}
+        >
+          Shell
+        </button>
+        {#each agentOptions.filter((c) => c.agent !== 'claude') as c (c.agent)}
+          {@const on = chosenKind === 'work' && chosenAgent === c.agent}
+          <button
+            class="kind-pick"
+            class:active={on}
+            aria-pressed={on}
+            data-testid={`agent-${c.agent}`}
+            disabled={!c.enabled}
+            title={c.reason ?? undefined}
+            onclick={() => onPickAgent(c.agent)}
+          >
+            {c.label}{#if c.tag}{" "}<span class="soon">{c.tag}</span>{/if}
+          </button>
+        {/each}
+      </div>
+    </div>
+
+    {#if asBackground}
+      <!-- The one prompt field a background run needs (Dialogs board). -->
+      <div class="cell span">
+        <label for="bg-prompt">First prompt</label>
+        <textarea id="bg-prompt" data-testid="bg-prompt" rows="4" bind:value={bgPrompt} placeholder="What should Claude work on?"></textarea>
+        <p class="work-note" data-testid="bg-note">
+          Runs supervised on {chosenHost} in its home folder, with no pane; it shows in the list when it starts.
+        </p>
+      </div>
+    {/if}
+
+    {#if plannedKey && !asBackground}
+      <p class="work-note span" data-testid="work-note">
         {#if duplicateOf}
+          <span class="k">work</span> <code>{plannedKey}</code>
           <span class="dup" data-testid="work-duplicate">
             — already running as <b>{duplicateOf.friendly_name ?? duplicateOf.tmux_name}</b>
             on {duplicateOf.host_alias}.
@@ -1299,20 +1380,28 @@
               >Open it</button
             >
           </span>
-        {:else if pastWork}
-          <span class="dup" data-testid="work-past">
-            — has previous work ({pastWorkSummary(pastWork, now * 1000)}).
-            <button type="button" class="linkish" data-testid="resume-past" onclick={() => (resumeOpen = true)}
-              >Resume</button
+        {:else if pastWork && !pastDismissed}
+          <!-- NewSession board: "Has previous work: Resume X · Start fresh
+               instead", inline, never a second dialog in the way. -->
+          <span class="dup past-row" data-testid="work-past">
+            Has previous work:
+            <button type="button" class="past-resume" data-testid="resume-past" onclick={() => (resumeOpen = true)}
+              >Resume {plannedKey}</button
+            >
+            <span class="muted">{pastWorkSummary(pastWork, now * 1000)}</span>
+            ·
+            <button type="button" class="linkish" data-testid="start-fresh" onclick={() => (pastDismissed = true)}
+              >Start fresh instead</button
             >
           </span>
         {:else}
+          <span class="k">work</span> <code>{plannedKey}</code>
           <span class="muted">— sessions on this branch group under it (sidebar: by work)</span>
         {/if}
       </p>
     {/if}
     {#if ticket}
-      <div class="ticket-box" data-testid="ticket-box">
+      <div class="ticket-box span" data-testid="ticket-box">
         <p class="work-note">
           <span class="k">ticket</span> <code>{ticket.key}</code>
           {ticket.title}{#if ticket.status_name}<span class="muted"> — {ticket.status_name}</span>{/if}
@@ -1394,45 +1483,8 @@
       <ResumeDialog workKey={plannedKey} onclose={() => (resumeOpen = false)} onresumed={onCancel} />
     {/if}
 
-      <!-- A group, not a labelable control: it is named by aria-labelledby. -->
-      <span class="field-label" id="kind-picker-label">Agent</span>
-      <div class="kind-row" id="kind-picker" role="group" aria-labelledby="kind-picker-label" data-testid="agent-picker">
-        <button
-          class="kind-pick"
-          class:active={runsClaude}
-          aria-pressed={runsClaude}
-          data-testid="kind-work"
-          onclick={() => onPickKind('work')}
-        >
-          Claude Code
-        </button>
-        <button
-          class="kind-pick"
-          class:active={chosenKind === 'shell'}
-          aria-pressed={chosenKind === 'shell'}
-          data-testid="kind-shell"
-          onclick={() => onPickKind('shell')}
-        >
-          Shell
-        </button>
-        {#each agentOptions.filter((c) => c.agent !== 'claude') as c (c.agent)}
-          {@const on = chosenKind === 'work' && chosenAgent === c.agent}
-          <button
-            class="kind-pick"
-            class:active={on}
-            aria-pressed={on}
-            data-testid={`agent-${c.agent}`}
-            disabled={!c.enabled}
-            title={c.reason ?? undefined}
-            onclick={() => onPickAgent(c.agent)}
-          >
-            {c.label}{#if c.tag}{" "}<span class="soon">{c.tag}</span>{/if}
-          </button>
-        {/each}
-      </div>
-
     {#if runsClaude && !ticket && !asBackground}
-      <div class="launch-row">
+      <div class="launch-row span">
         <div class="launch-field">
           <label for="launch-model">Model</label>
           <select id="launch-model" data-testid="launch-model" bind:value={chosenModel}>
@@ -1490,141 +1542,166 @@
       </div>
     {/if}
 
-    {#if runsClaude && !ticket}
-      <span class="field-label" id="run-picker-label">Run</span>
-      <div class="kind-row" id="run-picker" role="group" aria-labelledby="run-picker-label">
-        <button
-          class="kind-pick"
-          class:active={!runBackground}
-          aria-pressed={!runBackground}
-          data-testid="run-pane"
-          onclick={() => (runBackground = false)}
-        >
-          In a pane
-        </button>
-        <button
-          class="kind-pick"
-          class:active={runBackground}
-          aria-pressed={runBackground}
-          data-testid="run-background"
-          onclick={() => (runBackground = true)}
-          title="A supervised background session on the host, outside this project's worktree"
-        >
-          In background
-        </button>
+    {#if chosenKind === 'shell'}
+      <div class="cell span">
+        <label for="start-command">Start command (optional)</label>
+        <input
+          id="start-command"
+          data-testid="start-command"
+          bind:value={startCommand}
+          placeholder="e.g. pnpm test"
+        />
       </div>
-      {#if runBackground}
-        <label for="bg-prompt">First prompt</label>
-        <textarea id="bg-prompt" data-testid="bg-prompt" rows="3" bind:value={bgPrompt} placeholder="What should Claude work on?"></textarea>
-        <p class="work-note" data-testid="bg-note">
-          Runs supervised on {chosenHost} in its home folder, with no pane; it shows in the list when it starts.
+    {/if}
+
+    <div class="cell span">
+      <HostChips
+        active={chosenHost}
+        labelId="new-session-host-label"
+        showUsage
+        {now}
+        {locale}
+        {timeZone}
+        selectedAccount={chosenLoginAccount}
+        proposedHost={hostProposed?.value ?? null}
+        onpick={(alias) => {
+          pickHost(alias);
+          nameOverride = null;
+        }}
+      />
+      {#if hostProposed && hostProposed.value === chosenHost}
+        <ProposedBy
+          proposal={hostProposed}
+          field="host"
+          floor={HOST_PLACEMENT_FLOOR}
+          testid="new-session-host-proposed"
+          onchange={changeProposedHost}
+        />
+      {/if}
+    </div>
+
+    {#if !asBackground}
+      <div class="cell">
+        <!-- Not a <label>: the picker is a listbox, which a label cannot name
+             (it names itself with ariaLabel). -->
+        <span class="field-label" aria-hidden="true">Worktree</span>
+        {#if hostWorktrees.status === 'error' && hostWorktrees.error}
+          <div class="wt-status err" role="alert" data-testid="wt-status">
+            <span data-testid="wt-status-text"
+              >Couldn't list the worktrees on {chosenHost}. {errorSentence(hostWorktrees.error)}</span
+            >
+            <button type="button" class="wt-rescan" data-testid="wt-scan-again" onclick={() => rescans++}>Scan again</button>
+            <details class="wt-details">
+              <summary>Details</summary>
+              <code data-testid="wt-status-details">{errorDetail(hostWorktrees.error)}</code>
+            </details>
+          </div>
+        {:else if worktreeStatus}
+          <p class="wt-status" data-testid="wt-status">{worktreeStatus}</p>
+        {/if}
+        {#if remoteWorktreesUnlistable}
+          <p class="wt-status" data-testid="wt-remote-unknown">{remoteWorktreesUnlistable}</p>
+        {/if}
+        <PickerList
+          items={worktreeItems}
+          activeKey={inNewMode ? 'new' : String(chosenWorktreeId)}
+          onpick={onPickWorktreeKey}
+          maxHeight="9rem"
+          ariaLabel="Worktree"
+          testid="wt-picker"
+        />
+      </div>
+
+      <div class="cell">
+        {#if inNewMode}
+          <label for="new-wt-name">New branch / worktree name</label>
+          <input
+            id="new-wt-name"
+            data-testid="new-worktree-name"
+            value={newWorktreeName}
+            oninput={(e) => onNewWorktreeNameInput((e.target as HTMLInputElement).value)}
+            onblur={onNewWorktreeNameBlur}
+            placeholder="fix login bug → fix-login-bug"
+          />
+          <label for="new-wt-base">Base branch</label>
+          <input
+            id="new-wt-base"
+            data-testid="new-worktree-base"
+            bind:value={baseBranch}
+            placeholder="default branch"
+          />
+        {:else}
+          <p class="wt-status" data-testid="wt-existing-note">
+            Runs in the existing worktree <code>{chosenWorktree?.name ?? 'main'}</code>.
+          </p>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- NewSession board: tmux name, Run and cwd fold under Advanced. Native
+         <details>, so its fields stay in the form (and in Enter-to-create)
+         while folded. It opens for a background run, whose Run choice is in
+         it. -->
+    <details class="advanced span" data-testid="new-session-advanced" bind:open={advancedOpen}>
+      <summary>Advanced</summary>
+      <div class="adv-grid">
+        {#if !asBackground}
+          <div class="cell">
+            <label for="session-name">tmux name</label>
+            <input
+              id="session-name"
+              data-testid="new-session-name"
+              value={name}
+              oninput={(e) => onNameInput((e.target as HTMLInputElement).value)}
+              placeholder="empty = let fleet pick one"
+            />
+          </div>
+        {/if}
+        {#if runsClaude && !ticket}
+          <div class="cell">
+            <span class="field-label" id="run-picker-label">Run</span>
+            <div class="kind-row run-row" id="run-picker" role="group" aria-labelledby="run-picker-label">
+              <button
+                class="kind-pick"
+                class:active={!runBackground}
+                aria-pressed={!runBackground}
+                data-testid="run-pane"
+                onclick={() => (runBackground = false)}
+              >
+                With a pane
+              </button>
+              <button
+                class="kind-pick"
+                class:active={runBackground}
+                aria-pressed={runBackground}
+                data-testid="run-background"
+                onclick={() => (runBackground = true)}
+                title="A supervised background session on the host, outside this project's worktree"
+              >
+                In background
+              </button>
+            </div>
+          </div>
+        {/if}
+      </div>
+      {#if !asBackground}
+        <p class="preview" data-testid="path-preview" title={pathPreview}>
+          <span class="k">cwd</span> <code>{pathPreview}</code>
         </p>
       {/if}
-    {/if}
-
-    {#if chosenKind === 'shell'}
-      <label for="start-command">start command (optional)</label>
-      <input
-        id="start-command"
-        data-testid="start-command"
-        bind:value={startCommand}
-        placeholder="e.g. pnpm test"
-      />
-    {/if}
-
-    <HostChips
-      active={chosenHost}
-      labelId="new-session-host-label"
-      showUsage
-      {now}
-      {locale}
-      {timeZone}
-      selectedAccount={chosenLoginAccount}
-      proposedHost={hostProposed?.value ?? null}
-      onpick={(alias) => {
-        pickHost(alias);
-        nameOverride = null;
-      }}
-    />
-    {#if hostProposed && hostProposed.value === chosenHost}
-      <ProposedBy
-        proposal={hostProposed}
-        field="host"
-        floor={HOST_PLACEMENT_FLOOR}
-        testid="new-session-host-proposed"
-        onchange={changeProposedHost}
-      />
-    {/if}
-
-    <!-- Not a <label>: the picker is a listbox, which a label cannot name
-         (it names itself with ariaLabel). -->
-    <span class="field-label" aria-hidden="true">Worktree</span>
-    {#if hostWorktrees.status === 'error' && hostWorktrees.error}
-      <div class="wt-status err" role="alert" data-testid="wt-status">
-        <span data-testid="wt-status-text"
-          >Couldn't list the worktrees on {chosenHost}. {errorSentence(hostWorktrees.error)}</span
-        >
-        <button type="button" class="wt-rescan" data-testid="wt-scan-again" onclick={() => rescans++}>Scan again</button>
-        <details class="wt-details">
-          <summary>Details</summary>
-          <code data-testid="wt-status-details">{errorDetail(hostWorktrees.error)}</code>
-        </details>
-      </div>
-    {:else if worktreeStatus}
-      <p class="wt-status" data-testid="wt-status">{worktreeStatus}</p>
-    {/if}
-    {#if remoteWorktreesUnlistable}
-      <p class="wt-status" data-testid="wt-remote-unknown">{remoteWorktreesUnlistable}</p>
-    {/if}
-    <PickerList
-      items={worktreeItems}
-      activeKey={inNewMode ? 'new' : String(chosenWorktreeId)}
-      onpick={onPickWorktreeKey}
-      maxHeight="9rem"
-      ariaLabel="Worktree"
-      testid="wt-picker"
-    />
-
-    {#if inNewMode}
-      <label for="new-wt-name">new branch / worktree name</label>
-      <input
-        id="new-wt-name"
-        data-testid="new-worktree-name"
-        value={newWorktreeName}
-        oninput={(e) => onNewWorktreeNameInput((e.target as HTMLInputElement).value)}
-        onblur={onNewWorktreeNameBlur}
-        placeholder="fix login bug → fix-login-bug"
-      />
-      <label for="new-wt-base">base branch</label>
-      <input
-        id="new-wt-base"
-        data-testid="new-worktree-base"
-        bind:value={baseBranch}
-        placeholder="default branch"
-      />
-    {/if}
-
-    <label for="session-name">tmux name</label>
-    <input
-      id="session-name"
-      data-testid="new-session-name"
-      value={name}
-      oninput={(e) => onNameInput((e.target as HTMLInputElement).value)}
-      placeholder="empty = let fleet pick one"
-    />
-    <p class="preview" data-testid="path-preview" title={pathPreview}>
-      <span class="k">cwd</span> <code>{pathPreview}</code>
-    </p>
+    </details>
 
     {#if error}
-      <p class="err">{error}</p>
+      <p class="err span">{error}</p>
     {/if}
     {#if busy && $creatingStart}
       <!-- Redesign step 5.13: the create's worktree and tmux steps run
            while it is in flight; the dialog then closes into the same Pulse
            in the new session's conversation, on its agent step. -->
       {@const c = $creatingStart}
-      <PulseSteps pulse={sessionPulse(null, c.kind)} title="Starting {c.name || 'a session'} on {c.host_alias}" testid="new-session-pulse" />
+      <div class="span">
+        <PulseSteps pulse={sessionPulse(null, c.kind)} title="Starting {c.name || 'a session'} on {c.host_alias}" testid="new-session-pulse" />
+      </div>
     {/if}
   </div>
 
@@ -1712,6 +1789,40 @@
      scrolls instead of squeezing them toward zero. :global so it reaches
      PickerList's root too. */
   .fields > :global(*) { flex-shrink: 0; }
+  /* NewSession board: two columns (~760px); full-width rows span both. */
+  .fields {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-content: start;
+    gap: 0.6rem 0.9rem;
+  }
+  .fields > .span { grid-column: 1 / -1; }
+  .cell { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
+  .title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+  .title-row h3 { margin: 0; }
+  .title-in, .title-note { color: var(--fg-muted); font-weight: 400; font-size: var(--text-xs); }
+  .project-chip {
+    font: inherit;
+    padding: 0.05rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-pane);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  .advanced { border-top: 1px solid var(--border); padding-top: 0.4rem; }
+  .advanced summary { cursor: pointer; font-size: var(--text-xs); color: var(--fg-muted); }
+  .adv-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0.6rem 0.9rem; margin: 0.4rem 0; }
+  .past-resume {
+    font: inherit;
+    padding: 0 0.4rem;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--fg);
+    cursor: pointer;
+  }
+  textarea { font: inherit; padding: 0.3rem 0.4rem; border: 1px solid var(--border); background: var(--bg-pane); color: var(--fg); border-radius: var(--radius-sm); }
   label, .field-label { font-size: var(--text-2xs); color: var(--fg-muted); text-transform: uppercase; }
   input {
     font: inherit;

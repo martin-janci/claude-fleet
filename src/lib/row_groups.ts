@@ -99,3 +99,41 @@ export function groupRows(
     rows: buckets.get(k)!,
   }));
 }
+
+// ── Caps and folds (Sessions board) ──
+// A long group shows its first rows and one "4 more running ›" row; Idle and
+// Done start folded, Done saying how many finished today ("Done 6 · 2
+// today"). Opening a group, or the more row, is remembered by group key for
+// as long as the list is mounted.
+
+/** Rows a group shows before its "N more" row. */
+export const GROUP_CAP = 5;
+
+/** State groups that start folded: nothing in them asks for anything. */
+export const FOLDED_BY_DEFAULT: ReadonlySet<string> = new Set(['state:idle', 'state:done']);
+
+/** The rows a capped group draws: its first `cap`, plus `keep` (the open
+ *  session) when it sits further down, so the selection never disappears
+ *  behind the more row. */
+export function cappedRows(rows: readonly SessionRow[], cap: number, keep: number | null = null): SessionRow[] {
+  if (rows.length <= cap) return [...rows];
+  const head = rows.slice(0, cap);
+  const kept = keep === null ? undefined : rows.slice(cap).find((s) => s.id === keep);
+  return kept ? [...head, kept] : head;
+}
+
+/** "4 more running", "2 more on mac": the word the group's rows share. */
+export function moreLabel(group: Pick<RowGroup, 'key' | 'label'>, hidden: number): string {
+  if (group.key === 'state:working') return `${hidden} more running`;
+  if (group.key.startsWith('state:')) return `${hidden} more`;
+  if (group.key.startsWith('host:')) return `${hidden} more on ${group.label}`;
+  return `${hidden} more ${group.label}`;
+}
+
+/** How many rows finished their last turn since local midnight. */
+export function doneToday(rows: readonly SessionRow[], nowSecs: number): number {
+  const d = new Date(nowSecs * 1000);
+  d.setHours(0, 0, 0, 0);
+  const midnight = Math.floor(d.getTime() / 1000);
+  return rows.filter((s) => (s.last_stop_at ?? 0) >= midnight).length;
+}
