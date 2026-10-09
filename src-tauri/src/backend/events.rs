@@ -311,6 +311,10 @@ impl EventBridge {
         let mut backoff = backoff();
         // Retries since the stream last worked — what the banner counts.
         let mut attempt: u32 = 0;
+        // Connects that failed in a row — what the call breaker counts. A
+        // stream that opened (whatever it then carried) starts it over, so
+        // the reconnect after a stream ends never counts as a refusal.
+        let mut refused: u32 = 0;
         loop {
             if self.cancel.is_cancelled() {
                 return;
@@ -321,6 +325,7 @@ impl EventBridge {
             let last = self.last_id.lock().expect("last id").clone();
             match self.stream.open(last.as_deref()).await {
                 Ok(body) => {
+                    refused = 0;
                     // Reporting `Connected` and re-listing both move into
                     // `pump`, gated on the hub's `ready` frame: whether this
                     // hub's rows are trusted at all is not known until that
@@ -357,6 +362,7 @@ impl EventBridge {
                 }
                 Err(e) => {
                     attempt = attempt.saturating_add(1);
+                    refused = refused.saturating_add(1);
                     wait = backoff.next(jitter());
                     tracing::warn!(
                         error = %e,
@@ -365,6 +371,7 @@ impl EventBridge {
                     );
                     self.status.report(HubConnection::Offline {
                         attempt,
+                        refused,
                         retry_in_secs: retry_in_secs(wait),
                         reason: e,
                     });

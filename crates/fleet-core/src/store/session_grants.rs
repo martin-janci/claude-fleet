@@ -1954,4 +1954,30 @@ mod tests {
         s.grant_session(session, GrantRecipient::Person(b), GRANT_WATCH, a)
             .expect("a live colleague");
     }
+
+    /// A person's org grants (the second half of `grants_for_person`) read
+    /// the partial org index, not every grant ever written (review r16, H8).
+    #[test]
+    fn the_org_grants_lookup_uses_its_index() {
+        let s = Store::open_in_memory().unwrap();
+        let mut stmt = s
+            .conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT g.session_id, g.level FROM session_grants g \
+                   JOIN org_members m ON m.org_id = g.org_id AND m.person_id = ?1 \
+                  WHERE g.org_id IS NOT NULL AND g.revoked_at IS NULL \
+                    AND m.removed_at IS NULL AND m.role IN ('admin', 'member') \
+                    AND m.shares_since IS NOT NULL AND m.shares_since <= g.granted_at",
+            )
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map([1], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            plan.iter().any(|l| l.contains("idx_session_grants_org")),
+            "{plan:?}"
+        );
+    }
 }

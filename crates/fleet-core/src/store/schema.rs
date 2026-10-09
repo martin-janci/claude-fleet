@@ -1666,6 +1666,12 @@ const MIGRATIONS: &[Migration] = &[
         146,
         include_str!("../../migrations/146_routine_orphans.sql"),
     ),
+    // Review r16: a partial index on the live org grants, for the org half
+    // of `grants_for_person` (`IF NOT EXISTS`, safe to re-run).
+    Migration::plain(
+        147,
+        include_str!("../../migrations/147_session_grants_org.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -6104,7 +6110,9 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(indexes, 3);
+        // 142's three, rebuilt with the table, and 147's org index (review
+        // r16), which runs again after it.
+        assert_eq!(indexes, 4);
         s.conn
             .execute(
                 "UPDATE session_grants SET level = 'answer' WHERE id = ?1",
