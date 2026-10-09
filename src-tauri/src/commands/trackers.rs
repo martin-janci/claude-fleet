@@ -331,6 +331,10 @@ pub struct StartWorkArgs {
     /// The brief as a person edited it in the preview.
     #[serde(default)]
     pub brief: Option<String>,
+    /// The preview only: have a model draft the brief on the planned host
+    /// (redesign 6.10). A start never drafts; it sends `brief`.
+    #[serde(default)]
+    pub draft_brief: bool,
     /// The session name as edited in the dialog.
     #[serde(default)]
     pub name: Option<String>,
@@ -399,8 +403,9 @@ pub async fn preview_start_work(
     args: StartWorkArgs,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
 ) -> Result<StartPreview, IpcError> {
-    routed::preview_start_work(&backend, args, &store).await
+    routed::preview_start_work(&backend, args, &store, &ssh).await
 }
 
 #[tauri::command]
@@ -567,9 +572,11 @@ pub(crate) mod routed {
         backend: &FleetBackend,
         args: StartWorkArgs,
         store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
     ) -> Result<StartPreview, IpcError> {
         let wire = WorkLinkArgs {
             action: "preview_start".into(),
+            draft_brief: args.draft_brief.then_some(true),
             ..start_wire(&args)
         };
         match backend.hub() {
@@ -578,14 +585,25 @@ pub(crate) mod routed {
                 // A standalone desktop owns its fleet: Jev K1 may ask (off by
                 // default). A paired one routed to its hub above.
                 let decide = fleet_core::service::decide::DecideCtx::jev(Arc::clone(store));
-                tickets::preview_start_decided(
+                let view = fleet_core::service::view_scope::ViewScope::internal();
+                let mut preview = tickets::preview_start_decided(
                     store,
                     &fleet_core::service::work::start_args(&wire),
-                    &fleet_core::service::view_scope::ViewScope::internal(),
+                    &view,
                     &default_net(),
                     Some(&decide),
                 )
-                .await
+                .await?;
+                if args.draft_brief {
+                    fleet_core::service::work::brief_draft::draft_into(
+                        store,
+                        ssh.as_ref(),
+                        &mut preview,
+                        &view,
+                    )
+                    .await?;
+                }
+                Ok(preview)
             }
         }
     }

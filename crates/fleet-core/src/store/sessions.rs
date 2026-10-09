@@ -1350,6 +1350,17 @@ impl Store {
     /// value once — a re-create keeps the original start. Emits
     /// `session_updated` so the sidebar's elapsed label does not wait for a
     /// re-list.
+    /// Put session `id` in project `project_id` (Adopt into, step 4.12).
+    /// The worktree it named belonged to its old project, so it is cleared.
+    pub fn set_session_project(&self, id: i64, project_id: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET project_id=?1, worktree_id=NULL WHERE id=?2",
+            rusqlite::params![project_id, id],
+        )?;
+        self.emit_session(id)?;
+        Ok(())
+    }
+
     pub fn set_started_at(&self, id: i64, at: i64) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE sessions SET started_at=COALESCE(started_at, ?1) WHERE id=?2",
