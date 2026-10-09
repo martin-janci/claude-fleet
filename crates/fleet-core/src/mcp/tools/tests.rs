@@ -720,6 +720,7 @@ async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
                 keys: Some("Delete".into()),
                 force: false,
                 client_msg_id: None,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -738,6 +739,7 @@ async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
                 keys: Some("Enter".into()),
                 force: false,
                 client_msg_id: None,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -809,6 +811,7 @@ async fn keys_press_a_key_without_a_marker_and_without_recording_a_prompt() {
                 keys: Some("Escape".into()),
                 force: false,
                 client_msg_id: None,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -2218,6 +2221,7 @@ async fn run_prompt_refuses_a_session_that_is_not_between_turns() {
                 timeout_s: Some(0),
                 max_chars: None,
                 raw: false,
+                confirm_nonce: None,
             }),
         )
     };
@@ -4613,6 +4617,7 @@ async fn send_prompt_with_a_body_is_refused_into_a_blocked_session() {
                 force: false,
                 client_msg_id: None,
                 keys: None,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -4653,6 +4658,7 @@ async fn an_empty_prompt_without_submit_is_refused_before_the_gate() {
                 force: false,
                 client_msg_id: None,
                 keys: None,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -4686,6 +4692,7 @@ async fn an_empty_prompt_without_submit_is_refused_regardless_of_session_state()
                 force: false,
                 client_msg_id: None,
                 keys: None,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -7780,16 +7787,16 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
         "kill_session",
         "delete_worktree",
         "broadcast_prompt",
+        // Review round 15, F21: the operator's text reaches a session only
+        // through a person.
+        "send_prompt",
+        "run_prompt",
+        "queue_prompt",
     ] {
         assert!(guard::operator_must_confirm(true, tool), "{tool}");
         assert!(!guard::operator_must_confirm(false, tool), "{tool}");
     }
-    for tool in [
-        "list_sessions",
-        "send_prompt",
-        "work",
-        "discover_lost_sessions",
-    ] {
+    for tool in ["list_sessions", "work", "discover_lost_sessions"] {
         assert!(!guard::operator_must_confirm(true, tool), "{tool}");
     }
     let op = client_caller(
@@ -7823,6 +7830,118 @@ fn confirm_nonce_of(e: &McpError) -> String {
         .as_str()
         .unwrap()
         .to_string()
+}
+
+/// Review round 15, F21: what the operator types into another session —
+/// a `/assign` or `/start` brief, a key, a queued or awaited prompt, a task
+/// for an existing worker — waits for a person's approval, bound to the
+/// text, so an approval for one brief cannot send another. A hub, with no
+/// one to approve, refuses it.
+#[tokio::test]
+async fn the_operators_prompts_wait_for_a_person() {
+    let (s, _, on_b) = two_host_store();
+    let t = guarded_tools(s, true);
+    let send = |prompt: &str, nonce: Option<&str>| {
+        serde_json::from_value::<SendPromptParams>(serde_json::json!({
+            "session_id": on_b,
+            "prompt": prompt,
+            "confirm_nonce": nonce,
+        }))
+        .unwrap()
+    };
+    let asked = t
+        .send_prompt(
+            Extension(operator()),
+            Parameters(send("Work on PD-1", None)),
+        )
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let other = t
+        .send_prompt(
+            Extension(operator()),
+            Parameters(send("Delete the repo", Some(&nonce))),
+        )
+        .await
+        .unwrap_err();
+    assert_ne!(
+        confirm_nonce_of(&other),
+        nonce,
+        "an approved brief does not carry another text"
+    );
+    let key = t
+        .send_prompt(
+            Extension(operator()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "session_id": on_b, "prompt": "", "keys": "1",
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&key);
+    let run = t
+        .run_prompt(
+            Extension(operator()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "session_id": on_b, "prompt": "Work on PD-1",
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&run);
+    let queued = t
+        .queue_prompt(
+            Extension(operator()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "session_id": on_b, "prompt": "Work on PD-1",
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&queued);
+    let dispatched = t
+        .dispatch_task(
+            Extension(operator()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "worker_session_id": on_b, "prompt": "Work on PD-1",
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&dispatched);
+
+    let (s, _, on_b) = two_host_store();
+    let hub = guarded_tools(s, false);
+    let e = hub
+        .send_prompt(
+            Extension(operator()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "session_id": on_b, "prompt": "Work on PD-1",
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        e.message.starts_with("E_FORBIDDEN") && e.message.contains("the operator"),
+        "{}",
+        e.message
+    );
 }
 
 #[tokio::test]
@@ -8312,6 +8431,155 @@ async fn the_operator_never_decides_a_proposal() {
         .expect("a person accepts");
 }
 
+/// The operator as `ensure_operator` pairs it in production: a full client
+/// token bound to no person (`insert_client_token` writes no `person_id`),
+/// so it is never the hub's personal owner either.
+fn production_operator() -> Caller {
+    let mut c = operator();
+    if let Some(cl) = c.client.as_mut() {
+        cl.person_id = None;
+    }
+    c.is_personal_owner = false;
+    c
+}
+
+/// Review round 15, F18: `accept_many`, `undo_accept` and `verify` are a
+/// person's acts exactly as `accept` is. The operator's scope is `All`, so
+/// `person_decides` lets it through; the arm itself must refuse it.
+#[tokio::test]
+async fn the_operator_never_accepts_many_undoes_an_accept_or_verifies() {
+    let s = Store::open_in_memory().unwrap();
+    let parent = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "Ship v1",
+            ..Default::default()
+        })
+        .unwrap();
+    let proposal = s
+        .propose_subtask(&crate::store::Proposal {
+            parent_id: parent.id,
+            title: "a worker's idea",
+            notes: None,
+            why: None,
+            proposed_by: "dev-web",
+        })
+        .unwrap();
+    let t = test_tools(s);
+    let call = async |caller: Caller, args: serde_json::Value| {
+        t.work_link(
+            Extension(caller),
+            Parameters(serde_json::from_value(args).unwrap()),
+        )
+        .await
+    };
+    let state = || {
+        t.store
+            .lock()
+            .unwrap()
+            .get_work_item(proposal.id)
+            .unwrap()
+            .unwrap()
+            .proposal_state
+    };
+    let refused = |what: &str, r: Result<CallToolResult, McpError>| {
+        let e = r.expect_err(what);
+        assert!(
+            e.message.starts_with("E_FORBIDDEN") && e.message.contains("a person decides"),
+            "{what}: {}",
+            e.message
+        );
+    };
+    let many = serde_json::json!({ "action": "accept_many", "item_ids": [proposal.id] });
+    let undo = serde_json::json!({ "action": "undo_accept", "item_ids": [proposal.id] });
+    refused(
+        "the operator does not accept a plan",
+        call(production_operator(), many.clone()).await,
+    );
+    assert_eq!(state().as_deref(), Some("proposed"));
+    call(Caller::master(), many)
+        .await
+        .expect("a person accepts the plan");
+    assert_eq!(state().as_deref(), Some("accepted"));
+    refused(
+        "the operator does not take an accept back",
+        call(production_operator(), undo.clone()).await,
+    );
+    assert_eq!(state().as_deref(), Some("accepted"));
+    refused(
+        "the operator does not verify",
+        call(
+            production_operator(),
+            serde_json::json!({
+                "action": "verify",
+                "item_id": parent.id,
+                "line": "tests pass",
+                "ok": true,
+            }),
+        )
+        .await,
+    );
+    call(Caller::master(), undo)
+        .await
+        .expect("a person takes the accept back");
+    assert_eq!(state().as_deref(), Some("proposed"));
+}
+
+/// Review round 15, F18: a start rule decides where everyone's tasks start
+/// and a routine is a saved prompt that starts a session; the operator makes,
+/// accepts or runs neither. Reading them stays open to it.
+#[tokio::test]
+async fn the_operator_never_makes_start_rules_or_routines() {
+    let t = test_tools(Store::open_in_memory().unwrap());
+    for action in ["save", "accept"] {
+        let e = t
+            .start_rules(
+                Extension(production_operator()),
+                Parameters(
+                    serde_json::from_value(serde_json::json!({ "action": action, "rule_id": 1 }))
+                        .unwrap(),
+                ),
+            )
+            .await
+            .expect_err("the operator does not decide start rules");
+        assert!(
+            e.message.starts_with("E_FORBIDDEN") && e.message.contains("a person makes"),
+            "start_rules {action}: {}",
+            e.message
+        );
+    }
+    for action in ["save", "run_now"] {
+        let e = t
+            .routines(
+                Extension(production_operator()),
+                Parameters(
+                    serde_json::from_value(
+                        serde_json::json!({ "action": action, "routine_id": 1 }),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .await
+            .expect_err("the operator does not save or run routines");
+        assert!(
+            e.message.starts_with("E_FORBIDDEN") && e.message.contains("a person saves"),
+            "routines {action}: {}",
+            e.message
+        );
+    }
+    t.start_rules(
+        Extension(production_operator()),
+        Parameters(serde_json::from_value(serde_json::json!({ "action": "list" })).unwrap()),
+    )
+    .await
+    .expect("the operator may list start rules");
+    t.routines(
+        Extension(production_operator()),
+        Parameters(serde_json::from_value(serde_json::json!({ "action": "list" })).unwrap()),
+    )
+    .await
+    .expect("the operator may list routines");
+}
+
 fn operator() -> Caller {
     client_caller(
         crate::service::operator::OPERATOR_CLIENT_NAME,
@@ -8641,8 +8909,10 @@ async fn the_operator_s_other_starts_and_restarts_are_gated() {
     // Six starts asked for, nothing more.
     assert_eq!(t.guards.confirms.pending_tools().len(), 6);
 
-    // Dispatching into an existing worker starts nothing: not gated (the
-    // worker is blocked, so the delivery gate refuses it instead).
+    // Dispatching into an existing worker starts nothing, but it types the
+    // operator's prompt into the worker's pane, so it waits for a person
+    // too (review round 15, F21) — before the delivery gate, which would
+    // refuse it for the blocked worker.
     t.store
         .lock()
         .unwrap()
@@ -8666,11 +8936,7 @@ async fn the_operator_s_other_starts_and_restarts_are_gated() {
         )
         .await
         .unwrap_err();
-    assert!(
-        !e.message.starts_with("E_CONFIRM_REQUIRED"),
-        "{}",
-        e.message
-    );
+    confirm_nonce_of(&e);
 }
 
 /// …and for every caller that is not the operator, nothing changes: the
