@@ -333,7 +333,10 @@ mod tests {
         let calls = |prefix: &str| -> Vec<String> {
             let mut names = Vec::new();
             for (path, text) in &src {
-                if path.ends_with("service/loops.rs") {
+                // By component, not by string: Windows spells it `service\loops.rs`.
+                if std::path::Path::new(path)
+                    .ends_with(std::path::Path::new("service").join("loops.rs"))
+                {
                     continue;
                 }
                 for part in text.split(prefix).skip(1) {
