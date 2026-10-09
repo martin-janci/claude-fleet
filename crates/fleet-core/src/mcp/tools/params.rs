@@ -703,6 +703,15 @@ pub struct SessionConversationParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionSummarySinceParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// The start of the window, unix seconds: the turns that ended at or
+    /// after it are summarised.
+    pub since: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SessionToolDetailParams {
     /// Fleet session id.
     pub session_id: i64,
