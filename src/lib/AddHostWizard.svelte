@@ -276,7 +276,7 @@
           />
         </label>
       {:else if step === 2}
-        <p class="sub">Fleet connects over SSH and checks what sessions need. Nothing is installed without asking.</p>
+        <p class="sub">Fleet connects over SSH and checks what sessions need. Nothing is installed: the checks only read.</p>
         <ul class="checks" data-testid="wizard-checks">
           {#each rows as c (c.key)}
             <li class="check {c.state}" data-testid="wizard-check" data-key={c.key} data-state={c.state}>

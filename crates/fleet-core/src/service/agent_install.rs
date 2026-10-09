@@ -194,9 +194,26 @@ struct Plan {
     insecure: bool,
 }
 
+#[cfg(test)]
 fn plan(store: &Mutex<Store>, args: &InstallAgentArgs) -> Result<Plan, IpcError> {
-    crate::validate::host_alias(&args.alias)?;
+    plan_in(&*lock(store)?, args)
+}
+
+/// Plan the job and write its `running` row under ONE store guard, so the
+/// "already running" check and the insert are atomic: two concurrent
+/// installs on a host cannot both pass the check (r18).
+fn plan_and_claim(
+    store: &Mutex<Store>,
+    args: &InstallAgentArgs,
+) -> Result<(Plan, AgentInstallRow), IpcError> {
     let s = lock(store)?;
+    let plan = plan_in(&s, args)?;
+    let row = s.insert_agent_install(&plan.alias, &plan.version)?;
+    Ok((plan, row))
+}
+
+fn plan_in(s: &Store, args: &InstallAgentArgs) -> Result<Plan, IpcError> {
+    crate::validate::host_alias(&args.alias)?;
     let host = s
         .list_hosts()?
         .into_iter()
@@ -214,7 +231,7 @@ fn plan(store: &Mutex<Store>, args: &InstallAgentArgs) -> Result<Plan, IpcError>
             format!("{} is already an agent host", host.alias),
         ));
     }
-    crate::service::trackers::admin::refuse_agent_transport_on_tracker_host(&s, &host.alias)?;
+    crate::service::trackers::admin::refuse_agent_transport_on_tracker_host(s, &host.alias)?;
     if let Some(running) = s
         .agent_installs(Some(&host.alias), 1)?
         .into_iter()
@@ -239,7 +256,7 @@ fn plan(store: &Mutex<Store>, args: &InstallAgentArgs) -> Result<Plan, IpcError>
             // A loopback default would point the agent at its own machine:
             // it reaches the hub only through a provisioning tunnel, which
             // the hub stops keeping once the host is an agent host (r18-A1).
-            let base = crate::service::hub::HubBase::read(&s)?;
+            let base = crate::service::hub::HubBase::read(s)?;
             if !base.public {
                 return Err(IpcError::new(
                     codes::E_INVALID,
@@ -302,8 +319,7 @@ pub fn start(
             "only a hub accepts fleet-agent connections; this app reaches its hosts over SSH",
         ));
     };
-    let plan = plan(&store, &args)?;
-    let row = lock(&store)?.insert_agent_install(&plan.alias, &plan.version)?;
+    let (plan, row) = plan_and_claim(&store, &args)?;
     let id = row.id;
     tokio::spawn(async move {
         let outcome = run(&store, &*ssh, &registry, id, &plan, CONNECT_WAIT).await;
@@ -527,6 +543,50 @@ mod tests {
         assert!(plan(&store, &args).is_ok());
         let s = store.lock().unwrap();
         assert_eq!(s.agent_install(old).unwrap().unwrap().state, "failed");
+    }
+
+    /// r18: the "already running" check and the insert share one store
+    /// guard, so of several installs started at once on one host exactly
+    /// one claims it and the rest are refused with a conflict.
+    #[test]
+    fn concurrent_installs_on_one_host_claim_it_once() {
+        let store = store_with_ssh_host();
+        store
+            .lock()
+            .unwrap()
+            .set_setting(crate::mcp::SETTING_TOKEN, "tok")
+            .unwrap();
+        let args = InstallAgentArgs {
+            alias: "mercury".into(),
+            hub_url: Some("https://fleet.example.com".into()),
+            version: Some("0.5.4".into()),
+        };
+        const N: usize = 8;
+        let barrier = Arc::new(std::sync::Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let (store, args, barrier) = (store.clone(), args.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    plan_and_claim(&store, &args).map(|(_, row)| row.id)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let won = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(won, 1, "{results:?}");
+        assert!(results
+            .iter()
+            .filter_map(|r| r.as_ref().err())
+            .all(|e| e.code == codes::E_CONFLICT));
+        let s = store.lock().unwrap();
+        let running = s
+            .agent_installs(Some("mercury"), 99)
+            .unwrap()
+            .into_iter()
+            .filter(|j| j.state == "running")
+            .count();
+        assert_eq!(running, 1);
     }
 
     #[test]

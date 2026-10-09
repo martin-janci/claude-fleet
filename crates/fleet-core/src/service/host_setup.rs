@@ -202,7 +202,12 @@ pub fn parse(key: &str, stdout: &str, ms: u128, agents_accepted: bool) -> SetupC
                 "agent",
                 "warn",
                 "fleet-agent not installed",
-                format!("Install {}", crate::app_version::get()),
+                // Nothing here installs it (the checks only read): the
+                // hub's `install_agent` does, once the host is added (r18).
+                format!(
+                    "once the host is added, the hub can install fleet-agent {} on it (install_agent)",
+                    crate::app_version::get()
+                ),
             ),
             None => row(
                 "agent",
@@ -401,7 +406,14 @@ mod tests {
         assert_eq!(parse("agent", "fa=\n", 0, false).state, "na");
         let hub = parse("agent", "fa=\n", 0, true);
         assert_eq!(hub.state, "warn");
-        assert!(hub.detail.starts_with("Install "));
+        // The wizard installs nothing: the copy names who can, and when.
+        assert!(!hub.detail.starts_with("Install "), "{}", hub.detail);
+        assert!(hub.detail.contains("install_agent"), "{}", hub.detail);
+        assert!(
+            hub.detail.contains("once the host is added"),
+            "{}",
+            hub.detail
+        );
         let there = parse("agent", "fa=fleet-agent 0.5.4\n", 0, true);
         assert_eq!(
             (there.state.as_str(), there.label.as_str()),
