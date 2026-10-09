@@ -42,9 +42,9 @@ impl FleetTools {
     }
 
     #[tool(description = "Update admin, master only: pin a version (below \
-        installed = rollback), unpin, refresh the channel, rollout_* in \
-        waves, or one org's policy (set_policy / clear_policy). E_INVALID, \
-        E_CONFLICT, E_UPDATE_UNVERIFIED.")]
+        installed = rollback), unpin, update_now, refresh the channel, \
+        rollout_* in waves, or an org's policy (set_policy / clear_policy). \
+        E_INVALID, E_CONFLICT, E_UPDATE_UNVERIFIED.")]
     pub(super) async fn update_admin(
         &self,
         Parameters(p): Parameters<UpdateAdminParams>,
@@ -99,6 +99,46 @@ impl FleetTools {
                     .await
                     .map_err(to_mcp_err)?;
                 ok_json_compact(&o)
+            }
+            "update_now" => {
+                let r = update::update_now(
+                    &self.store,
+                    component()?,
+                    target,
+                    p.version.as_deref(),
+                    &update::trusted_keys(),
+                    now,
+                )
+                .map_err(to_mcp_err)?;
+                // Each agent host's updater, through the agent itself: a
+                // file its path unit watches. Best effort and in parallel;
+                // an offline agent installs on its next timer pass.
+                let script = crate::shell::quote(update::AGENT_POKE_SCRIPT);
+                let pokes = r.agents.iter().map(|alias| {
+                    let script = script.clone();
+                    async move {
+                        let out = self
+                            .ssh
+                            .run(
+                                alias,
+                                &["bash", "-c", &script],
+                                std::time::Duration::from_secs(10),
+                            )
+                            .await;
+                        let result = match out {
+                            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+                            Err(e) => e.code,
+                        };
+                        serde_json::json!({ "host": alias, "result": result })
+                    }
+                });
+                let agents = futures_util::future::join_all(pokes).await;
+                tracing::info!(component = %r.pin.component, target = %r.pin.target, version = %r.pin.version, "[mcp] update now");
+                ok_json_compact(&serde_json::json!({
+                    "pin": r.pin,
+                    "hub_woken": r.hub_woken,
+                    "agents": agents,
+                }))
             }
             "set_policy" | "clear_policy" => {
                 let org_id = p.org_id.ok_or_else(|| {
@@ -161,8 +201,9 @@ impl FleetTools {
             other => Err(mcp_err(
                 codes::E_INVALID,
                 format!(
-                    "action must be pin | unpin | refresh | rollout_start | rollout_pause | \
-                     rollout_resume | rollout_abort | set_policy | clear_policy, got {other:?}"
+                    "action must be pin | unpin | update_now | refresh | rollout_start | \
+                     rollout_pause | rollout_resume | rollout_abort | set_policy | clear_policy, \
+                     got {other:?}"
                 ),
                 None,
             )),

@@ -1249,8 +1249,8 @@ pub struct UpdateStatusParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct UpdateAdminParams {
-    /// pin | unpin | refresh | rollout_start | rollout_pause | rollout_resume | rollout_abort |
-    /// set_policy | clear_policy.
+    /// pin | unpin | update_now | refresh | rollout_start | rollout_pause | rollout_resume |
+    /// rollout_abort | set_policy | clear_policy.
     pub action: String,
     /// hub | agent | desktop | android | ios.
     #[serde(default)]

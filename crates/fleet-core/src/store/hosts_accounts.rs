@@ -211,6 +211,15 @@ impl Store {
         })
     }
 
+    /// Every host on the agent transport, by alias.
+    pub fn agent_host_aliases(&self) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT alias FROM hosts WHERE transport = 'agent' ORDER BY alias")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
     pub fn insert_host(&self, alias: &str, ssh_alias: Option<&str>) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO hosts (alias, ssh_alias, reachable, hidden) VALUES (?1, ?2, 0, 0)

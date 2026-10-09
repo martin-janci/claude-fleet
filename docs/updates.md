@@ -92,6 +92,23 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   `update_status.last_refresh` says why it failed.
   `FLEET_UPDATE_CHANNEL_URL` points the hub at a mirror. It changes only
   where the documents come from: what is trusted is still the signature.
+- **Update now.** `update_admin { action: update_now, component, target?,
+  version? }` installs at once, whatever the mode: a mandatory pin to
+  `version` (default: the channel's recommended release) for the component
+  or one target, and every updater that can be woken is. A target with such
+  a pin to reach asks again within two minutes instead of hours.
+  - **Agents:** the hub runs one line through each agent (every agent host,
+    or the one named), which drops `update-now` in the agent's runtime
+    directory; `fleet-agent-update.path` (from `install --auto-update`)
+    starts a pass. The answer lists each host as `poked`, or why not (an
+    offline agent installs on its next timer pass; an agent installed
+    before this needs `install --auto-update` again for the trigger).
+  - **The hub:** `<data_dir>/update-now`. `fleet-updater`'s loop takes it
+    within five seconds; `fleet-hub-update.path` starts `fleet-hub update
+    apply`.
+  - **Desktops and phones:** the decision moves to `update_required`
+    (`update:decision` reaches them at once), so they show the required
+    banner or card; a person still installs.
 - **Stage a rollout.** `update_admin { action: rollout_start, component,
   version, waves?, halt_failure_ratio? }` opens `version` (a release the
   verified channel lists and permits) to growing waves of the component's
@@ -383,7 +400,9 @@ sudo fleet-agent install --hub https://fleet.example.com --token-file - --auto-u
 ```
 
 `--auto-update` adds `fleet-agent-update.timer` (every six hours, spread
-over half an hour) and the oneshot `fleet-agent-update.service` it starts;
+over half an hour), `fleet-agent-update.path` (a pass at once when the
+hub's `update_now` asks) and the oneshot `fleet-agent-update.service` they
+start;
 the pass runs outside `fleet-agent.service`, so restarting the agent does
 not stop it halfway. One pass:
 
@@ -417,8 +436,8 @@ It asks the running hub with an `updater` token, as `fleet-updater` does:
 ```bash
 sudo -u fleet env FLEET_HUB_DATA_DIR=/var/lib/fleet-hub fleet-hub pair --name updater --mode updater
 sudo fleet-hub update pair '<the URL it printed>'
-sudo cp deploy/hub/fleet-hub-update.service deploy/hub/fleet-hub-update.timer /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now fleet-hub-update.timer
+sudo cp deploy/hub/fleet-hub-update.{service,timer,path} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now fleet-hub-update.timer fleet-hub-update.path
 ```
 
 Releases live in `/usr/local/lib/fleet-hub/<version>/`, and
