@@ -1609,6 +1609,17 @@ automatically on app start.
   answered or expired). Both are the owner's own device only, never the
   operator; each change sends an empty `confirm:changed` event. Every
   other caller is unaffected: for them these tools are not gated.
+- **Handoff receipts.** Each successful call of the operator that hands
+  work on leaves a receipt (redesign 9.3): a prompt or task to a session
+  (`send_prompt`, `queue_prompt`, `run_prompt`, `dispatch_task`), a new
+  session, a new or started mission, a created task, a proposed tree of
+  subtasks (`work_link` `create` / `propose_tree` / `mission_*`). Control
+  draws them as chips and cards. `control_handoffs` (`limit?`, default 50)
+  lists them newest first, each with its target's state now (a mission's
+  name and state, a task's or the tree's items with their status and
+  proposal state); like `mcp_confirms` it answers the owner's own device
+  only, since a receipt quotes the operator's prompt. Each new receipt sends
+  an empty `handoff:changed` event. No other caller's calls leave one.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central
   machine.

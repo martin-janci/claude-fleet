@@ -1267,6 +1267,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "mcp_confirms",
         },
     ),
+    // Redesign step 9.3: the receipts of what the agent handed on live
+    // where the agent runs, which on a hub-backed desktop is the hub.
+    (
+        "control_handoffs",
+        Verdict::Routed {
+            tool: "control_handoffs",
+        },
+    ),
     // ── the UX agent's operator session ─────────────────────────────────────
     //
     // Both route unconditionally. The operator panel is the same panel on a

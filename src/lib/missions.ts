@@ -4,6 +4,7 @@
 // one, the lifecycle, the item cap) live in fleet-core's
 // `service::work::missions`, served by the hub on a paired desktop.
 
+import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import type { WorkItemRow } from './trackers';
 import { bumpWorkChanged } from './work';
@@ -572,6 +573,15 @@ export function eventSentence(e: MissionEvent): string {
     default:
       return e.kind.replace(/_/g, ' ');
   }
+}
+
+/** A request to show one mission in the Work view's Missions tab (a
+ *  "Sent to a mission" chip in Control, redesign 9.3). WorkTree switches to
+ *  the tab; WorkMissions opens the mission and clears the request. */
+export const missionOpenRequest = writable<{ id: number } | null>(null);
+
+export function openMission(id: number): void {
+  missionOpenRequest.set({ id });
 }
 
 export function listMissions(): Promise<Result<Mission[]>> {
