@@ -1658,6 +1658,14 @@ const MIGRATIONS: &[Migration] = &[
         145,
         include_str!("../../migrations/145_pr_shepherd_merges.sql"),
     ),
+    // Review r02: routines whose project or host is gone are paused with
+    // the reason, and a partial index serves the scheduler's scan of runs
+    // without an outcome. Idempotent as written (the UPDATEs match only
+    // enabled orphans; the index is `IF NOT EXISTS`).
+    Migration::plain(
+        146,
+        include_str!("../../migrations/146_routine_orphans.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
