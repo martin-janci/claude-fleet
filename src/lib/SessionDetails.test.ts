@@ -121,6 +121,21 @@ describe('SessionDetails', () => {
     expect(cell.textContent).not.toContain('host@x.com');
   });
 
+  it('a host-login session shows the account it runs on, not the host’s current one', async () => {
+    hosts.set([
+      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: 'u1', provisioned: false, transport: 'ssh' },
+    ]);
+    accounts.set([
+      { uuid: 'u1', email: 'host-b@x.com', display_name: 'B', organization_name: null, organization_uuid: null, seat_tier: 'max', last_seen_at: 1, nickname: null, has_extra_usage: false },
+      { uuid: 'u2', email: 'sess-a@x.com', display_name: 'A', organization_name: null, organization_uuid: null, seat_tier: 'pro', last_seen_at: 1, nickname: null, has_extra_usage: false },
+    ]);
+    render(SessionDetails, { props: { session: { ...sampleSession, account_uuid: 'u2' } } });
+    await tick();
+    const cell = await screen.findByTestId('session-account');
+    expect(cell.textContent).toContain('sess-a@x.com');
+    expect(cell.textContent).not.toContain('host-b@x.com');
+  });
+
   it('switching the login asks first, then restarts under the picked profile', async () => {
     const { invoke } = await import('@tauri-apps/api/core');
     const inv = invoke as unknown as ReturnType<typeof vi.fn>;

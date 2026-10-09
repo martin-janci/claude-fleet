@@ -48,6 +48,19 @@ describe('accountPill', () => {
     );
   });
 
+  it('is at the limit only on the raw figure, not a rounded 0% left', () => {
+    const p = accountPill(ADMIN.uuid, ADMIN, snapshot(ADMIN.uuid, { usage: usage(10, 99.6) }), NOW);
+    expect(p.level).toBe('warn');
+    expect(p.text).toBe(`${ADMIN.email} 0%`);
+  });
+
+  it('lets the weekly limit bind once the 5-hour window has reset', () => {
+    const u = { ...usage(100, 100), five_hour: { utilization: 100, resets_at: NOW - 60 } };
+    const p = accountPill(ADMIN.uuid, ADMIN, snapshot(ADMIN.uuid, { usage: u }), NOW);
+    expect(p.window).toBe('weekly');
+    expect(p.level).toBe('limit');
+  });
+
   it('shows no number without a reading, or once it expired', () => {
     expect(accountPill(ADMIN.uuid, ADMIN, undefined, NOW).text).toBe(ADMIN.email);
     const old = accountPill(ADMIN.uuid, ADMIN, snapshot(ADMIN.uuid, { fetched_at: NOW - 5 * HOUR }), NOW);
