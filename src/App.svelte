@@ -103,7 +103,7 @@
   import { markStartup, startCatchUp, takeUpdateReveal, trackActivity } from './lib/startup';
   import { loadProjectPicks } from './lib/project_picks';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
-  import { get } from 'svelte/store';
+  import { derived, get } from 'svelte/store';
   import { destination, goTo, leave } from './lib/destination';
 
   const isNumber = (v: unknown): v is number => typeof v === 'number';
@@ -551,6 +551,16 @@
     else if (!detailsMain) goTo('details');
   });
   onDestroy(unsubRowAction);
+  // Settings is a page: going anywhere else (a chord, the switcher, a link)
+  // or opening another session leaves it, as the rail does.
+  let lastPlace = `${get(destination)}|${get(selectedSession)?.id ?? ''}`;
+  const unsubLeaveSettings = derived([destination, selectedSession], ([d, s]) => `${d}|${s?.id ?? ''}`).subscribe(
+    (place) => {
+      if (place !== lastPlace && get(settingsOpen)) settingsOpen.set(false);
+      lastPlace = place;
+    },
+  );
+  onDestroy(unsubLeaveSettings);
   // The Files tab shows the worktree file viewer over the terminal. It needs a selected session (the worktree to browse);
   // deselecting one drops back to the terminal automatically.
   // Primitive projections of the selection: `$selectedSession` changes
@@ -722,6 +732,7 @@
   // fleet page (Accounts, Hosts, Assets); over a session (Files, the board)
   // they leave the right column alone.
   function onRailSelect(id: RailId) {
+    if (id !== 'settings') settingsOpen.set(false);
     if (id === 'inbox' || id === 'sessions' || id === 'work') {
       sidebarCollapsed = false;
       sidebarView.set(id);
@@ -792,9 +803,13 @@
   // whole width; Automation and Toolkit bring their own navigation. The
   // Sidebar stays mounted under a fleet page, hidden, so its chords and
   // state survive the round trip.
-  const listHidden = $derived(fleetPageShown);
+  // Settings is a page of its own too (UX audit 2026-10-09, S1): its nav
+  // takes the list column's place.
+  const listHidden = $derived(fleetPageShown || $settingsOpen);
   // A task in the Work view is not a session: no session tabs over it.
-  const sessionChrome = $derived(!!$selectedSession && !fleetPageShown && !(taskShowing && !boardShown));
+  const sessionChrome = $derived(
+    !!$selectedSession && !fleetPageShown && !$settingsOpen && !(taskShowing && !boardShown),
+  );
   const detailsMain = $derived(
     !wideMode && !boardShown && ($destination === 'details' || taskShowing || !$selectedSession),
   );
@@ -802,7 +817,7 @@
   // board, whatever the inspector pref.
   const boardTask = $derived(boardShown && taskShowing);
   const inspectorRoom = $derived(boardTask || (!!$selectedSession && !wideMode && !boardShown && !detailsMain));
-  const inspectorShown = $derived(boardTask || (inspectorRoom && inspectorOpen));
+  const inspectorShown = $derived(!$settingsOpen && (boardTask || (inspectorRoom && inspectorOpen)));
   // Step 5.3: the pane's shells, for the Terminals tab. It is current while
   // the pane shows one of them (alone or split beside the agent).
   const selTerminals = $derived(
@@ -937,6 +952,13 @@
   function onKeydown(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
     const target = e.target as HTMLElement | null;
+    // Settings, the same rule as the fleet pages: Esc goes back to what was
+    // open under it, not while typing in a field or inside a dialog.
+    if ($settingsOpen) {
+      if (e.defaultPrevented || isEditable(target) || target?.closest?.('dialog')) return;
+      settingsOpen.set(false);
+      return;
+    }
     // Esc leaves files mode (the terminal is covered while it's open, so Esc
     // can't be meant for the terminal here) — but not while the user is
     // typing in a field such as the file filter, where Esc belongs to that
@@ -1044,12 +1066,9 @@
 <!-- Redesign 3.17: the Main board's header, above everything else. -->
 <ShellHeader mac={isMac} />
 <!-- Redesign 10.5: the first-run tour and Get started float above the
-     layout; Settings opens over it. Both used to be mounted by the Sidebar,
+     layout. Both used to be mounted by the Sidebar,
      which a fleet page hides and a collapsed rail unmounts. -->
 <FirstRun mac={isMac} />
-{#if $settingsOpen}
-  <SettingsDialog onClose={() => settingsOpen.set(false)} />
-{/if}
 <StartupSplash onhubsettings={() => settingsOpen.set(true)} />
 {#if revealVersion}
   <UpdateReveal version={revealVersion} onclose={() => (revealVersion = null)} />
@@ -1210,6 +1229,12 @@
              task, the empty state): over the mounted terminal like the rest. -->
         <div class="view-slot overlay" data-testid="details-view">
           <Details />
+        </div>
+      {/if}
+      {#if $settingsOpen}
+        <!-- Settings over whatever was open; leaving it shows that again. -->
+        <div class="view-slot overlay" data-testid="settings-view">
+          <SettingsDialog onClose={() => settingsOpen.set(false)} />
         </div>
       {/if}
     </div>

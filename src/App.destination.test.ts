@@ -11,7 +11,7 @@ import { clearToasts } from './lib/toasts';
 import { workBoardOpen, requestHostsView, settingsOpen, requestAssetsView, shortcutSheetOpen } from './lib/app_views';
 import { toolkitTab } from './lib/toolkit_skills';
 import { sidebarView } from './lib/work_view';
-import { destination } from './lib/destination';
+import { destination, leave } from './lib/destination';
 import { controlTab } from './lib/control';
 import { link, task } from './lib/work_view_fixture';
 import type { WorkTreePage } from './lib/work_view';
@@ -340,8 +340,30 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     await fireEvent.click(getByTestId('sidebar-collapse'));
     await waitFor(() => expect(queryByTestId('sidebar-expand')).not.toBeNull());
     await fireEvent.click(getByTestId('rail-settings'));
-    await waitFor(() => expect(document.querySelector('.settings-dialog')).not.toBeNull());
+    await waitFor(() => expect(queryByTestId('settings-page')).not.toBeNull());
     settingsOpen.set(false);
+  });
+
+  it('UX audit S1: Settings is a page in place of the list, and the rail or Esc leaves it', async () => {
+    const { getByTestId, queryByTestId } = render(App);
+    await fireEvent.click(getByTestId('rail-settings'));
+    await waitFor(() => expect(queryByTestId('settings-page')).not.toBeNull());
+    // A page, not a modal: no <dialog>, the list column hidden, the rail on Settings.
+    expect(getByTestId('settings-page').closest('dialog')).toBeNull();
+    expect(getByTestId('settings-view')).toBeTruthy();
+    expect(document.querySelector('main.layout')!.classList.contains('list-off')).toBe(true);
+    expect(getByTestId('rail-settings').getAttribute('aria-current')).toBe('page');
+    // Another rail item leaves it.
+    await fireEvent.click(getByTestId('rail-control'));
+    await waitFor(() => expect(queryByTestId('settings-page')).toBeNull());
+    expect(get(settingsOpen)).toBe(false);
+    // Esc leaves it too, back to what was open under it.
+    await fireEvent.click(getByTestId('rail-settings'));
+    await waitFor(() => expect(queryByTestId('settings-page')).not.toBeNull());
+    await fireEvent.keyDown(document.body, { key: 'Escape' });
+    await waitFor(() => expect(queryByTestId('settings-page')).toBeNull());
+    expect(get(destination)).toBe('control');
+    leave('control');
   });
 
 });
