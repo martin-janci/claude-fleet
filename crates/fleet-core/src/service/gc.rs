@@ -164,6 +164,25 @@ pub fn plan(
     out
 }
 
+/// Whether session `id` is still a kill target now: Pause all is off and
+/// [`plan`] still picks its current row.
+fn still_planned(
+    s: &Store,
+    id: i64,
+    cfg: &GcConfig,
+    controller: Option<&(String, String)>,
+    reachable: &HashSet<String>,
+    now: i64,
+) -> bool {
+    if crate::service::loops::paused(s) {
+        return false;
+    }
+    match s.get_session_by_id(id) {
+        Ok(Some(row)) => !plan(&[row], cfg, controller, reachable, now).is_empty(),
+        _ => false,
+    }
+}
+
 /// Side effects the sweeper performs, injected for tests.
 #[async_trait::async_trait]
 pub trait GcExec: Send + Sync {
@@ -351,6 +370,13 @@ pub async fn sweep_with(
                 p.idle_secs
             );
             if let Ok(s) = store.lock() {
+                // The plan read every row once; an inspect is SSH and git, so
+                // by now a person may have resumed this session or pressed
+                // Pause all. Ask again for this one row, under the lock the
+                // event is written under (review r06 F4).
+                if !still_planned(&s, p.session_id, cfg, controller.as_ref(), &reachable, now) {
+                    continue;
+                }
                 if let Err(e) = s.insert_session_event(p.session_id, "gc_killed", Some(&detail)) {
                     tracing::warn!(
                         session_id = p.session_id,
@@ -898,6 +924,60 @@ mod tests {
         let gc: Vec<_> = events.iter().filter(|e| e.kind == "gc_killed").collect();
         assert_eq!(gc.len(), 1);
         assert_eq!(gc[0].detail.as_deref(), Some("work:kill:idle_10000s"));
+    }
+
+    /// An exec whose inspect lets the world move on: it runs `during`
+    /// against the store, as a person resuming the session or pressing
+    /// Pause all while the inspect's git runs over SSH would.
+    struct MovingExec {
+        store: std::sync::Arc<Mutex<Store>>,
+        during: fn(&Store),
+        inner: FakeExec,
+    }
+
+    #[async_trait::async_trait]
+    impl GcExec for MovingExec {
+        async fn inspect(&self, h: &str, t: &str) -> Result<SafeKillInspection, IpcError> {
+            (self.during)(&self.store.lock().unwrap());
+            self.inner.inspect(h, t).await
+        }
+        async fn safe_kill(&self, h: &str, t: &str) -> Result<(), IpcError> {
+            self.inner.safe_kill(h, t).await
+        }
+        async fn kill(&self, h: &str, t: &str) -> Result<(), IpcError> {
+            self.inner.kill(h, t).await
+        }
+    }
+
+    /// Review r06 F4: the sweep asks again before each kill, so a session
+    /// resumed, or a Pause all pressed, while its inspect ran is left alone.
+    #[tokio::test]
+    async fn a_session_resumed_or_paused_during_its_inspect_is_not_killed() {
+        let resumed: fn(&Store) = |s| {
+            s.conn_ref()
+                .execute("UPDATE sessions SET idle_since = 10000", [])
+                .unwrap();
+        };
+        let paused: fn(&Store) = |s| {
+            crate::service::settings::set(s, crate::service::settings::AUTOMATION_PAUSED, "true")
+                .unwrap();
+        };
+        for during in [resumed, paused] {
+            let store = std::sync::Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+            let id = seed_idle_work(&store, 0);
+            let exec = MovingExec {
+                store: std::sync::Arc::clone(&store),
+                during,
+                inner: fake(false),
+            };
+            let report = sweep_with(&store, &exec, &CFG, 10_000).await;
+            assert_eq!(report.killed, 0);
+            assert_eq!(exec.inner.inspects.load(Ordering::SeqCst), 1);
+            assert_eq!(exec.inner.kills.load(Ordering::SeqCst), 0);
+            let s = store.lock().unwrap();
+            let events = s.list_session_events(id, 10).unwrap();
+            assert!(events.iter().all(|e| e.kind != "gc_killed"));
+        }
     }
 
     #[tokio::test]

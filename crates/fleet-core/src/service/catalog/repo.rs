@@ -155,6 +155,9 @@ struct CatalogFile {
     schema_version: u64,
 }
 
+/// The git verbs that reach the catalog's remote.
+const NETWORK_VERBS: [&str; 5] = ["clone", "fetch", "pull", "push", "ls-remote"];
+
 /// Run git and hand back the raw `Output`, exit status included. Only
 /// callers that give a non-zero status its own meaning (`has_staged`) use
 /// this directly; everything else goes through `git`, which turns a non-zero
@@ -171,6 +174,21 @@ fn git_output(dir: &Path, args: &[&str]) -> Result<std::process::Output, IpcErro
         // a desktop launched from the dock, git asking for a password would
         // wait forever while holding the authoring lock. Fail instead.
         .env("GIT_TERMINAL_PROMPT", "0");
+    // The verbs that talk to the remote run on the caller's thread while the
+    // authoring lock is held: a remote that stops answering must end them,
+    // not hold every later authoring action and card apply behind it
+    // (review r06). ssh gives up on a dead host and never asks; https gives
+    // up on a transfer that stalls. A person's own GIT_SSH_COMMAND wins.
+    if args.first().is_some_and(|v| NETWORK_VERBS.contains(v)) {
+        if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+            cmd.env(
+                "GIT_SSH_COMMAND",
+                "ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2",
+            );
+        }
+        cmd.env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
+            .env("GIT_HTTP_LOW_SPEED_TIME", "30");
+    }
     // Tests must not depend on (or be broken by) the host's own global git
     // config or identity environment: isolate every git invocation the
     // production code makes from both. This has no effect on release builds

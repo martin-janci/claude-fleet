@@ -534,6 +534,14 @@ impl ReconcileGate {
         })
     }
 
+    /// Claim the single pass slot, waiting for a pass already running.
+    pub async fn begin(&self) -> ReconcilePass<'_> {
+        ReconcilePass {
+            _guard: self.running.lock().await,
+            gate: self,
+        }
+    }
+
     /// `true` when a full pass completed less than `window` ago.
     pub fn is_fresh(&self, window: std::time::Duration) -> bool {
         self.last_completed
@@ -2005,6 +2013,21 @@ pub(super) async fn run_full_reconcile(
     Ok(true)
 }
 
+/// A pass of this caller's own: waits for one already running, then runs.
+/// A forced listing needs it: the running pass may have probed its hosts
+/// before the session the caller just started existed, so its rows cannot
+/// answer "what is there now" (review r06, from r17 F4).
+async fn run_own_reconcile(
+    store: &Mutex<Store>,
+    deps: &Arc<ReconcileDeps>,
+    gate: &ReconcileGate,
+) -> Result<(), IpcError> {
+    let pass = gate.begin().await;
+    reconcile_sessions_with(store, deps).await?;
+    pass.complete();
+    Ok(())
+}
+
 /// Test access to the private gate entry point, so reconcile tests exercise
 /// the real claim → pass → complete sequence.
 #[cfg(test)]
@@ -2036,8 +2059,8 @@ pub(super) fn list_freshness_window(store: &Mutex<Store>) -> std::time::Duration
 /// `list_sessions` core with injectable deps/gate/window (tests). See the
 /// public `list_sessions` for the policy.
 ///
-/// `force` always awaits a pass inline (an explicit user refresh must show
-/// its own result). Otherwise: a COLD start — no pass has completed in this
+/// `force` always awaits a pass of its own inline (an explicit user refresh
+/// must show its own result), after any pass already running. Otherwise: a COLD start — no pass has completed in this
 /// process yet (`gate.has_completed_once()` false) — also awaits one inline,
 /// so the very first listing is not empty. Once at least one pass has
 /// completed, a stale gate no longer probes inline: the stored rows are
@@ -2068,7 +2091,7 @@ pub(super) async fn list_sessions_with_reader(
 ) -> Result<Vec<SessionRow>, IpcError> {
     let mut reader = reader;
     if force {
-        run_full_reconcile(store, deps, gate).await?;
+        run_own_reconcile(store, deps, gate).await?;
         reader = &**store;
     } else if !gate.has_completed_once() {
         // Cold start: keep today's inline pass so the first listing isn't

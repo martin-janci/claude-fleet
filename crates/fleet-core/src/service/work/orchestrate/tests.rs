@@ -396,6 +396,33 @@ async fn pause_all_stops_the_mission_tick() {
     assert_eq!(s.missions_due(now).unwrap(), vec![fx.m.id], "still due");
 }
 
+/// Review r06 F5: a step the loop planned before Pause all was pressed is
+/// refused when its turn comes, before any run starts.
+#[tokio::test]
+async fn a_loop_step_planned_before_pause_all_does_not_start() {
+    let fx = fixture();
+    let item = member(&fx, "one");
+    settings::set(
+        &lock(&fx.deps.store).unwrap(),
+        settings::AUTOMATION_PAUSED,
+        "true",
+    )
+    .unwrap();
+    let step = Step {
+        kind: "run".into(),
+        item_id: Some(item),
+        role: Some("implement".into()),
+        reason: "ready".into(),
+        context: None,
+        auto: true,
+    };
+    let r = apply_step(&fx.deps, &fx.m, &step, &Actor::Loop, &ViewScope::internal()).await;
+    assert!(!r.ok);
+    assert!(r.detail.contains("stood down"), "{}", r.detail);
+    let s = lock(&fx.deps.store).unwrap();
+    assert_eq!(s.mission_task_counts(fx.m.id).unwrap().open, 0);
+}
+
 #[test]
 fn a_continuous_mission_wakes_on_its_timer() {
     let mut m = fixture().m;
