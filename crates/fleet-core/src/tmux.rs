@@ -17,6 +17,123 @@ pub fn exact_session(name: &str) -> String {
     format!("={name}")
 }
 
+/// The most shell terminals one session keeps (redesign step 5.3).
+pub const MAX_SHELL_TERMINALS: u32 = 9;
+
+/// The tmux session that holds shell terminal `n` of `session` (redesign
+/// step 5.3): `<session>--sh<n>`. A terminal is a tmux session of its own,
+/// never a window or pane of the agent's session, so `exact_pane(session)`
+/// always lands on the agent and never on a shell.
+pub fn shell_terminal_name(session: &str, n: u32) -> String {
+    format!("{session}--sh{n}")
+}
+
+/// `Some((session, n))` when `name` is a shell terminal's tmux session
+/// ([`shell_terminal_name`]): the suffix `--sh` and a number 1..=99 with no
+/// leading zero, after a non-empty session name. PURE.
+pub fn parse_shell_terminal_name(name: &str) -> Option<(&str, u32)> {
+    let at = name.rfind("--sh")?;
+    let (session, digits) = (&name[..at], &name[at + 4..]);
+    if session.is_empty()
+        || digits.is_empty()
+        || digits.len() > 2
+        || digits.starts_with('0')
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((session, digits.parse().ok()?))
+}
+
+/// Whether `name` is a shell terminal, which reconcile, discover and every
+/// session list leave out: a terminal belongs to its session and is never a
+/// session row of its own (no ghost, no Lost and found entry).
+pub fn is_shell_terminal_name(name: &str) -> bool {
+    parse_shell_terminal_name(name).is_some()
+}
+
+/// Every tmux session name on the server, one per line; nothing when no
+/// server runs. [`shell_terminals_in`] picks a session's terminals out.
+pub const LIST_SESSION_NAMES_SCRIPT: &str =
+    "tmux list-sessions -F '#{session_name}' 2>/dev/null; true";
+
+/// The terminal numbers of `session` in [`LIST_SESSION_NAMES_SCRIPT`]'s
+/// output, ascending. PURE.
+pub fn shell_terminals_in(session: &str, names: &str) -> Vec<u32> {
+    let mut out: Vec<u32> = names
+        .lines()
+        .filter_map(|l| parse_shell_terminal_name(l.trim()))
+        .filter(|(s, _)| *s == session)
+        .map(|(_, n)| n)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Exit code [`open_shell_terminal_script`] ends with when the agent's own
+/// tmux session is gone: a terminal is only ever opened beside a live one.
+pub const SHELL_TERMINAL_NO_SESSION: i32 = 3;
+
+/// Open terminal `n` of `session` unless it is already open: a tmux session
+/// of its own, started in the agent pane's current directory (`$HOME` when
+/// that is gone), running the same respawning login shell a shell session
+/// does, so `exit` in it gives a fresh prompt rather than closing it.
+pub fn open_shell_terminal_script(session: &str, n: u32) -> String {
+    let sh = shell_terminal_name(session, n);
+    format!(
+        "tmux has-session -t {agent} 2>/dev/null || exit {gone}; \
+         cwd=$(tmux display-message -p -t {pane} '#{{pane_current_path}}' 2>/dev/null); \
+         [ -d \"$cwd\" ] || cwd=\"$HOME\"; \
+         tmux has-session -t {exact} 2>/dev/null || tmux new-session -d -s {name} -c \"$cwd\" \
+         -e COLORTERM=truecolor -e TERM=xterm-256color -e \"LANG=${{LANG:-en_US.UTF-8}}\" \
+         -e \"PATH=$PATH\" {cmd}",
+        agent = quote(&exact_session(session)),
+        gone = SHELL_TERMINAL_NO_SESSION,
+        pane = quote(&exact_pane(session)),
+        exact = quote(&exact_session(&sh)),
+        name = quote(&sh),
+        cmd = quote(&shell_pane_command(None)),
+    )
+}
+
+/// Close terminal `n` of `session`. One already gone is not an error.
+pub fn close_shell_terminal_script(session: &str, n: u32) -> String {
+    format!(
+        "tmux kill-session -t {} 2>/dev/null; true",
+        quote(&exact_session(&shell_terminal_name(session, n)))
+    )
+}
+
+/// The `case` pattern matching every terminal of `session`: the name is
+/// quoted, so it matches literally, and the suffix is `--sh` and 1..=99.
+fn shell_terminal_case(session: &str) -> String {
+    let q = quote(session);
+    format!("{q}--sh[1-9]|{q}--sh[1-9][0-9]")
+}
+
+/// Close every terminal of `session`: a killed session takes its terminals
+/// with it.
+pub fn close_all_shell_terminals_script(session: &str) -> String {
+    format!(
+        "tmux list-sessions -F '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do \
+         case \"$s\" in {pat}) tmux kill-session -t \"=$s\";; esac; done; true",
+        pat = shell_terminal_case(session),
+    )
+}
+
+/// Rename every terminal of `old` to the same terminal of `new`: a renamed
+/// session keeps its terminals.
+pub fn rename_shell_terminals_script(old: &str, new: &str) -> String {
+    format!(
+        "tmux list-sessions -F '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do \
+         case \"$s\" in {pat}) tmux rename-session -t \"=$s\" {new}\"${{s#{old}}}\";; esac; done; true",
+        pat = shell_terminal_case(old),
+        new = quote(new),
+        old = quote(old),
+    )
+}
+
 /// The same, for commands taking a *pane* target (`capture-pane`,
 /// `respawn-pane`). tmux only accepts `=` in the session part of a pane
 /// target, so the trailing `:` (current window, active pane) is required:
@@ -53,6 +170,18 @@ pub trait TmuxExec: Send + Sync {
     ) -> Result<(), IpcError> {
         let _ = cwd;
         self.restart_session(name, pane_cmd).await
+    }
+    /// Run one shell script against this host's tmux server: `bash -c`
+    /// locally, the same transport as every other call remotely. Used by
+    /// shell terminals (step 5.3), whose open / close / list are scripts of
+    /// their own ([`open_shell_terminal_script`] and friends). The default
+    /// refuses, so a test double never runs anything it was not built for.
+    async fn run_script(&self, script: &str) -> Result<std::process::Output, IpcError> {
+        let _ = script;
+        Err(IpcError::new(
+            codes::E_TMUX,
+            "this tmux executor runs no scripts",
+        ))
     }
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError>;
     /// Capture the pane plus `lines` rows of scrollback history.
@@ -621,6 +750,14 @@ impl TmuxExec for LocalTmux {
         local_allowed()?;
         kill_session(name).await
     }
+    async fn run_script(&self, script: &str) -> Result<std::process::Output, IpcError> {
+        local_allowed()?;
+        crate::proc::command("bash")
+            .args(["-c", script])
+            .output()
+            .await
+            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn bash: {e}")))
+    }
     async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError> {
         local_allowed()?;
         rename_session(old, new).await
@@ -833,7 +970,7 @@ pub fn probe_snapshot_script(tail_lines: u32, want_versions: bool) -> String {
          printf '%s\\n' '---FLEET:account'; {}; \
          printf '%s\\n' '---FLEET:profiles'; {}; \
          printf '%s\\n' '---FLEET:panes'; \
-         tmux list-sessions -F '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do printf '%s\\n' \"---FLEET:pane $s\"; tmux capture-pane -t \"=$s:\" -S {start} -p 2>/dev/null | sed 's/^---FLEET/ &/'; done; \
+         tmux list-sessions -F '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do case \"$s\" in *--sh[1-9]|*--sh[1-9][0-9]) continue;; esac; printf '%s\\n' \"---FLEET:pane $s\"; tmux capture-pane -t \"=$s:\" -S {start} -p 2>/dev/null | sed 's/^---FLEET/ &/'; done; \
          printf '%s\\n' '---FLEET:end'",
         crate::service::hosts::OAUTH_ACCOUNT_SCRIPT,
         profiles_script()
@@ -995,6 +1132,10 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ))
         }
+    }
+
+    async fn run_script(&self, script: &str) -> Result<std::process::Output, IpcError> {
+        self.remote_sh(script).await
     }
 
     async fn kill_session(&self, name: &str) -> Result<(), IpcError> {
@@ -1405,13 +1546,22 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
 /// then delete, every row on the host; an `E_TMUX` makes the reconcile count
 /// the host unreachable for this pass instead. Blank output and "no server
 /// running" still mean zero sessions.
+#[cfg(test)]
+pub(crate) fn parse_sessions_for_test(input: &str) -> Result<Vec<TmuxSession>, IpcError> {
+    parse_sessions_checked(input)
+}
+
 fn parse_sessions_checked(input: &str) -> Result<Vec<TmuxSession>, IpcError> {
-    let sessions = parse_sessions(input);
+    let mut sessions = parse_sessions(input);
     let mut lines = input.lines().map(str::trim).filter(|l| !l.is_empty());
     let Some(first) = lines.next() else {
         return Ok(sessions);
     };
     if !sessions.is_empty() || is_no_server_running(input) {
+        // Shell terminals (step 5.3) leave AFTER the "nothing parsed"
+        // check: a host running only terminals parsed fine, it just has no
+        // session for the list.
+        sessions.retain(|s| !is_shell_terminal_name(&s.name));
         return Ok(sessions);
     }
     let sample: String = first.chars().take(80).collect();

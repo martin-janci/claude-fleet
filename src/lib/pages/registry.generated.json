@@ -1841,6 +1841,46 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests.",
+      "key": "decide.jev.duplicate",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: duplicate task",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -3186,6 +3226,11 @@
             {
               "hint": "Puts the likely option first in an agent's question or a form; you still answer. Never a push or a permission.",
               "key": "decide.jev.quick_answer",
+              "type": "field"
+            },
+            {
+              "hint": "Marks a proposed task that may repeat an existing one; you still merge or keep both.",
+              "key": "decide.jev.duplicate",
               "type": "field"
             },
             {

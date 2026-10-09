@@ -141,6 +141,19 @@ pub struct NewShellSessionParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ShellTerminalsParams {
+    /// The session whose terminals to list, open or close.
+    pub session_id: i64,
+    /// list (default), open or close.
+    #[serde(default)]
+    pub action: crate::service::sessions::ShellTerminalAction,
+    /// The terminal's number, 1 to 9: close needs it; open without it
+    /// takes the lowest free one.
+    #[serde(default)]
+    pub n: Option<u32>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct KillSessionParams {
     /// Fleet session id, or host_alias + name.
     #[serde(default)]

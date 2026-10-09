@@ -40,6 +40,9 @@
   import { startWork, ticketBriefPreview, type TicketRow } from './trackers';
   import { startWorkMulti, siblingCandidates, multiStartNote, multiStartToast, shownSiblings } from './multi_start';
   import ProposedBy from './ProposedBy.svelte';
+  import PulseSteps from './PulseSteps.svelte';
+  import { sessionPulse } from './session_loaders';
+  import { creatingStart } from './session_starting';
   import { preselect, type ProposalLike } from './ai_proposal';
   import { HOST_PLACEMENT_FLOOR, hostProposal, proposeHostPlacement, recordHostPlacement } from './host_placement';
   import { previewStartWork, siblingProposal } from './start_preview';
@@ -1483,6 +1486,13 @@
 
     {#if error}
       <p class="err">{error}</p>
+    {/if}
+    {#if newLayout && busy && $creatingStart}
+      <!-- Redesign step 5.13: the create's worktree and tmux steps run
+           while it is in flight; the dialog then closes into the same Pulse
+           in the new session's conversation, on its agent step. -->
+      {@const c = $creatingStart}
+      <PulseSteps pulse={sessionPulse(null, c.kind)} title="Starting {c.name || 'a session'} on {c.host_alias}" testid="new-session-pulse" />
     {/if}
   </div>
 

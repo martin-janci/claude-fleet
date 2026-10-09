@@ -2510,6 +2510,25 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "shell_terminals",
+            "shell_terminals",
+            json!({ "session_id": 7, "action": "open", "n": 2 }),
+            r#"{"session_id":7,"host_alias":"trn","terminals":[{"n":2,"tmux_name":"demo--sh2"}],"opened":2}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::shell_terminals(
+                    b,
+                    fleet_core::service::sessions::ShellTerminalsArgs {
+                        session_id: 7,
+                        action: fleet_core::service::sessions::ShellTerminalAction::Open,
+                        n: Some(2),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "safe_kill_session",
             "safe_kill_session",
             json!({ "host_alias": "trn", "tmux_name": "demo" }),

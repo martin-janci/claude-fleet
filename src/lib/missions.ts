@@ -336,6 +336,32 @@ export function moveLabel(from: string, to: string): string {
   return MOVE_LABEL[to] ?? to;
 }
 
+/** The moves that end a mission. In the New layout they sit in the ⋯ menu
+ *  beside Edit and Pause, each behind a confirm (redesign parity row P19). */
+export const FINAL_MOVES: readonly string[] = ['completed', 'failed', 'cancelled'];
+
+/** A state's moves split for the New layout: Start, Pause and Resume stay
+ *  buttons; Complete, Mark failed and Cancel go to the ⋯ menu. */
+export function splitMoves(state: string): { inline: string[]; menu: string[] } {
+  const all = MISSION_MOVES[state] ?? [];
+  return {
+    inline: all.filter((to) => !FINAL_MOVES.includes(to)),
+    menu: all.filter((to) => FINAL_MOVES.includes(to)),
+  };
+}
+
+/** The confirm line before a move from the ⋯ menu ends a mission. */
+export function finalMoveQuestion(name: string, to: string): string {
+  switch (to) {
+    case 'completed':
+      return `Complete ${name}? It stops changing; its tasks stay.`;
+    case 'failed':
+      return `Mark ${name} failed? It stops changing; its tasks stay.`;
+    default:
+      return `Cancel ${name}? It stops changing; its tasks stay.`;
+  }
+}
+
 /** A mission that no longer changes. */
 export function isFinal(state: string): boolean {
   return state === 'completed' || state === 'failed' || state === 'cancelled';

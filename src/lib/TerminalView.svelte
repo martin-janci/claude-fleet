@@ -13,7 +13,7 @@
   import { hintAnchor } from './hints';
   import { toIpcError } from './result';
   import { push, pushError } from './toasts';
-  import { repairSession, hasNoPane, showFriendlyNames, sessionsAnswered } from './sessions';
+  import { repairSession, hasNoPane, showFriendlyNames, sessionsAnswered, sessionAgent } from './sessions';
   import { splashShown } from './startup';
   import Loader from './Loader.svelte';
   import { displayName } from './attention';
@@ -27,6 +27,27 @@
   import { fitCells } from './terminal_size';
   import { hubStatus, ownsTheFleet } from './hub';
   import { accessOf, noAttachReason } from './access';
+  import { sessionBlocked } from './share';
+  import { uiLayout } from './prefs';
+  import { matchShortcut } from './shortcuts';
+  import {
+    shellTerminals,
+    shellTerminalName,
+    terminalPtyId,
+    nextTerminalTab,
+    type ShellTerminalsResult,
+  } from './terminals';
+  import TerminalStrip from './TerminalStrip.svelte';
+  import { AGENT_LABELS } from './row_groups';
+  import Self from './TerminalView.svelte';
+
+  /** Shell terminals (step 5.3). App mounts this pane with no `shell`: it is
+   *  the session's terminal area, with the Agent | Shell N strip in the new
+   *  layout, and its grid shows the tab picked there. Split mounts a second
+   *  copy beside it with `shell` set, which shows that one terminal and
+   *  nothing else (no strip, no microphone). */
+  let { shell = undefined }: { shell?: number } = $props();
+  const isRoot = $derived(shell === undefined);
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -73,8 +94,16 @@
     // `screen` too: a half-open pane (a PTY whose Screen was torn down under
     // it) must never satisfy the guard, or selecting that session again would
     // skip the reopen and leave a blank grid that still swallows keystrokes.
+    // Read before the short-circuit below: the open effects must re-run
+    // when the picked terminal changes, even on a run that stopped at
+    // `screen` (which is not reactive).
+    const want = myShell;
     return (
-      !!sess && screen !== null && sess.tmux_name === currentSession && sess.host_alias === currentHost
+      !!sess &&
+      screen !== null &&
+      sess.tmux_name === currentSession &&
+      sess.host_alias === currentHost &&
+      currentShell === want
     );
   }
 
@@ -104,6 +133,119 @@
   const termOwned = $derived(termAccess === 'own');
   const termNoAttachWhy = $derived(noAttachReason(termAccess, $hubStatus));
 
+  // ── Shell terminals (step 5.3) ──────────────────────────────────────
+  // The strip is the new layout's (ground rule: behind `ui.layout` until
+  // 7.5); the classic pane is the agent's terminal, exactly as before.
+  const showStrip = $derived(
+    isRoot && $uiLayout === 'new' && termOwned && !!$selectedSession && !hasNoPane($selectedSession),
+  );
+  /** The session's open terminals, by number. */
+  let shells: number[] = $state([]);
+  /** The picked tab: `null` is the agent. */
+  let activeShell: number | null = $state(null);
+  /** Agent on the left, the picked terminal on the right. */
+  let split = $state(false);
+  let stripBusy = $state(false);
+  /** What THIS pane's grid attaches to: `null` is the agent. */
+  const myShell: number | null = $derived(
+    !isRoot ? (shell ?? null) : showStrip && !split ? activeShell : null,
+  );
+  const sideShell: number | null = $derived(showStrip && split ? activeShell : null);
+  /** The session the terminal list belongs to, so a reply for the previous
+   *  selection is dropped. */
+  let stripFor: number | null = null;
+  /** Opening or closing a terminal is `own`, as the attach itself is. */
+  const stripBlocked = $derived($sessionBlocked($selectedSession, 'shell_terminals'));
+
+  function takeTerminals(r: ShellTerminalsResult | null) {
+    if (!r || r.session_id !== stripFor) return;
+    shells = r.terminals.map((t) => t.n);
+    if (activeShell != null && !shells.includes(activeShell)) activeShell = null;
+    if (activeShell == null) split = false;
+  }
+
+  $effect(() => {
+    const id = showStrip ? ($selectedSession?.id ?? null) : null;
+    if (id === stripFor) return;
+    stripFor = id;
+    shells = [];
+    activeShell = null;
+    split = false;
+    if (id == null) return;
+    void shellTerminals(id).then((r) => {
+      if (r.ok && r.value) takeTerminals(r.value);
+    });
+  });
+
+  async function newTerminal() {
+    const id = stripFor;
+    if (id == null || stripBusy || stripBlocked !== null) return;
+    stripBusy = true;
+    try {
+      const r = await shellTerminals(id, 'open');
+      if (!r.ok) {
+        pushError(r.error, 'New terminal failed');
+        return;
+      }
+      takeTerminals(r.value);
+      if (r.value?.session_id === stripFor && r.value.opened != null) activeShell = r.value.opened;
+    } finally {
+      stripBusy = false;
+    }
+  }
+
+  /** Close one terminal. The pane lets go of it first, so its attach is
+   *  closed rather than seeing the tmux session vanish and reconnecting. */
+  async function closeTerminal(n: number) {
+    const id = stripFor;
+    if (id == null || stripBusy || stripBlocked !== null) return;
+    if (activeShell === n) {
+      activeShell = null;
+      split = false;
+    }
+    stripBusy = true;
+    try {
+      await tick();
+      const r = await shellTerminals(id, 'close', n);
+      if (!r.ok) {
+        pushError(r.error, 'Closing the terminal failed');
+        return;
+      }
+      takeTerminals(r.value);
+    } finally {
+      stripBusy = false;
+    }
+  }
+
+  function selectTab(n: number | null) {
+    activeShell = n;
+    if (n == null) split = false;
+  }
+
+  /** Clear the picked terminal's screen: Ctrl+L to its shell. */
+  function clearTerminal() {
+    if (activeShell == null) return;
+    void invoke('pty_write', { args: { id: terminalPtyId(activeShell), data: '\x0c' } }).catch((e) => {
+      pushError(toIpcError(e), 'Clear failed');
+    });
+  }
+
+  /** ⌥⌘T (Ctrl+Alt+T) opens a terminal, ⌘` (Ctrl+`) goes to the next tab.
+   *  Captured before the grid sees them, so neither reaches the pty. */
+  function onTerminalChord(e: KeyboardEvent) {
+    if (!showStrip) return;
+    const id = matchShortcut('global', e, isMac);
+    if (id === 'new-terminal') {
+      e.preventDefault();
+      e.stopPropagation();
+      void newTerminal();
+    } else if (id === 'next-terminal') {
+      e.preventDefault();
+      e.stopPropagation();
+      selectTab(nextTerminalTab(activeShell, shells));
+    }
+  }
+
   $effect(() => {
     // Reading the derived subscribes this effect to all three of its sources.
     if (termOwned) return;
@@ -114,9 +256,13 @@
   });
 
   /** The id this pane's PTY lives under in the backend's PTY map
-   *  (`pty.rs`). One pane, one id: the agent's terminal. Shell terminals get
-   *  ids of their own (step 5.3), so opening one never replaces this. */
-  const PTY_ID = 'agent';
+   *  (`pty.rs`): `agent` for the agent's terminal, `sh<N>` for shell
+   *  terminal N (step 5.3), so opening one never replaces another. Set by
+   *  each open, so a close always names the PTY that open made. */
+  let PTY_ID = 'agent';
+  /** The shell terminal attached now (`null`: the agent), with
+   *  `currentSession` / `currentHost`. */
+  let currentShell: number | null = $state(null);
 
   /** Forward bytes to the PTY. A rejection (PTY gone, host dropped) used to be
    *  swallowed; now it surfaces once — the toast store dedupes repeats. */
@@ -385,7 +531,7 @@
     if (!sess) {
       void closeTerm();
       // Nothing attached: the microphone has no session to serve.
-      if (get(voiceState).state !== 'off') void releaseVoice();
+      if (isRoot && get(voiceState).state !== 'off') void releaseVoice();
       return;
     }
     if (isAttachedTo(sess)) return;
@@ -461,8 +607,12 @@
 
   /** Has the open that captured `gen` been superseded — by a close, a destroy,
    *  a newer open, or the selection moving on? */
-  function openIsStale(gen: number, target: { tmux_name: string; host_alias: string }): boolean {
+  function openIsStale(
+    gen: number,
+    target: { tmux_name: string; host_alias: string; shell?: number | null },
+  ): boolean {
     if (destroyed || gen !== openGeneration) return true;
+    if (target.shell !== undefined && target.shell !== myShell) return true;
     const sel = $selectedSession;
     return !sel || sel.tmux_name !== target.tmux_name || sel.host_alias !== target.host_alias;
   }
@@ -481,7 +631,8 @@
     // the two open-effects below re-run inside it.
     if (!termOwned) return;
     if (!container) return;
-    const target = { tmux_name: sess.tmux_name, host_alias: sess.host_alias };
+    const shellN = myShell;
+    const target = { tmux_name: sess.tmux_name, host_alias: sess.host_alias, shell: shellN };
     opening = true;
     // A fresh attach may render fine: let it report a parser failure again.
     reportedTerminalError = false;
@@ -505,6 +656,8 @@
       // destroys from here on bumps it again and this open stands down.
       gen = ++openGeneration;
       if (standDown()) return;
+      // From here on every pty call names this open's terminal.
+      PTY_ID = terminalPtyId(shellN);
       openError = null;
       disconnected = false;
       await tick();
@@ -550,7 +703,7 @@
       // ask for — attempting it anyway put an E_LOCAL_ONLY toast on every
       // attach of a project-backed session. Repair workspace is unaffected:
       // it passes `explicit: true` and routes.
-      if (sess.project_id != null && !hasNoPane(sess) && ownsTheFleet()) {
+      if (shellN == null && sess.project_id != null && !hasNoPane(sess) && ownsTheFleet()) {
         const rep = await repairSession(sess.id);
         if (standDown()) return;
         if (rep.ok) {
@@ -571,11 +724,22 @@
         }
       }
 
+      // A shell terminal is (re)made before the attach: `open` is a no-op
+      // for one that is up, and brings back one a host reboot took.
+      if (shellN != null) {
+        const made = await shellTerminals(sess.id, 'open', shellN);
+        if (standDown()) return;
+        if (!made.ok) {
+          openError = `Terminal error: ${made.error.message}`;
+          return;
+        }
+      }
+
       try {
         await invoke('pty_open', {
           args: {
             id: PTY_ID,
-            session_name: sess.tmux_name,
+            session_name: shellN == null ? sess.tmux_name : shellTerminalName(sess.tmux_name, shellN),
             host_alias: sess.host_alias,
             cols: dim.cols,
             rows: dim.rows,
@@ -610,15 +774,19 @@
       }
       currentSession = sess.tmux_name;
       currentHost = sess.host_alias;
+      currentShell = shellN;
       ptyOpen = true;
       attachedAt = Date.now();
-      // The microphone claim follows the attached session (closeTerm runs on
-      // every switch, so release lives on the deselect / destroy paths).
-      followSession(sess.id, get(hostByAlias).get(sess.host_alias)?.transport ?? 'ssh');
-      // Work graph M7: a person attaching is a touch — it un-archives the
-      // session and keeps tidy-up off it for an hour. Not an automatic
-      // reconnect. Best-effort: an older hub without the action refuses it.
-      if (!isAutoReconnect) void unarchiveSession(sess.id).catch(() => {});
+      if (shellN == null) {
+        // The microphone claim follows the attached session (closeTerm runs
+        // on every switch, so release lives on the deselect / destroy
+        // paths). A shell terminal never takes it: the voice is the agent's.
+        followSession(sess.id, get(hostByAlias).get(sess.host_alias)?.transport ?? 'ssh');
+        // Work graph M7: a person attaching is a touch — it un-archives the
+        // session and keeps tidy-up off it for an hour. Not an automatic
+        // reconnect. Best-effort: an older hub without the action refuses it.
+        if (!isAutoReconnect) void unarchiveSession(sess.id).catch(() => {});
+      }
 
       // Start the adaptive drain loop. 30 ms (~33 Hz) is the floor when output
       // is flowing; it backs off to DRAIN_MAX_MS when the terminal is idle.
@@ -650,7 +818,10 @@
         sel &&
         !destroyed &&
         !isAttachedTo(sel) &&
-        (bailed || sel.tmux_name !== target.tmux_name || sel.host_alias !== target.host_alias)
+        (bailed ||
+          sel.tmux_name !== target.tmux_name ||
+          sel.host_alias !== target.host_alias ||
+          target.shell !== myShell)
       ) {
         void openTerm();
       }
@@ -885,6 +1056,7 @@
     }
     currentSession = null;
     currentHost = null;
+    currentShell = null;
   }
 
   /** macOS: Cmd+C/V/A are the clipboard chords and Option is the ESC-prefix
@@ -1047,7 +1219,7 @@
     destroyed = true;
     openGeneration += 1;
     void closeTerm();
-    if (get(voiceState).state !== 'off') void releaseVoice();
+    if (isRoot && get(voiceState).state !== 'off') void releaseVoice();
     mouse.dispose();
   });
 
@@ -1187,6 +1359,8 @@
   );
 </script>
 
+<svelte:window onkeydowncapture={onTerminalChord} />
+
 {#if $selectedSession && !termOwned}
   <!-- The last line of the gate: App does not mount this component for a row
        the client does not own, so reaching here means the answer changed under
@@ -1202,6 +1376,22 @@
     {/if}
   </div>
 {:else if $selectedSession}
+  <div class="term-root" class:nested={!isRoot}>
+  {#if showStrip}
+    <TerminalStrip
+      agentLabel={AGENT_LABELS[sessionAgent($selectedSession)] ?? 'Terminal'}
+      {shells}
+      active={activeShell}
+      {split}
+      busy={stripBusy}
+      onselect={selectTab}
+      onnew={() => void newTerminal()}
+      onclose={(n) => void closeTerminal(n)}
+      onsplit={() => (split = !split)}
+      onclear={clearTerminal}
+    />
+  {/if}
+  <div class="term-panes">
   <div class="wrap">
     {#if autoReconnecting}
       <div class="reconnect-banner" data-testid="terminal-autoreconnect-banner">
@@ -1219,11 +1409,16 @@
            It used to render the tmux name unconditionally, so with the
            default settings the two disagreed about what you were looking
            at. The tmux name stays reachable in the tooltip. -->
-      <span class="name" title={$selectedSession.tmux_name}
+      <span class="name" title={myShell == null ? $selectedSession.tmux_name : shellTerminalName($selectedSession.tmux_name, myShell)}
         >{displayName($selectedSession, $showFriendlyNames)}</span
       >
+      {#if myShell != null}
+        <span class="shell-tag" data-testid="terminal-shell-tag">Shell {myShell}</span>
+      {/if}
       <TransferChip session={$selectedSession} />
-      <MicToggle session={$selectedSession} transport={selectedSessionHostTransport} />
+      {#if myShell == null}
+        <MicToggle session={$selectedSession} transport={selectedSessionHostTransport} />
+      {/if}
       <span class="size" data-testid="terminal-size">
         {#if lastCols > 0}{lastCols}×{lastRows}{:else}measuring…{/if}
       </span>
@@ -1362,6 +1557,15 @@
       {/if}
     {/if}
   </div>
+  {#if sideShell != null}
+    <div class="side" data-testid="terminal-split">
+      {#key sideShell}
+        <Self shell={sideShell} />
+      {/key}
+    </div>
+  {/if}
+  </div>
+  </div>
 {:else}
   <div class="empty" data-testid="terminal-empty">
     {#if !$sessionsAnswered}
@@ -1401,6 +1605,35 @@
 {/if}
 
 <style>
+  .term-root {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
+    min-height: 0;
+  }
+  .term-panes {
+    flex: 1 1 auto;
+    display: flex;
+    min-height: 0;
+    min-width: 0;
+  }
+  .term-panes > .wrap {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .side {
+    flex: 1 1 0;
+    min-width: 0;
+    border-left: 1px solid var(--border);
+  }
+  .shell-tag {
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+    padding: 0.05rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
   .wrap {
     position: relative;
     display: flex;
