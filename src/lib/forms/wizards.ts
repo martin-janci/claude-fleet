@@ -8,8 +8,10 @@ import type { LoaderName } from '../loader-kit.generated';
 import type { FormSpec } from './forms';
 import linkHub from './wizards/link_hub.json';
 import addProject from './wizards/add_project.json';
+import addHost from './wizards/add_host.json';
+import pairDevice from './wizards/pair_device.json';
 
-export type WizardId = 'link_hub' | 'add_project';
+export type WizardId = 'link_hub' | 'add_project' | 'add_host' | 'pair_device';
 
 export interface Wizard {
   id: WizardId;
@@ -26,6 +28,11 @@ export const WIZARDS: Record<WizardId, Wizard> = {
   // In the chat only: 6.11's dialog keeps its GitHub browser (owner picker,
   // "already in fleet"), which a form cannot hold.
   add_project: { id: 'add_project', spec: addProject as FormSpec, sending: 'Adding…', loader: 'comet' },
+  // The one-step Add host, for the chat and Get started: 4.9's guided
+  // wizard keeps its drafts and per-step checks, which a form cannot hold.
+  add_host: { id: 'add_host', spec: addHost as FormSpec, sending: 'Checking…', loader: 'sonar' },
+  // Settings › Devices' Pair a device in the New layout.
+  pair_device: { id: 'pair_device', spec: pairDevice as FormSpec, sending: 'Pairing…', loader: 'halo' },
 };
 
 /** `spec` with the choices only known when it opens (the fleet's hosts, a

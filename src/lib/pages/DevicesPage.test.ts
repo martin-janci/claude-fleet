@@ -3,7 +3,7 @@
 // page binds and unbinds devices. Every change runs a command that routes to
 // the hub's `org_admin`.
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
@@ -14,6 +14,7 @@ import { orgs, type OrgDetail } from '../orgs';
 import { devices, qrRects, type DeviceSummary } from '../devices';
 import { catalogStatuses } from '../assets_workspace';
 import { toasts } from '../toasts';
+import { uiLayout } from '../prefs';
 import { bundle } from './testing';
 import type { Page } from './pages';
 
@@ -156,6 +157,43 @@ describe('Settings → Devices: rename and mode (11.3)', () => {
     await fireEvent.click((await screen.findAllByTestId('resource-row'))[1]);
     expect((screen.getByTestId('edit-mode-readonly') as HTMLInputElement).checked).toBe(true);
     expect((screen.getByTestId('edit-mode-full') as HTMLInputElement).checked).toBe(false);
+  });
+});
+
+describe('Settings → Devices, New layout: Pair a device is a wizard (10.12)', () => {
+  const show = () => render(ResourcePage, { props: { page: pageOf('settings.devices'), resource: resourceOf('device') } });
+  beforeEach(() => uiLayout.set('new'));
+  afterEach(() => uiLayout.set('classic'));
+
+  it('opens the pair_device wizard, offers the orgs, and shows the code it mints', async () => {
+    show();
+    await fireEvent.click(screen.getByTestId('resource-add'));
+    expect(screen.getByTestId('wizard-pair_device')).toBeInTheDocument();
+    // The inline create form is the Classic layout's.
+    expect(screen.queryByTestId('resource-create')).toBeNull();
+    expect(screen.getByTestId('form-field-org-1').textContent).toContain('Acme');
+    await fireEvent.input(screen.getByTestId('form-field-device'), { target: { value: 'new-phone' } });
+    await fireEvent.click(screen.getByTestId('form-field-org-1'));
+    await fireEvent.click(screen.getByTestId('form-submit'));
+    await waitFor(() => expect(argsOf('pair_device')).toEqual({ device: 'new-phone', mode: 'full', org_id: 1, person: null }));
+    await waitFor(() => expect(screen.queryByTestId('wizard-pair_device')).toBeNull());
+    expect(screen.getByTestId('pairing-code').textContent).toBe('abc123');
+    expect(screen.getByTestId('pairing-halo')).toBeInTheDocument();
+  });
+
+  it('keeps the wizard open with the refusal when pairing fails', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'pair_device') throw { code: 'E_FORBIDDEN', message: 'Only the owner pairs devices.' };
+      if (cmd === 'list_devices') return [laptop, phone];
+      return null;
+    });
+    show();
+    await fireEvent.click(screen.getByTestId('resource-add'));
+    await fireEvent.input(screen.getByTestId('form-field-device'), { target: { value: 'x' } });
+    await fireEvent.click(screen.getByTestId('form-submit'));
+    expect((await screen.findByTestId('wizard-error')).textContent).toBe('Only the owner pairs devices.');
+    expect(screen.getByTestId('wizard-pair_device')).toBeInTheDocument();
+    expect(screen.queryByTestId('pairing-result')).toBeNull();
   });
 });
 
