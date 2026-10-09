@@ -59,6 +59,12 @@ pub struct ManifestInput<'a> {
     pub desktop_accepts: Window,
     pub assets: &'a [Asset],
     pub hub_image: Option<&'a HubImage>,
+    /// The desktop's updater bundles (`.app.tar.gz`, `.AppImage`,
+    /// `-setup.exe`) by asset name → `tauri-plugin-updater`'s `signature`:
+    /// the base64 of a `minisign -S` signature by the release key, made by
+    /// `scripts/release-manifest.sh` (S7). A bundle without one is offered as
+    /// a download only.
+    pub tauri_sigs: &'a BTreeMap<String, String>,
 }
 
 /// The track a version belongs to (U9): a pre-release is `beta` (`-rc.N`) or
@@ -74,8 +80,8 @@ pub fn track_of(v: &Version) -> Track {
 }
 
 /// Build the release manifest from the release's actual assets. Names that
-/// are not an installable artifact (SHA256SUMS, the manifest itself, the
-/// Tauri updater bundles until they are signed — S7) are left out.
+/// are not an installable artifact (SHA256SUMS, the manifest itself, an
+/// updater bundle nobody signed) are left out.
 pub fn build_manifest(i: &ManifestInput) -> Result<ReleaseManifest, String> {
     let v = i.version.to_string();
     let mut components: BTreeMap<String, ComponentRelease> = BTreeMap::new();
@@ -124,7 +130,47 @@ pub fn build_manifest(i: &ManifestInput) -> Result<ReleaseManifest, String> {
             "nsis",
         ),
     ];
+    // What tauri-plugin-updater installs in place, once signed.
+    let updatable = [
+        (
+            format!("claude-fleet_{v}_aarch64.app.tar.gz"),
+            "macos-aarch64",
+            None,
+        ),
+        (
+            format!("claude-fleet_{v}_x64.app.tar.gz"),
+            "macos-x86_64",
+            None,
+        ),
+        (
+            format!("claude-fleet_{v}_amd64.AppImage"),
+            "linux-x86_64",
+            Some("appimage"),
+        ),
+        (
+            format!("claude-fleet_{v}_x64-setup.exe"),
+            "windows-x86_64",
+            Some("nsis"),
+        ),
+    ];
     for a in i.assets {
+        if let (Some((_, platform, variant)), Some(sig)) = (
+            updatable.iter().find(|(n, _, _)| *n == a.name),
+            i.tauri_sigs.get(&a.name),
+        ) {
+            push(
+                "desktop",
+                Artifact::Tauri {
+                    platform: (*platform).into(),
+                    variant: variant.map(String::from),
+                    name: a.name.clone(),
+                    sha256: a.sha256.clone(),
+                    size: a.size,
+                    tauri_signature: sig.clone(),
+                },
+            );
+            continue;
+        }
         if let Some(target) = a
             .name
             .strip_prefix(&format!("fleet-hub-{v}-"))
@@ -428,7 +474,65 @@ mod tests {
             desktop_accepts: Window::new(6, 6),
             assets: &assets,
             hub_image: image,
+            tauri_sigs: &BTreeMap::new(),
         })
+    }
+
+    #[test]
+    fn a_signed_updater_bundle_is_a_tauri_artifact_and_an_unsigned_one_a_download() {
+        let ver = v("0.5.5");
+        let names = [
+            "claude-fleet_0.5.5_aarch64.app.tar.gz",
+            "claude-fleet_0.5.5_aarch64.dmg",
+            "claude-fleet_0.5.5_amd64.AppImage",
+            "claude-fleet_0.5.5_amd64.deb",
+            "claude-fleet_0.5.5_x64-setup.exe",
+            "fleet-hub-0.5.5-x86_64-unknown-linux-gnu.tar.gz",
+        ];
+        let assets: Vec<Asset> = names.iter().map(|n| asset(n)).collect();
+        let sigs: BTreeMap<String, String> = [
+            ("claude-fleet_0.5.5_aarch64.app.tar.gz", "c2lnLW1hYw=="),
+            ("claude-fleet_0.5.5_amd64.AppImage", "c2lnLWFwcGltYWdl"),
+        ]
+        .into_iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        let m = build_manifest(&ManifestInput {
+            version: &ver,
+            commit: "c",
+            build_id: "b",
+            published_at: 0,
+            assets_base: "https://x/",
+            notes_url: "",
+            hub: &compat(),
+            desktop_accepts: Window::new(6, 6),
+            assets: &assets,
+            hub_image: None,
+            tauri_sigs: &sigs,
+        })
+        .unwrap();
+        let d = crate::Component::Desktop;
+        let mac = m
+            .artifact_for(d, &Platform::new("macos", "aarch64", "tauri"))
+            .unwrap();
+        assert!(
+            matches!(mac, Artifact::Tauri { tauri_signature, name, .. }
+                if tauri_signature == "c2lnLW1hYw==" && name.ends_with(".app.tar.gz")),
+            "{mac:?}"
+        );
+        let appimage = m
+            .artifact_for(d, &Platform::new("linux", "x86_64", "appimage"))
+            .unwrap();
+        assert!(matches!(appimage, Artifact::Tauri { .. }), "{appimage:?}");
+        // No signature: the installer is a download a person runs.
+        let nsis = m
+            .artifact_for(d, &Platform::new("windows", "x86_64", "nsis"))
+            .unwrap();
+        assert!(matches!(nsis, Artifact::Download { .. }), "{nsis:?}");
+        assert!(matches!(
+            m.artifact_for(d, &Platform::new("linux", "x86_64", "deb")),
+            Some(Artifact::Download { .. })
+        ));
     }
 
     #[test]
@@ -510,6 +614,7 @@ mod tests {
             desktop_accepts: Window::new(6, 6),
             assets: &none,
             hub_image: None,
+            tauri_sigs: &BTreeMap::new(),
         })
         .unwrap_err();
         assert!(e.contains("no hub artifact"), "{e}");

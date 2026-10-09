@@ -124,6 +124,34 @@ pub async fn list_update_targets(
     routed::list_update_targets(&backend, &store).await
 }
 
+/// Does this desktop have an update, and how would it install? Paired: its
+/// hub decides; standalone: the published channel under this app's own
+/// `update.*` settings. The answer's target is verified against the release
+/// key and remembered for `update_install` (design S7).
+#[tauri::command]
+pub async fn update_check(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    updates: State<'_, crate::self_update::SelfUpdate>,
+    data_dir: State<'_, crate::commands::diagnostics::AppDataDir>,
+) -> Result<crate::self_update::DesktopUpdate, IpcError> {
+    let backend: Arc<FleetBackend> = Arc::clone(&backend);
+    updates.check(&backend, &store, &data_dir.0).await
+}
+
+/// Install the target the last `update_check` verified, in place, and
+/// restart. Refused for a target this platform only downloads.
+#[tauri::command]
+pub async fn update_install(
+    app: tauri::AppHandle,
+    backend: State<'_, Arc<FleetBackend>>,
+    updates: State<'_, crate::self_update::SelfUpdate>,
+    data_dir: State<'_, crate::commands::diagnostics::AppDataDir>,
+) -> Result<(), IpcError> {
+    let backend: Arc<FleetBackend> = Arc::clone(&backend);
+    updates.install(&app, &backend, &data_dir.0).await
+}
+
 pub(crate) mod routed {
     use super::*;
     use fleet_core::service::update;

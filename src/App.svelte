@@ -101,6 +101,8 @@
   import { markStartup, startCatchUp, takeUpdateReveal, trackActivity } from './lib/startup';
   import { loadProjectPicks } from './lib/project_picks';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
+  import UpdateBanner from './lib/UpdateBanner.svelte';
+  import { startUpdateChecks } from './lib/updates';
   import { get } from 'svelte/store';
   import { destination, goTo, leave } from './lib/destination';
 
@@ -198,7 +200,9 @@
     if (trackerRefresh) clearInterval(trackerRefresh);
     stopActivity?.();
     stopCatchUp?.();
+    stopUpdateChecks?.();
   });
+  let stopUpdateChecks: (() => void) | null = null;
 
   // `work:*` frames: trackers and their first sync. When a tracker finishes
   // its FIRST sync, the sessions whose keys it owns just got titles and
@@ -259,6 +263,10 @@
     }
     // Only a hub client has a live link to lose; see HubConnectionBanner.
     if (get(hubStatus).remote) void startHubConnection();
+    // This app's own update (S7): asked once start-up has settled, then on
+    // the decision's interval. Paired, the hub decides; standalone, the
+    // published channel.
+    stopUpdateChecks = startUpdateChecks();
     const hr0 = await healthCheck();
     // `health_check` routes to the hub's `fleet_health` in remote mode, so
     // it hits the same skewed-contract gate as every list load below — and
@@ -1041,6 +1049,7 @@
 {#if $hubStatus.remote}
   <HubConnectionBanner hubUrl={$hubStatus.url} />
 {/if}
+<UpdateBanner />
 {#if $hubStatus.unavailable}
   <HubUnavailableBanner
     reason={$hubStatus.unavailable}

@@ -17,9 +17,8 @@ and the phones. Design and rationale:
 > channel directly (slice S3). The Docker hub updates itself through
 > `fleet-updater` (slice S6, below): opt-in, and under the default
 > `update.hub.mode=notify` it installs only what an operator pins. The
-> desktop and the phone install nothing yet (slices S7–S8): on a standalone
-> desktop the Settings → Updates rows have no effect. A hub that cannot
-> verify a channel still offers nothing. `nightly` is published by
+> desktop updates itself (slice S7, below). The phone installs nothing yet
+> (S8). A hub that cannot verify a channel still offers nothing. `nightly` is published by
 > `nightly.yml` (slice S2b).
 
 ## Who decides what
@@ -113,6 +112,56 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   including the signed documents it rests on. It exits 1 when there is no
   answer: no channel published yet, a document no trusted key signed, or
   GitHub unreachable.
+
+## The desktop updates itself
+
+The app checks about 15 seconds after it starts and then on the interval
+the decision names (`update.check_interval_secs`, at least an hour):
+
+- **paired**, it asks its hub (`POST /update/check`, as `client:<id>`) under
+  the fleet's `update.desktop.mode` and pins. That route is outside the hub's
+  wire contract on purpose: a desktop too old or too new for its hub's
+  contract — the one that most needs an update — still learns what to install;
+- **standalone**, it reads the published channel itself (Git mode) under its
+  own Settings → Updates rows.
+
+Either way the target is verified against the release key before anything
+else happens: the signed channel lists it, the signed manifest carries a
+bundle for this platform, and the publisher has not withdrawn it.
+
+| platform | what it does |
+|---|---|
+| macOS | replaces the `.app` from the signed `.app.tar.gz`, restarts |
+| Windows | runs the signed NSIS installer, restarts |
+| Linux, started as an AppImage | replaces the AppImage, restarts |
+| Linux, installed from the `.deb` | offers the `.deb` to download; a person installs it |
+
+A banner says what is on offer: *"claude-fleet 0.5.5 is available — restart
+to update"*, which can be dismissed for the session, or *"Update required…"*
+when the hub refuses this build or a mandatory release is past its deadline,
+which cannot. `notify` waits for that button, `automatic` installs at the
+next launch, and `manual` offers only what an operator pins
+(`update_admin { action: pin, component: desktop, version }`).
+
+The install is `tauri-plugin-updater`'s. It downloads the bundle and checks
+its minisign signature a second time, against the same release key. The
+signature is not a file of its own: CI signs each updater bundle with the
+release key, and the signature travels inside the signed manifest
+(`tauri_signature`). Its trusted comment names the version, and the app
+requires that (`requireSignedVersion`), so an older bundle's signature
+cannot pass for a newer one's. The plugin is handed the verified decision
+from a one-shot `127.0.0.1` listener inside the app, and has no update
+endpoint of its own. That loopback URL is why
+`dangerousInsecureTransportProtocol` is on; the bundle itself comes over
+`https`.
+
+Paired, the hub sees every step (`downloading` … `installing`, then
+`validating` and `success` from the relaunched app, or `failed`). Every
+request a paired desktop makes also names its build
+(`X-Fleet-Client: desktop/0.5.5 (macos-aarch64; build 1a2b3c4; contract 14-14)`),
+so the hub knows what each desktop runs before it ever asks. A desktop
+never installs an older build by itself: a `rollback` decision is shown,
+not applied.
 
 ## fleet-updater: the Docker hub updates itself
 

@@ -7470,3 +7470,40 @@ fn a_hub_screenshot_comes_back_as_the_image_block_it_answered() {
     .expect_err("no image block");
     assert_eq!(err.code, fleet_core::ipc_error::codes::E_PARSE);
 }
+
+/// Update-channel design §6.5: the one thing a skewed hub still answers is
+/// what to update to. `/update/check` and `/update/report` — and nothing
+/// else — bypass the wire-contract gate every routed command refuses at.
+#[test]
+fn update_routes_are_the_only_contract_exemption() {
+    assert_eq!(
+        remote::HubBackend::UPDATE_PATHS,
+        ["/update/check", "/update/report"]
+    );
+    for state in [
+        connection::HubConnection::HubTooOld {
+            hub_contract: 1,
+            min_contract: 3,
+        },
+        connection::HubConnection::HubTooNew {
+            hub_contract: 9,
+            max_contract: 1,
+        },
+    ] {
+        let fake = Fake::answering("{}");
+        let backend = skewed_backend(&fake, state);
+        let hub = backend.hub().expect("a remote backend");
+        block_on(hub.post_update("/update/check", r#"{"update_proto":1}"#.into()))
+            .expect("a skewed hub is still asked what to update to");
+        assert_eq!(
+            fake.seen.lock().unwrap().as_slice(),
+            [r#"{"update_proto":1}"#.to_string()]
+        );
+        let err = block_on(hub.post_update("/mcp", "{}".into())).unwrap_err();
+        assert_eq!(
+            err.code,
+            codes::E_INTERNAL,
+            "only the update routes: {err:?}"
+        );
+    }
+}

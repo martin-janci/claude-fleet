@@ -574,7 +574,11 @@ the operator's side is `docs/updates.md`). Two kinds of signed document:
 
 - **the release manifest** — `release-manifest.json` + `.minisig` on each
   release from 0.4.1: every component's artifacts by digest (the hub image
-  by `sha256:` digest, the tarballs, the desktop downloads) and the
+  by `sha256:` digest, the tarballs, the desktop downloads, and the
+  desktop's updater bundles — `.app.tar.gz`, AppImage, NSIS — each with a
+  `tauri_signature`: `release-manifest.sh` signs the bundle itself with the
+  same key, trusted comment `version:<v>`, for tauri-plugin-updater; no
+  `TAURI_SIGNING_PRIVATE_KEY` and no `.sig` asset) and the
   protocol windows the **released** fleet-hub states itself
   (`fleet-hub compat`). Immutable, like the release. Written by
   `scripts/release-manifest.sh` in the `manifest` job, before `checksums`,
@@ -587,8 +591,8 @@ the operator's side is `docs/updates.md`). Two kinds of signed document:
   started against the manifest (design §8.4); it never names a run, since
   the image is another run and a re-run job another attempt
   (`scripts/release-update-scripts-test.sh` holds the three to one form);
-- **the channel documents** — `stable.json`, `beta.json` (and later
-  `nightly.json`), each with its `.minisig`, on the orphan branch
+- **the channel documents** — `stable.json`, `beta.json` and
+  `nightly.json` (see *Nightlies*), each with its `.minisig`, on the orphan branch
   `update-channels`: what each track currently offers, recommends,
   requires, and rolls back to, with a `sequence` (a replayed older document
   is refused) and an `expires_at` 14 days out (an expired one is treated as

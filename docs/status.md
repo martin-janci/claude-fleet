@@ -674,6 +674,22 @@ containers for one service. `scripts/updater-e2e.sh` (CI hub-headless,
 built: the `/events` push that would wake it early (S4b), its own
 self-update.
 
+**S7 is landed:** the desktop updates itself (`src-tauri/src/self_update.rs`,
+`update_check` / `update_install`, both `SameInBoth`; `src/lib/updates.ts`,
+`UpdateBanner.svelte`). Paired it posts `/update/check` through
+`HubBackend::post_update`, the one call outside the contract gate
+(`update_routes_are_the_only_contract_exemption`); standalone it runs
+`git_check` under its own settings. `tauri-plugin-updater` installs only the
+target `verify_target` passed, fed from a one-shot loopback endpoint, and
+checks the bundle's minisign signature again. Owner's answer to the Tauri
+key: the release key itself — no `TAURI_SIGNING_PRIVATE_KEY`. Tauri's signer
+cannot use the unencrypted minisign key, so `release-manifest.sh` signs the
+`.app.tar.gz` / AppImage / NSIS bundles with `minisign` and the signatures
+(`version:` in the trusted comment, `requireSignedVersion`) ride in the
+manifest as `Artifact::Tauri`. Every desktop request carries
+`X-Fleet-Client` (`fleet_core::http_client::set_client_header`). A `.deb` is
+offered as a download. The footer's hover title already names both versions.
+
 **S3 is landed:** `service::update::git_check` (Git mode: a `GitCheck`
 from the hub's own settings, pin and last-seen sequence) and `fleet-hub
 update check [--track] [--json]`, which reads the published channel and
@@ -694,7 +710,7 @@ hours `X.Y.Z-dev.N.g<sha>` (hub and tarballs; `release-assets.sh
 has-desktop` is false), once a day `X.Y.Z-dev.N.desktop.g<sha>` with the
 desktop bundles (owner's §13.3 answer). `update.track` offers `nightly`;
 Git mode scans past releases without the caller's artifact, and the hub
-keeps 20 manifests. Pruned to the newest 12 + 3. The rest of S4b and S7–S9
+keeps 20 manifests. Pruned to the newest 12 + 3. The rest of S4b, S8 and S9
 are not built; §13 question 7 waits on the owner (2 is answered: a signed
 amendment).
 

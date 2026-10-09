@@ -4464,7 +4464,7 @@
               "type": "field"
             },
             {
-              "text": "The Docker hub updates itself through fleet-updater (opt-in, docs/updates.md). nightly is every green main commit: the hub and agents on each push, the desktop once a day.",
+              "text": "This desktop updates itself (paired, its hub decides; standalone, these rows do), only to a release the release key signed. The Docker hub updates itself through fleet-updater (opt-in). nightly: the hub on each green main push, the desktop once a day.",
               "tone": "info",
               "type": "notice"
             }
@@ -4474,7 +4474,7 @@
         {
           "items": [
             {
-              "text": "This desktop installs nothing yet: these rows say what the fleet follows, and the desktop updater is slice S6. See docs/updates.md.",
+              "text": "The desktop row is also this desktop's own: notify offers a restart to update, automatic installs at the next launch, manual installs only a pin. See docs/updates.md.",
               "tone": "info",
               "type": "notice"
             },

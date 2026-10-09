@@ -6,7 +6,7 @@
 //! ```text
 //! fleet-release manifest --version V --commit SHA --build-id ID --assets DIR
 //!     --assets-base URL --notes-url URL --compat compat.json --desktop-accepts MIN,MAX
-//!     [--hub-image IMAGE@sha256:…] [--now UNIX] --out release-manifest.json
+//!     [--hub-image IMAGE@sha256:…] [--tauri-sigs DIR] [--now UNIX] --out release-manifest.json
 //! fleet-release channel-add --track T [--channel FILE] --manifest FILE --manifest-url URL
 //!     [--now UNIX] [--expires-days N] [--keep N] --out FILE
 //! fleet-release channel-edit --track T --channel FILE --op OP [--version V]
@@ -171,6 +171,25 @@ fn manifest(o: &Opts) -> Result<String, String> {
         });
     }
     assets.sort_by(|a, b| a.name.cmp(&b.name));
+    // `--tauri-sigs DIR`: `<asset>.minisig` per updater bundle, carried as
+    // the base64 of the signature file (what tauri-plugin-updater reads).
+    let mut tauri_sigs = std::collections::BTreeMap::new();
+    if let Some(sig_dir) = o.opt("tauri-sigs").filter(|s| !s.is_empty()) {
+        use base64::Engine as _;
+        let rd = std::fs::read_dir(sig_dir).map_err(|e| format!("read {sig_dir}: {e}"))?;
+        for e in rd {
+            let e = e.map_err(|e| e.to_string())?;
+            let file = e.file_name().to_string_lossy().into_owned();
+            let Some(asset) = file.strip_suffix(".minisig") else {
+                continue;
+            };
+            let sig = std::fs::read(e.path()).map_err(|err| format!("read {file}: {err}"))?;
+            tauri_sigs.insert(
+                asset.to_string(),
+                base64::engine::general_purpose::STANDARD.encode(sig),
+            );
+        }
+    }
     let m = build_manifest(&ManifestInput {
         version: &version,
         commit: o.req("commit")?,
@@ -182,6 +201,7 @@ fn manifest(o: &Opts) -> Result<String, String> {
         desktop_accepts: window(o.req("desktop-accepts")?)?,
         assets: &assets,
         hub_image: hub_image.as_ref(),
+        tauri_sigs: &tauri_sigs,
     })?;
     let out = o.req("out")?;
     write(out, &to_bytes(&m))?;

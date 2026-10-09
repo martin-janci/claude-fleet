@@ -8,7 +8,8 @@ signs `release-manifest.json` and writes the `stable` / `beta` channels on
 fleet-core's HTTPS client), **the first half of S4b** (`X-Fleet-Client`,
 `update:changed`, `fleet_health.updates`, `update_status { target }`)
 **S5** (`fleet-hub healthcheck --ready --json`, `fleet-hub backup`) **and S6**
-(`fleet-updater`, the `auto-update` compose profile). The rest is not built. What S2 and S4 still owe is
+(`fleet-updater`, the `auto-update` compose profile), **S2b** (`nightly.yml`)
+**and S7** (the desktop updates itself). The rest is not built. What S2 and S4 still owe is
 listed under S2b and S4b in §12.
 
 It answers two findings of the release-process review
@@ -947,7 +948,7 @@ Each slice lands on its own, green, with its tests.
 | **S4b** (half ✅) | 4, 5 | **built:** `X-Fleet-Client` recorded into `update_observed` on `last_seen_at`'s beat (`fleet_update::client_header`, written there and not to `client_tokens`, so migration 060's auth-epoch trigger needs no exemption); `update:changed` (ids only, kind `update`, hidden from scoped streams); `fleet_health.updates` with `update_required`, `update_failed`, `update_rolled_back`, `rollback_failed`, `channel_stale`; `update_check_for` as `update_status { target }` (one tool fewer on the definition budget). **Left:** `update:decision` pushed per target on `/events`; `hub-e2e.sh` section U; `update_rollouts`, the admin rollout actions and `rollout_paused` (with S9); the org-scoped policy rows | `fleet-core` | `hub-e2e.sh` section U: a fake client and a fake agent see `update_available`, `update_required` and `client_too_new` from a channel signed by an e2e key (`FLEET_UPDATE_E2E_KEYS`, `e2e` builds only) |
 | **S5** ✅ | 8 | `fleet-hub healthcheck --ready --json`, `fleet-hub backup --to` | `crates/fleet-hub/src/serve.rs`, `fleet-core::store` | a test drives both against a real store |
 | **S6** ✅ | 6, 9 | `fleet-updater`: Docker adapter, the state file, the gates, rollback with and without migration; compose `auto-update` profile; image publish | `crates/fleet-updater/`, `deploy/hub/` | a docker e2e (opt-in, like `--hub-e2e`) against a local registry with three images: good, crash-on-start, and migrates-then-unready. All three end in the right state, and the third restores the backup. |
-| **S7** | 10 | desktop: `tauri-plugin-updater` wired to `Decision`; `TAURI_SIGNING_PRIVATE_KEY` = the release key; `update_check` / `update_install` commands + verdict rows; the Updates view; footer shows both versions; contract-gate exemption | `src-tauri`, `src/lib/updates.ts`, `src/components/UpdatesView.svelte` | a standalone desktop updates itself from `nightly`; a paired one from its hub |
+| **S7** ✅ | 10 | desktop: `tauri-plugin-updater` wired to `Decision`; `TAURI_SIGNING_PRIVATE_KEY` = the release key; `update_check` / `update_install` commands + verdict rows; the Updates view; footer shows both versions; contract-gate exemption | `src-tauri`, `src/lib/updates.ts`, `src/components/UpdatesView.svelte` | a standalone desktop updates itself from `nightly`; a paired one from its hub |
 | **S8** | 11 | fleet-mobile: `X-Fleet-Client`, `/update/check`, the Updates row and required screen; Android `PackageInstaller` adapter; release job publishes a versioned APK + sums and dispatches the manifest amendment | fleet-mobile | see its spec |
 | **S9** | 12 | rollouts (waves, auto-advance, halt), maintenance window, per-org policy, the agent's binary adapter, the bare-binary hub, the hub-served artifact mirror | | |
 

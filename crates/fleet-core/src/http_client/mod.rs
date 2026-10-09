@@ -4,11 +4,15 @@
 //! hub (federation). The desktop re-exports it; nothing about it changed in
 //! the move.
 
+mod client_header;
 pub mod http1;
 
 #[cfg(test)]
 #[path = "tests_transport.rs"]
 mod tests;
+
+use client_header::client_header_line;
+pub use client_header::set_client_header;
 
 /// What the hub answered: the HTTP status and the body exactly as received,
 /// SSE framing still intact. Interpreting it is the job of the desktop's
@@ -206,11 +210,12 @@ impl HubTransport for TcpTransport {
         // SSE-framed; rmcp refuses a request that does not accept
         // `text/event-stream`.
         let request = format!(
-            "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n\
+            "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n{}\
              Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             at.target(),
             at.authority(),
+            client_header_line(),
             body.len()
         );
         // Unbounded here on purpose: the caller that knows the tool
@@ -338,10 +343,11 @@ pub async fn download_to(
     let (host, port) = (at.host().to_string(), at.port());
     let mut conn = connect(&at).await?;
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n\
+        "GET {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n{}\
          Accept: */*\r\nConnection: close\r\n\r\n",
         at.target(),
         at.authority(),
+        client_header_line(),
     );
     let io = |e: std::io::Error| format!("read from {host}:{port}: {e}");
     conn.write_all(request.as_bytes()).await.map_err(io)?;

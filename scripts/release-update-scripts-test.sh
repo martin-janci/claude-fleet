@@ -85,7 +85,14 @@ check "it states the shipped hub's contract" test "$(json "$m" 'd["compatibility
 dmin="$(sed -n 's/^pub const MIN_HUB_CONTRACT: u32 = \([0-9]*\);.*/\1/p' "$root/src-tauri/src/backend/contract.rs")"
 check "and the desktop's window from contract.rs" test "$(json "$m" 'd["compatibility"]["contract"]["desktop_accepts"][0]')" = "$dmin"
 check "it carries the hub image by digest" test "$(json "$m" '[a["digest"] for a in d["components"]["hub"]["artifacts"] if a["kind"]=="oci"][0]')" = "$digest"
-check "desktop downloads, not the unsigned updater bundle" test "$(json "$m" 'len(d["components"]["desktop"]["artifacts"])')" = 5
+check "desktop: two dmgs and a deb to download, three updater bundles" test "$(json "$m" 'len(d["components"]["desktop"]["artifacts"])')" = 6
+check "the updater bundles are tauri artifacts" test "$(json "$m" 'sorted(a["name"] for a in d["components"]["desktop"]["artifacts"] if a["kind"]=="tauri")')" = \
+  "['claude-fleet_${v}_aarch64.app.tar.gz', 'claude-fleet_${v}_amd64.AppImage', 'claude-fleet_${v}_x64-setup.exe']"
+json "$m" '[a["tauri_signature"] for a in d["components"]["desktop"]["artifacts"] if a["name"].endswith(".app.tar.gz")][0]' \
+  | base64 -d >"$t/mac.minisig"
+check "whose signature is the release key's over the bundle" \
+  minisign -V -q -p "$t/test.pub" -m "$assets/claude-fleet_${v}_aarch64.app.tar.gz" -x "$t/mac.minisig"
+check "and names the version, as requireSignedVersion wants" grep -q "version:$v" "$t/mac.minisig"
 
 # Publish it, then run update-channels.sh against a local bare remote.
 mkdir -p "$t/published/v$v"
