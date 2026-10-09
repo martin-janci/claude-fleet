@@ -543,6 +543,47 @@ Code: `service/decide/mission_triage.rs`,
 `service/work/orchestrate/triage.rs`; step 9.10 of the redesign's
 transition plan.
 
+## `control_route` — which mission or session a Control message is about (K2)
+
+After a person sends a message in Control's chat, the desktop asks one
+Choice over the active missions, the running sessions and Control itself,
+and shows the answer under the message as a receipt: *For "Hub federation
+v2" · Proposed by Jev · Change*.
+
+- **Rule first.** A message of fewer than 4 words is never sent: in assist
+  Control asks where it goes, with nothing pre-selected. A slash command is
+  never routed.
+- **Asked after the send.** The message has already reached Control's
+  agent; nothing here moves, forwards or holds it.
+- **What is sent.** The message's first 1,000 characters, each mission's
+  name and the start of its goal, each session's name and project, redacted
+  by the envelope.
+- **Shadow / assist.** Shadow records only; in assist a usable answer naming
+  a target is the receipt, and `unsure` or a weak answer is the question.
+- **What is recorded.** Subject `control_message` `msg:<HMAC>` (the message
+  is never stored as is). "Change" marks the run `corrected`; opening the
+  proposed target marks it `confirmed`.
+
+Code: `service/decide/control_route.rs`; step 9.9 of the redesign's
+transition plan.
+
+## `summary_check` — whether a "Since 13:20" summary matches the transcript (J9)
+
+A watcher's summary of what a session did since a time (`session_summary_since`,
+drafted by `claude -p` on the session's host) is checked before it is shown:
+one Noul, "every statement in the summary is supported by the transcript".
+
+- **What is sent.** The summary and the newest 80,000 bytes of the
+  transcript excerpt it was written from, redacted by the envelope.
+- **Off** asks nothing and the summary shows, marked unchecked. **Shadow**
+  records the answer and the summary still shows, unchecked. **Assist**
+  shows it only at a confidence of 50% or more; a lower answer, or no answer
+  (a fallback), hides it.
+- **What is recorded.** Subject `session` `<id>`, one run per draft.
+
+Code: `service/decide/summary_check.rs`, `service/watch_summary.rs`; step
+11.11 of the redesign's transition plan.
+
 ## `work_link` — the work item of a session no rule could link (J1)
 
 When three turns of a conversation have gone by and nothing linked the
