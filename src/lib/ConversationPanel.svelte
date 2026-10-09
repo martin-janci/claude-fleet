@@ -115,6 +115,9 @@
   import RichText from './RichText.svelte';
   import BackgroundDetail from './BackgroundDetail.svelte';
   import Loader from './Loader.svelte';
+  import PulseSteps from './PulseSteps.svelte';
+  import { startingSessions } from './session_starting';
+  import { sessionPulse, thinkingLabel } from './session_loaders';
   import { selectSessionExplicitly } from './selection';
   import { tasks } from './tasks';
   import { outbox, isHeld, receipt, outboxBody } from './outbox';
@@ -698,6 +701,15 @@
           ? `${doing.label} · ${formatDuration(doing.sinceMs)}`
           : doing.label
         : indicator.label
+      : null,
+  );
+  // The new layout's loaders (redesign step 5.13): a session this window
+  // just started shows the Pulse sequence until its agent reports a status;
+  // a working agent gets the Atom beside what it is doing.
+  const starting = $derived($uiLayout === 'new' && $startingSessions.has(session.id));
+  const thinking = $derived(
+    $uiLayout === 'new' && indicator?.kind === 'working'
+      ? thinkingLabel(doing ? { label: doing.label, since: doing.sinceMs !== null ? formatDuration(doing.sinceMs) : null } : null)
       : null,
   );
   // In the template, `turnLive` marks the last turn of the current
@@ -1990,6 +2002,13 @@
   <div class="thread-area">
   {#if bgEntry}
     <BackgroundDetail entry={bgEntry} onBack={() => (background = null)} onOpenSession={goToSession} />
+  {:else if starting && empty && !(outgoing.length > 0 && viewing === null)}
+    <div class="empty-state" data-testid="conv-starting">
+      <PulseSteps
+        pulse={sessionPulse(session)}
+        title="Starting {session.friendly_name ?? session.tmux_name} on {session.host_alias}"
+      />
+    </div>
   {:else if empty && !(outgoing.length > 0 && viewing === null)}
     <div class="empty-state" data-testid="conv-empty-state">
       <p class="empty-title" data-testid="conv-empty">{empty}</p>
@@ -2346,9 +2365,13 @@
             role={indicator ? 'status' : undefined}
             aria-hidden={indicator ? undefined : 'true'}
           >
-            <Loader size={16} paused={!indicator} class="indicator-loader" />
+            {#if thinking}
+              <Loader name="atom" size={20} stage={false} class="indicator-loader" testid="conv-atom" />
+            {:else}
+              <Loader size={16} paused={!indicator} class="indicator-loader" />
+            {/if}
             <span class="indicator-label"
-              >{!indicator ? '\u00a0' : indicator.kind === 'sent' ? 'Waiting for Claude…' : indicatorLabel}</span
+              >{!indicator ? '\u00a0' : indicator.kind === 'sent' ? 'Waiting for Claude…' : (thinking ?? indicatorLabel)}</span
             >
           </div>
         {/if}

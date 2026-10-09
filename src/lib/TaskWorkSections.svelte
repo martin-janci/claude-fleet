@@ -10,7 +10,8 @@
   import { selectSessionExplicitly } from './selection';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
-  import { openTask, readErrorText, type TaskDetail } from './work_view';
+  import { duplicateProposal, openTask, readErrorText, type TaskDetail } from './work_view';
+  import ProposedBy from './ProposedBy.svelte';
   import WorkButton from './WorkButton.svelte';
   import { uiLayout } from './prefs';
   import type { Result } from './result';
@@ -126,6 +127,45 @@
             {#if p.why}<p class="text">{p.why}</p>{/if}
             {#if p.notes}<p class="text muted">{p.notes}</p>{/if}
             {#if p.proposed_by}<p class="muted small">Proposed by {p.proposed_by}</p>{/if}
+            {#if $uiLayout === 'new' && p.duplicate}
+              <!-- Redesign 6.9 (K4): Jev's "may duplicate". Merge rejects
+                   the proposal (the existing task covers it); Keep both
+                   accepts it. A person decides either way. -->
+              <div class="dup" data-testid="task-proposal-duplicate">
+                <span
+                  >May duplicate <button
+                    type="button"
+                    class="link"
+                    data-testid="task-proposal-duplicate-open"
+                    onclick={() => p.duplicate && openTask(p.duplicate.task_id)}
+                    >{p.duplicate.key ?? p.duplicate.title}</button
+                  ></span
+                >
+                <ProposedBy
+                  proposal={duplicateProposal(p)}
+                  field="duplicate"
+                  testid="task-proposal-duplicate-by"
+                />
+              </div>
+              <div class="acts">
+                <button
+                  class="btn"
+                  type="button"
+                  data-testid="task-proposal-merge"
+                  title="Reject this proposal: the existing task covers it"
+                  disabled={busy}
+                  onclick={() => void run(decideWorkProposal(p.item_id, false))}>Merge</button
+                >
+                <button
+                  class="btn"
+                  type="button"
+                  data-testid="task-proposal-keep-both"
+                  title="Accept this proposal as a task of its own"
+                  disabled={busy}
+                  onclick={() => void run(decideWorkProposal(p.item_id, true))}>Keep both</button
+                >
+              </div>
+            {:else}
             <div class="acts">
               <button
                 class="btn btn--primary"
@@ -142,6 +182,7 @@
                 onclick={() => void run(decideWorkProposal(p.item_id, false))}>Reject</button
               >
             </div>
+            {/if}
           </div>
         {/each}
         {#if (detail.rejected_proposals?.length ?? 0) > 0}
@@ -293,6 +334,22 @@
   .acts {
     display: flex;
     gap: 6px;
+  }
+  .dup {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--fg-2);
+  }
+  .dup .link {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
   }
   .job {
     padding: 4px 0;

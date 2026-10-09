@@ -345,3 +345,79 @@ describe('PageView — a page action (declarative pages P5)', () => {
     expect(screen.queryByTestId('page-action-work.retention_sweep')).toBeNull();
   });
 });
+
+describe('PageView — the notifications matrix (11.9)', () => {
+  it('shows a row per state and a column per channel, and a tick saves that channel', async () => {
+    show('settings.notifications');
+    const grid = screen.getByTestId('settings-matrix');
+    for (const h of ['Desktop', 'Phone', 'Sound']) expect(within(grid).getByText(h)).toBeTruthy();
+    const desktopDone = screen.getByTestId('matrix-notify.desktop-done') as HTMLInputElement;
+    expect(desktopDone.checked).toBe(false);
+    expect((screen.getByTestId('matrix-notify.desktop-blocked') as HTMLInputElement).checked).toBe(true);
+    await fireEvent.click(desktopDone);
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('set_fleet_setting', {
+        key: 'notify.desktop',
+        value: 'needs_you,failed,blocked,done,routine_failed',
+      }),
+    );
+    // Quiet hours stay ordinary rows.
+    expect(control('notify.quiet_hours')).toBeTruthy();
+  });
+
+  it('is read-only on a hub client', () => {
+    render(PageView, {
+      props: {
+        page: pageOf('settings.notifications'),
+        pages: bundle.pages,
+        descs,
+        values: defaults,
+        sources: bundle.sources,
+        readonly: true,
+        onnavigate: vi.fn(),
+      },
+    });
+    expect((screen.getByTestId('matrix-notify.phone-failed') as HTMLInputElement).disabled).toBe(true);
+  });
+});
+
+describe('PageView — Updates lists every part of the fleet (11.9b)', () => {
+  const rows = [
+    { device: 'Hub', part: 'Hub', version: '0.5.4', update: 'Up to date', reported_at: 100 },
+    { device: 'mercury', part: 'Agent', version: '0.5.3', update: 'Update available', offers: '0.5.4', reported_at: 100 },
+    { device: 'Device 7', part: 'Phone', version: '0.5.3', update: 'Update available', offers: '0.5.4', reported_at: 100 },
+  ];
+
+  function updates(props: { readonly?: boolean; remote?: boolean } = {}) {
+    inv.mockImplementation(
+      registryRouter({}, (cmd) => (cmd === 'list_update_targets' ? rows : null)).impl,
+    );
+    render(PageView, {
+      props: {
+        page: pageOf('settings.updates'),
+        pages: bundle.pages,
+        descs,
+        values: defaults,
+        sources: bundle.sources,
+        onnavigate: vi.fn(),
+        ...props,
+      },
+    });
+  }
+
+  it('reads the hub through list_update_targets, agents and the phone included', async () => {
+    updates();
+    const table = await screen.findByTestId('data-table-updates.targets');
+    await waitFor(() => expect(within(table).getByText('mercury')).toBeTruthy());
+    expect(within(table).getByText('Phone')).toBeTruthy();
+    expect(within(table).getAllByText('0.5.4').length).toBeGreaterThan(1);
+    expect(inv).toHaveBeenCalledWith('list_update_targets', undefined);
+    expect(inv).not.toHaveBeenCalledWith('fetch_page_source', expect.anything());
+  });
+
+  it('still shows on a paired desktop, where its command routes to the hub', async () => {
+    updates({ readonly: true, remote: true });
+    const table = await screen.findByTestId('data-table-updates.targets');
+    await waitFor(() => expect(within(table).getByText('Device 7')).toBeTruthy());
+  });
+});

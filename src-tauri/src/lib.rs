@@ -405,6 +405,7 @@ pub fn run() {
             commands::sessions::list_sessions,
             commands::sessions::new_session,
             commands::sessions::kill_session,
+            commands::sessions::shell_terminals,
             commands::sessions::safe_kill_session,
             commands::sessions::inspect_safe_kill,
             commands::sessions::discard_kill_session,
@@ -573,6 +574,7 @@ pub fn run() {
             commands::federation::list_peer_links,
             commands::federation::link_peer_hub,
             commands::federation::unlink_peer_hub,
+            commands::updates::list_update_targets,
             commands::debug_devices::list_debug_devices,
             commands::debug_devices::scan_debug_devices,
             commands::debug_devices::update_debug_device,
@@ -585,6 +587,7 @@ pub fn run() {
             commands::debug_devices::debug_device_logs,
             commands::debug_devices::debug_device_screenshot,
             commands::prs::list_pull_requests,
+            commands::presence::session_presence,
             commands::pages::setting_history,
             commands::pages::set_fleet_setting,
             commands::tasks::list_tasks,
@@ -613,6 +616,7 @@ pub fn run() {
             commands::mutate::repo_stage,
             commands::mutate::repo_unstage,
             commands::mutate::repo_commit_create,
+            commands::mutate::draft_commit_message,
             commands::mutate::repo_fetch,
             commands::mutate::repo_pull,
             commands::mutate::repo_push,
@@ -636,6 +640,8 @@ pub fn run() {
             commands::account_usage::account_usage_history,
             commands::account_usage::account_spend,
             commands::account_usage::check_account_headroom,
+            commands::account_usage::propose_host_placement,
+            commands::account_usage::record_host_placement,
             commands::mcp::mcp_status,
             commands::mcp::mcp_configure,
             commands::mcp::install_fleet_hook,
@@ -714,6 +720,7 @@ pub fn run() {
             pty::pty_close,
             pty::pty_drain,
             commands::editor::open_session_in_editor,
+            commands::windows::open_terminal_window,
             commands::voice::voice_claim,
             commands::voice::voice_release,
             cancel_command,
@@ -725,6 +732,18 @@ pub fn run() {
             // On exit: close ssh masters AND any open PTY, so we don't leak
             // background ssh processes or an orphaned `tmux attach` / `ssh
             // -tt` child after quit.
+            // A pop-out terminal (step 5.4) going away closes its own PTY and
+            // nothing else: the app, its ssh masters and the main window's
+            // terminals carry on.
+            if let tauri::WindowEvent::Destroyed = event {
+                if commands::windows::is_popout_label(window.label()) {
+                    use tauri::Manager;
+                    if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
+                        pty::close_pty(pty.inner(), window.label());
+                    }
+                    return;
+                }
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 use tauri::Manager;
                 ssh_client_for_exit.shutdown_all();

@@ -81,6 +81,8 @@ export const shareSheetFor = writable<number | null>(null);
 const SESSION_TIER = {
   // ── spec §4.3 invariant 5: the `own` tier, cited not restated ──────────
   kill_session: 'own',
+  // A shell on the owner's host (step 5.3): never through a grant.
+  shell_terminals: 'own',
   safe_kill_session: 'own',
   // `inspect_safe_kill` is the read Safe remove opens with, but it is the
   // first step of a kill and offering it to a driver would be a dialog whose

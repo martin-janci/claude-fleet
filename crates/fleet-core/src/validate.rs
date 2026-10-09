@@ -293,7 +293,15 @@ fn tmux_name_with(value: &str, allow_colon: bool, allow_hash: bool) -> Result<()
 /// commands could not find. The UI trims before calling in; only DevTools /
 /// the MCP API reach here with padding, and they get a clear `E_INVALID`.
 pub fn tmux_name(value: &str) -> Result<(), IpcError> {
-    tmux_name_with(value, false, false)
+    tmux_name_with(value, false, false)?;
+    // A name ending `--sh<N>` is a shell terminal's (step 5.3), which every
+    // session list leaves out: a session created under one would vanish.
+    if crate::tmux::is_shell_terminal_name(value) {
+        return Err(invalid(
+            "session name must not end in --sh and a number; that suffix names a terminal",
+        ));
+    }
+    Ok(())
 }
 
 /// Validate a tmux session name used as a **lookup key**, not a creation

@@ -617,6 +617,12 @@ Lower a person's or org's grant on your session from drive to watch (owner only)
 
 Parameters: `org`, `person`, `session_id`
 
+### `session_presence`
+
+Presence: report that you have a session open (again every heartbeat_secs; leaving: true when you close it) and read who else has. The owner sees everyone; others see the owner and themselves. Returns { session_id, viewers: [{ person_id, name, device?, since, you? }], heartbeat_secs }.
+
+Parameters: `leaving`, `session_id`
+
 ### `session_share`
 
 Share a session you OWN with a person, or an org you are in (its members from now), at watch (read) or drive (also prompt). Owner only; never 'own' or a terminal. Returns the row. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.
@@ -704,6 +710,12 @@ Parameters: `key`, `limit`
 ### `setting_proposals`
 
 Settings proposals waiting for review, each with the key's value now, and can_write: whether this device may decide.
+
+### `shell_terminals`
+
+A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals.
+
+Parameters: `action`, `n`, `session_id`
 
 ### `spawn_review`
 
@@ -818,6 +830,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::list_sessions`
 - `commands::sessions::new_session`
 - `commands::sessions::kill_session`
+- `commands::sessions::shell_terminals`
 - `commands::sessions::safe_kill_session`
 - `commands::sessions::inspect_safe_kill`
 - `commands::sessions::discard_kill_session`
@@ -998,6 +1011,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::debug_device_logs`
 - `commands::debug_devices::debug_device_screenshot`
 - `commands::prs::list_pull_requests`
+- `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`
@@ -1026,6 +1040,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mutate::repo_stage`
 - `commands::mutate::repo_unstage`
 - `commands::mutate::repo_commit_create`
+- `commands::mutate::draft_commit_message`
 - `commands::mutate::repo_fetch`
 - `commands::mutate::repo_pull`
 - `commands::mutate::repo_push`
@@ -1049,6 +1064,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::account_usage::account_usage_history`
 - `commands::account_usage::account_spend`
 - `commands::account_usage::check_account_headroom`
+- `commands::account_usage::propose_host_placement`
+- `commands::account_usage::record_host_placement`
 - `commands::mcp::mcp_status`
 - `commands::mcp::mcp_configure`
 - `commands::mcp::install_fleet_hook`
@@ -1127,6 +1144,7 @@ Frontend commands registered in `src/lib.rs`:
 - `pty::pty_close`
 - `pty::pty_drain`
 - `commands::editor::open_session_in_editor`
+- `commands::windows::open_terminal_window`
 - `commands::voice::voice_claim`
 - `commands::voice::voice_release`
 - `cancel_command`

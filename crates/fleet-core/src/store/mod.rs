@@ -31,6 +31,7 @@ mod local_workspaces;
 mod mission_loop;
 mod nl_census;
 mod orchestration;
+mod org_activity;
 mod org_members;
 mod orgs;
 mod participants;
@@ -78,7 +79,9 @@ mod work_usage;
 mod work_view;
 
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
-pub use aux_usage::{AuxUsageRow, NewAuxUsage, AUX_ORIGIN_PLANNER, AUX_ORIGIN_SUMMARY};
+pub use aux_usage::{
+    AuxUsageRow, NewAuxUsage, AUX_ORIGIN_COMMIT_MESSAGE, AUX_ORIGIN_PLANNER, AUX_ORIGIN_SUMMARY,
+};
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use changesets::{
     AppliedRecord, ChangesetItemRow, ChangesetRow, NewChangesetItem, TriageVerdictRow,
@@ -152,7 +155,7 @@ pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
 pub use routines::{
     NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, ROUTINE_LEASE_SECS, ROUTINE_OVERLAPS,
-    ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
+    ROUTINE_RUN_OUTCOMES, ROUTINE_RUN_OUTCOME_SOURCES, ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
 };
 pub use rows::*;
 pub use schema::known_schema_version;

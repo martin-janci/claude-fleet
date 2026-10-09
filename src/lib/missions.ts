@@ -335,6 +335,32 @@ export function moveLabel(from: string, to: string): string {
   return MOVE_LABEL[to] ?? to;
 }
 
+/** The moves that end a mission. In the New layout they sit in the ⋯ menu
+ *  beside Edit and Pause, each behind a confirm (redesign parity row P19). */
+export const FINAL_MOVES: readonly string[] = ['completed', 'failed', 'cancelled'];
+
+/** A state's moves split for the New layout: Start, Pause and Resume stay
+ *  buttons; Complete, Mark failed and Cancel go to the ⋯ menu. */
+export function splitMoves(state: string): { inline: string[]; menu: string[] } {
+  const all = MISSION_MOVES[state] ?? [];
+  return {
+    inline: all.filter((to) => !FINAL_MOVES.includes(to)),
+    menu: all.filter((to) => FINAL_MOVES.includes(to)),
+  };
+}
+
+/** The confirm line before a move from the ⋯ menu ends a mission. */
+export function finalMoveQuestion(name: string, to: string): string {
+  switch (to) {
+    case 'completed':
+      return `Complete ${name}? It stops changing; its tasks stay.`;
+    case 'failed':
+      return `Mark ${name} failed? It stops changing; its tasks stay.`;
+    default:
+      return `Cancel ${name}? It stops changing; its tasks stay.`;
+  }
+}
+
 /** A mission that no longer changes. */
 export function isFinal(state: string): boolean {
   return state === 'completed' || state === 'failed' || state === 'cancelled';
@@ -381,6 +407,25 @@ export function nodeGlyph(state: string): string {
 /** A node's state in words. */
 export function nodeLabel(state: string): string {
   return state === 'ready' ? 'Ready' : state.charAt(0).toUpperCase() + state.slice(1);
+}
+
+/** Node states a mission is working on now (a run or a person's task in
+ *  progress): its current steps. */
+const WORKING = new Set(['running', 'doing']);
+
+/** Whether `detail`'s mission waits on a person: an open card in the
+ *  confirm queue, or a next step only a person takes (`ask`). */
+export function waitsOnPerson(detail: Pick<MissionDetail, 'plan'>): boolean {
+  const plan = detail.plan;
+  return (plan?.cards ?? []).some((c) => c.state === 'open') || (plan?.steps ?? []).some((s) => s.kind === 'ask');
+}
+
+/** The nodes that carry Comet trails (redesign step 9.12): the current
+ *  steps of an active mission, and none while it waits on a person (the
+ *  manual: no loader while waiting on a person). */
+export function trailNodes(detail: MissionDetail): Set<number> {
+  if (detail.mission.state !== 'active' || waitsOnPerson(detail)) return new Set();
+  return new Set((detail.graph?.nodes ?? []).filter((n) => WORKING.has(n.state)).map((n) => n.item_id));
 }
 
 /** The graph's nodes by wave, W1 first; items the graph leaves out (an

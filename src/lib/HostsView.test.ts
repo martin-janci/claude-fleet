@@ -27,6 +27,7 @@ import {
   fleetUsage,
   host,
   outageUsage,
+  session,
   snapshot,
 } from './hosts_fixture';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
@@ -912,6 +913,59 @@ describe('HostsView: the Hosts table (Layout: New)', () => {
     expect(table()).toBeTruthy();
     await key(table(), 'Escape');
     expect(v.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('New layout: Restore on a lost session works from the detail Open shows', async () => {
+    uiLayout.set('new');
+    const lost = [
+      session('mefistos', 'mef-lost-a', { lost_at: NOW - 10 * MIN, claude_session_id: 'c-a' }),
+      session('mefistos', 'mef-lost-b', { lost_at: NOW - 10 * MIN, claude_session_id: 'c-b' }),
+    ];
+    sessions.update((ss) => [...ss, ...lost]);
+    const base = inv.getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (c: string, x?: unknown) => {
+      if (c === 'restore_host_sessions') {
+        const a = (x as { args: { host_alias: string; dry_run: boolean; session_ids: number[] | null } }).args;
+        return {
+          host_alias: a.host_alias,
+          dry_run: a.dry_run,
+          plan: lost.map((s) => ({
+            session_id: s.id,
+            tmux_name: s.tmux_name,
+            cwd: null,
+            claude_session_id: s.claude_session_id,
+            friendly_name: null,
+            action: 'restore',
+            reason: null,
+          })),
+          results: a.dry_run ? [] : lost.map((s) => ({ session_id: s.id, tmux_name: s.tmux_name, ok: true, error: null })),
+        };
+      }
+      return base(c, x);
+    });
+    mount();
+    await tick();
+    const row = screen.getAllByTestId('hosts-table-row').find((r) => r.dataset.alias === 'mefistos')!;
+    await fireEvent.click(within(row).getByTestId('hosts-table-open'));
+    await tick();
+    await tick();
+    expect(detailAlias()).toBe('mefistos');
+    const restore = within(detail()).getByTestId('restore-lost');
+    expect(restore.textContent).toContain('Restore 2 lost sessions');
+    await fireEvent.click(restore);
+    const confirm = await screen.findByTestId('confirm-restore');
+    expect(screen.getByTestId('confirm-dialog').textContent).toContain('mef-lost-a');
+    expect(calls('restore_host_sessions').map((c) => (c[1] as { args: unknown }).args)).toEqual([
+      { host_alias: 'mefistos', dry_run: true, session_ids: null },
+    ]);
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(calls('restore_host_sessions')).toHaveLength(2));
+    expect((calls('restore_host_sessions')[1][1] as { args: unknown }).args).toEqual({
+      host_alias: 'mefistos',
+      dry_run: false,
+      session_ids: lost.map((s) => s.id),
+    });
+    await waitFor(() => expect(screen.getByTestId('restore-summary').textContent).toContain('Restored 2 of 2'));
   });
 
   it('j/k and Home move the table selection, Enter opens it, and n/s still act on it', async () => {

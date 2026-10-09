@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { get } from 'svelte/store';
 import AppearanceSettings from './AppearanceSettings.svelte';
 import { uiDensity, uiLayout } from './prefs';
@@ -50,5 +50,25 @@ describe('AppearanceSettings', () => {
       expect(get(motionPref)).toBe(id);
       expect(localStorage.getItem('cf:pref:ui.motion')).toBe(`"${id}"`);
     }
+  });
+});
+
+// Parity P11: Appearance is shared by both layouts, so the theme picker works
+// the same with New on.
+describe('AppearanceSettings in the New layout', () => {
+  beforeEach(() => uiLayout.set('new'));
+  afterEach(() => uiLayout.set('classic'));
+
+  it('New layout: shows New as the current layout and picks the theme', async () => {
+    render(AppearanceSettings);
+    expect(screen.getByTestId('appearance-layout-new').getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByTestId('appearance-theme-auto').textContent).toBe('System');
+    await fireEvent.click(screen.getByTestId('appearance-theme-dark'));
+    expect(get(theme)).toBe('dark');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    await fireEvent.click(screen.getByTestId('appearance-theme-auto'));
+    expect(get(theme)).toBe('auto');
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+    expect(get(uiLayout)).toBe('new');
   });
 });

@@ -158,8 +158,14 @@ impl AgentAdapter for Agy {
     /// first launch under this falls through to `--continue`. Reading the
     /// real id back (agy's `cache/last_conversations.json` maps a workspace
     /// to its newest conversation) is left to the routing that stores it.
-    fn mint_conversation_id(&self) -> String {
-        uuid::Uuid::new_v4().to_string()
+    fn mint_conversation_id(&self) -> Option<String> {
+        Some(uuid::Uuid::new_v4().to_string())
+    }
+
+    /// Unused while [`AgentAdapter::mint_conversation_id`] mints a
+    /// placeholder: the no-id launch line.
+    fn start_command(&self, tmux_name: &str, launch: &ClaudeLaunch) -> String {
+        self.launch_command(None, tmux_name, launch)
     }
 
     fn models(&self) -> &'static [PickerOption] {

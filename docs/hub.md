@@ -3271,6 +3271,7 @@ Every command below refuses in hub client mode; the full table, with the command
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
 | `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
+| `draft_commit_message` | the hub exposes no draft tool — a commit message is drafted where the commit is made: in the session, or from a standalone app |
 | `fetch_page_source` | a page's data sources read this fleet's store, which the hub owns; read the same numbers on the hub with usage_report |
 | `flow_back` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |
 | `flow_cancel` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |
@@ -3285,8 +3286,10 @@ Every command below refuses in hub client mode; the full table, with the command
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
 | `merge_host` | merging one host's rows into another is fleet administration, which the hub reserves for its own operator — run it there with `fleet-hub host merge <from> <into>` |
 | `probe_ssh_alias` | it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it |
+| `propose_host_placement` | the decision model and the account usage are the hub's while it owns the fleet; pick the host as usual |
 | `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub provision [--host <alias>] [--content-only]` |
 | `purge_project` | it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub |
+| `record_host_placement` | the decision model's runs are recorded on the hub that owns the fleet; nothing to record here |
 | `refresh_account_usage` | it reads the account's usage over this machine's SSH connection to the host; refresh it on the hub |
 | `remove_host` | removing a host is fleet administration, which the hub reserves for its own operator — remove it there with `fleet-hub` |
 | `remove_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |

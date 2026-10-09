@@ -15,6 +15,8 @@
   import { abandonStart } from './trackers';
   import { readErrorText } from './work_view';
   import { progressText, startSteps } from './start_progress';
+  import { ticketPulse } from './session_loaders';
+  import PulseSteps from './PulseSteps.svelte';
 
   let { sessionId, onclose }: { sessionId: number; onclose: () => void } = $props();
 
@@ -69,6 +71,9 @@
 {#if progress && (alive || error)}
   <span class="sp" data-testid="start-progress">
     <span class="steps">
+      {#if !progress.done && !progress.abandoned}
+        <PulseSteps pulse={ticketPulse(progress)} size={16} markOnly testid="start-pulse" />
+      {/if}
       {#each progress.steps as s (s.id)}
         <span class="step step--{s.state}" data-testid="start-step" data-step={s.id} data-state={s.state}
           >{s.state === 'done' ? '✓' : s.state === 'active' ? '…' : '○'} {s.label}</span
@@ -111,6 +116,7 @@
     flex-wrap: wrap;
     gap: 6px;
     justify-content: flex-end;
+    align-items: center;
   }
   .step--done {
     color: var(--fg);

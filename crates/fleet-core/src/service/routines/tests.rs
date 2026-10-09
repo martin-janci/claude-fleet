@@ -479,6 +479,34 @@ async fn a_fire_on_an_account_over_the_line_is_skipped() {
     assert_eq!(runs_of(&f, r.id)[1].state, "running");
 }
 
+/// Redesign 8.7: a routine names the account it runs as.
+#[test]
+fn a_routine_names_the_account_it_bills() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    assert_eq!(
+        get(&f.store, &ana, r.id).unwrap().account,
+        None,
+        "no login yet"
+    );
+    {
+        let s = lock(&f.store).unwrap();
+        let now = crate::store::now_unix();
+        crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 95.0, now);
+    }
+    let a = get(&f.store, &ana, r.id).unwrap().account.unwrap();
+    assert_eq!(
+        (
+            a.host_alias.as_str(),
+            a.login.profile.as_deref(),
+            a.login.account_uuid.as_str()
+        ),
+        ("mac", Some("work"), "work")
+    );
+    assert!(a.over);
+}
+
 #[tokio::test]
 async fn pause_all_stops_the_schedule_but_not_a_person() {
     let f = fx();
@@ -738,5 +766,189 @@ fn turning_a_routine_back_on_restarts_its_schedule_and_cursor() {
     assert_eq!(
         skip_next(&f.store, &ana, m.id, true).unwrap_err().code,
         codes::E_INVALID_STATE
+    );
+}
+
+// Step 8.10: what a run came to.
+
+fn run_row(f: &Fx, id: i64) -> RoutineRunRow {
+    lock(&f.store)
+        .unwrap()
+        .get_routine_run(id)
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_failed_run_is_failed_from_its_exit_and_nothing_overrides_it() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let mut i = input(&f);
+    i.overlap = Some("parallel".into());
+    save(&f.store, &ana, Some(r.id), &i).unwrap();
+    let errored = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    event(&f, errored.session_id.unwrap(), "stop_failure");
+    f.fake.fail.store(true, Ordering::SeqCst);
+    let unstarted = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    tick_once(&f.deps, OCT8 + 60).await;
+    for id in [errored.id, unstarted.id] {
+        let run = run_row(&f, id);
+        assert_eq!(run.state, "failed");
+        assert_eq!(run.outcome.as_deref(), Some("failed"));
+        assert_eq!(run.outcome_source.as_deref(), Some("exit"));
+        let s = lock(&f.store).unwrap();
+        assert!(!outcome::record(
+            &s,
+            &run,
+            outcome::RunOutcome::Nothing,
+            outcome::OutcomeSource::Jev,
+            OCT8
+        )
+        .unwrap());
+        assert!(!outcome::record(
+            &s,
+            &run,
+            outcome::RunOutcome::DidWork,
+            outcome::OutcomeSource::Rule,
+            OCT8
+        )
+        .unwrap());
+    }
+    assert_eq!(run_row(&f, errored.id).outcome.as_deref(), Some("failed"));
+}
+
+#[tokio::test]
+async fn a_done_run_no_rule_can_read_waits_for_jev_and_nothing_to_do_stays_quiet() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    let sid = run.session_id.unwrap();
+    event(&f, sid, "turn_done");
+    tick_once(&f.deps, OCT8 + 60).await;
+    let done = run_row(&f, run.id);
+    assert_eq!(done.state, "done");
+    assert_eq!(done.outcome, None, "no rule reads a plain finished turn");
+    {
+        let s = lock(&f.store).unwrap();
+        let waiting: Vec<i64> = s
+            .routine_runs_without_outcome(10)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(waiting, vec![run.id]);
+        assert_eq!(
+            s.get_session_by_id(sid).unwrap().unwrap().last_viewed_at,
+            None
+        );
+        // Jev's answer: nothing to do. The session is marked seen, so its
+        // finished turn is not an unread one in the Inbox.
+        assert!(outcome::record(
+            &s,
+            &done,
+            outcome::RunOutcome::Nothing,
+            outcome::OutcomeSource::Jev,
+            OCT8 + 90
+        )
+        .unwrap());
+        assert_eq!(
+            s.get_session_by_id(sid).unwrap().unwrap().last_viewed_at,
+            Some(OCT8 + 90)
+        );
+        assert!(s.routine_runs_without_outcome(10).unwrap().is_empty());
+        // A rule that learns more later still wins over Jev.
+        assert!(outcome::record(
+            &s,
+            &done,
+            outcome::RunOutcome::DidWork,
+            outcome::OutcomeSource::Rule,
+            OCT8 + 95
+        )
+        .unwrap());
+        assert!(!outcome::record(
+            &s,
+            &done,
+            outcome::RunOutcome::Nothing,
+            outcome::OutcomeSource::Jev,
+            OCT8 + 99
+        )
+        .unwrap());
+    }
+    let after = run_row(&f, run.id);
+    assert_eq!(after.outcome.as_deref(), Some("did_work"));
+    assert_eq!(after.outcome_source.as_deref(), Some("rule"));
+}
+
+#[tokio::test]
+async fn the_rules_read_an_open_question_and_a_pull_request() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    let mut done = run.clone();
+    done.state = "done".into();
+    let row = lock(&f.store)
+        .unwrap()
+        .get_session_by_id(run.session_id.unwrap())
+        .unwrap()
+        .unwrap();
+    use outcome::{rule_outcome, OutcomeSource::*, RunOutcome::*};
+    assert_eq!(
+        rule_outcome(&run, Some(&row)),
+        None,
+        "a running run has no outcome"
+    );
+    assert_eq!(rule_outcome(&done, Some(&row)), None);
+    assert_eq!(
+        rule_outcome(&done, None),
+        None,
+        "a vanished session is the exit's to say"
+    );
+
+    let mut asked = row.clone();
+    asked.claude_status = Some("blocked".into());
+    assert_eq!(rule_outcome(&done, Some(&asked)), Some((NeedsPerson, Rule)));
+    let mut j2 = row.clone();
+    j2.turn_outcome = Some("asked".into());
+    assert_eq!(rule_outcome(&done, Some(&j2)), Some((NeedsPerson, Rule)));
+    j2.turn_outcome = Some("finished".into());
+    assert_eq!(
+        rule_outcome(&done, Some(&j2)),
+        None,
+        "finished is Jev's to split"
+    );
+
+    let mut pr = row.clone();
+    pr.pr_url = Some("https://github.com/acme/web/pull/7".into());
+    assert_eq!(rule_outcome(&done, Some(&pr)), Some((DidWork, Rule)));
+    // A question beats a PR: the person is wanted either way.
+    pr.claude_status = Some("blocked".into());
+    assert_eq!(rule_outcome(&done, Some(&pr)), Some((NeedsPerson, Rule)));
+
+    let mut failed = done.clone();
+    failed.state = "failed".into();
+    assert_eq!(rule_outcome(&failed, Some(&pr)), Some((Failed, Exit)));
+    let mut skipped = done;
+    skipped.state = "skipped".into();
+    assert_eq!(rule_outcome(&skipped, None), None);
+}
+
+#[test]
+fn an_outcome_outside_the_list_is_refused() {
+    let f = fx();
+    let s = lock(&f.store).unwrap();
+    assert_eq!(
+        s.set_routine_run_outcome(1, "busy", "jev")
+            .unwrap_err()
+            .code,
+        codes::E_INVALID
+    );
+    assert_eq!(
+        s.set_routine_run_outcome(1, "nothing", "llm")
+            .unwrap_err()
+            .code,
+        codes::E_INVALID
     );
 }

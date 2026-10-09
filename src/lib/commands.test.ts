@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { get } from 'svelte/store';
 import { approvable, commandRows, keepsKind, paletteCommands, runCommand, settingRow, splitPrefix } from './commands';
-import { applyTheme } from './theme';
+import { applyTheme, theme } from './theme';
+import { uiLayout } from './prefs';
 import { allDescriptors } from './pages/testing';
 import { session } from './hosts_fixture';
 import type { PendingInput } from './pending_input';
@@ -73,6 +75,27 @@ describe('palette commands', () => {
     expect(meta(false, 'app.hosts')).toBe('Ctrl+Shift+H');
     expect(meta(true, 'app.shortcuts')).toBe('?');
     expect(meta(true, 'app.pause-all')).toBe('Commands');
+  });
+});
+
+// Parity P11: the ⌘K theme command is shared by both layouts.
+describe('palette commands in the New layout', () => {
+  beforeEach(() => uiLayout.set('new'));
+  afterEach(() => {
+    uiLayout.set('classic');
+    applyTheme('auto');
+  });
+
+  it('New layout: the theme command names the theme it switches to, and switches it', async () => {
+    applyTheme('auto');
+    const ctx = { selected: null, sessionView: 'conversation' as const };
+    const label = () => paletteCommands(ctx).find((c) => c.id === 'app.theme')?.label;
+    expect(label()).toBe('Theme: light');
+    await runCommand('app.theme', ctx);
+    expect(get(theme)).toBe('light');
+    expect(label()).toBe('Theme: dark');
+    await runCommand('app.theme', ctx);
+    expect(get(theme)).toBe('dark');
   });
 });
 
