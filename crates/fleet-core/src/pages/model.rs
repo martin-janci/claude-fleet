@@ -207,6 +207,11 @@ pub struct Section {
     /// than rows.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub tiles: bool,
+    /// Settings fields that are each a subset of the same options, shown as
+    /// one grid: a row per option, a column per field, a tick where the
+    /// field holds the option (Orbit Fleet 11.9, the notifications matrix).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub matrix: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<Condition>,
     pub items: Vec<Item>,

@@ -315,14 +315,15 @@ impl Store {
         let today = d.now.div_euclid(86_400);
         // Org administration phase C: the same slices again, keyed by the
         // session's org as it is now, for the org's spend and budget.
-        let org: Option<i64> = self.conn.query_row(
+        // Redesign 11.8: and by whose session it is (0: nobody's).
+        let (org, person): (Option<i64>, i64) = self.conn.query_row(
             concat!(
                 "SELECT ",
                 crate::session_org_sql!("s"),
-                " FROM sessions s WHERE s.id = ?1"
+                ", COALESCE(s.owner_person_id, 0) FROM sessions s WHERE s.id = ?1"
             ),
             rusqlite::params![session_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         // Redesign 4.2: and again keyed by the session's account and the
         // slice's model, for cost per account and per model.
@@ -340,6 +341,7 @@ impl Store {
             self.add_usage_daily(day, host_alias, backfill, t)?;
             if let Some(org) = org {
                 self.add_usage_daily_org(day, org, backfill, t)?;
+                self.add_usage_daily_person(day, org, person, backfill, t)?;
             }
             self.add_usage_daily_account(day, &account, slice_model.unwrap_or(""), backfill, t)
         };
@@ -481,6 +483,58 @@ impl Store {
              WHERE account_uuid = ?1 AND day >= ?2 AND backfill = 0 GROUP BY day",
         )?;
         let rows = stmt.query_map(rusqlite::params![account_uuid, since_day], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Add `t` to one `usage_daily_person` row (redesign 11.8), keyed
+    /// `(day, org_id, person_id, backfill)`; `person_id` 0 is nobody's.
+    fn add_usage_daily_person(
+        &self,
+        day: i64,
+        org_id: i64,
+        person_id: i64,
+        backfill: bool,
+        t: &UsageTotals,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO usage_daily_person (day, org_id, person_id, backfill, input_tokens, \
+             output_tokens, cache_write_tokens, cache_read_tokens, cost_micros) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+             ON CONFLICT(day, org_id, person_id, backfill) DO UPDATE SET \
+             input_tokens = input_tokens + excluded.input_tokens, \
+             output_tokens = output_tokens + excluded.output_tokens, \
+             cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens, \
+             cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens, \
+             cost_micros = cost_micros + excluded.cost_micros",
+            rusqlite::params![
+                day,
+                org_id,
+                person_id,
+                backfill as i64,
+                t.input_tokens,
+                t.output_tokens,
+                t.cache_write_tokens,
+                t.cache_read_tokens,
+                t.cost_micros
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// One org's LIVE spend by person, summed over `since_day..`:
+    /// `person id (0: nobody's) → cost_micros`.
+    pub fn org_person_live_cost_since(
+        &self,
+        org: i64,
+        since_day: i64,
+    ) -> Result<std::collections::BTreeMap<i64, i64>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT person_id, SUM(cost_micros) FROM usage_daily_person \
+             WHERE org_id = ?1 AND day >= ?2 AND backfill = 0 GROUP BY person_id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![org, since_day], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
         })?;
         rows.collect()

@@ -21,8 +21,7 @@ describe('ShortcutSheet', () => {
     expect(row('session-list.down')?.textContent).toContain('J or ↓');
     expect(row('inspector')?.textContent).toContain('⌥⌘B');
     expect(row('new-terminal')?.textContent).toContain('⌥⌘T');
-    // Planned chords are not listed until their step wires them.
-    expect(row('go-to-file')).toBeNull();
+    expect(row('go-to-file')?.textContent).toContain('⌥⌘P');
     const scopes = screen.getAllByTestId('shortcut-section').map((s) => s.dataset.scope);
     expect(scopes[0]).toBe('global');
     expect(scopes).toContain('hosts');

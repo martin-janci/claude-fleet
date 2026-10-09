@@ -289,6 +289,10 @@ pub enum ItemLabel {
     /// One of an org's "Needs an admin" (`service::org_needs::AdminNeed`):
     /// what it is in a line, then why or when, listed rather than chipped.
     AdminNeed,
+    /// One person's share of an org's spend (`service::org_spend::
+    /// PersonSpend`): a table row of who, then today, 7 days and the month
+    /// in dollars; nobody's reads "Routines, missions and unclaimed".
+    PersonSpend,
 }
 
 /// A line under a field's value where its section shows tiles: a closed
@@ -540,6 +544,12 @@ const ORG: ResourceType = ResourceType {
             "Last 14 days",
             "Estimated cost of its sessions on each of the last 14 days (UTC), today last.",
             FieldKind::MoneySeries,
+        ),
+        FieldSpec::new(
+            "spend_by_person",
+            "By person",
+            "Whose sessions spent it: today, the last 7 days and this month (UTC). Shown only to an admin who sees every session; otherwise it is hidden whole, never in part.",
+            FieldKind::Items { item_label: ItemLabel::PersonSpend, remove: None, add: &[] },
         ),
         FieldSpec::new(
             "needs_admin",
@@ -1287,8 +1297,9 @@ mod tests {
         for f in org.fields {
             if let FieldKind::Items { remove, add, .. } = &f.kind {
                 // The org's catalogs are shown, never changed here: they are
-                // added and removed on Settings → Catalogs.
-                if ["catalogs", "needs_admin"].contains(&f.id) {
+                // added and removed on Settings → Catalogs. Spend by person
+                // and what needs an admin are read-only reports.
+                if ["catalogs", "needs_admin", "spend_by_person"].contains(&f.id) {
                     assert!(remove.is_none() && add.is_empty(), "{}", f.id);
                     continue;
                 }

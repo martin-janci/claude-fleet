@@ -573,6 +573,10 @@ impl Store {
             "DELETE FROM usage_daily_org WHERE org_id = ?1",
             rusqlite::params![id],
         )?;
+        tx.execute(
+            "DELETE FROM usage_daily_person WHERE org_id = ?1",
+            rusqlite::params![id],
+        )?;
         // Phase D (migration 107): its members become FORMER members — the
         // row stays, so a person whose last company this was reads nothing
         // of any org rather than every org's work — and what was shared with

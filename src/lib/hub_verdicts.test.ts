@@ -192,6 +192,7 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
     'repo_stage',
     'repo_unstage',
     'repo_commit_create',
+    'draft_commit_message',
     'repo_fetch',
     'repo_pull',
     'repo_push',

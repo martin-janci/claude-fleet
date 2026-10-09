@@ -8,7 +8,7 @@ fn claude_is_the_adapter_for_every_kind_but_shell() {
     }
     assert!(for_kind("shell").is_none());
     assert_eq!(by_id("claude").map(|a| a.label()), Some("Claude Code"));
-    for no_adapter_yet in ["shell", "codex", "agy", "nope"] {
+    for no_adapter_yet in ["shell", "nope"] {
         assert!(by_id(no_adapter_yet).is_none(), "{no_adapter_yet}");
     }
 }
@@ -34,9 +34,9 @@ fn claude_launches_exactly_as_before() {
             );
         }
     }
-    let minted = a.mint_conversation_id();
+    let minted = a.mint_conversation_id().expect("Claude Code mints its ids");
     assert!(a.valid_conversation_id(&minted), "{minted}");
-    assert_ne!(minted, a.mint_conversation_id());
+    assert_ne!(Some(minted), a.mint_conversation_id());
     assert!(!a.valid_conversation_id("x'; rm -rf ~"));
 }
 
@@ -118,5 +118,138 @@ fn claude_lists_mirror_the_composer() {
     assert_eq!(
         ts_entries(&ts, "SLASH_COMMANDS", ("name", "description")),
         slash
+    );
+}
+
+// Agy (12.3). PROVISIONAL: no machine fleet runs on has agy, so the panes
+// and the stream below are transcribed from agy's documentation, not
+// captured. Replace them with `tmux capture-pane -p` output from a real agy.
+
+#[test]
+fn agy_is_known_by_id() {
+    let a = by_id("agy").expect("agy adapter");
+    assert_eq!(a.id(), crate::store::AGENT_AGY);
+    assert_eq!(a.label(), "Agy");
+    assert!(crate::store::AGENTS.contains(&a.id()));
+}
+
+#[test]
+fn agy_launches_resume_then_continue() {
+    let a = by_id("agy").unwrap();
+    let id = "0b6f1f9e-3c2a-4b1e-9a8d-1c2b3d4e5f60";
+    let plain = a.launch_command(None, "dev-x", &ClaudeLaunch::default());
+    assert!(plain.contains("agy --continue; exec"), "{plain}");
+    assert!(
+        !plain.contains("--name"),
+        "agy takes no session name: {plain}"
+    );
+
+    let full = ClaudeLaunch {
+        model: Some("gemini-3.8-flash".into()),
+        effort: Some("high".into()),
+        profile: Some("work".into()),
+    };
+    let cmd = a.launch_command(Some(id), "dev-x", &full);
+    assert!(
+        cmd.contains(&format!(
+            "agy --conversation '{id}' --model 'gemini-3.8-flash' --effort 'high' 2>/dev/null \
+             || agy --continue --model 'gemini-3.8-flash' --effort 'high';"
+        )),
+        "{cmd}"
+    );
+    assert!(
+        !cmd.contains("CLAUDE_CONFIG_DIR"),
+        "a Claude profile does not apply to agy: {cmd}"
+    );
+    assert!(cmd.ends_with("exec ${SHELL:-/bin/zsh} -l"), "{cmd}");
+}
+
+#[test]
+fn agy_drops_what_it_does_not_take() {
+    let a = by_id("agy").unwrap();
+    for effort in ["xhigh", "max"] {
+        let launch = ClaudeLaunch {
+            model: Some("default".into()),
+            effort: Some(effort.into()),
+            profile: None,
+        };
+        let cmd = a.launch_command(None, "x", &launch);
+        assert!(!cmd.contains("--effort"), "{effort}: {cmd}");
+        assert!(!cmd.contains("--model"), "default is no flag: {cmd}");
+    }
+    let values: Vec<&str> = a.effort_levels().iter().map(|o| o.value).collect();
+    assert_eq!(values, ["low", "medium", "high"]);
+    assert!(a
+        .models()
+        .iter()
+        .all(|m| crate::validate::claude_model(m.value).is_ok()));
+    assert!(a.launch_switch("/model gemini-3.8-flash").is_none());
+    assert!(a.slash_commands().iter().any(|c| c.name == "resume"));
+    let minted = a.mint_conversation_id().expect("a placeholder id");
+    assert!(a.valid_conversation_id(&minted));
+    assert!(!a.valid_conversation_id("x'; rm -rf ~"));
+}
+
+/// agy's tool approval dialog, as the Real Python walk-through prints it.
+#[test]
+fn agy_approval_dialog_reads_as_a_permission_prompt() {
+    use crate::service::pane_intel::{ClaudeStatus, WaitingFor};
+    let pane = "\
+● ListDir(/home/me/expense-report)
+Command
+  Requesting permission for: python cli.py transactions.csv
+Do you want to proceed?
+> 1. Yes
+  2. Yes, and always allow in this conversation for commands that start with 'python cli.py transactions.csv'
+  3. Yes, and always allow for commands that start with 'python cli.py transactions.csv' (Persist to settings.json)
+  4. No
+";
+    let intel = by_id("agy").unwrap().analyze_pane(pane);
+    assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
+    assert_eq!(intel.waiting_for, Some(WaitingFor::Permission));
+    let input = intel.pending_input.expect("pending input");
+    assert_eq!(input.question.as_deref(), Some("Do you want to proceed?"));
+    assert_eq!(input.options.len(), 4);
+    assert!(input.options[0].selected && input.options[0].label == "Yes");
+    assert_eq!(input.options[3].label, "No");
+}
+
+/// The same dialog with agy's `> ` input line drawn below it is scrollback.
+#[test]
+fn agy_answered_dialog_above_the_prompt_is_not_pending() {
+    let pane = "\
+Do you want to proceed?
+  1. Yes
+  4. No
+● Ran python cli.py transactions.csv
+────────────────────────────────────────
+> 
+";
+    let intel = by_id("agy").unwrap().analyze_pane(pane);
+    assert!(intel.pending_input.is_none(), "{intel:?}");
+}
+
+/// Headless `--output-format stream-json`, shaped as agy's headless page
+/// documents it.
+#[test]
+fn agy_reads_a_stream_json_conversation() {
+    let ndjson = r#"{"event":"init","cwd":"/w","tools":[],"permission_mode":"request-review"}
+{"event":"step_update","conversation_id":"c","step_index":0,"state":"DONE","step_type":"user_input","text_delta":"Fix the bug"}
+{"event":"step_update","conversation_id":"c","step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"run_command"}
+{"event":"step_update","conversation_id":"c","step_index":1,"state":"DONE","step_type":"tool","tool_name":"run_command"}
+{"event":"step_update","conversation_id":"c","step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"Fixed "}
+{"event":"step_update","conversation_id":"c","step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"it."}
+{"event":"step_update","conversation_id":"c","step_index":2,"state":"DONE","step_type":"agent_response"}
+not json
+{"event":"result","conversation_id":"c","status":"SUCCESS","response":"Fixed it."}"#;
+    let turns = by_id("agy").unwrap().parse_transcript(ndjson);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].prompt.as_deref(), Some("Fix the bug"));
+    assert_eq!(turns[0].items.len(), 2);
+    assert!(
+        matches!(&turns[0].items[0], crate::service::transcript::ConvItem::Tool { name, .. } if name == "run_command")
+    );
+    assert!(
+        matches!(&turns[0].items[1], crate::service::transcript::ConvItem::Text { text } if text == "Fixed it.")
     );
 }

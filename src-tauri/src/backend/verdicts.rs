@@ -116,6 +116,10 @@ const NO_GIT_WRITE_TOOL: &str =
     "the hub exposes no git-write tool — a remote client must not stage or commit under a \
      running agent; do it in the session, or from a standalone app";
 
+const NO_DRAFT_TOOL: &str =
+    "the hub exposes no draft tool — a commit message is drafted where the commit is made: \
+     in the session, or from a standalone app";
+
 /// Every command in `generate_handler!`, grouped as there, with its verdict.
 pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── health and this app's own logs ──────────────────────────────────────
@@ -815,7 +819,21 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "unlink_peer",
         },
     ),
+    // Settings → Updates (Orbit Fleet 11.9b): what each part of the fleet
+    // runs, from the hub's update picture.
+    (
+        "list_update_targets",
+        Verdict::Routed {
+            tool: "update_status",
+        },
+    ),
     ("list_pull_requests", Verdict::Routed { tool: "prs" }),
+    (
+        "session_presence",
+        Verdict::Routed {
+            tool: "session_presence",
+        },
+    ),
     (
         "list_debug_devices",
         Verdict::Routed {
@@ -1010,6 +1028,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "draft_commit_message",
+        Verdict::LocalOnly {
+            instead: NO_DRAFT_TOOL,
+        },
+    ),
+    (
         "repo_fetch",
         Verdict::LocalOnly {
             instead: NO_GIT_WRITE_TOOL,
@@ -1132,9 +1156,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── account usage ───────────────────────────────────────────────────────
     (
         "list_account_usage",
-        Verdict::LocalOnly {
-            instead: "this app does not poll account usage while a hub owns the fleet, so \
-                      the cache is empty; read usage on the hub",
+        Verdict::Routed {
+            tool: "account_usage",
         },
     ),
     (
@@ -1156,6 +1179,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::LocalOnly {
             instead: "this app does not poll account usage while a hub owns the fleet, so \
                       it cannot tell which account has headroom; start the session as usual",
+        },
+    ),
+    (
+        "propose_host_placement",
+        Verdict::LocalOnly {
+            instead: "the decision model and the account usage are the hub's while it owns \
+                      the fleet; pick the host as usual",
+        },
+    ),
+    (
+        "record_host_placement",
+        Verdict::LocalOnly {
+            instead: "the decision model's runs are recorded on the hub that owns the fleet; \
+                      nothing to record here",
         },
     ),
     (
@@ -1215,17 +1252,19 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       the hub",
         },
     ),
+    // Redesign step 9.2: the operator's calls that wait for a person wait in
+    // the queue of the server they reached, which on a hub-backed desktop is
+    // the hub's. The owner's device lists and answers it there.
     (
         "mcp_confirm",
-        Verdict::SameInBoth {
-            why: "answers this process's own confirm queue, which is empty in remote mode — \
-                  answering nothing is correct",
+        Verdict::Routed {
+            tool: "answer_mcp_confirm",
         },
     ),
     (
         "mcp_pending_confirms",
-        Verdict::SameInBoth {
-            why: "the same queue, the same reason",
+        Verdict::Routed {
+            tool: "mcp_confirms",
         },
     ),
     // ── the UX agent's operator session ─────────────────────────────────────

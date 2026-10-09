@@ -570,6 +570,15 @@ fn hosts_has_claude_profiles(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// `already_applied` guard of migration 129.
+fn grants_have_profile(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orchestration_grants') WHERE name = 'profile'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn sessions_has_turn_outcome(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'turn_outcome'",
@@ -634,6 +643,16 @@ fn work_items_has_orchestration_project(conn: &Connection) -> rusqlite::Result<b
 fn host_tokens_has_rotated_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('host_tokens') WHERE name = 'rotated_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 139.
+fn routine_runs_has_outcome_source(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'outcome_source'",
         [],
         |r| r.get(0),
     )?;
@@ -1572,6 +1591,30 @@ const MIGRATIONS: &[Migration] = &[
     // and the fleet-agent install jobs (`agent_installs`). New tables only,
     // `IF NOT EXISTS`, safe to re-run.
     Migration::plain(135, include_str!("../../migrations/135_host_setup.sql")),
+    // PR shepherd: a person's standing rule per project and one row per
+    // problem the shepherd saw on a session's PR (two CREATE TABLE IF NOT
+    // EXISTS, idempotent as written).
+    Migration::plain(136, include_str!("../../migrations/136_pr_shepherd.sql")),
+    // Orbit Fleet 8.7: a mission grant names its login (one ADD COLUMN,
+    // guarded).
+    Migration {
+        version: 137,
+        sql: include_str!("../../migrations/137_grant_profile.sql"),
+        already_applied: Some(grants_have_profile),
+    },
+    // Orbit Fleet 11.8: `usage_daily_person`, an org's spend by person. A
+    // new table, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        138,
+        include_str!("../../migrations/138_usage_daily_person.sql"),
+    ),
+    // Orbit Fleet 8.10: what a routine run came to (two ADD COLUMNs,
+    // guarded on the last).
+    Migration {
+        version: 139,
+        sql: include_str!("../../migrations/139_routine_run_outcome.sql"),
+        already_applied: Some(routine_runs_has_outcome_source),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

@@ -22,10 +22,13 @@ vi.mock('@tauri-apps/api/event', () => {
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import McpConfirmDialog from './McpConfirmDialog.svelte';
+import { resetConfirmsForTests } from './confirms';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
+  // The queue is module state shared with Control's cards (step 9.2).
+  resetConfirmsForTests();
   inv.mockReset();
   inv.mockImplementation(async (cmd: string) => {
     switch (cmd) {

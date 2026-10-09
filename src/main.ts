@@ -10,6 +10,7 @@ import { initMotion } from './lib/motion';
 import { installErrorReporting } from './lib/error_report';
 import { selectedSession } from './lib/selection';
 import { trackViewedSession } from './lib/session_viewed';
+import { trackPresence } from './lib/presence';
 import { startTraySync } from './lib/tray_state';
 import { currentPopout } from './lib/terminal_popout';
 import TerminalPopout from './lib/TerminalPopout.svelte';
@@ -18,7 +19,7 @@ initTheme();
 initMotion();
 installErrorReporting();
 // A pop-out terminal window (redesign 5.4) is this page too, and shows one
-// terminal: no tray (the main window owns it) and no "viewed" marks.
+// terminal: no tray (the main window owns it), no "viewed" marks, no presence.
 const popout = currentPopout();
 const target = document.getElementById('app')!;
 let app: ReturnType<typeof mount>;
@@ -26,6 +27,8 @@ if (popout) {
   app = mount(TerminalPopout, { target, props: { popout } });
 } else {
   trackViewedSession(selectedSession);
+  // Who else has the open session on screen (redesign 11.7b); a hub feature.
+  trackPresence(selectedSession);
   // The tray and menu-bar icon follows the fleet (redesign 3.17).
   startTraySync();
   app = mount(App, { target });

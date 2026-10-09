@@ -49,6 +49,17 @@
           "key": "update.mobile.mode"
         }
       ]
+    },
+    {
+      "title": "What runs where",
+      "items": [
+        {
+          "type": "table",
+          "source": {
+            "id": "updates.targets"
+          }
+        }
+      ]
     }
   ]
 }

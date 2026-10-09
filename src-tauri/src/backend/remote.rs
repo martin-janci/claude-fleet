@@ -825,6 +825,13 @@ impl HubBackend {
         self.route("set_quick_replies", &args).await
     }
 
+    /// `commands::account_usage::list_account_usage`.
+    pub async fn list_account_usage(
+        &self,
+    ) -> Result<Vec<fleet_core::service::account_usage::AccountUsageSnapshot>, IpcError> {
+        self.route("list_account_usage", &json!({})).await
+    }
+
     /// `commands::prs::list_pull_requests`.
     pub async fn list_pull_requests(
         &self,

@@ -1,0 +1,26 @@
+
+  >_ OpenAI Codex (v0.162.0)
+     /home/dev/repo
+
+› please run the check
+
+✔ You approved codex to run curl -sI https://example.com this time
+
+• Failed (exit 56) curl -sI https://example.com
+  └ Content-Length: 69
+    Connection: close
+
+    + 3 lines (^t to expand)
+
+• Done.
+
+  Worked for 5s • 10:42 PM
+
+› think deeply
+
+• Working (4s • esc to interrupt)
+
+› Ask Codex to do anything
+
+  mock-model default · /home/dev/repo · ⠦
+  ← for agents · ? for shortcuts                                                               ⚠ 1 warning · f2 to view

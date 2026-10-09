@@ -13,6 +13,7 @@
   import { projects } from './projects';
   import { readPref, uiLayout, writePref } from './prefs';
   import MissionGraph from './MissionGraph.svelte';
+  import Loader from './Loader.svelte';
   import { defaultLaneBy, type LaneBy } from './mission_graph';
   import { PLAN_IMPORT_MAX_ROWS, importLine, importMissionPlan, parsePlan } from './plan_import';
   import { hosts } from './hosts';
@@ -22,6 +23,8 @@
   import type { IpcError } from './result';
   import {
     MISSION_MOVES,
+    finalMoveQuestion,
+    splitMoves,
     createMission,
     deleteMission,
     doneWhenRows,
@@ -72,6 +75,7 @@
     POLICY_MIN_WAKE_SECS,
     type HumanError,
     type MissionCard,
+    trailNodes,
     type GraphNode,
     type Mission,
     type MissionDetail,
@@ -116,6 +120,11 @@
   let repoPick = $state<number | ''>('');
   let repoRole = $state('');
   let confirmDelete = $state(false);
+  // Parity row P19 (New layout): Complete, Mark failed and Cancel live in a
+  // ⋯ menu beside Edit and Pause, and each asks before it ends the mission.
+  let moreOpen = $state(false);
+  let confirmMove = $state<string | null>(null);
+  let moreEl = $state<HTMLElement>();
 
   const saveBlocked = $derived(!!hubActionBlocked('save_mission', $hubStatus, $hubConnection));
   const changeBlocked = $derived(!!hubActionBlocked('set_mission_state', $hubStatus, $hubConnection));
@@ -225,6 +234,9 @@
   const autonomy = $derived(plan ? autonomyWords(plan.autonomy) : null);
   const pressable = $derived((plan?.steps ?? []).filter((s) => s.kind !== 'ask'));
   const openCards = $derived((plan?.cards ?? []).filter((c) => c.state === 'open'));
+  // Comet trails beside the mission's current steps (redesign step 9.12,
+  // New layout): only while it runs, never while it waits on a person.
+  const trails = $derived($uiLayout === 'new' && detail ? trailNodes(detail) : new Set<number>());
   let answers = $state<Record<number, string>>({});
   let granting = $state(false);
   let grantLevel = $state(2);
@@ -308,6 +320,44 @@
   }
   const mayChange = $derived(!!detail?.may_change && !!mission && !isFinal(mission.state));
   const moves = $derived(mission ? (MISSION_MOVES[mission.state] ?? []) : []);
+  const split = $derived(mission ? splitMoves(mission.state) : { inline: [], menu: [] });
+
+  function pickFinal(to: string) {
+    moreOpen = false;
+    confirmMove = to;
+  }
+
+  async function confirmFinal() {
+    const to = confirmMove;
+    confirmMove = null;
+    if (to) await move(to);
+  }
+
+  function moreKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      moreOpen = false;
+      moreEl?.querySelector<HTMLElement>('[data-testid="mission-more"]')?.focus();
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const all = Array.from(moreEl?.querySelectorAll<HTMLElement>('[role=menuitem]:not(:disabled)') ?? []);
+    if (!all.length) return;
+    e.preventDefault();
+    const i = all.indexOf(document.activeElement as HTMLElement);
+    all[(i + (e.key === 'ArrowDown' ? 1 : all.length - 1)) % all.length].focus();
+  }
+
+  $effect(() => {
+    if (!moreOpen) return;
+    moreEl?.querySelector<HTMLElement>('[role=menuitem]:not(:disabled)')?.focus();
+    const away = (e: PointerEvent) => {
+      if (moreEl && !moreEl.contains(e.target as Node)) moreOpen = false;
+    };
+    window.addEventListener('pointerdown', away, true);
+    return () => window.removeEventListener('pointerdown', away, true);
+  });
   const repoChoices = $derived(
     $projects
       .map((p) => p.project)
@@ -346,6 +396,8 @@
     selectedId = id;
     editing = false;
     confirmDelete = false;
+    moreOpen = false;
+    confirmMove = null;
     notice = null;
     plannerFailure = null;
     importOpen = false;
@@ -570,16 +622,71 @@
             <button class="btn btn--quiet" type="button" disabled={busy || saveBlocked} data-testid="mission-edit" onclick={startEdit}
               >Edit</button
             >
-            {#each moves as to (to)}
+            {#if $uiLayout === 'new'}
+              {#each split.inline as to (to)}
+                <button
+                  class="btn btn--chip"
+                  type="button"
+                  disabled={busy || changeBlocked}
+                  data-testid="mission-move-{to}"
+                  onclick={() => void move(to)}>{moveLabel(mission.state, to)}</button
+                >
+              {/each}
+              {#if split.menu.length > 0}
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <span class="more" bind:this={moreEl} onkeydown={moreKey}>
+                  <button
+                    class="btn btn--quiet"
+                    type="button"
+                    aria-label="More mission actions"
+                    aria-haspopup="menu"
+                    aria-expanded={moreOpen}
+                    disabled={busy || changeBlocked}
+                    data-testid="mission-more"
+                    onclick={() => (moreOpen = !moreOpen)}>⋯</button
+                  >
+                  {#if moreOpen}
+                    <span class="more-menu" role="menu" aria-label="Mission actions" data-testid="mission-more-menu">
+                      {#each split.menu as to (to)}
+                        <button
+                          type="button"
+                          role="menuitem"
+                          class="mi"
+                          class:danger={to !== 'completed'}
+                          data-testid="mission-menu-{to}"
+                          onclick={() => pickFinal(to)}>{moveLabel(mission.state, to)}…</button
+                        >
+                      {/each}
+                    </span>
+                  {/if}
+                </span>
+              {/if}
+            {:else}
+              {#each moves as to (to)}
+                <button
+                  class="btn btn--chip"
+                  type="button"
+                  disabled={busy || changeBlocked}
+                  data-testid="mission-move-{to}"
+                  onclick={() => void move(to)}>{moveLabel(mission.state, to)}</button
+                >
+              {/each}
+            {/if}
+          </div>
+          {#if confirmMove}
+            <div class="row confirm-move" role="alertdialog" aria-label="Confirm" data-testid="mission-move-confirm-row">
+              <span>{finalMoveQuestion(mission.name, confirmMove)}</span>
               <button
-                class="btn btn--chip"
+                class="btn"
+                class:btn--danger={confirmMove !== 'completed'}
                 type="button"
                 disabled={busy || changeBlocked}
-                data-testid="mission-move-{to}"
-                onclick={() => void move(to)}>{moveLabel(mission.state, to)}</button
+                data-testid="mission-move-confirm"
+                onclick={() => void confirmFinal()}>{moveLabel(mission.state, confirmMove)}</button
               >
-            {/each}
-          </div>
+              <button class="btn btn--quiet" type="button" data-testid="mission-move-keep" onclick={() => (confirmMove = null)}>Keep</button>
+            </div>
+          {/if}
         {/if}
       {/if}
 
@@ -793,6 +900,9 @@
               {#if it}
                 <li data-testid="mission-node" data-state={n.state}>
                   <span class="glyph s-{n.state}" title={nodeLabel(n.state)} aria-label={nodeLabel(n.state)}>{nodeGlyph(n.state)}</span>
+                  {#if trails.has(n.item_id)}
+                    <Loader name="comet-trails" size={20} label="Working on it" testid="mission-trails" />
+                  {/if}
                   <span class="main">
                     <span class="title">{it.key ? `${it.key} · ` : ''}{it.title}</span>
                     {#if (n.waiting_for ?? []).length > 0}
@@ -1046,6 +1156,19 @@
   .steps li, .cards li { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
   .cards input { flex: 1 1 8rem; min-width: 0; }
   .missions { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.5rem; font-size: 0.85rem; }
+  .more { position: relative; display: inline-flex; }
+  .more-menu {
+    position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; min-width: 11rem; padding: 0.25rem;
+    display: flex; flex-direction: column; background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius-md); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+  }
+  .mi {
+    text-align: left; border: none; background: transparent; color: var(--fg); cursor: pointer;
+    font: inherit; font-size: 0.85rem; padding: 0.35rem 0.5rem; border-radius: var(--radius-sm, 4px);
+  }
+  .mi:hover, .mi:focus-visible { background: var(--bg-hover); }
+  .mi.danger { color: var(--danger); }
+  .confirm-move { margin-top: 0.3rem; font-size: 0.85rem; }
   .bar, .row { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
   .create { display: flex; flex-direction: column; gap: 0.4rem; width: 100%; }
   input, textarea, select {
