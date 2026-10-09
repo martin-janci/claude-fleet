@@ -476,9 +476,17 @@ mu_num() { echo "$2" | grep -oE "\\\\\"$1\\\\\": ?[0-9]+" | grep -oE '[0-9]+$' |
 # `owner_person_id = NULL` / `visibility = 'unclaimed'` (store/reconcile.rs --
 # a reconcile pass names no owner), which is the population §4.3's holding
 # state exists for.
+# A forced listing runs no pass of its own while another one (the hub's tick,
+# an earlier listing's catch-up) holds the gate: it reads the rows that pass
+# leaves, which may predate $NAME6. So force a pass until one has seen it,
+# bounded: a hub that never reconciles it still fails the check below.
 tmux new-session -d -s "$NAME6" 2>/dev/null
-tool "$PA" "$PUB" "$TOKA" list_sessions '{"force":true}' >/dev/null
-unc1=$("$BIN" session unclaimed --host local --data-dir "$ROOT/a" --port "$PA" 2>&1)
+unc1_seen() {
+  tool "$PA" "$PUB" "$TOKA" list_sessions '{"force":true}' >/dev/null
+  unc1=$("$BIN" session unclaimed --host local --data-dir "$ROOT/a" --port "$PA" 2>&1)
+  echo "$unc1" | grep -q "$NAME6"
+}
+until_ok 50 unc1_seen
 check "a tmux session fleet did not start is reconciled as an unclaimed row" 'echo "$unc1" | grep -q "$NAME6"' "$unc1"
 lh_m=$(tool "$PA" "$PUB" "$TOKA" list_hosts '{}')
 check "on a hub with one person that person is served the per-host unclaimed count" 'echo "$lh_m" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+"' "${lh_m:0:400}"

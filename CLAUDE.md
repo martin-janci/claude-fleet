@@ -152,26 +152,24 @@ purpose, telling you to read the diff and run again without the variable. The
 failure is the receipt, not a problem.
 
 Known Rust flakes — timing-sensitive, so they fail on a loaded box; re-run
-alone before blaming your change: the `CHAIN_BUDGET` migration tests in
-`store/schema/tests_upgrade.rs` (`FILE_OPEN_BUDGET` lifted the file-based
-upgrade test to 30 s **on Windows only**, so on Linux
-`opening_a_pre_work_graph_file_upgrades_it_within_budget` and the two
-in-memory chains still hold `CHAIN_BUDGET` at 5 s), `service::add_project`,
-and `fleet-agent`'s `conn::tests::report_frames_stay_under_the_frame_cap_and_carry_the_rest_over`
-(it fails `Elapsed(())` in a parallel run and passes alone in 0.15 s).
-`work::scale_tests::*` hold their wall-clock budgets only with
-`FLEET_SCALE_BUDGETS=1` (CI sets it); without it an over-budget call is
-printed, not failed — their query-plan checks always run.
+alone before blaming your change: `service::add_project`, and `fleet-agent`'s
+`conn::tests::report_frames_stay_under_the_frame_cap_and_carry_the_rest_over`
+(it failed `Elapsed(())` in a parallel run and passes alone in 0.15 s; review
+r17 could not reproduce either in 24 runs under 3x CPU load). Wall-clock
+budgets hold only with `FLEET_SCALE_BUDGETS=1` (CI sets it): without it an
+over-budget call is printed, not failed. That covers `work::scale_tests::*`
+(their query-plan checks always run) and the M12.1 migration budgets in
+`store/schema/tests_upgrade.rs` (`CHAIN_BUDGET` 5 s, `FILE_OPEN_BUDGET` 30 s
+on Windows), whose row and schema checks always run.
 
-`mcp::tools::tests::a_one_person_fleet_still_sees_its_unclaimed_rows` is the
-opposite shape: it **passes in the full suite and fails run alone**, where
-`list_sessions` answers 12 rows for a store holding 2. Not a leak (the master
-is unrestricted by design and these are unclaimed rows it may see), but a
-test that only pins under load pins nothing, so it is a real defect in the
-test and not yet diagnosed. Ruled out already: cross-test pollution (it
-fails with `--exact` alone), the machine's tmux server (`TMUX_TMPDIR` at an
-empty dir changes nothing), and a seeded template (no migration inserts
-`sessions`).
+A tool-layer test reconciles the REAL machine unless it says otherwise:
+`reconcile_gate()` is process-global, so the first listing in a test process
+probes `local` (tmux and background Claude agents) whenever `hub.local_host`
+is on, which a fresh store defaults to. `test_tools()` in
+`mcp/tools/tests.rs` turns it off unless the test set it; a test that builds
+`FleetTools` itself sets `hub.local_host=false`. That was why
+`a_one_person_fleet_still_sees_its_unclaimed_rows` failed alone and passed in
+the full suite (another test had taken the gate first).
 
 Not a flake:
 `cargo test -p fleet-core --lib -- --test-threads=1` takes 23–25 minutes

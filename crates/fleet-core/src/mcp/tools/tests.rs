@@ -1459,7 +1459,23 @@ fn the_control_api_guide_names_every_attention_reason_and_status() {
 
 // ---- handler-level gates (review of #50) ----
 
+/// The tools over `store`, with the real SSH client: so unless the test
+/// itself says otherwise, `hub.local_host` is off. A fresh store defaults it
+/// on, and then the first listing in the process (`reconcile_gate()` is
+/// process-global) reconciles the REAL machine's tmux and background agents
+/// into the store: a test run alone saw a `local` row of whatever Claude was
+/// running on the box, and passed in the full suite only because another
+/// test had taken the gate first.
 fn test_tools(store: Store) -> FleetTools {
+    if store
+        .get_setting(crate::service::hub::SETTING_LOCAL_HOST)
+        .unwrap()
+        .is_none()
+    {
+        store
+            .set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+            .unwrap();
+    }
     FleetTools::new(
         Arc::new(Mutex::new(store)),
         Arc::new(SshClient::new()),

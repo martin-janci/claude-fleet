@@ -32,6 +32,22 @@ const FILE_OPEN_BUDGET: Duration = if cfg!(windows) {
 
 const SEED: u64 = 0x5EED_0012_0001;
 
+/// Fail when `took` is over `budget`, but only with `FLEET_SCALE_BUDGETS=1`
+/// (CI sets it), as `work::scale_tests` does: the budgets are wall-clock, so
+/// on a loaded box they fail for the load, not the migrations. Unset, an
+/// over-budget step is printed. Everything else these tests check is exact
+/// and always enforced.
+fn within_budget(what: &str, took: Duration, budget: Duration) {
+    if took < budget {
+        return;
+    }
+    let msg = format!("{what} took {took:?}, over its {budget:?} budget");
+    if std::env::var("FLEET_SCALE_BUDGETS").is_ok_and(|v| v == "1") {
+        panic!("{msg}");
+    }
+    println!("[m12.1] {msg}; not enforced without FLEET_SCALE_BUDGETS=1");
+}
+
 fn store_over(conn: Connection) -> Store {
     Store {
         conn,
@@ -120,10 +136,7 @@ fn the_chain_from_pre_work_graph_to_latest_is_fast_complete_and_sound() {
         pending.first().unwrap().version,
         pending.last().unwrap().version,
     );
-    assert!(
-        elapsed < CHAIN_BUDGET,
-        "the migration chain took {elapsed:?}, over its {CHAIN_BUDGET:?} budget"
-    );
+    within_budget("the migration chain", elapsed, CHAIN_BUDGET);
 
     // Every migration is recorded, and nothing beyond the known list.
     let (_, versions, _) = fingerprint(&store);
@@ -363,10 +376,7 @@ fn opening_a_pre_work_graph_file_upgrades_it_within_budget() {
     let store = Store::open_with_bus(&path, Arc::new(NoopEventBus)).expect("open and upgrade");
     let elapsed = started.elapsed();
     println!("M12.1: open_with_bus upgraded the generated state.db in {elapsed:?}");
-    assert!(
-        elapsed < FILE_OPEN_BUDGET,
-        "opening took {elapsed:?}, over {FILE_OPEN_BUDGET:?}"
-    );
+    within_budget("opening", elapsed, FILE_OPEN_BUDGET);
     assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     assert_eq!(
         count(&store, "SELECT COUNT(*) FROM sessions"),
@@ -393,10 +403,10 @@ fn per_migration_times_on_the_generated_database() {
         total += took;
         assert!(preexisting.is_empty());
         println!("M12.1: migration {:03} took {took:?}", m.version);
-        assert!(
-            took < CHAIN_BUDGET,
-            "migration {} alone took {took:?}",
-            m.version
+        within_budget(
+            &format!("migration {} alone", m.version),
+            took,
+            CHAIN_BUDGET,
         );
     }
     store
