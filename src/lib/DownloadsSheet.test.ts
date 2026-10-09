@@ -12,6 +12,7 @@ import DownloadsSheet from './DownloadsSheet.svelte';
 import { _resetDownloadsForTests, savedTo, type Download } from './downloads';
 import { clearNotices } from './notifications';
 import { clearToasts, push } from './toasts';
+import { expectAccessible } from './a11y_check';
 
 const MB = 1024 * 1024;
 const row = (id: number, state: string, extra: Partial<Download> = {}): Download => ({
@@ -103,5 +104,18 @@ describe('Notifications', () => {
     await fireEvent.click(screen.getByTestId('notice-action'));
     expect(run).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId('notice-action')).toBeNull();
+  });
+});
+
+describe('Downloads: accessibility', () => {
+  it('the Downloads sheet is accessible', async () => {
+    savedTo.set(new Map([[6, '/Users/m/Downloads/f6.tar.gz']]));
+    push({ kind: 'error', code: 'E_SSH', message: "Couldn't move to mercury" });
+    await open([
+      row(3, 'failed', { error: 'host went offline' }),
+      row(5, 'fetching', { fetched_bytes: 44 * MB }),
+      row(6, 'ready', { downloaded_at: 1 }),
+    ]);
+    await expectAccessible(screen.getByTestId('downloads-sheet'));
   });
 });

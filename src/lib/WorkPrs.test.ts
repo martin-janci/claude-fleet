@@ -9,6 +9,7 @@ vi.mock('./open_external', () => ({ openExternal: vi.fn(async () => true) }));
 import { invoke } from '@tauri-apps/api/core';
 import { openExternal } from './open_external';
 import WorkPrs from './WorkPrs.svelte';
+import { expectAccessible } from './a11y_check';
 import { sessions } from './sessions';
 import { session } from './hosts_fixture';
 import { prChecksLabel, prRef, prStateLabel, type PullRequestRow } from './prs';
@@ -109,5 +110,11 @@ describe('WorkPrs', () => {
     expect(prChecksLabel({ ci_status: 'failing', review_decision: 'CHANGES_REQUESTED' })).toBe('CI failing · changes requested');
     expect(prChecksLabel({})).toBe('');
     expect(prRef({ url: 'https://x/y', repo: null, number: null })).toBe('https://x/y');
+  });
+
+  it('is accessible', async () => {
+    const { container } = render(WorkPrs);
+    await flush();
+    await expectAccessible(container);
   });
 });

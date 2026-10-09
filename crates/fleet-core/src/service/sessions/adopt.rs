@@ -28,12 +28,20 @@ pub struct AdoptSessionArgs {
     /// Fleet session id of a live tmux session fleet did not start
     /// (`started_at` is null).
     pub session_id: i64,
+    /// The project it is adopted into (step 4.12: Adopt into, prefilled by
+    /// `lost_target`). Omitted keeps the project reconcile found, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
     /// Who adopts it: the row's owner when it has none. Set in Rust from the
     /// connection (`mcp::tools::fleet::owner_for`), never read from the
     /// request, exactly like `NewSessionArgs::owner_person_id`; skipped both
     /// ways, so a hub client never sends it either.
     #[serde(skip)]
     pub owner_person_id: Option<i64>,
+    /// Who adopts: an agent's adoption answers no Jev proposal. Set in Rust
+    /// from the connection, never read from the request.
+    #[serde(skip)]
+    pub decider: crate::store::Decider,
 }
 
 /// True for a row fleet would list under Lost and found as "outside fleet":
@@ -70,9 +78,20 @@ pub fn adopt_session(args: AdoptSessionArgs, store: &Mutex<Store>) -> Result<Ses
             format!("session {} cannot be adopted: {why}", row.id),
         ));
     }
+    if let Some(pid) = args.project_id {
+        if s.get_project(pid)?.is_none() {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("project {pid} not found"),
+            ));
+        }
+    }
     let id = row.id;
     s.atomically(|s| {
         s.set_started_at(id, now_unix())?;
+        if let Some(pid) = args.project_id.filter(|p| row.project_id != Some(*p)) {
+            s.set_session_project(id, pid)?;
+        }
         s.claim_if_unclaimed(id, args.owner_person_id)?;
         // A person adopting it is, from here on, who started it (migration
         // 123): the origin chip names the adopter, as for `new_session`.
@@ -84,6 +103,23 @@ pub fn adopt_session(args: AdoptSessionArgs, store: &Mutex<Store>) -> Result<Ses
         s.insert_session_event_quietly(id, None, EVENT_ADOPTED, detail.as_deref())?;
         Ok(())
     })?;
+    // Jev N4's follow-up: the project a person adopted it into, against the
+    // proposal they were shown (best effort, never an error). An agent's
+    // adoption answers nothing.
+    if args.decider == crate::store::Decider::Person {
+        if let Err(e) = crate::service::decide::lost_target::record_choice(
+            &s,
+            crate::service::decide::lost_target::LostKind::Pane,
+            &crate::service::decide::lost_target::pane_subject(id),
+            args.project_id.or(row.project_id),
+            now_unix(),
+        ) {
+            tracing::warn!(
+                "[decide] adopt_target follow-up not recorded: {}",
+                e.message
+            );
+        }
+    }
     s.get_session_by_id(id)?.ok_or_else(|| {
         IpcError::new(
             codes::E_NOTFOUND,
@@ -109,7 +145,9 @@ mod tests {
         adopt_session(
             AdoptSessionArgs {
                 session_id: id,
+                project_id: None,
                 owner_person_id: owner,
+                decider: Default::default(),
             },
             store,
         )

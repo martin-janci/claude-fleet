@@ -24,10 +24,11 @@
 //!   `response_item` lines carry the assistant's messages and tool calls.
 
 use super::{AgentAdapter, LaunchSwitch, PickerOption, SlashCommand};
+use crate::service::context::ContextUsage;
 use crate::service::pane_intel::{
     self, ClaudeStatus, PaneIntel, PendingInput, PendingOption, StuckKind, WaitingFor,
 };
-use crate::service::transcript::{ConvItem, ConvTurn};
+use crate::service::transcript::{ConvItem, ConvTurn, ToolDetail, TOOL_DETAIL_MAX_CHARS};
 use crate::tmux::ClaudeLaunch;
 
 /// The Codex CLI adapter.
@@ -196,6 +197,14 @@ impl AgentAdapter for CodexCli {
 
     fn parse_transcript(&self, transcript: &str) -> Vec<ConvTurn> {
         parse_rollout(transcript)
+    }
+
+    fn context_usage(&self, transcript: &str) -> Option<ContextUsage> {
+        context_from_rollout(transcript)
+    }
+
+    fn tool_detail(&self, lines: &str, id: &str) -> Option<ToolDetail> {
+        tool_detail_from_rollout(lines, id)
     }
 }
 
@@ -539,6 +548,26 @@ fn new_turn(prompt: Option<String>, at: Option<String>, uuid: Option<String>) ->
     }
 }
 
+/// A tool call's arguments: `function_call` carries them as a JSON string,
+/// `custom_tool_call` as its raw `input` (an `apply_patch` body).
+fn call_args(p: &serde_json::Value) -> serde_json::Value {
+    match p.get("arguments").and_then(|v| v.as_str()) {
+        Some(raw) => {
+            serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
+        }
+        None => p.get("input").cloned().unwrap_or(serde_json::Value::Null),
+    }
+}
+
+/// A tool call's output text.
+fn call_output(p: &serde_json::Value) -> String {
+    match p.get("output") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
 /// The conversation's turns from a Codex rollout file (or its tail: a line
 /// that is not a whole JSON object is skipped).
 fn parse_rollout(text: &str) -> Vec<ConvTurn> {
@@ -593,11 +622,7 @@ fn parse_rollout(text: &str) -> Vec<ConvTurn> {
                     }
                     "function_call" | "custom_tool_call" => {
                         let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
-                        let args = match p.get("arguments").and_then(|v| v.as_str()) {
-                            Some(raw) => serde_json::from_str(raw)
-                                .unwrap_or_else(|_| serde_json::Value::String(raw.to_string())),
-                            None => p.get("input").cloned().unwrap_or(serde_json::Value::Null),
-                        };
+                        let args = call_args(p);
                         let id = p
                             .get("call_id")
                             .and_then(|v| v.as_str())
@@ -606,11 +631,7 @@ fn parse_rollout(text: &str) -> Vec<ConvTurn> {
                     }
                     "function_call_output" | "custom_tool_call_output" => {
                         let call = p.get("call_id").and_then(|v| v.as_str());
-                        let output = match p.get("output") {
-                            Some(serde_json::Value::String(s)) => s.clone(),
-                            Some(other) => other.to_string(),
-                            None => String::new(),
-                        };
+                        let output = call_output(p);
                         finish_tool(&mut turns, call, &output, at.clone());
                         None
                     }
@@ -654,6 +675,176 @@ fn finish_tool(turns: &mut [ConvTurn], call: Option<&str>, output: &str, at: Opt
             }
         }
     }
+}
+
+/// Tool call `id`'s input and output from rollout lines (the whole file or
+/// the lines mentioning the id). `None` when no call has that id.
+fn tool_detail_from_rollout(lines: &str, id: &str) -> Option<ToolDetail> {
+    let mut detail: Option<ToolDetail> = None;
+    let mut output: Option<String> = None;
+    for line in lines.lines() {
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if entry.get("type").and_then(|v| v.as_str()) != Some("response_item") {
+            continue;
+        }
+        let p = &entry["payload"];
+        if p.get("call_id").and_then(|v| v.as_str()) != Some(id) {
+            continue;
+        }
+        match p.get("type").and_then(|v| v.as_str()) {
+            Some("function_call" | "custom_tool_call") if detail.is_none() => {
+                let args = call_args(p);
+                let input = match &args {
+                    serde_json::Value::String(raw) => raw.clone(),
+                    other => serde_json::to_string_pretty(other).unwrap_or_default(),
+                };
+                // A shell call's command, as Claude's `Bash` shows it.
+                let command = (args.get("cmd").is_some() || args.get("command").is_some())
+                    .then(|| tool_target(&args))
+                    .flatten();
+                detail = Some(ToolDetail {
+                    id: id.to_string(),
+                    name: p
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool")
+                        .to_string(),
+                    input: cap(input, TOOL_DETAIL_MAX_CHARS),
+                    edit: None,
+                    command: command.map(|c| cap(c, TOOL_DETAIL_MAX_CHARS)),
+                    result: None,
+                    is_error: false,
+                });
+            }
+            // The first output after the call is its own.
+            Some("function_call_output" | "custom_tool_call_output")
+                if detail.is_some() && output.is_none() =>
+            {
+                output = Some(call_output(p));
+            }
+            _ => {}
+        }
+    }
+    let mut d = detail?;
+    if let Some(out) = output {
+        d.is_error = output_failed(&out);
+        d.result = Some(cap(out, TOOL_DETAIL_MAX_CHARS));
+    }
+    Some(d)
+}
+
+/// The context the conversation used on its last turn: Codex's own
+/// `token_count` event, whose last usage is what the next request sends
+/// and whose window is the model's.
+fn context_from_rollout(text: &str) -> Option<ContextUsage> {
+    let mut last: Option<ContextUsage> = None;
+    let mut model: Option<String> = None;
+    for line in text.lines() {
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let p = &entry["payload"];
+        match (
+            entry.get("type").and_then(|v| v.as_str()),
+            p.get("type").and_then(|v| v.as_str()),
+        ) {
+            (Some("turn_context"), _) => {
+                model = p.get("model").and_then(|v| v.as_str()).map(str::to_string);
+            }
+            (Some("event_msg"), Some("token_count")) => {
+                let info = &p["info"];
+                let tokens = info
+                    .pointer("/last_token_usage/total_tokens")
+                    .and_then(|v| v.as_i64());
+                let window = info.get("model_context_window").and_then(|v| v.as_i64());
+                if let (Some(tokens), Some(window)) = (tokens, window) {
+                    if window > 0 {
+                        last = Some(ContextUsage {
+                            tokens,
+                            window,
+                            model: model.clone(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    last
+}
+
+// ------------------------------------------------- conversation lookup ----
+
+/// Rollout files a lookup reads the first line of, newest first.
+const ROLLOUT_SCAN: usize = 200;
+
+/// The rollout a Codex pane is writing, found on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PaneRollout {
+    /// The conversation id, from the file name.
+    pub id: String,
+    pub path: String,
+}
+
+/// The script that finds, for each tmux session in `panes`, the newest
+/// rollout under `${CODEX_HOME:-~/.codex}/sessions` whose `session_meta`
+/// names the pane's cwd: what `codex resume --last` would resume there.
+/// Codex allots a conversation's id itself and writes its rollout on the
+/// first prompt, so this is how fleet learns the id. Prints
+/// `cdx<TAB>name<TAB>path` per pane found; `None` for no panes.
+pub(crate) fn rollouts_script(panes: &[&str]) -> Option<String> {
+    if panes.is_empty() {
+        return None;
+    }
+    let mut s = format!(
+        r#"set +e
+d="${{CODEX_HOME:-$HOME/.codex}}/sessions"
+[ -d "$d" ] || exit 0
+files=$(ls -1t "$d"/*/*/*/rollout-*.jsonl 2>/dev/null | head -n {ROLLOUT_SCAN})
+[ -n "$files" ] || exit 0
+"#
+    );
+    for name in panes {
+        s.push_str(&format!(
+            r#"c=$(tmux display-message -p -t {target} '#{{pane_current_path}}' 2>/dev/null)
+if [ -n "$c" ]; then
+  printf '%s\n' "$files" | while IFS= read -r f; do
+    if head -n 1 "$f" | grep -qF "\"cwd\":\"$c\""; then printf 'cdx\t%s\t%s\n' {name} "$f"; break; fi
+  done
+fi
+"#,
+            target = crate::shell::quote(&crate::tmux::exact_pane(name)),
+            name = crate::shell::quote(name),
+        ));
+    }
+    Some(s)
+}
+
+/// [`rollouts_script`]'s answer by tmux session. A line whose file name
+/// carries no valid id is skipped.
+pub(crate) fn parse_rollouts(out: &str) -> std::collections::HashMap<String, PaneRollout> {
+    out.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            if parts.next()? != "cdx" {
+                return None;
+            }
+            let name = parts.next()?;
+            let path = parts.next()?;
+            let stem = path.rsplit('/').next()?.strip_suffix(".jsonl")?;
+            let id = stem.get(stem.len().checked_sub(36)?..)?;
+            crate::validate::claude_session_id(id).ok()?;
+            Some((
+                name.to_string(),
+                PaneRollout {
+                    id: id.to_string(),
+                    path: path.to_string(),
+                },
+            ))
+        })
+        .collect()
 }
 
 #[cfg(test)]

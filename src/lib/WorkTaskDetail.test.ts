@@ -12,6 +12,8 @@ vi.mock('./open_external', () => ({ openExternal: vi.fn(async () => true) }));
 import { invoke } from '@tauri-apps/api/core';
 import { openExternal } from './open_external';
 import WorkTaskDetail from './WorkTaskDetail.svelte';
+import { expectAccessible } from './a11y_check';
+import { uiLayout } from './prefs';
 import { sessions } from './sessions';
 import { selectedSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
@@ -718,5 +720,23 @@ describe('WorkTaskDetail', () => {
     expect(before(screen.getByTestId('task-subtasks'), sessionsHead)).toBe(true);
     expect(before(sessionsHead, screen.getByTestId('task-steps'))).toBe(true);
     expect(screen.getByTestId('task-step').textContent).toContain('Read ABC-12');
+  });
+
+  it('is accessible', async () => {
+    uiLayout.set('new');
+    try {
+      handlers.work_task = () => ({
+        ...trackerTask,
+        subtasks: [{ task_id: 'item:41', item_id: 41, key: 'TASK-41', title: 'SELECT stats', origin: 'manual', status: 'todo', live_sessions: 0 }],
+        steps: [{ label: 'ABC-12 login', claude_session_id: 'c1', steps: [{ text: 'Read ABC-12', state: 'completed', at: 1 }] }],
+      });
+      const { container } = render(WorkTaskDetail, { taskId: 'item:12' });
+      await flush();
+      (screen.getByTestId('work-task-more') as HTMLDetailsElement).open = true;
+      await flush();
+      await expectAccessible(container);
+    } finally {
+      uiLayout.set('classic');
+    }
   });
 });

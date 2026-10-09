@@ -169,4 +169,12 @@ impl AgentAdapter for ClaudeCode {
     fn parse_transcript(&self, transcript: &str) -> Vec<ConvTurn> {
         transcript::parse_conversation(transcript)
     }
+
+    fn context_usage(&self, transcript: &str) -> Option<crate::service::context::ContextUsage> {
+        crate::service::context::context_from_jsonl(transcript)
+    }
+
+    fn tool_detail(&self, lines: &str, id: &str) -> Option<transcript::ToolDetail> {
+        transcript::parse_tool_detail(lines, id)
+    }
 }
