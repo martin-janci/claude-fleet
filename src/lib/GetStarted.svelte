@@ -14,7 +14,11 @@
   import { devices, loadDevices } from './devices';
   import { goTo } from './destination';
   import { openSettingsAt, requestHostsView } from './app_views';
-  import { openNewSessionPicker } from './switcher_request';
+  import { projects } from './projects';
+  import { selectSessionExplicitly } from './selection';
+  import WizardDialog from './forms/WizardDialog.svelte';
+  import { newSessionWizard, startNewSession } from './forms/new_session_wizard';
+  import type { FieldProblem, Values } from './forms/forms';
   import { onboardingDismissed } from './onboarding';
   import { openRoutines } from './routines';
   import { sidebarView } from './work_view';
@@ -34,9 +38,32 @@
     void enabledRoutineCount().then((n) => (routines = n));
   });
 
+  const visibleHosts = $derived($hosts.filter((h) => !h.hidden));
+
+  let wizardOpen = $state(false);
+  let wizardBusy = $state(false);
+  let wizardError = $state<string | null>(null);
+  let wizardProblems = $state<FieldProblem[]>([]);
+  const wizard = $derived(newSessionWizard({ projects: $projects.map((p) => p.project), hosts: visibleHosts }));
+
+  async function startFromWizard(values: Values) {
+    wizardBusy = true;
+    wizardError = null;
+    wizardProblems = [];
+    const r = await startNewSession(values);
+    wizardBusy = false;
+    if (!r.ok) {
+      wizardError = r.error ?? null;
+      wizardProblems = r.problems ?? [];
+      return;
+    }
+    wizardOpen = false;
+    selectSessionExplicitly(r.row);
+  }
+
   const items = $derived(
     getStartedItems({
-      visibleHostCount: $hosts.filter((h) => !h.hidden).length,
+      visibleHostCount: visibleHosts.length,
       accountCount: $accounts.length,
       workSessionCount: $sessions.filter((s) => !hasNoPane(s)).length,
       githubConnected: $trackers.some((t) => t.provider === 'github' && t.state === 'ok'),
@@ -54,7 +81,9 @@
       case 'account':
         return goTo('accounts');
       case 'session':
-        return openNewSessionPicker();
+        // The New session wizard: project, host and agent in one place (10.12).
+        wizardOpen = true;
+        return;
       case 'github':
         return openSettingsAt('trackers');
       case 'phone':
@@ -114,6 +143,16 @@
     {/if}
   {/if}
 </section>
+
+{#if wizardOpen}
+  <WizardDialog
+    {wizard}
+    busy={wizardBusy}
+    error={wizardError}
+    problems={wizardProblems}
+    run={(v) => void startFromWizard(v)}
+    onclose={() => (wizardOpen = false)} />
+{/if}
 
 <style>
   .panel {

@@ -104,7 +104,8 @@ describe('GetStarted', () => {
     await fireEvent.click(screen.getByTestId('get-started-account'));
     expect(get(destination)).toBe('accounts');
     await fireEvent.click(screen.getByTestId('get-started-session'));
-    expect(get(switcherRequest)).not.toBeNull();
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    expect(get(switcherRequest)).toBeNull();
     await fireEvent.click(screen.getByTestId('get-started-github'));
     expect(get(settingsSection)).toBe('trackers');
     await fireEvent.click(screen.getByTestId('get-started-phone'));
