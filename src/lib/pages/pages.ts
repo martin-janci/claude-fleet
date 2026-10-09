@@ -104,6 +104,16 @@ export interface Filter {
   default?: number;
 }
 
+/** A master_detail page's records drawn as a graph (`model.rs` `GraphView`). */
+export interface GraphView {
+  center: string;
+  /** The resource's choice field each line follows. */
+  state: string;
+  /** Its values drawn as up (solid); any other is down (dashed). */
+  up: string[];
+  facts: string[];
+}
+
 export interface Page {
   spec: string;
   id: string;
@@ -115,6 +125,8 @@ export interface Page {
   resource?: string;
   /** A `master_detail` page's items about the whole list. */
   list_items?: Item[];
+  /** A `master_detail` page's records also drawn as a graph. */
+  graph?: GraphView;
   /** A `review_apply` page's proposals: settings (`pages/review.ts`) or
    *  guides (`pages/guides.ts`). */
   review?: 'settings' | 'guides';

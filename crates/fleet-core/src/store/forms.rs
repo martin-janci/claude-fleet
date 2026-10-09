@@ -82,6 +82,11 @@ impl Store {
     }
 
     pub fn insert_form(&self, f: &NewForm<'_>) -> Result<FormRow> {
+        // The form is whole now: its draft (`ask { draft }`) has served.
+        self.conn.execute(
+            "DELETE FROM form_drafts WHERE session_id = ?1",
+            [f.session_id],
+        )?;
         self.conn.execute(
             "INSERT INTO form_requests (form_id, session_id, host_alias, spec, why, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -232,6 +237,47 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Write the form `session_id`'s agent is still writing (migration
+    /// 153): the session's row carries it as `form_draft`, so its chat draws
+    /// the form in. Replaces the session's previous draft.
+    pub fn set_form_draft(&self, session_id: i64, draft: &str, why: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO form_drafts (session_id, draft, why, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(session_id) DO UPDATE SET draft = excluded.draft, why = excluded.why,
+                                                   updated_at = excluded.updated_at",
+            rusqlite::params![session_id, draft, why, now_unix()],
+        )?;
+        self.form_touched(&[session_id])
+    }
+
+    /// Drop `session_id`'s draft. `false` when it had none.
+    pub fn clear_form_draft(&self, session_id: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "DELETE FROM form_drafts WHERE session_id = ?1",
+            [session_id],
+        )?;
+        if n > 0 {
+            self.form_touched(&[session_id])?;
+        }
+        Ok(n > 0)
+    }
+
+    /// Drafts last written before `older_than`: an agent that stopped
+    /// half-way does not leave its chat building forever.
+    pub fn purge_form_drafts(&self, older_than: i64) -> Result<usize> {
+        let mut st = self
+            .conn
+            .prepare("DELETE FROM form_drafts WHERE updated_at < ?1 RETURNING session_id")?;
+        let ids: Vec<i64> = st
+            .query_map([older_than], |r| r.get(0))?
+            .collect::<Result<_>>()?;
+        drop(st);
+        if !ids.is_empty() {
+            self.form_touched(&ids)?;
+        }
+        Ok(ids.len())
+    }
+
     pub fn mark_form_swept(&self, form_id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE form_requests SET secrets_on_host = 0 WHERE form_id = ?1",
@@ -289,6 +335,38 @@ mod tests {
             "the merge guard sees it"
         );
         assert_eq!(bus.names(), vec!["session:updated"]);
+    }
+
+    /// Migration 153: a draft bumps and announces its session's row each
+    /// write, and goes with its deleted session.
+    #[test]
+    fn a_draft_bumps_its_row_and_goes_with_its_session() {
+        let (s, bus) = store_with_recorder();
+        let sid = seed(&s);
+        let before = s.get_session_by_id(sid).unwrap().unwrap();
+        bus.take();
+        s.set_form_draft(sid, "{\"title\":\"Pick", Some("why"))
+            .unwrap();
+        let after = s.get_session_by_id(sid).unwrap().unwrap();
+        assert!(
+            after.row_version > before.row_version,
+            "the merge guard sees it"
+        );
+        assert_eq!(bus.names(), vec!["session:updated"]);
+        assert_eq!(
+            after.form_draft.as_ref().map(|d| d.draft.as_str()),
+            Some("{\"title\":\"Pick")
+        );
+        assert!(
+            !s.clear_form_draft(seed_other(&s)).unwrap(),
+            "none to clear"
+        );
+        s.delete_session(sid).unwrap();
+        let n: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM form_drafts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     #[test]

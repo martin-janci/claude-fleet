@@ -38,6 +38,7 @@
   import WorkRules from './WorkRules.svelte';
   import TaskList from './TaskList.svelte';
   import WorkTaskRow from './WorkTaskRow.svelte';
+  import { formatCostMicros } from './sessions';
   import {
     buildSections,
     distributeTasks,
@@ -134,6 +135,9 @@
   }
 
   const sections: OrgSection[] = $derived(page ? buildSections(page.groups, page.orgs, states) : []);
+  // A blocked task names what it waits for by key when that task is loaded.
+  const loadedById = $derived(new Map(sections.flatMap((o) => o.groups.flatMap((g) => g.tasks.map((t) => [t.task_id, t] as const)))));
+  const taskById = (id: string) => loadedById.get(id);
   const selectedSessionId = $derived($selectedSession?.id ?? null);
   const expanded = $derived($workExpanded[$workViewKey] ?? {});
 
@@ -710,6 +714,7 @@
                 <span class="caret" class:open={groupOpen(g)} aria-hidden="true">▸</span>
                 {#if o.color}<span class="org-dot" style="background: {o.color}" aria-hidden="true"></span>{/if}
                 <span class="group-name">{sectionTitle(o, g)}</span>
+                {#if g.cost > 0}<span class="spend" data-testid="work-group-spend" title="Spend of its tasks">{formatCostMicros(g.cost)}</span>{/if}
                 <span class="of-count" data-testid="work-group-count">{g.count}</span>
               </button>
               {#if groupOpen(g)}
@@ -726,6 +731,7 @@
                         task={t}
                         selected={$selectedTaskId === t.task_id}
                         currentSessionId={selectedSessionId}
+                        lookup={taskById}
                         onselect={() => selectTask(t)}
                         onopen={(l) => openOccurrence(t, l)}
                       />
@@ -921,6 +927,15 @@
     height: 6px;
     border-radius: 50%;
     flex: none;
+  }
+  .spend {
+    margin-left: auto;
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .spend + .of-count {
+    margin-left: var(--space-1);
   }
   .more-btn {
     margin: 2px 0 2px 18px;

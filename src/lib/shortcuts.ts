@@ -9,9 +9,15 @@
  * - The other scopes are the per-view tables (Hosts, Assets, the task list,
  *   the review sheets, the board, a session row) and the contextual chords of
  *   the terminal, the conversation, the switcher and the New session dialog.
- *   Their handlers still read `e.key` themselves; the rows here are the
- *   inventory the freeze test checks against the handler sources, what the
- *   `?` sheet (`ShortcutSheet`, 3.8) lists and what ⌘K commands (3.9) read.
+ *   Every scope in `MATCHED_SCOPES` asks the table (`viewKey` /
+ *   `matchShortcut`) which action a key is, so its rows ARE its handler's
+ *   keys; `shortcuts.test.ts` replays every key and modifier combination
+ *   through the table against a copy of each handler's 0.5.4 key logic. The
+ *   three in `SCOPE_SOURCES` (the switcher's two and the New session dialog)
+ *   still read `e.key`: their handlers take a key under any mix of ⌘ and Ctrl
+ *   by design, so the rows there are the inventory the freeze test checks
+ *   against their source. All of them are what the `?` sheet
+ *   (`ShortcutSheet`, 3.8) lists and what ⌘K commands (3.9) read.
  * - `planned` rows are the design manual's new chords (`keyboard.md`): they
  *   match nothing yet, but they take part in the conflict check, so a chord
  *   is known to be free on both platforms before its step wires it.
@@ -19,6 +25,9 @@
  * A binding names `KeyboardEvent.key` (compared case-insensitively) and the
  * exact modifiers held; `anyShift` ignores Shift, for symbols such as `?`
  * that need it on some layouts and for handlers that never looked at it.
+ * `exactCase` compares the key as typed (a view's `j` is not Caps Lock's
+ * `J`), and `anyMods` ignores every modifier (the board's Escape cancels a
+ * drag whatever is held).
  */
 
 export type Mod = 'meta' | 'ctrl' | 'alt' | 'shift';
@@ -27,6 +36,8 @@ export interface Binding {
   readonly key: string;
   readonly mods: readonly Mod[];
   readonly anyShift?: boolean;
+  readonly exactCase?: boolean;
+  readonly anyMods?: boolean;
 }
 
 export type Scope =
@@ -86,10 +97,16 @@ export interface Shortcut {
   readonly shadows?: readonly string[];
 }
 
-/** `'Meta+Shift+O'` → a binding; a trailing `~` means any Shift. */
+/** `'Meta+Shift+O'` → a binding. Trailing flags: `~` any Shift, `=` the
+ *  key's exact case, `*` any modifiers (`'j~='`, `'Escape*'`). */
 export function bind(spec: string): Binding {
-  const anyShift = spec.endsWith('~');
-  const body = anyShift ? spec.slice(0, -1) : spec;
+  let body = spec;
+  const flags = new Set<string>();
+  while (body.length > 1 && '~=*'.includes(body[body.length - 1])) {
+    flags.add(body[body.length - 1]);
+    body = body.slice(0, -1);
+  }
+  const anyShift = flags.has('~');
   // The key may itself be `+` only as the whole spec; none of ours is.
   const parts = body.split('+');
   const key = parts.pop() ?? '';
@@ -100,8 +117,18 @@ export function bind(spec: string): Binding {
     }
     return m as Mod;
   });
-  return { key: key === 'Space' ? ' ' : key, mods, ...(anyShift ? { anyShift } : {}) };
+  return {
+    key: key === 'Space' ? ' ' : key,
+    mods,
+    ...(anyShift ? { anyShift } : {}),
+    ...(flags.has('=') ? { exactCase: true } : {}),
+    ...(flags.has('*') ? { anyMods: true } : {}),
+  };
 }
+
+/** A view's single keys as its handler has always read them: the key as
+ *  typed (`=`), Shift ignored (`~`), and never with ⌘, Ctrl or Alt. */
+const view = (...specs: string[]) => both(...specs.map((x) => (x.length === 1 && /[a-z]/i.test(x) ? `${x}~=` : `${x}~`)));
 
 const both = (...specs: string[]) => ({ mac: specs.map(bind), other: specs.map(bind) });
 const split = (mac: string[], other: string[]) => ({ mac: mac.map(bind), other: other.map(bind) });
@@ -191,62 +218,62 @@ export const SHORTCUTS: readonly Shortcut[] = [
 
   // ── Per-view tables: single keys, never with Cmd/Ctrl/Alt ────────────
   // HostsView
-  row('hosts', 'hosts.down', 'Next host', keys('j', 'ArrowDown')),
-  row('hosts', 'hosts.up', 'Previous host', keys('k', 'ArrowUp')),
-  row('hosts', 'hosts.first', 'First host', keys('Home')),
-  row('hosts', 'hosts.last', 'Last host', keys('End')),
-  row('hosts', 'hosts.detail', 'Into the detail', keys('Enter', 'ArrowRight')),
-  row('hosts', 'hosts.list', 'Back to the list', keys('ArrowLeft')),
-  row('hosts', 'hosts.close', 'Close the legend, the detail or Hosts', keys('Escape')),
-  row('hosts', 'hosts.reprobe', 'Re-probe the host', keys('r')),
-  row('hosts', 'hosts.usage', 'Refresh usage', keys('u')),
-  row('hosts', 'hosts.filter-sidebar', 'Filter the sidebar to the host', keys('s')),
-  row('hosts', 'hosts.new-session', 'New session on the host', keys('n')),
-  row('hosts', 'hosts.edit', 'Edit the account', keys('e')),
-  row('hosts', 'hosts.search', 'Search hosts', keys('/')),
-  row('hosts', 'hosts.legend', 'Legend', keys('?~'), { shadows: ['shortcut-sheet'] }),
+  row('hosts', 'hosts.down', 'Next host', view('j', 'ArrowDown')),
+  row('hosts', 'hosts.up', 'Previous host', view('k', 'ArrowUp')),
+  row('hosts', 'hosts.first', 'First host', view('Home')),
+  row('hosts', 'hosts.last', 'Last host', view('End')),
+  row('hosts', 'hosts.detail', 'Into the detail', view('Enter', 'ArrowRight')),
+  row('hosts', 'hosts.list', 'Back to the list', view('ArrowLeft')),
+  row('hosts', 'hosts.close', 'Close the legend, the detail or Hosts', view('Escape')),
+  row('hosts', 'hosts.reprobe', 'Re-probe the host', view('r')),
+  row('hosts', 'hosts.usage', 'Refresh usage', view('u')),
+  row('hosts', 'hosts.filter-sidebar', 'Filter the sidebar to the host', view('s')),
+  row('hosts', 'hosts.new-session', 'New session on the host', view('n')),
+  row('hosts', 'hosts.edit', 'Edit the account', view('e')),
+  row('hosts', 'hosts.search', 'Search hosts', view('/')),
+  row('hosts', 'hosts.legend', 'Legend', view('?~'), { shadows: ['shortcut-sheet'] }),
   // AssetsWorkspace
   row('assets', 'assets.primary', 'Run the primary (apply the card or Sync fleet)',
-    keys('Meta+Enter', 'Ctrl+Enter')),
-  row('assets', 'assets.down', 'Next row', keys('j', 'ArrowDown')),
-  row('assets', 'assets.up', 'Previous row', keys('k', 'ArrowUp')),
-  row('assets', 'assets.search', 'Search assets', keys('/')),
-  row('assets', 'assets.adopt', 'Adopt (import or apply the New card)', keys('a')),
-  row('assets', 'assets.sync', 'Sync the asset', keys('s')),
-  row('assets', 'assets.edit', 'Edit the asset', keys('e')),
-  row('assets', 'assets.ignore', 'Ignore the card', keys('i')),
+    keys('Meta+Enter', 'Ctrl+Enter', 'Meta+Ctrl+Enter')),
+  row('assets', 'assets.down', 'Next row', view('j', 'ArrowDown')),
+  row('assets', 'assets.up', 'Previous row', view('k', 'ArrowUp')),
+  row('assets', 'assets.search', 'Search assets', view('/')),
+  row('assets', 'assets.adopt', 'Adopt (import or apply the New card)', view('a')),
+  row('assets', 'assets.sync', 'Sync the asset', view('s')),
+  row('assets', 'assets.edit', 'Edit the asset', view('e')),
+  row('assets', 'assets.ignore', 'Ignore the card', view('i')),
   // TaskList
-  row('task-list', 'task-list.down', 'Next task', keys('j')),
-  row('task-list', 'task-list.up', 'Previous task', keys('k')),
+  row('task-list', 'task-list.down', 'Next task', view('j')),
+  row('task-list', 'task-list.up', 'Previous task', view('k')),
   row('task-list', 'task-list.work', 'Work on the task', keys('s')),
   row('task-list', 'task-list.work-ask', 'Start options for the task', keys('Shift+S')),
   // WorkReview
-  row('work-review', 'work-review.down', 'Next item', keys('j', 'ArrowDown')),
-  row('work-review', 'work-review.up', 'Previous item', keys('k', 'ArrowUp')),
-  row('work-review', 'work-review.yes', 'Confirm or keep', keys('y')),
-  row('work-review', 'work-review.no', 'Reject the suggestion', keys('n')),
-  row('work-review', 'work-review.pick', 'Pick for a bulk action', keys('x')),
+  row('work-review', 'work-review.down', 'Next item', view('j', 'ArrowDown')),
+  row('work-review', 'work-review.up', 'Previous item', view('k', 'ArrowUp')),
+  row('work-review', 'work-review.yes', 'Confirm or keep', view('y')),
+  row('work-review', 'work-review.no', 'Reject the suggestion', view('n')),
+  row('work-review', 'work-review.pick', 'Pick for a bulk action', view('x')),
   // LinkReview
-  row('link-review', 'link-review.down', 'Next link', keys('j', 'ArrowDown')),
-  row('link-review', 'link-review.up', 'Previous link', keys('k', 'ArrowUp')),
-  row('link-review', 'link-review.yes', 'Confirm the link', keys('y', 'Enter')),
-  row('link-review', 'link-review.no', 'Not this', keys('n', 'Backspace')),
-  row('link-review', 'link-review.close', 'Close the sheet', keys('Escape')),
+  row('link-review', 'link-review.down', 'Next link', view('j', 'ArrowDown')),
+  row('link-review', 'link-review.up', 'Previous link', view('k', 'ArrowUp')),
+  row('link-review', 'link-review.yes', 'Confirm the link', view('y', 'Enter')),
+  row('link-review', 'link-review.no', 'Not this', view('n', 'Backspace')),
+  row('link-review', 'link-review.close', 'Close the sheet', view('Escape')),
   // TidyReview
-  row('tidy-review', 'tidy-review.down', 'Next session', keys('j', 'ArrowDown')),
-  row('tidy-review', 'tidy-review.up', 'Previous session', keys('k', 'ArrowUp')),
-  row('tidy-review', 'tidy-review.toggle', 'Toggle the session', keys('Space')),
-  row('tidy-review', 'tidy-review.apply', 'Apply the tidy', keys('Enter')),
-  row('tidy-review', 'tidy-review.close', 'Close the sheet', keys('Escape')),
+  row('tidy-review', 'tidy-review.down', 'Next session', view('j', 'ArrowDown')),
+  row('tidy-review', 'tidy-review.up', 'Previous session', view('k', 'ArrowUp')),
+  row('tidy-review', 'tidy-review.toggle', 'Toggle the session', view('Space')),
+  row('tidy-review', 'tidy-review.apply', 'Apply the tidy', view('Enter')),
+  row('tidy-review', 'tidy-review.close', 'Close the sheet', view('Escape')),
   // WorkBoard
   row('work-board', 'work-board.edit', 'Edit the card', keys('e')),
   row('work-board', 'work-board.left', 'Move the card a column left', keys('ArrowLeft')),
   row('work-board', 'work-board.right', 'Move the card a column right', keys('ArrowRight')),
-  row('work-board', 'work-board.cancel-drag', 'Cancel the drag', keys('Escape~')),
+  row('work-board', 'work-board.cancel-drag', 'Cancel the drag', keys('Escape*')),
   // SessionRowItem
-  row('session-row', 'session-row.yes', 'Confirm the suggested link', keys('y')),
-  row('session-row', 'session-row.no', 'Reject the suggested link', keys('n')),
-  row('session-row', 'session-row.link', 'Link or pick work', keys('l')),
+  row('session-row', 'session-row.yes', 'Confirm the suggested link', view('y')),
+  row('session-row', 'session-row.no', 'Reject the suggested link', view('n')),
+  row('session-row', 'session-row.link', 'Link or pick work', view('l')),
 
   // Sidebar session list (3.8): the row has focus.
   row('session-list', 'session-list.down', 'Next session', keys('j', 'ArrowDown')),
@@ -268,12 +295,25 @@ export const SHORTCUTS: readonly Shortcut[] = [
 ];
 
 /** The view handlers each per-view scope lives in, for the freeze test. */
+/** The scopes whose handlers still read `e.key` themselves, for the freeze
+ *  test: each takes some key under any mix of ⌘ and Ctrl (Enter, the
+ *  arrows), which no row can say without taking chords from the terminal. */
 export const SCOPE_SOURCES: Partial<Record<Scope, string>> = {
-  terminal: 'src/lib/TerminalView.svelte',
-  conversation: 'src/lib/ConversationPanel.svelte',
   switcher: 'src/lib/QuickSwitcher.svelte',
   'switcher-new': 'src/lib/QuickSwitcher.svelte',
   'new-session-dialog': 'src/lib/NewSessionDialog.svelte',
+};
+
+/** Scopes whose handler asks the registry (`viewKey` or `matchShortcut`),
+ *  as the global chords do: the table is the handler, so there are no keys
+ *  in the source to check — the freeze test replays every key instead. */
+export const MATCHED_SCOPES: Partial<Record<Scope, string>> = {
+  'session-list': 'src/lib/Sidebar.svelte',
+  'question-card': 'src/lib/AnswerPrompt.svelte',
+  'form-card': 'src/lib/forms/FormWizard.svelte',
+  form: 'src/lib/forms/form_frame.ts',
+  terminal: 'src/lib/TerminalView.svelte',
+  conversation: 'src/lib/ConversationPanel.svelte',
   hosts: 'src/lib/HostsView.svelte',
   assets: 'src/lib/AssetsWorkspace.svelte',
   'task-list': 'src/lib/TaskList.svelte',
@@ -282,15 +322,6 @@ export const SCOPE_SOURCES: Partial<Record<Scope, string>> = {
   'tidy-review': 'src/lib/TidyReview.svelte',
   'work-board': 'src/lib/WorkBoard.svelte',
   'session-row': 'src/lib/SessionRowItem.svelte',
-};
-
-/** Scopes whose handler asks `matchShortcut` (3.8), as the global chords do:
- *  the table is the handler, so there are no keys in the source to check. */
-export const MATCHED_SCOPES: Partial<Record<Scope, string>> = {
-  'session-list': 'src/lib/Sidebar.svelte',
-  'question-card': 'src/lib/AnswerPrompt.svelte',
-  'form-card': 'src/lib/forms/FormWizard.svelte',
-  form: 'src/lib/forms/form_frame.ts',
 };
 
 export interface KeyEventLike {
@@ -314,9 +345,14 @@ export interface KeyEventLike {
  */
 export function bindingMatches(b: Binding, e: KeyEventLike, isMac = true): boolean {
   if (e.getModifierState?.('AltGraph')) return false;
-  const letterByCode =
-    isMac && e.altKey && /^[a-z]$/i.test(b.key) && e.code === `Key${b.key.toUpperCase()}`;
-  if (b.key.toLowerCase() !== e.key.toLowerCase() && !letterByCode) return false;
+  if (b.exactCase) {
+    if (b.key !== e.key) return false;
+  } else {
+    const letterByCode =
+      isMac && e.altKey && /^[a-z]$/i.test(b.key) && e.code === `Key${b.key.toUpperCase()}`;
+    if (b.key.toLowerCase() !== e.key.toLowerCase() && !letterByCode) return false;
+  }
+  if (b.anyMods) return true;
   const has = (m: Mod) => b.mods.includes(m);
   if (has('meta') !== e.metaKey || has('ctrl') !== e.ctrlKey || has('alt') !== e.altKey) return false;
   return b.anyShift === true || has('shift') === e.shiftKey;
@@ -333,6 +369,19 @@ export function matchShortcut(scope: Scope, e: KeyEventLike, isMac: boolean): st
     if (bindingsFor(s, isMac).some((b) => bindingMatches(b, e, isMac))) return s.id;
   }
   return null;
+}
+
+const IS_MAC =
+  typeof navigator !== 'undefined' &&
+  (/Mac|iPhone|iPad|iPod/.test(navigator.platform ?? '') || /Macintosh/.test(navigator.userAgent ?? ''));
+
+/**
+ * The shared matcher every view's keydown uses (step 0.1): the action `e`
+ * triggers in `scope` on this platform, or null. A view switches on the
+ * returned id, never on `e.key`, so its keys are the rows above.
+ */
+export function viewKey(scope: Scope, e: KeyEventLike, isMac: boolean = IS_MAC): string | null {
+  return matchShortcut(scope, e, isMac);
 }
 
 export function shortcutById(id: string): Shortcut | undefined {
@@ -364,6 +413,7 @@ export function shortcutLabel(id: string, isMac: boolean): string {
 
 function overlaps(a: Binding, b: Binding): boolean {
   if (a.key.toLowerCase() !== b.key.toLowerCase()) return false;
+  if (a.anyMods || b.anyMods) return true;
   const strip = (x: Binding) => x.mods.filter((m) => !(x.anyShift && m === 'shift'));
   const am = strip(a), bm = strip(b);
   for (const m of ['meta', 'ctrl', 'alt'] as const) if (am.includes(m) !== bm.includes(m)) return false;

@@ -5,7 +5,7 @@
 import type { OfState } from './kit/status';
 import { formatCostMicros, type SessionRow } from './sessions';
 import { timeAgo } from './session_status';
-import { occurrenceKind, WORK_STAGE_LABELS, WORK_STAGES, type WorkStage, type WorkTask, type WorkTaskLink } from './work_view';
+import { blockedOnLine, occurrenceKind, WORK_STAGE_LABELS, WORK_STAGES, type WorkStage, type WorkTask, type WorkTaskLink } from './work_view';
 
 /** The links of sessions working on it now. */
 export function liveLinks(t: Pick<WorkTask, 'sessions'>): WorkTaskLink[] {
@@ -42,20 +42,25 @@ export function taskTone(t: WorkTask): OfState {
   if (live.some(failed)) return 'failed';
   const stage = stageOf(t);
   if (stage === 'done') return 'done';
-  if (stage === 'blocked') return 'failed';
+  // The status-word decision: a blocked task reads Needs you, with its
+  // reason on the line (step 6.3).
+  if (stage === 'blocked') return 'waiting';
   if (live.some((l) => l.claude_status === 'working') || stage === 'in_progress' || stage === 'in_review') return 'working';
   return 'idle';
 }
 
 /** The row's second line: the stage, then why. A failed session leads in
  *  red (`failed: true`) instead of the stage. */
-export function taskLine(t: WorkTask): { lead: string; failed: boolean; why: string } {
+export function taskLine(
+  t: WorkTask,
+  lookup?: (id: string) => Pick<WorkTask, 'key' | 'title'> | null | undefined,
+): { lead: string; failed: boolean; why: string } {
   const live = liveLinks(t);
   const broken = live.find(failed);
   const stage = WORK_STAGE_LABELS[stageOf(t)];
   if (broken) return { lead: 'Session failed', failed: true, why: broken.name ?? '' };
   if (t.needs_you || live.some((l) => l.needs_you)) return { lead: stage, failed: false, why: 'session needs you' };
-  if (t.blocked) return { lead: stage, failed: false, why: 'waits for another task' };
+  if (t.blocked) return { lead: stage, failed: false, why: blockedOnLine(t, lookup) ?? 'Blocked on another task' };
   const main = live.find((l) => l.primary) ?? live[0];
   if (main?.name) return { lead: stage, failed: false, why: main.host ? `${main.name} on ${main.host}` : main.name };
   const where = t.tracker_name ?? t.project_label ?? '';

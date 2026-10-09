@@ -31,6 +31,8 @@ export interface LoopHealth {
   label: string;
   /** Stops while `automation.paused` is on. */
   pausable: boolean;
+  /** Why a loop that is not pausable keeps running on Pause all. */
+  keeps_running?: string | null;
   last_run_at?: number | null;
   next_run_at?: number | null;
   /** `ok`, `error` or `paused`; absent before its first run. */

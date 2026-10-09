@@ -495,6 +495,7 @@ mod tests {
             turn_outcome: None,
             proposals: Vec::new(),
             pending_form: None,
+            form_draft: None,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),

@@ -158,3 +158,23 @@ fn every_wizard_spec_is_valid() {
     }
     assert!(seen > 0, "no wizard specs in {}", dir.display());
 }
+
+/// Redesign 10.12: every wizard a `wizard` chat block may open has its spec
+/// file, and the app's list (`chat_wizard_ids.ts`) is the same, in order.
+#[test]
+fn every_chat_wizard_has_a_spec_and_the_app_lists_the_same() {
+    use super::chat_blocks::CHAT_WIZARDS;
+    for id in CHAT_WIZARDS {
+        let spec = cases(&format!("src/lib/forms/wizards/{id}.json"));
+        if let Err(problems) = parse(&spec) {
+            panic!("{id}: {problems:?}");
+        }
+    }
+    let ts = crate::repo_files::read("src/lib/forms/chat_wizard_ids.ts");
+    let quoted: Vec<String> = CHAT_WIZARDS.iter().map(|id| format!("'{id}'")).collect();
+    let line = format!(
+        "export const CHAT_WIZARD_IDS = [{}] as const;",
+        quoted.join(", ")
+    );
+    assert!(ts.contains(&line), "chat_wizard_ids.ts should hold: {line}");
+}

@@ -308,6 +308,11 @@ pub async fn run_with(
         let Ok(s) = store.lock() else {
             return 0;
         };
+        // Pause all (redesign 8.1): no keystroke, no recreate. The tick's
+        // gate records the pause; this stops any other caller too.
+        if crate::service::loops::paused(&s) {
+            return 0;
+        }
         let rows = s.list_all_sessions().unwrap_or_default();
         let controller = s.get_controller().ok().flatten();
         let attempts: std::collections::HashMap<i64, u32> = rows
@@ -471,6 +476,7 @@ mod tests {
             turn_outcome: None,
             proposals: Vec::new(),
             pending_form: None,
+            form_draft: None,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
@@ -809,6 +815,35 @@ mod tests {
             .map(|e| e.detail.clone().unwrap_or_default())
             .collect();
         assert_eq!(applied, vec!["press_enter:press_enter"]);
+    }
+
+    /// Redesign 8.1: Pause all stops the playbooks before they press a key.
+    #[tokio::test]
+    async fn pause_all_stops_the_playbooks() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let id = seed_stuck(&store, "dev-a", "press_enter");
+        crate::service::settings::set(
+            &store.lock().unwrap(),
+            crate::service::settings::AUTOMATION_PAUSED,
+            "true",
+        )
+        .unwrap();
+        let exec = FakeExec {
+            enters: AtomicUsize::new(0),
+            recreates: AtomicUsize::new(0),
+            fail: false,
+            attached: false,
+        };
+        let now = now_unix() + 10;
+        assert_eq!(run_with(&store, &exec, &ALL_ON, now).await, 0);
+        assert_eq!(exec.enters.load(Ordering::SeqCst), 0);
+        let row = store
+            .lock()
+            .unwrap()
+            .get_session_by_id(id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.last_playbook_at, None);
     }
 
     #[tokio::test]

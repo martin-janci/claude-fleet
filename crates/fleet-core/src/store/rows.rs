@@ -15,6 +15,16 @@ pub struct PendingForm {
     pub title: String,
 }
 
+/// The form a session's agent is still writing (`ask { draft }`, migration
+/// 153): the JSON so far, which the chat draws in as skeleton fields.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FormDraft {
+    pub draft: String,
+    #[serde(default)]
+    pub why: Option<String>,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectRow {
     pub id: i64,
@@ -395,6 +405,10 @@ pub struct SessionRow {
     /// so an older hub's row (without it) still parses.
     #[serde(default)]
     pub pending_form: Option<PendingForm>,
+    /// The form this session's agent is still writing (`ask { draft }`),
+    /// absent when none. `serde(default)` for an older hub's row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form_draft: Option<FormDraft>,
 }
 
 /// `sessions.agent` (migration 121): Claude Code, the default.
@@ -722,7 +736,9 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
         FROM form_requests f WHERE f.session_id = sessions.id AND f.state = 'pending') \
        AS pending_form, agent, origin, origin_ref, last_viewed_at, turn_outcome, ",
     crate::proposals_sql!("session", "CAST(sessions.id AS TEXT)"),
-    " AS proposals"
+    " AS proposals, \
+     (SELECT json_object('draft', d.draft, 'why', d.why, 'updated_at', d.updated_at) \
+        FROM form_drafts d WHERE d.session_id = sessions.id) AS form_draft"
 );
 
 /// Decode `sessions.pr_evidence`. Malformed text (never written by us)
@@ -841,6 +857,9 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         last_viewed_at: row.get(71)?,
         turn_outcome: row.get(72)?,
         proposals: decode_proposals(row.get(73)?),
+        form_draft: row
+            .get::<_, Option<String>>(74)?
+            .and_then(|j| serde_json::from_str(&j).ok()),
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).

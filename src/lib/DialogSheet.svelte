@@ -139,69 +139,69 @@
   .sheet {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3, 12px);
+    gap: var(--space-3);
   }
   header {
     display: flex;
     flex-direction: column;
-    gap: var(--space-1, 4px);
+    gap: var(--space-1);
   }
   .sheet-title {
     margin: 0;
-    font-size: var(--text-lg, 15px);
-    font-weight: var(--text-lg-weight, 600);
+    font-size: var(--text-lg);
+    font-weight: var(--text-lg-weight);
   }
   .sheet-lead {
     margin: 0;
     color: var(--fg-muted);
-    font-size: var(--text-sm, 12.5px);
-    line-height: var(--text-sm-lh, 1.45);
+    font-size: var(--text-sm);
+    line-height: var(--text-sm-lh);
   }
   .sheet-fields {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3, 12px);
+    gap: var(--space-3);
   }
   /* Field rows inside any sheet: a small label over its control. */
   .sheet-fields :global(.field) {
     display: flex;
     flex-direction: column;
-    gap: var(--space-1, 4px);
+    gap: var(--space-1);
   }
   .sheet-fields :global(.field-label) {
-    font-size: var(--text-xs, 11.5px);
+    font-size: var(--text-xs);
     color: var(--fg-muted);
   }
   .sheet-fields :global(.field-note) {
     margin: 0;
-    font-size: var(--text-xs, 11.5px);
+    font-size: var(--text-xs);
     color: var(--fg-muted);
   }
   .sheet-fields :global(select),
   .sheet-fields :global(textarea),
   .sheet-fields :global(input[type='text']) {
     font: inherit;
-    font-size: var(--text-sm, 12.5px);
+    font-size: var(--text-sm);
     color: var(--fg);
-    background: var(--bg-sunk, var(--bg-pane));
-    border: 1px solid var(--control-border, var(--border));
-    border-radius: var(--radius-sm, var(--radius-sm));
-    padding: var(--space-1, 4px) var(--space-2, 8px);
+    background: var(--bg-sunk);
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
   }
   .sheet-fields :global(textarea) {
     resize: vertical;
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
   }
   .sheet-why {
-    margin: calc(-1 * var(--space-2, 8px)) 0 0;
+    margin: calc(-1 * var(--space-2)) 0 0;
     text-align: right;
     color: var(--fg-muted);
-    font-size: var(--text-xs, 11.5px);
+    font-size: var(--text-xs);
   }
   footer {
     display: flex;
     align-items: center;
-    gap: var(--space-2, 8px);
+    gap: var(--space-2);
   }
   .secondary {
     flex: 1;

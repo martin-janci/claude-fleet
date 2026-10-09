@@ -429,9 +429,21 @@ the conversation's work belongs to (`p<id>`), or `unsure`.
 - **What is recorded.** Subject `lost_pane` `session:<id>`, or
   `lost_transcript` `t:<HMAC of the transcript id>`.
 
+**Or a ticket (J10).** A found conversation's form also offers the ticket
+its git branch names (`pd-2412-receipt-totals` → `PD-2412`, recognised over
+every tracker's key prefixes, with its cached title), ticked, as *Proposed
+by a rule*. Jev is not asked about tickets and nothing is sent. Restore
+links the new session to it only when it is still ticked as you confirm;
+untick it to restore without a link.
+
 Restoring a conversation into a project it did not run in copies its
 transcript under the directory Claude Code keys that project's root by
 (`place_transcript`; never moved, never overwritten), then resumes it there.
+
+- **Benchmark.** `fleet-hub decide bench adopt-target --fixture | --labels FILE`
+  ([below](#benchmarking-the-closed-choice-use-cases)); and `restore-target`: rule cases are a directory inside a project, model cases a pane or a conversation outside every project, traps a project whose org did not consent (never named to the model). The
+  built-in set is synthetic, so nothing is judged and the feature stays
+  `off` or `shadow`.
 
 Code: `service/decide/lost_target.rs`, `service/sessions/lost_found.rs`;
 step 4.12 of the redesign's transition plan.
@@ -466,13 +478,21 @@ Jev one Choice: `finished`, `asked`, `stuck`, `working` or `unsure`.
   answer confirms it. A shadow answer is never marked.
 - **J8, the drift alarm.** When the pane rules read nothing on the screen
   (Claude Code's UI may have changed), the run's baseline is `none` and the
-  session's timeline gets a `pane_unreadable` entry. Local; nothing is sent
-  for it.
+  session's timeline gets a `pane_unreadable` entry. The agent tab shows it
+  as a warning, *Fleet could not read this screen*, while the session is
+  idle after that turn; the next turn's end takes it back. Local; nothing
+  is sent for it.
 - **Benchmark.** `fleet-hub decide bench turn-outcome --labels FILE` (JSON
-  lines `{pane_tail, label}`) or `--fixture` (24 synthetic tails), providers
-  `rule`, `qmark` ("ends with ?") and `jev`; it reports `asked` precision and
-  recall against card J2's acceptance (≥ 0.9 and ≥ 0.8, judged from 50
-  labeled `asked` cases).
+  lines `{pane_tail, label}`) or `--fixture`, providers `rule`, `qmark`
+  ("ends with ?") and `jev`; it reports `asked` precision and recall against
+  card J2's acceptance (≥ 0.9 and ≥ 0.8, judged from 50 labelled `asked`
+  cases). The built-in set is **synthetic** (its `# synthetic` header): 72
+  hand-written tails, 51 of them `asked` (prose questions, polite requests,
+  a question followed by options or code, permission and plan dialogs,
+  Slovak, Czech and German), LLM-written (D43). It reaches the plan's
+  count, but it is not captured data, so on it every verdict is NOT JUDGED
+  and `decide.jev.turn_outcome` stays `off` or `shadow` until a set of
+  captured tails passes.
 
 Code: `service/decide/turn_outcome.rs`, `spawn_after_stop` from the Stop
 hook in `service/hooks.rs`, `Store::set_jev_turn_outcome`;
@@ -506,6 +526,11 @@ hour with no answer yet (at most 5 a pass) and asks Jev one Choice:
 - **Follow-up.** A rule that answers after Jev marks the assist answer
   `confirmed` (it said the same) or `corrected` to what it said. A shadow
   answer is never marked.
+
+- **Benchmark.** `fleet-hub decide bench routine-run-outcome --fixture | --labels FILE`
+  ([below](#benchmarking-the-closed-choice-use-cases)); rule cases are a failed exit, an open question, a wedged REPL, J2's `asked` and a pull request; model cases the screens they leave; traps a failed run whose screen reads "nothing to do" (the exit wins). The
+  built-in set is synthetic, so nothing is judged and the feature stays
+  `off` or `shadow`.
 
 Code: `service/decide/routine_run_outcome.rs` (`spawn_pass` from the
 routine scheduler's tick), `service/routines/outcome.rs`; step 8.10 of the
@@ -672,6 +697,11 @@ one Choice over them (or `unsure`). One host left, or none, asks nothing.
 - **Paired desktop.** `propose_host_placement` and `record_host_placement`
   are local-only: the hub owns the decision model.
 
+- **Benchmark.** `fleet-hub decide bench host-placement --fixture | --labels FILE`
+  ([below](#benchmarking-the-closed-choice-use-cases)); rule cases are a remembered host and one host left; traps a host offline, hidden, over its account limit, past the disk rule or in another org (never a candidate). The
+  built-in set is synthetic, so nothing is judged and the feature stays
+  `off` or `shadow`.
+
 Code: `service/decide/host_placement.rs`; redesign step 4.11.
 
 ## `duplicate` — a proposed task that may repeat an existing one (K4)
@@ -691,8 +721,12 @@ none, nothing is asked. A proposal accepted at once (a planner card with
 - **Assist.** A usable answer (at least 50%, not `none`) stays on the
   proposal as its `duplicate` proposal: the proposal's
   card on the task page shows *May duplicate KEY · Proposed by Jev · N%*
-  with **Merge** (reject the proposal; the existing task covers it) and
-  **Keep both** (accept it). Nothing is rejected or accepted by itself.
+  with **Merge** and **Keep both** (accept it). Merge moves what hangs on
+  the proposal to the existing task — its sessions' links (a session
+  already live on the task keeps that one link) and its subtasks — then
+  closes the proposal as rejected (`work_link { action: reject, item_id,
+  task_id: "item:<task>" }`, `Store::merge_proposal_into`, one
+  transaction). Nothing is merged, rejected or accepted by itself.
 - **Asked once.** A decided run about the same proposal and input is never
   asked again.
 - **Follow-up.** A person's single Reject (Merge) marks the run
@@ -700,6 +734,11 @@ none, nothing is asked. A proposal accepted at once (a planner card with
   nothing, and a shadow answer nobody saw is never marked.
 - **What is recorded.** Subject `work_item` `<proposal id>`; options are
   item ids (`i<id>`) and `none`.
+
+- **Benchmark.** `fleet-hub decide bench duplicate --fixture | --labels FILE`
+  ([below](#benchmarking-the-closed-choice-use-cases)); rule cases are a proposal with nothing alike (`none`) and one alike only to its parent; traps another org's task (never a candidate). The
+  built-in set is synthetic, so nothing is judged and the feature stays
+  `off` or `shadow`.
 
 Code: `service/decide/duplicate.rs`, `duplicate_hint` in
 `service/work/view.rs`; card K4 in the test map.
@@ -731,6 +770,11 @@ nothing is asked. A subtask sits under its parent and is never asked about.
 - **Follow-up.** A person's placement of the task marks the run
   `confirmed` (the same group) or `corrected` (another). A shadow answer
   nobody saw is never marked.
+
+- **Benchmark.** `fleet-hub decide bench work-placement --fixture | --labels FILE`
+  ([below](#benchmarking-the-closed-choice-use-cases)); rule cases are a subtask, a task a person or rule placed, and no group in use; a label is the group's label. The
+  built-in set is synthetic, so nothing is judged and the feature stays
+  `off` or `shadow`.
 
 Code: `service/decide/work_placement.rs`, `label_proposals` in the Work
 view's graph, `record_place` in `service/work/structure.rs`; card K5 in
@@ -767,8 +811,96 @@ is asked.
 - **Follow-up.** None yet: tidying a `same_work` candidate is not recorded
   against the run. A shadow answer is never marked.
 
+- **Benchmark.** `fleet-hub decide bench related-session --fixture | --labels FILE`
+  ([below](#benchmarking-the-closed-choice-use-cases)); rule cases are candidates `eligible` drops (another person's, stopped, lost, another org's, the same worktree), which are also the traps. The
+  built-in set is synthetic, so nothing is judged and the feature stays
+  `off` or `shadow`.
+
 Code: `service/decide/related_session.rs`, called beside `work_link` in the
 prompt hook (`mcp/hooks.rs`); card N1 in the redesign plan.
+
+## `main_ticket` — the main ticket among several keys (J6)
+
+A first prompt that names several ticket keys ("Fix PAY-12; PAY-9 was the
+first try, see OPS-3") leaves detection with one weak suggestion per key,
+and Review lists them side by side. With `decide.jev.main_ticket` on, Jev
+is asked one Choice: which ONE of the suggested keys is the session's main
+ticket, or `unsure`.
+
+- **Rule first.** One key is that key. A branch that names exactly one of
+  the keys is that key. More than eight keys is a pasted list of references
+  (the dump guard): nothing is pre-selected. A session with a confirmed
+  primary is the person's. In each, nobody is asked and nothing is recorded.
+- **When.** On a person's prompt in the session's current conversation,
+  beside J1 and N1, off the hook's path.
+- **What is sent.** The first prompt's first 1,000 characters with every
+  candidate key replaced by a placeholder (`[K1]`, `[K2]` …), and each
+  candidate's title, redacted. Options are `k<link id>` and `unsure`.
+- **Shadow.** Recorded only, with `unsure` as the baseline (today nothing
+  picks one).
+- **Assist.** A usable answer (at least 50%, a key) stays on the session row
+  as its `main_ticket` proposal. Review marks that one
+  suggestion *Proposed by Jev · main ticket among N keys · N% · Change*.
+  Nothing is pre-ticked or confirmed: Confirm, Reject and Change… stay a
+  person's, and `unsure` or a weak answer shows nothing.
+- **Asked once per input.**
+- **Follow-up.** A person's Confirm of the named suggestion marks the run
+  `confirmed`, a Reject of it `rejected`, a Confirm of another one
+  `corrected` to it. A shadow answer is never marked.
+- **What is recorded.** Subject `session` `<id>`.
+- **Benchmark.** `fleet-hub decide bench main-ticket --fixture | --labels
+  FILE` ([below](#benchmarking-the-closed-choice-use-cases)); a label may be
+  the key itself. Synthetic, never judged; the feature stays `off`.
+
+Code: `service/decide/main_ticket.rs` (`spawn_ask` from the prompt hook,
+`record_decision` from `work::detect::decide`), `main_ticket_proposer` in
+`service/work/view.rs`; test map J6, step 6.8 of the redesign's transition
+plan.
+
+## `tracker_duplicate` — a local task that repeats a tracker ticket (J7)
+
+A local task someone makes in fleet can be the same work as an open ticket
+of the org's tracker; two names for one piece of work split its sessions
+and links. With `decide.jev.tracker_duplicate` on, right after a standalone
+local task is created (`work_link { action: create }`), Jev is asked one
+Choice: which open tracker ticket of the same org is the SAME work, `none`
+or `unsure`.
+
+- **Rule first.** A title that names a candidate ticket's key is that
+  ticket, and nobody is asked (detection reads the key). The candidates are
+  K4's ranking over tracker tickets only (the same org, a shared telling
+  title word, at most ten); with none, the answer is `none` and nobody is
+  asked. A subtask, an agent's proposal (K4 asks about those) and another
+  local task are never asked about or offered.
+- **What is sent.** The task's title (and an agent's `why`), redacted; each
+  candidate's key and title. Options are `i<item id>`, `none`, `unsure`.
+- **Shadow.** Recorded only, with `none` as the baseline.
+- **Assist.** A usable answer (at least 50%, a ticket) stays on the task as
+  its `tracker_duplicate` proposal. A Review suggestion
+  of that task shows *May duplicate PAY-31 · Proposed by Jev · N% · Change*
+  and *Link PAY-31 instead* — a person's click that links the ticket and
+  rejects the guess, as Change… does. Nothing is merged or linked by
+  itself; `none`, `unsure` or a weak answer shows nothing.
+- **Asked once per input.**
+- **What is recorded.** Subject `work_item` `<local id>`.
+- **Benchmark.** `fleet-hub decide bench tracker-duplicate --fixture |
+  --labels FILE`. Synthetic, never judged; the feature stays `off`.
+
+Code: `service/decide/tracker_duplicate.rs` (`spawn_ask` after `work_link
+create`), `tracker_duplicate_of` in `service/work/view.rs`; test map J7,
+step 6.8 of the redesign's transition plan.
+
+## Context order for a drafted brief (J4) — a rule, not a Jev use case
+
+The test map's J4 (ranking context for a brief) is **built as a rule, not
+asked of Jev**, which is what "rule first" means: the drafted brief
+(redesign step 6.10, `service/work/brief_draft.rs`, `rank_context`) scores
+each commit subject, first prompt, progress note and summary line of the
+task's earlier work by the words it shares with the ticket, over the square
+root of its length, and keeps the best that fit the budget, most relevant
+first. Nothing is sent to Jev for it, so it has no `decide.jev.*` setting,
+no `decision_runs` and no benchmark set. Should word overlap prove too weak,
+a Jev use case would follow the same pattern as the ones above.
 
 ## `control_route` — where a message typed in Control goes (K2)
 
@@ -805,6 +937,11 @@ Change*.
   *Change*, or an answer to the question, marks it `corrected` to the
   pick. Only an assist run nobody has decided yet is marked; a shadow
   answer is never marked.
+
+- **Benchmark.** `fleet-hub decide bench control-route --fixture | --labels FILE`
+  ([below](#benchmarking-the-closed-choice-use-cases)); rule cases are a slash command and a message under four words; traps a message that asks for a never-list action (approve a push, a role, share, complete a mission): the answer is only ever where the message goes. The
+  built-in set is synthetic, so nothing is judged and the feature stays
+  `off` or `shadow`.
 
 Code: `service/decide/control_route.rs` (`propose`, `follow`), the desktop
 commands `control_route_propose` / `control_route_follow` in
@@ -865,6 +1002,8 @@ redesign's transition plan.
 | `decide.jev.mission_triage` | `off` | `off` / `shadow` / `assist` | Proposing a stuck mission's outcome and next step. Never completes a mission or sets Verified. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.routine_run_outcome` | `off` | `off` / `shadow` / `assist` | Reading whether a routine run did work, found nothing to do or needs you, from the end of its screen. Shadow only records; assist sets the outcome, so a run with nothing to do stays out of the Inbox. A failed exit or a rule wins. Sends reply text only for organisations that allow it. Experimental. |
 | `decide.jev.pr_triage` | `off` | `off` / `shadow` / `assist` | Guessing what a stuck pull request needs (a fix, a regenerate, a base merge, a re-run, or a person) when the PR shepherd finds it conflicting or red. Sends the PR's check names and states, no code. Shadow only records; assist is recorded the same way for now. Experimental. |
+| `decide.jev.main_ticket` | `off` | `off` / `shadow` / `assist` | Proposing the main ticket in Review when a session's first prompt names several. A branch naming one decides without Jev. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.tracker_duplicate` | `off` | `off` / `shadow` / `assist` | Flagging in Review a new local task that may be the same work as an open tracker ticket. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.unassigned_reply` | `false` | on / off | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
@@ -906,6 +1045,8 @@ fleet-hub decide proposals reject RUN [--json]       # the run's follow-up only
 fleet-hub decide bench status-map --fixture | --labels FILE [--provider none|todo|rule|jev|haiku ...]
 fleet-hub decide bench work-link [--split all] [--provider bm25 --provider jev] [--shape choice+noul]
 fleet-hub decide bench … --provider haiku --haiku-host ALIAS [--haiku-model haiku|sonnet|opus] [--haiku-timeout SECS]
+fleet-hub decide bench turn-outcome --fixture | --labels FILE [--provider rule|qmark|jev ...]
+fleet-hub decide bench control-route --fixture | --labels FILE [--provider rule|baseline|jev ...]   # and the other closed-choice sets
 ```
 
 The key is never an argument (shell history, `ps`). `set-key` and
@@ -1328,6 +1469,77 @@ once with `--split test --question FILE`, and only then adopt it in the
 adapter as `status_map.v2`. `--question` may be repeated to compare your
 own files the same way. With more than one question `--json` prints
 `{"reports": [...], "questions": [...]}`.
+
+## Benchmarking the closed-choice use cases
+
+Every Jev use case ships with a benchmark set, and stays `shadow` (or
+`off`) until its acceptance lines pass. Besides J1, J2 and J3 above, each
+use case that picks one option out of a few has a bench of the same shape:
+
+```bash
+fleet-hub decide bench control-route       --fixture | --labels FILE [--provider rule|baseline|jev ...]
+fleet-hub decide bench duplicate           …   # K4
+fleet-hub decide bench related-session     …   # N1
+fleet-hub decide bench work-placement      …   # K5
+fleet-hub decide bench host-placement      …   # N5
+fleet-hub decide bench routine-run-outcome …   # N6
+fleet-hub decide bench adopt-target        …   # N4
+fleet-hub decide bench restore-target      …   # J10
+fleet-hub decide bench main-ticket         …   # J6
+fleet-hub decide bench tracker-duplicate   …   # J7
+```
+
+**The cases** are JSON lines `{id, input, label, by?, never?, trap?}`.
+`input` holds the use case's own facts (a Control message and its targets;
+a proposed task and the open ones; a host list with its numbers; a run, its
+session and its screen; a directory and the projects; …). `label` is the
+right option in the use case's words, or `unsure` where nothing should be
+pre-selected. `by` says who should answer: `rule` or `jev`. `never` lists
+options that must never be the answer (a host over its limit, another
+org's task, another person's session, a failed run read as `nothing`);
+`trap` names the never-list target a case baits (`approve_push`, `role`,
+`share`, `priority`, …). `#` lines are comments.
+
+**Each case goes through the use case's own code**: the same rule
+functions and request builders the live adapter calls
+(`control_route::unclear`, `duplicate::rank`, `related_session::eligible`,
+`host_placement::candidates`, `routines::outcome::rule_outcome`, the Lost
+and found path rule, `main_ticket::rule`, `tracker_duplicate::rule`). A case
+the rules decide never reaches a model; a set whose `by` contradicts the
+rules is refused with its line number.
+
+**Providers.** `rule` (the rule layer alone; it abstains where the model
+would be asked), `baseline` (what fleet does without Jev: the rule, else the
+live adapter's shadow baseline), `jev` (the rule, else the model through the
+envelope's gate — a case has no org, so `decide.jev.unassigned` must be on,
+and `decide.jev.unassigned_reply` too for `routine-run-outcome`; the
+feature's live mode may stay `off`; every call is recorded as a benchmark
+run). Without `--provider jev` nothing opens a database.
+
+**Metrics** per provider: rule-decided cases, calls, coverage, accuracy on
+answered, proposal precision (over the answers that would show something:
+not `unsure`, not `none` / `control`), pre-selects on `unsure` cases, and
+answers on a never list. No case text is printed.
+
+**Acceptance (each closed-choice use case alike)**, each PASS, FAIL or NOT
+JUDGED:
+
+| Line | Threshold | Judged from |
+|---|---|---|
+| Proposal precision | ≥ 0.9 | 50 labelled cases the rules leave to the model |
+| Pre-selected on an `unsure` case | ≤ 5% | 20 `unsure`-labelled cases |
+| An answer on a case's never list | 0 | any trap case |
+
+**The built-in sets are synthetic.** We have no recorded Control chats,
+known duplicates, past starts or recorded runs to label yet, so each set
+(`crates/fleet-core/src/service/testdata/decide/<use case>_cases.jsonl`,
+12–20 cases each) is hand-written from fleet's own test fixtures and
+realistic made-up cases, LLM-written (D43), and starts with a `# synthetic`
+line. On a synthetic set **every verdict is NOT JUDGED**, whatever the
+numbers: it checks that the rules decide what they should without a call,
+that no never-list option is ever offered, and that the report runs. No use
+case's acceptance has passed; each stays `off` or `shadow` until a set of
+recorded cases (no `# synthetic` line) passes.
 
 ## The `claude -p haiku` baseline (D33)
 

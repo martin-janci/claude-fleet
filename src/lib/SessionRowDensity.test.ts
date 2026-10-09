@@ -8,6 +8,36 @@ import { hubStatus, STANDALONE } from './hub';
 import { resetAccessForTests } from './access';
 import { showRowDetails, type SessionRow } from './sessions';
 import { COMPACT_ROW_PX, uiDensity } from './prefs';
+import { readFileSync } from 'node:fs';
+import RowList from './__fixtures__/SessionRowList.svelte';
+
+// app.css's :root tokens, and the component's Compact rule.
+const ROOT_TOKENS: Record<string, string> = (() => {
+  const css = readFileSync('src/app.css', 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const root = css.slice(css.indexOf(':root'), css.indexOf('}', css.indexOf(':root')));
+  return Object.fromEntries([...root.matchAll(/--([a-z0-9-]+)\s*:\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()]));
+})();
+
+function compactRule(): string {
+  const src = readFileSync('src/lib/SessionRowItem.svelte', 'utf8');
+  const rule = src.match(/\.sess-row\.compact\s*\{([^}]*)\}/)?.[1] ?? '';
+  return rule.match(/min-height:\s*([^;]+);/)?.[1].trim() ?? '';
+}
+
+/** A length built from px and tokens (`calc(2 * var(--x) + var(--y))`), in px. */
+function px(expr: string): number {
+  let e = expr;
+  for (let i = 0; i < 5 && /var\(--/.test(e); i++) {
+    e = e.replace(/var\(--([a-z0-9-]+)\)/g, (_, n: string) => {
+      const v = ROOT_TOKENS[n];
+      if (v === undefined) throw new Error(`--${n} is not a :root token`);
+      return `(${v})`;
+    });
+  }
+  const arith = e.replace(/calc/g, '').replace(/px/g, '');
+  if (!/^[\d\s.+\-*/()]+$/.test(arith)) throw new Error(`not a px length: ${expr}`);
+  return Function(`return (${arith});`)() as number;
+}
 import { accounts } from './accounts';
 import { ADMIN, fleetAccounts } from './hosts_fixture';
 
@@ -105,7 +135,7 @@ describe('row density (redesign step 3.6)', () => {
     const row = screen.getByTestId('sess-row');
     expect(row.dataset.density).toBe('compact');
     expect(row.classList.contains('compact')).toBe(true);
-    expect(row.style.minHeight).toBe(`${COMPACT_ROW_PX}px`);
+    expect(row.matches('.sess-row.compact')).toBe(true);
     expect(screen.getByTestId('sess-age').textContent).toBe('2m');
     const meta = screen.getByTestId('sess-meta-line');
     expect(meta.textContent?.replace(/\s+/g, ' ').trim()).toBe('Working · Claude Code · mac · Running tests');
@@ -128,11 +158,31 @@ describe('row density (redesign step 3.6)', () => {
     expect(meta.textContent).toContain('Needs you');
   });
 
-  it('20 Compact rows fit a 1080p window', () => {
-    // 1080 px less the title bar, header, filters and status bar the shell
-    // draws around the list (280 px, generous for every layout).
-    const chrome = 280;
-    expect(20 * COMPACT_ROW_PX).toBeLessThanOrEqual(1080 - chrome);
+  it('20 Compact rows fit a 1080p window, measured from the CSS tokens', async () => {
+    uiDensity.set('compact');
+    // Twenty real rows, as the list renders them.
+    const { container } = render(RowList, {
+      props: { rows: Array.from({ length: 20 }, (_, i) => props({ ...full, id: 100 + i, tmux_name: `row-${i}` } as SessionRow)) },
+    });
+    await tick();
+    const rows = Array.from(container.querySelectorAll<HTMLElement>('[data-testid="sess-row"]'));
+    expect(rows).toHaveLength(20);
+    // jsdom lays nothing out, so each row's height is read from the rule
+    // that sizes it — the component's `.sess-row.compact` min-height — with
+    // its tokens resolved against app.css's :root.
+    const minHeight = compactRule();
+    expect(minHeight).toMatch(/var\(--/);
+    const heights = rows.map((r) => {
+      expect(r.matches('.sess-row.compact'), r.dataset.density).toBe(true);
+      // Nothing inline overrides the rule.
+      expect(r.style.minHeight).toBe('');
+      return px(minHeight);
+    });
+    expect(heights[0]).toBe(COMPACT_ROW_PX);
+    // The shell around the list, from its own tokens: the window's title bar
+    // (a header's height), the app header, the Filters row and the status bar.
+    const chrome = px('var(--header-h)') * 2 + px('var(--control-h-lg)') + px('var(--status-h)');
+    expect(heights.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(1080 - chrome);
   });
 });
 

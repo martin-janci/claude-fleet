@@ -243,10 +243,10 @@
 </DialogSheet>
 
 <style>
-  .row { display: flex; gap: var(--space-3, 12px); }
+  .row { display: flex; gap: var(--space-3); }
   .field.grow { flex: 1; }
   .field textarea:disabled { opacity: 0.6; }
   .field input[aria-invalid='true'] { border-color: var(--danger); }
   .note { font-size: var(--text-2xs); color: var(--fg-muted); margin: 0; }
-  .err { color: var(--danger); font-size: var(--text-xs, 11.5px); margin: 0; }
+  .err { color: var(--danger); font-size: var(--text-xs); margin: 0; }
 </style>

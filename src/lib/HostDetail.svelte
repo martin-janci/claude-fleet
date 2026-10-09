@@ -7,6 +7,9 @@
   // `Rotate token…` and `Remove host…` sit at the bottom, have no keyboard
   // shortcut, and confirm with Cancel focused, stating the consequence.
   import HostOffline from './states/HostOffline.svelte';
+  import Icon from './kit/Icon.svelte';
+  import KeyValue from './kit/KeyValue.svelte';
+  import Meter from './kit/Meter.svelte';
   import type { HostRow } from './hosts';
   import { deleteHost, setHostHarnesses, codexModeOf, harnessesFor, type HarnessMode } from './hosts';
   import type { AccountRow } from './accounts';
@@ -46,8 +49,10 @@
   import { provisionHost } from './mcp';
   import { CHECK_GLYPH, checklistLoaderText, checklistRows, hostChecks, needsReprovision, runHostCheck } from './host_check';
   import Loader from './Loader.svelte';
+  import AgentInstallAction from './AgentInstallAction.svelte';
   import LostTargetForm from './LostTargetForm.svelte';
   import { isOutsideFleet, needsRestoreInto, placeTranscript } from './lost_found';
+  import { linkSessionWork } from './work';
 
   let {
     host,
@@ -102,9 +107,19 @@
   // Orbit Fleet 4.7: the health checklist. Run on demand (an SSH round trip
   // per host; never on every selection move), remembered per host.
   let checking = $state(false);
+  // Show sessions (step 3.14's offline host): to this pane's own list.
+  let sessionsBlock = $state<HTMLElement | null>(null);
+  function showSessions() {
+    sessionsBlock?.scrollIntoView?.({ block: 'start' });
+    sessionsBlock?.querySelector<HTMLElement>('[data-testid="detail-session"]')?.focus();
+  }
   let provisioning = $state(false);
   const lastCheck = $derived($hostChecks.get(host.alias) ?? null);
-  const checklist = $derived(checklistRows({ host, check: lastCheck, inventory: $inventory, hubVersion }));
+  // Orbit Fleet 4.9: a paired desktop's hub accepts agents, so an SSH host's
+  // fleet-agent row offers the install job.
+  const checklist = $derived(
+    checklistRows({ host, check: lastCheck, inventory: $inventory, hubVersion, agentsAccepted: $hubStatus.remote }),
+  );
   const checkBlocked = $derived(hubBlock('check_host', $hubStatus));
   const provisionBlocked = $derived(hubBlock('provision_hosts', $hubStatus));
   const reprovisionAdvised = $derived(needsReprovision(checklist, host));
@@ -143,6 +158,19 @@
   const isLocal = $derived(host.alias === 'local');
   /** The $HOME disk meter, null until the host was sampled. */
   const disk = $derived(diskMeter(host));
+  // The header's facts, in the kit's KeyValue (manual: KeyValue).
+  const facts = $derived([
+    ...(host.ssh_alias ? [{ label: 'ssh', value: host.ssh_alias, mono: true, testid: 'detail-ssh' }] : []),
+    ...(host.transport === 'agent' ? [{ label: 'transport', value: 'agent', testid: 'detail-transport' }] : []),
+    {
+      label: 'last ping',
+      value: host.last_pinged_at ? `${formatAge(now - host.last_pinged_at)} ago` : 'never',
+      tnum: true,
+      testid: 'detail-ping',
+    },
+    { label: 'claude', content: claudeFact, tnum: true },
+    { label: 'tmux', value: host.tmux_version ?? '—', tnum: true },
+  ]);
 
   // Sessions the backend marked lost (host reboot / tmux server restart) that
   // still carry a Claude conversation to resume. `bg`/`external` rows have no
@@ -331,7 +359,7 @@
     return null;
   }
 
-  async function restoreInto(c: LostCandidate, projectId: number | null): Promise<string | null> {
+  async function restoreInto(c: LostCandidate, projectId: number | null, ticket: string | null): Promise<string | null> {
     if (projectId === null) return 'Pick a project to restore it into.';
     const refused = candidateBlocked(c);
     if (refused !== null) return refused;
@@ -351,6 +379,11 @@
     if (!r.ok) return r.error.message;
     restoringId = null;
     resumedIds = new Set(resumedIds).add(c.claude_session_id);
+    // J10: the ticket the branch names, when the person kept it ticked.
+    if (ticket !== null) {
+      const linked = await linkSessionWork(r.value.id, { key: ticket });
+      if (!linked.ok) push({ kind: 'error', message: `Restored, but not linked to ${ticket}: ${linked.error.message}` });
+    }
     return null;
   }
 
@@ -469,6 +502,10 @@
   }
 </script>
 
+{#snippet claudeFact()}
+  {host.claude_version ?? '—'} <span class="muted" data-testid="detail-claude-age">{versionAge(host, now)}</span>
+{/snippet}
+
 <section
   bind:this={detailEl}
   class="host-detail"
@@ -514,37 +551,25 @@
         code={host.last_probe_error_code ?? null}
         {now}
         sessions={hostSessions.length}
+        paused={hostSessions.map(sessionName)}
+        onshow={hostSessions.length > 0 ? showSessions : null}
         ontry={onreprobe}
         trying={probing}
         tryBlocked={reprobeBlocked} />
     {/if}
-    <dl class="facts">
-      {#if host.ssh_alias}
-        <dt>ssh</dt><dd data-testid="detail-ssh">{host.ssh_alias}</dd>
-      {/if}
-      {#if host.transport === 'agent'}
-        <dt>transport</dt><dd class="transport-agent" data-testid="detail-transport">agent</dd>
-      {/if}
-      <dt>last ping</dt>
-      <dd data-testid="detail-ping">
-        {host.last_pinged_at ? `${formatAge(now - host.last_pinged_at)} ago` : 'never'}
-      </dd>
-      <dt>claude</dt>
-      <dd>{host.claude_version ?? '—'} <span class="muted" data-testid="detail-claude-age">{versionAge(host, now)}</span></dd>
-      <dt>tmux</dt><dd>{host.tmux_version ?? '—'}</dd>
-    </dl>
+    <KeyValue items={facts} testid="detail-facts" />
     <!-- ux F-14: disk, load, uptime and the agent version — the facts the
          live fleet had no signal for (two hosts at 98 % disk). -->
     <div class="health" data-testid="detail-health" aria-label="Health">
       {#if disk}
-        <div class="meter" data-testid="detail-health-meter" data-level={disk.level} role="meter" aria-valuenow={disk.pct} aria-valuemin="0" aria-valuemax="100" aria-label="disk used">
-          <div class="fill" style:width={`${disk.pct}%`}></div>
-        </div>
+        <span class="disk" data-testid="detail-health-meter" data-level={disk.level}
+          ><Meter value={disk.pct / 100} level={disk.level} label="disk used" /></span
+        >
       {/if}
       <span class="line">{healthLine(host, now)}</span>
     </div>
     {#if attention}
-      <p class="attention" data-testid="detail-attention">{attention.glyph} {attention.title}</p>
+      <p class="attention" data-testid="detail-attention"><Icon name={attention.icon} size={12} /> {attention.title}</p>
     {/if}
   </header>
 
@@ -571,6 +596,11 @@
           <span class="check-glyph" aria-hidden="true">{CHECK_GLYPH[row.state]}</span>
           <span class="check-label">{row.label}</span>
           <span class="check-detail">{row.detail}</span>
+          {#if row.install}
+            <span class="check-action">
+              <AgentInstallAction alias={host.alias} version={hubVersion} testid="detail-agent-install" ondone={onreprobe} />
+            </span>
+          {/if}
         </li>
       {/each}
     </ul>
@@ -648,7 +678,7 @@
   </section>
 
   <!-- 3. Sessions -->
-  <section class="block" aria-label="Sessions on {host.alias}">
+  <section class="block" aria-label="Sessions on {host.alias}" bind:this={sessionsBlock}>
     <div class="section-head">
       <h3>Sessions <span class="muted">{hostSessions.length}</span></h3>
       <div class="actions">
@@ -741,7 +771,7 @@
                         cwd: c.cwd,
                         git_branch: c.git_branch,
                       }}
-                      onsubmit={(pid) => restoreInto(c, pid)}
+                      onsubmit={(pid, ticket) => restoreInto(c, pid, ticket)}
                       oncancel={() => (restoringId = null)}
                     />
                   {:else}
@@ -984,20 +1014,7 @@
   .status.off { color: var(--usage-warn); }
   .muted { color: var(--fg-muted); }
   .health { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.25rem; font-size: var(--text-2xs); }
-  .meter { width: 6rem; height: 0.4rem; background: var(--track); border-radius: var(--radius-xs); overflow: hidden; flex-shrink: 0; }
-  .fill { height: 100%; background: var(--status-done); }
-  .meter[data-level='warn'] .fill { background: var(--status-waiting); }
-  .meter[data-level='crit'] .fill { background: var(--danger); }
-  .facts {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 0.6rem;
-    row-gap: 0.1rem;
-    margin: 0.4rem 0 0;
-  }
-  .facts dt { color: var(--fg-muted); }
-  .facts dd { margin: 0; font-variant-numeric: tabular-nums; }
-  .transport-agent { color: var(--accent); }
+  .disk { width: 6rem; flex-shrink: 0; }
   .attention { margin: 0.4rem 0 0; color: var(--usage-warn); }
   .block { border-top: 1px solid var(--border); padding-top: 0.6rem; }
   .account-line { display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.4rem; min-width: 0; }
@@ -1082,6 +1099,7 @@
   .check-live-step { font-size: var(--text-2xs); color: var(--fg-muted); }
   .checklist { list-style: none; margin: 0.4rem 0; padding: 0; font-size: var(--text-2xs); }
   .checklist li { display: grid; grid-template-columns: 1.2rem 9rem 1fr; gap: 0.4rem; padding: 0.15rem 0; }
+  .checklist .check-action { grid-column: 3; }
   .checklist li[data-state='ok'] .check-glyph { color: var(--usage-ok); }
   .checklist li[data-state='warn'] .check-glyph,
   .checklist li[data-state='warn'] .check-detail { color: var(--usage-warn); }

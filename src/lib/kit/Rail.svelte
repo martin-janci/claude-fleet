@@ -42,8 +42,11 @@
     aria-current={current === item.id ? 'page' : undefined}
     onclick={(e) => pick(e, item.id)}
     data-rail={item.id}
-    ><Icon name={item.icon} size={18} />{item.label}{#if item.badge}<span class="badge tnum" aria-label="{item.badge} need you"
-        >{item.badge}</span
+    data-testid={testid ? `${testid}-${item.id}` : undefined}
+    ><Icon name={item.icon} size={18} />{item.label}{#if item.badge}<span
+        class="badge tnum"
+        aria-label="{item.badge} need you"
+        data-testid={testid ? `${item.id}-${testid}-count` : undefined}>{item.badge}</span
       >{/if}</a
   >
 {/snippet}

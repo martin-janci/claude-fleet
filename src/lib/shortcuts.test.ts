@@ -9,7 +9,9 @@ import {
   formatBinding,
   matchShortcut,
   shortcutLabel,
+  viewKey,
   type KeyEventLike,
+  type Scope,
   type Shortcut,
 } from './shortcuts';
 import {
@@ -272,8 +274,8 @@ describe('shortcut registry', () => {
   });
 });
 
-// The per-view tables still read `e.key` in their own handlers. Each key the
-// registry lists for a view must still be handled in that view's source, so
+// The scopes whose handlers still read `e.key` (SCOPE_SOURCES): each key the
+// registry lists for one must still be handled in that view's source, so
 // dropping one from a handler (or the registry) fails here.
 describe('shortcut freeze: per-view tables match their handlers', () => {
   for (const [scope, file] of Object.entries(SCOPE_SOURCES)) {
@@ -294,12 +296,139 @@ describe('shortcut freeze: per-view tables match their handlers', () => {
   }
 });
 
+// Step 0.1's freeze for the views moved onto the registry: each function
+// below is that view's 0.5.4 key logic, copied as it shipped and reduced to
+// the action it took. Every key and modifier combination is replayed as a
+// real KeyboardEvent through the registry (`viewKey`, what the handler now
+// asks) and must name the same action, on the Mac and off it. Do not edit
+// these copies to make a test pass.
+type Frozen = (e: Ev, isMac: boolean) => string | null;
+const noMod = (e: Ev) => !e.metaKey && !e.ctrlKey && !e.altKey;
+const FROZEN_054: Record<string, Frozen> = {
+  terminal: (e, isMac) => {
+    const k = e.key.toLowerCase();
+    const cmdChord = e.metaKey && !e.altKey && !e.ctrlKey;
+    const ctrlShiftChord = !isMac && e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
+    if (!(cmdChord || ctrlShiftChord)) return null;
+    return k === 'v' ? 'terminal.paste' : k === 'c' ? 'terminal.copy' : k === 'a' ? 'terminal.select-all' : null;
+  },
+  conversation: (e, isMac) => {
+    if ((e.key === '[' || e.key === ']') && noMod(e)) return e.key === '[' ? 'conversation.prev-turn' : 'conversation.next-turn';
+    const mod = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+    if (!mod || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'f') return null;
+    return 'conversation.find';
+  },
+  hosts: (e) => {
+    if (!noMod(e)) return null;
+    const m: Record<string, string> = {
+      ArrowDown: 'hosts.down', j: 'hosts.down', ArrowUp: 'hosts.up', k: 'hosts.up', Home: 'hosts.first',
+      End: 'hosts.last', Enter: 'hosts.detail', ArrowRight: 'hosts.detail', ArrowLeft: 'hosts.list',
+      Escape: 'hosts.close', r: 'hosts.reprobe', u: 'hosts.usage', s: 'hosts.filter-sidebar',
+      n: 'hosts.new-session', e: 'hosts.edit', '/': 'hosts.search', '?': 'hosts.legend',
+    };
+    return m[e.key] ?? null;
+  },
+  assets: (e) => {
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key === 'Enter') return 'assets.primary';
+    if (!noMod(e)) return null;
+    const m: Record<string, string> = {
+      j: 'assets.down', ArrowDown: 'assets.down', k: 'assets.up', ArrowUp: 'assets.up', '/': 'assets.search',
+      a: 'assets.adopt', s: 'assets.sync', e: 'assets.edit', i: 'assets.ignore',
+    };
+    return m[e.key] ?? null;
+  },
+  'task-list': (e) => {
+    if (!noMod(e)) return null;
+    if (e.key === 'j' || e.key === 'k') return e.key === 'j' ? 'task-list.down' : 'task-list.up';
+    if (e.key === 's' || e.key === 'S') return e.shiftKey ? 'task-list.work-ask' : 'task-list.work';
+    return null;
+  },
+  'work-review': (e) => {
+    if (!noMod(e)) return null;
+    const m: Record<string, string> = {
+      j: 'work-review.down', ArrowDown: 'work-review.down', k: 'work-review.up', ArrowUp: 'work-review.up',
+      y: 'work-review.yes', n: 'work-review.no', x: 'work-review.pick',
+    };
+    return m[e.key] ?? null;
+  },
+  'link-review': (e) => {
+    if (!noMod(e)) return null;
+    const m: Record<string, string> = {
+      Escape: 'link-review.close', j: 'link-review.down', ArrowDown: 'link-review.down', k: 'link-review.up',
+      ArrowUp: 'link-review.up', y: 'link-review.yes', Enter: 'link-review.yes', n: 'link-review.no',
+      Backspace: 'link-review.no',
+    };
+    return m[e.key] ?? null;
+  },
+  'tidy-review': (e) => {
+    if (!noMod(e)) return null;
+    const m: Record<string, string> = {
+      Escape: 'tidy-review.close', j: 'tidy-review.down', ArrowDown: 'tidy-review.down', k: 'tidy-review.up',
+      ArrowUp: 'tidy-review.up', ' ': 'tidy-review.toggle', Enter: 'tidy-review.apply',
+    };
+    return m[e.key] ?? null;
+  },
+  // Two handlers: the window's Escape (while a drag runs, whatever is held)
+  // and the card's keys.
+  'work-board': (e) => {
+    if (e.key === 'Escape') return 'work-board.cancel-drag';
+    if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return null;
+    if (e.key === 'e' || e.key === 'E') return 'work-board.edit';
+    if (e.key === 'ArrowLeft') return 'work-board.left';
+    if (e.key === 'ArrowRight') return 'work-board.right';
+    return null;
+  },
+  'session-row': (e) => {
+    if (!noMod(e)) return null;
+    return e.key === 'y' ? 'session-row.yes' : e.key === 'n' ? 'session-row.no' : e.key === 'l' ? 'session-row.link' : null;
+  },
+};
+
+// The named keys the views use beyond the freeze's KEYS.
+const VIEW_KEYS = [...KEYS, 'Home', 'End', 'Space'];
+
+function* realEvents(): Generator<KeyboardEvent> {
+  for (const key of VIEW_KEYS) {
+    for (let m = 0; m < 16; m++) {
+      yield new KeyboardEvent('keydown', {
+        key, metaKey: !!(m & 1), ctrlKey: !!(m & 2), altKey: !!(m & 4), shiftKey: !!(m & 8), bubbles: true,
+      });
+    }
+  }
+}
+
+describe('shortcut freeze: views matched through the registry answer every key as 0.5.4 did', () => {
+  it('covers every matched scope that had a 0.5.4 handler', () => {
+    // 'form' (G1.2) is new since 0.5.4 too: DialogSheet/WizardDialog/FormWizard.
+    const since38 = ['session-list', 'question-card', 'form-card', 'form'];
+    expect(Object.keys(FROZEN_054).sort()).toEqual(Object.keys(MATCHED_SCOPES).filter((k) => !since38.includes(k)).sort());
+    // 14 of the 17 scopes ask the registry; the other 3 are SCOPE_SOURCES.
+    expect(Object.keys(MATCHED_SCOPES)).toHaveLength(14);
+    expect(new Set([...Object.keys(MATCHED_SCOPES), ...Object.keys(SCOPE_SOURCES), 'global']).size).toBe(18);
+  });
+
+  for (const [scope, frozen] of Object.entries(FROZEN_054)) {
+    for (const isMac of [true, false]) {
+      it(`${scope} on ${isMac ? 'macOS' : 'Linux/Windows'}`, () => {
+        const drift: string[] = [];
+        for (const e of realEvents()) {
+          const was = frozen(e, isMac);
+          const now = viewKey(scope as Scope, e, isMac);
+          if (was !== now) drift.push(`${show(e)}: ${was} → ${now}`);
+        }
+        expect(drift).toEqual([]);
+      });
+    }
+  }
+});
+
 // Step 3.8's scopes are matched through the registry, so their handlers must
 // ask it for their own scope.
 describe('shortcut registry: matched scopes ask the registry', () => {
   for (const [scope, file] of Object.entries(MATCHED_SCOPES)) {
     it(`${scope} (${file})`, () => {
-      expect(readFileSync(file, 'utf8')).toContain(`matchShortcut('${scope}'`);
+      const src = readFileSync(file, 'utf8');
+      expect(src.includes(`matchShortcut('${scope}'`) || src.includes(`viewKey('${scope}'`)).toBe(true);
     });
   }
 

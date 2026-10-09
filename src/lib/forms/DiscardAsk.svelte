@@ -21,13 +21,13 @@
   .discard-ask {
     display: flex;
     align-items: center;
-    gap: var(--space-2, 8px);
+    gap: var(--space-2);
     flex: 1;
     justify-content: flex-end;
   }
   .q {
     margin-right: auto;
-    font-size: var(--text-sm, 12.5px);
+    font-size: var(--text-sm);
     color: var(--fg);
   }
 </style>

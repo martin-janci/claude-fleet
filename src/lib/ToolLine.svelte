@@ -16,7 +16,8 @@
   } from './conversation';
   import CopyButton from './CopyButton.svelte';
   import Loader from './Loader.svelte';
-  import Icon, { type IconName } from './Icon.svelte';
+  import Icon from './kit/Icon.svelte';
+  import type { OfIconName as IconName } from './kit/icons';
   import { lineDiff, splitPath, parseNumbered, parseTodos, parseFileList, inputField, detailKind } from './tool_view';
 
   let {
@@ -164,7 +165,7 @@
     WebSearch: 'search',
     TodoWrite: 'list',
   };
-  const icon = $derived<IconName>(ICONS[line.name || toolName(line.summary)] ?? 'tool');
+  const icon = $derived<IconName>(ICONS[line.name || toolName(line.summary)] ?? 'toolkit');
   const TODO_ICON: Record<string, IconName> = { completed: 'circle-check', in_progress: 'circle-half', pending: 'circle' };
   const resultLines = $derived(detail?.result != null ? detail.result.split('\n') : []);
   const longResult = $derived(resultLines.length > RESULT_MAX_LINES);
@@ -318,7 +319,7 @@
     background: none;
     border: none;
     border-radius: var(--radius-sm);
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-family: var(--mono);
     font-size: var(--text-2xs);
     line-height: 1.5;
     color: var(--fg-muted);
@@ -409,7 +410,7 @@
     margin: -0.4rem -0.6rem 0.4rem;
     padding: 0.3rem 0.6rem;
     border-bottom: 1px solid var(--border);
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-family: var(--mono);
     font-size: var(--text-2xs);
   }
   .path {
@@ -461,7 +462,7 @@
     padding: 0.25rem 0;
     border-radius: var(--radius-sm);
     background: var(--bg);
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-family: var(--mono);
     font-size: var(--text-2xs);
     line-height: 1.5;
   }
@@ -529,7 +530,7 @@
     align-items: center;
     gap: 0.4rem;
     padding: 0.08rem 0;
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-family: var(--mono);
     font-size: var(--text-2xs);
     color: var(--fg-muted);
     white-space: nowrap;
@@ -554,16 +555,16 @@
   .todos li.completed {
     color: var(--fg-muted);
   }
-  .todos li.completed :global(.icon) {
+  .todos li.completed :global(.of-ico) {
     color: var(--diff-add-fg);
   }
   .todos li.in_progress {
     font-weight: 600;
   }
-  .todos li.in_progress :global(.icon) {
+  .todos li.in_progress :global(.of-ico) {
     color: var(--accent);
   }
-  .todos li.pending :global(.icon) {
+  .todos li.pending :global(.of-ico) {
     color: var(--fg-muted);
   }
   .ticon {

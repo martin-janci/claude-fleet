@@ -3,6 +3,7 @@ import { createRowStore } from './row_store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 import { readPref, writePref } from './prefs';
 import type { DecisionProposal } from './proposals';
+import { foldStartProgress, newStartToken, NO_START_STEPS, type StartProgressFrame, type StartSteps } from './start_steps';
 
 /** The `claude_status` vocabulary (pane_intel `ClaudeStatus`). Anything the
  *  backend has not classified arrives as `null`. */
@@ -200,6 +201,9 @@ export interface SessionRow {
   // Chat forms (migration 119): the form this session's agent asked and is
   // waiting on. Optional: an older hub sends none.
   pending_form?: { form_id: string; title: string } | null;
+  /** The form this session's agent is still writing (`ask { draft }`,
+   *  redesign 10.12): the JSON so far, drawn in by ChatWizards. */
+  form_draft?: { draft: string; why: string | null; updated_at: number } | null;
   /** The session's primary work link (migration 046), set through the work
    *  commands (`work.ts`). Absent from a hub older than the work graph. */
   work?: SessionWork | null;
@@ -865,6 +869,12 @@ export interface NewSessionArgs {
    *  (the same as `kind: 'shell'`). `agy` is refused until fleet can launch
    *  it. A Codex session takes no `profile`. */
   agent?: SessionAgent | null;
+  /** Opaque id the start reports its steps under (`start:progress`, step
+   *  5.13); `newSessionAbortable` mints it. */
+  start_token?: string | null;
+  /** The person was asked about `accounts.pause_at` (step 4.4) and chose to
+   *  start anyway; without it a hub refuses such a start (`E_ACCOUNT_LIMIT`). */
+  over_limit_ok?: boolean;
 }
 
 /** A ⌘N start whose create command is in flight (redesign step 5.13): the
@@ -874,9 +884,20 @@ export interface CreatingStart {
   /** Empty when the backend mints the name. */
   name: string;
   kind: 'work' | 'shell';
+  /** The `start_token` the command carries. */
+  token: string;
+  /** What the backend has reported so far (`start:progress`). */
+  steps: StartSteps;
 }
 
 export const creatingStart = writable<CreatingStart | null>(null);
+
+/** `start:progress` (step 5.13): move the in-flight start's step, if the
+ *  frame is this window's own start. Frames of other starts — another
+ *  window's, another device's on the same hub — are ignored. */
+export function applyStartProgress(f: StartProgressFrame): void {
+  creatingStart.update((c) => (c && c.token === f.token ? { ...c, steps: foldStartProgress(c.steps, f) } : c));
+}
 
 /** Rows a create returned before their agent was up; `session_starting.ts`
  *  follows them until it is. */
@@ -893,14 +914,17 @@ export async function newSessionAbortable(
 ): Promise<Result<SessionRow>> {
   // The Pulse sequence (5.13) follows the start: the command in flight is
   // its worktree and tmux steps, the row it returns waits on the agent.
+  const token = args.start_token || newStartToken();
   creatingStart.set({
     host_alias: args.host_alias,
     name: args.name ?? '',
     kind: args.kind === 'shell' || args.agent === 'shell' ? 'shell' : 'work',
+    token,
+    steps: NO_START_STEPS,
   });
   let r: Result<SessionRow>;
   try {
-    r = await invokeCmdAbortable<SessionRow>('new_session', { args }, signal);
+    r = await invokeCmdAbortable<SessionRow>('new_session', { args: { ...args, start_token: token } }, signal);
   } finally {
     creatingStart.set(null);
   }

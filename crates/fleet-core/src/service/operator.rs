@@ -646,7 +646,9 @@ impl OperatorHost for LiveHost {
                 // `unclaimed` would hide the agent's own session from the
                 // person it works for. See
                 // `crate::service::sessions::hub_personal_owner`.
+                over_limit_ok: false,
                 owner_person_id: crate::service::sessions::hub_personal_owner(&self.store),
+                start_token: None,
             },
             &self.store,
             &self.ssh,

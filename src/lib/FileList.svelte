@@ -4,6 +4,7 @@
   import type { Result } from './result';
   import DraftField from './DraftField.svelte';
   import { fileIcon, folderIcon } from './fileicons';
+  import Icon from './kit/Icon.svelte';
   import Skeleton from './states/Skeleton.svelte';
 
   interface TreeNode {
@@ -129,6 +130,16 @@
   const stagedCount = $derived(changes.filter((c) => c.staged).length);
 
   const statusByPath = $derived(new Map(changes.map((c) => [c.path, c.status])));
+  /** The folders a changed file sits in (the FilesTree board's tree marks
+   *  them, so a change deep in a closed folder is still seen). */
+  const changedDirs = $derived(
+    new Set(
+      changes.flatMap((c) => {
+        const parts = c.path.split('/');
+        return parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join('/'));
+      }),
+    ),
+  );
 
   const filterLc = $derived(filter.trim().toLowerCase());
 
@@ -220,7 +231,7 @@
               <span class="badge {BADGE[c.status]?.cls ?? 'b-mod'}"
                 >{BADGE[c.status]?.letter ?? '•'}</span
               >
-              <span class="ficon">{fileIcon(c.path)}</span>
+              <span class="ficon"><Icon name={fileIcon(c.path)} size={14} /></span>
               <span class="name">{c.path}</span>
             </button>
           </div>
@@ -255,7 +266,7 @@
               <span class="badge {BADGE[c.status]?.cls ?? 'b-mod'}"
                 >{BADGE[c.status]?.letter ?? '•'}</span
               >
-              <span class="ficon">{fileIcon(c.path)}</span>
+              <span class="ficon"><Icon name={fileIcon(c.path)} size={14} /></span>
               <span class="name">{c.path}</span>
             </button>
           {/each}
@@ -273,7 +284,7 @@
             onclick={() => onSelect(path, statusByPath.get(path))}
             title={path}
           >
-            <span class="ficon">{fileIcon(path)}</span>
+            <span class="ficon"><Icon name={fileIcon(path)} size={14} /></span>
             <span class="name">{path}</span>
           </button>
         {/each}
@@ -344,8 +355,11 @@
       onclick={() => toggle(node.path)}
     >
       <span class="caret">{expanded[node.path] ? '▾' : '▸'}</span>
-      <span class="ficon">{folderIcon(expanded[node.path])}</span>
+      <span class="ficon"><Icon name={folderIcon(expanded[node.path])} size={14} /></span>
       <span class="name">{node.name}</span>
+      {#if changedDirs.has(node.path)}
+        <span class="dir-dot" data-testid="tree-dir-changed" title="Has changed files" aria-label="has changed files"></span>
+      {/if}
     </button>
     {#if expanded[node.path]}
       {#each node.children as child (child.path)}
@@ -360,8 +374,12 @@
       onclick={() => onSelect(node.path, statusByPath.get(node.path))}
       title={node.path}
     >
-      <span class="ficon">{fileIcon(node.name)}</span>
+      <span class="ficon"><Icon name={fileIcon(node.name)} size={14} /></span>
       <span class="name">{node.name}</span>
+      {#if statusByPath.has(node.path)}
+        {@const st = statusByPath.get(node.path) ?? ''}
+        <span class="badge tb {BADGE[st]?.cls ?? 'b-mod'}" data-testid="tree-badge" title={st}>{BADGE[st]?.letter ?? '•'}</span>
+      {/if}
     </button>
   {/if}
 {/snippet}
@@ -459,7 +477,7 @@
     white-space: nowrap;
   }
   .row.file .name {
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: var(--mono);
   }
   .caret {
     flex: 0 0 auto;
@@ -469,11 +487,10 @@
   }
   .ficon {
     flex: 0 0 auto;
+    display: inline-flex;
+    justify-content: center;
     width: 1.2rem;
-    overflow: hidden;
-    text-align: center;
-    font-size: var(--text-2xs);
-    line-height: 1;
+    color: var(--fg-muted);
   }
   .badge {
     flex: 0 0 auto;
@@ -484,6 +501,17 @@
     border-radius: var(--radius-xs);
     font-size: var(--text-2xs);
     font-weight: 700;
+  }
+  .tb {
+    margin-left: auto;
+  }
+  .dir-dot {
+    flex: 0 0 auto;
+    margin-left: auto;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--status-waiting);
   }
   .b-mod {
     background: var(--waiting-soft);

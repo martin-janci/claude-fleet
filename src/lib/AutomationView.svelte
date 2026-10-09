@@ -298,11 +298,11 @@
   h1 { margin: 0; font-size: var(--text-lg); line-height: 22px; font-weight: 600; }
   .grow { flex: 1; }
   .today { font-size: var(--text-xs); color: var(--fg-muted); font-variant-numeric: tabular-nums; }
-  .banner { margin: 0; padding: var(--space-2, 8px) var(--space-4, 16px); font-size: var(--text-sm, 12.5px); background: color-mix(in srgb, var(--status-waiting) 14%, transparent); }
-  .err { margin: 0; padding: var(--space-2, 8px) var(--space-4, 16px); font-size: var(--text-sm, 12.5px); color: var(--status-failed); }
-  .loading { display: flex; justify-content: center; padding: var(--space-6, 24px); }
+  .banner { margin: 0; padding: var(--space-2) var(--space-4); font-size: var(--text-sm); background: color-mix(in srgb, var(--status-waiting) 14%, transparent); }
+  .err { margin: 0; padding: var(--space-2) var(--space-4); font-size: var(--text-sm); color: var(--status-failed); }
+  .loading { display: flex; justify-content: center; padding: var(--space-6); }
   .body { flex: 1; min-height: 0; overflow: auto; padding: var(--space-4) var(--space-6); display: flex; flex-direction: column; gap: var(--space-3); }
-  .hint, .none { margin: 0; font-size: var(--text-sm, 12.5px); color: var(--fg-muted); }
+  .hint, .none { margin: 0; font-size: var(--text-sm); color: var(--fg-muted); }
   .table { list-style: none; margin: 0; padding: 0; max-width: 960px; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
   .table li { display: grid; grid-template-columns: 16px 80px minmax(0, 1fr) 64px 52px 64px; gap: 4px 10px; align-items: center; padding: 9px 12px; font-size: var(--text-sm); }
   .table li + li { border-top: 1px solid var(--border); }
