@@ -2160,12 +2160,27 @@ impl FleetTools {
         Parameters(args): Parameters<crate::service::trackers::admin::WorkAdminArgs>,
     ) -> Result<CallToolResult, McpError> {
         use crate::service::trackers::admin::{self as a, AdminAction};
-        // Master-only enforcement already happened centrally
-        // (`enforce_admin`, `work_admin` is `Access::Master`). The audit line
-        // is built by hand: the secret never reaches it, not even as a length.
+        // `Access::Person` let in the master and the hub owner's own unbound
+        // device. A device reaches the trackers only (connect, test,
+        // disconnect from the phone), and only when trusted and `full`;
+        // orgs, retention, usage and buckets stay the master's. The audit
+        // line is built by hand: the secret never reaches it, not even as a
+        // length.
         let summary = args.audit_summary();
         audit("work_admin", &summary);
-        match AdminAction::parse(&args.action).map_err(to_mcp_err)? {
+        let action = AdminAction::parse(&args.action).map_err(to_mcp_err)?;
+        if !caller.is_master() {
+            if !action.is_tracker_action() {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "a device manages trackers here (list, add, update, set_credential, \
+                     test, remove); the rest of work_admin is the hub operator's",
+                    None,
+                ));
+            }
+            super::fleet::owner_device_admin(&caller, "managing trackers")?;
+        }
+        match action {
             // M11.4's sync metrics and M12.3's retention (rows, dry run,
             // last sweep), each read under its own short locks.
             AdminAction::Status => {

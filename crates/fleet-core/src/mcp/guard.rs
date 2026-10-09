@@ -295,17 +295,18 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     },
     ToolPolicy {
         name: "add_host",
-        access: Access::Master,
+        access: Access::Person,
         readonly: false,
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
     // Orbit Fleet 4.9: installs fleet-agent on a host over SSH and moves the
     // host onto it — fleet administration, like `add_host`. Returns at once;
-    // the job runs on.
+    // the job runs on. `add_host` and this are `Person` since contract 13:
+    // the hub owner's trusted phone may call them (`owner_device_admin`).
     ToolPolicy {
         name: "install_agent",
-        access: Access::Master,
+        access: Access::Person,
         readonly: false,
         confirm: false,
         deadline: Deadline::Quick,
@@ -1012,13 +1013,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: true,
         deadline: Deadline::Lifecycle,
     },
-    // Trackers and their credentials (work graph M3): fleet admin, so the
-    // master only — on a paired desktop every command behind it is
-    // `LocalOnly` (review C17). Confirm-gated for `remove`; `test` talks to
+    // Trackers and their credentials (work graph M3): fleet admin. Since
+    // contract 13 the hub owner's trusted phone reaches the tracker actions
+    // (`owner_device_admin`); everything else stays the master's. On a
+    // paired desktop every command behind it is still `LocalOnly` (C17). Confirm-gated for `remove`; `test` talks to
     // the tracker, hence the lifecycle deadline.
     ToolPolicy {
         name: "work_admin",
-        access: Access::Master,
+        access: Access::Person,
         readonly: false,
         confirm: true,
         deadline: Deadline::Lifecycle,
@@ -2632,7 +2634,6 @@ mod tests {
     fn admin_tools_are_the_fleet_admin_set_and_mutating() {
         for t in [
             "provision_hosts",
-            "add_host",
             "remove_host",
             "merge_host",
             "hide_host",
@@ -2643,10 +2644,16 @@ mod tests {
             "pair_client",
             "revoke_client",
             "set_client_trust",
-            // Trackers and their credentials (work graph M3).
-            "work_admin",
         ] {
             assert!(is_admin_tool(t), "{t}");
+            assert!(!is_readonly_tool(t), "{t}");
+        }
+        // Contract 13 (Martin, "Owner's phone"; trackers "Allow on phone"):
+        // the hub owner's own device reaches these past the gate, and the
+        // handler asks for a trusted `full` device (`owner_device_admin`).
+        for t in ["add_host", "install_agent", "work_admin"] {
+            assert_eq!(policy(t).map(|p| p.access), Some(Access::Person), "{t}");
+            assert!(!is_admin_tool(t), "{t}");
             assert!(!is_readonly_tool(t), "{t}");
         }
         // Listing them is master-only too — it enumerates every paired

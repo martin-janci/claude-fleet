@@ -179,4 +179,17 @@
 //!   `QueuePromptResult`, `DeferredPromptRow`, `BranchDiff`,
 //!   `ShellTerminalsResult`, `RunsPage`, `RunRow`, `ControlHandoffRow`,
 //!   `HandoffItem` and `AccountUsageSnapshot`.
-pub const CONTRACT_REVISION: u32 = 12;
+//! - **13** — *new tools, a new grant level and wider access*. The desktop
+//!   routes `control_route_propose` / `control_route_follow` to the new
+//!   `control_route` tool (9.9), `list_library`, `add_library_items` and
+//!   `remove_library_item` to `library` (9.7), and `lost_target`,
+//!   `place_transcript` and `start_rules` (8.11) to tools of those names;
+//!   a revision-12 hub serves none of them. A grant's level gains `answer`
+//!   (11.7a) in `my_grants`, `session_access`, `session_share` and
+//!   `grant:changed`, which a client reading the level as a closed enum
+//!   fails on. And the hub owner's trusted `full` phone may now call
+//!   `add_host`, `install_agent` and `work_admin`'s tracker actions
+//!   (Martin's "Owner's phone" and trackers "Allow on phone"); a phone
+//!   offers them from this revision on. The golden file pins
+//!   `ControlRoute`, `LostTarget` and `PlacedTranscript`.
+pub const CONTRACT_REVISION: u32 = 13;
