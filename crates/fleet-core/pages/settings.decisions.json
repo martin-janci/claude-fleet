@@ -69,6 +69,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.work_placement",
+          "hint": "Proposes a group for a new task nothing placed; you still place it."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
         }
       ]

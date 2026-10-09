@@ -58,6 +58,9 @@ mod tests;
 pub mod work_link;
 #[cfg(test)]
 mod work_link_tests;
+pub mod work_placement;
+#[cfg(test)]
+mod work_placement_tests;
 
 pub use jev::{
     Answer, BackendError, DecisionBackend, JevBackend, JevRequest, JevResponse, NoulCriteria,
@@ -104,10 +107,12 @@ pub enum Feature {
     QuickAnswer,
     /// Flagging a proposed task that may duplicate an existing one (K4).
     Duplicate,
+    /// Proposing a Work-view group for a task nobody placed (K5).
+    WorkPlacement,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 7] = [
+    pub const ALL: [Feature; 8] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
@@ -115,6 +120,7 @@ impl Feature {
         Feature::HostPlacement,
         Feature::QuickAnswer,
         Feature::Duplicate,
+        Feature::WorkPlacement,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -126,6 +132,7 @@ impl Feature {
             Feature::HostPlacement => "host_placement",
             Feature::QuickAnswer => "quick_answer",
             Feature::Duplicate => "duplicate",
+            Feature::WorkPlacement => "work_placement",
         }
     }
 
@@ -143,6 +150,7 @@ impl Feature {
             Feature::HostPlacement => settings::DECIDE_JEV_HOST_PLACEMENT,
             Feature::QuickAnswer => settings::DECIDE_JEV_QUICK_ANSWER,
             Feature::Duplicate => settings::DECIDE_JEV_DUPLICATE,
+            Feature::WorkPlacement => settings::DECIDE_JEV_WORK_PLACEMENT,
         }
     }
 }

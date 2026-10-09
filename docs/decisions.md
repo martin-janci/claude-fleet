@@ -494,6 +494,38 @@ none, nothing is asked. A proposal accepted at once (a planner card with
 Code: `service/decide/duplicate.rs`, `duplicate_hint` in
 `service/work/view.rs`; card K4 in the test map.
 
+## `work_placement` — the group of a task nobody placed (K5)
+
+When a person creates a standalone task (`work_link { action: create }`
+with no parent), and `decide.jev.work_placement` is on, Jev is asked one
+Choice: which of the groups people use in the Work view the task belongs
+in, or `none` / `unsure`. The groups are the labels of people's
+placements, most used first, then the enabled rules' groups, at most 20;
+with none in use, or when a person or a rule already placed the task,
+nothing is asked. A subtask sits under its parent and is never asked about.
+
+- **What is sent.** The task's title and key, redacted; each group's label.
+- **What is recorded.** Subject `work_item` `<id>`; each option is `g` and
+  12 hex digits of an HMAC of the label under the local fingerprint key, so
+  no label is ever recorded.
+- **Shadow.** Asked off the creating call's path and only recorded, with
+  `none` as the baseline (today such a task sits in no group of a person's).
+- **Assist.** A usable answer (at least 50%, a group) stays on the task as
+  its `work_placement` proposal. The Work view reads it back with the
+  label (a proposal whose group is no longer in use is dropped), and in the
+  New layout the task's Group line shows *Jev proposes “X” · Proposed by
+  Jev · N%* with **Place in X**. Jev never places a task and never writes a
+  rule.
+- **Asked once.** A decided run about the same task and input is never
+  asked again.
+- **Follow-up.** A person's placement of the task marks the run
+  `confirmed` (the same group) or `corrected` (another). A shadow answer
+  nobody saw is never marked.
+
+Code: `service/decide/work_placement.rs`, `label_proposals` in the Work
+view's graph, `record_place` in `service/work/structure.rs`; card K5 in
+the test map.
+
 ## Settings
 
 <!-- BEGIN GENERATED: settings decide. -->
@@ -508,6 +540,7 @@ Code: `service/decide/duplicate.rs`, `duplicate_hint` in
 | `decide.jev.host_placement` | `off` | `off` / `shadow` / `assist` | Pre-selecting the host of a new session when no rule, limit or offline host decides. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.quick_answer` | `off` | `off` / `shadow` / `assist` | Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.duplicate` | `off` | `off` / `shadow` / `assist` | Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.work_placement` | `off` | `off` / `shadow` / `assist` | Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
 | `decide.jev.breaker_failures` | `5` | 1–100 | Failed calls in a row that open the circuit breaker. |

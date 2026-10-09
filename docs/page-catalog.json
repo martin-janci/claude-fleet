@@ -3585,6 +3585,24 @@
       ]
     },
     {
+      "default_widget": "select",
+      "key": "decide.jev.work_placement",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: task group",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "switch",
       "key": "decide.jev.unassigned",
       "kind": {

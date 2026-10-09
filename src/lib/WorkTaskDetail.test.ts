@@ -16,6 +16,7 @@ import { sessions } from './sessions';
 import { selectedSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
 import { link, task } from './work_view_fixture';
+import { uiLayout } from './prefs';
 import { noteWorkChanged, selectedTaskId, workTreeMeta, type OrgImpact, type TaskDetail } from './work_view';
 
 const trackerTask: TaskDetail = {
@@ -679,5 +680,43 @@ describe('WorkTaskDetail', () => {
     expect(before(screen.getByTestId('task-subtasks'), sessionsHead)).toBe(true);
     expect(before(sessionsHead, screen.getByTestId('task-steps'))).toBe(true);
     expect(screen.getByTestId('task-step').textContent).toContain('Read ABC-12');
+  });
+  describe('K5: Jev proposes a group (redesign 6.9)', () => {
+    const proposed: TaskDetail = {
+      ...localTask,
+      task: { ...localTask.task, proposals: [{ feature: 'work_placement', value: 'Payments', source: 'jev', confidence_pct: 77 }] },
+    };
+
+    it('offers Place in the proposed group in the New layout, and places on click', async () => {
+      uiLayout.set('new');
+      handlers.work_task = () => proposed;
+      handlers.place_work = () => ({ ...proposed.task, group: { id: 'label:Payments', label: 'Payments', source: 'manual' }, placement_version: 1 });
+      render(WorkTaskDetail, { props: { taskId: 'item:77' } });
+      await flush();
+      expect(screen.getByTestId('work-task-group-proposal').textContent).toContain('Jev proposes “Payments”');
+      expect(screen.getByTestId('work-task-group-proposed-by').textContent).toContain('77%');
+      await fireEvent.click(screen.getByTestId('work-task-group-proposal-place'));
+      await flush();
+      expect(calls('place_work')[0]).toEqual({ task_id: 'item:77', group: 'Payments', expected_version: 0 });
+      expect(screen.queryByTestId('work-task-group-proposal')).toBeNull();
+      uiLayout.set('classic');
+    });
+
+    it('shows nothing in the classic layout', async () => {
+      uiLayout.set('classic');
+      handlers.work_task = () => proposed;
+      render(WorkTaskDetail, { props: { taskId: 'item:77' } });
+      await flush();
+      expect(screen.queryByTestId('work-task-group-proposal')).toBeNull();
+    });
+
+    it('shows nothing once a person placed the task', async () => {
+      uiLayout.set('new');
+      handlers.work_task = () => ({ ...proposed, task: { ...proposed.task, group: { id: 'label:Infra', label: 'Infra', source: 'manual' } } });
+      render(WorkTaskDetail, { props: { taskId: 'item:77' } });
+      await flush();
+      expect(screen.queryByTestId('work-task-group-proposal')).toBeNull();
+      uiLayout.set('classic');
+    });
   });
 });
