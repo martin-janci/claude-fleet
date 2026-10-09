@@ -45,6 +45,8 @@ export interface ActionSpec {
   report: boolean;
   /** Its answer is shown by this formatter. */
   result?: ResultView;
+  /** The loader beside the form while it runs. */
+  busy?: 'counter-orbit';
 }
 
 export type ItemLabel =
@@ -53,7 +55,8 @@ export type ItemLabel =
   | { type: 'org_rule' }
   | { type: 'device' }
   | { type: 'member' }
-  | { type: 'admin_need' };
+  | { type: 'admin_need' }
+  | { type: 'person_spend' };
 
 /** A tile's line under its value (`Sub`). */
 export type Sub = { type: 'budget'; field: string } | { type: 'count'; field: string; text: string };
@@ -74,6 +77,7 @@ export type FieldKind =
   | { type: 'count' }
   | { type: 'money' }
   | { type: 'money_series' }
+  | { type: 'sync'; unit: string }
   | { type: 'settings'; set: ActionSpec }
   | { type: 'items'; item_label: ItemLabel; remove?: ActionSpec; add: ActionSpec[] };
 
@@ -218,12 +222,27 @@ export function itemLabel(label: ItemLabel, item: unknown): string {
   if (label.type === 'org_rule') return ruleChip(item as OrgRuleRow);
   if (label.type === 'device') return deviceChip(item as DeviceItem);
   if (label.type === 'admin_need') return needLine(item as AdminNeed).text;
+  if (label.type === 'person_spend') return personSpendName(item as PersonSpend);
   if (label.type === 'member') {
     const m = item as { name?: string; display_name?: string; role?: string };
     return `${m.display_name || m.name || ''} · ${m.role ?? ''}`;
   }
   const v = (item as Record<string, unknown> | null)?.[label.field];
   return v === undefined || v === null ? '' : String(v);
+}
+
+/** One person's share of an org's spend (`service::org_spend::PersonSpend`);
+ *  no `person_id` is nobody's. */
+export interface PersonSpend {
+  person_id?: number;
+  name?: string;
+  today_micros: number;
+  week_micros: number;
+  month_micros: number;
+}
+
+export function personSpendName(p: PersonSpend): string {
+  return p.person_id === undefined || p.person_id === null ? 'Routines, missions and unclaimed' : (p.name ?? `person ${p.person_id}`);
 }
 
 /** One of an org's "Needs an admin" (`service::org_needs::AdminNeed`). */
@@ -275,6 +294,28 @@ export function needLine(
 }
 
 /** A tile's line under its value, or `''`. */
+/** A `sync` field's value: a transfer in progress (11.12). */
+export interface SyncProgress {
+  done: number;
+  total: number;
+  both_ways: boolean;
+  /** Unix seconds the transfer last moved. */
+  since?: number;
+}
+
+/** 1280 → "1 280": the loaders' count reads in groups of three. */
+export function grouped(n: number): string {
+  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+}
+
+/** The Constellation's line: "412 of 1 280 messages · 18 s". */
+export function syncLine(unit: string, s: SyncProgress, now: number): string {
+  const head = `${grouped(s.done)} of ${grouped(s.total)} ${unit}`;
+  if (s.since === undefined) return head;
+  const secs = Math.max(0, now - s.since);
+  return `${head} · ${secs < 60 ? `${secs} s` : `${Math.floor(secs / 60)} min`}`;
+}
+
 export function subLine(sub: Sub | undefined, value: unknown, record: ResourceRecord): string {
   if (!sub) return '';
   const n = record[sub.field];

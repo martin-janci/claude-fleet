@@ -366,6 +366,38 @@ Code: `service/decide/sibling_repos.rs`, `sibling_candidates` and
 `preview_start_decided` in `service/trackers/tickets.rs`; step 3.12 of the
 redesign's transition plan.
 
+## `quick_answer` — the likely option first (J5)
+
+When an agent asks a question with numbered options, or opens a chat form
+whose first step has one choice of up to nine options, Jev may be asked
+which option the person is likely to pick. The card shows that option first
+with *Proposed by Jev (N%)*; the numbers follow the shown order, and each
+option still sends its own key. A form pre-selects it when the field is
+empty. *Keep the order* (question) or *Change* (form) puts the options back.
+
+- **Never on a push, a permission or a risky option.** A permission dialog
+  and a multi-select question are never asked about. An option whose words
+  name a push, a force, a delete, a deploy, a merge, an "allow" or another
+  step that is hard to undo (`RISKY_WORDS`) is left out of the question, and
+  the card checks the same words again before it moves anything
+  (`src/lib/quick_answer.ts`).
+- **What is sent.** The question's text (600 characters at most) and the
+  safe options' labels, redacted. Nothing from the pane or the repository.
+- **Shadow / assist.** Always asked off the path a person waits on: the
+  reconcile tick asks about a new question after its pass, and `ask { form }`
+  asks after it opened the form. A proposal appears when it is ready, or not
+  at all. Shadow only records, with the option under the cursor (or the
+  form field's default) as the baseline.
+- **Asked once per question.** A question read again is not asked again; a
+  question that changed or went away withdraws its proposal (`ignored`), so
+  an answer never outlives its question.
+- **What is recorded.** Subject `session` `<id>` (on the session row's
+  `proposals`) or `form` `<form_id>` (the form's `proposal`); options are
+  `o<n>`, the option's number from 1, and `unsure`.
+
+Code: `service/decide/quick_answer.rs` (`QuickAnswerTrigger` on the
+reconcile tick, `spawn_for_form` after `ask { form }`).
+
 ## `work_link` — the work item of a session no rule could link (J1)
 
 When three turns of a conversation have gone by and nothing linked the
@@ -403,6 +435,65 @@ Code: `service/decide/work_link.rs`, `work_link_subject` in
 `service/hooks.rs`, `on_jev_proposal` in `service/work/detect.rs`; card J1
 in the test map.
 
+## `host_placement` — the host of a project's new session (N5)
+
+Host choice goes by rules and numbers first. The New session dialog keeps the
+host it remembers for the project (or the one it was opened on), and the
+numbers drop every host that is offline or hidden, outside the project's
+organisation, or whose own account is past `accounts.pause_at`. Only when
+the dialog has no host to keep and two or more hosts are left is Jev asked
+one Choice over them (or `unsure`). One host left, or none, asks nothing.
+
+- **What is sent.** The project's `owner/repo` and, per candidate, bucketed
+  numbers: this project's starts there in the last 30 days, whether it is
+  checked out there, live sessions, free disk and account use (to a tenth)
+  and latency (to 50 ms). Host aliases are the options.
+- **Shadow.** Asked off the dialog's path and only recorded, with the first
+  candidate (`local` first, then by alias) as the baseline.
+- **Assist.** The dialog waits for the one call and pre-selects the host with
+  *Proposed by Jev (N%)* (New layout). You still press Create; picking
+  another host is yours. A host over its limit or offline is never proposed.
+- **Asked once per input.** Re-opening the dialog on the same numbers reuses
+  the decided run for 7 days.
+- **Follow-up.** Your start marks the proposal you were shown `confirmed` or
+  `corrected`; a shadow answer nobody saw marks nothing.
+- **What is recorded.** Subject `project_start` `project:<id>`; options are
+  `h:<alias>`.
+- **Paired desktop.** `propose_host_placement` and `record_host_placement`
+  are local-only: the hub owns the decision model.
+
+Code: `service/decide/host_placement.rs`; redesign step 4.11.
+
+## `duplicate` — a proposed task that may repeat an existing one (K4)
+
+When an agent (`work_link { action: propose | propose_tree }`) or the
+planner proposes a task, and `decide.jev.duplicate` is on, Jev is asked one
+Choice per new proposal: which open task of the same org touched in the last
+90 days is the SAME work, or `none`. The candidates are the tasks sharing a
+telling title word with the proposal, most alike first, at most 10; with
+none, nothing is asked. A proposal accepted at once (a planner card with
+"accept created") is never asked about.
+
+- **What is sent.** The proposal's title and the start of the agent's `why`
+  (600 characters), redacted; each candidate's key and title.
+- **Shadow.** Asked off the proposing call's path and only recorded, with
+  `none` as the baseline (today nothing flags a duplicate).
+- **Assist.** A usable answer (at least 50%, not `none`) stays on the
+  proposal as its `duplicate` proposal: in the New layout the proposal's
+  card on the task page shows *May duplicate KEY · Proposed by Jev · N%*
+  with **Merge** (reject the proposal; the existing task covers it) and
+  **Keep both** (accept it). Nothing is rejected or accepted by itself.
+- **Asked once.** A decided run about the same proposal and input is never
+  asked again.
+- **Follow-up.** A person's single Reject (Merge) marks the run
+  `confirmed`, an Accept (Keep both) `rejected`. A bulk accept marks
+  nothing, and a shadow answer nobody saw is never marked.
+- **What is recorded.** Subject `work_item` `<proposal id>`; options are
+  item ids (`i<id>`) and `none`.
+
+Code: `service/decide/duplicate.rs`, `duplicate_hint` in
+`service/work/view.rs`; card K4 in the test map.
+
 ## Settings
 
 <!-- BEGIN GENERATED: settings decide. -->
@@ -414,6 +505,9 @@ in the test map.
 | `decide.jev.work_link` | `off` | `off` / `shadow` / `assist` | Choosing a ticket for a session no rule could link. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.start_project` | `off` | `off` / `shadow` / `assist` | Pre-selecting the repository of a task's first start. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.sibling_repos` | `off` | `off` / `shadow` / `assist` | Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.host_placement` | `off` | `off` / `shadow` / `assist` | Pre-selecting the host of a new session when no rule, limit or offline host decides. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.quick_answer` | `off` | `off` / `shadow` / `assist` | Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.duplicate` | `off` | `off` / `shadow` / `assist` | Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
 | `decide.jev.breaker_failures` | `5` | 1–100 | Failed calls in a row that open the circuit breaker. |

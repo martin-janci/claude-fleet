@@ -69,6 +69,12 @@ pub enum AddProjectSource {
     Clone {
         /// `https://github.com/<owner>/<repo>` or `git@github.com:<owner>/<repo>.git`.
         url: String,
+        /// The project is already in the fleet: clone it onto this (remote)
+        /// host too and answer its existing row. Without it an existing
+        /// project is refused `E_EXISTS`. Sent only when set, so a routed
+        /// call without it is what an older hub was always sent.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        existing: bool,
     },
     /// Adopt a checkout that already exists on the `local` host.
     Folder {
@@ -168,7 +174,9 @@ pub async fn add_project_with(
     crate::validate::host_alias(&args.host_alias)?;
     require_fleet_host(store, &args.host_alias)?;
     match &args.source {
-        AddProjectSource::Clone { url } => clone_source(&args, url, store, ssh, &token).await,
+        AddProjectSource::Clone { url, existing } => {
+            clone_source(&args, url, *existing, store, ssh, &token).await
+        }
         AddProjectSource::Folder { path } => folder_source(&args, path, store).await,
         AddProjectSource::New { .. } => new_source(&args, store, ssh, &token).await,
     }
@@ -177,6 +185,7 @@ pub async fn add_project_with(
 async fn clone_source(
     args: &AddProjectArgs,
     url: &str,
+    existing: bool,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
     token: &CancellationToken,
@@ -187,7 +196,31 @@ async fn clone_source(
             format!("{url:?} is not a GitHub repository (try owner/repo or its URL)"),
         )
     })?;
-    refuse_existing_project(store, &owner, &repo)?;
+    // A second host for a project the fleet already has (Add project's
+    // "Clone on" with several hosts, redesign 6.11): the row stays as it is
+    // and the host gets the checkout a session there would otherwise clone
+    // on first use. `local` is where the row's own path lives, so it is
+    // never a second host.
+    let existing_row = if existing {
+        if args.host_alias == crate::service::projects::LOCAL_HOST {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "{owner}/{repo} is already a fleet project; only a remote host can get another checkout"
+                ),
+            ));
+        }
+        Some(existing_project_row(store, &owner, &repo)?)
+    } else {
+        refuse_existing_project(store, &owner, &repo)?;
+        None
+    };
+    // The row's own casing, so the checkout lands where a session there
+    // looks for it (`remote_project_path_for` reads the row).
+    let (owner, repo) = match &existing_row {
+        Some(r) => (r.project.owner.clone(), r.project.repo.clone()),
+        None => (owner, repo),
+    };
     // TOCTOU, accepted: the lock above is dropped here and re-taken inside
     // `register`. Two concurrent adds of `Owner/Repo` and `owner/repo` could
     // both pass that case-insensitive guard and then both succeed in
@@ -237,11 +270,38 @@ async fn clone_source(
         // is checked out there — see [`checkout_is_this_repo`] for why
         // adopting on that alone can register a row for the wrong repository.
         if already_a_checkout(&out) && checkout_is_this_repo(&out, &owner, &repo) {
-            return register(store, &owner, &repo, &local_base, false);
+            return match existing_row {
+                Some(row) => Ok(row),
+                None => register(store, &owner, &repo, &local_base, false),
+            };
         }
         return Err(git_error(&args.host_alias, &owner, &repo, &dest, &out));
     }
-    register(store, &owner, &repo, &local_base, false)
+    match existing_row {
+        Some(row) => Ok(row),
+        None => register(store, &owner, &repo, &local_base, false),
+    }
+}
+
+/// The fleet's row for `owner/repo` (case-insensitively), for a clone onto
+/// another host: `E_NOTFOUND` when there is none to add a host to.
+fn existing_project_row(
+    store: &Mutex<Store>,
+    owner: &str,
+    repo: &str,
+) -> Result<ProjectTreeRow, IpcError> {
+    let s = lock(store)?;
+    s.list_projects_joined()?
+        .into_iter()
+        .find(|r| {
+            r.project.owner.eq_ignore_ascii_case(owner) && r.project.repo.eq_ignore_ascii_case(repo)
+        })
+        .ok_or_else(|| {
+            IpcError::new(
+                codes::E_NOTFOUND,
+                format!("{owner}/{repo} is not a fleet project yet; add it first"),
+            )
+        })
 }
 
 /// The script stopped at [`clone_script`]'s own "already a checkout" guard:
@@ -1239,6 +1299,10 @@ pub struct GithubRepo {
     pub description: Option<String>,
     pub is_private: bool,
     pub updated_at: Option<String>,
+    /// The repository's main language ("Rust"), shown on its row. Absent
+    /// from an older hub's answer and from a repository GitHub has none for.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// `gh repo list --json`'s camelCase wire shape. Kept private and separate
@@ -1251,37 +1315,67 @@ struct GhRepoWire {
     description: Option<String>,
     is_private: bool,
     updated_at: Option<String>,
+    #[serde(default)]
+    primary_language: Option<GhLanguageWire>,
+}
+
+/// `primaryLanguage` is an object (`{"name": "Rust"}`), or null.
+#[derive(serde::Deserialize)]
+struct GhLanguageWire {
+    name: String,
 }
 
 /// Production entry point for the Add-project dialog's browse mode.
 pub async fn list_github_repos(
     host_alias: &str,
+    owner: Option<&str>,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<Vec<GithubRepo>, IpcError> {
-    list_github_repos_with(host_alias, store, &**ssh).await
+    list_github_repos_with(host_alias, owner, store, &**ssh).await
+}
+
+/// The `gh repo list` command for one owner, or for the host's own login
+/// when `owner` is `None`. The owner is checked as a GitHub name before it
+/// is quoted in, so a value like `-rf` never reaches `gh` as a flag.
+fn gh_repo_list_cmd(owner: Option<&str>) -> Result<String, IpcError> {
+    const FIELDS: &str = "nameWithOwner,description,isPrivate,updatedAt,primaryLanguage";
+    match owner {
+        None => Ok(format!("gh repo list --limit 200 --json {FIELDS}")),
+        Some(o) if crate::repo_url::is_component(o, 39) => Ok(format!(
+            "gh repo list {} --limit 200 --json {FIELDS}",
+            quote(o)
+        )),
+        Some(o) => Err(IpcError::new(
+            codes::E_INVALID,
+            format!("{o:?} is not a GitHub user or organisation name"),
+        )),
+    }
 }
 
 /// The repositories `gh` can see on `host_alias` — read-only, nothing is
 /// registered or written. `host_alias` must be a registered fleet host (see
-/// [`require_fleet_host`]).
+/// [`require_fleet_host`]). `owner` lists that user's or organisation's
+/// repositories instead of the host login's own (the Add-project dialog's
+/// owner field, redesign step 6.11).
 pub async fn list_github_repos_with(
     host_alias: &str,
+    owner: Option<&str>,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
 ) -> Result<Vec<GithubRepo>, IpcError> {
     crate::validate::host_alias(host_alias)?;
+    let owner = owner.map(str::trim).filter(|o| !o.is_empty());
+    let cmd = gh_repo_list_cmd(owner)?;
     require_fleet_host(store, host_alias)?;
-    const CMD: &str =
-        "gh repo list --limit 200 --json nameWithOwner,description,isPrivate,updatedAt";
     let out = if host_alias == crate::service::projects::LOCAL_HOST {
         // A short read-only probe: no cancellation is wired for browse mode,
         // so a token that is never fired is the same as having none.
-        run_local_script(CMD, GH_WALL_CLOCK, &CancellationToken::new()).await?
+        run_local_script(&cmd, GH_WALL_CLOCK, &CancellationToken::new()).await?
     } else {
         ssh.run_bounded(
             host_alias,
-            &["bash", "-lc", &quote(CMD)],
+            &["bash", "-lc", &quote(&cmd)],
             CLONE_CONNECT_TIMEOUT,
             GH_WALL_CLOCK,
         )
@@ -1327,6 +1421,7 @@ pub async fn list_github_repos_with(
             description: w.description,
             is_private: w.is_private,
             updated_at: w.updated_at,
+            language: w.primary_language.map(|l| l.name).filter(|n| !n.is_empty()),
         })
         .collect())
 }
@@ -2034,6 +2129,7 @@ mod tests {
                 host_alias: "vps".into(),
                 source: AddProjectSource::Clone {
                     url: "https://github.com/o/r".into(),
+                    existing: false,
                 },
                 call_id: None,
             },
@@ -2103,6 +2199,7 @@ mod tests {
                     host_alias: "vps".into(),
                     source: AddProjectSource::Clone {
                         url: "https://github.com/o/r".into(),
+                        existing: false,
                     },
                     call_id: None,
                 },
@@ -2158,6 +2255,7 @@ mod tests {
                 host_alias: "vps".into(),
                 source: AddProjectSource::Clone {
                     url: "https://github.com/o/r".into(),
+                    existing: false,
                 },
                 call_id: None,
             },
@@ -2265,6 +2363,7 @@ mod tests {
                 host_alias: "vps".into(),
                 source: AddProjectSource::Clone {
                     url: "https://gitlab.com/o/r".into(),
+                    existing: false,
                 },
                 call_id: None,
             },
@@ -2294,7 +2393,10 @@ mod tests {
         let err = add_project_with(
             AddProjectArgs {
                 host_alias: "vps".into(),
-                source: AddProjectSource::Clone { url: "o/r".into() },
+                source: AddProjectSource::Clone {
+                    url: "o/r".into(),
+                    existing: false,
+                },
                 call_id: None,
             },
             &store,
@@ -2325,6 +2427,7 @@ mod tests {
                 host_alias: "vps".into(),
                 source: AddProjectSource::Clone {
                     url: "owner/repo".into(),
+                    existing: false,
                 },
                 call_id: None,
             },
@@ -2349,7 +2452,10 @@ mod tests {
         let err = add_project_with(
             AddProjectArgs {
                 host_alias: "vps".into(),
-                source: AddProjectSource::Clone { url: "o/r".into() },
+                source: AddProjectSource::Clone {
+                    url: "o/r".into(),
+                    existing: false,
+                },
                 call_id: None,
             },
             &store,
@@ -2430,7 +2536,10 @@ mod tests {
         let err = add_project_with(
             AddProjectArgs {
                 host_alias: "-oProxyCommand=evil".into(),
-                source: AddProjectSource::Clone { url: "o/r".into() },
+                source: AddProjectSource::Clone {
+                    url: "o/r".into(),
+                    existing: false,
+                },
                 call_id: None,
             },
             &store,
@@ -5129,7 +5238,9 @@ mod tests {
                 r#"[{"nameWithOwner":"acme/widget","description":"w","isPrivate":true,"updatedAt":"2026-09-01T10:00:00Z"}]"#,
             ),
         );
-        let repos = list_github_repos_with("vps", &store, &fake).await.unwrap();
+        let repos = list_github_repos_with("vps", None, &store, &fake)
+            .await
+            .unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].name_with_owner, "acme/widget");
         assert!(repos[0].is_private);
@@ -5144,7 +5255,7 @@ mod tests {
                 "gh: To get started with GitHub CLI, please run: gh auth login",
             ),
         );
-        let err = list_github_repos_with("vps", &store, &bad)
+        let err = list_github_repos_with("vps", None, &store, &bad)
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_GH);
@@ -5159,7 +5270,7 @@ mod tests {
             Match::script_contains("gh repo list"),
             Reply::fail(127, "bash: line 1: gh: command not found"),
         );
-        let err = list_github_repos_with("vps", &store, &fake)
+        let err = list_github_repos_with("vps", None, &store, &fake)
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_GH);
@@ -5179,7 +5290,7 @@ mod tests {
             Match::script_contains("gh repo list"),
             Reply::ok("not json at all"),
         );
-        let err = list_github_repos_with("vps", &store, &fake)
+        let err = list_github_repos_with("vps", None, &store, &fake)
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_GH);
@@ -5192,7 +5303,7 @@ mod tests {
         let fake = FakeSsh::new();
         fake.with_home("/home/u")
             .on(Match::script_contains("gh repo list"), Reply::ok("[]"));
-        let err = list_github_repos_with("elsewhere", &store, &fake)
+        let err = list_github_repos_with("elsewhere", None, &store, &fake)
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_NOTFOUND);
@@ -5202,6 +5313,7 @@ mod tests {
                 host_alias: "elsewhere".into(),
                 source: AddProjectSource::Clone {
                     url: "https://github.com/acme/widget".into(),
+                    existing: false,
                 },
                 call_id: None,
             },
@@ -5220,11 +5332,212 @@ mod tests {
     async fn list_github_repos_validates_the_host_alias_before_any_ssh() {
         let store = store_with_no_projects();
         let fake = FakeSsh::new();
-        let err = list_github_repos_with("-oProxyCommand=evil", &store, &fake)
+        let err = list_github_repos_with("-oProxyCommand=evil", None, &store, &fake)
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_INVALID);
         assert!(fake.calls().is_empty());
+    }
+
+    // ── the four sources of the Add-project dialog (redesign 6.11): From
+    // GitHub, Clone a URL, Existing folder and New repo. Clone, folder and
+    // new are covered above; From GitHub is the listing plus a clone of
+    // what it listed, tested here end to end ─────────────────────────────
+
+    #[tokio::test]
+    async fn from_github_lists_an_owners_repos_and_clones_the_one_picked() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u")
+            .on(
+                Match::script_contains("gh repo list"),
+                Reply::ok(
+                    r#"[{"nameWithOwner":"papaya-pos/receipts","description":null,"isPrivate":true,
+                        "updatedAt":"2026-10-08T10:00:00Z","primaryLanguage":{"name":"TypeScript"}},
+                       {"nameWithOwner":"papaya-pos/legacy","description":null,"isPrivate":false,
+                        "updatedAt":null,"primaryLanguage":null}]"#,
+                ),
+            )
+            .on(Match::script_contains("git clone"), Reply::ok(""));
+
+        let repos = list_github_repos_with("vps", Some("papaya-pos"), &store, &fake)
+            .await
+            .unwrap();
+        let script = fake.calls_for("vps").last().unwrap().script().unwrap();
+        assert!(
+            script.contains("gh repo list 'papaya-pos' --limit 200"),
+            "{script}"
+        );
+        assert!(script.contains("primaryLanguage"), "{script}");
+        assert_eq!(repos[0].language.as_deref(), Some("TypeScript"));
+        assert_eq!(repos[1].language, None);
+
+        // The dialog adds what it listed by its `owner/repo`.
+        let row = add_project_with(
+            AddProjectArgs {
+                host_alias: "vps".into(),
+                source: AddProjectSource::Clone {
+                    url: repos[0].name_with_owner.clone(),
+                    existing: false,
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (row.project.owner.as_str(), row.project.repo.as_str()),
+            ("papaya-pos", "receipts")
+        );
+        let script = fake.calls_for("vps").last().unwrap().script().unwrap();
+        assert!(
+            script.contains("git clone 'git@github.com:papaya-pos/receipts.git'"),
+            "{script}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_existing_project_is_cloned_onto_another_host_and_keeps_its_row() {
+        let store = store_with_no_projects();
+        store.lock().unwrap().upsert_host("trn").unwrap();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u")
+            .on(Match::script_contains("git clone"), Reply::ok(""));
+        let add = |host: &str, existing: bool| AddProjectArgs {
+            host_alias: host.into(),
+            source: AddProjectSource::Clone {
+                url: "acme/api".into(),
+                existing,
+            },
+            call_id: None,
+        };
+        let first = add_project_with(add("vps", false), &store, &fake, CancellationToken::new())
+            .await
+            .unwrap();
+        // Without `existing` a second host is still refused, as before.
+        let err = add_project_with(add("trn", false), &store, &fake, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_EXISTS);
+
+        let again = add_project_with(add("trn", true), &store, &fake, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(again.project.id, first.project.id);
+        assert_eq!(again.project.base_path, first.project.base_path);
+        let script = fake.calls_for("trn").last().unwrap().script().unwrap();
+        assert!(
+            script.contains(
+                "git clone 'git@github.com:acme/api.git' '/home/u/projects/github.com/acme/api'"
+            ),
+            "{script}"
+        );
+        assert_eq!(store.lock().unwrap().list_projects().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_existing_project_already_checked_out_on_the_host_answers_its_row() {
+        let store = store_with_no_projects();
+        store
+            .lock()
+            .unwrap()
+            .upsert_project("acme", "api", "/somewhere/acme/api")
+            .unwrap();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u").on(
+            Match::script_contains("git clone"),
+            Reply::fail(3, &already_cloned_stderr("git@github.com:acme/api.git")),
+        );
+        let row = add_project_with(
+            AddProjectArgs {
+                host_alias: "vps".into(),
+                source: AddProjectSource::Clone {
+                    url: "ACME/Api".into(),
+                    existing: true,
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        // The row is the fleet's, untouched: an adopted path is not moved.
+        assert_eq!(row.project.base_path, "/somewhere/acme/api");
+        // Cloned under the row's casing, where a session on vps looks.
+        let script = fake.calls_for("vps").last().unwrap().script().unwrap();
+        assert!(
+            script.contains("'/home/u/projects/github.com/acme/api'"),
+            "{script}"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_is_refused_on_local_and_for_a_project_the_fleet_lacks() {
+        let store = store_with_no_projects();
+        store
+            .lock()
+            .unwrap()
+            .upsert_project("acme", "api", "/p/acme/api")
+            .unwrap();
+        let fake = FakeSsh::new();
+        let run = |host: &str, url: &str| AddProjectArgs {
+            host_alias: host.into(),
+            source: AddProjectSource::Clone {
+                url: url.into(),
+                existing: true,
+            },
+            call_id: None,
+        };
+        let err = add_project_with(
+            run("local", "acme/api"),
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        let err = add_project_with(
+            run("vps", "acme/other"),
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND);
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+    }
+
+    #[tokio::test]
+    async fn from_github_refuses_an_owner_that_is_not_a_github_name_before_any_ssh() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        for owner in ["-rf", "a b", "acme;id", &"a".repeat(40)] {
+            let err = list_github_repos_with("vps", Some(owner), &store, &fake)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, codes::E_INVALID, "{owner}");
+        }
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+    }
+
+    #[tokio::test]
+    async fn from_github_with_a_blank_owner_lists_the_logins_own_repos() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u")
+            .on(Match::script_contains("gh repo list"), Reply::ok("[]"));
+        list_github_repos_with("vps", Some("  "), &store, &fake)
+            .await
+            .unwrap();
+        let script = fake.calls_for("vps").last().unwrap().script().unwrap();
+        assert!(script.contains("gh repo list --limit 200"), "{script}");
     }
 
     // ── cancellation end-to-end: `call_id` → `CancellationToken` → the
@@ -5247,7 +5560,10 @@ mod tests {
         let call = add_project_with(
             AddProjectArgs {
                 host_alias: "vps".into(),
-                source: AddProjectSource::Clone { url: "o/r".into() },
+                source: AddProjectSource::Clone {
+                    url: "o/r".into(),
+                    existing: false,
+                },
                 call_id: None,
             },
             &store,
@@ -5499,7 +5815,10 @@ mod tests {
         let err = add_project(
             AddProjectArgs {
                 host_alias: "vps".into(),
-                source: AddProjectSource::Clone { url: "o/r".into() },
+                source: AddProjectSource::Clone {
+                    url: "o/r".into(),
+                    existing: false,
+                },
                 call_id: Some(42),
             },
             &store,
@@ -5607,11 +5926,21 @@ mod tests {
         );
         let v = serde_json::to_value(AddProjectSource::Clone {
             url: "https://github.com/o/r".into(),
+            existing: false,
         })
         .unwrap();
         assert_eq!(
             v,
             serde_json::json!({ "kind": "clone", "url": "https://github.com/o/r" })
+        );
+        let v = serde_json::to_value(AddProjectSource::Clone {
+            url: "o/r".into(),
+            existing: true,
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({ "kind": "clone", "url": "o/r", "existing": true })
         );
     }
 

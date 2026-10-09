@@ -39,4 +39,4 @@ CREATE TABLE IF NOT EXISTS start_rules (
 CREATE UNIQUE INDEX IF NOT EXISTS start_rules_one
   ON start_rules (COALESCE(org_id, 0), UPPER(pattern), project_id);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (134);
+INSERT OR IGNORE INTO schema_version (version) VALUES (141);

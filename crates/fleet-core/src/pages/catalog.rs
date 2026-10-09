@@ -17,7 +17,7 @@ pub fn default_widget(kind: Kind) -> Widget {
         Kind::PathMap => Widget::KeyValueTable,
         Kind::IdSet => Widget::IdList,
         Kind::PriceMap => Widget::Textarea,
-        Kind::Text { .. } => Widget::Text,
+        Kind::Text { .. } | Kind::TimeRange => Widget::Text,
     }
 }
 
@@ -33,7 +33,7 @@ pub fn accepts(widget: Widget, kind: Kind) -> bool {
         Widget::KeyValueTable => matches!(kind, Kind::PathMap),
         Widget::IdList => matches!(kind, Kind::IdSet),
         Widget::Textarea => matches!(kind, Kind::PathMap | Kind::PriceMap | Kind::IdSet),
-        Widget::Text => matches!(kind, Kind::Text { .. }),
+        Widget::Text => matches!(kind, Kind::Text { .. } | Kind::TimeRange),
     }
 }
 

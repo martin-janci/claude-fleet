@@ -9,23 +9,41 @@
   import { matchShortcut } from '../shortcuts';
   import { detectMac, isEditable } from '../terminal_keys';
   import { stepProblems, visibleSteps } from './form_model';
-  import type { FieldProblem, FormField, FormSpec, Values } from './forms';
+  import type { FieldProblem, FormField, FormProposal, FormSpec, Values } from './forms';
+  import ProposedBy from '../ProposedBy.svelte';
+  import { preselect } from '../ai_proposal';
+  import { QUICK_ANSWER, risky } from '../quick_answer';
+  import Loader from '../Loader.svelte';
 
   let {
     spec,
     busy = false,
     disabled = false,
     serverProblems = [],
+    proposal = null,
+    initial = {},
+    sending = 'Sending…',
     onsubmit,
     onunplaced,
+    oncancel,
   }: {
     spec: FormSpec;
+    /** Jev's likely option for one choice (step 10.9): shown first and
+     *  pre-selected when the field is empty; never a risky option. */
+    proposal?: FormProposal | null;
     busy?: boolean;
     disabled?: boolean;
     serverProblems?: FieldProblem[];
+    /** Starting values over the spec's own defaults (a wizard opened with
+     *  what the screen already knows). Read once, as the defaults are. */
+    initial?: Values;
+    /** The last button while `busy`, after a Comet (step 10.12). */
+    sending?: string;
     onsubmit: (values: Values) => void;
     /** Server problems whose field is on no visible step (nowhere to show them). */
     onunplaced?: (problems: FieldProblem[]) => void;
+    /** A quiet Cancel at the row's start (a wizard in a dialog). */
+    oncancel?: () => void;
   } = $props();
   const uid = $props.id();
 
@@ -39,7 +57,7 @@
   // The spec of one form never changes under the wizard (FormCard unmounts the
   // wizard while it loads another form), so the starting values are read once on purpose.
   // svelte-ignore state_referenced_locally
-  let values = $state<Values>(defaults(spec));
+  let values = $state<Values>({ ...defaults(spec), ...initial });
   let index = $state(0);
   const steps = $derived(visibleSteps(spec, values));
   const step = $derived(steps[Math.min(index, steps.length - 1)]);
@@ -65,9 +83,17 @@
     values = { ...values, [name]: v };
   }
 
+  // Whether `busy` is this wizard's own submit (the card is also busy while
+  // it declines, and that is not "Sending…").
+  let sent = $state(false);
+  $effect(() => {
+    if (!busy) sent = false;
+  });
+
   /** Only what a visible field holds is sent: a hidden step's values stay
    *  behind, as the backend would drop them anyway. */
   function submit() {
+    sent = true;
     const shown = new Set(steps.flatMap((s) => s.fields.map((f) => f.name)));
     const out: Values = {};
     for (const [k, v] of Object.entries(values)) if (shown.has(k)) out[k] = v;
@@ -82,6 +108,34 @@
 
   const off = $derived(busy || disabled);
   const str = (f: FormField) => (typeof values[f.name] === 'string' ? (values[f.name] as string) : '');
+
+  // J5 quick answer: the proposed option goes first and is pre-selected when
+  // nothing is chosen yet; "Change" puts the order back and clears it.
+  let dismissed = $state(false);
+  const proposed = $derived.by(() => {
+    if (dismissed || !proposal || preselect(QUICK_ANSWER, proposal) === null) return null;
+    const f = spec.steps.flatMap((s) => s.fields).find((x) => x.name === proposal.field);
+    const opt = f?.type === 'select' ? f.options?.find(([v]) => v === proposal.value) : undefined;
+    return opt && !risky(opt[1]) && !risky(opt[0]) ? proposal : null;
+  });
+  $effect(() => {
+    const p = proposed;
+    if (!p) return;
+    untrack(() => {
+      if (values[p.field] === undefined) set(p.field, p.value);
+    });
+  });
+  /** A field's options in the order shown: the proposed one first. */
+  function optionsOf(f: FormField): [string, string][] {
+    const all = f.options ?? [];
+    if (!proposed || proposed.field !== f.name) return all;
+    const at = all.findIndex(([v]) => v === proposed.value);
+    return at < 0 ? all : [all[at], ...all.slice(0, at), ...all.slice(at + 1)];
+  }
+  function dismissProposal(f: FormField) {
+    if (proposed && values[f.name] === proposed.value) set(f.name, undefined);
+    dismissed = true;
+  }
 
   /** A choice short enough to number: a select or multiselect of 1–9 options. */
   const numbered = (f: FormField) =>
@@ -114,7 +168,7 @@
     const target = e.target instanceof HTMLElement ? e.target : null;
     if (isEditable(target) || target?.dataset?.imeProxy !== undefined || target?.closest?.('dialog')) return;
     if (document.querySelector('[data-testid="answer-card"]:not(.compact)')) return;
-    const o = f.options?.[Number(e.key) - 1];
+    const o = optionsOf(f)[Number(e.key) - 1];
     if (!o) return;
     e.preventDefault();
     pick(f, o[0]);
@@ -162,7 +216,7 @@
         {:else if f.type === 'select' && numbered(f)}
           <span class="label" id={`${uid}-${f.name}`}>{f.label}{f.required ? ' *' : ''}</span>
           <div class="options" role="radiogroup" aria-labelledby={`${uid}-${f.name}`}>
-            {#each f.options ?? [] as [v, l], i (v)}
+            {#each optionsOf(f) as [v, l], i (v)}
               <button
                 type="button"
                 role="radio"
@@ -177,6 +231,13 @@
               </button>
             {/each}
           </div>
+          {#if proposed?.field === f.name}
+            <ProposedBy
+              proposal={proposed}
+              field={QUICK_ANSWER}
+              testid={`form-proposed-${f.name}`}
+              onchange={() => dismissProposal(f)} />
+          {/if}
         {:else}
           <label for={`${uid}-${f.name}`}>{f.label}{f.required ? ' *' : ''}</label>
           {#if f.type === 'select'}
@@ -231,12 +292,15 @@
     {/each}
   {/if}
   <div class="row">
+    {#if oncancel}
+      <button type="button" class="cancel" data-testid="form-cancel" disabled={busy} onclick={oncancel}>Cancel</button>
+    {/if}
     {#if index > 0}
       <button type="button" data-testid="form-back" disabled={busy} onclick={() => (index -= 1)}>Back</button>
     {/if}
     {#if last}
       <button type="button" class="primary" data-testid="form-submit" disabled={off || !ready} onclick={submit}>
-        {spec.submit ?? 'Submit'}
+        {#if busy && sent}<Loader name="comet" size={12} class="btn-loader" />{sending}{:else}{spec.submit ?? 'Submit'}{/if}
       </button>
     {:else}
       <button type="button" class="primary" data-testid="form-next" disabled={off || !ready} onclick={() => (index += 1)}>Next</button>
@@ -256,6 +320,7 @@
   .help { font-size: 11px; color: var(--fg-muted); }
   .err { font-size: 11px; color: var(--usage-crit); }
   .row { display: flex; gap: 0.4rem; justify-content: flex-end; }
+  .row .cancel { margin-right: auto; }
   .options { display: flex; flex-direction: column; gap: 0.15rem; }
   .opt { display: flex; gap: 0.45rem; align-items: center; text-align: left; font: inherit; font-size: 0.82rem; padding: 0.25rem 0.4rem; border: 1px solid transparent; border-radius: 4px; background: none; color: inherit; cursor: pointer; }
   .opt:hover:not(:disabled) { background: var(--bg-hover); }

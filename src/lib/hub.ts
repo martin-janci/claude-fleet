@@ -154,6 +154,14 @@ const REASONS = {
     'host discovery reads this machine’s SSH config, and a paired client does not administer the fleet anyway',
   check_host:
     'the health checklist reads a host’s settings over this app’s own SSH, and this desktop is a paired client',
+  list_host_setups:
+    'the add-host wizard adds hosts from this machine’s SSH config, and a paired client does not administer the fleet',
+  save_host_setup:
+    'the add-host wizard adds hosts from this machine’s SSH config, and a paired client does not administer the fleet',
+  discard_host_setup:
+    'the add-host wizard adds hosts from this machine’s SSH config, and a paired client does not administer the fleet',
+  run_host_setup_check:
+    'the add-host wizard checks a host over this app’s own SSH, and a paired client does not administer the fleet',
   provision_hosts:
     'provisioning rewrites every host’s hook block to report to whichever app ran it, and this desktop is a paired client',
   install_fleet_hook:
@@ -205,8 +213,6 @@ const REASONS = {
   // P6); this is what a paired desktop says when the hub serves them none.
   fleet_settings:
     'the hub did not serve its settings to this device — a hub older than this app, or a device bound to one organisation, reads none; the hub’s operator changes them with fleet-hub settings or set_setting',
-  list_account_usage:
-    'this app does not poll account usage while a hub owns the fleet, so its cache stays empty',
   refresh_account_usage:
     'it reads the account’s usage over this machine’s SSH connection to the host',
   account_usage_history:
@@ -215,6 +221,9 @@ const REASONS = {
     'this app collects no usage while a hub owns the fleet, so it has no spend per account',
   check_account_headroom:
     'this app does not poll account usage while a hub owns the fleet, so it cannot tell which account has headroom',
+  propose_host_placement:
+    'the decision model and the account usage are the hub’s while it owns the fleet; pick the host as usual',
+  record_host_placement: 'the decision model’s runs are recorded on the hub that owns the fleet; nothing to record here',
   set_account_nickname:
     'the nickname lives in the hub’s database and there is no tool to set it',
 
@@ -339,6 +348,8 @@ export const ROUTED_ACTIONS = [
   'answer_form',
   'decline_form',
   'kill_session',
+  // A session's shell terminals (step 5.3).
+  'shell_terminals',
   'safe_kill_session',
   'rename_session',
   'set_friendly_name',

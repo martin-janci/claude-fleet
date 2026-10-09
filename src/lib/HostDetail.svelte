@@ -43,7 +43,9 @@
   import EmbedSlot from './pages/EmbedSlot.svelte';
   import { inventory } from './assets';
   import { provisionHost } from './mcp';
-  import { CHECK_GLYPH, checklistRows, hostChecks, needsReprovision, runHostCheck } from './host_check';
+  import { CHECK_GLYPH, checklistLoaderText, checklistRows, hostChecks, needsReprovision, runHostCheck } from './host_check';
+  import { uiLayout } from './prefs';
+  import Loader from './Loader.svelte';
 
   let {
     host,
@@ -104,6 +106,8 @@
   const checkBlocked = $derived(hubBlock('check_host', $hubStatus));
   const provisionBlocked = $derived(hubBlock('provision_hosts', $hubStatus));
   const reprovisionAdvised = $derived(needsReprovision(checklist, host));
+  // Orbit Fleet 4.13: the Hex field beside what is running, Layout: New only.
+  const liveText = $derived($uiLayout === 'new' ? checklistLoaderText(host.alias, checking, provisioning) : null);
 
   async function runChecks() {
     if (checkBlocked !== null || checking) return;
@@ -517,6 +521,12 @@
         </li>
       {/each}
     </ul>
+    {#if liveText}
+      <div class="check-live" data-testid="detail-check-live">
+        <Loader name="hex-field" size={96} testid="detail-check-loader" />
+        <span class="check-live-step" data-testid="detail-check-live-step" aria-live="polite">{liveText}</span>
+      </div>
+    {/if}
     <div class="actions">
       <button
         type="button"
@@ -962,6 +972,8 @@
   .check-head { display: flex; align-items: baseline; gap: 0.5rem; }
   .check-head h3 { margin: 0; }
   .grow { flex: 1; }
+  .check-live { display: flex; align-items: center; gap: 0.75rem; margin: 0.4rem 0; }
+  .check-live-step { font-size: 0.8rem; color: var(--fg-muted); }
   .checklist { list-style: none; margin: 0.4rem 0; padding: 0; font-size: 0.8rem; }
   .checklist li { display: grid; grid-template-columns: 1.2rem 9rem 1fr; gap: 0.4rem; padding: 0.15rem 0; }
   .checklist li[data-state='ok'] .check-glyph { color: var(--usage-ok); }

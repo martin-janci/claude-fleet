@@ -15,6 +15,7 @@ mod bench_work_link;
 mod catalog;
 mod changesets;
 mod clients;
+mod control_handoffs;
 mod conversations;
 mod debug_devices;
 mod decisions;
@@ -22,6 +23,7 @@ mod deferred_prompts;
 mod downloads;
 mod forms;
 mod guides;
+mod host_setup;
 mod hosts_accounts;
 mod item_deps;
 mod item_verify;
@@ -30,11 +32,13 @@ mod local_workspaces;
 mod mission_loop;
 mod nl_census;
 mod orchestration;
+mod org_activity;
 mod org_members;
 mod orgs;
 mod participants;
 mod peer_links;
 mod people;
+mod pr_shepherd;
 mod project_picks;
 mod projects;
 mod pull_requests;
@@ -77,7 +81,9 @@ mod work_usage;
 mod work_view;
 
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
-pub use aux_usage::{AuxUsageRow, NewAuxUsage, AUX_ORIGIN_PLANNER, AUX_ORIGIN_SUMMARY};
+pub use aux_usage::{
+    AuxUsageRow, NewAuxUsage, AUX_ORIGIN_COMMIT_MESSAGE, AUX_ORIGIN_PLANNER, AUX_ORIGIN_SUMMARY,
+};
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use changesets::{
     AppliedRecord, ChangesetItemRow, ChangesetRow, NewChangesetItem, TriageVerdictRow,
@@ -85,6 +91,9 @@ pub use changesets::{
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, ClientBinding, CLIENT_MODES,
     LINE_SEPARATORS,
+};
+pub use control_handoffs::{
+    handoff_preview, ControlHandoffRow, HandoffItem, NewHandoff, HANDOFFS_KEEP, HANDOFF_PREVIEW_MAX,
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, SeenDevice};
@@ -98,6 +107,7 @@ pub use deferred_prompts::{DeferredPromptRow, DEFERRED_MAX_ATTEMPTS};
 pub use downloads::{DownloadRow, NewDownload};
 pub use forms::{FormFinish, FormRow, NewForm, FORM_STATES};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
+pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
 pub use item_deps::{ItemDepRow, DEP_SOURCES};
 pub use item_verify::{
     normalize_done_when, VerificationRow, DONE_WHEN_LINE_MAX_CHARS, DONE_WHEN_MAX,
@@ -140,6 +150,9 @@ pub use peer_links::{
 pub use people::{
     machine_token_kind, validate_person_name, PersonRow, MAX_PERSON_NAME_LEN, PERSONAL_OWNER_NAME,
 };
+pub use pr_shepherd::{
+    ShepherdEpisodeRow, ShepherdRuleRow, SHEPHERD_LEVELS, SHEPHERD_RECIPES_MAX_CHARS,
+};
 pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
 pub use pull_requests::{repo_and_number, PrSeenBy, PullRequestRow};
 pub use read_cursors::CursorRow;
@@ -147,7 +160,7 @@ pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
 pub use routines::{
     NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, ROUTINE_LEASE_SECS, ROUTINE_OVERLAPS,
-    ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
+    ROUTINE_RUN_OUTCOMES, ROUTINE_RUN_OUTCOME_SOURCES, ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
 };
 pub use rows::*;
 pub use schema::known_schema_version;
@@ -561,6 +574,21 @@ impl Store {
             instance: next_instance(),
             peer_generations: Default::default(),
         })
+    }
+
+    /// What the fleet knows beyond a session's own row — down hosts,
+    /// accounts at a limit or without a login — as this store's bus follows
+    /// it (step 2.6, [`EventBus::attention_facts`]). Empty off the hub, which
+    /// is the row-only classification. Every hub site that decides
+    /// `needs_attention` reads it here, beside `health.context_red_pct`.
+    pub fn attention_facts(&self) -> crate::service::attention::Facts {
+        self.bus.inner.attention_facts()
+    }
+
+    /// Each account's latest usage answer as this store's bus follows it
+    /// ([`EventBus::account_usage`]). Empty off the hub.
+    pub fn bus_account_usage(&self) -> Vec<crate::service::account_usage::AccountUsageSnapshot> {
+        self.bus.inner.account_usage()
     }
 
     /// An in-memory store for a test. Its database is a copy of one that went

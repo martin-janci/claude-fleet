@@ -166,8 +166,8 @@ fn a_listed_row_carries_why_it_needs_a_person_and_nothing_when_it_does_not() {
 
     assert_eq!(
         json(blocked_row).get("needs_attention"),
-        Some(&serde_json::json!({ "reason": "waiting", "since": 1 })),
-        "the reason and since are on the row"
+        Some(&serde_json::json!({ "reason": "waiting", "since": 1, "state": "action_required" })),
+        "the reason, since and state are on the row"
     );
     assert!(
         json(calm_row).get("needs_attention").is_none(),
@@ -2400,6 +2400,7 @@ fn router_sum_serves_every_tool() {
         include_str!("prs.rs"),
         include_str!("routines.rs"),
         include_str!("start_rules.rs"),
+        include_str!("presence.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -7785,6 +7786,95 @@ async fn an_operator_summary_is_confirm_gated_and_refused_on_a_hub() {
     assert!(e.message.contains("no approver"), "{}", e.message);
 }
 
+/// Redesign step 9.2: on a hub the operator's start waits in the hub's own
+/// queue, and the owner's paired device lists it (`mcp_confirms`) and
+/// answers it (`answer_mcp_confirm`); each move tells the devices
+/// `confirm:changed`. The operator itself can do neither.
+#[tokio::test]
+async fn a_paired_device_lists_and_answers_the_operators_waiting_start() {
+    use crate::service::work::WorkLinkArgs;
+    let bus = Arc::new(crate::events::RecordingEventBus::new());
+    let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    let t = guarded_tools(s, true);
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    let phone = client_caller("phone", TokenMode::Full);
+    let start = |nonce: Option<String>| WorkLinkArgs {
+        action: "start".into(),
+        item_id: Some(9_999),
+        confirm_nonce: nonce,
+        ..Default::default()
+    };
+    let nonce = confirm_nonce_of(
+        &t.work_link(Extension(op.clone()), Parameters(start(None)))
+            .await
+            .unwrap_err(),
+    );
+
+    let listed = result_json(&t.mcp_confirms(Extension(phone.clone())).await.unwrap());
+    let row = &listed.as_array().unwrap()[0];
+    assert_eq!(row["nonce"], nonce.as_str());
+    assert_eq!(row["operator"], true);
+    assert_eq!(row["caller"], "client:ux-agent");
+    assert!(row["asked_at"].as_i64().unwrap() > 0);
+
+    for e in [
+        t.mcp_confirms(Extension(op.clone())).await.unwrap_err(),
+        t.answer_mcp_confirm(
+            Extension(op.clone()),
+            Parameters(AnswerMcpConfirmParams {
+                nonce: nonce.clone(),
+                approved: true,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    ] {
+        assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    }
+
+    bus.take();
+    let answered = t
+        .answer_mcp_confirm(
+            Extension(phone.clone()),
+            Parameters(AnswerMcpConfirmParams {
+                nonce: nonce.clone(),
+                approved: true,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_json(&answered), true);
+    assert_eq!(bus.names(), vec!["confirm:changed"]);
+    assert_eq!(
+        result_json(&t.mcp_confirms(Extension(phone.clone())).await.unwrap()),
+        serde_json::json!([])
+    );
+    // Approved: the retry passes the gate (and the unknown item refuses).
+    let after = t
+        .work_link(Extension(op), Parameters(start(Some(nonce.clone()))))
+        .await
+        .unwrap_err();
+    assert!(after.message.starts_with("E_NOTFOUND"), "{}", after.message);
+
+    // A second answer finds nothing and says so, without a frame.
+    bus.take();
+    let again = t
+        .answer_mcp_confirm(
+            Extension(phone),
+            Parameters(AnswerMcpConfirmParams {
+                nonce,
+                approved: false,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_json(&again), false);
+    assert!(bus.names().is_empty());
+}
+
 #[tokio::test]
 async fn an_operator_new_session_or_kill_is_gated_before_anything_runs() {
     let (s, pid, on_b) = two_host_store();
@@ -8731,6 +8821,7 @@ async fn add_project_refuses_a_hostile_alias_before_any_ssh() {
                 "-oProxyCommand=x",
                 AddProjectSource::Clone {
                     url: "https://github.com/o/r".into(),
+                    existing: false,
                 },
             )),
         )
@@ -8742,6 +8833,7 @@ async fn add_project_refuses_a_hostile_alias_before_any_ssh() {
             Extension(Caller::master()),
             Parameters(ListGithubReposParams {
                 host_alias: "-oProxyCommand=x".into(),
+                owner: None,
             }),
         )
         .await
@@ -9096,6 +9188,7 @@ fn add_params(host: &str, source: AddProjectSource) -> AddProjectParams {
 fn clone_src() -> AddProjectSource {
     AddProjectSource::Clone {
         url: "https://github.com/acme/widget".into(),
+        existing: false,
     }
 }
 
@@ -9180,6 +9273,7 @@ async fn list_github_repos_returns_what_gh_lists_on_the_host() {
             Extension(Caller::master()),
             Parameters(ListGithubReposParams {
                 host_alias: "hostb".into(),
+                owner: None,
             }),
         )
         .await
@@ -9262,6 +9356,7 @@ async fn add_project_and_list_github_repos_are_fenced_to_the_callers_host_and_or
                 Extension(who.clone()),
                 Parameters(ListGithubReposParams {
                     host_alias: "hostb".into(),
+                    owner: None,
                 }),
             )
             .await
@@ -9272,6 +9367,7 @@ async fn add_project_and_list_github_repos_are_fenced_to_the_callers_host_and_or
             Extension(who),
             Parameters(ListGithubReposParams {
                 host_alias: "hosta".into(),
+                owner: None,
             }),
         )
         .await
@@ -9303,6 +9399,7 @@ async fn add_project_and_list_github_repos_refuse_an_unregistered_host() {
             Extension(Caller::master()),
             Parameters(ListGithubReposParams {
                 host_alias: "not-a-fleet-host".into(),
+                owner: None,
             }),
         )
         .await
@@ -9547,11 +9644,13 @@ async fn an_operator_fork_needs_a_person_too() {
 fn add_projects_audit_line_never_carries_a_raw_clone_url() {
     let line = super::repo::add_project_audit_target(&AddProjectSource::Clone {
         url: "https://user:ghp_SECRET@github.com/acme/widget".into(),
+        existing: false,
     });
     assert!(!line.contains("SECRET"), "{line}");
     assert_eq!(line, "kind=clone repo=<invalid>");
     let line = super::repo::add_project_audit_target(&AddProjectSource::Clone {
         url: "https://github.com/acme/widget.git".into(),
+        existing: false,
     });
     assert_eq!(line, "kind=clone repo=acme/widget");
 }
@@ -10033,6 +10132,7 @@ async fn list_hosts_serves_the_unclaimed_count_to_whoever_administers_the_host()
 pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // lifecycle.rs
     ("kill_session", &["Own"]),
+    ("shell_terminals", &["Own"]),
     ("move_session", &["Own"]),
     ("rename_session", &["Own"]),
     ("repair_session", &["Drive"]),
@@ -10095,6 +10195,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // `'own'` — frontend territory, named in this round's hand-off.
     ("delete_worktree", &["Own"]),
     ("repo_blame", &["Read"]),
+    ("repo_branch_diff", &["Read"]),
     ("repo_branches", &["Read"]),
     ("repo_changes", &["Read"]),
     ("repo_commit", &["Read"]),
@@ -10102,6 +10203,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("repo_diff", &["Read"]),
     ("repo_file", &["Read"]),
     ("repo_log", &["Read"]),
+    ("repo_range_diff", &["Read"]),
     ("repo_tree", &["Read"]),
     // session_ops.rs
     ("capture_session", &["Read"]),
@@ -10166,6 +10268,11 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("session_narrow", &["Own"]),
     ("session_share", &["Own"]),
     ("session_unshare", &["Own"]),
+    // presence.rs — redesign 11.7b. `Read`: being on a session you may read
+    // is what a watch share is for. Who ELSE is looking is narrowed inside
+    // `service::presence` (the owner sees everyone, a grantee the owner and
+    // themselves), the same line `session_access` draws at `Own`.
+    ("session_presence", &["Read"]),
     // `Read`, and the reason is the whole of `Access::HostToken`: `may_own`
     // is false for a per-host token whatever pane it proves — the proof says
     // "I am standing in this session", never "this session is mine" — so an
@@ -10462,6 +10569,8 @@ fn tool_blocks() -> std::collections::BTreeMap<String, String> {
         // Chat forms: `ask`'s list/get/wait read the form's session, its
         // answer/decline drive it.
         "forms.rs",
+        // Presence (11.7b): `session_presence` threads `Reach::Read`.
+        "presence.rs",
     ] {
         let src = std::fs::read_to_string(dir.join(file)).expect("read a tool file");
         let code = src
@@ -17153,6 +17262,7 @@ fn the_sharing_tools_are_never_a_per_host_tokens() {
         "session_narrow",
         "session_access",
         "my_grants",
+        "session_presence",
     ] {
         assert!(
             guard::NOT_FOR_HOST_TOKENS.contains(&tool),
@@ -17173,6 +17283,7 @@ fn the_sharing_tools_are_never_a_per_host_tokens() {
     // The two reads are reads; the three writes are not.
     assert!(guard::is_readonly_tool("session_access"));
     assert!(guard::is_readonly_tool("my_grants"));
+    assert!(guard::is_readonly_tool("session_presence"));
     for w in ["session_share", "session_unshare", "session_narrow"] {
         assert!(!guard::is_readonly_tool(w), "{w}");
     }

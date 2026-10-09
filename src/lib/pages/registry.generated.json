@@ -1761,6 +1761,126 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Pre-selecting the host of a new session when no rule, limit or offline host decides. Shadow only records; assist suggests.",
+      "key": "decide.jev.host_placement",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: session host",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests.",
+      "key": "decide.jev.quick_answer",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: quick answer",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests.",
+      "key": "decide.jev.duplicate",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: duplicate task",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -2183,6 +2303,212 @@
       "unit": "usd",
       "value": "0",
       "zero": "none"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "needs_you,failed,blocked,routine_failed",
+      "help": "The session states the desktop shows a notification for.",
+      "key": "notify.desktop",
+      "kind": {
+        "options": [
+          "needs_you",
+          "failed",
+          "blocked",
+          "done",
+          "routine_failed"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Desktop",
+      "modified": false,
+      "option_labels": [
+        [
+          "needs_you",
+          "Needs you"
+        ],
+        [
+          "failed",
+          "Failed"
+        ],
+        [
+          "blocked",
+          "Blocked"
+        ],
+        [
+          "done",
+          "Done"
+        ],
+        [
+          "routine_failed",
+          "Routine run failed"
+        ]
+      ],
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "needs_you,failed,blocked,routine_failed"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "needs_you,failed,routine_failed",
+      "help": "The session states the phone shows a notification for.",
+      "key": "notify.phone",
+      "kind": {
+        "options": [
+          "needs_you",
+          "failed",
+          "blocked",
+          "done",
+          "routine_failed"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Phone",
+      "modified": false,
+      "option_labels": [
+        [
+          "needs_you",
+          "Needs you"
+        ],
+        [
+          "failed",
+          "Failed"
+        ],
+        [
+          "blocked",
+          "Blocked"
+        ],
+        [
+          "done",
+          "Done"
+        ],
+        [
+          "routine_failed",
+          "Routine run failed"
+        ]
+      ],
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "needs_you,failed,routine_failed"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "needs_you",
+      "help": "The session states whose notification also plays a sound.",
+      "key": "notify.sound",
+      "kind": {
+        "options": [
+          "needs_you",
+          "failed",
+          "blocked",
+          "done",
+          "routine_failed"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Sound",
+      "modified": false,
+      "option_labels": [
+        [
+          "needs_you",
+          "Needs you"
+        ],
+        [
+          "failed",
+          "Failed"
+        ],
+        [
+          "blocked",
+          "Blocked"
+        ],
+        [
+          "done",
+          "Done"
+        ],
+        [
+          "routine_failed",
+          "Routine run failed"
+        ]
+      ],
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "needs_you"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "",
+      "help": "A daily range, like 22:00-07:30, in which no notification is shown or sounded, on each device's own clock. Empty: none.",
+      "key": "notify.quiet_hours",
+      "kind": {
+        "type": "time_range"
+      },
+      "label": "Quiet hours",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": ""
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "failed",
+      "help": "The states that still notify during quiet hours.",
+      "key": "notify.quiet_except",
+      "kind": {
+        "options": [
+          "needs_you",
+          "failed",
+          "blocked",
+          "done",
+          "routine_failed"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Through quiet hours",
+      "modified": false,
+      "option_labels": [
+        [
+          "needs_you",
+          "Needs you"
+        ],
+        [
+          "failed",
+          "Failed"
+        ],
+        [
+          "blocked",
+          "Blocked"
+        ],
+        [
+          "done",
+          "Done"
+        ],
+        [
+          "routine_failed",
+          "Routine run failed"
+        ]
+      ],
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "failed"
     }
   ],
   "pages": [
@@ -2893,6 +3219,21 @@
               "type": "field"
             },
             {
+              "hint": "Pre-selects a new session's host when two or more online hosts under their limit are left; you press Create.",
+              "key": "decide.jev.host_placement",
+              "type": "field"
+            },
+            {
+              "hint": "Puts the likely option first in an agent's question or a form; you still answer. Never a push or a permission.",
+              "key": "decide.jev.quick_answer",
+              "type": "field"
+            },
+            {
+              "hint": "Marks a proposed task that may repeat an existing one; you still merge or keep both.",
+              "key": "decide.jev.duplicate",
+              "type": "field"
+            },
+            {
               "key": "decide.jev.unassigned",
               "type": "field"
             }
@@ -3241,6 +3582,10 @@
             {
               "key": "spend_series",
               "type": "field"
+            },
+            {
+              "key": "spend_by_person",
+              "type": "field"
             }
           ],
           "title": "Spend"
@@ -3550,6 +3895,10 @@
         {
           "items": [
             {
+              "key": "sync",
+              "type": "field"
+            },
+            {
               "key": "latency",
               "type": "field"
             },
@@ -3575,6 +3924,47 @@
       ],
       "spec": "fleet.page/1",
       "title": "Federation"
+    },
+    {
+      "id": "settings.notifications",
+      "intro": "What reaches you, and where. The hub keeps these, so the desktop and the phone follow the same matrix and the same quiet hours.",
+      "layout": "category",
+      "parent": "settings",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "notify.desktop",
+              "type": "field"
+            },
+            {
+              "key": "notify.phone",
+              "type": "field"
+            },
+            {
+              "key": "notify.sound",
+              "type": "field"
+            }
+          ],
+          "matrix": true,
+          "title": "Where each state reaches you"
+        },
+        {
+          "items": [
+            {
+              "key": "notify.quiet_hours",
+              "type": "field"
+            },
+            {
+              "key": "notify.quiet_except",
+              "type": "field"
+            }
+          ],
+          "title": "Quiet hours"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Notifications"
     },
     {
       "id": "settings.updates",
@@ -3625,6 +4015,17 @@
             }
           ],
           "title": "Per component"
+        },
+        {
+          "items": [
+            {
+              "source": {
+                "id": "updates.targets"
+              },
+              "type": "table"
+            }
+          ],
+          "title": "What runs where"
         }
       ],
       "spec": "fleet.page/1",
@@ -4047,6 +4448,16 @@
           "id": "spend_series",
           "label": "Last 14 days",
           "type": "money_series"
+        },
+        {
+          "add": [],
+          "help": "Whose sessions spent it: today, the last 7 days and this month (UTC). Shown only to an admin who sees every session; otherwise it is hidden whole, never in part.",
+          "id": "spend_by_person",
+          "item_label": {
+            "type": "person_spend"
+          },
+          "label": "By person",
+          "type": "items"
         },
         {
           "add": [],
@@ -6054,6 +6465,7 @@
             }
           ]
         ],
+        "busy": "counter-orbit",
         "command": "link_peer_hub",
         "envelope": "args",
         "id": "peer_link.add",
@@ -6154,6 +6566,13 @@
           "type": "text"
         },
         {
+          "help": "Messages carried today against those still queued, while the queue drains.",
+          "id": "sync",
+          "label": "Syncing",
+          "type": "sync",
+          "unit": "messages"
+        },
+        {
           "help": "The round trip of the last exchange this hub dialed.",
           "id": "latency",
           "label": "Latency",
@@ -6212,6 +6631,49 @@
       },
       "params": [],
       "shape": "account_usage"
+    },
+    {
+      "columns": [
+        {
+          "id": "device",
+          "label": "Device",
+          "ty": "text"
+        },
+        {
+          "id": "part",
+          "label": "Part",
+          "ty": "text"
+        },
+        {
+          "id": "version",
+          "label": "Version",
+          "ty": "text"
+        },
+        {
+          "id": "update",
+          "label": "Update",
+          "ty": "text"
+        },
+        {
+          "id": "offers",
+          "label": "Offered",
+          "ty": "text"
+        },
+        {
+          "id": "reported_at",
+          "label": "Reported",
+          "ty": "time"
+        }
+      ],
+      "help": "The hub, every host's agent, each desktop and the phone: the version each runs and what the hub would tell it now (`update_status`).",
+      "id": "updates.targets",
+      "label": "What runs where",
+      "live": {
+        "command": "list_update_targets",
+        "event": "update"
+      },
+      "params": [],
+      "shape": "rows"
     },
     {
       "fields": [

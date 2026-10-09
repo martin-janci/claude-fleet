@@ -852,6 +852,12 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     // running hub) reach it through `service::settings::set`.
     if let Ok(s) = store.lock() {
         bus.set_context_red_pct(fleet_core::service::health::context_red_pct(&s));
+        // …and the host rows the three `Blocked` reasons start from; the bus
+        // follows every later probe itself (step 2.6).
+        match s.list_hosts() {
+            Ok(hosts) => bus.attention_seeded(&hosts, &[]),
+            Err(e) => tracing::warn!("attention facts: list_hosts failed: {e}"),
+        }
     }
     if !r.local_host {
         // Before the control API and the ticks start: from here on every
@@ -893,17 +899,22 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     ));
     let reg = fleet_core::cancel::CancellationRegistry::new();
     let tunnels = Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new());
-    // No desktop to approve a destructive-call confirmation: log it. The
-    // `mcp.confirm_destructive` setting is off by default; docs/hub.md says
-    // to leave it off on a hub.
-    let guards = McpGuards::new(Arc::new(|req: &fleet_core::mcp::guard::ConfirmRequest| {
-        tracing::warn!(
-            tool = %req.tool,
-            nonce = %req.nonce,
-            "confirmation requested but this hub has no approver; disable mcp.confirm_destructive"
-        );
-    }))
-    .without_approver();
+    // A call that waits for a person parks its nonce here and tells the
+    // owner's devices the queue moved (`confirm:changed`, ids-free); the
+    // owner's paired desktop or phone lists and answers it through
+    // `mcp_confirms` / `answer_mcp_confirm` (redesign step 9.2). Unanswered,
+    // it expires with CONFIRM_TTL like on a desktop.
+    let confirm_bus = Arc::clone(&bus);
+    let guards = McpGuards::new(Arc::new(
+        move |req: &fleet_core::mcp::guard::ConfirmRequest| {
+            tracing::info!(
+                tool = %req.tool,
+                caller = %req.caller,
+                "confirmation requested; waiting for the owner's device"
+            );
+            confirm_bus.confirm_changed();
+        },
+    ));
 
     warn_if_confirm_destructive(&store);
 
@@ -941,7 +952,11 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         &r.data_dir.join("state.db"),
         fleet_core::store::READ_POOL_SIZE,
     ) {
-        Ok(Some(pool)) => Some(Arc::new(pool)),
+        // The facts `needs_attention` is decided from live on the bus, not
+        // in the file: a pooled read must see the writer's.
+        Ok(Some(pool)) => Some(Arc::new(
+            pool.following(Arc::clone(&bus) as Arc<dyn EventBus>),
+        )),
         Ok(None) => {
             tracing::warn!("state.db is not in WAL; every read stays on the writer");
             None
@@ -1228,8 +1243,9 @@ async fn await_ticks(handles: Vec<tokio::task::JoinHandle<()>>, timeout: std::ti
 }
 
 /// A state.db copied from a desktop can carry `mcp.confirm_destructive=true`;
-/// a hub has no approver, so every destructive tool would be refused. Say so
-/// once at startup (no behaviour change).
+/// on a hub every destructive tool then waits for the owner's paired device
+/// to approve it (`answer_mcp_confirm`). Say so once at startup (no
+/// behaviour change).
 fn warn_if_confirm_destructive(store: &Mutex<Store>) {
     let on = store
         .lock()
@@ -1239,8 +1255,8 @@ fn warn_if_confirm_destructive(store: &Mutex<Store>) {
     if on {
         tracing::warn!(
             setting = "mcp.confirm_destructive",
-            "mcp.confirm_destructive is on, but destructive tools cannot be approved on a hub \
-             (no desktop approver): they will be refused with E_CONFIRM_REQUIRED; turn the setting off"
+            "mcp.confirm_destructive is on: every destructive tool waits for the owner's paired \
+             device to approve it; turn the setting off if no device answers"
         );
     }
 }

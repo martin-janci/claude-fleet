@@ -258,7 +258,8 @@ side are in `hub.md` → *A host that cannot be reached*; this is the contract.
 
 Tools see an agent host through the same calls as an SSH host. `agent_status`
 reports which agent hosts are connected. `add_host { transport: "agent" }`
-registers one without an SSH probe.
+registers one without an SSH probe. `install_agent` does the whole *Set it
+up* of `docs/hub.md` for a host the hub already reaches over SSH.
 
 ## Tools
 
@@ -281,8 +282,13 @@ Index by area (names only; see the reference for details):
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
   `probe_host`, `hide_host`, `provision_hosts`,
-  `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
-  connected; see *`/agent`* above).
+  `list_accounts`, `account_usage` (each account's latest plan usage: the
+  5-hour and weekly windows with their reset times, status and when it was
+  fetched, as the hub's usage poll last answered; never fetches; hub
+  contract 11), `agent_status` (which agent hosts have a `fleet-agent`
+  connected; see *`/agent`* above), `install_agent` (install `fleet-agent`
+  on a host the hub reaches over SSH and move the host onto it; a job read
+  with `agent_installs`).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
   `forget_project` (drop a row a local-less hub cannot rescan away),
   `add_project` (clone, adopt or create a repository on a host — `git` and
@@ -297,7 +303,9 @@ Index by area (names only; see the reference for details):
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
   `new_shell_session`, `new_bg_session`, `spawn_review`, `rename_session`,
   `set_friendly_name`, `touch_session_viewed` (the turns it has finished
-  read as seen; drive reach), `register_self`, `whoami`, `ensure_operator` (the UX
+  read as seen; drive reach), `shell_terminals` (list, open or close the
+  session's shell terminals, tmux sessions `<name>--sh<N>` beside the agent
+  that no session list shows; own reach), `register_self`, `whoami`, `ensure_operator` (the UX
   agent's own session, idempotent), `operator_status` (why it cannot work,
   if it cannot).
 - **Sharing & ownership** (multi-user M1) — `session_share` (give one
@@ -317,6 +325,14 @@ Index by area (names only; see the reference for details):
   claim is `fleet-hub session claim <id> --person <name>`, beside
   `fleet-hub session unclaimed`. Sharing never confers a terminal: a
   terminal is this machine's own SSH, which no revoke could reach.
+- **Presence** (redesign 11.7b) — `session_presence` (`session_id`,
+  `leaving?`): say you have a session open, again every `heartbeat_secs`
+  (20), and once with `leaving: true` when you close it; the answer is who
+  has it open now, `{ person_id, name, device?, since, you? }` per device.
+  Watch reach. The owner sees everyone; anyone else sees the owner and
+  themselves, never another grantee. The hub keeps it in memory only, so a
+  report lapses 45 s after its last heartbeat and a restart forgets it. A
+  per-host token is refused it.
 - **Composer** — `quick_replies` (the fleet's shared chip row: the prompt
   presets the desktop and the phone both draw above their text box, in list
   order, each with `auto_send`: a tap sends at once rather than filling the
@@ -377,7 +393,7 @@ Index by area (names only; see the reference for details):
   `resume_claude_session_id`).
 - **Worktree files & git (read-only)** — `repo_changes`, `repo_tree`,
   `repo_file`, `repo_diff`, `repo_blame`, `repo_log`, `repo_branches`,
-  `repo_commit`, `repo_commit_diff`.
+  `repo_commit`, `repo_commit_diff`, `repo_branch_diff`, `repo_range_diff`.
 - **Host clipboard** — `get_clipboard`, `set_clipboard`.
 - **Asset catalog** — `list_assets` (catalog assets with per-host drift
   state, unmanaged assets and parse problems; the personal catalog only
@@ -813,8 +829,16 @@ Index by area (names only; see the reference for details):
   `failed` on an error, a lost or removed session, six quiet hours, or a
   session past the run budget (which also turns the routine off with
   `paused_reason`), and `skipped` when the last run is still going under
-  `overlap: skip`, today's budget is spent, or a person skipped it.
-  `automation.paused` (Pause all) stops the schedule and event fires,
+  `overlap: skip`, today's budget is spent, the account its login bills
+  is at or past `accounts.pause_at` (Orbit Fleet 8.7, read from the stored
+  usage readings), or a person skipped it.
+  A finished run also carries an `outcome` (8.10): `did_work`, `nothing`,
+  `failed` or `needs_person`, with `outcome_source` `exit` (a failed run,
+  which nothing overrides), `rule` (an open question or a wedged session is
+  `needs_person`, a pull request `did_work`) or `jev`; a run no rule can
+  read has none until Jev answers. A `nothing` run marks its session seen,
+  so it stays out of the Inbox. `automation.paused` (Pause all) stops the
+  schedule and event fires,
   never `run_now`. Read and changed by the owner and the org's admins, read
   by the org's members, never served to a per-host token; the routine's
   org is its host's.
@@ -993,12 +1017,18 @@ derive from them.
   press_enter`.
 - **`needs_attention.reason`** (on session rows and `/events` frames), most
   urgent first: `waiting` (blocked on a dialog), `stuck` (`stuck_kind` says
-  which), `stop_failed` (the last turn ended in an API error; re-prompt),
+  which), `host_down` (the session's host was pinged and did not answer),
+  `account_limit` (its account's 5-hour or weekly window is used up and the
+  session is not working), `no_credentials` (its account's login is missing,
+  expired or rejected, and the session is not working), `stop_failed` (the
+  last turn ended in an API error; re-prompt),
   `failed` (a pane-less agent reported failure), `context_full` (context at or
   past `health.context_red_pct`), `stale_working` (the demotion above),
   `ci_failing` (idle with failing PR checks) and `lifecycle` (a failed or
   pending safe kill, a ghost, a lost row). `since` is when the session
-  entered that state.
+  entered that state. `state` (contract 11) is the attention state the
+  reason puts it in: `action_required`, `failed`, `blocked` (`host_down`,
+  `account_limit`, `no_credentials`) or `paused` (`lifecycle`).
 
 ### Errors and limits
 
@@ -1588,9 +1618,25 @@ automatically on app start.
   with `new_worker`, `restore_host_sessions` (not its `dry_run`),
   `recreate_session`, `restart_session`, `work_link` `start` / `resume` —
   its `safe_kill_session`, and every tool above return
-  `E_CONFIRM_REQUIRED` until a person approves them on the desktop; on a
-  hub, which has no approver, they are refused with `E_FORBIDDEN`. Every
+  `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
+  dialog or Control's cards, and on a hub from the owner's paired device,
+  which lists the waiting calls with `mcp_confirms` (each with `nonce`,
+  `tool`, `summary`, `caller`, `operator`, `asked_at`) and answers one with
+  `answer_mcp_confirm` (`nonce`, `approved`; `false` when it was already
+  answered or expired). Both are the owner's own device only, never the
+  operator; each change sends an empty `confirm:changed` event. Every
   other caller is unaffected: for them these tools are not gated.
+- **Handoff receipts.** Each successful call of the operator that hands
+  work on leaves a receipt (redesign 9.3): a prompt or task to a session
+  (`send_prompt`, `queue_prompt`, `run_prompt`, `dispatch_task`), a new
+  session, a new or started mission, a created task, a proposed tree of
+  subtasks (`work_link` `create` / `propose_tree` / `mission_*`). Control
+  draws them as chips and cards. `control_handoffs` (`limit?`, default 50)
+  lists them newest first, each with its target's state now (a mission's
+  name and state, a task's or the tree's items with their status and
+  proposal state); like `mcp_confirms` it answers the owner's own device
+  only, since a receipt quotes the operator's prompt. Each new receipt sends
+  an empty `handoff:changed` event. No other caller's calls leave one.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central
   machine.

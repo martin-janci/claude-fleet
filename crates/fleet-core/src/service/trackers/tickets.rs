@@ -672,6 +672,9 @@ pub struct StartArgs {
     /// agent's token, the operator. `None` = a person, recorded with
     /// `owner`. Never on the wire, for `owner`'s reason.
     pub origin: Option<crate::store::SessionOrigin>,
+    /// The login the session bills (redesign 8.7): a credential profile on
+    /// the host; `None` = the host's own. Set by a mission's grant.
+    pub profile: Option<String>,
 }
 
 /// Where a start lands and what it is called.
@@ -715,6 +718,10 @@ pub struct StartPlan {
     /// did: the popover says "by rule PD-*".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<i64>,
+    /// The login it bills ([`StartArgs::profile`]). `#[serde(skip)]`: only
+    /// a mission's grant names one.
+    #[serde(skip)]
+    pub profile: Option<String>,
 }
 
 /// `slug(key + " " + title)`: lower case, `[a-z0-9-]`, runs collapsed, at
@@ -1142,6 +1149,7 @@ pub fn plan_resolved(
         owner: args.owner,
         origin: args.origin.clone(),
         rule_id: rule.map(|r| r.id),
+        profile: args.profile.clone(),
     })
 }
 
@@ -1413,7 +1421,7 @@ where
         resume_claude_session_id: None,
         model: None,
         effort: None,
-        profile: None,
+        profile: plan.profile.clone(),
         agent: None,
         // Who or what started it (migration 124); `None` = a person.
         origin: plan.origin.clone(),

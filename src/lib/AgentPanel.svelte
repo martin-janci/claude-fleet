@@ -5,12 +5,13 @@
   // here is the frame, the chip, and the four states where the agent cannot
   // simply be talked to.
   //
-  // Three of the blocked states get a button (`blockedCopy`'s own rule):
-  // `absent` -> openAgent() wakes it, `lost` -> restartOperator() brings the
-  // session back, and `host_down` with a fallback -> openAgent() starts it
-  // on that host (which openAgent already does unasked; the button is the
-  // retry). `no_mcp` / `token_revoked` / `no_host` are explanatory only —
-  // their fixes live outside this panel, so there is nothing to wire.
+  // Every blocked state gets a next step (redesign step 9.1, `blockedCopy`'s
+  // `next`): wake, restart and move run here; Control API opens Settings,
+  // add/open host open the Hosts view; replace kills the agent's session
+  // after an inline confirm (a kill is always confirmed) and starts a new one.
+  //
+  // `embedded` is Control's Chat tab (step 9.1): the same frame drawn inline
+  // in the right column, always shown, with no grip, maximize or close.
   //
   // This sheet used to own a composer of its own, because the chip's prefix
   // had to be glued onto the prompt and ConversationPanel knew nothing about
@@ -32,12 +33,19 @@
     blockedCopy,
     closeAgent,
     openAgent,
+    ensureAgent,
     restartOperator,
+    replaceOperator,
     type OperatorBlocked,
   } from './operator';
+  import { openSettingsAt, requestHostsView } from './app_views';
   import { agentContext, type AgentContextInput } from './agent_context';
   import { OPERATOR_COMMANDS } from './operator';
   import { insertIntoComposer } from './conversation';
+  import ConfirmCards from './ConfirmCards.svelte';
+  import HandoffCards from './HandoffCards.svelte';
+  import { controlThinking } from './control_loaders';
+  import { uiLayout } from './prefs';
   import {
     agentPanelSize,
     agentPanelMaximized,
@@ -47,7 +55,16 @@
     type AgentPanelSize,
   } from './agent_panel_size';
 
-  let { contextInput = null }: { contextInput?: AgentContextInput | null } = $props();
+  let {
+    contextInput = null,
+    embedded = false,
+  }: { contextInput?: AgentContextInput | null; embedded?: boolean } = $props();
+
+  // Control shows the agent whenever it is open, so it makes sure there is
+  // one, as opening the sheet does, without opening the sheet.
+  $effect(() => {
+    if (embedded) void ensureAgent();
+  });
 
   // Which context's chip the person dismissed, by label rather than a bare
   // boolean: "not this context" outlives the click, but only for as long as
@@ -72,29 +89,54 @@
       ? blockedCopy($operatorState as OperatorBlocked, $operatorHost, $operatorFallback)
       : null,
   );
-  // Which function a blocked-state button runs, keyed on the actual state
-  // rather than matching the copy string — `absent` wakes, `lost` restarts,
-  // `host_down` with a fallback starts the agent there, everything else has
-  // no button at all (`blocked.action` is null there).
-  const blockedAction = $derived(
-    $operatorState === 'absent' || ($operatorState === 'host_down' && $operatorFallback)
-      ? () => void openAgent()
-      : $operatorState === 'lost'
-        ? () => void restart()
-        : null,
-  );
-  // A restart is an SSH round trip or two (and after a host reboot, a new
-  // tmux session); the button says so and takes no second press meanwhile.
+  // Which function a blocked-state button runs, keyed on `blocked.next`
+  // rather than the copy string.
+  function runNext() {
+    if (!blocked) return;
+    switch (blocked.next) {
+      case 'wake':
+      case 'move':
+        void (embedded ? ensureAgent() : openAgent());
+        return;
+      case 'restart':
+        void busyWhile(restartOperator);
+        return;
+      case 'control_api':
+        openSettingsAt('control-api');
+        return;
+      case 'replace':
+        confirmingReplace = true;
+        return;
+      case 'add_host':
+        requestHostsView();
+        return;
+      case 'open_host':
+        requestHostsView($operatorHost);
+        return;
+    }
+  }
+  // A restart or a replace is an SSH round trip or two (and after a host
+  // reboot, a new tmux session); the button says so and takes no second
+  // press meanwhile.
   let restarting = $state(false);
-  async function restart() {
+  let confirmingReplace = $state(false);
+  async function busyWhile(fn: () => Promise<void>) {
     if (restarting) return;
     restarting = true;
     try {
-      await restartOperator();
+      await fn();
     } finally {
       restarting = false;
     }
   }
+  async function replace() {
+    confirmingReplace = false;
+    await busyWhile(replaceOperator);
+  }
+  // A confirm left open belongs to the state that asked it.
+  $effect(() => {
+    if ($operatorState !== 'token_revoked') confirmingReplace = false;
+  });
 
   // Escape closes the sheet, INCLUDING from inside the composer. This is a
   // non-modal overlay, so it is not a <dialog> and gets no `cancel` event
@@ -104,7 +146,7 @@
   // here, where the panel owns the key, and marked handled so the same
   // press does not also leave Files or Hosts behind it.
   function onPanelKeydown(e: KeyboardEvent) {
-    if (e.key !== 'Escape') return;
+    if (e.key !== 'Escape' || embedded) return;
     e.preventDefault();
     e.stopPropagation();
     closeAgent();
@@ -168,6 +210,15 @@
 </script>
 
 {#snippet chip()}
+  <!-- Step 9.2: the agent's starts and kills wait here as cards, in the
+       transcript, in the New layout. Mounted only while this row renders, so
+       a request is never parked on a card nobody can see (confirms.ts). -->
+  {#if $uiLayout === 'new'}
+    <ConfirmCards />
+    <!-- Steps 9.3 and 9.6: what the agent handed on, as chips and cards
+         that follow their target's state. -->
+    <HandoffCards />
+  {/if}
   {#if ctx}
     <button
       class="chip"
@@ -189,7 +240,7 @@
   {/each}
 {/snippet}
 
-{#if $agentPanelOpen}
+{#if embedded || $agentPanelOpen}
   <!-- A non-modal dialog: `role="dialog"` on a div (a <section> is a
        landmark and may not take the role), `tabindex="-1"` so the sheet
        itself can hold focus and Escape reaches this handler even when no
@@ -198,17 +249,19 @@
        is that the app stays usable underneath it. -->
   <div
     class="agent-panel"
-    class:sized={$agentPanelSize !== null && !$agentPanelMaximized}
-    class:maximized={$agentPanelMaximized}
-    style:--agent-w={$agentPanelSize ? `${$agentPanelSize.w}px` : undefined}
-    style:--agent-h={$agentPanelSize ? `${$agentPanelSize.h}px` : undefined}
-    role="dialog"
+    class:embedded
+    class:sized={!embedded && $agentPanelSize !== null && !$agentPanelMaximized}
+    class:maximized={!embedded && $agentPanelMaximized}
+    style:--agent-w={!embedded && $agentPanelSize ? `${$agentPanelSize.w}px` : undefined}
+    style:--agent-h={!embedded && $agentPanelSize ? `${$agentPanelSize.h}px` : undefined}
+    role={embedded ? 'region' : 'dialog'}
     tabindex="-1"
     aria-label="Agent"
-    data-testid="agent-panel"
+    data-testid={embedded ? 'control-agent' : 'agent-panel'}
     bind:this={panelEl}
     onkeydown={onPanelKeydown}
   >
+    {#if !embedded}
     <!-- A focusable separator is a widget (it takes the arrow keys), which
          the a11y rules do not model; the same exception Resizer.svelte is. -->
     <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
@@ -246,11 +299,21 @@
         onclick={closeAgent}>✕</button
       >
     </header>
+    {/if}
     {#if blocked}
       <p class="blocked">{blocked.title}</p>
-      {#if blocked.action && blockedAction}
-        <button onclick={blockedAction} disabled={restarting}
-          >{restarting ? 'Restarting…' : blocked.action}</button
+      {#if confirmingReplace}
+        <p class="confirm" data-testid="agent-replace-confirm">
+          Kill the agent's session on {$operatorHost} and start a new one? Its conversation so far stays in that session's
+          transcript.
+        </p>
+        <div class="confirm-row">
+          <button onclick={() => void replace()} data-testid="agent-replace-yes">Kill and start a new agent</button>
+          <button onclick={() => (confirmingReplace = false)}>Cancel</button>
+        </div>
+      {:else}
+        <button onclick={runNext} disabled={restarting} data-testid="agent-next-step"
+          >{restarting ? (blocked.next === 'replace' ? 'Replacing…' : 'Restarting…') : blocked.action}</button
         >
       {/if}
       {#if $operatorError}
@@ -268,6 +331,7 @@
         promptPrefix={ctx?.prefix ?? null}
         blockWhileBusy={true}
         composerAbove={chip}
+        thinkingAs={embedded ? controlThinking : undefined}
       />
     {/if}
   </div>
@@ -361,6 +425,27 @@
   .blocked {
     margin: 0;
     color: var(--fg-muted);
+  }
+  /* Control's Chat tab: the frame fills the right column instead of
+     floating over its corner. */
+  .agent-panel.embedded {
+    position: static;
+    width: auto;
+    height: 100%;
+    max-height: none;
+    box-sizing: border-box;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    z-index: auto;
+    min-height: 0;
+  }
+  .confirm {
+    margin: 0;
+  }
+  .confirm-row {
+    display: flex;
+    gap: 0.5rem;
   }
   .error {
     margin: 0;

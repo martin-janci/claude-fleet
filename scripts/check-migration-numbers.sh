@@ -101,9 +101,12 @@ if [[ ${#problems[@]} -gt 0 ]]; then
   cat >&2 <<EOF
 
 Renumber this branch's migrations from $(printf '%03d' $((base_max + 1))): merge $base first,
-then rename each file and update its MIGRATIONS entry in
-crates/fleet-core/src/store/schema.rs, the schema-version assertions and any
-doc that names the number. The latest number on main is always:
+then run scripts/renumber-migrations.sh, which renames each file and updates
+its schema_version row, its MIGRATIONS entry in
+crates/fleet-core/src/store/schema.rs and the doc comments this branch added
+that name it (and resolves a MIGRATIONS-only merge conflict there). It lists
+any other added line that still names an old number. The latest number on
+main is always:
   git ls-tree --name-only $base $DIR/ | tail -1
 EOF
   exit 1

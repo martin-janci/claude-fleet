@@ -101,9 +101,9 @@ pub struct ParamSpec {
 
 /// A source the app keeps current itself instead of reading through
 /// `fetch_page_source`: `command` loads it, so that command's hub verdict
-/// is the source's (`list_account_usage` is `LocalOnly`: a paired desktop
-/// has no usage cache and shows no data items), and the `event` row kind
-/// keeps it live. `fetch` refuses it.
+/// is the source's (`list_account_usage` routes to the hub's
+/// `account_usage`), and the `event` row kind keeps it live. `fetch`
+/// refuses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Live {
     pub command: &'static str,
@@ -148,6 +148,26 @@ pub const SOURCES: &[SourceSpec] = &[
         label: "Claude account usage",
         help: "Each Claude account's plan headroom: the 5-hour and weekly windows, per-model limits, when it was checked and from which host, and when a refresh is allowed.",
         shape: Shape::AccountUsage,
+        params: &[],
+    },
+    SourceSpec {
+        id: "updates.targets",
+        live: Some(Live {
+            command: "list_update_targets",
+            event: "update",
+        }),
+        label: "What runs where",
+        help: "The hub, every host's agent, each desktop and the phone: the version each runs and what the hub would tell it now (`update_status`).",
+        shape: Shape::Rows {
+            columns: &[
+                col("device", "Device", ColType::Text),
+                col("part", "Part", ColType::Text),
+                col("version", "Version", ColType::Text),
+                col("update", "Update", ColType::Text),
+                col("offers", "Offered", ColType::Text),
+                col("reported_at", "Reported", ColType::Time),
+            ],
+        },
         params: &[],
     },
     SourceSpec {
@@ -644,16 +664,15 @@ mod tests {
         }
     }
 
-    /// A live source is read through its command, never `fetch`; only an
-    /// `account_usage` source is live, and it is the only one of that shape.
+    /// A live source is read through its command, never `fetch`; every
+    /// `account_usage` source is live.
     #[test]
     fn a_live_source_is_refused_by_fetch_and_names_its_command() {
         let (s, now) = seeded();
         for spec in SOURCES {
-            assert_eq!(
-                spec.live.is_some(),
-                spec.shape == Shape::AccountUsage,
-                "{}: live exactly when it is account usage",
+            assert!(
+                spec.live.is_some() || spec.shape != Shape::AccountUsage,
+                "{}: account usage is read live",
                 spec.id
             );
             if let Some(live) = spec.live {

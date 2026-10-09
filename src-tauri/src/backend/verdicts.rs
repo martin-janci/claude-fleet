@@ -116,6 +116,10 @@ const NO_GIT_WRITE_TOOL: &str =
     "the hub exposes no git-write tool — a remote client must not stage or commit under a \
      running agent; do it in the session, or from a standalone app";
 
+const NO_DRAFT_TOOL: &str =
+    "the hub exposes no draft tool — a commit message is drafted where the commit is made: \
+     in the session, or from a standalone app";
+
 /// Every command in `generate_handler!`, grouped as there, with its verdict.
 pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── health and this app's own logs ──────────────────────────────────────
@@ -198,6 +202,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "kill_session",
         Verdict::Routed {
             tool: "kill_session",
+        },
+    ),
+    (
+        "shell_terminals",
+        Verdict::Routed {
+            tool: "shell_terminals",
         },
     ),
     (
@@ -809,7 +819,21 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "unlink_peer",
         },
     ),
+    // Settings → Updates (Orbit Fleet 11.9b): what each part of the fleet
+    // runs, from the hub's update picture.
+    (
+        "list_update_targets",
+        Verdict::Routed {
+            tool: "update_status",
+        },
+    ),
     ("list_pull_requests", Verdict::Routed { tool: "prs" }),
+    (
+        "session_presence",
+        Verdict::Routed {
+            tool: "session_presence",
+        },
+    ),
     (
         "list_debug_devices",
         Verdict::Routed {
@@ -902,6 +926,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("repo_diff", Verdict::Routed { tool: "repo_diff" }),
     ("repo_blame", Verdict::Routed { tool: "repo_blame" }),
     (
+        "repo_branch_diff",
+        Verdict::Routed {
+            tool: "repo_branch_diff",
+        },
+    ),
+    (
+        "repo_range_diff",
+        Verdict::Routed {
+            tool: "repo_range_diff",
+        },
+    ),
+    (
         "upload_to_session",
         Verdict::SameInBoth {
             why: "the same story as `pty_open`: the bytes are on this machine and so is the \
@@ -992,6 +1028,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "draft_commit_message",
+        Verdict::LocalOnly {
+            instead: NO_DRAFT_TOOL,
+        },
+    ),
+    (
         "repo_fetch",
         Verdict::LocalOnly {
             instead: NO_GIT_WRITE_TOOL,
@@ -1066,6 +1108,38 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "list_host_setups",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "save_host_setup",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "discard_host_setup",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "run_host_setup_check",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
         "hide_host",
         Verdict::LocalOnly {
             instead: "hiding a host is fleet administration, which the hub reserves for its \
@@ -1082,9 +1156,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── account usage ───────────────────────────────────────────────────────
     (
         "list_account_usage",
-        Verdict::LocalOnly {
-            instead: "this app does not poll account usage while a hub owns the fleet, so \
-                      the cache is empty; read usage on the hub",
+        Verdict::Routed {
+            tool: "account_usage",
         },
     ),
     (
@@ -1106,6 +1179,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::LocalOnly {
             instead: "this app does not poll account usage while a hub owns the fleet, so \
                       it cannot tell which account has headroom; start the session as usual",
+        },
+    ),
+    (
+        "propose_host_placement",
+        Verdict::LocalOnly {
+            instead: "the decision model and the account usage are the hub's while it owns \
+                      the fleet; pick the host as usual",
+        },
+    ),
+    (
+        "record_host_placement",
+        Verdict::LocalOnly {
+            instead: "the decision model's runs are recorded on the hub that owns the fleet; \
+                      nothing to record here",
         },
     ),
     (
@@ -1165,17 +1252,27 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       the hub",
         },
     ),
+    // Redesign step 9.2: the operator's calls that wait for a person wait in
+    // the queue of the server they reached, which on a hub-backed desktop is
+    // the hub's. The owner's device lists and answers it there.
     (
         "mcp_confirm",
-        Verdict::SameInBoth {
-            why: "answers this process's own confirm queue, which is empty in remote mode — \
-                  answering nothing is correct",
+        Verdict::Routed {
+            tool: "answer_mcp_confirm",
         },
     ),
     (
         "mcp_pending_confirms",
-        Verdict::SameInBoth {
-            why: "the same queue, the same reason",
+        Verdict::Routed {
+            tool: "mcp_confirms",
+        },
+    ),
+    // Redesign step 9.3: the receipts of what the agent handed on live
+    // where the agent runs, which on a hub-backed desktop is the hub.
+    (
+        "control_handoffs",
+        Verdict::Routed {
+            tool: "control_handoffs",
         },
     ),
     // ── the UX agent's operator session ─────────────────────────────────────
@@ -1660,6 +1757,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "the same story as pty_open: VS Code and the `ssh` that asks the pane \
                   for its folder are this machine's, built from the alias and tmux name \
                   passed in; it reads no state.db and the hub is not in the path",
+        },
+    ),
+    (
+        "open_terminal_window",
+        Verdict::SameInBoth {
+            why: "a window of this app, whose pane attaches through pty_open like the \
+                  main window's; it reads no state.db and the hub is not in the path",
         },
     ),
     // ── the voice relay's microphone claim ──────────────────────────────────

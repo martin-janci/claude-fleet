@@ -208,6 +208,13 @@ The renderer lives in `src/lib/pages/`:
 - `Tabs.svelte` and `Disclosure.svelte`, tabs and collapsible sections;
 - `SettingsNav.svelte`, the page list and search.
 
+A section with `"matrix": true` shows its fields as one grid
+(`MatrixSection.svelte`): a row per option, a column per field, a checkbox
+in each cell, as Settings → Notifications does with Desktop, Phone and
+Sound. Every field must be a `choice_set` setting over the same options,
+with no `widget`, and there must be at least two of them. A resource page
+has no matrix.
+
 Its tests run against `src/lib/pages/registry.generated.json`. That file holds
 exactly what `list_pages` and `describe_fleet_settings` answer on a fresh
 store, so it is never a hand copy. It is regenerated with the other page docs.
@@ -232,6 +239,10 @@ type declares:
   - `money`, micro-USD shown as dollars, and `money_series`, a
     `[{ day, cost_micros }]` list shown as a bar chart with a table toggle;
     an absent value leaves either out (the caller may not see spend);
+  - `sync`, a transfer in progress (`{ done, total, both_ways, since? }`,
+    a hub link's): a Constellation with the real count ("412 of 1 280
+    messages · 18 s") while `total` is above `done`, a Counter-orbit while
+    both ends trade with nothing queued; absent while idle, and left out;
   - `items`: a list changed through its own `remove` and `add` actions,
     shown by a closed formatter (`plain`, `field`, `org_rule`, `device`,
     `member`, or `admin_need`, which lists each need on its own line with
@@ -249,7 +260,9 @@ type declares:
   `text`, `secret` (a password input, never kept), `color` or `options`;
   `variants` limits an action to records whose `variant_by` field holds one
   of the listed values (Jira asks an email and a token, Asana a token); a
-  `report` action shows the command's `{ ok, error }` as a toast.
+  `report` action shows the command's `{ ok, error }` as a toast, and a
+  `busy` action shows that loader beside its form while the command runs
+  (`counter-orbit` when Link a hub talks to the other hub).
 
 Every action names an **existing desktop command** and binds each argument
 to one of: a record field, the sub-item or its field, a form param, or

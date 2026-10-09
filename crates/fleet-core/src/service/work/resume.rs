@@ -2097,6 +2097,7 @@ mod tests {
         let plan = crate::service::trackers::tickets::StartPlan {
             owner: None,
             origin: None,
+            profile: None,
             key: "ABC-1".into(),
             title: String::new(),
             item_id: None,

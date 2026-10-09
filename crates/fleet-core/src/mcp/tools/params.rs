@@ -141,6 +141,19 @@ pub struct NewShellSessionParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ShellTerminalsParams {
+    /// The session whose terminals to list, open or close.
+    pub session_id: i64,
+    /// list (default), open or close.
+    #[serde(default)]
+    pub action: crate::service::sessions::ShellTerminalAction,
+    /// The terminal's number, 1 to 9: close needs it; open without it
+    /// takes the lowest free one.
+    #[serde(default)]
+    pub n: Option<u32>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct KillSessionParams {
     /// Fleet session id, or host_alias + name.
     #[serde(default)]
@@ -570,6 +583,9 @@ pub struct AddProjectParams {
 pub struct ListGithubReposParams {
     /// Host whose `gh` login lists the repositories.
     pub host_alias: String,
+    /// A GitHub user or organisation to list instead of the login's own.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -1003,6 +1019,21 @@ pub struct SettingHistoryParams {
     /// Newest first, 1-100; 20 when unset.
     #[serde(default)]
     pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ControlHandoffsParams {
+    /// How many, newest first (default 50, at most 500).
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AnswerMcpConfirmParams {
+    /// The confirm_nonce the waiting call was handed.
+    pub nonce: String,
+    /// true runs the call on its retry; false refuses it.
+    pub approved: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

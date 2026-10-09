@@ -35,8 +35,17 @@
 
 #[cfg(feature = "nl-detect")]
 pub mod bench;
+pub mod duplicate;
+#[cfg(test)]
+mod duplicate_tests;
 pub mod haiku;
+pub mod host_placement;
+#[cfg(test)]
+mod host_placement_tests;
 pub mod jev;
+pub mod quick_answer;
+#[cfg(test)]
+mod quick_answer_tests;
 pub mod sibling_repos;
 #[cfg(test)]
 mod sibling_repos_tests;
@@ -88,14 +97,24 @@ pub enum Feature {
     StartProject,
     /// Pre-ticking the sibling repository a ticket start also needs (N3).
     SiblingRepos,
+    /// Pre-selecting the host of a project's new session when no rule or
+    /// number decides (N5, redesign step 4.11).
+    HostPlacement,
+    /// The likely option first in an agent's question or a form (J5).
+    QuickAnswer,
+    /// Flagging a proposed task that may duplicate an existing one (K4).
+    Duplicate,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 4] = [
+    pub const ALL: [Feature; 7] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
         Feature::SiblingRepos,
+        Feature::HostPlacement,
+        Feature::QuickAnswer,
+        Feature::Duplicate,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -104,6 +123,9 @@ impl Feature {
             Feature::WorkLink => "work_link",
             Feature::StartProject => "start_project",
             Feature::SiblingRepos => "sibling_repos",
+            Feature::HostPlacement => "host_placement",
+            Feature::QuickAnswer => "quick_answer",
+            Feature::Duplicate => "duplicate",
         }
     }
 
@@ -118,6 +140,9 @@ impl Feature {
             Feature::WorkLink => settings::DECIDE_JEV_WORK_LINK,
             Feature::StartProject => settings::DECIDE_JEV_START_PROJECT,
             Feature::SiblingRepos => settings::DECIDE_JEV_SIBLING_REPOS,
+            Feature::HostPlacement => settings::DECIDE_JEV_HOST_PLACEMENT,
+            Feature::QuickAnswer => settings::DECIDE_JEV_QUICK_ANSWER,
+            Feature::Duplicate => settings::DECIDE_JEV_DUPLICATE,
         }
     }
 }

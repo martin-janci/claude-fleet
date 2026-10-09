@@ -7,6 +7,10 @@ Auto-generated from the embedded MCP tool router. See [`control-api.md`](control
 
 ## MCP tools
 
+### `account_usage`
+
+Each Claude account's latest plan usage: 5-hour and weekly utilization with reset times, status, fetched_at. Never fetches.
+
 ### `add_host`
 
 Register a host. transport "ssh" (default) is probed first and persisted only if reachable; "agent" (a host the hub cannot reach; it runs fleet-agent and dials in) is persisted unprobed, unreachable until its agent connects (token: `fleet-hub agent-token <alias>` on the hub). Returns the host row.
@@ -25,9 +29,21 @@ Adopt a live tmux session fleet did not start (started_at null: someone ran tmux
 
 Parameters: `session_id`
 
+### `agent_installs`
+
+fleet-agent install jobs, newest first: state, step, detail.
+
+Parameters: `alias`
+
 ### `agent_status`
 
 Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
+
+### `answer_mcp_confirm`
+
+Approve or deny one waiting call by its nonce; false when it was already answered or expired.
+
+Parameters: `approved`, `nonce`
 
 ### `apply_sync`
 
@@ -70,6 +86,12 @@ Parameters: `action`, `args`, `catalog`, `confirm_nonce`
 Changeset cards that adopt, sync and fix assets: list (one in full with id), propose (rebuild from the last scan), propose_layer (a layer change as a card), apply (positions picks items; a drift card takes one), undo (the latest applied card per catalog), dismiss, reject_item. Mutating actions need a grant on every catalog the card names.
 
 Parameters: `action`, `change`, `confirm_nonce`, `id`, `positions`
+
+### `control_handoffs`
+
+What the agent handed on, newest first: prompts and tasks sent to sessions, new sessions, missions, tasks and proposed trees, each with its target's state now.
+
+Parameters: `limit`
 
 ### `debug_devices`
 
@@ -161,6 +183,12 @@ Read the messages sent TO session_id, newest first; task results arrive as kind=
 
 Parameters: `fresh_for`, `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
 
+### `install_agent`
+
+Install fleet-agent on a host this hub reaches over SSH, then move the host onto it. Returns the job at once (see agent_installs): target, download (checked against SHA256SUMS), start (token on stdin), connect (no hello in 120 s: back on SSH). Defaults: this hub's public URL and version. Hub only.
+
+Parameters: `alias`, `hub_url`, `version`
+
 ### `kill_session`
 
 Kill a session: a tmux session, or a background agent row (`bg:<uuid>`, kind `bg`) via `claude stop`; an inactive one (claude_status `stopped`) is removed from the list instead. Rows of kind `external` (Claude running outside fleet) are refused with E_INVALID_STATE: close them where they run. For disposable or already-pushed work you want gone NOW; prefer safe_kill_session when the worktree may hold unpushed work. Returns the killed id. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
@@ -199,7 +227,7 @@ Parameters: `limit`, `session_id`
 
 Repositories gh on the host can see, for choosing what to clone with add_project.
 
-Parameters: `host_alias`
+Parameters: `host_alias`, `owner`
 
 ### `list_host_worktrees`
 
@@ -246,6 +274,10 @@ Parameters: `limit`, `requester_session_id`, `state`
 Git worktrees fleet knows about, with their alive-session occupants (0 = free to delete via delete_worktree). Returns {total, worktrees}: total counts every match. Narrow with project_id / host_alias: a fleet-wide call answers hundreds of rows.
 
 Parameters: `host_alias`, `limit`, `project_id`, `summary`
+
+### `mcp_confirms`
+
+Calls waiting for your OK (the agent's starts and kills), oldest first.
 
 ### `merge_host`
 
@@ -411,6 +443,12 @@ Blame of one worktree file as runs of lines: {path, hunks: [{start, lines, hash,
 
 Parameters: `path`, `session_id`
 
+### `repo_branch_diff`
+
+What a session's branch carries: the commits no remote has and the files they change, and the files it changes against the base branch: {branch, upstream, unpushed, unpushedFiles, truncated, base, aheadOfBase, baseFiles}.
+
+Parameters: `session_id`
+
 ### `repo_branches`
 
 Local + remote branches of a session's worktree, with ahead/behind and `merged` (the base branch contains the tip).
@@ -452,6 +490,12 @@ Parameters: `path`, `session_id`
 Commit log (branch graph) of a session's worktree, newest first, with parents + ref decorations; `skip` pages back.
 
 Parameters: `all`, `limit`, `session_id`, `skip`
+
+### `repo_range_diff`
+
+One file's diff over a session's unpushed commits (range `unpushed`) or against the base branch (range `base`): {path, diff, binary, truncated}.
+
+Parameters: `path`, `range`, `session_id`
 
 ### `repo_tree`
 
@@ -579,6 +623,12 @@ Lower a person's or org's grant on your session from drive to watch (owner only)
 
 Parameters: `org`, `person`, `session_id`
 
+### `session_presence`
+
+Presence: report that you have a session open (again every heartbeat_secs; leaving: true when you close it) and read who else has. The owner sees everyone; others see the owner and themselves. Returns { session_id, viewers: [{ person_id, name, device?, since, you? }], heartbeat_secs }.
+
+Parameters: `leaving`, `session_id`
+
 ### `session_share`
 
 Share a session you OWN with a person, or an org you are in (its members from now), at watch (read) or drive (also prompt). Owner only; never 'own' or a terminal. Returns the row. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.
@@ -667,6 +717,12 @@ Parameters: `key`, `limit`
 
 Settings proposals waiting for review, each with the key's value now, and can_write: whether this device may decide.
 
+### `shell_terminals`
+
+A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals.
+
+Parameters: `action`, `n`, `session_id`
+
 ### `spawn_review`
 
 Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns its row.
@@ -747,9 +803,9 @@ Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. edit {item_id, title?, notes?, assignees?}: a person edits work with no ticket. create {title, parent?, notes?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status}; mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check. mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours?, budget_cents?, hosts?, max_parallel?}; mission_revoke; missions_pause_all. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. edit {item_id, title?, notes?, assignees?}: a person edits work with no ticket. create {title, parent?, notes?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status}; mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check. mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours?, budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; missions_pause_all. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
 
-Parameters: `ack_live`, `action`, `assignees`, `brief`, `bucket_id`, `budget_cents`, `card_id`, `confirm_nonce`, `days`, `decisions`, `depends_on`, `done_when`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `item_id`, `item_ids`, `items`, `key`, `level`, `line`, `link_id`, `max_parallel`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `primary`, `project_id`, `project_ids`, `role`, `rule`, `rule_id`, `session_id`, `source`, `status`, `step`, `task_id`, `title`, `tree`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
+Parameters: `ack_live`, `action`, `assignees`, `brief`, `bucket_id`, `budget_cents`, `card_id`, `confirm_nonce`, `days`, `decisions`, `depends_on`, `done_when`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `item_id`, `item_ids`, `items`, `key`, `level`, `line`, `link_id`, `max_parallel`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `primary`, `profile`, `project_id`, `project_ids`, `role`, `rule`, `rule_id`, `session_id`, `source`, `status`, `step`, `task_id`, `title`, `tree`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -786,6 +842,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::list_sessions`
 - `commands::sessions::new_session`
 - `commands::sessions::kill_session`
+- `commands::sessions::shell_terminals`
 - `commands::sessions::safe_kill_session`
 - `commands::sessions::inspect_safe_kill`
 - `commands::sessions::discard_kill_session`
@@ -966,6 +1023,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::debug_device_logs`
 - `commands::debug_devices::debug_device_screenshot`
 - `commands::prs::list_pull_requests`
+- `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`
@@ -975,6 +1033,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::files::repo_file`
 - `commands::files::repo_diff`
 - `commands::files::repo_blame`
+- `commands::files::repo_branch_diff`
+- `commands::files::repo_range_diff`
 - `commands::upload::upload_to_session`
 - `commands::upload::pick_attachments`
 - `commands::upload::attachment_preview`
@@ -992,6 +1052,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mutate::repo_stage`
 - `commands::mutate::repo_unstage`
 - `commands::mutate::repo_commit_create`
+- `commands::mutate::draft_commit_message`
 - `commands::mutate::repo_fetch`
 - `commands::mutate::repo_pull`
 - `commands::mutate::repo_push`
@@ -1001,6 +1062,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::add_host`
 - `commands::hosts::probe_host`
 - `commands::hosts::check_host`
+- `commands::hosts::list_host_setups`
+- `commands::hosts::save_host_setup`
+- `commands::hosts::discard_host_setup`
+- `commands::hosts::run_host_setup_check`
 - `commands::hosts::probe_ssh_alias`
 - `commands::hosts::remove_host`
 - `commands::hosts::merge_host`
@@ -1011,6 +1076,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::account_usage::account_usage_history`
 - `commands::account_usage::account_spend`
 - `commands::account_usage::check_account_headroom`
+- `commands::account_usage::propose_host_placement`
+- `commands::account_usage::record_host_placement`
 - `commands::mcp::mcp_status`
 - `commands::mcp::mcp_configure`
 - `commands::mcp::install_fleet_hook`
@@ -1020,6 +1087,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::rotate_host_token`
 - `commands::mcp::mcp_confirm`
 - `commands::mcp::mcp_pending_confirms`
+- `commands::mcp::control_handoffs`
 - `commands::operator::ensure_operator`
 - `commands::operator::operator_status`
 - `commands::hub::hub_status`
@@ -1089,6 +1157,7 @@ Frontend commands registered in `src/lib.rs`:
 - `pty::pty_close`
 - `pty::pty_drain`
 - `commands::editor::open_session_in_editor`
+- `commands::windows::open_terminal_window`
 - `commands::voice::voice_claim`
 - `commands::voice::voice_release`
 - `cancel_command`

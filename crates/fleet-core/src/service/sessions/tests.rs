@@ -3352,6 +3352,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        pane_tails: Default::default(),
         account: None,
         profiles: None,
         pr_info: PrInfoMap::new(),
@@ -3403,6 +3404,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        pane_tails: Default::default(),
         account: None,
         profiles: None,
         pr_info: PrInfoMap::new(),
@@ -3927,6 +3929,7 @@ fn reconcile_linking(
         agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        pane_tails: Default::default(),
         account: None,
         profiles: None,
         pr_info: PrInfoMap::new(),
@@ -4203,15 +4206,15 @@ fn worktree_key_non_repo_path_is_none() {
 fn recreate_pane_command_matches_kind_and_id() {
     let id = "550e8400-e29b-41d4-a716-446655440000";
     assert_eq!(
-        recreate_pane_command("shell", Some(id), "dev-x", &Default::default()),
+        recreate_pane_command("shell", "claude", Some(id), "dev-x", &Default::default()),
         crate::tmux::shell_pane_command(None)
     );
     assert_eq!(
-        recreate_pane_command("work", Some(id), "dev-x", &Default::default()),
+        recreate_pane_command("work", "claude", Some(id), "dev-x", &Default::default()),
         crate::tmux::pane_command_for(Some(id), "dev-x")
     );
     assert_eq!(
-        recreate_pane_command("work", None, "dev-x", &Default::default()),
+        recreate_pane_command("work", "claude", None, "dev-x", &Default::default()),
         crate::tmux::pane_command_for(None, "dev-x")
     );
     // A corrupt/non-UUID stored id must NOT inject — it degrades to the
@@ -4219,6 +4222,7 @@ fn recreate_pane_command_matches_kind_and_id() {
     assert_eq!(
         recreate_pane_command(
             "work",
+            "claude",
             Some("not-a-uuid; rm -rf /"),
             "dev-x",
             &Default::default()
@@ -4227,7 +4231,7 @@ fn recreate_pane_command_matches_kind_and_id() {
     );
     // "review" is a non-shell kind → same resume behavior as "work".
     assert_eq!(
-        recreate_pane_command("review", Some(id), "dev-x", &Default::default()),
+        recreate_pane_command("review", "claude", Some(id), "dev-x", &Default::default()),
         crate::tmux::pane_command_for(Some(id), "dev-x")
     );
 }
@@ -6133,6 +6137,7 @@ async fn a_verdict_never_marks_a_row_a_newer_probe_already_saw_live() {
         agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        pane_tails: Default::default(),
         account: None,
         profiles: None,
         pr_info: PrInfoMap::new(),
@@ -6614,6 +6619,7 @@ fn pair_pass(
         agent_rows: Some(agents),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        pane_tails: Default::default(),
         account: None,
         profiles: None,
         pr_info: PrInfoMap::new(),
@@ -6787,6 +6793,7 @@ fn vps_probe(
         agent_rows: Some(agents),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        pane_tails: Default::default(),
         account: None,
         profiles: None,
         pr_info,
@@ -7447,7 +7454,7 @@ fn a_sent_switch_is_stored_and_relaunched() {
         let launch = stored_launch(&s, id);
         assert_eq!(launch.model.as_deref(), Some("opus[1m]"));
         let sid = "550e8400-e29b-41d4-a716-446655440000";
-        let pane = recreate_pane_command("work", Some(sid), "dev-launch", &launch);
+        let pane = recreate_pane_command("work", "claude", Some(sid), "dev-launch", &launch);
         assert_eq!(
             pane.matches("--model 'opus[1m]' --effort 'high'").count(),
             3,
@@ -7494,7 +7501,7 @@ fn a_stored_profile_relaunches_under_its_config_dir_and_a_switch_drops_the_old_a
     let launch = stored_launch(&s, id);
     assert_eq!(launch.profile.as_deref(), Some("work"));
     let sid = "550e8400-e29b-41d4-a716-446655440000";
-    let pane = recreate_pane_command("work", Some(sid), "dev-prof", &launch);
+    let pane = recreate_pane_command("work", "claude", Some(sid), "dev-prof", &launch);
     assert!(
         pane.contains("export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"'work';"),
         "{pane}"
@@ -7502,7 +7509,8 @@ fn a_stored_profile_relaunches_under_its_config_dir_and_a_switch_drops_the_old_a
 
     // A shell session never runs under one, whatever is stored.
     assert!(
-        !recreate_pane_command("shell", None, "dev-prof", &launch).contains("CLAUDE_CONFIG_DIR")
+        !recreate_pane_command("shell", "claude", None, "dev-prof", &launch)
+            .contains("CLAUDE_CONFIG_DIR")
     );
 
     // A tampered value never reaches the shell.
@@ -7581,4 +7589,41 @@ fn stored_launch_drops_values_that_no_longer_validate() {
     assert_eq!(stored_launch(&s, id), crate::tmux::ClaudeLaunch::default());
     s.set_session_launch_model(id, Some("sonnet")).unwrap();
     assert_eq!(stored_launch(&s, id).model.as_deref(), Some("sonnet"));
+}
+
+/// A Codex row's pane is read by the Codex adapter (12.2): its approval
+/// becomes the session's prompt card. A Claude row on the same host keeps
+/// Claude's reading of the same screen, which differs.
+#[test]
+fn reconcile_reads_a_codex_pane_with_the_codex_adapter() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let live = || vec![tmux_session("dev-cx"), tmux_session("dev-a")];
+    let first = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &first, &[]).unwrap();
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    s.set_session_agent(cx.id, crate::store::AGENT_CODEX)
+        .unwrap();
+
+    let approval = include_str!("../../agent_adapter/testdata/codex/approval_command.txt");
+    let mut probe = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    for name in ["dev-cx", "dev-a"] {
+        probe.pane_tails.insert(name.into(), approval.into());
+    }
+    probe.intel = intel_from_tails(&probe.pane_tails);
+    reconcile_write_one_host(&mut s, &probe, &[]).unwrap();
+
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    let card = cx.pending_input.expect("the Codex approval is a card");
+    assert_eq!(card.kind, "permission");
+    assert_eq!(card.options[0].label, "Yes, proceed");
+    assert_eq!(card.detail.as_deref(), Some("curl -sI https://example.com"));
+    assert_eq!(cx.claude_status.as_deref(), Some("blocked"));
+    let a = s.get_session("dev-a", "vps").unwrap().unwrap();
+    let claude_read = crate::service::pane_intel::analyze(approval).pending_input;
+    assert_eq!(
+        a.pending_input, claude_read,
+        "a Claude row keeps Claude's reading"
+    );
+    assert_ne!(a.pending_input, Some(card), "and the two readings differ");
 }

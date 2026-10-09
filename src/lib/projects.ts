@@ -144,7 +144,12 @@ export async function listHostWorktrees(
 /** Wire shape of `service::add_project::AddProjectArgs::source`
  *  (`#[serde(tag = "kind", rename_all = "snake_case")]`). */
 export type AddProjectSource =
-  | { kind: 'clone'; url: string }
+  | {
+      kind: 'clone';
+      url: string;
+      /** Already in the fleet: clone it onto this (remote) host too. */
+      existing?: boolean;
+    }
   | { kind: 'folder'; path: string }
   | { kind: 'new'; owner: string; repo: string; create_remote: boolean; confirm?: string };
 
@@ -154,6 +159,8 @@ export interface GithubRepo {
   description: string | null;
   is_private: boolean;
   updated_at: string | null;
+  /** Main language ("Rust"); absent from an older hub's answer. */
+  language?: string | null;
 }
 
 /**
@@ -179,8 +186,13 @@ export async function addProject(
 
 /** The repositories `gh` can see on `hostAlias`, for the Add-project
  *  dialog's browse mode. Read-only. */
-export async function listGithubRepos(hostAlias: string): Promise<Result<GithubRepo[]>> {
-  return invokeCmd<GithubRepo[]>('list_github_repos', { args: { host_alias: hostAlias } });
+/** `owner` lists that user's or organisation's repositories instead of the
+ *  host login's own; it is sent only when given, so the request is
+ *  byte-for-byte today's without one. */
+export async function listGithubRepos(hostAlias: string, owner?: string): Promise<Result<GithubRepo[]>> {
+  return invokeCmd<GithubRepo[]>('list_github_repos', {
+    args: owner ? { host_alias: hostAlias, owner } : { host_alias: hostAlias },
+  });
 }
 
 const CONFIRM_TOKEN_RE = /^[0-9a-f]{64}$/;

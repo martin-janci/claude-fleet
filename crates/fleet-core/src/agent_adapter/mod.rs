@@ -8,19 +8,24 @@
 //! sent lines switch the stored model or effort), how to read its pane
 //! (status, stuck states, dialogs), and how to read its transcript.
 //!
-//! A session's agent is `sessions.agent` (migration 121), which today
-//! follows `kind`: [`for_kind`] maps `shell` to no adapter (a shell has no
-//! agent) and every other kind to Claude Code, the only adapter so far.
-//! [`by_id`] knows `claude` only; `codex` and `agy` are refused at start
-//! (`normalize_agent`) until their adapters exist.
+//! A session's agent is `sessions.agent` (migration 121): [`for_session`]
+//! maps a `shell` session to no adapter (a shell has no agent) and any
+//! other to its agent's, Claude Code for an agent with none. [`by_id`]
+//! knows `claude`, `codex` ([`CodexCli`], 12.2) and `agy` ([`Agy`], 12.3,
+//! built from agy's docs and provisional until real agy screens are
+//! captured).
 //!
 //! Claude Code moved behind [`ClaudeCode`] with no behaviour change: it
 //! delegates to the functions that did the work before (`tmux`'s launch
 //! chain, `pane_intel`, `transcript`), and their own tests still pin them.
 
+mod agy;
 mod claude;
+mod codex;
 
+pub use agy::Agy;
 pub use claude::ClaudeCode;
+pub use codex::CodexCli;
 
 use crate::service::pane_intel::PaneIntel;
 use crate::service::transcript::ConvTurn;
@@ -62,8 +67,9 @@ pub trait AgentAdapter: Send + Sync {
     fn label(&self) -> &'static str;
 
     /// The pane command for a session named `tmux_name`. With a
-    /// conversation id: resume it, else start it under that id. Without
-    /// one: continue the newest conversation in the cwd, else start fresh.
+    /// conversation id: resume it, else start it under that id (or fresh,
+    /// for an agent that cannot take one). Without one: continue the newest
+    /// conversation in the cwd, else start fresh.
     /// `conversation_id` must already have passed
     /// [`AgentAdapter::valid_conversation_id`]; `launch` is the session's
     /// model, effort and login profile.
@@ -80,8 +86,16 @@ pub trait AgentAdapter: Send + Sync {
     fn valid_conversation_id(&self, id: &str) -> bool;
 
     /// A fresh conversation id for a new session, so a later recreate
-    /// resumes THIS conversation rather than the cwd's newest.
-    fn mint_conversation_id(&self) -> String;
+    /// resumes THIS conversation rather than the cwd's newest. `None` for
+    /// an agent that picks its own id (Codex): its new session starts with
+    /// [`AgentAdapter::start_command`] instead.
+    fn mint_conversation_id(&self) -> Option<String>;
+
+    /// The pane command for a brand-new conversation, never resuming one,
+    /// for an agent whose [`AgentAdapter::mint_conversation_id`] is `None`.
+    /// An agent that mints ids starts new sessions under one through
+    /// [`AgentAdapter::launch_command`] and never calls this.
+    fn start_command(&self, tmux_name: &str, launch: &ClaudeLaunch) -> String;
 
     /// The model aliases the model picker offers (a hint list; any value
     /// the agent takes is accepted).
@@ -108,6 +122,8 @@ pub trait AgentAdapter: Send + Sync {
 }
 
 static CLAUDE_CODE: ClaudeCode = ClaudeCode;
+static AGY: Agy = Agy;
+static CODEX_CLI: CodexCli = CodexCli;
 
 /// Claude Code's adapter.
 pub fn claude() -> &'static dyn AgentAdapter {
@@ -119,13 +135,25 @@ pub fn claude() -> &'static dyn AgentAdapter {
 pub fn by_id(agent: &str) -> Option<&'static dyn AgentAdapter> {
     match agent {
         crate::store::AGENT_CLAUDE => Some(claude()),
+        crate::store::AGENT_CODEX => Some(&CODEX_CLI),
+        crate::store::AGENT_AGY => Some(&AGY),
         _ => None,
     }
 }
 
-/// The adapter for a session of `kind`: none for a `shell` session, Claude
-/// Code for every other kind (the row's `agent` follows its kind until a
-/// second adapter lands).
+/// The adapter for a session of `kind` running `agent` (its row's
+/// `agent`, or a new session's requested one): none for a `shell`
+/// session, the agent's own when it has one, else Claude Code (the default
+/// agent, and what every row ran before migration 121).
+pub fn for_session(kind: &str, agent: Option<&str>) -> Option<&'static dyn AgentAdapter> {
+    if kind == "shell" {
+        return None;
+    }
+    Some(agent.and_then(by_id).unwrap_or_else(claude))
+}
+
+/// The adapter for a session of `kind` whose agent is not known: none for
+/// a `shell` session, Claude Code for every other kind.
 pub fn for_kind(kind: &str) -> Option<&'static dyn AgentAdapter> {
     if kind == "shell" {
         None

@@ -273,6 +273,10 @@ pub(super) struct HostProbe {
     /// nor dismissal revival that pass — every agent counts as active.
     pub(super) agent_mtimes: Option<std::collections::HashMap<String, i64>>,
     pub(super) intel: PaneIntelMap,
+    /// The pane tails `intel` was read from, by `tmux_name`. `intel` is
+    /// Claude Code's reading; a row whose agent is another (Codex) is read
+    /// again from its tail by that agent's adapter when the row is known.
+    pub(super) pane_tails: std::collections::HashMap<String, String>,
     /// `tmux_name → gh pr view` result for the sessions probed THIS pass
     /// (PROD-5). A name absent from the map was not probed (cache still
     /// fresh, host has no `gh`, or the probe failed) and keeps its stored
@@ -822,7 +826,15 @@ fn write_reachable_host(
         // Pane-tail intel from the off-lock probe (may be absent if the
         // capture failed — then all four intel fields stay None and the
         // upsert's COALESCE preserves the session's prior values).
-        let pane = intel.get(&sess.name);
+        // A row running another agent (Codex) is read by its own adapter.
+        let own_read = prior_row
+            .filter(|r| r.agent != crate::store::AGENT_CLAUDE && r.kind != "shell")
+            .and_then(|r| crate::agent_adapter::by_id(&r.agent))
+            .and_then(|a| {
+                let tail = probe.pane_tails.get(&sess.name)?;
+                (!tail.is_empty()).then(|| a.analyze_pane(tail))
+            });
+        let pane = own_read.as_ref().or_else(|| intel.get(&sess.name));
         // PR probe result for this pass (PROD-5). `pr_observed`
         // makes the values authoritative so a closed PR's stale
         // link clears; an unprobed session keeps its stored fields.
@@ -1619,6 +1631,7 @@ pub(super) async fn probe_with_timeout(
         };
         // One pane-tail read per live session, parsed into reconcile intel.
         let intel = intel_from_tails(&snap.pane_tails);
+        let pane_tails = snap.pane_tails;
         // `None`: not due this pass (cadence) or the host could not be
         // asked. Either way the bg pruner below must not run this pass —
         // treating "not asked" as "no agents" is exactly what ghosts every
@@ -1649,7 +1662,7 @@ pub(super) async fn probe_with_timeout(
             tmux_result,
             agent_rows,
             agent_mtimes,
-            intel,
+            (intel, pane_tails),
             (account, profiles),
             identity,
             versions,
@@ -1661,7 +1674,7 @@ pub(super) async fn probe_with_timeout(
             result,
             agent_rows,
             agent_mtimes,
-            intel,
+            (intel, pane_tails),
             (account, profiles),
             identity,
             versions,
@@ -1674,6 +1687,7 @@ pub(super) async fn probe_with_timeout(
             agent_rows,
             agent_mtimes,
             intel,
+            pane_tails,
             pr_info: PrInfoMap::new(),
             account,
             profiles,
@@ -1695,6 +1709,7 @@ pub(super) async fn probe_with_timeout(
                 agent_rows: None,
                 agent_mtimes: None,
                 intel: PaneIntelMap::new(),
+                pane_tails: Default::default(),
                 pr_info: PrInfoMap::new(),
                 account: None,
                 profiles: None,

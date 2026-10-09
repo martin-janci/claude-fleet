@@ -361,7 +361,8 @@ fn tier(reach: Reach, who: Who) -> Out {
 ///
 /// * the five person-facing SHARING surfaces, because a per-host token
 ///   proves no person and so can be neither an owner nor a grantee
-///   (`sharing.rs`'s header, spec §4.3);
+///   (`sharing.rs`'s header, spec §4.3), and presence (11.7b), which
+///   reports a PERSON looking at a session;
 /// * `list_downloads`, because listing and removing sent files is a
 ///   person's half of the downloads feature — a host's Claude only SENDS one
 ///   (`send_file`, which is deliberately NOT here: the session's own agent
@@ -372,6 +373,7 @@ const NEVER_A_HOST_TOKENS: &[&str] = &[
     "session_narrow",
     "session_access",
     "my_grants",
+    "session_presence",
     "list_downloads",
 ];
 
@@ -687,6 +689,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
     let r = match tool {
         // ---- lifecycle.rs -------------------------------------------------
         "kill_session" => fx.t.kill_session(ext, p!()).await,
+        "shell_terminals" => fx.t.shell_terminals(ext, p!()).await,
         "safe_kill_session" => fx.t.safe_kill_session(ext, p!()).await,
         "rename_session" => fx.t.rename_session(ext, p!()).await,
         "set_friendly_name" => fx.t.set_friendly_name(ext, p!()).await,
@@ -737,6 +740,8 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "repo_branches" => fx.t.repo_branches(ext, p!()).await,
         "repo_commit" => fx.t.repo_commit(ext, p!()).await,
         "repo_commit_diff" => fx.t.repo_commit_diff(ext, p!()).await,
+        "repo_branch_diff" => fx.t.repo_branch_diff(ext, p!()).await,
+        "repo_range_diff" => fx.t.repo_range_diff(ext, p!()).await,
         // ---- session_ops.rs -----------------------------------------------
         "list_sessions" => fx.t.list_sessions(ext, p!()).await,
         "related_sessions" => fx.t.related_sessions(ext, p!()).await,
@@ -759,6 +764,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "session_access" => fx.t.session_access(ext, p!()).await,
         "session_claim" => fx.t.session_claim(ext, p!()).await,
         "my_grants" => fx.t.my_grants(ext).await,
+        "session_presence" => fx.t.session_presence(ext, p!()).await,
         // ---- downloads.rs -------------------------------------------------
         "send_file" => fx.t.send_file(ext, p!()).await,
         "list_downloads" => fx.t.list_downloads(ext, p!()).await,
@@ -941,6 +947,7 @@ async fn run_matrix() {
     m.gated("safe_kill_session", Reach::Own, row).await;
     m.gated("restart_session", Reach::Own, row).await;
     m.gated("recreate_session", Reach::Own, row).await;
+    m.gated("shell_terminals", Reach::Own, row).await;
     m.gated(
         "move_session",
         Reach::Own,
@@ -1046,6 +1053,10 @@ async fn run_matrix() {
         .await;
     }
     m.gated("session_access", Reach::Own, row).await;
+    // Presence (11.7b): a watch grantee may say it is looking; a stranger
+    // gets the not-found every session tool answers, and learns nobody's
+    // there.
+    m.gated("session_presence", Reach::Read, row).await;
     // `send_file` is the `own` tier, and the reason is the FILE's path
     // rather than anything about the session: `send_file { session_id, path }`
     // copies a file off the session's host at an UNCONSTRAINED absolute path
@@ -1360,6 +1371,13 @@ async fn run_matrix() {
         "repo_commit_diff",
         Reach::Read,
         |fx, _| json!({ "session_id": fx.row, "hash": "HEAD", "path": "README.md" }),
+    )
+    .await;
+    m.gated("repo_branch_diff", Reach::Read, row).await;
+    m.gated(
+        "repo_range_diff",
+        Reach::Read,
+        |fx, _| json!({ "session_id": fx.row, "path": "README.md", "range": "base" }),
     )
     .await;
 
@@ -1892,7 +1910,7 @@ async fn a_driver_is_refused_every_owner_only_tool() {
 fn own_tier_args(fx: &Fx, tool: &str) -> Value {
     match tool {
         "kill_session" | "safe_kill_session" | "restart_session" | "recreate_session"
-        | "session_access" => json!({ "session_id": fx.row }),
+        | "session_access" | "shell_terminals" => json!({ "session_id": fx.row }),
         "move_session" => {
             json!({ "session_id": fx.row, "target_host_alias": FAR, "dry_run": true })
         }

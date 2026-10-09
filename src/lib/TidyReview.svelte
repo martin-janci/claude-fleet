@@ -18,6 +18,8 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import ResumeButton from './ResumeButton.svelte';
+  import Loader from './Loader.svelte';
+  import { uiLayout } from './prefs';
   import {
     applyItems,
     applyTidy,
@@ -401,9 +403,8 @@
   <div
     class="tidy-sheet"
     data-testid="tidy-sheet"
-    role="listbox"
+    role="dialog"
     aria-label="Tidy up"
-    aria-multiselectable="true"
     tabindex="-1"
     bind:this={sheet}
     onkeydown={onSheetKey}
@@ -432,7 +433,20 @@
         {notMine === 1 ? 'it is' : 'they are'}. Tidying one is the owner's to do.
       </p>
     {/if}
+    {#if busy && $uiLayout === 'new'}
+      <!-- Redesign step 5.13: the safe kills check each worktree before it
+           goes, so the scan gets the manual's Hex field over the list. -->
+      <div class="tidy-scan" data-testid="tidy-scan">
+        <Loader name="hex-field" size={48} label="Checking worktrees" />
+        <span>Checking {tickedCount} worktree{tickedCount === 1 ? '' : 's'}…</span>
+      </div>
+    {/if}
+    <!-- The rows as a tree (redesign step 7.2): one group per reason, so a
+         row's checkbox, buttons and select are its own controls, not the
+         hidden children of an option. -->
+    <div role="tree" aria-label="Sessions to tidy" aria-multiselectable="true">
     {#each groups as g (g.reason)}
+      <div role="group" aria-label={tidyReasonLabel(g.reason)}>
       <div class="group-head" data-testid="tidy-group">{tidyReasonLabel(g.reason)} · {g.items.length}</div>
       {#each g.items as c (c.session_id)}
         {@const i = ordered.indexOf(c)}
@@ -447,7 +461,7 @@
           class:cursor={i === cursor}
           data-testid="tidy-row"
           data-session-id={c.session_id}
-          role="option"
+          role="treeitem"
           aria-selected={ticked.has(c.session_id)}
           tabindex="-1"
           title="Show only this session in the sidebar"
@@ -515,7 +529,9 @@
           {/if}
         </div>
       {/each}
+      </div>
     {/each}
+    </div>
     <div class="sheet-foot">
       <button
         class="btn btn--primary"
@@ -529,6 +545,14 @@
 {/if}
 
 <style>
+  .tidy-scan {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    font-size: 11px;
+    color: var(--fg-muted);
+  }
   /* Segments of the attention line (SidebarFilters' .attention-line). */
   .al-seg {
     order: 0;

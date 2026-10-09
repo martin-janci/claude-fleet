@@ -114,8 +114,14 @@ impl AgentAdapter for ClaudeCode {
         crate::validate::claude_session_id(id).is_ok()
     }
 
-    fn mint_conversation_id(&self) -> String {
-        uuid::Uuid::new_v4().to_string()
+    fn mint_conversation_id(&self) -> Option<String> {
+        Some(uuid::Uuid::new_v4().to_string())
+    }
+
+    /// Unused: Claude Code takes a minted id, so a new session starts under
+    /// one. Starting bare is the no-id launch line.
+    fn start_command(&self, tmux_name: &str, launch: &ClaudeLaunch) -> String {
+        crate::tmux::pane_command_with(None, tmux_name, launch)
     }
 
     fn models(&self) -> &'static [PickerOption] {

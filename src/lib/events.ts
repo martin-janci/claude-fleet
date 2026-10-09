@@ -101,6 +101,22 @@ export type RowEventHandlers = {
   onGrantChanged?: (changes: GrantChanged[]) => void;
 };
 
+/**
+ * `confirm:changed` (redesign step 9.2): the queue of control-API calls
+ * waiting for a person moved. An empty frame; `confirms.ts` listens to it on
+ * its own (not through `subscribeRowEvents`' batching) and re-reads the
+ * queue, which on a hub-backed desktop is the hub's.
+ */
+export const CONFIRM_CHANGED_EVENT = 'confirm:changed';
+
+/**
+ * `handoff:changed` (redesign step 9.3): Control's agent handed work on and
+ * a receipt was written. An empty frame; `handoffs.ts` listens to it on its
+ * own and re-reads `control_handoffs`, which on a hub-backed desktop is the
+ * hub's.
+ */
+export const HANDOFF_CHANGED_EVENT = 'handoff:changed';
+
 /** The payload of `update:changed`: what moved, never the row itself. */
 /** `what` is observed | pin | channel today; a newer hub may add others. */
 export type UpdateChanged = { what: string; target?: string };

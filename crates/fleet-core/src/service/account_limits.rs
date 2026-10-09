@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::ipc_error::{codes, IpcError};
-use crate::service::account_usage::{AccountUsageSnapshot, UsageCache, Window};
+use crate::service::account_usage::{AccountUsage, AccountUsageSnapshot, UsageCache, Window};
 use crate::service::settings;
 use crate::store::{HostRow, Store};
 
@@ -64,7 +64,11 @@ pub struct Headroom {
 /// Percent used of the account's tighter window at `now`: the larger of the
 /// 5-hour and weekly use, counting only a window that has not reset yet.
 pub fn used_pct(snap: Option<&AccountUsageSnapshot>, now: i64) -> Option<f64> {
-    let usage = snap?.usage.as_ref()?;
+    used_pct_of(snap?.usage.as_ref()?, now)
+}
+
+/// [`used_pct`] of one reading.
+pub fn used_pct_of(usage: &AccountUsage, now: i64) -> Option<f64> {
     let live = |w: &Option<Window>| {
         w.as_ref()
             .filter(|w| w.utilization.is_finite() && w.resets_at.is_none_or(|at| at > now))
@@ -79,7 +83,12 @@ pub fn used_pct(snap: Option<&AccountUsageSnapshot>, now: i64) -> Option<f64> {
 /// Every login on `host` that is logged in to an account: its own, then each
 /// profile, in the order the host lists them.
 pub fn host_logins(host: &HostRow, usage: &[AccountUsageSnapshot], now: i64) -> Vec<HostLogin> {
-    let used = |uuid: &str| used_pct(usage.iter().find(|s| s.account_uuid == uuid), now);
+    logins_with(host, |uuid| {
+        used_pct(usage.iter().find(|s| s.account_uuid == uuid), now)
+    })
+}
+
+fn logins_with(host: &HostRow, used: impl Fn(&str) -> Option<f64>) -> Vec<HostLogin> {
     let own = host.account_uuid.as_deref().map(|uuid| HostLogin {
         profile: None,
         account_uuid: uuid.to_string(),
@@ -136,6 +145,102 @@ pub fn headroom(
     }
 }
 
+/// A login automation found at or past `accounts.pause_at` (redesign 8.7).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OverLimit {
+    pub host_alias: String,
+    pub login: HostLogin,
+    pub pause_at_pct: f64,
+}
+
+impl OverLimit {
+    /// Why a run was skipped, for a run row or a mission event.
+    pub fn reason(&self) -> String {
+        let who = match &self.login.profile {
+            Some(p) => format!("profile {p} on {}", self.host_alias),
+            None => format!("{}'s own login", self.host_alias),
+        };
+        format!(
+            "the account of {who} is at {:.0}%, over accounts.pause_at ({:.0}%)",
+            self.login.used_pct.unwrap_or_default(),
+            self.pause_at_pct
+        )
+    }
+}
+
+/// The account a login bills, for automation that names it ("runs as … on
+/// mac", redesign 8.7): from the store's newest usage snapshots, which the
+/// usage poll writes wherever it runs (the hub included), so a loop needs no
+/// cache.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoginAccount {
+    pub host_alias: String,
+    #[serde(flatten)]
+    pub login: HostLogin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// At or past `accounts.pause_at`: automation leaves it alone.
+    pub over: bool,
+}
+
+/// [`LoginAccount`] of the login `profile` on `host_alias` (`None` = the
+/// host's own). `None` for an unknown host or a login not on a known
+/// account.
+pub fn login_account(
+    s: &Store,
+    host_alias: &str,
+    profile: Option<&str>,
+    now: i64,
+) -> Result<Option<LoginAccount>, IpcError> {
+    let Some(host) = s.get_host_row(host_alias)? else {
+        return Ok(None);
+    };
+    let snaps = s.latest_usage_snapshots()?;
+    let pause_at = pause_at_pct(s);
+    let profile = profile.map(str::trim).filter(|p| !p.is_empty());
+    let Some(login) = logins_with(&host, |uuid| {
+        snaps
+            .iter()
+            .find(|r| r.account_uuid == uuid)
+            .and_then(|r| used_pct_of(&r.usage, now))
+    })
+    .into_iter()
+    .find(|l| l.profile.as_deref() == profile) else {
+        return Ok(None);
+    };
+    let email = s
+        .list_accounts()?
+        .into_iter()
+        .find(|a| a.uuid == login.account_uuid)
+        .and_then(|a| a.email);
+    Ok(Some(LoginAccount {
+        host_alias: host_alias.to_string(),
+        over: login.used_pct.is_some_and(|u| u >= pause_at),
+        login,
+        email,
+    }))
+}
+
+/// Whether automation (a routine, the mission loop) should leave the login
+/// `profile` on `host_alias` alone: its account is at or past
+/// `accounts.pause_at` ([`login_account`]). `None` when under the line,
+/// without a reading, for a login that is not on a known account, or for an
+/// unknown host: nothing here refuses what it cannot measure.
+pub fn over_limit(
+    s: &Store,
+    host_alias: &str,
+    profile: Option<&str>,
+    now: i64,
+) -> Result<Option<OverLimit>, IpcError> {
+    Ok(login_account(s, host_alias, profile, now)?
+        .filter(|a| a.over)
+        .map(|a| OverLimit {
+            host_alias: a.host_alias,
+            login: a.login,
+            pause_at_pct: pause_at_pct(s),
+        }))
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CheckAccountHeadroomArgs {
     pub host_alias: String,
@@ -178,6 +283,61 @@ pub fn check_account_headroom(
         pause_at,
         now,
     ))
+}
+
+/// Test seam: put `host_alias`'s login `profile` (its own for `None`) on
+/// account `uuid`, with a stored reading of `pct` used in both windows.
+#[cfg(test)]
+pub(crate) fn seed_usage(
+    s: &Store,
+    host_alias: &str,
+    profile: Option<&str>,
+    uuid: &str,
+    pct: f64,
+    now: i64,
+) {
+    use crate::service::account_usage::AccountUsage;
+    use crate::store::{AccountRow, UsageSnapshotRow};
+    let _ = s.insert_host(host_alias, None);
+    s.upsert_account(&AccountRow {
+        uuid: uuid.into(),
+        ..Default::default()
+    })
+    .unwrap();
+    match profile {
+        None => s.set_host_account(host_alias, Some(uuid)).unwrap(),
+        Some(p) => {
+            let mut list = s
+                .get_host_row(host_alias)
+                .unwrap()
+                .and_then(|h| h.claude_profiles)
+                .unwrap_or_default();
+            list.retain(|x| x.name != p);
+            list.push(crate::store::HostProfileRow {
+                name: p.into(),
+                account_uuid: Some(uuid.into()),
+                email: None,
+            });
+            s.set_host_profiles(host_alias, &list).unwrap();
+        }
+    }
+    let w = Some(Window {
+        utilization: pct,
+        resets_at: Some(now + 3_600),
+    });
+    s.insert_usage_snapshot(&UsageSnapshotRow {
+        account_uuid: uuid.into(),
+        fetched_at: now - 60,
+        usage: AccountUsage {
+            five_hour: w.clone(),
+            seven_day: w,
+            seven_day_opus: None,
+            seven_day_sonnet: None,
+        },
+        subscription: None,
+        source_host: None,
+    })
+    .unwrap();
 }
 
 #[cfg(test)]
@@ -316,5 +476,25 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, codes::E_NOTFOUND);
         assert_eq!(pause_at_pct(&store.lock().unwrap()), 50.0);
+    }
+
+    /// Redesign 8.7: automation reads the stored readings, per login.
+    #[test]
+    fn over_limit_reads_the_stored_reading_of_the_login_asked_about() {
+        let s = Store::open_in_memory().unwrap();
+        seed_usage(&s, "mac", None, "own", 95.0, NOW);
+        seed_usage(&s, "mac", Some("work"), "work", 40.0, NOW);
+        let over = over_limit(&s, "mac", None, NOW).unwrap().unwrap();
+        assert_eq!(over.login.used_pct, Some(95.0));
+        assert!(over.reason().contains("95%"), "{}", over.reason());
+        assert!(over.reason().contains("90%"), "{}", over.reason());
+        assert_eq!(over_limit(&s, "mac", Some("work"), NOW).unwrap(), None);
+        // A window that reset says nothing; an unknown host or login neither.
+        assert_eq!(over_limit(&s, "mac", None, NOW + 7_200).unwrap(), None);
+        assert_eq!(over_limit(&s, "nowhere", None, NOW).unwrap(), None);
+        assert_eq!(over_limit(&s, "mac", Some("fresh"), NOW).unwrap(), None);
+        // The line is the setting.
+        settings::set(&s, settings::ACCOUNTS_PAUSE_AT, "99").unwrap();
+        assert_eq!(over_limit(&s, "mac", None, NOW).unwrap(), None);
     }
 }

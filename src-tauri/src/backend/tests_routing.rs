@@ -379,7 +379,7 @@ fn routed_read_cases() -> Vec<Case> {
 fn routed_read_cases_but_org_admin() -> Vec<Case> {
     use fleet_core::service::repo::SessionIdArgs;
     use fleet_core::service::repo_read::{
-        RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs,
+        DiffRange, RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs, RepoRangeDiffArgs,
     };
     use fleet_core::service::worktrees::ListHostWorktreesArgs;
 
@@ -428,6 +428,19 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             Box::new(|b, s, _| block_on(commands::hosts::routed::list_accounts(b, s)).map(|_| ())),
         ),
         (
+            "list_account_usage",
+            "account_usage",
+            json!({}),
+            "[]",
+            Box::new(|b, s, _| {
+                let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
+                block_on(commands::account_usage::routed::list_account_usage(
+                    b, s, &cache,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "list_projects",
             "list_projects",
             json!({ "summary": false }),
@@ -467,6 +480,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     b,
                     commands::projects::ListGithubReposArgs {
                         host_alias: "trn".into(),
+                        owner: None,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_github_repos",
+            "list_github_repos",
+            json!({ "host_alias": "trn", "owner": "papaya-pos" }),
+            r#"[{"name_with_owner":"papaya-pos/receipts","is_private":true}]"#,
+            Box::new(|b, s, h| {
+                block_on(commands::projects::routed::list_github_repos(
+                    b,
+                    commands::projects::ListGithubReposArgs {
+                        host_alias: "trn".into(),
+                        owner: Some("papaya-pos".into()),
                     },
                     s,
                     h,
@@ -699,6 +731,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // `leaving` is skipped when false, so a heartbeat is the session id
+        // alone; the hub learns the device from the connection, never here.
+        (
+            "session_presence",
+            "session_presence",
+            json!({ "session_id": 42 }),
+            r#"{"session_id":42,"viewers":[{"person_id":3,"name":"jane","since":1700000000}],"heartbeat_secs":20}"#,
+            Box::new(|b, _, _| {
+                block_on(commands::presence::routed::session_presence(
+                    b,
+                    fleet_core::service::presence::SessionPresenceArgs {
+                        session_id: 42,
+                        leaving: false,
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "list_pull_requests",
             "prs",
@@ -715,6 +765,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     },
                 ))
                 .map(|_| ())
+            }),
+        ),
+        (
+            "control_handoffs",
+            "control_handoffs",
+            json!({ "limit": 5 }),
+            r#"[{"id":1,"at":1,"kind":"session","tool":"send_prompt","session_id":3}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::mcp::routed::control_handoffs(b, s, Some(5))).map(|_| ())
+            }),
+        ),
+        (
+            "mcp_pending_confirms",
+            "mcp_confirms",
+            json!({}),
+            r#"[{"nonce":"n","tool":"kill_session","summary":"","caller":"client:ux-agent","operator":true,"asked_at":1}]"#,
+            Box::new(|b, _, _| {
+                let guards = fleet_core::mcp::McpGuards::new(Arc::new(|_| {}));
+                block_on(commands::mcp::routed::mcp_pending_confirms(b, &guards)).map(|_| ())
             }),
         ),
         (
@@ -736,6 +805,15 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             "[]",
             Box::new(|b, s, _| {
                 block_on(commands::federation::routed::list_peer_links(b, s)).map(|_| ())
+            }),
+        ),
+        (
+            "list_update_targets",
+            "update_status",
+            json!({}),
+            r#"{"targets":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::updates::routed::list_update_targets(b, s)).map(|_| ())
             }),
         ),
         (
@@ -1235,6 +1313,40 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 block_on(commands::files::routed::repo_changes(
                     b,
                     SessionIdArgs { session_id: 7 },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "repo_branch_diff",
+            "repo_branch_diff",
+            json!({ "session_id": 7 }),
+            r#"{"branch":"feat","upstream":null,"unpushed":[],"unpushedFiles":[],"truncated":false,"base":"origin/main","aheadOfBase":2,"baseFiles":[]}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::files::routed::repo_branch_diff(
+                    b,
+                    SessionIdArgs { session_id: 7 },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "repo_range_diff",
+            "repo_range_diff",
+            json!({ "session_id": 7, "path": "src/lib.rs", "range": "base" }),
+            r#"{"path":"src/lib.rs","diff":"","binary":false,"truncated":false}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::files::routed::repo_range_diff(
+                    b,
+                    RepoRangeDiffArgs {
+                        session_id: 7,
+                        path: "src/lib.rs".into(),
+                        range: DiffRange::Base,
+                    },
                     s,
                     h,
                 ))
@@ -2333,6 +2445,22 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "mcp_confirm",
+            "answer_mcp_confirm",
+            json!({ "nonce": "n", "approved": true }),
+            "true",
+            Box::new(|b, _, _| {
+                let guards = fleet_core::mcp::McpGuards::new(Arc::new(|_| {}));
+                block_on(commands::mcp::routed::mcp_confirm(
+                    b,
+                    &guards,
+                    "n".into(),
+                    true,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "decide_setting_proposals",
             "decide_setting_proposals",
             json!({ "accept": [4], "reject": [5] }),
@@ -2383,6 +2511,25 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         host_alias: "trn".into(),
                         name: "demo".into(),
                         force: true,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "shell_terminals",
+            "shell_terminals",
+            json!({ "session_id": 7, "action": "open", "n": 2 }),
+            r#"{"session_id":7,"host_alias":"trn","terminals":[{"n":2,"tmux_name":"demo--sh2"}],"opened":2}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::shell_terminals(
+                    b,
+                    fleet_core::service::sessions::ShellTerminalsArgs {
+                        session_id: 7,
+                        action: fleet_core::service::sessions::ShellTerminalAction::Open,
+                        n: Some(2),
                     },
                     s,
                     h,
@@ -4288,7 +4435,13 @@ fn stop_waiting_on_a_hub_client_abandons_add_project() {
     use fleet_core::cancel::CancellationRegistry;
     use fleet_core::service::add_project::{AddProjectArgs, AddProjectSource};
     for (source, github) in [
-        (AddProjectSource::Clone { url: "o/r".into() }, false),
+        (
+            AddProjectSource::Clone {
+                url: "o/r".into(),
+                existing: false,
+            },
+            false,
+        ),
         (
             AddProjectSource::New {
                 owner: "o".into(),
@@ -6030,6 +6183,14 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/federation.rs"),
     ),
     ("commands/prs.rs", include_str!("../commands/prs.rs")),
+    (
+        "commands/presence.rs",
+        include_str!("../commands/presence.rs"),
+    ),
+    (
+        "commands/updates.rs",
+        include_str!("../commands/updates.rs"),
+    ),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",
@@ -6059,6 +6220,10 @@ const SOURCES: &[(&str, &str)] = &[
     ("commands/tray.rs", include_str!("../commands/tray.rs")),
     ("commands/upload.rs", include_str!("../commands/upload.rs")),
     ("commands/voice.rs", include_str!("../commands/voice.rs")),
+    (
+        "commands/windows.rs",
+        include_str!("../commands/windows.rs"),
+    ),
     ("commands/work.rs", include_str!("../commands/work.rs")),
     (
         "commands/work_view.rs",

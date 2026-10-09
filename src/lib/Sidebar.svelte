@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { tick, untrack, type Snippet } from 'svelte';
   import { get } from 'svelte/store';
   import { projects, refreshProjects, type ProjectTreeRow } from './projects';
   import {
@@ -24,7 +24,8 @@
   import { selectedSession, selectSession, selectSessionExplicitly, revealSeq } from './selection';
   import { forgetSessionUi } from './session_ui';
   import { applySessionRename, renameKeyHandler } from './session_rename';
-  import { readPref, writePref } from './prefs';
+  import { readPref, writePref, uiLayout } from './prefs';
+  import { accessOf } from './access';
   import AddProjectDialog from './AddProjectDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
   import OnboardingCard from './OnboardingCard.svelte';
@@ -296,7 +297,7 @@
     const recent: SessionPredicate = r === 'all' ? null : (s) => withinRecency(s.last_activity_at, r, opts.now);
     return bothPredicates(bothPredicates(needsYouOnly ? (s) => needsYou(s, opts) : null, recent), work);
   }
-  const rowPredicate = $derived.by((): SessionPredicate => {
+  const rowBase = $derived.by((): SessionPredicate => {
     if (focus) {
       const id = focus.id;
       return (s) => s.id === id;
@@ -306,6 +307,19 @@
     const unfolded: SessionPredicate = folded.size === 0 ? null : (s) => !folded.has(s.id);
     return bothPredicates(unfolded, triagePredicate(workPredicate));
   });
+  // ── Shared with me (redesign step 5.8) ──
+  // The New layout lifts the sessions someone shared with this person (watch
+  // or drive) out of the tree and the groups into one group of their own;
+  // Classic keeps them where they were. An unknown access (null) is not a
+  // share and stays put.
+  const splitShared = $derived($uiLayout === 'new' && !focus);
+  function isSharedWithMe(s: SessionRow): boolean {
+    const a = $accessOf(s);
+    return a === 'watch' || a === 'drive';
+  }
+  const rowPredicate = $derived(
+    splitShared ? bothPredicates((s) => !isSharedWithMe(s), rowBase) : rowBase,
+  );
 
   // What narrows the list, for the empty state (the chrome shows the same
   // facets as chips).
@@ -908,6 +922,19 @@
     );
   }
   const orphanSessions = $derived(orphansOf(treePredicate));
+  const sharedWithMe = $derived.by((): SessionRow[] => {
+    if (!splitShared) return [];
+    const q = viewSearch.toLowerCase();
+    const base = rowBase;
+    return $sessions.filter(
+      (s) =>
+        s.kind !== 'external' &&
+        isSharedWithMe(s) &&
+        sessionVisible(s, viewHost, viewBg, base, viewScope) &&
+        sessionMatchesSearch(s, q),
+    );
+  });
+  let sharedOpen = $state(true);
 
   // ── Flat groups (redesign step 3.6): state, host or agent ──
   // The same rows the project tree and "Other sessions" would show, in the
@@ -928,7 +955,9 @@
   // The rows the list would show under the same filters, narrowed to what
   // raises the badge (`inbox.ts`); the rest is counted in one line.
   const inboxPool = $derived(
-    $sidebarView === 'inbox' ? [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions] : [],
+    $sidebarView === 'inbox'
+      ? [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions, ...sharedWithMe]
+      : [],
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
   // Redesign step 7.4: a row whose state moves it to another group is a new
@@ -1043,7 +1072,7 @@
 
   /** True only when the key event started on the row element itself.
    *
-   *  The row is a tabbable `role="button"` that CONTAINS real buttons (the
+   *  The row is a tabbable treeitem that CONTAINS real buttons (the
    *  action cluster, revealed by `:focus-within`). `keydown` bubbles from a
    *  focused descendant up to the row, and activating a `<button>` is the
    *  DEFAULT ACTION of that keydown — so an ancestor calling
@@ -1333,9 +1362,10 @@
 <svelte:window onkeydown={onWindowKeydown} />
 
 <div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
-  {#snippet sessionRow(sess: SessionRow, readOnly = false, inWorkGroup = false)}
+  {#snippet sessionRow(sess: SessionRow, readOnly = false, inWorkGroup = false, trailing: Snippet | undefined = undefined)}
     <SessionRowItem
       {sess}
+      {trailing}
       workKey={inWorkGroup || readOnly ? null : workKeyFor(sess, branchById)}
       workOf={readOnly ? null : workKeyFor(sess, branchById)}
       {selectMode}
@@ -1402,9 +1432,11 @@
     <div class="section-header inbox-head" data-testid="inbox-head">
       {inboxList.length === 0 ? 'Nothing needs you' : `${inboxList.length} need${inboxList.length === 1 ? 's' : ''} you`}
     </div>
-    {#each inboxList as sess (sess.id)}
-      {@render sessionRow(sess)}
-    {/each}
+    <div class="tree" role="tree" aria-label="Needs you">
+      {#each inboxList as sess (sess.id)}
+        {@render sessionRow(sess)}
+      {/each}
+    </div>
     <div class="inbox-rest" data-testid="inbox-rest">
       {#if inboxRestText}<span class="muted">Not waiting · {inboxRestText}</span>{/if}
       <button
@@ -1423,6 +1455,8 @@
     {#snippet pastRow(key: string, l: WorkLink)}
       <div
         class="past-row"
+        role="treeitem"
+        aria-selected="false"
         data-testid="past-work-row"
         title="Ended {l.ended_at ? timeAgo(l.ended_at, nowSec * 1000) : ''}{l.snap_worktree ? ` · worktree ${l.snap_worktree}` : ''}"
       >
@@ -1438,7 +1472,7 @@
       </div>
     {/snippet}
     {#if workGroups.length > 0 || pastOnlyGroups.length > 0}
-      <ul class="tree work-tree" data-testid="work-groups">
+      <ul class="tree work-tree" data-testid="work-groups" role="tree" aria-label="Work">
         {#each workGroups as g (g.key)}
           {@const isCollapsed = collapsedWork.has(g.key)}
           {@const pr = workGroupPrSummary(g.sessions)}
@@ -1451,7 +1485,7 @@
             { org_id: g.sessions[0]?.work?.org_id ?? g.sessions[0]?.org_id ?? null },
             $orgColorById,
           )}
-          <li class="proj">
+          <li class="proj" role="none">
             <div
               class="proj-row work-row"
               class:work-done={ticket?.status?.category === 'done'}
@@ -1459,7 +1493,8 @@
               data-org-color={groupColor ?? undefined}
               style:box-shadow={groupColor ? `inset 3px 0 0 ${groupColor}` : undefined}
               title="Sessions whose tag, branch or worktree names {g.key}"
-              role="button"
+              role="treeitem"
+              aria-selected="false"
               tabindex="0"
               aria-expanded={!isCollapsed}
               onclick={() => toggleWorkCollapse(g.key)}
@@ -1502,15 +1537,17 @@
             </div>
 
             {#if !isCollapsed}
+              {@const past = needsYouOnly || focus ? [] : ($pastWork.get(g.key) ?? []).filter((l) => pastVisible(g.key, l))}
+              <div role="group">
               {#each split.live as sess (sess.id)}
                 {@render sessionRow(sess, false, true)}
               {/each}
-              {@const past = needsYouOnly || focus ? [] : ($pastWork.get(g.key) ?? []).filter((l) => pastVisible(g.key, l))}
               {#if past.length + split.archived.length > 0}
                 <div
                   class="done-row"
                   data-testid="work-done"
-                  role="button"
+                  role="treeitem"
+                  aria-selected="false"
                   tabindex="0"
                   aria-expanded={openDone.has(g.key)}
                   onclick={() => (openDone = toggleIn(openDone, g.key))}
@@ -1523,8 +1560,8 @@
                 </div>
                 {#if openDone.has(g.key)}
                   {#each split.archived as sess (sess.id)}
-                    <div class="archived-wrap" data-testid="archived-session">
-                      {@render sessionRow(sess, false, true)}
+                    <!-- The chip sits inside the row, so the treeitem owns it. -->
+                    {#snippet archivedChip()}
                       <button
                         class="archived-chip"
                         data-testid="archived-chip"
@@ -1533,22 +1570,27 @@
                           'Archived: collapsed here, tmux still running. Click to bring it back (a prompt or an attach does too)'}
                         onclick={(e) => void unarchive(sess, e)}>archived · show</button
                       >
+                    {/snippet}
+                    <div class="archived-wrap" data-testid="archived-session" role="none">
+                      {@render sessionRow(sess, false, true, archivedChip)}
                     </div>
                   {/each}
                   {#each past as l (l.id)}{@render pastRow(g.key, l)}{/each}
                 {/if}
               {/if}
+              </div>
             {/if}
           </li>
         {/each}
         {#each pastOnlyGroups as pg (pg.key)}
           {@const isOpen = openPast.has(pg.key)}
-          <li class="proj past-only" data-testid="past-work-group">
+          <li class="proj past-only" data-testid="past-work-group" role="none">
             <div
               class="proj-row work-row"
               data-testid="past-work-header"
               title="Past work on {pg.key}: no session is running it"
-              role="button"
+              role="treeitem"
+              aria-selected="false"
               tabindex="0"
               aria-expanded={isOpen}
               onclick={() => (openPast = toggleIn(openPast, pg.key))}
@@ -1569,22 +1611,25 @@
               <ResumeButton workKey={pg.key} link={pg.links[0]} />
             </div>
             {#if isOpen}
-              {#each pg.links as l (l.id)}{@render pastRow(pg.key, l)}{/each}
+              <div role="group">
+                {#each pg.links as l (l.id)}{@render pastRow(pg.key, l)}{/each}
+              </div>
             {/if}
           </li>
         {/each}
       </ul>
     {/if}
     {#if flatBy && flatGroups.length > 0}
-      <ul class="tree flat-groups" data-testid="flat-groups" data-group-by={flatBy}>
+      <ul class="tree flat-groups" data-testid="flat-groups" data-group-by={flatBy} role="tree" aria-label="Sessions by {flatBy}">
         {#each flatGroups as g (g.key)}
           {@const isCollapsed = collapsedFlat.has(g.key)}
-          <li class="proj">
+          <li class="proj" role="none">
             <div
               class="proj-row"
               data-testid="flat-group"
               data-group={g.key}
-              role="button"
+              role="treeitem"
+              aria-selected="false"
               tabindex="0"
               aria-expanded={!isCollapsed}
               onclick={() => (collapsedFlat = toggleIn(collapsedFlat, g.key))}
@@ -1601,24 +1646,27 @@
               <span class="count">{g.rows.length}</span>
             </div>
             {#if !isCollapsed}
-              {#each g.rows as sess (sess.id)}
-                {@render sessionRow(sess)}
-              {/each}
+              <div role="group">
+                {#each g.rows as sess (sess.id)}
+                  {@render sessionRow(sess)}
+                {/each}
+              </div>
             {/if}
           </li>
         {/each}
       </ul>
     {:else if !flatBy && filtered.length > 0}
-      <ul class="tree">
+      <ul class="tree" role="tree" aria-label="Projects">
         {#each filtered as row (row.project.id)}
           {@const projectSessions = filteredSessionsByProject.get(row.project.id) ?? []}
           {@const isCollapsed = collapsed.has(row.project.id)}
-          <li class="proj">
+          <li class="proj" role="none">
             <div
               class="proj-row"
               data-testid="proj-row"
               title={row.project.base_path}
-              role="button"
+              role="treeitem"
+              aria-selected="false"
               tabindex="0"
               aria-expanded={!isCollapsed}
               onclick={() => toggleCollapse(row.project.id)}
@@ -1676,14 +1724,16 @@
             </div>
 
             {#if !isCollapsed}
-              {#each projectSessions as sess (sess.id)}
-                {@render sessionRow(sess)}
-              {/each}
+              <div role="group">
+                {#each projectSessions as sess (sess.id)}
+                  {@render sessionRow(sess)}
+                {/each}
+              </div>
             {/if}
           </li>
         {/each}
       </ul>
-    {:else if !loadError && orphanSessions.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
+    {:else if !loadError && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
       {#if !hubSkewEmptyMessage && listFacets.length > 0 && $projects.length > 0}
         <!-- Filters hide every row: say which, and offer the way back,
              instead of "no sessions" over a fleet that has some. -->
@@ -1706,9 +1756,32 @@
     {#if !flatBy && orphanSessions.length > 0}
       <div class="orphan-section" data-testid="orphan-sessions">
         <div class="section-header">Other sessions ({orphanSessions.length})</div>
-        {#each orphanSessions as sess (sess.id)}
-          {@render sessionRow(sess)}
-        {/each}
+        <div class="tree" role="tree" aria-label="Other sessions">
+          {#each orphanSessions as sess (sess.id)}
+            {@render sessionRow(sess)}
+          {/each}
+        </div>
+      </div>
+    {/if}
+
+    {#if sharedWithMe.length > 0}
+      <div class="orphan-section" data-testid="shared-with-me">
+        <button
+          class="section-header section-toggle"
+          data-testid="shared-with-me-toggle"
+          aria-expanded={sharedOpen}
+          onclick={() => (sharedOpen = !sharedOpen)}
+        >
+          <span class="caret" class:collapsed={!sharedOpen}>▾</span>
+          Shared with me ({sharedWithMe.length})
+        </button>
+        {#if sharedOpen}
+          <div class="tree" role="tree" aria-label="Shared with me">
+            {#each sharedWithMe as sess (sess.id)}
+              {@render sessionRow(sess)}
+            {/each}
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -1744,9 +1817,11 @@
           Outside fleet ({outsideFleet.length})
         </button>
         {#if outsideOpen}
-          {#each outsideFleet as sess (sess.id)}
-            {@render sessionRow(sess, true)}
-          {/each}
+          <div class="tree" role="tree" aria-label="Outside fleet">
+            {#each outsideFleet as sess (sess.id)}
+              {@render sessionRow(sess, true)}
+            {/each}
+          </div>
         {/if}
       </div>
     {/if}
