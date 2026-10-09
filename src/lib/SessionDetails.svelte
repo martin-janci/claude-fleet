@@ -154,16 +154,13 @@
   const hostRow = $derived($hostByAlias.get(session.host_alias) ?? null);
   // A session under a login profile bills that profile's account, not the
   // host's (docs/accounts.md); it has none until the host reports the
-  // profile logged in.
-  const accountRow = $derived(
-    session.claude_profile
-      ? session.account_uuid
-        ? ($accountByUuid.get(session.account_uuid) ?? null)
-        : null
-      : hostRow?.account_uuid
-        ? ($accountByUuid.get(hostRow.account_uuid) ?? null)
-        : null,
+  // profile logged in. Any other session shows the account it runs on (the
+  // host's login when reconcile saw it; reconcile keeps it when the host's
+  // login changes later), and the host's only before it has one.
+  const accountUuid = $derived(
+    session.claude_profile ? session.account_uuid : (session.account_uuid ?? hostRow?.account_uuid ?? null),
   );
+  const accountRow = $derived(accountUuid ? ($accountByUuid.get(accountUuid) ?? null) : null);
 
   // Switch the session to another login: a restart that resumes the same
   // conversation under it ('' = the host's own login).

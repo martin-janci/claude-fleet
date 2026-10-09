@@ -179,6 +179,25 @@ describe('bindingWindow and model buckets', () => {
     expect(bindingModelBucket(usage())).toBeNull();
   });
 
+  it('skips a window whose reset has passed while the other has not', () => {
+    const u = usage({
+      five_hour: { utilization: 100, resets_at: NOW - 1 },
+      seven_day: { utilization: 50, resets_at: RESET_WEEK },
+    });
+    expect(bindingWindow(u)).toBe('5h');
+    expect(bindingWindow(u, NOW)).toBe('weekly');
+    const w = usage({
+      five_hour: { utilization: 20, resets_at: RESET_5H },
+      seven_day: { utilization: 90, resets_at: NOW - 1 },
+    });
+    expect(bindingWindow(w, NOW)).toBe('5h');
+    const both = usage({
+      five_hour: { utilization: 20, resets_at: NOW - 1 },
+      seven_day: { utilization: 90, resets_at: NOW - 1 },
+    });
+    expect(bindingWindow(both, NOW)).toBe('weekly');
+  });
+
   it('names a model bucket only when it has fewer % left than overall weekly', () => {
     const u = usage({
       seven_day: { utilization: 42, resets_at: RESET_WEEK }, // 58% left
@@ -289,8 +308,23 @@ describe('chipLabel', () => {
       '~62% left ◷ · resets 15:10',
     );
     expect(chipLabel(snap({ usage: five, fetched_at: NOW - 31 * MIN }), NOW, false, L, TZ)).toBe('? left');
+    // A reset 5-hour window no longer binds: the weekly one still holds.
     const past = { ...five, five_hour: { utilization: 38, resets_at: NOW - 1 } };
-    expect(chipLabel(snap({ usage: past, fetched_at: NOW - 2 * MIN }), NOW, false, L, TZ)).toBe('? left');
+    expect(chipLabel(snap({ usage: past, fetched_at: NOW - 2 * MIN }), NOW, false, L, TZ)).toBe(
+      'weekly 90% left · resets Thu 09:00',
+    );
+    const bothPast = { ...past, seven_day: { utilization: 10, resets_at: NOW - 1 } };
+    expect(chipLabel(snap({ usage: bothPast, fetched_at: NOW - 2 * MIN }), NOW, false, L, TZ)).toBe('? left');
+  });
+
+  it('shows a weekly limit while the reset 5-hour window had less left', () => {
+    const u = usage({
+      five_hour: { utilization: 100, resets_at: NOW - 1 },
+      seven_day: { utilization: 100, resets_at: RESET_WEEK },
+    });
+    expect(chipLabel(snap({ usage: u, fetched_at: NOW - 2 * MIN }), NOW, false, L, TZ)).toBe(
+      '■ weekly LIMIT · resets Thu 09:00',
+    );
   });
 
   it('carries low and limit by glyph and word', () => {
