@@ -81,16 +81,18 @@ pub fn visible(s: &Store, scope: &ViewScope, row: &LibraryItemRow) -> bool {
 }
 
 /// [`visible`] with `row`'s session already read (`None`: it has none, or
-/// it is gone).
+/// it is gone). The person half is `may_own` on the session while it
+/// exists, and `may_own_person_row` on the recorded owner once it is gone.
 fn visible_with(scope: &ViewScope, row: &LibraryItemRow, sess: Option<&SessionRow>) -> bool {
     if scope.host.as_deref().is_some_and(|h| h != row.host_alias) {
         return false;
     }
     match sess {
         Some(sess) => scope.may_own(sess),
-        // The session is gone: its org still fences the row, and the owner
-        // recorded with it (migration 148) is the person half. Without that
-        // half every person in the org saw the file (review r04 F3).
+        // The session is gone: its org still fences the row, and
+        // `may_own_person_row` on the owner recorded with it (migration 148)
+        // is the person half. Without that half every person in the org saw
+        // the file (review r04 F3).
         None => {
             scope.org.sees_session_org_only(&row.host_alias, row.org_id)
                 && scope.may_own_person_row(row.org_id, row.owner_person_id)
