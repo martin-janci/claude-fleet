@@ -543,6 +543,28 @@ Code: `service/decide/mission_triage.rs`,
 `service/work/orchestrate/triage.rs`; step 9.10 of the redesign's
 transition plan.
 
+## `pr_triage` — what a stuck pull request needs (PR shepherd step 4)
+
+`decide.jev.pr_triage` on, each time the PR shepherd
+(`docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`) records a new
+episode, meaning one condition (`conflict`, `behind`, `ci_red`) on one
+pushed commit. It asks once per episode, in a task of its own, so the
+shepherd never waits for it.
+
+- **Question.** A choice: `fix_in_pr | regenerate | merge_base |
+  flaky_rerun | not_this_pr | needs_person`.
+- **What is sent.** The condition, GitHub's merge state, the failing check
+  names (at most 10, redacted), the counts, the review decision, the draft
+  flag and the number of unpushed commits. No log, diff, code or URL.
+- **Baseline.** The shepherd's fixed choice: `merge_base` for a conflict or
+  a stale branch, `fix_in_pr` for red CI.
+- **Modes.** Shadow records. Assist is recorded the same way for now. When
+  it is wired, it would only choose which prompt the shepherd sends. It
+  never sends, merges, skips or re-runs anything itself.
+
+Code: `service/decide/pr_triage.rs`, `ShepherdExec::triage` in
+`service/pr_shepherd/mod.rs`.
+
 ## `work_link` — the work item of a session no rule could link (J1)
 
 When three turns of a conversation have gone by and nothing linked the
@@ -728,6 +750,7 @@ prompt hook (`mcp/hooks.rs`); card N1 in the redesign plan.
 | `decide.jev.turn_outcome` | `off` | `off` / `shadow` / `assist` | Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it. Experimental. |
 | `decide.jev.mission_triage` | `off` | `off` / `shadow` / `assist` | Proposing a stuck mission's outcome and next step. Never completes a mission or sets Verified. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.routine_run_outcome` | `off` | `off` / `shadow` / `assist` | Reading whether a routine run did work, found nothing to do or needs you, from the end of its screen. Shadow only records; assist sets the outcome, so a run with nothing to do stays out of the Inbox. A failed exit or a rule wins. Sends reply text only for organisations that allow it. Experimental. |
+| `decide.jev.pr_triage` | `off` | `off` / `shadow` / `assist` | Guessing what a stuck pull request needs (a fix, a regenerate, a base merge, a re-run, or a person) when the PR shepherd finds it conflicting or red. Sends the PR's check names and states, no code. Shadow only records; assist is recorded the same way for now. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.unassigned_reply` | `false` | on / off | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
