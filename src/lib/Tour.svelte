@@ -134,7 +134,7 @@
   }
   .spot {
     border-radius: var(--radius-lg);
-    box-shadow: 0 0 0 4000px rgba(0, 0, 0, 0.62), 0 0 0 2px var(--accent) inset;
+    box-shadow: 0 0 0 4000px var(--scrim-strong), 0 0 0 2px var(--accent) inset;
     transition:
       left var(--dur-base),
       top var(--dur-base),
@@ -143,7 +143,7 @@
   }
   .dim {
     inset: 0;
-    background: rgba(0, 0, 0, 0.62);
+    background: var(--scrim-strong);
   }
   .pop {
     position: fixed;
