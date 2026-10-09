@@ -1,5 +1,6 @@
 use super::*;
 use crate::service::outcome::{CheckSummary, FailingCheck};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const NOW: i64 = 1_000_000;
@@ -196,6 +197,9 @@ struct FakeExec {
     attached: bool,
     fail: bool,
     last: Mutex<String>,
+    merged: AtomicUsize,
+    refuse: Option<&'static str>,
+    merge_fails: bool,
 }
 
 impl FakeExec {
@@ -205,6 +209,9 @@ impl FakeExec {
             attached: false,
             fail: false,
             last: Mutex::new(String::new()),
+            merged: AtomicUsize::new(0),
+            refuse: None,
+            merge_fails: false,
         }
     }
 }
@@ -221,6 +228,26 @@ impl ShepherdExec for FakeExec {
         self.sent.fetch_add(1, Ordering::SeqCst);
         *self.last.lock().unwrap() = prompt.to_string();
         Ok(NudgeOutcome::Sent)
+    }
+
+    async fn merge_if_green(
+        &self,
+        _h: &str,
+        url: &str,
+        sha: &str,
+    ) -> Result<MergeOutcome, IpcError> {
+        merge::merge_script(url, sha)?;
+        if let Some(why) = self.refuse {
+            return Ok(MergeOutcome::Refused(why.into()));
+        }
+        if self.merge_fails {
+            return Err(IpcError::new(
+                crate::ipc_error::codes::E_SHELL,
+                "head moved",
+            ));
+        }
+        self.merged.fetch_add(1, Ordering::SeqCst);
+        Ok(MergeOutcome::Merged)
     }
 }
 
@@ -354,4 +381,108 @@ fn a_rule_refuses_an_unknown_level_and_long_recipes() {
     assert_eq!(s.list_shepherd_rules().unwrap(), vec![r]);
     assert!(s.revoke_shepherd_rule(pid).unwrap());
     assert!(!s.revoke_shepherd_rule(pid).unwrap());
+}
+
+// --- the merge queue ----------------------------------------------------------
+
+fn green(id: i64, pr: u64) -> Candidate {
+    let mut c = cand(id, evidence("CLEAN", &[]));
+    c.evidence.head_oid = Some(format!("{id:0>40}"));
+    c.evidence.local_head = c.evidence.head_oid.clone();
+    c.pr_url = Some(format!("https://github.com/o/r/pull/{pr}"));
+    c
+}
+
+#[test]
+fn only_a_merge_rule_merges_and_the_lowest_pr_goes_first() {
+    let c = [green(1, 30), green(2, 12), green(3, 20)];
+    let none = HashSet::new();
+    let never = HashMap::new();
+    assert!(merge::plan_merges(&c, &rules("nudge"), &none, &never, NOW).is_empty());
+    let p = merge::plan_merges(&c, &rules("merge"), &none, &never, NOW);
+    assert_eq!(p.len(), 1, "one per project");
+    assert_eq!(p[0].pr_url, "https://github.com/o/r/pull/12");
+    assert_eq!(p[0].session_id, 2);
+}
+
+#[test]
+fn the_queue_waits_out_the_spacing_and_skips_tried_heads() {
+    let c = [green(1, 5), green(2, 6)];
+    let last = HashMap::from([(1, NOW - merge::MERGE_SPACING_SECS + 1)]);
+    assert!(merge::plan_merges(&c, &rules("merge"), &HashSet::new(), &last, NOW).is_empty());
+    let last = HashMap::from([(1, NOW - merge::MERGE_SPACING_SECS)]);
+    let tried = HashSet::from([(1, format!("{:0>40}", 1))]);
+    let p = merge::plan_merges(&c, &rules("merge"), &tried, &last, NOW);
+    assert_eq!(p[0].session_id, 2);
+}
+
+#[test]
+fn a_pr_that_is_not_fully_green_is_not_planned() {
+    let mut pending = green(1, 1);
+    pending.evidence.checks.pending = 1;
+    let mut draft = green(2, 2);
+    draft.evidence.draft = true;
+    let mut changes = green(3, 3);
+    changes.evidence.review_decision = Some("CHANGES_REQUESTED".into());
+    let mut red = green(4, 4);
+    red.evidence.checks.failing_total = 1;
+    let mut blocked = green(5, 5);
+    blocked.evidence.merge_state = Some("BLOCKED".into());
+    let mut no_checks = green(6, 6);
+    no_checks.evidence.checks.total = 0;
+    let mut unpushed = green(7, 7);
+    unpushed.evidence.ahead = Some(1);
+    let mut bad_url = green(8, 8);
+    bad_url.pr_url = Some("https://github.com/o/r/pull/8;x".into());
+    let c = [
+        pending, draft, changes, red, blocked, no_checks, unpushed, bad_url,
+    ];
+    assert!(
+        merge::plan_merges(&c, &rules("merge"), &HashSet::new(), &HashMap::new(), NOW).is_empty()
+    );
+}
+
+#[tokio::test]
+async fn the_runner_merges_once_and_spaces_the_next() {
+    let (store, pid, id) = seeded(&evidence("CLEAN", &[]));
+    grant(&store, pid, "merge");
+    let exec = FakeExec::new();
+    assert_eq!(run_with(&store, &exec, NOW).await, 1);
+    assert_eq!(run_with(&store, &exec, NOW + 20).await, 0);
+    assert_eq!(exec.merged.load(Ordering::SeqCst), 1);
+    let s = store.lock().unwrap();
+    assert_eq!(s.last_shepherd_merge_at(pid).unwrap(), Some(NOW));
+    assert!(s
+        .list_session_events(id, 50)
+        .unwrap()
+        .iter()
+        .any(|e| e.kind == "pr_shepherd" && e.detail.as_deref() == Some("merge:merged")));
+}
+
+#[tokio::test]
+async fn a_refusal_is_retried_after_a_probe_period_and_a_failure_is_not() {
+    let (store, pid, id) = seeded(&evidence("CLEAN", &[]));
+    grant(&store, pid, "merge");
+    let mut exec = FakeExec::new();
+    exec.refuse = Some("checks");
+    assert_eq!(run_with(&store, &exec, NOW).await, 1);
+    assert_eq!(run_with(&store, &exec, NOW + 20).await, 0, "held");
+    assert_eq!(
+        store.lock().unwrap().last_shepherd_merge_at(pid).unwrap(),
+        None,
+        "a refusal is not a merge"
+    );
+    exec.refuse = None;
+    exec.merge_fails = true;
+    let later = NOW + merge::REFUSAL_RETRY_SECS + 1;
+    assert_eq!(run_with(&store, &exec, later).await, 1);
+    assert_eq!(
+        run_with(&store, &exec, later + 10_000).await,
+        0,
+        "a failure is final"
+    );
+    let events = store.lock().unwrap().list_session_events(id, 50).unwrap();
+    assert!(events
+        .iter()
+        .any(|e| e.detail.as_deref() == Some("merge:failed:head moved")));
 }
