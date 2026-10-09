@@ -87,6 +87,12 @@ Changeset cards that adopt, sync and fix assets: list (one in full with id), pro
 
 Parameters: `action`, `change`, `confirm_nonce`, `id`, `positions`
 
+### `control_handoffs`
+
+What the agent handed on, newest first: prompts and tasks sent to sessions, new sessions, missions, tasks and proposed trees, each with its target's state now.
+
+Parameters: `limit`
+
 ### `debug_devices`
 
 Phones, emulators and simulators on any fleet host, used from any session that may see them; commands run on the device's host. run: one adb / simctl / devicectl command. install copies the app from your host. screenshot answers an image. A claim keeps others off (E_CONFLICT); use extends it.
@@ -545,6 +551,12 @@ send_prompt + wait_for_session(turn_gt) + session_transcript in one call. Return
 
 Parameters: `max_chars`, `prompt`, `raw`, `session_id`, `timeout_s`
 
+### `runs`
+
+Runs, newest first: tasks, mission steps, Jev decisions, planner and summary runs, routine fires. list: {runs, total}; each run has kind, owner, outcome (ok | failed | needs_person | nothing_to_do | running), duration_ms, cost_micros and session_ids.
+
+Parameters: `action`, `kind`, `limit`, `mission_id`, `offset`, `org_id`, `outcome`, `routine_id`, `session_id`, `since`, `until`
+
 ### `safe_kill_session`
 
 Ask a running Claude session to persist its work (commit + push), then arm deletion of its worktree + tmux session: for retiring a session that may hold unpushed work. Returns the row with safe_kill_state=requested; the delete fires only after the SAFE_REMOVE_READY marker AND a clean-tree check ('ready' / 'failed' arrive as row events).
@@ -711,6 +723,12 @@ Parameters: `key`, `limit`
 
 Settings proposals waiting for review, each with the key's value now, and can_write: whether this device may decide.
 
+### `shell_terminals`
+
+A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals.
+
+Parameters: `action`, `n`, `session_id`
+
 ### `spawn_review`
 
 Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns its row.
@@ -824,6 +842,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::list_sessions`
 - `commands::sessions::new_session`
 - `commands::sessions::kill_session`
+- `commands::sessions::shell_terminals`
 - `commands::sessions::safe_kill_session`
 - `commands::sessions::inspect_safe_kill`
 - `commands::sessions::discard_kill_session`
@@ -992,6 +1011,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::federation::list_peer_links`
 - `commands::federation::link_peer_hub`
 - `commands::federation::unlink_peer_hub`
+- `commands::updates::list_update_targets`
 - `commands::debug_devices::list_debug_devices`
 - `commands::debug_devices::scan_debug_devices`
 - `commands::debug_devices::update_debug_device`
@@ -1007,6 +1027,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
+- `commands::runs::list_runs`
 - `commands::tasks::list_tasks`
 - `commands::tasks::cancel_task`
 - `commands::files::repo_changes`
@@ -1033,6 +1054,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mutate::repo_stage`
 - `commands::mutate::repo_unstage`
 - `commands::mutate::repo_commit_create`
+- `commands::mutate::draft_commit_message`
 - `commands::mutate::repo_fetch`
 - `commands::mutate::repo_pull`
 - `commands::mutate::repo_push`
@@ -1067,6 +1089,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::rotate_host_token`
 - `commands::mcp::mcp_confirm`
 - `commands::mcp::mcp_pending_confirms`
+- `commands::mcp::control_handoffs`
 - `commands::operator::ensure_operator`
 - `commands::operator::operator_status`
 - `commands::hub::hub_status`
@@ -1136,6 +1159,7 @@ Frontend commands registered in `src/lib.rs`:
 - `pty::pty_close`
 - `pty::pty_drain`
 - `commands::editor::open_session_in_editor`
+- `commands::windows::open_terminal_window`
 - `commands::voice::voice_claim`
 - `commands::voice::voice_release`
 - `cancel_command`

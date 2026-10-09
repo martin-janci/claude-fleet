@@ -43,6 +43,8 @@
   import { OPERATOR_COMMANDS } from './operator';
   import { insertIntoComposer } from './conversation';
   import ConfirmCards from './ConfirmCards.svelte';
+  import HandoffCards from './HandoffCards.svelte';
+  import { controlThinking } from './control_loaders';
   import { uiLayout } from './prefs';
   import {
     agentPanelSize,
@@ -213,6 +215,9 @@
        a request is never parked on a card nobody can see (confirms.ts). -->
   {#if $uiLayout === 'new'}
     <ConfirmCards />
+    <!-- Steps 9.3 and 9.6: what the agent handed on, as chips and cards
+         that follow their target's state. -->
+    <HandoffCards />
   {/if}
   {#if ctx}
     <button
@@ -326,6 +331,7 @@
         promptPrefix={ctx?.prefix ?? null}
         blockWhileBusy={true}
         composerAbove={chip}
+        thinkingAs={embedded ? controlThinking : undefined}
       />
     {/if}
   </div>

@@ -3271,6 +3271,7 @@ Every command below refuses in hub client mode; the full table, with the command
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
 | `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
+| `draft_commit_message` | the hub exposes no draft tool — a commit message is drafted where the commit is made: in the session, or from a standalone app |
 | `fetch_page_source` | a page's data sources read this fleet's store, which the hub owns; read the same numbers on the hub with usage_report |
 | `flow_back` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |
 | `flow_cancel` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |

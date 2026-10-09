@@ -1,0 +1,39 @@
+{
+  "spec": "fleet.form/1",
+  "title": "Pair a device",
+  "intro": "Mint a one-time code a phone or another desktop pairs with. Nothing is paired until the device opens it.",
+  "submit": "Pair",
+  "steps": [
+    {
+      "title": "Device",
+      "fields": [
+        { "name": "device", "type": "text", "label": "Name", "required": true, "max_len": 64, "placeholder": "ada-phone" },
+        {
+          "name": "mode",
+          "type": "select",
+          "label": "Mode",
+          "required": true,
+          "value": "full",
+          "options": [["full", "Full"], ["readonly", "Read-only"]],
+          "help": "Full drives sessions; read-only watches."
+        },
+        {
+          "name": "org",
+          "type": "select",
+          "label": "Bind to an org",
+          "value": "none",
+          "options": [["none", "No org"]],
+          "help": "A bound device sees only that org's work and sessions."
+        },
+        {
+          "name": "person",
+          "type": "text",
+          "label": "Belongs to",
+          "max_len": 64,
+          "placeholder": "ada",
+          "help": "Empty pairs it to you."
+        }
+      ]
+    }
+  ]
+}

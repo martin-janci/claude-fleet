@@ -43,7 +43,7 @@ vi.mock('./selection', async () => {
 import { sessionConversation, sessionActivity, listConversations, toolDetail, type ConversationSummary, PROMPT_CLAMP_LINES, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
 import { getForm } from './forms/forms';
-import { sendPrompt, sessions, type SessionRow } from './sessions';
+import { sendPrompt, sessions, startedIds, type SessionRow } from './sessions';
 import { selectSessionExplicitly } from './selection';
 import { tasks, type TaskRow } from './tasks';
 import { composerPresets } from './composer_presets';
@@ -1424,6 +1424,70 @@ describe('ConversationPanel live indicator', () => {
     vi.advanceTimersByTime(ACTIVITY_POLL_MS);
     await settle();
     expect(mockedAct).toHaveBeenCalledTimes(2);
+  });
+
+  // Step 5.13 (LoadersInUse board): the new layout puts the Atom beside
+  // what the agent is doing, in words.
+  it('new layout: a running Read shows the Atom and "Thinking · reading <path>"', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    uiLayout.set('new');
+    try {
+      const running = conv();
+      running.turns[0].items.push(tool('Read(hub/pair.rs)', { name: 'Read', target: 'hub/pair.rs', done: false }));
+      mockedConv.mockReturnValue(ok(running));
+      mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working' }) });
+      render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+      await settle();
+      const ind = screen.getByTestId('conv-indicator');
+      expect(ind.textContent).toMatch(/^\s*Thinking · reading hub\/pair\.rs/);
+      expect(ind.querySelector('[data-testid="conv-atom"], [data-testid="conv-atom-pending"]')).not.toBeNull();
+    } finally {
+      uiLayout.set('classic');
+    }
+  });
+
+  // Step 9.13: Control's chat answers its own loader and line.
+  it('new layout: thinkingAs replaces the Atom line with the host’s loader and words', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    uiLayout.set('new');
+    try {
+      const running = conv();
+      running.turns[0].items.push(tool('Read(hub/pair.rs)', { name: 'Read', target: 'hub/pair.rs', done: false }));
+      mockedConv.mockReturnValue(ok(running));
+      mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working' }) });
+      const thinkingAs = vi.fn(() => ({ loader: 'constellation' as const, label: 'Planning · sent work to 2 sessions' }));
+      render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true, thinkingAs });
+      await settle();
+      const ind = screen.getByTestId('conv-indicator');
+      expect(ind.textContent?.trim()).toBe('Planning · sent work to 2 sessions');
+      expect(ind.querySelector('[data-testid^="conv-constellation"]')).not.toBeNull();
+      expect(ind.querySelector('[data-testid^="conv-atom"]')).toBeNull();
+      expect(thinkingAs).toHaveBeenCalledWith(expect.objectContaining({ turns: expect.any(Array) }));
+    } finally {
+      uiLayout.set('classic');
+    }
+  });
+
+  it('new layout: a session this window just started shows the Pulse until its agent is up', async () => {
+    uiLayout.set('new');
+    try {
+      const row = session({ id: 41, tmux_name: 'pd-3011', host_alias: 'mercury', claude_session_id: null, claude_status: null });
+      sessions.set([row]);
+      startedIds.set(new Set([41]));
+      mockedConv.mockReturnValue(err('E_NO_CONVERSATION'));
+      const { rerender } = render(ConversationPanel, { session: row, visible: true });
+      await settle();
+      expect(screen.getByTestId('conv-starting').textContent).toContain('Starting pd-3011 on mercury');
+      expect(screen.getAllByTestId('pulse-step').map((s) => s.getAttribute('data-state'))).toEqual(['done', 'done', 'active']);
+      const up = { ...row, claude_status: 'idle' as const };
+      sessions.set([up]);
+      await rerender({ session: up, visible: true });
+      await settle();
+      expect(screen.queryByTestId('conv-starting')).toBeNull();
+    } finally {
+      uiLayout.set('classic');
+      startedIds.set(new Set());
+    }
   });
 
   // #147 originally excluded the hub client here, because `session_activity`

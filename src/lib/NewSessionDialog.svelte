@@ -40,10 +40,14 @@
   import { startWork, ticketBriefPreview, type TicketRow } from './trackers';
   import { startWorkMulti, siblingCandidates, multiStartNote, multiStartToast, shownSiblings } from './multi_start';
   import ProposedBy from './ProposedBy.svelte';
+  import PulseSteps from './PulseSteps.svelte';
+  import { sessionPulse } from './session_loaders';
+  import { creatingStart } from './session_starting';
   import { preselect, type ProposalLike } from './ai_proposal';
   import { HOST_PLACEMENT_FLOOR, hostProposal, proposeHostPlacement, recordHostPlacement } from './host_placement';
   import { previewStartWork, siblingProposal } from './start_preview';
   import { openNewSessionPicker } from './switcher_request';
+  import { agentChoices, keepAgent, type PickerAgent } from './agent_picker';
 
   let {
     project,
@@ -188,6 +192,29 @@
 
   // "work" runs Claude Code in the pane; "shell" runs a plain login shell.
   let chosenKind = $state<'work' | 'shell'>(untrack(() => memory?.kind ?? 'work'));
+  // Which agent a "work" session runs (redesign 12.4): Claude Code, or an
+  // agent the chosen host has on its PATH. A ticket's start and a
+  // background run are Claude Code's own paths, so they keep it.
+  let chosenAgent = $state<PickerAgent>('claude');
+  const agentOptions = $derived(
+    agentChoices(
+      chosenHost,
+      $hosts.find((h) => h.alias === chosenHost),
+    ).map((c) =>
+      c.agent !== 'claude' && c.enabled && ticket
+        ? { ...c, enabled: false, reason: `A ticket starts with Claude Code`, tag: null }
+        : c,
+    ),
+  );
+  $effect(() => {
+    const next = keepAgent(untrack(() => chosenAgent), agentOptions);
+    untrack(() => {
+      if (next !== chosenAgent) chosenAgent = next;
+    });
+  });
+  /** The session runs Claude Code: its model, effort, profile, limit check,
+   *  background run and ticket brief apply. */
+  const runsClaude = $derived(chosenKind === 'work' && chosenAgent === 'claude');
   // Optional command run on start for a shell session (empty = bare shell).
   let startCommand = $state<string>('');
   // `claude --model` / `--effort` for a Claude session; '' = the host's
@@ -275,7 +302,7 @@
   let runBackground = $state(false);
   let bgPrompt = $state('');
   const bgSessionBlocked = $derived(hubActionBlocked('new_bg_session', $hubStatus, $hubConnection));
-  const asBackground = $derived(newLayout && runBackground && chosenKind === 'work' && !ticket);
+  const asBackground = $derived(newLayout && runBackground && runsClaude && !ticket);
   async function submitBackground() {
     if (bgSessionBlocked !== null) return;
     if (!bgPrompt.trim()) {
@@ -734,6 +761,13 @@
 
   function onPickKind(kind: 'work' | 'shell') {
     chosenKind = kind;
+    chosenAgent = 'claude';
+    nameOverride = null;
+  }
+
+  function onPickAgent(agent: PickerAgent) {
+    chosenKind = 'work';
+    chosenAgent = agent;
     nameOverride = null;
   }
 
@@ -1030,7 +1064,7 @@
     // current when the response lands.
     const submittedHost = chosenHost;
     const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
-    if (chosenKind === 'work' && !limitConfirmed) {
+    if (runsClaude && !limitConfirmed) {
       busy = true;
       const h = await checkAccountHeadroom(submittedHost, chosenProfile.trim() || null);
       busy = false;
@@ -1058,9 +1092,10 @@
         start_command:
           chosenKind === 'shell' ? startCommand.trim() || null : null,
         friendly_name: friendlyName.trim() || null,
-        model: chosenKind === 'work' && chosenModel ? chosenModel : null,
-        effort: chosenKind === 'work' && chosenEffort ? chosenEffort : null,
-        profile: chosenKind === 'work' && chosenProfile.trim() ? chosenProfile.trim() : null,
+        model: runsClaude && chosenModel ? chosenModel : null,
+        effort: runsClaude && chosenEffort ? chosenEffort : null,
+        profile: runsClaude && chosenProfile.trim() ? chosenProfile.trim() : null,
+        agent: chosenKind === 'work' && chosenAgent !== 'claude' ? chosenAgent : null,
       },
       createController.signal,
     );
@@ -1262,8 +1297,8 @@
       <div class="kind-row" id="kind-picker" role="group" aria-labelledby="kind-picker-label" data-testid="agent-picker">
         <button
           class="kind-pick"
-          class:active={chosenKind === 'work'}
-          aria-pressed={chosenKind === 'work'}
+          class:active={runsClaude}
+          aria-pressed={runsClaude}
           data-testid="kind-work"
           onclick={() => onPickKind('work')}
         >
@@ -1278,12 +1313,20 @@
         >
           Shell
         </button>
-        <button class="kind-pick" aria-pressed="false" data-testid="agent-codex" disabled title="Codex sessions are coming">
-          Codex <span class="soon">coming</span>
-        </button>
-        <button class="kind-pick" aria-pressed="false" data-testid="agent-agy" disabled title="Agy sessions are coming">
-          Agy <span class="soon">coming</span>
-        </button>
+        {#each agentOptions.filter((c) => c.agent !== 'claude') as c (c.agent)}
+          {@const on = chosenKind === 'work' && chosenAgent === c.agent}
+          <button
+            class="kind-pick"
+            class:active={on}
+            aria-pressed={on}
+            data-testid={`agent-${c.agent}`}
+            disabled={!c.enabled}
+            title={c.reason ?? undefined}
+            onclick={() => onPickAgent(c.agent)}
+          >
+            {c.label}{#if c.tag}{" "}<span class="soon">{c.tag}</span>{/if}
+          </button>
+        {/each}
       </div>
     {:else}
       <!-- A group, not a labelable control: it is named by aria-labelledby. -->
@@ -1310,7 +1353,7 @@
       </div>
     {/if}
 
-    {#if chosenKind === 'work' && !ticket && !asBackground}
+    {#if runsClaude && !ticket && !asBackground}
       <div class="launch-row">
         <div class="launch-field">
           <label for="launch-model">Model</label>
@@ -1368,7 +1411,7 @@
       </div>
     {/if}
 
-    {#if newLayout && chosenKind === 'work' && !ticket}
+    {#if newLayout && runsClaude && !ticket}
       <span class="field-label" id="run-picker-label">Run</span>
       <div class="kind-row" id="run-picker" role="group" aria-labelledby="run-picker-label">
         <button
@@ -1483,6 +1526,13 @@
 
     {#if error}
       <p class="err">{error}</p>
+    {/if}
+    {#if newLayout && busy && $creatingStart}
+      <!-- Redesign step 5.13: the create's worktree and tmux steps run
+           while it is in flight; the dialog then closes into the same Pulse
+           in the new session's conversation, on its agent step. -->
+      {@const c = $creatingStart}
+      <PulseSteps pulse={sessionPulse(null, c.kind)} title="Starting {c.name || 'a session'} on {c.host_alias}" testid="new-session-pulse" />
     {/if}
   </div>
 

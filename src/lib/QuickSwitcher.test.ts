@@ -1029,3 +1029,139 @@ describe('QuickSwitcher — the header command field (3.17)', () => {
     expect(get(switcherRequest)).toBeNull();
   });
 });
+
+// ---- Pin, hide and groups under the New layout (parity H1–H3) ----------------
+// The same keys as the New session mode tests above, with `uiLayout` at 'new':
+// pin, hide and groups are not layout-gated, and these prove it.
+
+describe('QuickSwitcher in the New layout', () => {
+  const NOW = Math.floor(Date.now() / 1000);
+  const p = (id: number, owner: string, repo: string, ago: number | null) => ({
+    project: { id, owner, repo, base_path: `/r/${repo}`, last_session_at: ago === null ? null : NOW - ago, adopted: false, system: false },
+    worktrees: [],
+  });
+  const fleet = p(1, 'me', 'claude-fleet', 60);
+  const om = [p(2, 'pp', 'openmarket-ai', 3600), p(3, 'pp', 'openmarket-docs', 7200), p(4, 'pp', 'openmarket-app', null)];
+  const epic = p(5, 'me', 'ppt-epic-145', null);
+
+  beforeEach(async () => {
+    const { uiLayout } = await import('./prefs');
+    uiLayout.set('new');
+    projects.set([fleet, ...om, epic]);
+    sessions.set([]);
+    projectPicks.set(new Map());
+    switcherRequest.set(null);
+    addProjectRequest.set(null);
+    toasts.set([]);
+    __trackers.set([]);
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'set_project_pick' ? (args as { args: unknown }).args : null);
+  });
+
+  afterEach(async () => {
+    const { uiLayout } = await import('./prefs');
+    uiLayout.set('classic');
+  });
+
+  async function openNew() {
+    openNewSessionPicker();
+    await tick();
+    return screen.getByTestId('switcher-input') as HTMLInputElement;
+  }
+  const activeLabel = (input: HTMLInputElement) =>
+    document.getElementById(input.getAttribute('aria-activedescendant') ?? '')?.textContent ?? '';
+  async function clearQuery(input: HTMLInputElement) {
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    await tick();
+    expect(input.value).toBe('');
+  }
+  async function highlight(key: string) {
+    const row = document.querySelector(`[data-key="${key}"]`);
+    expect(row).not.toBeNull();
+    await fireEvent.mouseMove(row!);
+    await tick();
+  }
+
+  it('Ctrl+P pins the highlighted project; Ctrl+Z undoes it', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true));
+    await clearQuery(input);
+    await fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(false));
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Undid: Pinned openmarket-ai'));
+  });
+
+  it('macOS: ⌘P pins the highlighted project and the picker stays open', async () => {
+    render(QuickSwitcher, { props: { isMac: true } });
+    await fireEvent.keyDown(window, { key: 'n', metaKey: true });
+    await tick();
+    const input = screen.getByTestId('switcher-input') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', metaKey: true });
+    await tick();
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true));
+  });
+
+  it('Ctrl+Backspace with a query is left to the input; with none it hides the highlighted row', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-docs' } });
+    await tick();
+    expect(screen.queryByText('Ctrl⌫ hide')).toBeNull();
+    expect(await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true })).toBe(true); // not defaultPrevented
+    await tick();
+    expect(get(projectPicks).get('pp/openmarket-docs')?.vis ?? null).toBeNull();
+    await clearQuery(input);
+    expect(screen.getByText('Ctrl⌫ hide')).toBeTruthy();
+    await highlight('project:3@g:c:pp:openmarket');
+    expect(await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true })).toBe(false);
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-docs')?.vis).toBe('hide'));
+  });
+
+  it('macOS: ⌘⌫ on an empty query hides the highlighted row', async () => {
+    render(QuickSwitcher, { props: { isMac: true } });
+    await fireEvent.keyDown(window, { key: 'n', metaKey: true });
+    await tick();
+    const input = screen.getByTestId('switcher-input') as HTMLInputElement;
+    await highlight('project:3@g:c:pp:openmarket');
+    expect(activeLabel(input)).toContain('openmarket-docs');
+    expect(await fireEvent.keyDown(input, { key: 'Backspace', metaKey: true })).toBe(false);
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-docs')?.vis).toBe('hide'));
+  });
+
+  it('Ctrl+G moves the project to a group through the menu', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'claude-fleet' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'g', ctrlKey: true });
+    await tick();
+    const gi = screen.getByLabelText('Group name');
+    await fireEvent.input(gi, { target: { value: 'Mine' } });
+    await fireEvent.keyDown(gi, { key: 'Enter' });
+    await vi.waitFor(() => expect(get(projectPicks).get('me/claude-fleet')?.grp).toBe('Mine'));
+    expect(screen.queryByTestId('project-actions')).toBeNull();
+  });
+
+  it('a folded group is one row with its count; ArrowLeft folds an open group, ArrowRight opens it', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    const row = Array.from(document.querySelectorAll('[data-testid=switcher-project]')).find(
+      (e) => e.textContent?.includes('openmarket-app'),
+    )!;
+    await fireEvent.mouseMove(row);
+    await fireEvent.keyDown(input, { key: 'ArrowLeft' });
+    await tick();
+    expect(screen.getByText('openmarket · 3 projects')).toBeTruthy();
+    expect(activeLabel(input)).toContain('openmarket · 3 projects');
+    await fireEvent.keyDown(input, { key: 'ArrowRight' });
+    await tick();
+    expect(screen.queryByText('openmarket · 3 projects')).toBeNull();
+  });
+});

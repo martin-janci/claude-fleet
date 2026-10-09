@@ -768,6 +768,15 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "control_handoffs",
+            "control_handoffs",
+            json!({ "limit": 5 }),
+            r#"[{"id":1,"at":1,"kind":"session","tool":"send_prompt","session_id":3}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::mcp::routed::control_handoffs(b, s, Some(5))).map(|_| ())
+            }),
+        ),
+        (
             "mcp_pending_confirms",
             "mcp_confirms",
             json!({}),
@@ -796,6 +805,34 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             "[]",
             Box::new(|b, s, _| {
                 block_on(commands::federation::routed::list_peer_links(b, s)).map(|_| ())
+            }),
+        ),
+        (
+            "list_update_targets",
+            "update_status",
+            json!({}),
+            r#"{"targets":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::updates::routed::list_update_targets(b, s)).map(|_| ())
+            }),
+        ),
+        (
+            "list_runs",
+            "runs",
+            json!({ "action": "list", "since": 5, "kind": "jev", "limit": 20 }),
+            r#"{"runs":[{"id":"jev:1","source":"jev","kind":"jev","owner":"status_map","started_at":6,"outcome":"ok","session_ids":[]}],"total":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::runs::routed::list_runs(
+                    b,
+                    s,
+                    fleet_core::service::runs::RunsArgs {
+                        since: Some(5),
+                        kind: Some("jev".into()),
+                        limit: Some(20),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -2493,6 +2530,25 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         host_alias: "trn".into(),
                         name: "demo".into(),
                         force: true,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "shell_terminals",
+            "shell_terminals",
+            json!({ "session_id": 7, "action": "open", "n": 2 }),
+            r#"{"session_id":7,"host_alias":"trn","terminals":[{"n":2,"tmux_name":"demo--sh2"}],"opened":2}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::shell_terminals(
+                    b,
+                    fleet_core::service::sessions::ShellTerminalsArgs {
+                        session_id: 7,
+                        action: fleet_core::service::sessions::ShellTerminalAction::Open,
+                        n: Some(2),
                     },
                     s,
                     h,
@@ -4398,7 +4454,13 @@ fn stop_waiting_on_a_hub_client_abandons_add_project() {
     use fleet_core::cancel::CancellationRegistry;
     use fleet_core::service::add_project::{AddProjectArgs, AddProjectSource};
     for (source, github) in [
-        (AddProjectSource::Clone { url: "o/r".into() }, false),
+        (
+            AddProjectSource::Clone {
+                url: "o/r".into(),
+                existing: false,
+            },
+            false,
+        ),
         (
             AddProjectSource::New {
                 owner: "o".into(),
@@ -6144,6 +6206,11 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/presence.rs",
         include_str!("../commands/presence.rs"),
     ),
+    (
+        "commands/updates.rs",
+        include_str!("../commands/updates.rs"),
+    ),
+    ("commands/runs.rs", include_str!("../commands/runs.rs")),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",
@@ -6173,6 +6240,10 @@ const SOURCES: &[(&str, &str)] = &[
     ("commands/tray.rs", include_str!("../commands/tray.rs")),
     ("commands/upload.rs", include_str!("../commands/upload.rs")),
     ("commands/voice.rs", include_str!("../commands/voice.rs")),
+    (
+        "commands/windows.rs",
+        include_str!("../commands/windows.rs"),
+    ),
     ("commands/work.rs", include_str!("../commands/work.rs")),
     (
         "commands/work_view.rs",

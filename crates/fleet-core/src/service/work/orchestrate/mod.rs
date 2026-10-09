@@ -576,6 +576,12 @@ async fn apply_card(
                 s.accept_proposals(&ids)?;
                 Ok(format!("created {} tasks", made.len()))
             } else {
+                drop(s);
+                // K4: whether each repeats an existing task (off by default).
+                crate::service::decide::duplicate::spawn_ask(
+                    &deps.store,
+                    made.iter().map(|r| r.id).collect(),
+                );
                 Ok(format!("proposed {} tasks", made.len()))
             }
         }

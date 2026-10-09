@@ -637,6 +637,27 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Open work items touched since `since`, newest first, at most `limit`:
+    /// not done, not resolved, still answering, and not a proposal nobody
+    /// decided (nor a rejected one). Where Jev's `duplicate` question picks
+    /// its candidates from ([`crate::service::decide::duplicate`]).
+    pub fn open_work_items_since(
+        &self,
+        since: i64,
+        limit: usize,
+    ) -> Result<Vec<WorkItemRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ITEM_COLUMNS} FROM work_items \
+             WHERE status_category <> 'done' AND resolution IS NULL \
+               AND unavailable_at IS NULL \
+               AND (proposal_state IS NULL OR proposal_state = 'accepted') \
+               AND updated_at >= ?1 \
+             ORDER BY updated_at DESC, id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![since, limit as i64], map_item)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Create a local work item, or return the local item that already has
     /// `key` (updating its title when a non-empty one is given). A local item
     /// with no key is always new.

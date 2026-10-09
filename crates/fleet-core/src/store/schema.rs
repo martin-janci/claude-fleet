@@ -669,8 +669,8 @@ fn peer_links_has_msgs_total(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 140: `session_grants`' CHECK
-/// already admits 'answer'. 140 rebuilds the table, so a re-run only records
+/// `already_applied` guard of migration 142: `session_grants`' CHECK
+/// already admits 'answer'. 142 rebuilds the table, so a re-run only records
 /// the version.
 fn session_grants_has_answer(conn: &Connection) -> rusqlite::Result<bool> {
     let sql: Option<String> = conn
@@ -1629,11 +1629,21 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/139_routine_run_outcome.sql"),
         already_applied: Some(routine_runs_has_outcome_source),
     },
+    // Orbit Fleet 9.3: `control_handoffs`, what Control's agent sent where.
+    // A new table only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        140,
+        include_str!("../../migrations/140_control_handoffs.sql"),
+    ),
+    // Orbit Fleet 8.3: the indexes behind `runs { list }` (one list over
+    // tasks, mission actions, Jev, `claude -p` and routine runs). Indexes only,
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(141, include_str!("../../migrations/141_runs_indexes.sql")),
     // Orbit Fleet 11.7, the Answer share level: `session_grants.level`'s
     // CHECK gains 'answer'. A table rebuild, so guarded.
     Migration {
-        version: 140,
-        sql: include_str!("../../migrations/140_share_level_answer.sql"),
+        version: 142,
+        sql: include_str!("../../migrations/142_share_level_answer.sql"),
         already_applied: Some(session_grants_has_answer),
     },
 ];
@@ -6016,11 +6026,11 @@ mod tests {
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     }
 
-    /// 140 (Orbit Fleet 11.7) rebuilds `session_grants` to widen its CHECK:
+    /// 142 (Orbit Fleet 11.7) rebuilds `session_grants` to widen its CHECK:
     /// the rows it held come through with their ids, the indexes are back,
     /// `answer` is admitted, and a re-run is only recorded.
     #[test]
-    fn migration_140_keeps_every_grant_and_admits_answer() {
+    fn migration_142_keeps_every_grant_and_admits_answer() {
         let s = Store::open_in_memory().unwrap();
         let ada = s.create_person("ada", None).unwrap().id;
         let bob = s.create_person("bob", None).unwrap().id;
@@ -6060,7 +6070,7 @@ mod tests {
                 .unwrap()
         };
         s.conn
-            .execute("DELETE FROM schema_version WHERE version >= 140", [])
+            .execute("DELETE FROM schema_version WHERE version >= 142", [])
             .unwrap();
         s.migrate().unwrap();
         assert!(session_grants_has_answer(&s.conn).unwrap());
@@ -6083,7 +6093,7 @@ mod tests {
             .expect("the CHECK admits answer");
         // A re-run is recorded, not rebuilt: the row keeps its new level.
         s.conn
-            .execute("DELETE FROM schema_version WHERE version >= 140", [])
+            .execute("DELETE FROM schema_version WHERE version >= 142", [])
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(level_of(&s), "answer");

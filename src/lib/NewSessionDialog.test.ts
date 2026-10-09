@@ -144,6 +144,32 @@ describe('NewSessionDialog', () => {
     expect((newSessionCall![1] as any).args.host_alias).toBe('mefistos');
   });
 
+  // Step 5.13: while the create runs, the new layout's dialog shows the
+  // Pulse on its worktree step; nothing shows in Classic.
+  it('new layout: the create in flight shows the Pulse on the worktree step', async () => {
+    uiLayout.set('new');
+    let finish!: () => void;
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockImplementation(async (args) => {
+      sessionsModule.creatingStart.set({ host_alias: args.host_alias, name: args.name, kind: 'work' });
+      await new Promise<void>((r) => (finish = r));
+      sessionsModule.creatingStart.set(null);
+      return { ok: false, error: { code: 'E_INVALID', message: 'stop here' } } as never;
+    });
+    try {
+      render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+      await tick();
+      await fireEvent.click(screen.getByText('Create'));
+      await tick();
+      const pulse = await screen.findByTestId('new-session-pulse');
+      expect(pulse.textContent).toContain('Setting up worktree · 1 of 3');
+      finish();
+      await vi.waitFor(() => expect(screen.queryByTestId('new-session-pulse')).toBeNull());
+    } finally {
+      spy.mockRestore();
+      uiLayout.set('classic');
+    }
+  });
+
   it('sends the picked model and effort for a Claude session, nothing for a shell', async () => {
     const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
       ok: false,
@@ -2034,15 +2060,49 @@ describe('NewSessionDialog in the New layout', () => {
   });
   afterEach(() => uiLayout.set('classic'));
 
-  it('offers Claude Code and Shell, with Codex and Agy shown as coming', async () => {
+  it('offers Claude Code and Shell; Codex only where it is on the PATH, Agy as coming', async () => {
     const { container } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
     await fireEvent.click(screen.getByTestId('run-background'));
     await expectAccessible(container);
     expect(screen.getByRole('group', { name: 'Agent' })).toBeTruthy();
     expect(screen.getByTestId('kind-work').textContent).toContain('Claude Code');
+    // The fixture's hosts were never sampled for agents.
     expect((screen.getByTestId('agent-codex') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('agent-codex').textContent).toContain('not on local');
     expect((screen.getByTestId('agent-agy') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('agent-agy').textContent).toContain('coming');
+  });
+
+  // Orbit Fleet 12.4: Codex is offered on a host that has it on its PATH,
+  // and a Codex session takes none of Claude Code's launch options.
+  it('starts a Codex session on a host that has it, without Claude options', async () => {
+    hosts.update((hs) => hs.map((h) => (h.alias === 'local' ? { ...h, agents_on_path: ['claude', 'codex'] } : h)));
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
+    const codex = screen.getByTestId('agent-codex') as HTMLButtonElement;
+    expect(codex.disabled).toBe(false);
+    await fireEvent.click(codex);
+    expect(codex.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByTestId('kind-work').getAttribute('aria-pressed')).toBe('false');
+    expect(screen.queryByTestId('launch-model')).toBeNull();
+    expect(screen.queryByTestId('launch-account')).toBeNull();
+    expect(screen.queryByTestId('run-background')).toBeNull();
+    const checks = calls('check_account_headroom').length;
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));
+    const args = (calls('new_session')[0][1] as any).args;
+    expect(args).toMatchObject({ kind: 'work', agent: 'codex', model: null, effort: null, profile: null });
+    // No Claude account limit check stands between Create and a Codex start.
+    expect(calls('check_account_headroom')).toHaveLength(checks);
+  });
+
+  it('a Claude Code session sends no agent', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));
+    expect((calls('new_session')[0][1] as any).args.agent).toBeNull();
   });
 
   it('defaults the account to the login with the most headroom and starts on it', async () => {

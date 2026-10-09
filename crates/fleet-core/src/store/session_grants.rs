@@ -105,7 +105,7 @@ pub(crate) fn bump_grant_generation() {
 
 /// Watch: read the session and its content, drive nothing.
 pub const GRANT_WATCH: &str = "watch";
-/// Answer (Orbit Fleet 11.7, migration 140): watch, plus answer the dialog
+/// Answer (Orbit Fleet 11.7, migration 142): watch, plus answer the dialog
 /// on the pane — a numbered option, Enter, Escape or Tab, and only while a
 /// fresh read of the pane shows a dialog. Nothing typed, no prompt, no `C-c`:
 /// the person can say yes or no to what the session asks and cannot steer it.
@@ -1193,7 +1193,7 @@ mod tests {
         }
     }
 
-    /// The Answer level (Orbit Fleet 11.7, migration 140) sits between the
+    /// The Answer level (Orbit Fleet 11.7, migration 142) sits between the
     /// two: it is granted like either, narrows to `watch`, and a `drive`
     /// grant narrows to it — never the other way.
     #[test]
