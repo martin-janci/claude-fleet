@@ -1029,6 +1029,21 @@ pub struct ControlHandoffsParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ControlRouteParams {
+    /// propose | follow
+    pub action: String,
+    /// propose: the message just sent in Control.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// follow: the run the receipt came from.
+    #[serde(default)]
+    pub run_id: Option<i64>,
+    /// follow: the option kept or picked (m<id>, s<id>, control).
+    #[serde(default)]
+    pub chosen: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct AnswerMcpConfirmParams {
     /// The confirm_nonce the waiting call was handed.
     pub nonce: String,
@@ -1257,6 +1272,30 @@ pub struct RoutinesParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct LibraryParams {
+    /// list | add | remove.
+    pub action: String,
+    /// list: only this session's files; add: the session they were put beside.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// list: only this host's files.
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// list: at most this many, newest first (default and cap 200).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// add: upload | attachment.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// add: the files, already on the session's host.
+    #[serde(default)]
+    pub files: Option<Vec<crate::service::library::LibraryFile>>,
+    /// remove: the row's id.
+    #[serde(default)]
+    pub id: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RemoveDownloadParams {
     /// The download's id (`list_downloads`).
     pub id: i64,
@@ -1281,8 +1320,8 @@ pub struct SessionShareParams {
     /// Or an org.
     #[serde(default)]
     pub org: Option<String>,
-    /// watch (read it) or drive (also prompt it). Nothing else — "own" is
-    /// not a grantable level.
+    /// watch (read it), answer (also answer its dialogs) or drive (also
+    /// prompt it). Nothing else — "own" is not a grantable level.
     pub level: String,
 }
 

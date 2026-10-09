@@ -15,6 +15,8 @@
   import { timeAgo } from './session_status';
   import { statusDotClass } from './trackers';
   import { candidatesFor, inScope, refreshTidy, requestTidy, tidyReport } from './tidy';
+  import { uiLayout } from './prefs';
+  import MorningBrief from './MorningBrief.svelte';
   import {
     loadToday,
     localMidnight,
@@ -186,6 +188,11 @@
 
   {#if error}
     <p class="error" role="alert" data-testid="today-error">{error}</p>
+  {/if}
+
+  {#if $uiLayout === 'new'}
+    <!-- Redesign 9.11: the brief drafted last; a new one only on Refresh. -->
+    <MorningBrief />
   {/if}
 
   {#if view}

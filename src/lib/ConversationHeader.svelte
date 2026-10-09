@@ -2,7 +2,7 @@
   import { untrack } from 'svelte';
   // Sticky bar above the Conversations tab thread: conversation switcher,
   // context meter, model, status and last notable event (spec §6).
-  import type { SessionRow } from './sessions';
+  import { sessionAgent, type SessionRow } from './sessions';
   import {
     contextMeter,
     conversationTitle,
@@ -105,17 +105,18 @@
   let button: HTMLButtonElement | undefined = $state();
 
   const entries = $derived(switcherEntries(conversations));
+  const agent = $derived(sessionAgent(session));
   const shown = $derived(
     viewing === null
       ? entries.find((c) => c.current)
       : entries.find((c) => c.claude_session_id === viewing),
   );
   const label = $derived(
-    shown ? switcherLabel(shown) : { when: viewing === null ? 'Current' : 'Earlier conversation', source: '' },
+    shown ? switcherLabel(shown, agent) : { when: viewing === null ? 'Current' : 'Earlier conversation', source: '' },
   );
   // The full title, turn count included, for the tooltip: the button drops
   // the source on a narrow header and never shows the count.
-  const title = $derived(shown ? conversationTitle(shown) : label.when);
+  const title = $derived(shown ? conversationTitle(shown, agent) : label.when);
   const meter = $derived(viewing === null ? contextMeter(session) : null);
   // An earlier conversation shows its own model; the current one prefers the
   // row's live value.
@@ -274,7 +275,7 @@
             onkeydown={(e) => onItemKey(e, c)}
             tabindex={i === focusIndex ? 0 : -1}
           >
-            <span class="t">{conversationTitle(c)}</span>
+            <span class="t">{conversationTitle(c, agent)}</span>
             {#if c.first_prompt}<span class="p">{c.first_prompt}</span>{/if}
           </li>
         {/each}

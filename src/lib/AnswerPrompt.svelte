@@ -80,7 +80,7 @@
    * revoke that lands during `await reread()` is seen by the check below it.
    */
   const writeBlocked = $derived(
-    hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'send_prompt'),
+    hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'answer_dialog'),
   );
 
   /** Boxes this card toggled that no reading of the pane shows yet: a toggle

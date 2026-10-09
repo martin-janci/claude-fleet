@@ -3287,6 +3287,46 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Redesign 9.11: B's mission is not completed, so whoever may change it
+    // is told a release note waits for that; nothing runs.
+    m.row(
+        "work_link",
+        "mission_release_note",
+        move |_, _| json!({ "action": "mission_release_note", "mission_id": mission_b }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's mission"),
+                _ => is_code(
+                    who,
+                    a,
+                    "E_INVALID_STATE",
+                    "a release note is for a completed mission",
+                ),
+            }
+        },
+    )
+    .await;
+    // Without refresh the brief answers the one drafted last and runs
+    // nothing; each caller's is their own.
+    m.row(
+        "work_link",
+        "today_brief",
+        |_, _| json!({ "action": "today_brief" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                _ => is_ok(who, a, "today_brief"),
+            }
+        },
+    )
+    .await;
     // Last of the loop's rows: it pauses B's mission for the rows after.
     m.row(
         "work_link",

@@ -79,6 +79,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.control_route",
+          "hint": "Says which mission or session a message in Control is about; you can change it. A short message gets a question instead."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.turn_outcome",
           "hint": "Sends Claude's last reply, redacted, only for organisations that allow reply text. Hooks always win."
         },

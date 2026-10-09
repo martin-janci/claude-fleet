@@ -101,7 +101,8 @@ impl<'a> SessionFacts<'a> {
 }
 
 /// The live grants TO one person, as session id → level
-/// ([`crate::store::GRANT_WATCH`] / [`crate::store::GRANT_DRIVE`]).
+/// ([`crate::store::GRANT_WATCH`] / [`crate::store::GRANT_ANSWER`] /
+/// [`crate::store::GRANT_DRIVE`]).
 ///
 /// A `BTreeMap`, never a `HashMap`, and that is load-bearing rather than
 /// taste: [`ViewScope`] derives `PartialEq`, and `mcp/events_route.rs`
@@ -545,6 +546,20 @@ impl ViewScope {
             return true;
         }
         self.grants.level(row.id) == Some(crate::store::GRANT_DRIVE)
+    }
+
+    /// May this scope ANSWER the dialog on `row`'s pane — press a numbered
+    /// option, Enter, Escape or Tab while the pane shows a dialog (Orbit
+    /// Fleet 11.7)?
+    ///
+    /// Everyone [`Self::may_drive`] admits, plus an `answer` grantee. What an
+    /// answer grantee may press, and the fresh pane read that proves a dialog
+    /// is there, are `mcp::tools::messaging::send_prompt`'s: this function
+    /// only answers who. A `watch` grantee is not here.
+    pub fn may_answer(&self, row: &SessionRow) -> bool {
+        self.may_drive(row)
+            || (self.sees_session_row(row).is_visible()
+                && self.grants.level(row.id) == Some(crate::store::GRANT_ANSWER))
     }
 
     /// May this scope perform an **owner-only** operation on `row`?
