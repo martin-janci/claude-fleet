@@ -82,13 +82,22 @@ describe('Toolkit (step 3.16)', () => {
       'MCP servers',
       'Hooks',
       'Assets catalog',
-      'Prompts & snippets ↗',
+      'Prompts & snippets',
       'Downloads…',
     ]);
     await fireEvent.click(nav.querySelector('[data-tab="mcp"]')!);
     expect(get(toolkitTab)).toBe('mcp');
     expect((await findByTestId('toolkit-mcp-summary')).textContent).toMatch(/0\s+MCP servers/);
     expect(nav.querySelector('[data-tab="mcp"]')!.getAttribute('aria-current')).toBe('page');
+    toolkitTab.set('skills');
+  });
+
+  it('edits the prompt chips in its Prompts & snippets page', async () => {
+    const { getByTestId, findByTestId } = render(Toolkit, { visible: true });
+    await fireEvent.click(getByTestId('toolkit-tabs').querySelector('[data-tab="prompts"]')!);
+    expect(get(toolkitTab)).toBe('prompts');
+    expect(await findByTestId('toolkit-prompts')).toBeTruthy();
+    expect(getByTestId('preset-add')).toBeTruthy();
     toolkitTab.set('skills');
   });
 
