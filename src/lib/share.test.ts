@@ -135,7 +135,7 @@ describe('sessionActionBlocked', () => {
   it('tells "somebody else’s session" apart from "we could not tell"', () => {
     // Three states, three sentences. The hub fences a stranger's row off the
     // stream, so the third is not supposed to be reachable — but when it is,
-    // sending someone to Settings → Hub over it would be wrong.
+    // sending someone to Settings → Hub & sync over it would be wrong.
     expect(sessionActionBlocked(row(), 'send_prompt', null, remote, 4)).toMatch(
       /belongs to someone else/i,
     );

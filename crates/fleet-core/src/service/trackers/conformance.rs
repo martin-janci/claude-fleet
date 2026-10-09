@@ -25,8 +25,8 @@
 //!
 //! **Snapshot golden.** Scenario 2 compares the normalised listing with
 //! `testdata/<provider>/golden_list.json`, so a provider API change shows
-//! up as a diff in review. `REGEN_TRACKER_GOLDENS=1 cargo test -p
-//! fleet-core conformance` rewrites them.
+//! up as a diff in review. `REGEN_TRACKER_GOLDENS=1 cargo
+//! fleet-test -- conformance` rewrites them.
 //!
 //! No scenario reaches a real tracker: every harness answers from a
 //! [`FakeTransport`].

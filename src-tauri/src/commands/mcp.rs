@@ -79,7 +79,7 @@ fn status(store: &Mutex<Store>, runtime: &Mutex<McpRuntime>) -> Result<McpStatus
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn mcp_status(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
@@ -257,7 +257,7 @@ impl From<fleet_core::store::HostTokenRow> for HostTokenInfo {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_host_tokens(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
@@ -282,7 +282,7 @@ pub fn parse_mode(mode: &str) -> Result<&'static str, IpcError> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_host_token_mode(
     host_alias: String,
     mode: String,

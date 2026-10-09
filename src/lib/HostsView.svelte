@@ -34,13 +34,11 @@
     sharedWith,
     type HostRowInfo,
   } from './hosts_view';
-  import AddHostPicker from './AddHostPicker.svelte';
   import AddHostWizard from './AddHostWizard.svelte';
   import HostsList from './HostsList.svelte';
   import HostDetail from './HostDetail.svelte';
   import HostsTable from './HostsTable.svelte';
   import { tableOrder } from './hosts_table';
-  import { uiLayout } from './prefs';
   import { attentionIdleMinutes } from './notify';
   import { hubStatus, hubBlock, hubActionBlocked, ownsTheFleet } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
@@ -94,12 +92,11 @@
   let refusal = $state<{ alias: string; nextTryAt: number } | null>(null);
   let copied = $state(false);
 
-  // Orbit Fleet 4.6: under Layout: New the view opens on the Hosts table,
-  // and Open (or Enter) shows a host in the master–detail below it. Classic
-  // never sees the table. A preselected host opens straight in its detail.
-  const newLayout = $derived($uiLayout === 'new');
+  // Orbit Fleet 4.6: the view opens on the Hosts table, and Open (or Enter)
+  // shows a host in the master–detail below it. A preselected host opens
+  // straight in its detail.
   let detailOpen = $state(untrack(() => preselect) !== null);
-  const showTable = $derived(newLayout && !detailOpen);
+  const showTable = $derived(!detailOpen);
   let tableEl = $state<HTMLElement>();
 
   let listEl = $state<HTMLElement>();
@@ -234,7 +231,7 @@
     focusDetail();
   }
 
-  /** Detail → back to the table (New layout only). */
+  /** Detail → back to the table. */
   async function backToTable() {
     detailOpen = false;
     await tick();
@@ -354,7 +351,7 @@
       case 'Escape':
         if (legendOpen) legendOpen = false;
         else if (inDetail) focusList();
-        else if (newLayout && detailOpen) void backToTable();
+        else if (detailOpen) void backToTable();
         else onClose();
         break;
       case 'r':
@@ -438,7 +435,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <section class="hosts-view" aria-label="Hosts" data-testid="hosts-view" onkeydown={onKeydown}>
   <header class="view-head">
-    {#if newLayout && detailOpen}
+    {#if detailOpen}
       <button type="button" class="head-btn" data-testid="hosts-back-to-table" onclick={() => void backToTable()}>← All hosts</button>
     {/if}
     <h1>Hosts</h1>
@@ -505,6 +502,7 @@
       {selectedAlias}
       {now}
       idleSecs={$attentionIdleMinutes * 60}
+      emptyText={hubSkewEmptyMessage}
       bind:tableEl
       onselect={(a) => {
         select(a);
@@ -575,11 +573,9 @@
   {/if}
 </section>
 
-{#if showAddPicker && newLayout}
-  <!-- Layout: New gets the add-host wizard (4.9); Classic keeps the picker. -->
+{#if showAddPicker}
+  <!-- The add-host wizard (4.9). -->
   <AddHostWizard onClose={() => (showAddPicker = false)} {onNewSession} />
-{:else if showAddPicker}
-  <AddHostPicker onClose={() => (showAddPicker = false)} />
 {/if}
 
 <style>

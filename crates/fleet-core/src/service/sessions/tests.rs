@@ -7681,7 +7681,7 @@ fn a_sent_switch_is_stored_and_relaunched() {
         let s = store.lock().unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert_eq!(row.effort_level.as_deref(), Some("high"));
-        let launch = stored_launch(&s, id);
+        let launch = stored_launch(&s, id).unwrap();
         assert_eq!(launch.model.as_deref(), Some("opus[1m]"));
         let sid = "550e8400-e29b-41d4-a716-446655440000";
         let pane = recreate_pane_command("work", "claude", Some(sid), "dev-launch", &launch);
@@ -7695,7 +7695,10 @@ fn a_sent_switch_is_stored_and_relaunched() {
     record_prompt_outcome(&store, "local", "dev-launch", "/model default", false);
     record_prompt_outcome(&store, "local", "dev-launch", "/effort auto", false);
     let s = store.lock().unwrap();
-    assert_eq!(stored_launch(&s, id), crate::tmux::ClaudeLaunch::default());
+    assert_eq!(
+        stored_launch(&s, id).unwrap(),
+        crate::tmux::ClaudeLaunch::default()
+    );
     assert_eq!(s.get_session_by_id(id).unwrap().unwrap().effort_level, None);
 }
 
@@ -7728,7 +7731,7 @@ fn a_stored_profile_relaunches_under_its_config_dir_and_a_switch_drops_the_old_a
         row.account_uuid, None,
         "the host login's account is not this session's any more"
     );
-    let launch = stored_launch(&s, id);
+    let launch = stored_launch(&s, id).unwrap();
     assert_eq!(launch.profile.as_deref(), Some("work"));
     let sid = "550e8400-e29b-41d4-a716-446655440000";
     let pane = recreate_pane_command("work", "claude", Some(sid), "dev-prof", &launch);
@@ -7750,7 +7753,7 @@ fn a_stored_profile_relaunches_under_its_config_dir_and_a_switch_drops_the_old_a
             [id],
         )
         .unwrap();
-    assert_eq!(stored_launch(&s, id).profile, None);
+    assert_eq!(stored_launch(&s, id).unwrap().profile, None);
 
     s.set_session_profile(id, None).unwrap();
     assert_eq!(
@@ -7805,6 +7808,18 @@ fn a_new_shell_session_refuses_a_profile() {
     assert_eq!(args.profile, None);
 }
 
+/// Review r05 F8: a launch read that fails fails the start (E_INTERNAL)
+/// instead of falling back to the host's login.
+#[test]
+fn a_failed_launch_read_fails_rather_than_using_the_host_login() {
+    let s = Store::open_in_memory().unwrap();
+    s.conn_ref()
+        .execute_batch("ALTER TABLE sessions RENAME COLUMN claude_profile TO gone_profile")
+        .unwrap();
+    let e = stored_launch(&s, 1).unwrap_err();
+    assert_eq!(e.code, codes::E_INTERNAL);
+}
+
 /// A tampered stored value never reaches the pane command.
 #[test]
 fn stored_launch_drops_values_that_no_longer_validate() {
@@ -7816,9 +7831,15 @@ fn stored_launch_drops_values_that_no_longer_validate() {
     s.set_session_launch_model(id, Some("opus'; rm -rf ~; '"))
         .unwrap();
     s.set_session_effort(id, Some("huge")).unwrap();
-    assert_eq!(stored_launch(&s, id), crate::tmux::ClaudeLaunch::default());
+    assert_eq!(
+        stored_launch(&s, id).unwrap(),
+        crate::tmux::ClaudeLaunch::default()
+    );
     s.set_session_launch_model(id, Some("sonnet")).unwrap();
-    assert_eq!(stored_launch(&s, id).model.as_deref(), Some("sonnet"));
+    assert_eq!(
+        stored_launch(&s, id).unwrap().model.as_deref(),
+        Some("sonnet")
+    );
 }
 
 /// A Codex row's pane is read by the Codex adapter (12.2): its approval

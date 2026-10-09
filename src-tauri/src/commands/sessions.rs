@@ -313,7 +313,7 @@ pub async fn place_transcript(
 
 /// Remove an inactive background agent (`kind='bg'`, not working) from the
 /// list. Frontend-only; logic lives in `service::bg_sessions`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dismiss_agent_session(
     args: DismissAgentArgs,
     backend: State<'_, Arc<FleetBackend>>,

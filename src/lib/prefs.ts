@@ -1,8 +1,8 @@
 /**
  * Tiny localStorage-backed key/value store for global UI prefs.
  *
- * Kept separate from session_ui because these are per-app prefs (sidebar
- * width, last-used filter) not tied to any specific tmux session.
+ * Per-app prefs (sidebar width, last-used filter), not tied to any specific
+ * tmux session.
  */
 
 import { writable } from 'svelte/store';
@@ -78,20 +78,22 @@ export const sessionView = writable<SessionView>(
 );
 sessionView.subscribe((v) => writePref('ui.sessionView', v));
 
-// ─── Layout pref (redesign step 0.3) ─────────────────────────────────────
+// ─── Retired layout pref ─────────────────────────────────────────────────
 
-export type UiLayout = 'classic' | 'new';
-
-const isUiLayout = (v: unknown): v is UiLayout => v === 'classic' || v === 'new';
-
-/**
- * Which shell the app shows: Classic (0.5.x) or New (the Orbit Fleet
- * redesign, growing behind this switch until the parity sign-off in 7.5).
- * Classic stays the default until then. Nothing reads it yet besides the
- * Appearance section; the destination store in 3.1 is the first consumer.
- */
-export const uiLayout = writable<UiLayout>(readPref<UiLayout>('ui.layout', 'classic', isUiLayout));
-uiLayout.subscribe((v) => writePref('ui.layout', v));
+// Step 13.1 removed the Classic layout, and with it the Classic/New switch
+// and the center Details pane. Their keys (`ui.layout`, then `ui.layout.v2`;
+// the pane's collapsed state, and its per-session widths under
+// `cf:session-ui`; the Inbox Classic stood in for) are forgotten once at
+// load.
+clearPref('ui.layout');
+clearPref('ui.layout.v2');
+clearPref('layout.center-collapsed');
+clearPref('sidebar.inbox-before-classic');
+try {
+  if (typeof localStorage !== 'undefined') localStorage.removeItem('cf:session-ui');
+} catch {
+  /* ignore */
+}
 
 // ─── Row density (redesign step 3.6) ─────────────────────────────────────
 

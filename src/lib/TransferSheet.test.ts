@@ -59,7 +59,6 @@ import type { HubConnection } from './hub_connection';
 import { hubStatus, STANDALONE } from './hub';
 import { UNKNOWN_SESSION_REASON } from './share';
 import { resetAccessForTests, setMyGrants } from './access';
-import { uiLayout } from './prefs';
 import { expectAccessible } from './a11y_check';
 import {
   requestPreflight,
@@ -1397,10 +1396,8 @@ describe('TransferSheet access gate (multi-user M1)', () => {
 });
 
 describe('TransferSheet: accessibility', () => {
-  afterEach(() => uiLayout.set('classic'));
 
   it('the Move sheet, set up and in progress, is accessible', async () => {
-    uiLayout.set('new');
     pendingMove();
     transferSheetFor.set(5);
     render(TransferSheet);

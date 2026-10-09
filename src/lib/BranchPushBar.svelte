@@ -1,7 +1,7 @@
 <!-- Push under the Changed list (redesign step 5.6, Files board): "Push 2 ↑"
      with where it goes and how far ahead the branch is. A branch no remote
      has yet is pushed with its upstream set, so the first push needs no
-     terminal. Classic keeps Push in the History and Branches toolbars. -->
+     terminal. -->
 <script lang="ts">
   import { repoPush } from './history';
   import type { BranchDiff } from './files';

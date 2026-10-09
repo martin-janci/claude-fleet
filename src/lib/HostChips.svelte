@@ -24,6 +24,7 @@
     locale,
     timeZone,
     selectedAccount,
+    proposedHost = null,
   }: {
     active: string;
     /** DOM id for the "Host" caption that names the group. */
@@ -40,10 +41,13 @@
     timeZone?: string;
     /**
      * The account the session will run on, when the caller has picked a
-     * login other than the host's own (the New layout's Account select).
+     * login other than the host's own (New session's Account select).
      * The selected host's line and warning then describe that account.
      */
     selectedAccount?: string | null;
+    /** The chip a proposal pre-selected, ringed `ai-pre` while it holds
+     *  (design-system/ai.md, review r15 F15). */
+    proposedHost?: string | null;
   } = $props();
 
   const visible = $derived($hosts.filter((h) => !h.hidden));
@@ -60,6 +64,7 @@
     <button
       type="button"
       class="btn btn--chip btn--toggle tag--mono host-pick"
+      class:ai-pre={proposedHost === h.alias && active === h.alias}
       aria-pressed={active === h.alias}
       data-alias={h.alias}
       disabled={disabled || (!h.reachable && h.alias !== 'local') || locked !== null}

@@ -1872,7 +1872,7 @@ pub async fn restart_session(
                 // once the relaunch succeeded ([`relaunch_recording_login`]):
                 // written first, a refused repair or a failed respawn left the
                 // row naming a login the pane never ran under.
-                let mut launch = stored_launch(&s, r.id);
+                let mut launch = stored_launch(&s, r.id)?;
                 if let Some(profile) = switch.as_ref() {
                     launch.profile = profile.clone();
                 }
@@ -2175,14 +2175,20 @@ pub(crate) fn store_start_launch(
 /// The model / effort / profile a session was started or last switched to, checked
 /// again ([`crate::tmux::ClaudeLaunch::checked`]). A failed read is the
 /// host's default: a rebuilt pane must not fail over a cosmetic column.
-pub(crate) fn stored_launch(s: &Store, session_id: i64) -> crate::tmux::ClaudeLaunch {
-    match s.session_launch(session_id) {
-        Ok((model, effort, profile)) => crate::tmux::ClaudeLaunch::checked(model, effort, profile),
-        Err(e) => {
-            tracing::warn!(session_id, error = %e, "reading the session's launch options failed");
-            crate::tmux::ClaudeLaunch::default()
-        }
-    }
+pub(crate) fn stored_launch(
+    s: &Store,
+    session_id: i64,
+) -> Result<crate::tmux::ClaudeLaunch, IpcError> {
+    // A read that fails fails the start, like a failed profile write (review
+    // r05 F8): falling back to the defaults would relaunch the session under
+    // the host's login, not the one it was started with.
+    let (model, effort, profile) = s.session_launch(session_id).map_err(|e| {
+        IpcError::new(
+            codes::E_INTERNAL,
+            format!("reading session {session_id}'s launch options failed: {e}"),
+        )
+    })?;
+    Ok(crate::tmux::ClaudeLaunch::checked(model, effort, profile))
 }
 
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -2242,7 +2248,7 @@ pub async fn recreate_session(
             &sess.agent,
             sess.claude_session_id.as_deref(),
             &sess.tmux_name,
-            &stored_launch(&s, sess.id),
+            &stored_launch(&s, sess.id)?,
         );
         (sess, cwd_src, pane_cmd)
     };

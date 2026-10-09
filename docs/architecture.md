@@ -491,7 +491,7 @@ bullet for the area you are about to change.
 - **Hub daemon** (`crates/fleet-hub`): the same core headless; `hub.*`
   settings, `HubBase` in `service/hub.rs`.
 - **Hub client mode** (`src-tauri/src/backend/`): a desktop paired with a hub
-  (Settings → Hub) resolves once at startup to a window onto that hub; every
+  (Settings → Hub & sync) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
   verdict is written down once, in `backend/verdicts.rs`, for every

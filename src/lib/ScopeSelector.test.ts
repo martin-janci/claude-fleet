@@ -1,6 +1,7 @@
 // Work graph M5.4: the scope selector (only at two or more scopes) and the
 // needs-you line for other scopes.
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
 
@@ -55,19 +56,27 @@ beforeEach(() => {
   scopeFilter.set('all');
 });
 
+/** The organisation scope lives in the Filters panel (step 3.7). */
+async function openFilters() {
+  await fireEvent.click(screen.getByTestId('filters-open'));
+  await tick();
+}
+
 describe('the scope selector', () => {
-  it('is absent with one scope — a single-company fleet sees no new chrome', () => {
+  it('is absent with one scope — a single-company fleet sees no new chrome', async () => {
     sessions.set([row({ project_id: 1 })]);
     render(SidebarFilters, { props });
-    expect(screen.queryByTestId('scope-select')).toBeNull();
+    await openFilters();
+    expect(screen.queryByTestId('filter-scope')).toBeNull();
   });
 
   it('appears with two scopes and sets the scope', async () => {
     sessions.set([row({ project_id: 1 }), row({ project_id: 2 })]);
     render(SidebarFilters, { props });
-    const sel = (await screen.findByTestId('scope-select')) as HTMLSelectElement;
-    expect(Array.from(sel.options).map((o) => o.textContent)).toEqual(['All', 'acme', 'beta', 'Unassigned']);
-    await fireEvent.change(sel, { target: { value: 'owner:beta' } });
+    await openFilters();
+    const group = (await screen.findByTestId('filter-scope')).closest('[role="group"]') as HTMLElement;
+    expect(within(group).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Any', 'acme', 'beta', 'Unassigned']);
+    await fireEvent.click(screen.getByTestId('filter-scope-owner:beta'));
     expect(get(scopeFilter)).toBe('owner:beta');
   });
 

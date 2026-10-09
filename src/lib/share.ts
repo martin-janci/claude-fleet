@@ -257,7 +257,7 @@ export function sessionActionBlocked(
     // distinguish: knowing who we are and finding no grant. The hub fences a
     // stranger's row off the stream, so holding one is not supposed to happen
     // — but "not shared with you" is the honest reading when it does, and
-    // blaming the hub for it would send someone to Settings → Hub over a row
+    // blaming the hub for it would send someone to Settings → Hub & sync over a row
     // that is simply somebody else's.
     // `hub.ts`'s own sentence, CALLED rather than copied: a disabled button
     // and the watcher's pane (`access.ts::noAttachReason`) owe the same

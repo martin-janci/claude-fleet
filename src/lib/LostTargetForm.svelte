@@ -90,6 +90,7 @@
     <span class="label">{action} into</span>
     <select
       bind:value={selected}
+      class:ai-pre={shownProposal !== null && !touched}
       onchange={() => (touched = true)}
       aria-label="{action} into"
       data-testid="lost-target-project"

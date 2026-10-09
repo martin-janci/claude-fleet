@@ -922,8 +922,10 @@ impl FleetTools {
                     return Err(mcp_err("E_INVALID", "follow needs run_id and chosen", None));
                 };
                 let s = lock(&self.store).map_err(to_mcp_err)?;
-                let marked = control_route::follow(&s, run_id, &chosen, crate::store::now_unix())
-                    .map_err(to_mcp_err)?;
+                let scope = caller.view_scope(&s).map_err(to_mcp_err)?;
+                let marked =
+                    control_route::follow(&s, &scope, run_id, &chosen, crate::store::now_unix())
+                        .map_err(to_mcp_err)?;
                 ok_json_compact(&marked)
             }
             other => Err(mcp_err(

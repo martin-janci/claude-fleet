@@ -29,7 +29,6 @@
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import PromptComposer from './PromptComposer.svelte';
   import WatchSummary from './WatchSummary.svelte';
-  import { uiLayout } from './prefs';
   import ReviewDialog from './ReviewDialog.svelte';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -216,9 +215,9 @@
   );
 
   // N1 (redesign 6.9): another of this person's sessions Jev says works on
-  // the same thing, when it is not listed above already. New layout only;
-  // nothing is stopped or merged.
-  const relatedProposal = $derived($uiLayout === 'new' ? proposalFor(session, 'related_session') : null);
+  // the same thing, when it is not listed above already. Nothing is
+  // stopped or merged.
+  const relatedProposal = $derived(proposalFor(session, 'related_session'));
   const proposedRelated = $derived.by(() => {
     const m = /^s(\d+)$/.exec(relatedProposal?.value ?? '');
     if (!m) return null;
@@ -678,10 +677,8 @@
     </div>
   </header>
 
-  {#if $uiLayout === 'new'}
-    <!-- Orbit Fleet 11.11: the watcher's summary tops the facts too. -->
-    <WatchSummary {session} />
-  {/if}
+  <!-- Orbit Fleet 11.11: the watcher's summary tops the facts too. -->
+  <WatchSummary {session} />
 
   <dl class="meta">
     <dt>Host</dt>

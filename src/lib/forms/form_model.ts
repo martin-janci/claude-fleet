@@ -2,6 +2,7 @@
 // which steps and fields are asked, and what is wrong with an answer. Both
 // run docs/form-examples/answers.json, so the words must match exactly.
 import type { FieldCondition, FieldProblem, FormField, FormSpec, FormStep, Values } from './forms';
+import { risky } from '../quick_answer';
 export type { FormSpec, FormStep, FormField, FieldProblem, Values } from './forms';
 
 const TEXT_LEN = 500;
@@ -131,4 +132,40 @@ export function checkAnswers(
   }
   if (w.problems.length > 0) return { ok: false, problems: w.problems };
   return { ok: true, answers: w.answers, secrets: w.secrets.sort() };
+}
+
+/**
+ * The values a form starts with: each field's `value`, never a secret's.
+ * For an agent's form (`fromAgent`) the agent does not decide for the
+ * person (review r09, as the phone does): a required checkbox starts
+ * unticked, and no checkbox, choice or multi-choice option whose label names
+ * a risky step (`RISKY_WORDS`: push, approve, allow, production…) starts
+ * chosen. The app's own wizards keep their defaults.
+ */
+export function startingValues(spec: FormSpec, fromAgent: boolean): Values {
+  const out: Values = {};
+  for (const step of spec.steps)
+    for (const f of step.fields) {
+      if (f.type === 'secret' || f.value === undefined) continue;
+      const v = fromAgent ? agentDefault(f, f.value) : f.value;
+      if (v !== undefined) out[f.name] = v;
+    }
+  return out;
+}
+
+function agentDefault(f: FormField, v: unknown): unknown {
+  const optionRisky = (value: unknown) => {
+    const o = (f.options ?? []).find(([ov]) => ov === value);
+    return risky(o ? o[1] : String(value));
+  };
+  switch (f.type) {
+    case 'bool':
+      return v === true && (f.required || risky(f.label)) ? false : v;
+    case 'select':
+      return optionRisky(v) ? undefined : v;
+    case 'multiselect':
+      return Array.isArray(v) ? v.filter((x) => !optionRisky(x)) : v;
+    default:
+      return v;
+  }
 }

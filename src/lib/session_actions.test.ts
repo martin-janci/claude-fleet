@@ -2,7 +2,7 @@
 // action Details offers, disabled for the same reason, and run through
 // Details itself (its confirm, its dialog).
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
 import SessionDetails from './SessionDetails.svelte';
@@ -13,7 +13,6 @@ import { sessions, type SessionRow } from './sessions';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import { resetAccessForTests, setMyGrants } from './access';
-import { uiLayout } from './prefs';
 import { clearSelection, selectedSession } from './selection';
 import { ROW_ACTIONS, requestSessionAction, sessionActionRequest, sessionMenuItems } from './session_actions';
 
@@ -64,11 +63,9 @@ beforeEach(() => {
   hubStatus.set({ ...STANDALONE });
   hubConnection.set({ state: 'standalone' });
   resetAccessForTests();
-  uiLayout.set('new');
   sessionActionRequest.set(null);
   clearSelection();
 });
-afterEach(() => uiLayout.set('classic'));
 
 /** Details' own action buttons, as the menu's items would name them. */
 function detailsActions(): Map<string, { disabled: boolean; title: string }> {
@@ -110,8 +107,8 @@ describe('row menu parity with Details', () => {
 });
 
 describe('the row menu', () => {
-  it('opens from ⋯ and from a right-click, only in the New layout', async () => {
-    const { container, unmount } = render(SessionRowItem, { props: rowProps(work) });
+  it('opens from ⋯ and from a right-click', async () => {
+    const { container } = render(SessionRowItem, { props: rowProps(work) });
     const row = container.querySelector('[data-testid="sess-row"]')!;
     await fireEvent.click(screen.getByTestId('row-menu-open'));
     expect(screen.getByTestId('session-row-menu')).toBeTruthy();
@@ -121,13 +118,6 @@ describe('the row menu', () => {
     expect(screen.getByTestId('session-row-menu')).toBeTruthy();
     expect(screen.getByTestId('row-menu-kill')).toBeTruthy();
     expect(screen.getByTestId('row-menu-details')).toBeTruthy();
-    unmount();
-
-    uiLayout.set('classic');
-    const classic = render(SessionRowItem, { props: rowProps(work) });
-    expect(screen.queryByTestId('row-menu-open')).toBeNull();
-    await fireEvent.contextMenu(classic.container.querySelector('[data-testid="sess-row"]')!);
-    expect(screen.queryByTestId('session-row-menu')).toBeNull();
   });
 
   it('an item opens the session and Details runs the action through its own confirm', async () => {

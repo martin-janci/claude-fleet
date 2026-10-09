@@ -1,6 +1,6 @@
 // Get started (Orbit Fleet redesign step 10.5, board Tour): the six things
-// that make a working fleet, as a floating checklist in the New layout's
-// bottom-right corner. It replaces the sidebar's onboarding card there;
+// that make a working fleet, as a floating checklist in the bottom-right
+// corner. It replaced the sidebar's onboarding card;
 // each row is done from the stores the app already keeps, and a click
 // opens the place that does it.
 import { readPref, writePref } from './prefs';

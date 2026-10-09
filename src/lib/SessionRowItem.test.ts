@@ -266,11 +266,9 @@ describe('SessionRowItem accessibility (7.2)', () => {
 
 describe('SessionRowItem: a session ⌘N just started (step 5.14)', () => {
   it('shows the Pulse sequence on the new row, on its agent step, and nothing else waits on it', async () => {
-    const { uiLayout } = await import('./prefs');
     const { sessions, startedIds } = await import('./sessions');
     const { resetStarting } = await import('./session_starting');
     const row = session('mercury', 'pd-3011', { id: 41, status: 'running', claude_status: null, lost_at: null });
-    uiLayout.set('new');
     sessions.set([row]);
     startedIds.set(new Set([41]));
     try {
@@ -292,7 +290,6 @@ describe('SessionRowItem: a session ⌘N just started (step 5.14)', () => {
     } finally {
       resetStarting();
       sessions.set([]);
-      uiLayout.set('classic');
     }
   });
 });

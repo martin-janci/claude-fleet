@@ -14,7 +14,6 @@
   import { selectSessionExplicitly } from './selection';
   import { resumeWork } from './work';
   import { groupSessionLinks, readErrorText, type WorkTask, type WorkTaskLink } from './work_view';
-  import { uiLayout } from './prefs';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionIdBlocked } from './share';
@@ -25,6 +24,7 @@
   import AttachPicker from './AttachPicker.svelte';
   import { operatorRow } from './operator';
   import type { AttachTarget, Attached } from './attach';
+  import type { IpcError } from './result';
   import {
     PRIMARY_LABEL,
     baseStartArgs,
@@ -53,9 +53,9 @@
   );
   const pastLinks = $derived(task.key ? grouped.past.filter((l) => l.resumable !== false) : []);
   const action = $derived(primaryAction({ live: liveLink !== null, resumable: pastLinks.length > 0 }));
-  /** Redesign 6.6: the New layout names the start "Start new", the same
-   *  words as ▾ and every other start point; Classic keeps "Start". */
-  const primaryLabel = $derived(action === 'start' && $uiLayout === 'new' ? 'Start new' : PRIMARY_LABEL[action]);
+  /** Redesign 6.6: the start is named "Start new", the same words as ▾ and
+   *  every other start point. */
+  const primaryLabel = $derived(action === 'start' ? 'Start new' : PRIMARY_LABEL[action]);
   const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
   /** Continue re-opens somebody's past conversation: the hub half, then the
    *  access half on the SOURCE session (`share.ts`'s `own` tier for
@@ -69,6 +69,8 @@
 
   let busy = $state(false);
   let error = $state<string | null>(null);
+  /** The session an E_EXISTS refusal points at: the error offers to open it. */
+  let existing = $state<number | null>(null);
   let menuOpen = $state(false);
   let popover = $state<StartPreview | null>(null);
   let attaching = $state(false);
@@ -137,6 +139,27 @@
     selectSessionExplicitly(row);
   }
 
+  /** Fail with `e`. An E_EXISTS (the work is live already, or being resumed)
+   *  names the session to open: its own `details.session_id`, else the live
+   *  session this task shows, else one whose primary work is this key. */
+  function fail(e: IpcError) {
+    error = readErrorText(e);
+    existing = null;
+    if (e.code !== 'E_EXISTS') return;
+    const sid = (e.details as { session_id?: number } | undefined)?.session_id;
+    if (typeof sid === 'number') existing = sid;
+    else if (liveLink?.session_id != null) existing = liveLink.session_id;
+    else {
+      const key = task.key?.toUpperCase();
+      existing = key ? (get(sessions).find((r) => r.work?.key?.toUpperCase() === key)?.id ?? null) : null;
+    }
+  }
+
+  function openExisting() {
+    const row = get(sessions).find((r) => r.id === existing);
+    if (row) selectSessionExplicitly(row);
+  }
+
   function openLive() {
     const row = liveLink?.session_id != null ? get(sessions).find((r) => r.id === liveLink.session_id) : undefined;
     if (row) selectSessionExplicitly(row);
@@ -152,10 +175,11 @@
     }
     busy = true;
     error = null;
+    existing = null;
     const r = await resumeWork({ key: task.key, mode: 'last', linkId: l.link_id });
     busy = false;
     if (r.ok) selectSessionExplicitly(r.value);
-    else error = readErrorText(r.error);
+    else fail(r.error);
   }
 
   /** Start: the preview first. `ask` opens the popover whatever it says. */
@@ -167,13 +191,22 @@
     }
     busy = true;
     error = null;
+    existing = null;
+    const forTask = task.task_id;
     const p = await previewStartWork(base);
+    // Another task was opened meanwhile (the task page keeps this button):
+    // this preview is not its (review r07), so neither its popover nor a
+    // start from it.
+    if (task.task_id !== forTask) {
+      busy = false;
+      return;
+    }
     if (!p.ok && previewUnsupported(p.error)) {
       // An older hub: start as before, its refusals shown as they come.
       const r = await startWork(base);
       busy = false;
       if (r.ok) started(r.value);
-      else error = readErrorText(r.error);
+      else fail(r.error);
       return;
     }
     if (!p.ok) {
@@ -185,7 +218,7 @@
       const r = await startFromPreview(base, p.value);
       busy = false;
       if (r.ok) started(r.value);
-      else error = readErrorText(r.error);
+      else fail(r.error);
       return;
     }
     busy = false;
@@ -318,7 +351,11 @@
       {/if}
     </span>
   {/if}
-  {#if error}<span class="err" role="alert" data-testid="work-button-error">{error}</span>{/if}
+  {#if error}<span class="err" role="alert" data-testid="work-button-error"
+      >{error}{#if existing !== null}
+        <button class="btn btn--quiet" type="button" data-testid="work-button-open-existing" onclick={openExisting}>Open it</button
+        >{/if}</span
+    >{/if}
   {#if progressFor != null}
     {#key progressFor}
       <StartProgressStrip sessionId={progressFor} onclose={() => (progressFor = null)} />

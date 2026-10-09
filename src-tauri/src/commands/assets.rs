@@ -1245,7 +1245,7 @@ pub(crate) mod routed {
     pub async fn catalog_apply_changeset(
         backend: &FleetBackend,
         args: ApplyChangesetArgs,
-        store: &Mutex<Store>,
+        store: &Arc<Mutex<Store>>,
         ssh: &Arc<SshClient>,
     ) -> Result<ChangesetView, IpcError> {
         match backend.hub() {
@@ -1273,7 +1273,7 @@ pub(crate) mod routed {
     pub async fn catalog_undo_changeset(
         backend: &FleetBackend,
         args: ChangesetIdArgs,
-        store: &Mutex<Store>,
+        store: &Arc<Mutex<Store>>,
     ) -> Result<ChangesetView, IpcError> {
         match backend.hub() {
             Some(hub) => {

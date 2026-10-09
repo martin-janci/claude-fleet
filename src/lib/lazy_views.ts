@@ -5,7 +5,6 @@ import { preload, type Loader } from './Lazy.svelte';
 
 export const lazyViews = {
   hosts: () => import('./HostsView.svelte'),
-  assets: () => import('./AssetsPanel.svelte'),
   toolkit: () => import('./Toolkit.svelte'),
   accounts: () => import('./AccountsPage.svelte'),
   control: () => import('./ControlView.svelte'),

@@ -98,7 +98,8 @@ pub(crate) mod routed {
             }
             None => {
                 let s = fleet_core::ipc_error::lock(store)?;
-                control_route::follow(&s, run_id, &chosen, fleet_core::store::now_unix())
+                let scope = fleet_core::service::view_scope::ViewScope::internal();
+                control_route::follow(&s, &scope, run_id, &chosen, fleet_core::store::now_unix())
             }
         }
     }

@@ -1,6 +1,6 @@
-// The UX agent's state, as the panel needs it. Follows `app_views.ts`: the
-// FAB and the panel talk through these stores instead of prop-drilling
-// through App.svelte.
+// The UX agent's state, as Control's Chat tab (`AgentPanel.svelte`) needs it.
+// Follows `app_views.ts`: Control and the panel talk through these stores
+// instead of prop-drilling through App.svelte.
 import { derived, get, writable, type Readable, type Writable } from 'svelte/store';
 import { invokeCmd } from './result';
 import { killSession, restartSession, sessions, type SessionRow } from './sessions';
@@ -34,7 +34,6 @@ export interface OperatorStatus {
   fallback?: string | null;
 }
 
-export const agentPanelOpen: Writable<boolean> = writable(false);
 export const operatorState: Writable<'unknown' | 'waking' | 'ready' | OperatorBlocked> =
   writable('unknown');
 /**
@@ -51,7 +50,7 @@ export const operatorHost: Writable<string> = writable('local');
 /**
  * Where the agent would be started instead of `operatorHost`, as the last
  * status call said; null when its home is usable or nothing else qualifies.
- * The `host_down` copy reads it, and so does `openAgent`, which moves a
+ * The `host_down` copy reads it, and so does `ensureAgent`, which moves a
  * stranded agent without asking.
  */
 export const operatorFallback: Writable<string | null> = writable(null);
@@ -95,7 +94,7 @@ export const operatorRow: Readable<SessionRow | null> = derived(
 /**
  * The next step a blocked state's button takes (redesign step 9.1, the
  * AgentStates board: "the redesign gives each one a next step").
- *  - `wake` / `move`: `openAgent` (wakes it, or starts it on the fallback).
+ *  - `wake` / `move`: `ensureAgent` (wakes it, or starts it on the fallback).
  *  - `restart`: `restartOperator`, the `lost` recovery.
  *  - `control_api`: Settings › Control API, where the control API is turned
  *    on. Not `mcp_configure` itself: that command is LocalOnly, and nothing
@@ -158,7 +157,7 @@ export function blockedCopy(
       };
     case 'host_down':
       // The agent's host stopped answering. With somewhere else to go,
-      // `openAgent` moves it there without asking — this copy is what shows
+      // `ensureAgent` moves it there without asking — this copy is what shows
       // if that move failed, and its button tries again. With nowhere, the
       // copy says what a host needs to qualify (`pick_operator_home`), and
       // the button opens that host.
@@ -190,11 +189,12 @@ export async function refreshOperator(): Promise<void> {
   operatorState.set(r.value.ready ? 'ready' : (r.value.blocked ?? 'absent'));
 }
 
-/** The in-flight `openAgent`, or null. See [`openAgent`]. */
+/** The in-flight `ensureAgent`, or null. */
 let opening: Promise<void> | null = null;
 
 /**
- * Open the panel and make sure there is an agent behind it.
+ * Make sure there is an agent: what Control (redesign step 9.1) runs when it
+ * shows.
  *
  * `absent` is the only reason worth acting on here: every other block is
  * either deliberate (the control API turned off, a token revoked) or a
@@ -203,35 +203,16 @@ let opening: Promise<void> | null = null;
  * `ensure_operator` fails with `E_PROVISION` when the control API has never
  * been enabled, and `operator_status` returns `no_mcp` first precisely so
  * that path is unreachable.
- */
-export function openAgent(): Promise<void> {
-  // Re-entrancy guard. Without it a double-click (or ⌘E while the first
-  // press is still on the wire) issues two `ensure_operator` calls, and
-  // Tauri runs commands concurrently. The backend now serialises them too —
-  // `operator_birth_lock` in `service/operator.rs` — but this is the layer
-  // that should not have asked twice in the first place: the second caller
-  // wants the same answer as the first, and joining the in-flight promise IS
-  // that answer.
-  //
-  // Not a boolean flag: a flag would let the second caller return before the
-  // agent exists, and the panel would render `unknown` over a session that
-  // is halfway born.
-  //
-  // Opening the panel happens HERE and not in `openAgentOnce`, because it is
-  // what every caller wants whether it starts the birth or joins one already
-  // running. Inside the work function it ran once, before the first `await`,
-  // so closing the sheet mid-birth and pressing again returned a promise
-  // already long past that line: the button did nothing, visibly, until the
-  // birth resolved.
-  agentPanelOpen.set(true);
-  return ensureAgent();
-}
-
-/**
- * Make sure there is an agent, without opening the floating sheet: what
- * Control (redesign step 9.1) runs when it shows, since in the New layout the
- * agent lives in the right column and not in the sheet. Shares `openAgent`'s
- * re-entrancy guard, so ⌘E pressed mid-birth joins the birth in flight.
+ *
+ * Re-entrancy guard: without it a double-click (or ⌘E while the first press
+ * is still on the wire) issues two `ensure_operator` calls, and Tauri runs
+ * commands concurrently. The backend serialises them too —
+ * `operator_birth_lock` in `service/operator.rs` — but this is the layer that
+ * should not have asked twice in the first place: the second caller wants the
+ * same answer as the first, and joining the in-flight promise IS that answer.
+ * Not a boolean flag: a flag would let the second caller return before the
+ * agent exists, and Control would render `unknown` over a session that is
+ * halfway born.
  */
 export function ensureAgent(): Promise<void> {
   if (opening) return opening;
@@ -262,35 +243,6 @@ async function openAgentOnce(): Promise<void> {
 }
 
 /**
- * Close the panel. The agent keeps running — the panel is a window onto a
- * session, not the session itself.
- */
-export function closeAgent(): void {
-  agentPanelOpen.set(false);
-}
-
-/**
- * What the FAB and ⌘E do: open the panel, or close it if it is already open.
- *
- * The design says the chord TOGGLES, and for a fixed sheet pinned over the
- * bottom-right corner of every view that is not a nicety — before this,
- * `agentPanelOpen` was written `true` in one place and `false` nowhere in
- * production code, so the first press covered the corner of the terminal,
- * Hosts and Files for the life of the process with no way back.
- *
- * Closing while the agent is still waking is deliberate and safe: the
- * in-flight `openAgent` runs to completion (nobody cancels a birth halfway
- * through), and reopening finds the session it created.
- */
-export function toggleAgent(): Promise<void> {
-  if (get(agentPanelOpen)) {
-    closeAgent();
-    return Promise.resolve();
-  }
-  return openAgent();
-}
-
-/**
  * Restart the operator's session (the `lost` recovery) and refresh status
  * afterward. If the session row is not in the store — the panel was never
  * opened, or status has not resolved yet — there is nothing to restart.
@@ -303,7 +255,7 @@ export async function restartOperator(): Promise<void> {
   operatorError.set(null);
   const session = get(operatorSession);
   if (!session) {
-    operatorError.set("The agent's session is not known yet. Close the panel and open it again.");
+    operatorError.set("The agent's session is not known yet. Leave Control and open it again.");
     return;
   }
   // The operator's session is an ordinary fleet row with an owner, so a
@@ -336,7 +288,7 @@ export async function replaceOperator(): Promise<void> {
   operatorError.set(null);
   const session = get(operatorSession);
   if (!session) {
-    operatorError.set("The agent's session is not known yet. Close the panel and open it again.");
+    operatorError.set("The agent's session is not known yet. Leave Control and open it again.");
     return;
   }
   const blocked = sessionActionBlocked(session, 'kill_session');

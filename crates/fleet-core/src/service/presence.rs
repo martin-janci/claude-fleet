@@ -195,6 +195,27 @@ pub struct PresenceView {
     pub heartbeat_secs: i64,
 }
 
+/// Whose view of the board is the owner's, for [`session_presence`]: the
+/// session's owner, and on an `unclaimed` row (no owner) the caller who
+/// sees it by the unclaimed rule rather than a grant (review r04): the one
+/// person of a one-person hub, or the hub owner's master token — the people
+/// `ViewScope::sees_session_row` lets read an unclaimed row as their own.
+/// Before this, each of them saw only themselves there. A grantee (whose
+/// reach is the grant) is still answered the owner, here nobody, and
+/// themselves.
+pub fn presence_owner(
+    owner: Option<i64>,
+    unclaimed: bool,
+    by_grant: bool,
+    person: Option<i64>,
+) -> Option<i64> {
+    match owner {
+        Some(o) => Some(o),
+        None if unclaimed && !by_grant => person,
+        None => None,
+    }
+}
+
 /// Record the caller's report and answer the session's viewers. The caller
 /// has already passed the session's `Reach::Watch` gate; `person` is the
 /// person that caller proves (`None` reports nothing and only reads), and
@@ -356,6 +377,28 @@ mod tests {
         let v = session_presence(&s, &b, Some(1), None, None, &args, 100).unwrap();
         assert!(v.viewers.is_empty());
         assert!(b.viewers(7, 100).is_empty());
+    }
+
+    /// Review r04: on an unclaimed row the people who see it by the
+    /// unclaimed rule see each other; a grantee still sees only themselves.
+    #[test]
+    fn an_unclaimed_rows_viewers_see_each_other_and_a_grantee_does_not() {
+        assert_eq!(presence_owner(Some(1), true, false, Some(2)), Some(1));
+        assert_eq!(presence_owner(None, true, false, Some(2)), Some(2));
+        assert_eq!(presence_owner(None, true, true, Some(2)), None);
+        assert_eq!(presence_owner(None, false, false, Some(2)), None);
+        let s = Store::open_in_memory().unwrap();
+        let ana = s.create_person("ana", None).unwrap().id;
+        let bo = s.create_person("bo", None).unwrap().id;
+        let b = PresenceBoard::new();
+        b.here(7, bo, Some("bo-mac"), 90);
+        let args = SessionPresenceArgs {
+            session_id: 7,
+            leaving: false,
+        };
+        let owner = presence_owner(None, true, false, Some(ana));
+        let v = session_presence(&s, &b, owner, Some(ana), Some("mac"), &args, 100).unwrap();
+        assert_eq!(v.viewers.len(), 2, "{:?}", v.viewers);
     }
 
     #[test]

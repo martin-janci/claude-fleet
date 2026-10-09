@@ -4,12 +4,14 @@
   // claude_status. `brief` is the read-only "Outside fleet" row's variant:
   // no activity in the tooltip, no inactive chip and no spinner.
   import { isInactiveAgent, type SessionRow } from './sessions';
-  import { claudeStatusColor, claudeStatusLabel, stuckStatus, STUCK_COLOR } from './attention';
+  import { claudeStatusColor, claudeStatusLabel, jevOutcome, stuckStatus, STUCK_COLOR } from './attention';
   import Loader from './Loader.svelte';
 
   let { sess, brief = false }: { sess: SessionRow; brief?: boolean } = $props();
 
   const activity = $derived(!brief && sess.current_activity ? ' — ' + sess.current_activity : '');
+  /** Review r15 F17: a row Jev's turn reading moved into Needs you says so. */
+  const jev = $derived(brief || sess.stuck_kind ? null : jevOutcome(sess));
 </script>
 
 {#if sess.stuck_kind}
@@ -34,6 +36,19 @@
     title="Claude: {sess.claude_status}{activity}"
   >{#if !brief && sess.claude_status === 'working'}<Loader name="comet" size={12} class="chip-loader" />{/if}{claudeStatusLabel(sess.claude_status)}</span>
 {/if}
+{#if jev}
+  <!-- Attribution, not a status: the row's status chip above says the state
+       in the six words; this says who read it so (design-system/ai.md). -->
+  <span
+    class="jev-mark"
+    data-testid="jev-outcome-chip"
+    data-outcome={jev}
+    title={jev === 'asked'
+      ? 'Jev read the end of the last turn as a question for you. A proposal, not a decision: the next hook replaces it.'
+      : 'Jev read the end of the last turn as stuck. A proposal, not a decision: the next hook replaces it.'}
+    >✦ Proposed by Jev</span
+  >
+{/if}
 
 <style>
   .claude-chip {
@@ -49,6 +64,18 @@
     vertical-align: -1px;
   }
   .stuck-chip { font-weight: 600; }
+  .jev-mark {
+    font-size: var(--text-2xs);
+    padding: 0.05rem 0.3rem;
+    border-radius: var(--radius-xs);
+    border: 1px solid;
+    flex-shrink: 0;
+    white-space: nowrap;
+    margin-left: 0.25rem;
+    color: var(--fg-2);
+    background: var(--chip-bg);
+    border-color: color-mix(in srgb, var(--ai-pre) 40%, transparent);
+  }
   .inactive-chip {
     background: color-mix(in srgb, var(--fg-muted) 18%, transparent);
     color: var(--fg-muted);

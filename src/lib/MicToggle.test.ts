@@ -1,7 +1,6 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
-import { uiLayout } from './prefs';
 import { get } from 'svelte/store';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => undefined) }));
 import { invoke } from '@tauri-apps/api/core';
@@ -50,11 +49,10 @@ describe('MicToggle', () => {
 });
 
 describe('MicToggle loaders (redesign 5.14, New layout)', () => {
-  afterEach(() => { uiLayout.set('classic'); vi.useRealTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
 
   it('a Sonar follows the mic level while it records, then a Dot wave while it transcribes', async () => {
     vi.useFakeTimers();
-    uiLayout.set('new');
     voiceState.set({ sessionId: 5, state: 'claimed', error: null, tipShown: true });
     render(MicToggle, { props: { session: sess, transport: 'ssh' } });
     applyVoiceEvent({ session_id: 5, state: 'capturing' });
@@ -82,9 +80,4 @@ describe('MicToggle loaders (redesign 5.14, New layout)', () => {
     expect(get(voiceState).state).toBe('claimed');
   });
 
-  it('Classic shows neither', () => {
-    voiceState.set({ sessionId: 5, state: 'capturing', error: null, tipShown: true, level: 0.5 });
-    render(MicToggle, { props: { session: sess, transport: 'ssh' } });
-    expect(screen.queryByTestId('mic-listening')).toBeNull();
-  });
 });

@@ -13,13 +13,11 @@ import { controlTab } from './control';
 import { sessions } from './sessions';
 import { operatorState, operatorSession } from './operator';
 import { session } from './hosts_fixture';
-import { uiLayout } from './prefs';
 import { expectAccessible } from './a11y_check';
 
 const asking = session('mac', 'asking', { claude_status: 'blocked', last_prompt: 'Fix the login bug' });
 
 beforeEach(() => {
-  uiLayout.set('new');
   controlViews.set(defaultLayout());
   controlTab.set('chat');
   sessions.set([asking, session('mac', 'busy', { claude_status: 'working' })]);
@@ -27,7 +25,6 @@ beforeEach(() => {
   operatorSession.set(session('local', 'fleet-operator', { id: 7 }));
 });
 afterEach(() => {
-  uiLayout.set('classic');
   sessions.set([]);
   operatorSession.set(null);
 });

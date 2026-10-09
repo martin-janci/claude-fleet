@@ -1,5 +1,5 @@
 <script lang="ts" generics="G extends string">
-  // The left list's Filters section in the New layout (Orbit Fleet redesign
+  // The left list's Filters section (Orbit Fleet redesign
   // step 3.7), the same for the Sessions list and the Work view: closed, it
   // is one row (search · Filters · Group); open, the panel under it holds
   // every other control, under the headings of `FILTER_SECTIONS`

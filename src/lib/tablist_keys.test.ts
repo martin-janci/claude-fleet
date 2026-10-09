@@ -65,6 +65,7 @@ describe('tablistKeys', () => {
 
 // Serial files wait for their slot; each row is removed when its file takes
 // `use:tablistKeys` (the test fails a row that no longer needs it).
+// `src/App.svelte` left with Classic's view tabs (step 13.1).
 const WAITING_FOR_SLOT: string[] = [];
 
 describe('every tablist answers the arrow keys (review r11)', () => {

@@ -15,7 +15,6 @@
   import { timeAgo } from './session_status';
   import { statusDotClass } from './trackers';
   import { candidatesFor, inScope, refreshTidy, requestTidy, tidyReport } from './tidy';
-  import { uiLayout } from './prefs';
   import MorningBrief from './MorningBrief.svelte';
   import MissionNudge from './MissionNudge.svelte';
   import Skeleton from './states/Skeleton.svelte';
@@ -201,12 +200,10 @@
     <p class="error" role="alert" data-testid="today-error">Couldn't load Today: {error}. Refresh tries again.</p>
   {/if}
 
-  {#if $uiLayout === 'new'}
-    <!-- Redesign 9.11: the brief drafted last; a new one only on Refresh. -->
-    <MorningBrief />
-    <!-- Redesign 9.10: stuck missions, with the next step Jev proposes. -->
-    <MissionNudge />
-  {/if}
+  <!-- Redesign 9.11: the brief drafted last; a new one only on Refresh. -->
+  <MorningBrief />
+  <!-- Redesign 9.10: stuck missions, with the next step Jev proposes. -->
+  <MissionNudge />
 
   {#if view}
     {#if isEmptyView(view)}

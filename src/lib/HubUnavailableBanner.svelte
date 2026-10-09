@@ -26,7 +26,7 @@
        errors; it is kept, under Details. -->
   <details class="details"><summary>Details</summary><code data-testid="hub-unavailable-details">{reason}</code></details>
   <button type="button" onclick={onsettings} data-testid="hub-unavailable-settings"
-    >Settings → Hub</button
+    >Settings → Hub &amp; sync</button
   >
 </div>
 

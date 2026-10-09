@@ -1,10 +1,9 @@
 <!--
-  Toolkit (Orbit Fleet redesign step 3.16, board Toolkit). The New layout's
-  screen for today's Assets workspace: Skills, the catalog's skills as a host
+  Toolkit (Orbit Fleet redesign step 3.16, board Toolkit). The screen for
+  today's Assets workspace: Skills, the catalog's skills as a host
   matrix with drift per host, and Assets, the workspace itself (layers and
   changesets) unchanged. Sync and Edit hand over to the Assets tab, where the
-  plan, the confirm and the editor already live. Classic keeps the Assets
-  overlay.
+  plan, the confirm and the editor already live.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';

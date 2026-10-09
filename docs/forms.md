@@ -88,6 +88,11 @@ Every field has `name` (`[a-z][a-z0-9_]*`, ≤ 40 chars, unique across the
 A `required` bool means "must be on" (a consent box). A `required`
 multiselect needs at least one value. A `value` must be valid for its
 field (an option value, inside min/max, …).
+The agent never decides for the person: on the desktop and the phone a
+`required` bool starts unticked whatever its `value`, and a bool, or a
+select or multiselect option, whose label names a risky step (the quick-answer
+`RISKY_WORDS`: push, approve, allow, deploy, production, …) does not start
+chosen.
 
 ### Conditions
 
@@ -178,8 +183,8 @@ is a fleet.form/1 spec in `src/lib/forms/wizards/<id>.json`, listed in
 spec renders two ways:
 
 - **As a dialog**, `WizardDialog.svelte`: the spec's title and intro, the
-  steps, Cancel. Settings › Hub's *Link to a hub…* is `link_hub`; in the
-  New layout, Settings › Devices' *Pair a device* is `pair_device`.
+  steps, Cancel. Settings › Hub's *Link to a hub…* is `link_hub`;
+  Settings › Devices' *Pair a device* is `pair_device`.
 - **In the chat**, `ChatForm.svelte`: a card Control or the app writes into
   the conversation. While the spec is still being written it draws in (a
   small Atom, what is being read, each field once its name, type and label
@@ -211,7 +216,7 @@ worktree (a new one with its branch and base, or one the opener offers),
 then the label and, for Claude Code, model, effort and login profile (a
 shell asks what to run instead). Its run (`new_session_wizard.ts`) makes
 the same `new_session` call the dialog makes, so the answered card carries
-the Pulse while the agent comes up. In the New layout, Get started's
+the Pulse while the agent comes up. Get started's
 *Create first session* opens it as a dialog and selects the session it
 started; ⌘N keeps its dialog, which holds what a form cannot
 hold: the duplicate check, the account headroom ask, a ticket start and

@@ -1,5 +1,5 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
@@ -7,7 +7,6 @@ import FilesPanel from './FilesPanel.svelte';
 import type { SessionRow } from './sessions';
 import type { BranchDiff, ChangedFile } from './files';
 import type { Commit } from './history';
-import { uiLayout } from './prefs';
 import { expectAccessible } from './a11y_check';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
@@ -41,7 +40,6 @@ let branchFails = false;
 beforeEach(() => {
   branchDiff = TWO_AHEAD;
   branchFails = false;
-  uiLayout.set('new');
   invoke.mockReset();
   invoke.mockImplementation(async (cmd: string, payload: { args: Record<string, unknown> }) => {
     switch (cmd) {
@@ -59,8 +57,6 @@ beforeEach(() => {
     }
   });
 });
-
-afterEach(() => uiLayout.set('classic'));
 
 function mount() {
   return render(FilesPanel, { props: { session: { id: 1 } as SessionRow } });
@@ -128,7 +124,7 @@ describe('FilesPanel Changed: committed groups', () => {
     expect(screen.queryByTestId('group-uncommitted')).toBeNull();
   });
 
-  it('an older hub without the tool keeps the classic flat list', async () => {
+  it('an older hub without the tool keeps the flat list', async () => {
     branchFails = true;
     mount();
     await screen.findByText('docs/hub.md');
@@ -137,11 +133,4 @@ describe('FilesPanel Changed: committed groups', () => {
     expect(screen.queryByTestId('branch-push-bar')).toBeNull();
   });
 
-  it('the classic layout never asks for the branch diff', async () => {
-    uiLayout.set('classic');
-    mount();
-    await screen.findByText('docs/hub.md');
-    expect(invoke.mock.calls.some((x) => x[0] === 'repo_branch_diff')).toBe(false);
-    expect(screen.queryByTestId('branch-push-bar')).toBeNull();
-  });
 });

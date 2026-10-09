@@ -1,24 +1,18 @@
 <script lang="ts">
   // The task page's shared-work sections (design 2026-09-29 §4): the brief
-  // (a native task's notes), subtasks (+ add, Start), agent proposals
+  // (a native task's notes), subtasks (+ add, and the Start split button), agent proposals
   // (accept / reject; rejected behind a toggle), delegated jobs with their
   // result, and agent steps per session — "per the agent", never a status.
   // `part` splits them around the page's Sessions list: the work above it,
   // the steps below. All text renders as text.
   import { createWorkTask, decideWorkProposal } from './work';
-  import { startWork } from './trackers';
-  import { selectSessionExplicitly } from './selection';
-  import { hubStatus, hubActionBlocked } from './hub';
-  import { hubConnection } from './hub_connection';
   import { duplicateProposal, openTask, readErrorText, type TaskDetail } from './work_view';
   import ProposedBy from './ProposedBy.svelte';
   import WorkButton from './WorkButton.svelte';
-  import { uiLayout } from './prefs';
   import type { Result } from './result';
 
   let { detail, part = 'all' }: { detail: TaskDetail; part?: 'all' | 'work' | 'steps' } = $props();
 
-  const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
   const showWork = $derived(part !== 'steps');
   const showSteps = $derived(part !== 'work');
   // A subtask's parent is never itself a subtask; a bare key has no item.
@@ -49,11 +43,6 @@
     if (!r.ok) return;
     newTitle = '';
     adding = false;
-  }
-
-  async function startSubtask(itemId: number, projectId: number | null | undefined) {
-    const r = await run(startWork({ item_id: itemId, ...(projectId != null ? { project_id: projectId } : {}) }));
-    if (r.ok) selectSessionExplicitly(r.value);
   }
 </script>
 
@@ -97,18 +86,9 @@
               >from a proposal</span
             >{/if}
           <span class="spacer"></span>
-          {#if s.status === 'todo' && s.live_sessions === 0 && $uiLayout === 'new'}
+          {#if s.status === 'todo' && s.live_sessions === 0}
             <!-- Redesign 6.6: the same split button as a task row. -->
             <WorkButton task={{ ...s, sessions: [] }} />
-          {:else if s.status === 'todo' && s.live_sessions === 0}
-            <button
-              class="btn"
-              type="button"
-              data-testid="task-subtask-start"
-              disabled={busy || startBlocked !== null}
-              title={startBlocked ?? 'Start a session for this subtask'}
-              onclick={() => void startSubtask(s.item_id, s.project_id)}>Start</button
-            >
           {:else}
             <span class="muted">{s.live_sessions > 0 ? `${s.live_sessions} live` : (s.job_state ?? s.status ?? '')}</span>
           {/if}
@@ -127,7 +107,7 @@
             {#if p.why}<p class="text">{p.why}</p>{/if}
             {#if p.notes}<p class="text muted">{p.notes}</p>{/if}
             {#if p.proposed_by}<p class="muted small">Proposed by {p.proposed_by}</p>{/if}
-            {#if $uiLayout === 'new' && p.duplicate}
+            {#if p.duplicate}
               <!-- Redesign 6.9 (K4): Jev's "may duplicate". Merge rejects
                    the proposal (the existing task covers it); Keep both
                    accepts it. A person decides either way. -->

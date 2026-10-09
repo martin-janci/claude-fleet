@@ -8,6 +8,7 @@
   import {
     freshness,
     leftPct,
+    severityLeft,
     paceFraction,
     severity,
     type UsageWindowKind,
@@ -35,7 +36,7 @@
   const left = $derived(win && known ? leftPct(win) : null);
   const used = $derived(left === null ? null : 100 - left);
   const level = $derived(
-    win && left !== null ? severity(window, left, win.resets_at, now, hasExtraUsage) : null,
+    win && left !== null ? severity(window, severityLeft(win), win.resets_at, now, hasExtraUsage) : null,
   );
   const pace = $derived(
     window === 'weekly' && win && known ? paceFraction(win.resets_at, now) : null,

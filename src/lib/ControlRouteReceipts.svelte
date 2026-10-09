@@ -2,8 +2,8 @@
   Redesign step 9.9 (Jev K2): under what the person just sent in Control,
   where it goes: "About Hub federation v2 · Proposed by Jev · Change", or,
   for a message too short or unclear to route, a question with the
-  missions and sessions to pick from. Mounted beside Control's composer in
-  the New layout; it watches the outbox for this session's prompts once
+  missions and sessions to pick from. Mounted beside Control's composer;
+  it watches the outbox for this session's prompts once
   they are sent, and routes each one once.
 -->
 <script lang="ts">

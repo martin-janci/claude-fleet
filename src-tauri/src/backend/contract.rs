@@ -44,7 +44,7 @@
 //! # Regenerating the golden file
 //!
 //! ```text
-//! REGEN_HUB_CONTRACT=1 cargo test -p claude-fleet --lib contract
+//! REGEN_HUB_CONTRACT=1 cargo fleet-test -- the_hubs_field_names_are_the_ones_the_desktop_reads
 //! ```
 //!
 //! Read the diff before committing it. A key that changed name is the hub

@@ -1,9 +1,8 @@
-<!-- The new layout's 44 px header (redesign step 3.17, Main board): the
-     Orbit mark and name, the ⌘K command field, the account pills (health
-     dot, name, both windows), and Automation with Pause all. Classic has no
-     header; this renders only under ui.layout = new. Automation (step 8.4)
-     says the active missions and today's spend and opens the Automation
-     screen; Pause all is `automation.paused`, and Resume clears it. -->
+<!-- The 44 px header (redesign step 3.17, Main board): the Orbit mark and
+     name, the ⌘K command field, the account pills (health dot, name, both
+     windows), and Automation with Pause all. Automation (step 8.4) says the
+     active missions and today's spend and opens the Automation screen; Pause
+     all is `automation.paused`, and Resume clears it. -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import AppHeader from './kit/AppHeader.svelte';

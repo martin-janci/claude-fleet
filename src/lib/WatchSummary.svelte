@@ -9,7 +9,7 @@
   import { draftedBy } from './ai_proposal';
   import DraftedLabel from './DraftedLabel.svelte';
   import type { SessionRow } from './sessions';
-  import { checkLabel, clock, defaultSince, sessionSummarySince, type WatchSummary } from './watch_summary';
+  import { checkLabel, clock, defaultSince, sessionSummarySince, turnsLabel, type WatchSummary } from './watch_summary';
 
   let { session }: { session: Pick<SessionRow, 'id' | 'last_viewed_at'> } = $props();
 
@@ -22,9 +22,12 @@
 
   const since = $derived(defaultSince(session.last_viewed_at, Math.floor(Date.now() / 1000)));
 
-  // A different session starts from nothing.
+  // A different session starts from nothing. Keyed on the id, not the row:
+  // a row event hands the same session back as a new object, and that must
+  // not clear the summary (review r16, as #721 fixed at the source).
+  const sessionId = $derived(session.id);
   $effect(() => {
-    void session.id;
+    void sessionId;
     summary = null;
     error = null;
     refused = null;
@@ -49,7 +52,7 @@
   }
 
   const meta = $derived(
-    summary ? draftedBy(summary.model, summary.host_alias, `from ${summary.turns} turn${summary.turns === 1 ? '' : 's'}`) : '',
+    summary ? draftedBy(summary.model, summary.host_alias, turnsLabel(summary)) : '',
   );
 </script>
 

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { checkAnswers, visibleSteps, stepProblems, type FormSpec } from './form_model';
+import { checkAnswers, visibleSteps, stepProblems, startingValues, type FormSpec } from './form_model';
 
 const doc = JSON.parse(readFileSync('docs/form-examples/answers.json', 'utf8'));
 const spec = doc.spec as FormSpec;
@@ -67,5 +67,44 @@ describe('unknown keys', () => {
       const unknown = r.problems.filter((p) => p.problem === 'is not a field of this form');
       expect(unknown.map((p) => p.field)).toEqual(['aa', 'mm', 'zz']);
     }
+  });
+});
+
+// Review r09: AI never decides. An agent's form does not start with a
+// required box ticked, nor with a risky option chosen; the app's own wizards
+// keep their defaults.
+describe('startingValues', () => {
+  const risky: FormSpec = {
+    spec: 'fleet.form/1',
+    title: 'Ship it',
+    steps: [
+      {
+        title: 'One',
+        fields: [
+          { name: 'agree', type: 'bool', label: 'I have read the plan', required: true, value: true },
+          { name: 'push', type: 'bool', label: 'Push to origin when done', value: true },
+          { name: 'tests', type: 'bool', label: 'Run the tests', value: true },
+          { name: 'target', type: 'select', label: 'Where', value: 'prod', options: [['prod', 'Deploy to production'], ['stage', 'Staging']] },
+          { name: 'safe', type: 'select', label: 'Branch', value: 'stage', options: [['prod', 'Deploy to production'], ['stage', 'Staging']] },
+          { name: 'steps', type: 'multiselect', label: 'Steps', value: ['lint', 'approve'], options: [['lint', 'Lint'], ['approve', 'Approve the PR']] },
+          { name: 'token', type: 'secret', label: 'Token', value: 'x' },
+        ],
+      },
+    ],
+  };
+
+  it("drops an agent's required tick and its risky choices, and keeps the rest", () => {
+    expect(startingValues(risky, true)).toEqual({ agree: false, push: false, tests: true, safe: 'stage', steps: ['lint'] });
+  });
+
+  it("keeps the app's own defaults, never a secret's", () => {
+    expect(startingValues(risky, false)).toEqual({
+      agree: true,
+      push: true,
+      tests: true,
+      target: 'prod',
+      safe: 'stage',
+      steps: ['lint', 'approve'],
+    });
   });
 });

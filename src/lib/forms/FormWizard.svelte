@@ -8,10 +8,10 @@
   import { destination } from '../destination';
   import { matchShortcut } from '../shortcuts';
   import { detectMac, isEditable } from '../terminal_keys';
-  import { stepProblems, visibleSteps } from './form_model';
+  import { startingValues, stepProblems, visibleSteps } from './form_model';
   import type { FieldProblem, FormField, FormProposal, FormSpec, Values } from './forms';
   import ProposedBy from '../ProposedBy.svelte';
-  import { preselect } from '../ai_proposal';
+  import { neverDecidesField, preselect } from '../ai_proposal';
   import { QUICK_ANSWER, risky } from '../quick_answer';
   import Loader from '../Loader.svelte';
 
@@ -24,6 +24,7 @@
     initial = {},
     sending = 'Sending…',
     buttonLoader = true,
+    ownDefaults = false,
     onsubmit,
     onunplaced,
     oncancel,
@@ -43,6 +44,9 @@
     /** The Comet in the submit button while sending; off when the host
      *  draws the flow's own loader (one loader per screen, review r12). */
     buttonLoader?: boolean;
+    /** The spec is the app's own (a wizard), so its defaults stand. An
+     *  agent's form starts with no risky default (`startingValues`). */
+    ownDefaults?: boolean;
     onsubmit: (values: Values) => void;
     /** Server problems whose field is on no visible step (nowhere to show them). */
     onunplaced?: (problems: FieldProblem[]) => void;
@@ -51,17 +55,10 @@
   } = $props();
   const uid = $props.id();
 
-  function defaults(s: FormSpec): Values {
-    const out: Values = {};
-    for (const step of s.steps)
-      for (const f of step.fields) if (f.type !== 'secret' && f.value !== undefined) out[f.name] = f.value;
-    return out;
-  }
-
   // The spec of one form never changes under the wizard (FormCard unmounts the
   // wizard while it loads another form), so the starting values are read once on purpose.
   // svelte-ignore state_referenced_locally
-  let values = $state<Values>({ ...defaults(spec), ...initial });
+  let values = $state<Values>({ ...startingValues(spec, !ownDefaults), ...initial });
   let index = $state(0);
   const steps = $derived(visibleSteps(spec, values));
   const step = $derived(steps[Math.min(index, steps.length - 1)]);
@@ -119,7 +116,8 @@
   const proposed = $derived.by(() => {
     if (dismissed || !proposal || preselect(QUICK_ANSWER, proposal) === null) return null;
     const f = spec.steps.flatMap((s) => s.fields).find((x) => x.name === proposal.field);
-    const opt = f?.type === 'select' ? f.options?.find(([v]) => v === proposal.value) : undefined;
+    if (!f || neverDecidesField(f)) return null;
+    const opt = f.type === 'select' ? f.options?.find(([v]) => v === proposal.value) : undefined;
     return opt && !risky(opt[1]) && !risky(opt[0]) ? proposal : null;
   });
   $effect(() => {
@@ -226,6 +224,7 @@
                 role="radio"
                 class="opt"
                 class:on={values[f.name] === v}
+                class:ai-pre={proposed?.field === f.name && proposed.value === v && values[f.name] === v}
                 aria-checked={values[f.name] === v}
                 data-testid={`form-field-${f.name}-${v}`}
                 disabled={off}
@@ -248,6 +247,7 @@
             <select
               id={`${uid}-${f.name}`}
               data-testid={`form-field-${f.name}`}
+              class:ai-pre={proposed?.field === f.name && values[f.name] === proposed.value}
               value={str(f)}
               disabled={off}
               onchange={(e) => set(f.name, (e.currentTarget as HTMLSelectElement).value || undefined)}>

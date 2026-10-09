@@ -37,7 +37,7 @@ fn generated_json_is_current() {
     assert_eq!(
         actual, expected,
         "\n\nsrc/lib/hub_verdicts.generated.json is stale. Regenerate with:\n  \
-         {REGEN_ENV}=1 cargo test -p claude-fleet --lib verdict_gen\n"
+         {REGEN_ENV}=1 cargo fleet-test -- verdict_gen\n"
     );
 }
 
@@ -62,7 +62,7 @@ fn doc_table_is_current() {
     assert_eq!(
         doc, expected,
         "\n\ndocs/hub.md's generated verdict table is stale. Regenerate with:\n  \
-         {REGEN_ENV}=1 cargo test -p claude-fleet --lib verdict_gen\n"
+         {REGEN_ENV}=1 cargo fleet-test -- verdict_gen\n"
     );
 }
 

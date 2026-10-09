@@ -1,12 +1,9 @@
-// Control (Orbit Fleet redesign step 9.1): the New layout's rail item for the
+// Control (Orbit Fleet redesign step 9.1): the rail item for the
 // fleet agent. The operator panel moves out of its floating sheet into the
 // right column, and Today moves here from the Inbox as Control's second tab.
-// ⌘E opens Control and ⌘⇧T its Today tab, in the New layout only; Classic
-// keeps the sheet (⌘E) and Today over Details (⌘⇧T) exactly as before.
+// ⌘E opens Control and ⌘⇧T its Today tab.
 import { get, writable } from 'svelte/store';
 import { destination, goTo, leave } from './destination';
-import { uiLayout } from './prefs';
-import { todayOpen } from './today';
 
 export type ControlTab = 'chat' | 'today';
 
@@ -26,14 +23,11 @@ export function toggleControl(tab: ControlTab): void {
   else openControl(tab);
 }
 
-/** ⌘⇧T and the switcher's Today row: Control's Today tab in the New layout,
- *  Today over Details in Classic. */
+/** ⌘⇧T and the switcher's Today row: Control's Today tab. */
 export function toggleToday(): void {
-  if (get(uiLayout) === 'new') toggleControl('today');
-  else todayOpen.update((v) => !v);
+  toggleControl('today');
 }
 
 export function openToday(): void {
-  if (get(uiLayout) === 'new') openControl('today');
-  else todayOpen.set(true);
+  openControl('today');
 }

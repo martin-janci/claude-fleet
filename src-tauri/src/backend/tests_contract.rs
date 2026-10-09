@@ -991,6 +991,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             check: fleet_core::service::decide::summary_check::Check::Passed,
             since: 1,
             turns: 2,
+            turns_capped: false,
             model: "haiku".into(),
             host_alias: "mefistos".into(),
             at: 3,
@@ -1308,7 +1309,7 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
         fleet_core::wire_contract::CONTRACT_REVISION,
         "{GOLDEN_PATH} was generated at wire-contract revision {}, but \
          fleet_core::wire_contract::CONTRACT_REVISION is now {} — regenerate \
-         with `{REGEN_ENV}=1 cargo test -p claude-fleet --lib contract` so \
+         with `{REGEN_ENV}=1 cargo fleet-test -- the_hubs_field_names_are_the_ones_the_desktop_reads` so \
          the golden's recorded revision matches, and read the diff",
         golden.revision,
         fleet_core::wire_contract::CONTRACT_REVISION,
@@ -1349,7 +1350,7 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
          None, and the desktop renders plausible wrong data with nothing in \
          the log. If \
          the rename is deliberate, regenerate with \
-         `{REGEN_ENV}=1 cargo test -p claude-fleet --lib contract` and read the \
+         `{REGEN_ENV}=1 cargo fleet-test -- the_hubs_field_names_are_the_ones_the_desktop_reads` and read the \
          diff.",
         complaints.join("\n\n")
     );

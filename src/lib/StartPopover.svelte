@@ -10,7 +10,6 @@
   import { selectSessionExplicitly } from './selection';
   import { decideWorkProposal } from './work';
   import { readErrorText } from './work_view';
-  import { uiLayout } from './prefs';
   import ProposedBy from './ProposedBy.svelte';
   import DraftField from './DraftField.svelte';
   import { startWork, type StartWorkArgs } from './trackers';
@@ -61,14 +60,14 @@
   // svelte-ignore state_referenced_locally
   const suggested = suggestedProjectId(initial);
   // svelte-ignore state_referenced_locally
-  const suggestedPct = initial.suggested_project?.confidence_pct ?? null;
-  // svelte-ignore state_referenced_locally
   const suggestedProposal = projectProposal(initial);
   // Redesign 8.11: the rule fleet offers after five identical starts, from
   // the first preview; gone once answered.
   // svelte-ignore state_referenced_locally
   let ruleOffer = $state.raw(initial.rule_offer ?? null);
   let ruleAdded = $state<string | null>(null);
+  /** The person picked a repository: Jev's ring comes off (ai.md, r15 F15). */
+  let projectTouched = $state(false);
   let branch = $state('');
   let showBrief = $state(false);
   let busy = $state(false);
@@ -254,8 +253,12 @@
     <select
       data-field="project"
       data-testid="start-popover-project"
+      class:ai-pre={suggested != null && choice.project_id === suggested && !projectTouched}
       value={choice.project_id ?? ''}
-      onchange={(e) => setProject((e.currentTarget as HTMLSelectElement).value)}
+      onchange={(e) => {
+        projectTouched = true;
+        setProject((e.currentTarget as HTMLSelectElement).value);
+      }}
     >
       {#if choice.project_id == null}<option value="">Pick a repository…</option>{/if}
       {#each preview.projects as p (p.id)}
@@ -267,7 +270,6 @@
     </select>
   </label>
   {#if suggested != null && choice.project_id === suggested}
-    {#if $uiLayout === 'new'}
       <ProposedBy
         proposal={suggestedProposal}
         field="project"
@@ -277,14 +279,9 @@
           root?.querySelector<HTMLElement>('[data-field="project"]')?.focus();
         }}
       />
-    {:else}
-      <span class="hint" data-testid="start-popover-suggested"
-        >Proposed by Jev{suggestedPct != null ? ` (${suggestedPct}%)` : ''}: check it before you start.</span
-      >
-    {/if}
   {/if}
 
-  {#if $uiLayout === 'new' && planned?.rule_id != null && choice.project_id === planned.project_id}
+  {#if planned?.rule_id != null && choice.project_id === planned.project_id}
     <span class="hint" data-testid="start-popover-by-rule">Picked by a start rule: change the repository to start elsewhere.</span>
   {/if}
 
@@ -366,13 +363,13 @@
     <pre class="brief" data-testid="start-popover-brief-text">{preview.brief}</pre>
   {/if}
 
-  {#if $uiLayout === 'new' && ruleOffer}
+  {#if ruleOffer}
     <div class="offer" data-testid="start-popover-rule-offer">
       <span>Add rule <strong>{ruleLine(ruleOffer, preview.projects)}</strong>? Next time it starts there without asking.</span>
       <button class="btn btn--quiet" type="button" data-testid="start-popover-rule-add" onclick={() => void answerOffer(true)}>Add rule</button>
       <button class="btn btn--quiet" type="button" data-testid="start-popover-rule-dismiss" onclick={() => void answerOffer(false)}>Dismiss</button>
     </div>
-  {:else if $uiLayout === 'new' && ruleAdded}
+  {:else if ruleAdded}
     <span class="hint" role="status" data-testid="start-popover-rule-added">Rule added: {ruleAdded}. Edit it in Automation.</span>
   {/if}
 

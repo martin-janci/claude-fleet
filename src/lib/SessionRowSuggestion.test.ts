@@ -8,7 +8,6 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import SessionRowItem from './SessionRowItem.svelte';
-import { uiLayout } from './prefs';
 import { hosts } from './hosts';
 import { session } from './hosts_fixture';
 import type { SessionRow, SessionWork } from './sessions';
@@ -104,7 +103,6 @@ describe('a row with a link suggestion', () => {
         ? [{ ...link, source: 'jev', rule: 'R12', evidence: [{ signal: 'jev', rule: 'R12', text: 'ABC-99', note: '82%', at: 1_790_000_000 }] }]
         : null,
     );
-    uiLayout.set('new');
     render(SessionRowItem, { props: props(row({ work_suggested: jev })) });
     const chip = screen.getByTestId('work-suggestion');
     expect(chip.dataset.proposed).toBe('jev');
@@ -117,15 +115,6 @@ describe('a row with a link suggestion', () => {
     await tick();
     const ev = await screen.findByTestId('why-evidence');
     expect(ev.textContent).toMatch(/Jev proposed ABC-99 from the first prompt at \d\d:\d\d \(82%\) · R12/);
-    uiLayout.set('classic');
-  });
-
-  it("keeps Classic's ? on the decision model's suggestion (6.8 parity)", () => {
-    uiLayout.set('classic');
-    render(SessionRowItem, { props: props(row({ work_suggested: { ...suggestion, source: 'jev', rule: 'R12' } })) });
-    const chip = screen.getByTestId('work-suggestion');
-    expect(chip.dataset.proposed).toBeUndefined();
-    expect(chip.textContent).toContain('?');
   });
 
   it('opens the evidence popover from the chip and confirms', async () => {

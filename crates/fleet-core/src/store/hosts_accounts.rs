@@ -433,7 +433,7 @@ impl Store {
         Ok(())
     }
 
-    pub(super) fn get_account_by_uuid(
+    pub(crate) fn get_account_by_uuid(
         &self,
         uuid: &str,
     ) -> Result<Option<AccountRow>, rusqlite::Error> {

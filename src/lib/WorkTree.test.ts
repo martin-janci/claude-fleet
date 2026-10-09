@@ -10,7 +10,6 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkTree from './WorkTree.svelte';
 import { expectAccessible } from './a11y_check';
-import { uiLayout } from './prefs';
 import { workBoardOpen } from './app_views';
 import { sessions } from './sessions';
 import { selectedSession, selectSession, clearSelection } from './selection';
@@ -156,12 +155,11 @@ describe('WorkTree', () => {
     const occ = within(tasks[0]).getAllByTestId('work-occurrence');
     expect(occ.map((o) => o.getAttribute('data-kind'))).toEqual(['primary', 'suggested', 'past']);
     expect(occ[2].textContent).toContain('ended');
-    // The Review tab carries its count.
-    expect(screen.getByTestId('work-tab-review').textContent).toContain('4');
+    // Review is a count beside Tasks.
+    expect(screen.getByTestId('work-review-count').textContent).toBe('4');
   });
 
   it('New layout: fixed tabs Tasks, Missions and Board, with Review as a count', async () => {
-    uiLayout.set('new');
     try {
       render(WorkTree);
       await flush();
@@ -192,12 +190,11 @@ describe('WorkTree', () => {
       expect(screen.getByTestId('work-prs')).toBeTruthy();
       expect(screen.getByTestId('work-tab-prs').getAttribute('aria-selected')).toBe('true');
     } finally {
-      uiLayout.set('classic');
       workBoardOpen.set(false);
     }
   });
 
-  it('the Pull requests tab shows the PRs view beside Tasks, Review and Missions (6.4)', async () => {
+  it('the Pull requests tab shows the PRs view beside Tasks, Missions and Board (6.4)', async () => {
     render(WorkTree);
     await flush();
     expect(screen.queryByTestId('work-prs')).toBeNull();
@@ -206,7 +203,7 @@ describe('WorkTree', () => {
     expect(screen.getByTestId('work-prs')).toBeTruthy();
     expect(screen.queryByTestId('work-review')).toBeNull();
     // Every earlier tab is still there.
-    for (const t of ['tasks', 'review', 'missions']) expect(screen.getByTestId(`work-tab-${t}`)).toBeTruthy();
+    for (const t of ['tasks', 'missions', 'board']) expect(screen.getByTestId(`work-tab-${t}`)).toBeTruthy();
   });
 
   it('opening a section loads it by itself; Load more pages with its own cursor', async () => {
@@ -262,6 +259,34 @@ describe('WorkTree', () => {
     expect(get(taskDetailOpen)).toBe(true);
     await flush();
     expect(screen.getAllByTestId('work-task')[1].classList.contains('selected')).toBe(true);
+  });
+
+  // Review r13 D15 (the Work half): a first load shows nothing for 400 ms and
+  // then a skeleton, never a "Loading work…" line that flashes on a quick load.
+  it('the first load shows no text before 400 ms, then a skeleton', async () => {
+    vi.useFakeTimers();
+    try {
+      treeImpl = () => new Promise(() => {});
+      render(WorkTree);
+      await tick();
+      const box = screen.getByTestId('work-tree-loading');
+      expect(box.textContent?.trim()).toBe('');
+      expect(within(box).queryByTestId('skeleton')).toBeNull();
+      vi.advanceTimersByTime(400);
+      await tick();
+      expect(within(box).getByTestId('skeleton').getAttribute('aria-label')).toBe('Loading work');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The other Work views hold the same rule; the source says it.
+  it('no Work view writes a "Loading …" line of its own', async () => {
+    const { readFileSync } = await import('node:fs');
+    for (const f of ['WorkBoard', 'WorkTree', 'WorkPrs', 'WorkMissions']) {
+      const s = readFileSync(`src/lib/${f}.svelte`, 'utf8');
+      expect(s, f).not.toMatch(/>\s*Loading[^<]*…\s*</);
+    }
   });
 
   it('empty, error with Retry, and an older hub', async () => {
@@ -468,7 +493,7 @@ describe('WorkTree', () => {
   it('a change while Review shows reads only its count; back on Tasks, the tree once', async () => {
     render(WorkTree, { debounceMs: 5 });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-tab-review'));
+    await fireEvent.click(screen.getByTestId('work-review-count'));
     await flush();
     const trees = treeCalls().length;
     const reviews = reviewCalls();
@@ -481,7 +506,7 @@ describe('WorkTree', () => {
     await flush();
     expect(treeCalls()).toHaveLength(trees + 1);
     // Nothing changed since: switching back and forth reads nothing.
-    await fireEvent.click(screen.getByTestId('work-tab-review'));
+    await fireEvent.click(screen.getByTestId('work-review-count'));
     await flush();
     await fireEvent.click(screen.getByTestId('work-tab-tasks'));
     await flush();
@@ -517,7 +542,7 @@ describe('WorkTree', () => {
     ]);
     expect(reviewCalls()).toBe(0);
     expect(screen.getByText('Receipts')).toBeTruthy();
-    expect(screen.getByTestId('work-tab-review').textContent).toContain('2');
+    expect(screen.getByTestId('work-review-count').textContent).toBe('2');
     bumpWorkChanged('session');
     await new Promise((r) => setTimeout(r, 30));
     await flush();
@@ -610,7 +635,7 @@ describe('WorkTree', () => {
     await fireEvent.click(within(group()).getByTestId('work-load-more'));
     await flush();
     expect(within(group()).getAllByTestId('work-task')).toHaveLength(3);
-    await fireEvent.click(screen.getByTestId('work-tab-review'));
+    await fireEvent.click(screen.getByTestId('work-review-count'));
     await flush();
     const before = treeCalls().length;
     noteWorkChanged([{ what: 'resync' }]);
@@ -632,7 +657,7 @@ describe('WorkTree', () => {
     expect(treeCalls().filter((a) => a.filters?.group === 'label:Payments')).toHaveLength(1);
     expect(screen.getByText('Receipts')).toBeTruthy();
     expect(reviewCalls()).toBe(1);
-    expect(screen.getByTestId('work-tab-review').textContent).toContain('4');
+    expect(screen.getByTestId('work-review-count').textContent).toBe('4');
   });
 
   it('a steady stream of changes still refreshes within the max wait', async () => {
@@ -671,9 +696,10 @@ describe('WorkTree', () => {
     // One read (the list's, archived on); the header still has its filters.
     expect(treeCalls()).toHaveLength(1);
     expect(treeCalls()[0].filters?.archived).toBe(true);
-    expect(screen.getByTestId('work-tab-review').textContent).toContain('4');
-    expect(screen.getByTestId('work-layout-list').getAttribute('aria-pressed')).toBe('true');
-    await fireEvent.click(screen.getByTestId('work-layout-grouped'));
+    expect(screen.getByTestId('work-review-count').textContent).toBe('4');
+    const group = screen.getByTestId('work-group-select') as HTMLSelectElement;
+    expect(group.value).toBe('list');
+    await fireEvent.change(group, { target: { value: 'group' } });
     await flush();
     expect(screen.queryByTestId('task-list')).toBeNull();
     expect(screen.getAllByTestId('work-org').length).toBeGreaterThan(0);
@@ -700,20 +726,15 @@ describe('WorkTree', () => {
   });
 
   it('is accessible', async () => {
-    uiLayout.set('new');
-    try {
-      selectSession(get(sessions)[0]);
-      const { container } = render(WorkTree);
-      await flush();
-      await expectAccessible(container);
-      await fireEvent.click(screen.getByTestId('work-review-count'));
-      await flush();
-      await expectAccessible(container);
-      workLayout.set('list');
-      await flush();
-      await expectAccessible(container);
-    } finally {
-      uiLayout.set('classic');
-    }
+    selectSession(get(sessions)[0]);
+    const { container } = render(WorkTree);
+    await flush();
+    await expectAccessible(container);
+    await fireEvent.click(screen.getByTestId('work-review-count'));
+    await flush();
+    await expectAccessible(container);
+    workLayout.set('list');
+    await flush();
+    await expectAccessible(container);
   });
 });
