@@ -832,6 +832,14 @@ impl HubBackend {
         self.route("list_account_usage", &json!({})).await
     }
 
+    /// `commands::account_usage::check_account_headroom` (contract 14).
+    pub async fn check_account_headroom(
+        &self,
+        args: &fleet_core::service::account_limits::CheckAccountHeadroomArgs,
+    ) -> Result<fleet_core::service::account_limits::Headroom, IpcError> {
+        self.route("check_account_headroom", args).await
+    }
+
     /// `commands::prs::list_pull_requests`.
     pub async fn list_pull_requests(
         &self,
