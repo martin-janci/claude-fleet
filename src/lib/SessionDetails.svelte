@@ -62,8 +62,17 @@
   import { shareSheetFor, sessionBlocked } from './share';
   import { hubConnection } from './hub_connection';
   import { sessionActionRequest, takeSessionAction, type SessionActionId } from './session_actions';
+  import Meter from './kit/Meter.svelte';
+  import { accountUsage } from './account_usage_store';
+  import { leftPct } from './account_usage';
+  import { goTo } from './destination';
+  import { shortcutLabel } from './shortcuts';
+  import { detectMac } from './terminal_keys';
 
-  let { session }: { session: SessionRow } = $props();
+  // Two layouts of one session (UX audit 2026-10-09, I1–I6 and D1–D3): the
+  // inspector beside the conversation (Main board) is a quick read plus the
+  // everyday actions; the Details tab (SessionDetails board) is everything.
+  let { session, variant = 'tab' }: { session: SessionRow; variant?: 'tab' | 'inspector' } = $props();
 
   // None of these three has a hub tool (`commands/sessions.rs`): the
   // pre-flight git inspect and the one-step discard-and-kill both act over
@@ -160,6 +169,25 @@
     session.claude_profile ? session.account_uuid : (session.account_uuid ?? hostRow?.account_uuid ?? null),
   );
   const accountRow = $derived(accountUuid ? ($accountByUuid.get(accountUuid) ?? null) : null);
+
+  const worktree = $derived(parentProject?.worktrees.find((w) => w.id === session.worktree_id) ?? null);
+  const usageSnap = $derived(accountUuid ? ($accountUsage[accountUuid] ?? null) : null);
+  const fiveHour = $derived(usageSnap?.usage?.five_hour ?? null);
+  const week = $derived(usageSnap?.usage?.seven_day ?? null);
+  const prNumber = $derived(session.pr_url?.match(/\/pull\/(\d+)/)?.[1] ?? null);
+  const ORIGIN_WORDS: Record<string, string> = {
+    person: 'You',
+    operator: 'Control',
+    mission: 'A mission',
+    background: 'Background agent',
+    token: 'Control API',
+    routine: 'A routine',
+  };
+  const startedBy = $derived(
+    (session.origin ? ORIGIN_WORDS[session.origin] : undefined) ??
+      (session.started_at ? 'Fleet' : 'Outside fleet'),
+  );
+  const inspectorChord = shortcutLabel('inspector', detectMac(typeof navigator === 'undefined' ? undefined : navigator));
 
   // Switch the session to another login: a restart that resumes the same
   // conversation under it ('' = the host's own login).
@@ -622,436 +650,87 @@
   });
 </script>
 
-<article class="details" data-testid="session-details">
-  <header class="header">
-    {#if renaming}
-      <input
-        bind:this={renameInput}
-        class="title-input"
-        data-testid={renaming === 'label' ? 'details-label' : 'details-rename'}
-        aria-label={renaming === 'label'
-          ? `Label for ${session.tmux_name} (empty clears it)`
-          : `New tmux session name for ${session.tmux_name}`}
-        placeholder={renaming === 'label' ? session.tmux_name : undefined}
-        bind:value={renameValue}
-        onkeydown={onRenameKey}
-        onblur={commitRename}
-      />
-    {:else}
-      <h2
-        class="title"
-        ondblclick={beginLabelEdit}
-        title="Double-click to edit the label"
-      >{session.tmux_name}</h2>
-    {/if}
-    {#if session.friendly_name && renaming !== 'label'}
-      <p class="friendly" data-testid="details-friendly-name">{session.friendly_name}</p>
-    {/if}
-    <div class="sub">
-      <span class="host">{session.host_alias}</span>
-      <span class="status status-{session.status}">{session.status}</span>
-      {#if session.stuck_kind}
-        <span
-          class="chip stuck-chip"
-          data-testid="details-stuck"
-          style="background: color-mix(in srgb, {STUCK_COLOR} 13%, transparent); color: {STUCK_COLOR}; border-color: color-mix(in srgb, {STUCK_COLOR} 40%, transparent);"
-          title={session.current_activity ?? undefined}
-        >{stuckStatus(session.stuck_kind)}{#if session.stuck_since !== null} · {formatElapsed(session.stuck_since, nowSec)}{/if}</span>
-      {:else if session.claude_status}
-        <span
-          class="chip claude-chip"
-          data-testid="details-claude-status"
-          style="background: color-mix(in srgb, {claudeStatusColor(session.claude_status)} 13%, transparent); color: {claudeStatusColor(session.claude_status)}; border-color: color-mix(in srgb, {claudeStatusColor(session.claude_status)} 27%, transparent);"
-          title={session.current_activity ?? undefined}
-        >{claudeStatusLabel(session.claude_status)}</span>
-      {/if}
-      {#if ctxLevel !== null && session.context_pct !== null}
-        <span
-          class="chip"
-          data-testid="details-context"
-          data-level={ctxLevel}
-          style="color: {contextColor(ctxLevel)}; border-color: {contextColor(ctxLevel)};"
-          title="Context window used"
-        >ctx {Math.round(session.context_pct)}%</span>
-      {/if}
-    </div>
-  </header>
+<!-- One component, two layouts (UX audit 2026-10-09, I1-I6 and D1-D3).
+     `inspector` is the Main board's compact column beside the
+     conversation: facts, a few actions, Share and Kill at the foot. `tab` is
+     the SessionDetails board: Facts tiles, Timeline, Related sessions and
+     every action grouped Steer / Place / Share. Both run the same handlers
+     and dialogs below, so nothing moves between them but the layout. -->
+{#snippet act(testid: string, label: string, run: () => void, blocked: string | null, title = '', cls = 'btn btn--quiet is-bounded')}
+  <button class={cls} onclick={run} disabled={blocked !== null} title={blocked ?? title} data-testid={testid}>{label}</button>
+{/snippet}
 
-  <!-- Orbit Fleet 11.11: the watcher's summary tops the facts too. -->
-  <WatchSummary {session} />
-
-  <dl class="meta">
-    <dt>Host</dt>
-    <dd data-testid="session-host">{session.host_alias}</dd>
-
-    <dt>Account</dt>
-    <dd data-testid="session-account">{accountEmailTier(accountRow)}</dd>
-
-    {#if canSwitchLogin}
-      <dt>Login</dt>
-      <dd class="login" data-testid="session-login">
-        <select
-          aria-label="Claude login"
-          data-testid="session-login-pick"
-          value={loginTarget}
-          onchange={(e) => (loginPick = (e.currentTarget as HTMLSelectElement).value)}
-          disabled={restartBlocked !== null}
-          title="The Claude login this session bills: the host's own, or a login profile (~/.claude-profiles/<name>)"
-        >
-          <option value="">Host login</option>
-          {#each loginChoices as p (p.name)}
-            <option value={p.name}>{p.name}{p.email ? ` (${p.email})` : p.account_uuid ? '' : ' (not logged in)'}</option>
-          {/each}
-        </select>
-        {#if loginTarget !== (session.claude_profile ?? '')}
-          <button
-            data-testid="session-login-switch"
-            onclick={() => (confirmingSwitch = true)}
-            disabled={restartBlocked !== null}
-            title={restartBlocked ?? ''}
-          >Switch…</button>
-        {/if}
-      </dd>
-    {/if}
-
-    <dt>Project</dt>
-    <dd>
-      {#if parentProject}
-        {parentProject.project.owner}/{parentProject.project.repo}
-      {:else}
-        <span class="muted">unmapped (orphan)</span>
-      {/if}
-    </dd>
-
-    <dt>Created</dt>
-    <dd>{formatRelative(session.created_at)}</dd>
-
-    <dt>Last activity</dt>
-    <dd>{formatRelative(session.last_activity_at)}</dd>
-
-    <dt>Elapsed</dt>
-    <dd data-testid="details-elapsed" title={session.started_at === null ? 'since tmux created the session (fleet did not start it)' : 'since fleet started the session'}>
-      {formatElapsed(sessionStart(session), nowSec)}
-    </dd>
-
-    {#if session.last_turn_at !== null}
-      <dt>Last turn</dt>
-      <dd data-testid="details-last-turn">{formatRelative(session.last_turn_at)}</dd>
-    {/if}
-
-    {#if session.last_prompt}
-      <dt>Last prompt</dt>
-      <dd class="last-prompt" data-testid="details-last-prompt">{session.last_prompt}</dd>
-    {/if}
-
-    {#if sessionUsageTokens(session) > 0}
-      <dt>Usage</dt>
-      <dd
-        data-testid="details-usage"
-        title="Estimated from the Claude Code transcript's token counts and a built-in per-model price table (override: usage.prices_json). Not a bill."
-      >
-        <span data-testid="details-cost">{#if (session.usage_cost_micros ?? 0) > 0}{formatCostMicros(session.usage_cost_micros)} estimated{:else}unpriced ({session.usage_model ?? 'unknown model'}){/if}</span>
-        <span class="muted">· {formatTokens(session.usage_input_tokens)} in · {formatTokens(session.usage_output_tokens)} out · {formatTokens(session.usage_cache_write_tokens)} cache write · {formatTokens(session.usage_cache_read_tokens)} cache read{#if session.usage_model} · {session.usage_model}{/if}</span>
-      </dd>
-    {/if}
-
-    {#if session.pr_url}
-      <dt>Pull request</dt>
-      <dd data-testid="details-pr">
-        <a class="pr-link" href={session.pr_url} target="_blank" rel="noreferrer">{session.pr_url.replace(/^https:\/\/github\.com\//, '')}</a>
-        {#if session.ci_status}
-          <span
-            class="chip"
-            data-testid="details-ci"
-            style="color: {ciStatusColor(session.ci_status)}; border-color: color-mix(in srgb, {ciStatusColor(session.ci_status)} 33%, transparent);"
-            title="CI checks: {session.ci_status}"
-          >{ciStatusLabel(session.ci_status)}</span>
-        {/if}
-      </dd>
-      {#if hasReading(assessRow(session, nowSec))}
-        <dt>Result</dt>
-        <dd data-testid="details-pr-result"><PrResult {session} {nowSec} /></dd>
-      {/if}
-    {/if}
-
-    {#if reviewedSource}
-      <dt class="meta-label">Reviewing</dt>
-      <dd>
-        <button class="link" onclick={() => selectSessionExplicitly(reviewedSource)} data-testid="reviewing-link">
-          {reviewedSource.tmux_name}
-        </button>
-      </dd>
-    {/if}
-  </dl>
-
-  <TicketCard {session} />
-  <SessionTasks {session} />
-  <LocalWorkspaceCard {session} />
-
-  {#if related.length > 0 || proposedRelated}
-    <section class="related" data-testid="related-sessions">
-      <h3>Related sessions ({related.length + (proposedRelated ? 1 : 0)})</h3>
-      <ul class="related-list">
-        {#if proposedRelated}
-          {@const r = proposedRelated}
-          <li class="proposed" data-testid="related-proposed">
-            <button class="related-row" data-testid="related-proposed-row" onclick={() => selectSessionExplicitly(r)}>
-              <span class="host-badge">[{r.host_alias}]</span>
-              <span class="account">Same work?</span>
-              <span class="status-word" data-status={r.status}>{sessionStatusWord(r)}</span>
-              <span class="sess-name">{r.tmux_name}</span>
-              <span class="age">{formatRelative(r.last_activity_at)}</span>
-            </button>
-            <ProposedBy proposal={relatedProposal} field="related_session" testid="related-proposed-by" />
-          </li>
-        {/if}
-        {#each related as r (r.id)}
-          <li>
-            <button
-              class="related-row"
-              data-testid="related-row"
-              onclick={() => selectSessionExplicitly(r)}
-            >
-              <span class="host-badge">[{r.host_alias}]</span>
-              <span class="account">{accountEmailTier(accountForRow(r))}</span>
-              <span class="status-word" data-status={r.status}>{sessionStatusWord(r)}</span>
-              <span class="sess-name">{r.tmux_name}</span>
-              <span class="age">{formatRelative(r.last_activity_at)}</span>
-            </button>
-          </li>
-        {/each}
-      </ul>
-    </section>
+{#snippet renameField()}
+  {#if renaming}
+    <input
+      bind:this={renameInput}
+      class="title-input"
+      data-testid={renaming === 'label' ? 'details-label' : 'details-rename'}
+      aria-label={renaming === 'label'
+        ? `Label for ${session.tmux_name} (empty clears it)`
+        : `New tmux session name for ${session.tmux_name}`}
+      placeholder={renaming === 'label' ? session.tmux_name : undefined}
+      bind:value={renameValue}
+      onkeydown={onRenameKey}
+      onblur={commitRename}
+    />
   {/if}
+{/snippet}
 
-  {#if reviewsOfThis.length > 0}
-    <section class="related" data-testid="reviews-panel">
-      <h3>Reviews ({reviewsOfThis.length})</h3>
-      <ul class="related-list">
-        {#each reviewsOfThis as r (r.id)}
-          <li>
-            <button
-              class="related-row"
-              data-testid="reviews-row"
-              onclick={() => selectSessionExplicitly(r)}
-            >
-              <span class="host-badge">[{r.host_alias}]</span>
-              <span class="account">{accountEmailTier(accountForRow(r))}</span>
-              <span class="status-word" data-status={r.status}>{sessionStatusWord(r)}</span>
-              <span class="sess-name">{r.tmux_name}</span>
-              <span class="age">{formatRelative(r.last_activity_at)}</span>
-            </button>
-          </li>
-        {/each}
-      </ul>
-    </section>
+{#snippet statusChip()}
+  {#if session.stuck_kind}
+    <span
+      class="chip stuck-chip"
+      data-testid="details-stuck"
+      style="background: color-mix(in srgb, {STUCK_COLOR} 13%, transparent); color: {STUCK_COLOR}; border-color: color-mix(in srgb, {STUCK_COLOR} 40%, transparent);"
+      title={session.current_activity ?? undefined}
+    >{stuckStatus(session.stuck_kind)}{#if session.stuck_since !== null} · {formatElapsed(session.stuck_since, nowSec)}{/if}</span>
+  {:else if session.claude_status}
+    <span
+      class="chip claude-chip"
+      data-testid="details-claude-status"
+      style="background: color-mix(in srgb, {claudeStatusColor(session.claude_status)} 13%, transparent); color: {claudeStatusColor(session.claude_status)}; border-color: color-mix(in srgb, {claudeStatusColor(session.claude_status)} 27%, transparent);"
+      title={session.current_activity ?? undefined}
+    >{claudeStatusLabel(session.claude_status)}</span>
+  {:else}
+    <span class="status status-{session.status}">{session.status}</span>
   {/if}
+{/snippet}
 
-  <TasksPanel sessionId={session.id} />
+{#snippet hostValue()}
+  <span class="host-dot" class:online={hostRow?.reachable} aria-hidden="true"></span>{session.host_alias}{#if hostRow}{' · '}{hostRow.reachable ? 'online' : 'offline'}{/if}
+{/snippet}
 
-  <Timeline
-    sessionId={session.id}
-    refreshKey={`${session.turn_seq}|${session.status}|${session.claude_status}|${session.stuck_kind}|${session.last_prompt}|${session.safe_kill_state}`}
-    onEvents={(e) => (timelineEvents = e)}
-  />
-
-  {#if !hasNoPane(session) && detailsOwned}
-    <section class="block">
-      <h3>Attach from another terminal</h3>
-      <div class="cmd-row">
-        <code class="cmd" data-testid="attach-command">{attachCommand}</code>
-        <button class="copy" onclick={onCopy} data-testid="copy-attach">
-          {copied ? '✓ copied' : 'copy'}
-        </button>
-      </div>
-    </section>
-  {/if}
-
-  <!-- Redesign 1.5, the action hierarchy: one primary (Send prompt), three
-       quick actions, and the rest behind ⋯ with the destructive ones last,
-       each behind its own confirm. Nothing is gone: every action that was a
-       button here is still a button, one click further at most. A pending
-       move's own controls stay in view, since they are the next step. -->
-  <section class="block actions" data-testid="details-actions">
-    {#if session.kind !== 'external'}
-      {#if session.kind !== 'shell'}
-        <button
-          class="btn btn--primary"
-          onclick={openComposer}
-          disabled={sendPromptBlocked !== null}
-          title={sendPromptBlocked ?? ''}
-          data-testid="send-prompt-from-details"
-    >
-          → Send prompt…
-        </button>
-      {/if}
-      <button
-        class="btn btn--quiet is-bounded"
-        onclick={() => (reviewOpen = true)}
-        disabled={reviewBlocked !== null}
-        title={reviewBlocked ?? ''}
-        data-testid="open-review"
-  >
-        Review…
-      </button>
-      <button
-        class="btn btn--quiet is-bounded"
-        onclick={openShare}
-        disabled={shareBlocked !== null}
-        title={shareBlocked ?? 'Share this session with one person — watch or drive, revocable, and never a terminal'}
-        data-testid="share-from-details"
-  >
-        Share…
-      </button>
-      {#if moveBackOrigin}
-        <button
-          class="btn btn--quiet is-bounded"
-          onclick={openMoveBack}
-          disabled={moveBlocked !== null}
-          title={moveBlocked ?? 'Move this session back to the host it came from'}
-          data-testid="details-move-back"
-    >
-          ⇄ Move back to {moveBackOrigin.fromHost}
-        </button>
-      {/if}
-      {#if unresolvedMove}
-        <button
-          class="btn btn--quiet is-bounded"
-          onclick={openFinishOrUndo}
-          disabled={moveBlocked !== null}
-          title={moveBlocked ?? 'Open the Transfer sheet to finish this move'}
-          data-testid="details-finish-move"
-    >
-          Finish the move to {unresolvedMove.toHost}…
-        </button>
-        <button
-          class="btn btn--quiet is-bounded"
-          onclick={openFinishOrUndo}
-          disabled={moveBlocked !== null}
-          title={moveBlocked ?? 'Open the Transfer sheet to undo this move'}
-          data-testid="details-undo-move"
-    >
-          Undo the move…
-        </button>
-      {/if}
-      {#if unresolvedWaitRec}
-        <button
-          class="btn btn--quiet is-bounded"
-          onclick={openWait}
-          disabled={moveBlocked !== null}
-          title={moveBlocked ?? 'Open the Transfer sheet for this pending move'}
-          data-testid="details-resume-wait"
-    >
-          ⇄ Waiting to move to {unresolvedWaitRec.toHost}…
-        </button>
-      {/if}
+{#snippet prValue()}
+  {#if session.pr_url}
+    <a class="pr-link" href={session.pr_url} target="_blank" rel="noreferrer">{prNumber ? `#${prNumber}` : session.pr_url.replace(/^https:\/\/github\.com\//, '')}</a>
+    {#if session.ci_status}
+      <span
+        class="chip"
+        data-testid="details-ci"
+        style="color: {ciStatusColor(session.ci_status)}; border-color: color-mix(in srgb, {ciStatusColor(session.ci_status)} 33%, transparent);"
+        title="CI checks: {session.ci_status}"
+      >{ciStatusLabel(session.ci_status)}</span>
     {/if}
-    <details class="more" data-testid="details-more">
-      <summary class="btn btn--quiet is-bounded" aria-label="More actions" title="More actions">⋯</summary>
-      <div class="more-menu">
-        <button
-          class="menu-item"
-          onclick={beginLabelEdit}
-          disabled={setFriendlyNameBlocked !== null}
-          title={setFriendlyNameBlocked ?? ''}
-          data-testid="label-from-details"
-    >
-          Rename
-        </button>
-        <!-- An external row runs outside fleet: the label (local fleet
-             metadata) is the only thing fleet can change about it. -->
-        {#if session.kind !== 'external'}
-          <button
-            class="menu-item"
-            onclick={beginRename}
-            disabled={renameBlocked !== null}
-            title={renameBlocked ?? ''}
-            data-testid="rename-from-details"
-      >
-            Rename tmux session
-          </button>
-          <button
-            class="menu-item"
-            onclick={askRestart}
-            disabled={restartBlocked !== null}
-            title={restartBlocked ?? ''}
-            data-testid="restart-from-details"
-      >
-            ↻ Restart…
-          </button>
-          {#if !hasNoPane(session) && session.project_id !== null}
-            <button
-              class="menu-item"
-              onclick={askRepair}
-              disabled={repairing || repairBlocked !== null}
-              title={repairBlocked ?? 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it'}
-              data-testid="repair-from-details"
-        >
-              Repair workspace…
-            </button>
-          {/if}
-          <button
-            class="menu-item"
-            onclick={askRecreate}
-            disabled={recreateBlocked !== null}
-            title={recreateBlocked ?? ''}
-            data-testid="recreate-from-details"
-      >
-            Recreate…
-          </button>
-          {#if canMove}
-            <button
-              class="menu-item"
-              onclick={openMove}
-              disabled={moveBlocked !== null}
-              title={moveBlocked ?? 'Continue this conversation on another host: same branch, same Claude session'}
-              data-testid="move-from-details"
-        >
-              ⇄ Move to host…
-            </button>
-          {/if}
-          {#if isInactiveAgent(session)}
-            <button
-              class="menu-item"
-              onclick={onRemoveFromList}
-              disabled={dismissAgentBlocked !== null}
-              title={dismissAgentBlocked ?? 'Hide this inactive agent until it becomes active again'}
-              data-testid="remove-from-list-details"
-        >
-              Remove from list
-            </button>
-          {/if}
-          <!-- Destructive, last, each behind its confirm. An inactive
-               agent's daemon is gone: Remove from list (above) is its only
-               removal action. -->
-          {#if !isInactiveAgent(session)}
-            <hr class="more-sep" />
-            {#if session.kind !== 'shell' && session.status === 'running' && session.safe_kill_state !== 'requested'}
-              <button
-                class="menu-item"
-                onclick={askSafeKill}
-                disabled={inspectSafeKillBlocked !== null}
-                title={inspectSafeKillBlocked ?? ''}
-                data-testid="safe-kill-from-details"
-          >
-                Safe remove…
-              </button>
-            {/if}
-            <button
-              class="menu-item danger"
-              onclick={askKill}
-              disabled={killBlocked !== null}
-              title={killBlocked ?? ''}
-              data-testid="kill-from-details"
-        >
-              Kill session…
-            </button>
-          {/if}
-        {/if}
-      </div>
-    </details>
-  </section>
+  {/if}
+{/snippet}
 
+{#snippet moveSteps()}
+  {#if session.kind !== 'external'}
+    {#if moveBackOrigin}
+      {@render act('details-move-back', `⇄ Move back to ${moveBackOrigin.fromHost}`, openMoveBack, moveBlocked, 'Move this session back to the host it came from')}
+    {/if}
+    {#if unresolvedMove}
+      {@render act('details-finish-move', `Finish the move to ${unresolvedMove.toHost}…`, openFinishOrUndo, moveBlocked, 'Open the Transfer sheet to finish this move')}
+      {@render act('details-undo-move', 'Undo the move…', openFinishOrUndo, moveBlocked, 'Open the Transfer sheet to undo this move')}
+    {/if}
+    {#if unresolvedWaitRec}
+      {@render act('details-resume-wait', `⇄ Waiting to move to ${unresolvedWaitRec.toHost}…`, openWait, moveBlocked, 'Open the Transfer sheet for this pending move')}
+    {/if}
+  {/if}
+{/snippet}
+
+{#snippet safeKillPill()}
   {#if session.safe_kill_state === 'requested'}
     <p class="safe-kill-pill pending" data-testid="safe-kill-pending">
       Safe-remove in progress: asked Claude to commit + push. Will delete the
@@ -1067,7 +746,325 @@
       Safe-remove ready — finalizing.
     </p>
   {/if}
-</article>
+{/snippet}
+
+{#snippet relatedRow(r: SessionRow, testid: string, sub: string)}
+  <button class="related-row" data-testid={testid} onclick={() => selectSessionExplicitly(r)}>
+    <span class="rel-dot" data-status={r.status} aria-hidden="true"></span>
+    <span class="rel-text">
+      <span class="sess-name">{r.friendly_name ?? r.tmux_name}</span>
+      <span class="rel-sub">{sessionStatusWord(r)} · {r.host_alias}{sub ? ` · ${sub}` : ''} · {formatRelative(r.last_activity_at)}</span>
+    </span>
+  </button>
+{/snippet}
+
+{#if variant === 'inspector'}
+  <article class="details inspector-view" data-testid="session-details" data-variant="inspector">
+    <header class="insp-head">
+      <h2 class="insp-title">Inspector</h2>
+      <span class="of-kbd" title="Show or hide the inspector">{inspectorChord}</span>
+    </header>
+    {@render renameField()}
+    <dl class="of of-kv facts-kv" data-testid="inspector-facts">
+      <dt>Host</dt>
+      <dd data-testid="session-host">{@render hostValue()}</dd>
+      <dt>Account</dt>
+      <dd data-testid="session-account">{accountRow?.email ?? accountEmailTier(accountRow)}</dd>
+      {#if fiveHour || week}
+        <dt>Usage</dt>
+        <dd data-testid="inspector-usage">
+          {#if fiveHour}5h {leftPct(fiveHour)}% left{/if}{#if fiveHour && week} · {/if}{#if week}week {leftPct(week)}%{/if}
+          {#if fiveHour}<Meter value={leftPct(fiveHour) / 100} level={leftPct(fiveHour) < 10 ? 'crit' : leftPct(fiveHour) < 25 ? 'warn' : 'ok'} label="{leftPct(fiveHour)}% of the 5-hour window left" />{/if}
+        </dd>
+      {/if}
+      {#if worktree?.branch}
+        <dt>Branch</dt>
+        <dd class="mono">{worktree.branch}</dd>
+      {/if}
+      {#if worktree}
+        <dt>Worktree</dt>
+        <dd class="mono">{worktree.path}</dd>
+      {/if}
+      {#if session.pr_url}
+        <dt>Pull request</dt>
+        <dd data-testid="details-pr">{@render prValue()}</dd>
+      {/if}
+      {#if session.work}
+        <dt>Task</dt>
+        <dd>{#if session.work.key}<span class="mono">{session.work.key}</span> {/if}{session.work.title}</dd>
+      {/if}
+      <dt>Started by</dt>
+      <dd>{startedBy}, {formatRelative(sessionStart(session))}</dd>
+      {#if (session.usage_cost_micros ?? 0) > 0}
+        <dt>Cost</dt>
+        <dd class="tnum" data-testid="details-cost">{formatCostMicros(session.usage_cost_micros)}</dd>
+      {/if}
+    </dl>
+    {@render safeKillPill()}
+    {#if session.kind !== 'external'}
+      <section class="insp-actions" data-testid="details-actions">
+        <h3>Actions</h3>
+        <div class="btn-row">
+          {#if session.kind !== 'shell'}
+            {@render act('send-prompt-from-details', 'Send prompt…', openComposer, sendPromptBlocked)}
+          {/if}
+          {#if canMove}
+            {@render act('move-from-details', 'Move to host…', openMove, moveBlocked, 'Continue this conversation on another host: same branch, same Claude session')}
+          {/if}
+          {@render act('open-review', 'Review…', () => (reviewOpen = true), reviewBlocked)}
+          {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked)}
+          {@render moveSteps()}
+        </div>
+        <p class="more-hint">
+          Rename, login, recreate and more:
+          <button type="button" class="hint-link" data-testid="inspector-open-details" onclick={() => goTo('details')}>Details</button>
+        </p>
+      </section>
+    {/if}
+    <WatchSummary {session} />
+    <footer class="insp-foot">
+      {@render act('share-from-details', 'Share…', openShare, shareBlocked, 'Share this session with one person — watch or drive, revocable, and never a terminal')}
+      <span class="grow"></span>
+      {#if isInactiveAgent(session)}
+        {@render act('remove-from-list-details', 'Remove from list', onRemoveFromList, dismissAgentBlocked, 'Hide this inactive agent until it becomes active again')}
+      {:else if session.kind !== 'external'}
+        {@render act('kill-from-details', 'Kill session…', askKill, killBlocked, '', 'btn btn--quiet is-bounded kill')}
+      {/if}
+    </footer>
+  </article>
+{:else}
+  <article class="details tab-view" data-testid="session-details" data-variant="tab">
+   <div class="tab-grid">
+   <div class="tab-main">
+    {@render renameField()}
+
+    <section class="block">
+      <h3>Facts</h3>
+      <div class="tiles" data-testid="details-facts">
+        <div class="tile">
+          <span class="tile-label">Status</span>
+          <span class="tile-value">{@render statusChip()}</span>
+        </div>
+        <div class="tile">
+          <span class="tile-label">Context</span>
+          <span class="tile-value">
+            {#if ctxLevel !== null && session.context_pct !== null}
+              <span data-testid="details-context" data-level={ctxLevel} style="color: {contextColor(ctxLevel)};" title="Context window used"
+                >{Math.round(session.context_pct)}%</span
+              >{#if session.context_tokens}<span class="muted"> · {formatTokens(session.context_tokens)}</span>{/if}
+            {:else}<span class="muted">—</span>{/if}
+          </span>
+        </div>
+        <div class="tile">
+          <span class="tile-label">Cost</span>
+          <span class="tile-value tnum">{#if (session.usage_cost_micros ?? 0) > 0}{formatCostMicros(session.usage_cost_micros)}{:else}<span class="muted">—</span>{/if}<span class="muted"> · {formatElapsed(sessionStart(session), nowSec)}</span></span>
+        </div>
+        <div class="tile">
+          <span class="tile-label">Host</span>
+          <span class="tile-value" data-testid="session-host">{@render hostValue()}</span>
+        </div>
+        <div class="tile">
+          <span class="tile-label">Account · profile</span>
+          <span class="tile-value" data-testid="session-account">{accountEmailTier(accountRow)}{#if session.claude_profile}<span class="muted"> · {session.claude_profile}</span>{/if}</span>
+        </div>
+        <div class="tile">
+          <span class="tile-label">PR · CI</span>
+          {#if session.pr_url}<span class="tile-value" data-testid="details-pr">{@render prValue()}</span>{:else}<span class="tile-value muted">—</span>{/if}
+        </div>
+      </div>
+    </section>
+
+    <dl class="of of-kv meta">
+      {#if canSwitchLogin}
+        <dt>Login</dt>
+        <dd class="login" data-testid="session-login">
+          <select
+            aria-label="Claude login"
+            data-testid="session-login-pick"
+            value={loginTarget}
+            onchange={(e) => (loginPick = (e.currentTarget as HTMLSelectElement).value)}
+            disabled={restartBlocked !== null}
+            title="The Claude login this session bills: the host's own, or a login profile (~/.claude-profiles/<name>)"
+          >
+            <option value="">Host login</option>
+            {#each loginChoices as p (p.name)}
+              <option value={p.name}>{p.name}{p.email ? ` (${p.email})` : p.account_uuid ? '' : ' (not logged in)'}</option>
+            {/each}
+          </select>
+          {#if loginTarget !== (session.claude_profile ?? '')}
+            <button
+              class="btn btn--quiet is-bounded"
+              data-testid="session-login-switch"
+              onclick={() => (confirmingSwitch = true)}
+              disabled={restartBlocked !== null}
+              title={restartBlocked ?? ''}
+            >Switch…</button>
+          {/if}
+        </dd>
+      {/if}
+      <dt>tmux session</dt>
+      <dd class="mono" data-testid="details-tmux-name">{session.tmux_name}</dd>
+      <dt>Project</dt>
+      <dd>
+        {#if parentProject}
+          {parentProject.project.owner}/{parentProject.project.repo}
+        {:else}
+          <span class="muted">unmapped (orphan)</span>
+        {/if}
+      </dd>
+      {#if worktree}
+        <dt>Worktree</dt>
+        <dd class="mono">{worktree.path}{#if worktree.branch}<span class="muted"> · {worktree.branch}</span>{/if}</dd>
+      {/if}
+      <dt>Started</dt>
+      <dd>{startedBy}, {formatRelative(session.created_at)}</dd>
+      <dt>Last activity</dt>
+      <dd>{formatRelative(session.last_activity_at)}</dd>
+      <dt>Elapsed</dt>
+      <dd data-testid="details-elapsed" title={session.started_at === null ? 'since tmux created the session (fleet did not start it)' : 'since fleet started the session'}>
+        {formatElapsed(sessionStart(session), nowSec)}
+      </dd>
+      {#if session.last_turn_at !== null}
+        <dt>Last turn</dt>
+        <dd data-testid="details-last-turn">{formatRelative(session.last_turn_at)}</dd>
+      {/if}
+      {#if session.last_prompt}
+        <dt>Last prompt</dt>
+        <dd class="last-prompt" data-testid="details-last-prompt">{session.last_prompt}</dd>
+      {/if}
+      {#if sessionUsageTokens(session) > 0}
+        <dt>Usage</dt>
+        <dd
+          data-testid="details-usage"
+          title="Estimated from the Claude Code transcript's token counts and a built-in per-model price table (override: usage.prices_json). Not a bill."
+        >
+          <span data-testid="details-cost">{#if (session.usage_cost_micros ?? 0) > 0}{formatCostMicros(session.usage_cost_micros)} estimated{:else}unpriced ({session.usage_model ?? 'unknown model'}){/if}</span>
+          <span class="muted">· {formatTokens(session.usage_input_tokens)} in · {formatTokens(session.usage_output_tokens)} out · {formatTokens(session.usage_cache_write_tokens)} cache write · {formatTokens(session.usage_cache_read_tokens)} cache read{#if session.usage_model} · {session.usage_model}{/if}</span>
+        </dd>
+      {/if}
+      {#if session.pr_url && hasReading(assessRow(session, nowSec))}
+        <dt>Result</dt>
+        <dd data-testid="details-pr-result"><PrResult {session} {nowSec} /></dd>
+      {/if}
+      {#if reviewedSource}
+        <dt class="meta-label">Reviewing</dt>
+        <dd>
+          <button class="link" onclick={() => selectSessionExplicitly(reviewedSource)} data-testid="reviewing-link">
+            {reviewedSource.tmux_name}
+          </button>
+        </dd>
+      {/if}
+    </dl>
+
+    <TicketCard {session} />
+    <SessionTasks {session} />
+
+    <Timeline
+      sessionId={session.id}
+      refreshKey={`${session.turn_seq}|${session.status}|${session.claude_status}|${session.stuck_kind}|${session.last_prompt}|${session.safe_kill_state}`}
+      onEvents={(e) => (timelineEvents = e)}
+    />
+
+    {#if related.length > 0 || proposedRelated}
+      <section class="block related" data-testid="related-sessions">
+        <h3>Related sessions <span class="count">{related.length + (proposedRelated ? 1 : 0)}</span></h3>
+        <ul class="related-list">
+          {#each related as r (r.id)}
+            <li>{@render relatedRow(r, 'related-row', accountEmailTier(accountForRow(r)))}</li>
+          {/each}
+          {#if proposedRelated}
+            {@const r = proposedRelated}
+            <li class="proposed" data-testid="related-proposed">
+              {@render relatedRow(r, 'related-proposed-row', 'same work?')}
+              <ProposedBy proposal={relatedProposal} field="related_session" testid="related-proposed-by" />
+            </li>
+          {/if}
+        </ul>
+      </section>
+    {/if}
+
+    {#if reviewsOfThis.length > 0}
+      <section class="block related" data-testid="reviews-panel">
+        <h3>Reviews <span class="count">{reviewsOfThis.length}</span></h3>
+        <ul class="related-list">
+          {#each reviewsOfThis as r (r.id)}
+            <li>{@render relatedRow(r, 'reviews-row', accountEmailTier(accountForRow(r)))}</li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+
+    <TasksPanel sessionId={session.id} />
+    <LocalWorkspaceCard {session} />
+    <WatchSummary {session} />
+   </div>
+
+   <!-- Actions sit beside the facts (SessionDetails board), below them
+        when the column is narrow. -->
+   <div class="tab-side">
+    <section class="block actions" data-testid="details-actions">
+      <h3>Actions</h3>
+      {@render safeKillPill()}
+      {#if session.kind !== 'external'}
+        <div class="group" data-testid="actions-steer">
+          <h4>Steer</h4>
+          <div class="btn-row">
+            {#if session.kind !== 'shell'}
+              {@render act('send-prompt-from-details', 'Send prompt…', openComposer, sendPromptBlocked, '', 'btn btn--primary')}
+            {/if}
+            {@render act('open-review', 'Review…', () => (reviewOpen = true), reviewBlocked)}
+            {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked)}
+          </div>
+        </div>
+        <div class="group" data-testid="actions-place">
+          <h4>Place</h4>
+          <div class="btn-row">
+            {#if canMove}
+              {@render act('move-from-details', 'Move to host…', openMove, moveBlocked, 'Continue this conversation on another host: same branch, same Claude session')}
+            {/if}
+            {@render moveSteps()}
+            {@render act('recreate-from-details', 'Recreate…', askRecreate, recreateBlocked)}
+            {#if !hasNoPane(session) && session.project_id !== null}
+              {@render act('repair-from-details', 'Repair workspace…', askRepair, repairing ? 'Repairing…' : repairBlocked, 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it')}
+            {/if}
+            {@render act('label-from-details', 'Rename', beginLabelEdit, setFriendlyNameBlocked)}
+            {@render act('rename-from-details', 'Rename tmux session', beginRename, renameBlocked)}
+          </div>
+        </div>
+        <div class="group" data-testid="actions-share">
+          <h4>Share</h4>
+          <div class="btn-row">
+            {@render act('share-from-details', 'Share…', openShare, shareBlocked, 'Share this session with one person — watch or drive, revocable, and never a terminal')}
+            {#if !hasNoPane(session) && detailsOwned}
+              <button class="btn btn--quiet is-bounded" onclick={onCopy} data-testid="copy-attach" title="Copy the command that attaches this session in another terminal">
+                {copied ? '✓ Copied' : 'Copy tmux attach'}
+              </button>
+              <code class="cmd" data-testid="attach-command">{attachCommand}</code>
+            {/if}
+          </div>
+        </div>
+      {:else}
+        <div class="btn-row">
+          {@render act('label-from-details', 'Rename', beginLabelEdit, setFriendlyNameBlocked)}
+        </div>
+      {/if}
+      {#if session.kind !== 'external'}
+        <div class="danger-row">
+          {#if isInactiveAgent(session)}
+            {@render act('remove-from-list-details', 'Remove from list', onRemoveFromList, dismissAgentBlocked, 'Hide this inactive agent until it becomes active again')}
+          {:else}
+            {#if session.kind !== 'shell' && session.status === 'running' && session.safe_kill_state !== 'requested'}
+              {@render act('safe-kill-from-details', 'Clean up (commit and push first)…', askSafeKill, inspectSafeKillBlocked)}
+            {/if}
+            {@render act('kill-from-details', 'Kill session…', askKill, killBlocked, '', 'btn btn--quiet is-bounded kill')}
+          {/if}
+        </div>
+      {/if}
+    </section>
+   </div>
+   </div>
+  </article>
+{/if}
 
 {#if composerOpen}
   <PromptComposer source={session} onClose={() => (composerOpen = false)} />
@@ -1262,6 +1259,79 @@
 {/if}
 
 <style>
+  /* Two layouts (UX audit 2026-10-09): the inspector's quick read and the
+     Details tab's everything. */
+  .inspector-view { gap: var(--space-3); padding: var(--space-3) var(--space-4); }
+  .tab-view { padding: var(--space-4) var(--space-6); container-type: inline-size; }
+  .tab-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-6); max-width: 1280px; }
+  .tab-main,
+  .tab-side { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+  .tab-side .actions { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: var(--space-3); }
+  .tab-side .cmd { display: block; width: 100%; box-sizing: border-box; overflow-wrap: anywhere; white-space: normal; }
+  @container (min-width: 820px) {
+    .tab-grid { grid-template-columns: minmax(0, 1fr) minmax(260px, 360px); }
+    .tab-side { position: sticky; top: 0; align-self: start; }
+  }
+  .insp-head { display: flex; align-items: center; gap: var(--space-2); }
+  .insp-title { margin: 0; font-size: var(--text-md); font-weight: 600; flex: 1 1 auto; }
+  .insp-actions h3,
+  .group h4 {
+    margin: 0 0 var(--space-2);
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--fg-muted);
+  }
+  .insp-foot,
+  .danger-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--border);
+  }
+  .btn-row { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+  .grow { flex: 1 1 auto; }
+  .more-hint { margin: var(--space-2) 0 0; font-size: var(--text-xs); color: var(--fg-muted); }
+  .hint-link {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .hint-link:hover { text-decoration: underline; }
+  /* The footer sits at the foot of the column (Main board). */
+  .inspector-view { min-height: 100%; box-sizing: border-box; }
+  .inspector-view .insp-foot { margin-top: auto; }
+  .kill { color: var(--danger); }
+  .kill:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 10%, transparent); }
+  .mono { font-family: var(--font-mono); font-size: var(--text-xs); overflow-wrap: anywhere; }
+  .tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-2); }
+  .tile {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-pane);
+  }
+  .tile-label { font-size: var(--text-2xs); color: var(--fg-muted); }
+  .tile-value { font-size: var(--text-sm); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .group { display: flex; flex-direction: column; }
+  .group + .group { margin-top: var(--space-3); }
+  .host-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--fg-muted); margin-right: 4px; vertical-align: middle; }
+  .host-dot.online { background: var(--status-done); }
+  .rel-dot[data-status='running'] { background: var(--status-working); }
+  .rel-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: var(--fg-muted); }
+  .rel-text { display: flex; flex-direction: column; min-width: 0; }
+  .rel-sub { font-size: var(--text-2xs); color: var(--fg-muted); }
+  .count { font-size: var(--text-2xs); color: var(--fg-muted); font-weight: 500; }
+
   .details {
     display: flex;
     flex-direction: column;
@@ -1378,42 +1448,6 @@
   }
   .copy:hover { border-color: var(--accent); }
 
-  .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-start; }
-  /* ⋯: everything that is not one of the three quick actions. */
-  .more { position: relative; }
-  .more > summary { list-style: none; }
-  .more > summary::-webkit-details-marker { display: none; }
-  .more-menu {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin-top: 4px;
-    padding: 4px;
-    min-width: 13rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    background: var(--bg-raise);
-  }
-  .menu-item {
-    text-align: left;
-    font: inherit;
-    font-size: var(--text-xs);
-    padding: 0.3rem 0.6rem;
-    min-height: 24px;
-    border: none;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--fg);
-    cursor: pointer;
-  }
-  .menu-item:hover:not(:disabled) { background: var(--control-bg-hover); }
-  .menu-item:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: -2px; }
-  .menu-item.danger { color: var(--danger); }
-  .menu-item.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 10%, transparent); }
-  /* One disabled look, distinct from a quiet button: dimmed, no hover, and
-     the reason in the title. */
-  .menu-item:disabled { opacity: 0.55; cursor: default; }
-  .more-sep { width: 100%; border: none; border-top: 1px solid var(--border); margin: 3px 0; }
   .danger {
     font-size: var(--text-xs);
     padding: 0.35rem 0.8rem;

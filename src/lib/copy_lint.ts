@@ -57,7 +57,42 @@ export function markupOf(src: string): string {
   return src
     .replace(/<script[^>]*>[\s\S]*?<\/script>/g, blank)
     .replace(/<style[^>]*>[\s\S]*?<\/style>/g, blank)
-    .replace(/<!--[\s\S]*?-->/g, blank);
+    .replace(/<!--[\s\S]*?-->/g, blank)
+    .replace(/\{@render act\(/g, (m, at: number, all: string) => actButton(all, at) ?? m);
+}
+
+/** `{@render act('testid', 'Label', run, …)}`: a component's button snippet
+ *  (SessionDetails draws every action through one), read as the
+ *  `<button data-testid="testid" onclick={run}>Label</button>` it renders so
+ *  the lints still see its label and what it opens. The rest of the call is
+ *  left in place; it holds no tag, so nothing else reads it. */
+function actButton(all: string, at: number): string | null {
+  const args: string[] = [];
+  let depth = 0;
+  let quote = '';
+  let start = at + '{@render act('.length;
+  for (let i = start; i < all.length && args.length < 3; i++) {
+    const c = all[i];
+    if (quote) {
+      if (c === '\\') i++;
+      else if (c === quote) quote = '';
+    } else if (c === "'" || c === '"' || c === '`') quote = c;
+    else if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) {
+      if (depth === 0) {
+        args.push(all.slice(start, i).trim());
+        break;
+      }
+      depth--;
+    } else if (c === ',' && depth === 0) {
+      args.push(all.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  const lit = (a: string | undefined) => /^'([^'\n]*)'$/.exec(a ?? '')?.[1];
+  const [id, label, run] = [lit(args[0]), lit(args[1]), args[2]];
+  if (id === undefined || label === undefined || !run || run.includes('\n')) return null;
+  return `<button data-testid="${id}" onclick={${run}}>${label}</button>{@render act(`;
 }
 
 function scriptOf(src: string): string {

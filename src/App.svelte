@@ -1217,7 +1217,7 @@
   <!-- The inspector (step 3.5), or its 0-width slot. -->
   {#if inspectorShown}
     <aside class="inspector" data-testid="inspector" aria-label="Inspector">
-      <Details />
+      <Details variant="inspector" />
     </aside>
   {:else}
     <div></div>

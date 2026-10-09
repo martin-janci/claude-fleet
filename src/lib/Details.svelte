@@ -9,6 +9,10 @@
   import { shortcutLabel } from './shortcuts';
   import { detectMac } from './terminal_keys';
 
+  // `inspector` is the compact column beside the conversation; `tab` is the
+  // Details tab (UX audit 2026-10-09, I1 and D1).
+  let { variant = 'tab' }: { variant?: 'tab' | 'inspector' } = $props();
+
   // The Work view (M14): a task picked in it shows here until a session is
   // opened (from anywhere) or the task is closed. With nothing picked the
   // column is a quiet empty state: Today lives in Control (⌘⇧T), not here
@@ -26,7 +30,7 @@
     onclose={closeTask}
   />
 {:else if $selectedSession}
-  <SessionDetails session={$selectedSession} />
+  <SessionDetails session={$selectedSession} {variant} />
 {:else}
   <section class="empty" data-testid="no-session" aria-label="No session open">
     <h2>No session open</h2>

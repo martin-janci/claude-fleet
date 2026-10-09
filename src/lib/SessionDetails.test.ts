@@ -78,7 +78,8 @@ describe('SessionDetails', () => {
     ]);
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();
-    expect((await screen.findByTestId('session-host')).textContent).toBe('mefistos');
+    // The host, then whether it is online (UX audit 2026-10-09, D1).
+    expect((await screen.findByTestId('session-host')).textContent).toMatch(/^mefistos\b/);
   });
 
   it('shows account when host has one linked', async () => {
@@ -213,9 +214,9 @@ describe('SessionDetails', () => {
       sessions.set([me, twin]);
       render(SessionDetails, { props: { session: me } });
       await tick();
-      expect(screen.getByTestId('related-sessions').textContent).toContain('Related sessions (1)');
+      expect(screen.getByTestId('related-sessions').textContent).toMatch(/Related sessions\s*1/);
       expect(screen.getByTestId('related-proposed-row').textContent).toContain('dev-twin');
-      expect(screen.getByTestId('related-proposed-row').textContent).toContain('Same work?');
+      expect(screen.getByTestId('related-proposed-row').textContent).toContain('same work?');
       expect(screen.getByTestId('related-proposed-by').textContent).toContain('81%');
     });
 
@@ -507,7 +508,7 @@ describe('SessionDetails outcome + triage fields (W2 Track D)', () => {
     expect(screen.getByTestId('details-last-prompt')).toHaveTextContent('Ship the GC sweeper');
     const pr = screen.getByTestId('details-pr');
     expect(pr.querySelector('a')).toHaveAttribute('href', 'https://github.com/martin-janci/claude-fleet/pull/42');
-    expect(pr).toHaveTextContent('martin-janci/claude-fleet/pull/42');
+    expect(pr).toHaveTextContent('#42');
     expect(screen.getByTestId('details-ci')).toHaveTextContent('CI');
   });
 
@@ -541,10 +542,10 @@ describe('SessionDetails label editing and timeline', () => {
     });
   });
 
-  it('double-clicking the title edits the label, focused', async () => {
+  it('Rename edits the label, focused', async () => {
     render(SessionDetails, { props: { session: { ...sampleSession, friendly_name: 'Fix login' } } });
     await tick();
-    await fireEvent.dblClick(document.querySelector('h2.title')!);
+    await fireEvent.click(screen.getByTestId('label-from-details'));
     const input = (await screen.findByTestId('details-label')) as HTMLInputElement;
     expect(input.value).toBe('Fix login');
     expect(document.activeElement).toBe(input);
@@ -1190,34 +1191,43 @@ describe('SessionDetails Share… and the per-session action gate (multi-user M1
 });
 
 describe('SessionDetails action hierarchy (redesign 1.5)', () => {
-  it('one primary, three quick actions, and everything else behind ⋯ with Kill last', async () => {
+  it('one primary, actions grouped Steer / Place / Share, and Kill last (SessionDetails board)', async () => {
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();
-    const bar = screen.getByTestId('details-actions');
     // Exactly one primary in the view, and it is Send prompt.
     const primaries = document.querySelectorAll('[data-testid="session-details"] .btn--primary');
     expect(primaries).toHaveLength(1);
     expect(primaries[0]).toBe(screen.getByTestId('send-prompt-from-details'));
-    // The quick row: Send prompt, Review, Share, then ⋯.
-    const quick = Array.from(bar.children)
-      .filter((el) => el.tagName === 'BUTTON')
-      .map((el) => el.getAttribute('data-testid'));
-    expect(quick).toEqual(['send-prompt-from-details', 'open-review', 'share-from-details']);
-    // Everything else is still a button, inside ⋯, destructive last.
-    const more = screen.getByTestId('details-more');
-    const inMore = Array.from(more.querySelectorAll('button')).map((el) => el.getAttribute('data-testid'));
-    expect(inMore).toEqual([
-      'label-from-details',
-      'rename-from-details',
-      'restart-from-details',
-      'recreate-from-details',
-      'safe-kill-from-details',
-      'kill-from-details',
-    ]);
-    expect(screen.getByTestId('kill-from-details').classList.contains('danger')).toBe(true);
+    const ids = (group: string) =>
+      Array.from(screen.getByTestId(group).querySelectorAll('button')).map((el) => el.getAttribute('data-testid'));
+    expect(ids('actions-steer')).toEqual(['send-prompt-from-details', 'open-review', 'restart-from-details']);
+    expect(ids('actions-place')).toEqual(
+      expect.arrayContaining(['recreate-from-details', 'label-from-details', 'rename-from-details']),
+    );
+    expect(ids('actions-share')[0]).toBe('share-from-details');
+    // The destructive ones sit apart, Kill last.
+    const all = Array.from(screen.getByTestId('details-actions').querySelectorAll('button')).map((el) =>
+      el.getAttribute('data-testid'),
+    );
+    expect(all.at(-1)).toBe('kill-from-details');
+    expect(all.at(-2)).toBe('safe-kill-from-details');
+    expect(screen.getByTestId('kill-from-details').classList.contains('kill')).toBe(true);
+    expect(screen.queryByTestId('details-more')).toBeNull();
   });
 
-  it('Kill, from ⋯, still asks before it kills', async () => {
+  it('the inspector keeps the everyday actions and points at Details for the rest (Main board)', async () => {
+    render(SessionDetails, { props: { session: sampleSession, variant: 'inspector' } });
+    await tick();
+    expect(screen.getByTestId('session-details').dataset.variant).toBe('inspector');
+    expect(screen.getByTestId('inspector-facts')).toBeTruthy();
+    for (const id of ['send-prompt-from-details', 'open-review', 'restart-from-details', 'share-from-details', 'kill-from-details']) {
+      expect(screen.getByTestId(id), id).toBeTruthy();
+    }
+    expect(screen.queryByTestId('recreate-from-details')).toBeNull();
+    expect(screen.getByTestId('inspector-open-details')).toBeTruthy();
+  });
+
+  it('Kill still asks before it kills', async () => {
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();
     await fireEvent.click(screen.getByTestId('kill-from-details'));
