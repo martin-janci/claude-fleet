@@ -10155,7 +10155,8 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // `resolve_row_and_gate` with `Reach::Drive` — spelled as its own helper
     // because `to_addr` can name the same row by address.
     ("send_message", &["Drive"]),
-    ("send_prompt", &["Drive"]),
+    // A key alone is `answer` (Orbit Fleet 11.7); a prompt is `drive`.
+    ("send_prompt", &["Answer", "Drive"]),
     ("queue_prompt", &["Drive"]),
     ("queued_prompts", &["Drive"]),
     ("session_conversations", &["Read"]),
@@ -10210,6 +10211,9 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("capture_session", &["Read"]),
     ("dismiss_ghost_session", &["Drive"]),
     ("adopt_session", &["Own"]),
+    // A pane's proposal is Adopt's own question, at Adopt's tier; a found
+    // conversation has no row (the person fence decides).
+    ("lost_target", &["Own"]),
     // Its `requester_session_id` is `dispatch_task`'s by another name: the
     // new row is stamped `parent_session_id`, so it shows in that session's
     // Conversations panel, and `inherit_worker_work` copies its work links.
@@ -10297,6 +10301,11 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
 /// reason. A row here is a claim a reviewer can check, not an exemption:
 /// each one has somewhere else the rule is applied.
 pub(super) const NO_PER_ROW_GATE: &[(&str, &str)] = &[
+    (
+        "place_transcript",
+        "a found conversation has no row to gate: `require_host` and the \
+         person fence on past conversations (`fence_lost_conversation`) decide",
+    ),
     (
         "list_sessions",
         "choke point 1 (T6): it FILTERS a page through `sees_session_row` \
@@ -10620,7 +10629,7 @@ fn tool_blocks() -> std::collections::BTreeMap<String, String> {
 
 /// The reaches one span of handler source threads.
 fn reaches_in(code: &str) -> Vec<String> {
-    let mut found: Vec<String> = ["Read", "Drive", "Own"]
+    let mut found: Vec<String> = ["Read", "Answer", "Drive", "Own"]
         .iter()
         .filter(|r| code.contains(&format!("Reach::{r}")))
         .map(|r| (*r).to_string())
@@ -11878,7 +11887,7 @@ fn the_reaches_the_desktop_decided_are_the_ones_the_hub_enforces() {
     assert_eq!(reach_of("rewind_conversation"), vec!["Own"]);
     // `request_work_handover` types into the pane like
     // `send_message { deliver, submit }`: both `drive`.
-    assert_eq!(reach_of("send_prompt"), vec!["Drive"]);
+    assert_eq!(reach_of("send_prompt"), vec!["Answer", "Drive"]);
     // The per-session work-graph writes — `set_primary_work`,
     // `decide_work_batch`, `reconsider_work_link`, `ack_work_link` — all
     // ride `work_link`'s drive arm.

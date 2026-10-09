@@ -33,6 +33,7 @@ import {
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import { uiLayout } from './prefs';
+import { expectAccessible } from './a11y_check';
 
 const inv = mockedInvoke as unknown as ReturnType<typeof vi.fn>;
 const calls = (cmd: string) => inv.mock.calls.filter((c) => c[0] === cmd);
@@ -1004,5 +1005,15 @@ describe('HostsView: the Hosts table (Layout: New)', () => {
     await tick();
     expect(detailAlias()).toBe('mefistos');
     expect(screen.getByTestId('hosts-back-to-table')).toBeTruthy();
+  });
+});
+
+describe('HostsView: accessibility', () => {
+  it('the Hosts table (Layout: New) is accessible', async () => {
+    uiLayout.set('new');
+    const { container } = mount();
+    await tick();
+    expect(screen.getByTestId('hosts-table')).toBeTruthy();
+    await expectAccessible(container);
   });
 });

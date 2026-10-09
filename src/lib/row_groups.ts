@@ -9,7 +9,9 @@ import {
   type AttentionOptions,
   type AttentionState,
 } from './attention';
+import { get } from 'svelte/store';
 import { sessionAgent, type SessionAgent, type SessionRow } from './sessions';
+import { startingSessions } from './session_starting';
 
 export type FlatGroupBy = 'state' | 'host' | 'agent';
 
@@ -53,10 +55,20 @@ export interface RowGroup {
  * manual's order; hosts sort by name. Empty groups are left out, and each
  * group keeps the rows in the order they arrived.
  */
-export function groupRows(rows: readonly SessionRow[], by: FlatGroupBy, opts: AttentionOptions): RowGroup[] {
+export function groupRows(
+  rows: readonly SessionRow[],
+  by: FlatGroupBy,
+  opts: AttentionOptions,
+  starting: ReadonlySet<number> = get(startingSessions),
+): RowGroup[] {
   const buckets = new Map<string, SessionRow[]>();
   const keyOf = (s: SessionRow): string => {
-    if (by === 'state') return attentionState(s, opts);
+    if (by === 'state') {
+      // Step 5.14: a session ⌘N just made lands under Working while its
+      // agent comes up, rather than reading Idle before it has run at all.
+      const st = attentionState(s, opts);
+      return st === 'idle' && starting.has(s.id) ? 'working' : st;
+    }
     if (by === 'agent') return sessionAgent(s);
     return s.host_alias;
   };

@@ -12,6 +12,7 @@ import DownloadsSheet from './DownloadsSheet.svelte';
 import { _resetDownloadsForTests, savedTo, type Download } from './downloads';
 import { clearNotices } from './notifications';
 import { clearToasts, push } from './toasts';
+import { expectAccessible } from './a11y_check';
 
 const MB = 1024 * 1024;
 const row = (id: number, state: string, extra: Partial<Download> = {}): Download => ({
@@ -57,10 +58,19 @@ describe('Downloads', () => {
     expect(rows.map((r) => r.dataset.state)).toEqual(['fetching']);
   });
 
-  it('shows a copy in flight with a meter and its bytes', async () => {
+  it('shows a copy in flight with a Progress ring and its bytes', async () => {
     await open([row(5, 'fetching', { fetched_bytes: 44 * MB })]);
     expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('50');
+    expect(screen.getByTestId('download-ring-pending')).toBeTruthy();
+    expect(screen.queryByTestId('download-rain-pending')).toBeNull();
     expect(screen.getByTestId('download-progress').textContent).toBe('44.0 MB of 88.0 MB');
+  });
+
+  it('shows Data rain for a copy of unknown size', async () => {
+    await open([row(5, 'fetching')]);
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    expect(screen.getByTestId('download-rain-pending')).toBeTruthy();
+    expect(screen.getByTestId('download-progress').textContent).toBe('copying…');
   });
 
   it('offers Show in … for a file saved in this window, and clears finished rows', async () => {
@@ -94,5 +104,18 @@ describe('Notifications', () => {
     await fireEvent.click(screen.getByTestId('notice-action'));
     expect(run).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId('notice-action')).toBeNull();
+  });
+});
+
+describe('Downloads: accessibility', () => {
+  it('the Downloads sheet is accessible', async () => {
+    savedTo.set(new Map([[6, '/Users/m/Downloads/f6.tar.gz']]));
+    push({ kind: 'error', code: 'E_SSH', message: "Couldn't move to mercury" });
+    await open([
+      row(3, 'failed', { error: 'host went offline' }),
+      row(5, 'fetching', { fetched_bytes: 44 * MB }),
+      row(6, 'ready', { downloaded_at: 1 }),
+    ]);
+    await expectAccessible(screen.getByTestId('downloads-sheet'));
   });
 });

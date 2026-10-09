@@ -13,6 +13,7 @@
   import type { AccountUsageSnapshot } from './account_usage_store';
   import type { HostTokenInfo, TokenMode } from './mcp';
   import {
+    adoptSession,
     restoreHostSessions,
     discoverLostSessions,
     newSessionAbortable,
@@ -46,6 +47,8 @@
   import { CHECK_GLYPH, checklistLoaderText, checklistRows, hostChecks, needsReprovision, runHostCheck } from './host_check';
   import { uiLayout } from './prefs';
   import Loader from './Loader.svelte';
+  import LostTargetForm from './LostTargetForm.svelte';
+  import { isOutsideFleet, needsRestoreInto, placeTranscript } from './lost_found';
 
   let {
     host,
@@ -304,6 +307,54 @@
    */
   function candidateBlocked(c: LostCandidate): string | null {
     return resumeHubBlocked ?? $sessionIdBlocked(c.existing_session_id, 'recreate_session');
+  }
+
+  // Orbit Fleet 4.12: Lost and found with proposals. A pane somebody started
+  // by hand is adopted into a project; a found conversation that cannot
+  // resume where it ran is restored into one. Both forms are prefilled
+  // (LostTargetForm) and both confirm.
+  // The new layout's: the classic one keeps its words unchanged.
+  const lostAndFound = $derived($uiLayout === 'new');
+  const outsidePanes = $derived(lostAndFound ? hostSessions.filter(isOutsideFleet) : []);
+  let adoptingId = $state<number | null>(null);
+  let restoringId = $state<string | null>(null);
+  const adoptHubBlocked = $derived(hubActionBlocked('adopt_session', $hubStatus, $hubConnection));
+
+  function adoptBlocked(s: SessionRow): string | null {
+    return adoptHubBlocked ?? $sessionBlocked(s, 'adopt_session');
+  }
+
+  async function adoptInto(s: SessionRow, projectId: number | null): Promise<string | null> {
+    const refused = adoptBlocked(s);
+    if (refused !== null) return refused;
+    const r = await adoptSession(s.id, projectId);
+    if (!r.ok) return r.error.message;
+    adoptingId = null;
+    push({ kind: 'success', message: `${s.tmux_name} adopted` });
+    return null;
+  }
+
+  async function restoreInto(c: LostCandidate, projectId: number | null): Promise<string | null> {
+    if (projectId === null) return 'Pick a project to restore it into.';
+    const refused = candidateBlocked(c);
+    if (refused !== null) return refused;
+    const placed = await placeTranscript({
+      host_alias: host.alias,
+      claude_session_id: c.claude_session_id,
+      project_id: projectId,
+    });
+    if (!placed.ok) return placed.error.message;
+    const r = await newSessionAbortable({
+      host_alias: host.alias,
+      project_id: projectId,
+      worktree_id: null,
+      name: placed.value.tmux_name,
+      resume_claude_session_id: c.claude_session_id,
+    });
+    if (!r.ok) return r.error.message;
+    restoringId = null;
+    resumedIds = new Set(resumedIds).add(c.claude_session_id);
+    return null;
   }
 
   // The restore plan may hold only skips (e.g. the fleet controller, which
@@ -676,6 +727,31 @@
                   {#if resumeErrors[c.claude_session_id]}
                     <p class="error" data-testid="discover-item-error">{resumeErrors[c.claude_session_id]}</p>
                   {/if}
+                {:else if lostAndFound && needsRestoreInto(c)}
+                  {#if restoringId === c.claude_session_id}
+                    <LostTargetForm
+                      action="Restore"
+                      entry={c.git_branch ?? c.cwd}
+                      requireProject
+                      args={{
+                        host_alias: host.alias,
+                        claude_session_id: c.claude_session_id,
+                        cwd: c.cwd,
+                        git_branch: c.git_branch,
+                      }}
+                      onsubmit={(pid) => restoreInto(c, pid)}
+                      oncancel={() => (restoringId = null)}
+                    />
+                  {:else}
+                    <button
+                      type="button"
+                      class="small"
+                      disabled={candidateBlocked(c) !== null}
+                      title={candidateBlocked(c) ?? 'Resume it in a project you pick'}
+                      data-testid="discover-restore-into"
+                      onclick={() => (restoringId = c.claude_session_id)}>Restore into…</button
+                    >
+                  {/if}
                 {:else if c.project_id !== null}
                   <span class="muted" title="Resume starts Claude in the project root or a registered worktree; this conversation ran elsewhere, so resuming would start a new, empty one">path is not a fleet worktree</span>
                 {:else}
@@ -686,6 +762,37 @@
           </ul>
         {/if}
       </div>
+    {/if}
+    {#if outsidePanes.length > 0}
+      <ul class="discover-items" data-testid="outside-panes" aria-label="Panes fleet did not start">
+        {#each outsidePanes as p (p.id)}
+          <li class="discover-item">
+            <div class="d-main">
+              <span class="d-cwd">{p.tmux_name}</span>
+              <span class="badge">outside fleet</span>
+              <span class="muted">running {shortAge(p.created_at, now)}</span>
+            </div>
+            {#if adoptingId === p.id}
+              <LostTargetForm
+                action="Adopt"
+                entry={p.tmux_name}
+                args={{ session_id: p.id }}
+                onsubmit={(pid) => adoptInto(p, pid)}
+                oncancel={() => (adoptingId = null)}
+              />
+            {:else}
+              <button
+                type="button"
+                class="small"
+                disabled={adoptBlocked(p) !== null}
+                title={adoptBlocked(p) ?? 'Fleet runs it from now on; the pane stays as it is'}
+                data-testid="outside-adopt"
+                onclick={() => (adoptingId = p.id)}>Adopt…</button
+              >
+            {/if}
+          </li>
+        {/each}
+      </ul>
     {/if}
     {#if hostSessions.length === 0}
       <p class="muted">No sessions on this host. Press <kbd>n</kbd> to start one.</p>

@@ -23,6 +23,7 @@ mod claim;
 pub mod deferred;
 mod discover;
 mod lifecycle;
+mod lost_found;
 mod paths;
 mod prompt;
 mod reconcile;
@@ -48,6 +49,7 @@ pub use self::claim::*;
 pub use self::deferred::*;
 pub use self::discover::*;
 pub use self::lifecycle::*;
+pub use self::lost_found::*;
 // `paths` has no `pub` item — its widest is `pub(crate)` — so the re-export
 // is `pub(crate)` too (a `pub` glob would re-export nothing).
 pub(crate) use self::paths::*;

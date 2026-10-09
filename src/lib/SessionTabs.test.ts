@@ -5,6 +5,7 @@ import { render, screen } from '@testing-library/svelte';
 import { describe, it, expect } from 'vitest';
 import SessionTabs from './SessionTabs.svelte';
 import { session } from './hosts_fixture';
+import { expectAccessible } from './a11y_check';
 import type { SessionRow } from './sessions';
 
 function mount(row: SessionRow | null, isMac = true) {
@@ -68,5 +69,61 @@ describe('SessionTabs: Share from the header (step 5.8)', () => {
     expect(get(shareSheetFor)).toBe(row.id);
     shareSheetFor.set(null);
     unmount();
+  });
+});
+
+describe('SessionTabs: accessibility', () => {
+  it('the session tab bar is accessible', async () => {
+    const { container } = mount(session('mercury', 'dev-a'));
+    await expectAccessible(container);
+  });
+});
+
+describe('SessionTabs: the Terminals tab (step 5.3)', () => {
+  it('sits after the agent tab with its count and the new-terminal chord', () => {
+    render(SessionTabs, {
+      props: {
+        session: session('mercury', 'dev-a'),
+        name: 'dev-a',
+        current: 'terminals',
+        terminalCount: 2,
+        disabled: {},
+        assetsActive: false,
+        inspectorOpen: false,
+        inspectorAvailable: true,
+        isMac: true,
+        onselect: () => {},
+        onassets: () => {},
+        oninspector: () => {},
+      },
+    });
+    const ids = screen.getAllByRole('tab').map((t) => t.dataset.testid);
+    expect(ids).toEqual(['stab-conversation', 'stab-agent', 'stab-terminals', 'stab-files', 'stab-details']);
+    const tab = screen.getByTestId('stab-terminals');
+    expect(tab.getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByTestId('stab-terminals-count').textContent).toBe('2');
+    expect(tab.querySelector('.of-kbd')?.textContent).toBe('⌥⌘T');
+  });
+
+  it('shows no count with no terminals open, and says why it is off', () => {
+    render(SessionTabs, {
+      props: {
+        session: session('mercury', 'dev-a'),
+        name: 'dev-a',
+        current: 'agent',
+        disabled: { terminals: 'Terminals open only on a session that is yours' },
+        assetsActive: false,
+        inspectorOpen: false,
+        inspectorAvailable: true,
+        isMac: false,
+        onselect: () => {},
+        onassets: () => {},
+        oninspector: () => {},
+      },
+    });
+    const tab = screen.getByTestId('stab-terminals') as HTMLButtonElement;
+    expect(screen.queryByTestId('stab-terminals-count')).toBeNull();
+    expect(tab.disabled).toBe(true);
+    expect(tab.title).toBe('Terminals open only on a session that is yours');
   });
 });

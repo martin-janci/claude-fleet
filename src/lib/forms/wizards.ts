@@ -10,8 +10,9 @@ import linkHub from './wizards/link_hub.json';
 import addProject from './wizards/add_project.json';
 import addHost from './wizards/add_host.json';
 import pairDevice from './wizards/pair_device.json';
+import newSession from './wizards/new_session.json';
 
-export type WizardId = 'link_hub' | 'add_project' | 'add_host' | 'pair_device';
+export type WizardId = 'link_hub' | 'add_project' | 'add_host' | 'pair_device' | 'new_session';
 
 export interface Wizard {
   id: WizardId;
@@ -33,6 +34,9 @@ export const WIZARDS: Record<WizardId, Wizard> = {
   add_host: { id: 'add_host', spec: addHost as FormSpec, sending: 'Checking…', loader: 'sonar' },
   // Settings › Devices' Pair a device in the New layout.
   pair_device: { id: 'pair_device', spec: pairDevice as FormSpec, sending: 'Pairing…', loader: 'halo' },
+  // ⌘N's start as a form, for the chat and Get started; its answered line
+  // carries the Pulse while the agent comes up (5.13).
+  new_session: { id: 'new_session', spec: newSession as FormSpec, sending: 'Starting…', loader: 'pulse-sequence' },
 };
 
 /** `spec` with the choices only known when it opens (the fleet's hosts, a

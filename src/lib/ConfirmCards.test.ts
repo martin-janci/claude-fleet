@@ -23,6 +23,7 @@ import { get } from 'svelte/store';
 import ConfirmCards from './ConfirmCards.svelte';
 import McpConfirmDialog from './McpConfirmDialog.svelte';
 import { confirmQueue, resetConfirmsForTests } from './confirms';
+import { expectAccessible } from './a11y_check';
 
 // Redesign step 9.2: the operator's confirms are cards in Control's
 // transcript; everything else, and the operator's requests whenever no
@@ -141,5 +142,17 @@ describe('confirms as transcript cards', () => {
     await tick();
     await tick();
     expect(screen.queryByTestId('confirm-card')).toBeNull();
+  });
+});
+
+describe('ConfirmCards: accessibility', () => {
+  it("the operator's pending kill, as a card, is accessible", async () => {
+    render(McpConfirmDialog);
+    const { container } = render(ConfirmCards);
+    await tick();
+    await emit('mcp:confirm-required', KILL);
+    await tick();
+    expect(screen.getByTestId('confirm-card')).toBeTruthy();
+    await expectAccessible(container);
   });
 });

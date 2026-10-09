@@ -29,6 +29,7 @@
   import { composerInsert } from './lib/conversation';
   import { tidyRequest } from './lib/tidy';
   import TerminalView from './lib/TerminalView.svelte';
+  import { terminalPane, requestTerminalTab } from './lib/terminals';
   import WatchView from './lib/WatchView.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
   import HostsView from './lib/HostsView.svelte';
@@ -65,7 +66,7 @@
   import { newSessionRequest, clearNewSessionRequest } from './lib/new_session_request';
   import { push, pushError } from './lib/toasts';
   import DownloadsSheet from './lib/DownloadsSheet.svelte';
-  import { downloads, unseen, loadDownloads, noteDownloadsChanged } from './lib/downloads';
+  import { downloads, downloadsOpen, unseen, loadDownloads, noteDownloadsChanged } from './lib/downloads';
   import { loadLocalWorkspaces, noteLocalWorkspacesChanged } from './lib/local_workspaces';
   import type { Result } from './lib/result';
   import type { UnlistenFn } from '@tauri-apps/api/event';
@@ -212,7 +213,6 @@
   let stopActivity: (() => void) | null = null;
   let stopCatchUp: (() => void) | null = null;
   // File downloads: the footer button and its sheet.
-  let showDownloads = $state(false);
   const unseenDownloads = $derived(unseen($downloads));
 
   function reportBootstrap(what: string, r: Result<unknown>): string | null {
@@ -835,6 +835,12 @@
   );
   const inspectorRoom = $derived(newLayout && !!$selectedSession && !wideMode && !boardMode && !detailsMain);
   const inspectorShown = $derived(inspectorRoom && inspectorOpen);
+  // Step 5.3: the pane's shells, for the Terminals tab. It is current while
+  // the pane shows one of them (alone or split beside the agent).
+  const selTerminals = $derived(
+    $terminalPane.sessionId != null && $terminalPane.sessionId === $selectedSession?.id ? $terminalPane : null,
+  );
+  const terminalsShown = $derived(selTerminals?.active != null);
   const currentTab: SessionTab | null = $derived(
     detailsMode
       ? 'details'
@@ -843,12 +849,15 @@
         : sessionTabActive && !boardMode
           ? effectiveView === 'conversation'
             ? 'conversation'
-            : 'agent'
+            : terminalsShown
+              ? 'terminals'
+              : 'agent'
           : null,
   );
   const tabDisabled = $derived<Partial<Record<SessionTab, string>>>({
     ...(!selHasClaudeId && !selNoPane ? { conversation: 'No Claude session id yet' } : {}),
-    ...(selNoPane ? { agent: NO_PANE_TITLE, files: NO_PANE_TITLE } : {}),
+    ...(selNoPane ? { agent: NO_PANE_TITLE, files: NO_PANE_TITLE, terminals: NO_PANE_TITLE } : {}),
+    ...(!selNoPane && !selTerminals ? { terminals: 'Terminals open only on a session that is yours' } : {}),
   });
   const selName = $derived(
     $selectedSession
@@ -857,8 +866,13 @@
   );
   function onSessionTab(tab: SessionTab) {
     if (tab === 'conversation') setSessionView('conversation');
-    else if (tab === 'agent') setSessionView('terminal');
-    else if (tab === 'files') showFiles();
+    else if (tab === 'agent') {
+      setSessionView('terminal');
+      requestTerminalTab('agent');
+    } else if (tab === 'terminals') {
+      setSessionView('terminal');
+      requestTerminalTab('shells');
+    } else if (tab === 'files') showFiles();
     else {
       closeHosts();
       goTo('details');
@@ -1176,6 +1190,7 @@
         session={$selectedSession}
         name={selName}
         current={currentTab}
+        terminalCount={selTerminals?.shells.length ?? 0}
         disabled={tabDisabled}
         assetsActive={assetsMode}
         {inspectorOpen}
@@ -1396,8 +1411,8 @@
   {/if}
 </main>
 
-{#if showDownloads}
-  <DownloadsSheet onclose={() => (showDownloads = false)} />
+{#if $downloadsOpen}
+  <DownloadsSheet onclose={() => downloadsOpen.set(false)} />
 {/if}
 
 <footer class="status">
@@ -1418,7 +1433,7 @@
       class="hub-badge"
       data-testid="footer-downloads"
       title="Files sessions sent to your devices"
-      onclick={() => (showDownloads = true)}
+      onclick={() => downloadsOpen.set(true)}
       >⤓ Downloads…{unseenDownloads > 0 ? ` (${unseenDownloads})` : ''}</button
     >
     {#if trackersLine}

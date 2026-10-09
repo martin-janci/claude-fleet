@@ -28,6 +28,7 @@ pub mod projects;
 pub mod prs;
 pub mod quick_replies;
 pub mod resolve_move;
+pub mod routines;
 pub mod runs;
 pub mod sessions;
 pub mod tasks;
