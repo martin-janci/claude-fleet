@@ -39,7 +39,7 @@
     box-sizing: border-box;
   }
   .command {
-    width: 260px;
+    width: var(--command-w);
     justify-content: space-between;
     color: var(--fg-muted);
   }

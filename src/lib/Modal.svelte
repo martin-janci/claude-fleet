@@ -152,7 +152,7 @@
     border-radius: var(--radius-md);
     background: var(--bg);
     color: var(--fg);
-    max-width: min(90vw, 720px);
+    max-width: min(90vw, var(--prose-max));
     /* No overflow here: a scrollbar on the <dialog> would be part of the
        element, and grabbing it would read as a backdrop click. */
     overflow: hidden;

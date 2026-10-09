@@ -2332,6 +2332,12 @@ impl Store {
         self.bus.move_progress(p);
     }
 
+    /// Emit `start:progress` (not a store row): a `new_session` step
+    /// boundary (redesign step 5.13).
+    pub fn bus_start_progress(&self, p: &crate::events::StartProgress) {
+        self.bus.start_progress(p);
+    }
+
     /// Emit `confirm:changed` (not a store row): the confirmation queue
     /// moved (redesign step 9.2).
     pub fn bus_confirm_changed(&self) {

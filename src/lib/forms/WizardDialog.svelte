@@ -65,10 +65,10 @@
 </Modal>
 
 <style>
-  .sheet { display: flex; flex-direction: column; gap: var(--space-3, 12px); }
-  header { display: flex; flex-direction: column; gap: var(--space-1, 4px); }
-  h3 { margin: 0; font-size: var(--text-lg, 15px); font-weight: var(--text-lg-weight, 600); }
-  .lead { margin: 0; color: var(--fg-muted); font-size: var(--text-sm, 12.5px); line-height: var(--text-sm-lh, 1.45); }
+  .sheet { display: flex; flex-direction: column; gap: var(--space-3); }
+  header { display: flex; flex-direction: column; gap: var(--space-1); }
+  h3 { margin: 0; font-size: var(--text-lg); font-weight: var(--text-lg-weight); }
+  .lead { margin: 0; color: var(--fg-muted); font-size: var(--text-sm); line-height: var(--text-sm-lh); }
   .running { display: flex; justify-content: center; }
-  .err { margin: 0; font-size: var(--text-xs, 11.5px); color: var(--danger, var(--usage-crit)); }
+  .err { margin: 0; font-size: var(--text-xs); color: var(--danger); }
 </style>

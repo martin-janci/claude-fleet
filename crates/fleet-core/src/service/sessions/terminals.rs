@@ -34,6 +34,27 @@ pub enum ShellTerminalAction {
     Close,
 }
 
+/// Where `open` starts a new terminal, on the session's own host (the
+/// strip's "New terminal opens on" picker).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
+)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum ShellTerminalStart {
+    // The agent pane's current directory: the session's worktree.
+    #[default]
+    Worktree,
+    // The login user's home directory on the session's host.
+    Home,
+}
+
+impl ShellTerminalStart {
+    fn is_worktree(&self) -> bool {
+        *self == ShellTerminalStart::Worktree
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellTerminalsArgs {
     pub session_id: i64,
@@ -41,6 +62,11 @@ pub struct ShellTerminalsArgs {
     pub action: ShellTerminalAction,
     #[serde(default)]
     pub n: Option<u32>,
+    /// `open` only: where the new terminal starts. Left off the wire when it
+    /// is the default, so a call that does not pick says exactly what it
+    /// said before the picker existed.
+    #[serde(default, skip_serializing_if = "ShellTerminalStart::is_worktree")]
+    pub at: ShellTerminalStart,
 }
 
 /// One open terminal: its number and the tmux session a terminal pane
@@ -123,7 +149,11 @@ pub(crate) async fn shell_terminals_with(
                 }
             };
             let out = tmux
-                .run_script(&open_shell_terminal_script(name, n))
+                .run_script(&open_shell_terminal_script(
+                    name,
+                    n,
+                    args.at == ShellTerminalStart::Home,
+                ))
                 .await?;
             if out.status.code() == Some(SHELL_TERMINAL_NO_SESSION) {
                 return Err(IpcError::new(
@@ -394,10 +424,10 @@ mod tests {
             .success());
 
         // No agent session: refused with its own exit code, nothing opened.
-        let gone = t.sh(&open_shell_terminal_script("nope", 1));
+        let gone = t.sh(&open_shell_terminal_script("nope", 1, false));
         assert_eq!(gone.status.code(), Some(SHELL_TERMINAL_NO_SESSION));
 
-        let open = t.sh(&open_shell_terminal_script("my api", 1));
+        let open = t.sh(&open_shell_terminal_script("my api", 1, false));
         assert!(
             open.status.success(),
             "{}",
@@ -405,11 +435,11 @@ mod tests {
         );
         // Opening an open terminal is a no-op, not a "duplicate session".
         assert!(t
-            .sh(&open_shell_terminal_script("my api", 1))
+            .sh(&open_shell_terminal_script("my api", 1, false))
             .status
             .success());
         assert!(t
-            .sh(&open_shell_terminal_script("my api", 2))
+            .sh(&open_shell_terminal_script("my api", 2, false))
             .status
             .success());
         assert_eq!(
@@ -422,6 +452,31 @@ mod tests {
             std::fs::canonicalize(String::from_utf8_lossy(&cwd.stdout).trim()).unwrap(),
             std::fs::canonicalize(dir.path()).unwrap()
         );
+        // "Opens on: Home folder" starts it in $HOME instead.
+        let home = tempfile::tempdir().unwrap();
+        let in_home = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(open_shell_terminal_script("my api", 3, true))
+            .env("TMUX_TMPDIR", &t.sock)
+            .env("SHELL", "/bin/sh")
+            .env("HOME", home.path())
+            .env_remove("TMUX")
+            .output()
+            .unwrap();
+        assert!(
+            in_home.status.success(),
+            "{}",
+            String::from_utf8_lossy(&in_home.stderr)
+        );
+        let cwd3 = t.sh("tmux display-message -p -t '=my api--sh3:' '#{pane_current_path}'");
+        assert_eq!(
+            std::fs::canonicalize(String::from_utf8_lossy(&cwd3.stdout).trim()).unwrap(),
+            std::fs::canonicalize(home.path()).unwrap()
+        );
+        assert!(t
+            .sh(&close_shell_terminal_script("my api", 3))
+            .status
+            .success());
 
         assert!(t
             .sh(&close_shell_terminal_script("my api", 2))

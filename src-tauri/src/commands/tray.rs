@@ -7,6 +7,11 @@
 //!
 //! The icons are `icons/tray/*.svg`, rendered to 64 px PNGs with
 //! `rsvg-convert -w 64 -h 64 <name>.svg -o <name>.png`.
+//!
+//! Step 3.14's Halo on the macOS dock: the same call carries the Inbox count
+//! the tray's Halo follows, and the dock icon wears it as its badge
+//! ([`dock_badge`]), cleared when nothing waits. Only macOS has that dock;
+//! elsewhere the tray is the whole story.
 
 use serde::Deserialize;
 use tauri::image::Image;
@@ -97,10 +102,37 @@ pub fn install(app: &tauri::App) {
     }
 }
 
-/// Switches the tray icon and its tooltip. Same in both modes: the tray is
-/// this window's. No tray (see `install`) is not an error.
+/// The dock badge for this many sessions waiting for you: the count, or
+/// none at all when nothing waits (a `0` badge would still read as "look").
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn dock_badge(needs_you: Option<u32>) -> Option<i64> {
+    needs_you.filter(|n| *n > 0).map(i64::from)
+}
+
+/// Halo on the dock: the main window's badge (macOS: the app's dock icon).
+#[cfg(target_os = "macos")]
+fn set_dock_badge(app: &tauri::AppHandle, needs_you: Option<u32>) {
+    if let Some(w) = app.get_webview_window("main") {
+        if let Err(e) = w.set_badge_count(dock_badge(needs_you)) {
+            tracing::debug!(error = %e, "dock badge unavailable");
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_dock_badge(_app: &tauri::AppHandle, _needs_you: Option<u32>) {}
+
+/// Switches the tray icon and its tooltip, and the dock's Halo badge to
+/// `needs_you` (the Inbox count; absent from an older frontend, which leaves
+/// no badge). Same in both modes: the tray and the dock are this window's.
+/// No tray (see `install`) is not an error.
 #[tauri::command]
-pub async fn set_tray_state(app: tauri::AppHandle, state: TrayState) -> Result<(), IpcError> {
+pub async fn set_tray_state(
+    app: tauri::AppHandle,
+    state: TrayState,
+    needs_you: Option<u32>,
+) -> Result<(), IpcError> {
+    set_dock_badge(&app, needs_you);
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return Ok(());
     };
@@ -133,6 +165,15 @@ mod tests {
                 "{state:?} reuses another state's tooltip"
             );
         }
+    }
+
+    #[test]
+    fn the_dock_badge_follows_the_inbox_count() {
+        assert_eq!(dock_badge(None), None);
+        assert_eq!(dock_badge(Some(0)), None, "nothing waiting: no badge");
+        assert_eq!(dock_badge(Some(1)), Some(1));
+        assert_eq!(dock_badge(Some(4)), Some(4));
+        assert_eq!(dock_badge(Some(u32::MAX)), Some(i64::from(u32::MAX)));
     }
 
     #[test]

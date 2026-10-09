@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   // Local workspace sync (Phase 1): the session's worktree, kept in step with
   // a folder on this machine. Off: a folder field and Enable. On: state,
   // both paths, when it last synced, open conflicts with Keep local / Keep
@@ -39,6 +40,7 @@
   import DiffView from './DiffView.svelte';
   import LocalChangesDialog from './LocalChangesDialog.svelte';
   import LocalWorkspacesOverview from './LocalWorkspacesOverview.svelte';
+  import Loader from './Loader.svelte';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -111,6 +113,20 @@
       await fn();
     } finally {
       busy = false;
+    }
+  }
+
+  // Combining the two sides of a conflict (keep both, or the agent merges
+  // them) is merging work: the kit's Liquid orbit runs while it does
+  // (redesign step 5.13, motion.md "Fork, rebase or merge").
+  let combining = $state(false);
+  async function combine(fn: () => Promise<unknown>) {
+    if (busy) return;
+    combining = true;
+    try {
+      await run(fn);
+    } finally {
+      combining = false;
     }
   }
 
@@ -249,7 +265,13 @@
     {/if}
     {#if link.conflicts.length > 0}
       <div class="conflicts" data-testid="lw-conflicts">
-        <p class="warn">⚠ Sync conflict: nothing was overwritten on either side.</p>
+        <p class="warn"><Icon name="warning" size={12} /> Sync conflict: nothing was overwritten on either side.</p>
+        {#if combining}
+          <p class="combining" data-testid="lw-combining">
+            <Loader name="liquid-orbit" size={40} label="Combining both sides" testid="lw-liquid" />
+            <span class="muted small">Combining both sides…</span>
+          </p>
+        {/if}
         <ul>
           {#each link.conflicts as c (c.path)}
             <li data-testid="lw-conflict">
@@ -283,7 +305,7 @@
                     disabled={busy}
                     data-testid="lw-keep-both"
                     title="Keep the remote file and save yours next to it as .local-copy"
-                    onclick={() => run(() => keepBothLocalConflict(link.id, c.path))}
+                    onclick={() => combine(() => keepBothLocalConflict(link.id, c.path))}
                   >Keep both</button>
                   <button
                     class="ghost small"
@@ -291,7 +313,7 @@
                     data-testid="lw-ask-resolve"
                     title="Put your version next to the remote one and ask the agent to merge them"
                     onclick={() =>
-                      run(() => askAiAboutLocalChanges(link.id, 'resolve', { paths: [c.path] }))}
+                      combine(() => askAiAboutLocalChanges(link.id, 'resolve', { paths: [c.path] }))}
                   >Ask AI to resolve</button>
                 </span>
               {/if}
@@ -463,6 +485,7 @@
   }
   .error { margin: 0; color: var(--usage-crit); font-size: var(--text-2xs); }
   .warn { margin: 0; color: var(--usage-warn); font-size: var(--text-xs); }
+  .combining { display: flex; align-items: center; gap: var(--space-2, 8px); margin: 0.3rem 0; }
   .conflicts ul { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
   .conflicts li { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; font-size: var(--text-2xs); }
   .kind { color: var(--fg-muted); }

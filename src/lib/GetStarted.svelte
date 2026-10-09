@@ -19,7 +19,7 @@
   import { projects } from './projects';
   import { selectSessionExplicitly } from './selection';
   import WizardDialog from './forms/WizardDialog.svelte';
-  import { newSessionWizard, startNewSession } from './forms/new_session_wizard';
+  import { buildFirstFleet, getStartedWizard } from './forms/get_started_wizard';
   import type { FieldProblem, Values } from './forms/forms';
   import { onboardingDismissed } from './onboarding';
   import { openRoutines } from './routines';
@@ -46,13 +46,16 @@
   let wizardBusy = $state(false);
   let wizardError = $state<string | null>(null);
   let wizardProblems = $state<FieldProblem[]>([]);
-  const wizard = $derived(newSessionWizard({ projects: $projects.map((p) => p.project), hosts: visibleHosts }));
+  // Step 10.12: Get started runs on its own form spec
+  // (`forms/wizards/get_started.json`): a host, a project and the first
+  // session, built in one go when its last button is pressed.
+  const wizard = $derived(getStartedWizard({ projects: $projects.map((p) => p.project), hosts: visibleHosts }));
 
   async function startFromWizard(values: Values) {
     wizardBusy = true;
     wizardError = null;
     wizardProblems = [];
-    const r = await startNewSession(values);
+    const r = await buildFirstFleet(values);
     wizardBusy = false;
     if (!r.ok) {
       wizardError = r.error ?? null;
@@ -91,7 +94,7 @@
       case 'account':
         return goTo('accounts');
       case 'session':
-        // The New session wizard: project, host and agent in one place (10.12).
+        // The Get started wizard: host, project and agent in one place (10.12).
         wizardOpen = true;
         return;
       case 'github':
@@ -127,7 +130,8 @@
   </div>
   {#if !$getStartedFolded}
     <div class="bar" aria-hidden="true"><span style="width:{(done / items.length) * 100}%"></span></div>
-    {#if building}
+    <!-- One loader per screen: while the wizard builds, its own Galaxy shows. -->
+    {#if building && !wizardBusy}
       <div class="building" data-testid="get-started-building">
         <Loader name="galaxy" size={120} label="Building your fleet" testid="get-started-galaxy" />
         <span class="meta">Building your fleet · starting your first session</span>

@@ -18,6 +18,7 @@
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import ProjectActionsMenu from './ProjectActionsMenu.svelte';
+  import Icon from './kit/Icon.svelte';
   import { switcherRequest } from './switcher_request';
   import { newSessionHostRequest, addProjectRequest } from './app_views';
   import { loadProjectPicks, pickKey, previousPick, projectPicks, setProjectPick } from './project_picks';
@@ -31,6 +32,7 @@
   import type { PickerItem } from './PickerList.svelte';
   import { sessions, sessionsAnswered, type SessionRow } from './sessions';
   import Loader from './Loader.svelte';
+  import { searchLoader } from './search_loader';
   import { projects } from './projects';
   import { hosts } from './hosts';
   import { requestAssetsView, requestHostsView } from './app_views';
@@ -130,12 +132,16 @@
   let tickets = $state<SwitcherTicket[]>([]);
   // Only the newest load lands (review r07).
   let ticketsSeq = 0;
+  // The ticket views are a step of the search while they load (9.12).
+  let ticketsLoading = $state(false);
   async function loadTickets() {
     const mine = ++ticketsSeq;
     if ($trackers.length === 0) {
       tickets = [];
+      ticketsLoading = false;
       return;
     }
+    ticketsLoading = true;
     const views: [string, string][] = [
       ['mine', 'My work'],
       ['sprint', 'Current sprint'],
@@ -143,6 +149,7 @@
     ];
     const answers = await Promise.all(views.map(([view]) => workTickets({ view, limit: 20 })));
     if (mine !== ticketsSeq) return;
+    ticketsLoading = false;
     const out: SwitcherTicket[] = [];
     answers.forEach((r, i) => {
       if (r.ok && Array.isArray(r.value)) {
@@ -175,6 +182,18 @@
     const more = names.length > 3 ? ` and ${names.length - 3} more` : '';
     return `Still hearing from ${shown}${more}`;
   });
+  // Step 9.12: the search's current step (the hosts it still hears from,
+  // then the ticket views), with the Dot wave while it is short and Comet
+  // trails once it has run long (`search_loader.ts`). One loader on the line.
+  const searchStep = $derived(stillHearing ?? (ticketsLoading ? 'Reading your tickets: My work, Current sprint, Recent' : null));
+  let searchSince = $state(0);
+  let searchNow = $state(0);
+  $effect(() => {
+    if (!open || !searchStep) return;
+    const t = setInterval(() => (searchNow = Date.now()), 500);
+    return () => clearInterval(t);
+  });
+  const searchMark = $derived(searchLoader(searchNow - searchSince));
   // Step 3.9: `>` commands, `#` tasks and tickets, `@` hosts.
   const prefix = $derived(splitPrefix(query));
   const lookupRow = $derived(
@@ -406,6 +425,7 @@
     lastUndo = null;
     open = true;
     seq++;
+    searchSince = searchNow = Date.now();
     void loadTickets();
     // Fresh picks for the NEXT open: this one's view is frozen.
     if (next === 'new') void loadProjectPicks();
@@ -963,10 +983,12 @@
         </div>
       {/if}
     </div>
-    {#if mode !== 'new' && stillHearing}
-      <div class="still-hearing" data-testid="switcher-still-hearing" role="status">
-        <Loader name="dot-wave" size={40} stage={false} />
-        <span>{stillHearing}</span>
+    {#if mode !== 'new' && searchStep}
+      <div class="still-hearing" data-testid="switcher-still-hearing" role="status" data-long={searchMark === 'comet-trails'}>
+        {#key searchMark}
+          <Loader name={searchMark} size={searchMark === 'comet-trails' ? 20 : 40} stage={false} />
+        {/key}
+        <span>{searchStep}</span>
       </div>
     {/if}
     <div class="hint">
@@ -1012,8 +1034,8 @@
         ev.stopPropagation();
         togglePin(e);
       }}
-      ><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></svg
-    ></button>
+      ><Icon name="pin" size={14} /></button
+    >
     <button
       type="button"
       tabindex="-1"
@@ -1023,8 +1045,8 @@
         ev.stopPropagation();
         openMenu(item.key, 'groups');
       }}
-      ><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg
-    ></button>
+      ><Icon name="folder" size={14} /></button
+    >
     <button
       type="button"
       tabindex="-1"
@@ -1034,8 +1056,8 @@
         ev.stopPropagation();
         toggleHide(e);
       }}
-      ><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.73 5.08A10.4 10.4 0 0 1 12 5c7 0 10 7 10 7a13 13 0 0 1-1.67 2.68" /><path d="M6.61 6.61A13.5 13.5 0 0 0 2 12s3 7 10 7a9.7 9.7 0 0 0 5.39-1.61" /><path d="m2 2 20 20" /><path d="M14.08 14.16a3 3 0 0 1-4.24-4.24" /></svg
-    ></button>
+      ><Icon name="hide" size={14} /></button
+    >
   {/if}
 {/snippet}
 

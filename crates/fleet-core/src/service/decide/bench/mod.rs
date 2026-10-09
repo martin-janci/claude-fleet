@@ -16,6 +16,11 @@
 //!   (`fleet-hub decide bench status-map`).
 //! - [`turn_outcome`]: card J2, what a silent turn's end came to, from
 //!   labeled pane tails (`fleet-hub decide bench turn-outcome`).
+//! - [`choice`]: one labelled set per closed-choice use case — K2
+//!   control_route, K4 duplicate, N1 related_session, K5 work_placement,
+//!   N5 host_placement, N6 routine_run_outcome, N4 adopt_target, J10
+//!   restore_target, J6 main_ticket, J7 tracker_duplicate
+//!   (`fleet-hub decide bench <use-case>`). The built-in sets are synthetic.
 //!
 //! - [`perturb`]: perturbed variants (dataset C) and the paired comparison
 //!   datasets B and C are judged by; [`status_map_robust`] applies them to
@@ -25,6 +30,9 @@
 //! and Brier, test map §4) and the acceptance verdicts both benches print.
 
 pub mod bm25;
+pub mod choice;
+#[cfg(test)]
+mod choice_tests;
 pub mod perturb;
 pub mod status_map;
 pub mod status_map_robust;

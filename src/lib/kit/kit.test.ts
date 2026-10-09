@@ -162,18 +162,12 @@ function textColours(root: Element, state: State) {
 
 /**
  * Pairs the manual's own tokens leave under 4.5:1, pinned at their measured
- * worst theme so a token change that moves them fails here (raised to 4.5:
- * delete the row; lowered: a regression). Reported to the manual with step
- * 0.9; fix them there, then in app.css and tokens.ts.
+ * worst theme so a token change that moves them fails here. Empty: the three
+ * step 0.9 found (fg-muted on bg-hover, fg-muted on failed-soft, status-failed
+ * on accent-soft) are fixed in the manual's bundle.css by the component
+ * reading fg-2 or fg in that state, not by moving a token value.
  */
-const KNOWN_SHORTFALLS: Record<string, number> = {
-  // A hovered row's age and a key hint in a hovered button (light 4.43).
-  'fg-muted on bg-hover': 4.43,
-  // A failed banner's evidence line (light 4.35).
-  'fg-muted on failed-soft/bg-pane': 4.35,
-  // "Failed:" on a selected row (dark 4.33).
-  'status-failed on accent-soft': 4.33,
-};
+const KNOWN_SHORTFALLS: Record<string, number> = {};
 
 function expectReadable(root: Element, what: string) {
   for (const state of ['base', 'hover'] as const) {

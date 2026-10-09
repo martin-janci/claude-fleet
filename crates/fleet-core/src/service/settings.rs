@@ -577,6 +577,12 @@ pub const DECIDE_JEV_MISSION_TRIAGE: &str = "decide.jev.mission_triage";
 pub const DECIDE_JEV_ROUTINE_RUN_OUTCOME: &str = "decide.jev.routine_run_outcome";
 /// `pr_triage`'s mode (what a PR shepherd episode most likely needs).
 pub const DECIDE_JEV_PR_TRIAGE: &str = "decide.jev.pr_triage";
+/// `main_ticket`'s mode (J6: the main ticket among several keys a
+/// session's prompt names, redesign step 6.8).
+pub const DECIDE_JEV_MAIN_TICKET: &str = "decide.jev.main_ticket";
+/// `tracker_duplicate`'s mode (J7: a local task that may be the same work
+/// as a tracker ticket, redesign step 6.8).
+pub const DECIDE_JEV_TRACKER_DUPLICATE: &str = "decide.jev.tracker_duplicate";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -1495,6 +1501,24 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: record only")]),
+    Spec::new(
+        DECIDE_JEV_MAIN_TICKET,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: main ticket",
+        "Proposing the main ticket in Review when a session's first prompt names several. A branch naming one decides without Jev. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_TRACKER_DUPLICATE,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: local task duplicates a ticket",
+        "Flagging in Review a new local task that may be the same work as an open tracker ticket. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
     Spec::new(
         DECIDE_JEV_UNASSIGNED,
         "false",
@@ -2764,6 +2788,9 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_QUICK_ANSWER, None), "off");
         assert_eq!(resolve(DECIDE_JEV_ADOPT_TARGET, None), "off");
         assert_eq!(resolve(DECIDE_JEV_RESTORE_TARGET, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_MAIN_TICKET, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_TRACKER_DUPLICATE, None), "off");
+        assert!(validate(DECIDE_JEV_MAIN_TICKET, "auto").is_err());
         assert!(validate(DECIDE_JEV_RESTORE_TARGET, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_MODEL, None), "jev-1.13.0");
         assert_eq!(resolve(DECIDE_RETENTION_DAYS, None), "90");

@@ -201,7 +201,9 @@ async fn an_unknown_project_id_is_not_found_not_a_raw_sqlite_error() {
         profile: None,
         agent: None,
         origin: None,
+        over_limit_ok: false,
         owner_person_id: None,
+        start_token: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
@@ -232,7 +234,9 @@ async fn an_unknown_project_id_is_not_found_for_a_new_worktree_too() {
         profile: None,
         agent: None,
         origin: None,
+        over_limit_ok: false,
         owner_person_id: None,
+        start_token: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
@@ -851,7 +855,9 @@ fn args_named(name: &str, resume: Option<&str>) -> NewSessionArgs {
         profile: None,
         agent: None,
         origin: None,
+        over_limit_ok: false,
         owner_person_id: None,
+        start_token: None,
     }
 }
 
@@ -1350,7 +1356,9 @@ fn a_new_session_is_linked_to_the_worktree_it_was_started_in() {
         profile: None,
         agent: None,
         origin: None,
+        over_limit_ok: false,
         owner_person_id: None,
+        start_token: None,
     };
 
     // A new worktree on local: its row is created and linked.
@@ -1814,14 +1822,15 @@ fn the_agent_settles_against_the_kind() {
     );
     // Codex (12.2) starts; its row is written `codex` by `new_session`.
     assert_eq!(settle(Some("codex"), None), ok(Some("codex"), None));
-    // So does agy (12.3).
-    assert_eq!(settle(Some("agy"), None), ok(Some("agy"), None));
+    // agy (12.3) is refused until its adapter is validated.
+    assert_eq!(settle(Some("agy"), None), None);
     // Contradictions and unknown names are invalid.
     for (agent, kind, code) in [
         ("shell", Some("work"), E_INVALID),
         ("claude", Some("shell"), E_INVALID),
         ("codex", Some("shell"), E_INVALID),
         ("agy", Some("shell"), E_INVALID),
+        ("agy", None, crate::ipc_error::codes::E_UNSUPPORTED),
         ("gemini", None, E_INVALID),
         ("Claude", None, E_INVALID),
     ] {
@@ -1847,11 +1856,14 @@ fn the_agent_settles_against_the_kind() {
     assert!(normalize_launch(&mut args).is_ok());
     args.profile = Some("work".into());
     assert_eq!(normalize_launch(&mut args).unwrap_err().code, E_INVALID);
-    // Nor has agy: it keeps its own login.
+    // agy is refused before its options are looked at (12.3).
     let mut args = args_named("dev-z", None);
     args.agent = Some("agy".into());
     args.profile = Some("work".into());
-    assert_eq!(normalize_launch(&mut args).unwrap_err().code, E_INVALID);
+    assert_eq!(
+        normalize_launch(&mut args).unwrap_err().code,
+        crate::ipc_error::codes::E_UNSUPPORTED
+    );
 }
 
 /// A new Codex session starts bare (Codex names its own conversation, so
@@ -1899,6 +1911,32 @@ fn an_agy_session_launches_agy() {
     );
     let pane = recreate_pane_command("work", "agy", None, "dev-ag", &Default::default());
     assert!(pane.contains("agy --continue; exec"), "{pane}");
+}
+
+/// Redesign 12.3: an agy row (written before agy was refused, or by hand)
+/// is not relaunched either: restart and recreate refuse it before any
+/// tmux call, with the same `E_UNSUPPORTED` as `new_session`.
+#[tokio::test]
+async fn restart_and_recreate_refuse_an_agy_row() {
+    use super::lifecycle::{recreate_session, restart_session};
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let id = s
+        .upsert_session("dev-ag", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.set_session_agent(id, "agy").unwrap();
+    let store = Mutex::new(s);
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let restart = serde_json::from_value(serde_json::json!({
+        "host_alias": "h", "name": "dev-ag"
+    }))
+    .unwrap();
+    let err = restart_session(restart, &store, &ssh).await.unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_UNSUPPORTED, "{err:?}");
+    let recreate = serde_json::from_value(serde_json::json!({ "session_id": id })).unwrap();
+    let err = recreate_session(recreate, &store, &ssh).await.unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_UNSUPPORTED, "{err:?}");
+    assert!(err.message.contains("agy"), "{}", err.message);
 }
 
 /// Recreate on a remote host whose checkout was deleted clones it back into

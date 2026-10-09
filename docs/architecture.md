@@ -36,11 +36,13 @@ bullet for the area you are about to change.
 - **Background loops** (`service/loops.rs`, redesign 8.1): every periodic
   job (reconcile and the jobs riding its tick, missions, tracker / catalog /
   local syncs, peers, updates, host refresh) reports its last run, next run
-  and result to one registry that `fleet_health.loops` lists; the jobs that
-  act on their own (`LOOPS[].pausable`) ask `loops::gate` first and stand
-  still while `automation.paused` is on. A new loop needs a `LOOPS` row, a
-  `loops::report` call and, when it writes, a gate
-  (`every_loop_reports_and_every_pausable_one_is_gated`).
+  and result to one registry that `fleet_health.loops` lists; every job
+  that acts on the person's behalf (`loops::acts`) asks `loops::gate` first
+  and stands still while `automation.paused` is on, and the rest
+  (`loops::keeps`) carry the reason they keep running, which the Automation
+  view shows. A new loop needs a `LOOPS` row, a `loops::report` call and,
+  when it acts, a gate (`every_loop_reports_and_every_pausable_one_is_gated`)
+  and a `pause_all_stops_*` behaviour test next to its pass.
 - **Declarative pages** (`crates/fleet-core/src/pages/`, P2): pages are JSON
   specs in `crates/fleet-core/pages/<id>.json`, listed in `PAGE_FILES`,
   that NAME registered settings, data sources (`pages/sources.rs`) and
@@ -66,6 +68,11 @@ bullet for the area you are about to change.
   item that takes it (Usage's window and host); Usage → Work graph usage
   (`usage.work`, source `work.usage` over `UsageSummary::rows`) replaced
   the hand-built WorkUsage panel and the `work_usage` command.
+  A table row may carry `transfer: { column, percent }` (not a column):
+  `DataItem.svelte` draws the transfer loader beside that cell, the
+  Progress ring for a known `percent`, Data rain for `null`
+  (`transfer_loader.ts`, step 10.10); Settings › Updates' rows carry it
+  while an update is in flight (`src-tauri/src/commands/updates.rs`).
   P4d: layout L8 `embed` places catalog items in the desktop's own
   screens at a closed `Slot`; account usage (`account_usage { view }`,
   live source `accounts.usage` over `list_account_usage`) is drawn that
@@ -308,7 +315,11 @@ bullet for the area you are about to change.
   `asset_inventory.drift_side` (`host` | `catalog`; also on `HostState`): a
   copy only behind its catalog opens no Drift card, shows under *Behind the
   catalog* in the Inbox whatever `catalog.auto` says, and SB6 brings it up
-  (`sb6_due`). Migration 097 stamps `changeset_items.decided_at`;
+  (`sb6_due`). What SB6 writes shows as a card (redesign 8.7,
+  `record_auto_card`): an applied Rollout, one `sync` item per host and
+  layer, carrying `AUTO_SYNC_NOTE`, which `ChangesetSummary.auto` reads and
+  the Inbox keeps under *Recently applied*. It has no Undo: a host write is
+  not a catalog commit, so it is changed by syncing the host. Migration 097 stamps `changeset_items.decided_at`;
   `rejected_rollouts` orders by it. Slug collisions in a Bootstrap card
   (per destination catalog, kind and slug) need a look; `changesets::list`
   computes undoability once (`undoable_ids`); the pass prunes an untouched

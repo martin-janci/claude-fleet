@@ -2,6 +2,12 @@
   // The states kit's offline host: said inside the host's own group or pane,
   // never as a window-wide error. What happened, how long ago, what it means
   // for the sessions there, and the next step.
+  //
+  // Step 3.14: the sessions it holds are named as Paused (they keep running in
+  // tmux and reattach), with Show sessions to go to them, and Wake host only
+  // where the host can be woken: the caller passes `onwake` for such a host,
+  // and nothing in the fleet can wake one yet (no wake-on-LAN or other wake
+  // route is configured anywhere), so no caller does today.
   import { sinceWords } from './states';
   import Loader from '../Loader.svelte';
 
@@ -16,6 +22,10 @@
     trying = false,
     tryBlocked = null,
     onopen = null,
+    paused = [],
+    onshow = null,
+    onwake = null,
+    waking = false,
   }: {
     alias: string;
     /** When the host last answered (seconds since the epoch). */
@@ -32,9 +42,20 @@
     /** Why Try again cannot run here (a hub client without the hub). */
     tryBlocked?: string | null;
     onopen?: (() => void) | null;
+    /** The names of the sessions there, which wait as Paused. */
+    paused?: readonly string[];
+    /** Show sessions: go to them (the host's session list). */
+    onshow?: (() => void) | null;
+    /** Wake host, only for a host that can be woken. */
+    onwake?: (() => void) | null;
+    waking?: boolean;
   } = $props();
 
   const since = $derived(sinceWords(lastSeen, now));
+  /** The list names a few; the rest are counted. */
+  const PAUSED_SHOWN = 4;
+  const pausedShown = $derived(paused.slice(0, PAUSED_SHOWN));
+  const pausedMore = $derived(Math.max(0, paused.length - PAUSED_SHOWN));
 </script>
 
 <div class="host-offline" role="status" data-testid="host-offline-state" data-alias={alias}>
@@ -47,14 +68,30 @@
   <p class="body">
     {#if reason}{reason}. {/if}{#if sessions}Its {sessions === 1 ? 'session is' : `${sessions} sessions are`} probably still running in tmux and reattach when the host is back.{:else}Sessions there reattach when the host is back.{/if}
   </p>
+  {#if paused.length > 0}
+    <ul class="paused" data-testid="host-offline-paused" aria-label="Paused sessions on {alias}">
+      {#each pausedShown as name, i (i)}
+        <li><span class="word">Paused</span> {name}</li>
+      {/each}
+      {#if pausedMore > 0}<li class="muted">and {pausedMore} more</li>{/if}
+    </ul>
+  {/if}
   {#if code}
     <details class="details">
       <summary>Details</summary>
       <code data-testid="host-offline-code">{code}</code>
     </details>
   {/if}
-  {#if ontry || onopen}
+  {#if ontry || onopen || onshow || onwake}
     <div class="actions">
+      {#if onwake}
+        <button
+          type="button"
+          class="btn"
+          disabled={waking}
+          data-testid="host-offline-wake"
+          onclick={onwake}>{waking ? 'Waking…' : 'Wake host'}</button>
+      {/if}
       {#if ontry}
         <button
           type="button"
@@ -66,6 +103,9 @@
       {/if}
       {#if onopen}
         <button type="button" class="btn" data-testid="host-offline-open" onclick={onopen}>Host detail</button>
+      {/if}
+      {#if onshow}
+        <button type="button" class="btn" data-testid="host-offline-show" onclick={onshow}>Show sessions</button>
       {/if}
     </div>
   {/if}
@@ -105,5 +145,18 @@
   .actions {
     display: flex;
     gap: 0.4rem;
+  }
+  .paused {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    font-family: var(--font-mono);
+  }
+  .paused .word {
+    font-family: var(--font-sans);
+    color: var(--status-idle);
   }
 </style>

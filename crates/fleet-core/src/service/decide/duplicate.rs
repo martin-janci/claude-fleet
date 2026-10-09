@@ -16,9 +16,10 @@
 //! * **Shadow** records the answer and does nothing else. **Assist** leaves
 //!   a usable answer (at or above [`MIN_CONFIDENCE`], not `none`) on the
 //!   proposal as its `duplicate` proposal (step 2.8): the proposal's card
-//!   shows "May duplicate <key>", and a person merges (rejects the
-//!   proposal) or keeps both (accepts it). Nothing is rejected, merged or
-//!   accepted by itself.
+//!   shows "May duplicate <key>", and a person merges (what hangs on the
+//!   proposal moves to that task and the proposal closes as rejected,
+//!   `Store::merge_proposal_into`) or keeps both (accepts it). Nothing is
+//!   rejected, merged or accepted by itself.
 //! * **Asked once.** A decided run about the same proposal on the same
 //!   input and question version is never asked again.
 //! * **Follow-up.** A person's single decision on the proposal marks the

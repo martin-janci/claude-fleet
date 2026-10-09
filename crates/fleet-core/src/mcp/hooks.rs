@@ -245,6 +245,9 @@ pub async fn handle_hook(
                 // N1 (redesign 6.9): another of this person's sessions on the
                 // same work, asked the same way.
                 crate::service::decide::related_session::spawn_ask(&state.store, id);
+                // J6 (redesign 6.8): the main ticket among several suggested
+                // keys, asked the same way.
+                crate::service::decide::main_ticket::spawn_ask(&state.store, id);
             }
             // Mail, then the classification nudge (work graph M4.6) when it
             // fires and fits: see `prompt_submit_context`.

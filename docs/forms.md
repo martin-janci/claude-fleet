@@ -23,6 +23,22 @@ back as the result of the agent's tool call. The design is
 - If the agent is aborted while it waits, its form stays pending: it expires
   after 24 h, or is cancelled when the session is killed.
 
+### Drafting a long form
+
+    ask { draft: "<the form's JSON so far>", why: "what you are reading" }
+
+Before a long form is whole, the agent may show it building: each `draft`
+call replaces the session's draft (at most 16 KiB, not validated, migration
+153), the session row carries it as `form_draft`, and the Conversation panel
+draws it in (`ChatForm` in its Building state: a small Atom, "Building a form
+· reading …", the title and a skeleton for each field once its name, type
+and label are whole; `partial_spec.ts`). It answers at once,
+`{status: "drafting", bytes}`. The `ask { form }` that follows replaces the
+draft with the form card; `ask { draft: "" }` drops it; the tick drops one
+not written to for 10 minutes. A draft is refused (`E_CONFLICT`) while the
+session already waits on a form. Same rules as `form`: only from inside the
+asking session.
+
 Results: `answered` (with `answers`, `secrets`, `answered_by`), `pending`,
 `declined` (with the person's `note`), `cancelled`, `expired` (24 h).
 
@@ -184,43 +200,74 @@ spec renders two ways:
 
 - **As a dialog**, `WizardDialog.svelte`: the spec's title and intro, the
   steps, Cancel. Settings › Hub's *Link to a hub…* is `link_hub`;
-  Settings › Devices' *Pair a device* is `pair_device`.
-- **In the chat**, `ChatForm.svelte`: a card Control or the app writes into
-  the conversation. While the spec is still being written it draws in (a
-  small Atom, what is being read, each field once its name, type and label
-  are whole; `partial_spec.ts`); once whole it is the wizard.
+  Settings › Devices' *Pair a device* is `pair_device`, and Get started's
+  *Start your first session* is `get_started`.
+- **In the chat**, `ChatForm.svelte`, as a card at the end of the
+  conversation (in a session's Conversation panel and in Control's chat,
+  which is the same panel). While the spec is still being written it draws
+  in (a small Atom, what is being read, each field once its name, type and
+  label are whole; `partial_spec.ts`); once whole it is the wizard. Three
+  ways put one there:
+  - An agent (Control's operator or any session) writes a `wizard` block,
+    `{"spec": "fleet.ui/1", "kind": "wizard", "wizard": "add_project",
+    "why": "…"}` (`docs/chat-blocks.md`). The card is the app's spec, never
+    the block's; once it ran (or was declined) a line saying so goes into
+    the session's composer, unsent, for the agent.
+  - The app opens one (`forms/chat_wizards.ts`): Control's *Add project*
+    chip puts the Add project form at the end of Control's chat.
+  - An agent's own `ask { draft }` then `ask { form }` (above): the draft
+    draws in, the form card replaces it.
+
+  `WizardChatCard.svelte` shows the Building state while it reads the
+  choices only known now (your hosts, your SSH config, your orgs), then the
+  wizard. The wizards a chat can run are `CHAT_WIZARD_IDS`
+  (`forms/chat_wizard_ids.ts`, the same list as `CHAT_WIZARDS` in
+  `pages/chat_blocks.rs`): `add_host`, `add_project`, `get_started`,
+  `new_session`, `pair_device`. `link_hub` stays in Settings › Hub.
 
 Choices only known when a wizard opens (the fleet's hosts, an owner's
 repositories) replace the file's example options through `withChoices`; a
 choice left with none leaves the form with the option that led to it.
-`add_project` is a chat wizard only: 6.11's dialog keeps its GitHub browser,
-which a form cannot hold. Its run (`add_project_wizard.ts`) adds each
-repository in turn, stops at the first failure and says what was added, and
-never creates a repository on GitHub (that needs the dialog's confirmation).
+`add_project` runs in the chat only: 6.11's dialog keeps its GitHub browser,
+which a form cannot hold, so in the chat it has no *From GitHub* (no list of
+an owner's repositories to offer). Its run (`add_project_wizard.ts`) adds
+each repository in turn, stops at the first failure and says what was added,
+and never creates a repository on GitHub (that needs the dialog's
+confirmation).
 
-Either way nothing runs until the last step's button is pressed: the
-button carries a Comet while it runs, the card then shrinks to one line,
-and a Pulse says what is starting. Never a modal over the chat or a
+Either way nothing runs until the last step's button is pressed: in the
+chat the button carries a Comet while it runs, the card then shrinks to one
+line, and a Pulse says what is starting. Never a modal over the chat or a
 full-screen loader. What the button does belongs to the screen that opens
-the wizard; the spec is data only. fleet-core's
-`every_wizard_spec_is_valid` validates every file there.
+the wizard (`chat_wizard_runs.ts` for the chat); the spec is data only.
+fleet-core's `every_wizard_spec_is_valid` validates every file there, and
+`every_chat_wizard_has_a_spec_and_the_app_lists_the_same` the chat's list.
 
-`add_host` is the guided Add host wizard (4.9) in one step, kept as a
-spec only: no screen opens it yet (its run was removed as dead code), and
-the Hosts page keeps 4.9's drafts and per-step checks. `pair_device` (`pair_device_wizard.ts`) offers the
+`add_host` is the guided Add host wizard (4.9) in one step, for the chat;
+the Hosts page keeps 4.9's drafts and per-step checks.
+Its run (`add_host_wizard.ts`) offers the hosts in `~/.ssh/config`, runs
+4.9's checks in order (Sonar while each waits), refuses a host SSH cannot
+reach, then adds it. `pair_device` (`pair_device_wizard.ts`) offers the
 hub's orgs and calls `pair_device`; on the Devices page its code and QR are
-PairingResult's, with its Halo.
+PairingResult's, with its Halo; in the chat its answered line carries the
+code and the link.
 
 `new_session` is ⌘N's start as a form: project, host and agent, then the
 worktree (a new one with its branch and base, or one the opener offers),
 then the label and, for Claude Code, model, effort and login profile (a
 shell asks what to run instead). Its run (`new_session_wizard.ts`) makes
 the same `new_session` call the dialog makes, so the answered card carries
-the Pulse while the agent comes up. Get started's
-*Create first session* opens it as a dialog and selects the session it
-started; ⌘N keeps its dialog, which holds what a form cannot
-hold: the duplicate check, the account headroom ask, a ticket start and
-Cancel creation.
+the Pulse while the agent comes up. ⌘N keeps its dialog, which holds what a
+form cannot hold: the duplicate check, the account headroom ask, a ticket
+start and Cancel creation.
+
+`get_started` is 10.5's Get started as one form: a host the fleet has, a
+project (one in the fleet, a repository to clone or a folder on the host)
+and the agent. Its run (`get_started_wizard.ts`) adds the project unless one
+in the fleet was picked, then starts the first session in a new worktree
+with the same `new_session` call; the dialog shows the Galaxy while it
+builds (10.10) and selects the session it started. A new machine joins from
+Hosts, which checks it first; the form only picks one.
 
 ## When to use it instead of AskUserQuestion
 

@@ -4,7 +4,8 @@
   // `pr_checked_at`). The rule is `evidence.ts` (Rust `service::evidence`'s
   // mirror); this only draws it. Nothing here gates or merges anything.
   import type { SessionRow } from './sessions';
-  import { assessRow, describeReason, hasReading, shortSha, verdictColor, verdictLabel } from './evidence';
+  import { assessRow, describeReason, hasReading, shortSha, verdictLabel, verdictState } from './evidence';
+  import StatusChip from './kit/StatusChip.svelte';
   import { timeAgo } from './session_status';
 
   let { session, nowSec }: { session: SessionRow; nowSec: number } = $props();
@@ -18,11 +19,7 @@
 {#if result}
   <div class="result" data-testid="pr-result" data-verdict={result.verdict}>
     <div class="head">
-      <span
-        class="verdict"
-        data-testid="pr-result-verdict"
-        style="color: {verdictColor(result.verdict)}; border-color: color-mix(in srgb, {verdictColor(result.verdict)} 33%, transparent);"
-      >{verdictLabel(result.verdict)}</span>
+      <StatusChip state={verdictState(result.verdict)} label={verdictLabel(result.verdict)} testid="pr-result-verdict" />
       {#if result.commit}<code class="sha" title={result.commit}>{shortSha(result.commit)}</code>{/if}
       {#if result.checked_at != null}
         <span class="muted" data-testid="pr-result-checked">checked {timeAgo(result.checked_at, nowSec * 1000)}</span>
@@ -56,12 +53,6 @@
     align-items: baseline;
     gap: 6px;
     flex-wrap: wrap;
-  }
-  .verdict {
-    font-size: var(--text-2xs);
-    border: 1px solid;
-    border-radius: var(--radius-xs);
-    padding: 0 5px;
   }
   .sha {
     font-size: var(--text-2xs);

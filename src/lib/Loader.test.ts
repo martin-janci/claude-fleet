@@ -135,6 +135,39 @@ describe('Loader kit', () => {
     expect(ring.style.getPropertyValue('--ofl-p')).toBe('0.64');
   });
 
+  // Step 3.15: Radar shows one blip per host that answers, Assemble one
+  // particle per session.
+  it('Radar and Assemble draw one particle per item', () => {
+    const blips = (count: number) => {
+      const { unmount } = render(Loader, { props: { delay: 0, name: 'radar', count, testid: 'r' } });
+      const el = screen.getByTestId('r');
+      const n = el.querySelectorAll('.ofl-rd2 i').length;
+      expect(el.getAttribute('data-count')).toBe(String(count));
+      // The sweep and its rings stay whatever the count.
+      expect(el.querySelector('.ofl-sweep')).not.toBeNull();
+      unmount();
+      return n;
+    };
+    expect(blips(0)).toBe(0);
+    expect(blips(3)).toBe(3);
+    expect(blips(9)).toBe(9);
+    expect(blips(500)).toBe(24);
+    const { unmount } = render(Loader, { props: { delay: 0, name: 'assemble', count: 22, testid: 'a' } });
+    expect(screen.getByTestId('a').querySelectorAll('.ofl-cv i')).toHaveLength(22);
+    expect(screen.getByTestId('a').querySelector('.ofl-cvring')).not.toBeNull();
+    unmount();
+    // Without a count, the manual's drawing as it is.
+    render(Loader, { props: { delay: 0, name: 'assemble', testid: 'b' } });
+    expect(screen.getByTestId('b').querySelectorAll('.ofl-cv i')).toHaveLength(64);
+    expect(screen.getByTestId('b').hasAttribute('data-count')).toBe(false);
+  });
+
+  it('a count on a loader that does not count changes nothing', () => {
+    render(Loader, { props: { delay: 0, name: 'dot-wave', count: 2, testid: 'w' } });
+    const spec = LOADER_SPECS.find((s) => s.id === 'dot-wave')!;
+    expect(screen.getByTestId('w').querySelectorAll('i')).toHaveLength((spec.markup.match(/<i /g) ?? []).length);
+  });
+
   // Redesign step 3.14: a lost hub must not read as a loop of hope.
   it('Signal lost plays once and rests, in every motion setting', () => {
     const css = readFileSync('src/lib/loader-kit.css', 'utf8');

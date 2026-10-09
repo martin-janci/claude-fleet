@@ -125,7 +125,7 @@
     align-items: center;
     gap: 0.25rem;
     font-size: var(--text-2xs);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     padding: 0 0.3rem;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);

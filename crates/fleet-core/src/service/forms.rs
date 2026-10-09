@@ -242,6 +242,70 @@ pub fn open(
     Ok(view(&row))
 }
 
+/// How long a draft lasts after its last write before the tick drops it.
+pub const DRAFT_TTL_SECS: i64 = 10 * 60;
+
+/// What `ask { draft }` answers.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DraftAck {
+    /// `drafting`, or `cleared` for an empty draft.
+    pub status: &'static str,
+    pub bytes: usize,
+}
+
+/// Show `text`, the fleet.form/1 JSON `session_id`'s agent has written so
+/// far, in its chat (redesign 10.12): the card draws the title and each
+/// whole field in while the agent goes on. Not validated (it is not whole
+/// yet), only bounded; `ask { form }` validates and replaces it. An empty
+/// `text` drops the draft.
+pub fn draft(
+    store: &Mutex<Store>,
+    session_id: i64,
+    text: &str,
+    why: Option<&str>,
+) -> Result<DraftAck, IpcError> {
+    bounded_text("why", why)?;
+    if text.len() > forms::MAX_SPEC_BYTES {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "the draft is {} bytes, over the {} a form may have",
+                text.len(),
+                forms::MAX_SPEC_BYTES
+            ),
+        ));
+    }
+    let s = lock(store)?;
+    if s.get_session_by_id(session_id)?.is_none() {
+        return Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {session_id} not found"),
+        ));
+    }
+    if text.trim().is_empty() {
+        s.clear_form_draft(session_id)?;
+        return Ok(DraftAck {
+            status: "cleared",
+            bytes: 0,
+        });
+    }
+    if let Some(open) = s.pending_form_of_session(session_id)? {
+        return Err(IpcError::new(
+            codes::E_CONFLICT,
+            format!(
+                "this session already waits on form {}; a draft is for the next one",
+                open.form_id
+            ),
+        )
+        .with_details(serde_json::json!({ "form_id": open.form_id })));
+    }
+    s.set_form_draft(session_id, text, why)?;
+    Ok(DraftAck {
+        status: "drafting",
+        bytes: text.len(),
+    })
+}
+
 /// Wait up to `timeout` for `form_id` to finish. A pending form at the
 /// deadline answers `pending`, not an error.
 pub async fn wait(
@@ -505,7 +569,13 @@ pub fn expire_and_purge(store: &Mutex<Store>, now: i64) -> usize {
         tracing::warn!(error = %e, "[forms] purge failed");
         0
     });
-    expired + purged
+    let drafts = s
+        .purge_form_drafts(now - DRAFT_TTL_SECS)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "[forms] draft purge failed");
+            0
+        });
+    expired + purged + drafts
 }
 
 /// First retry delay for a host whose sweep failed; doubles per consecutive
@@ -687,6 +757,77 @@ mod tests {
         let err = open(&st, sid, &spec(), None).unwrap_err();
         assert_eq!(err.code, codes::E_CONFLICT);
         assert_eq!(err.details.unwrap()["form_id"], json!(first.form_id));
+    }
+
+    /// Redesign 10.12: `ask { draft }` puts the form being written on the
+    /// session row, its `ask { form }` replaces it, and the tick drops one
+    /// left half-way.
+    #[test]
+    fn a_draft_rides_the_row_until_the_form_opens() {
+        let (st, sid) = fixture();
+        let text = r#"{"spec":"fleet.form/1","title":"Deploy","steps":[{"title":"Tar"#;
+        let ack = draft(&st, sid, text, Some("your hosts")).unwrap();
+        assert_eq!(
+            ack,
+            DraftAck {
+                status: "drafting",
+                bytes: text.len()
+            }
+        );
+        let row = st.lock().unwrap().get_session_by_id(sid).unwrap().unwrap();
+        let d = row.form_draft.expect("the row carries the draft");
+        assert_eq!(d.draft, text);
+        assert_eq!(d.why.as_deref(), Some("your hosts"));
+        // A newer draft replaces it.
+        draft(&st, sid, &format!("{text}get"), None).unwrap();
+        let row = st.lock().unwrap().get_session_by_id(sid).unwrap().unwrap();
+        assert!(row.form_draft.unwrap().draft.ends_with("Target"));
+        // The whole form takes its place, and a draft for it is now refused.
+        open(&st, sid, &spec(), None).unwrap();
+        let row = st.lock().unwrap().get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row.form_draft, None);
+        assert!(row.pending_form.is_some());
+        let err = draft(&st, sid, text, None).unwrap_err();
+        assert_eq!(err.code, codes::E_CONFLICT);
+    }
+
+    #[test]
+    fn a_draft_is_bounded_cleared_by_empty_text_and_dropped_when_stale() {
+        let (st, sid) = fixture();
+        let big = "x".repeat(forms::MAX_SPEC_BYTES + 1);
+        assert_eq!(
+            draft(&st, sid, &big, None).unwrap_err().code,
+            codes::E_INVALID
+        );
+        assert_eq!(
+            draft(&st, 9999, "{", None).unwrap_err().code,
+            codes::E_NOTFOUND
+        );
+        draft(&st, sid, "{", None).unwrap();
+        assert_eq!(draft(&st, sid, "  ", None).unwrap().status, "cleared");
+        let row = st.lock().unwrap().get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row.form_draft, None);
+        draft(&st, sid, "{", None).unwrap();
+        // Not yet stale: kept.
+        expire_and_purge(&st, now_unix());
+        assert!(st
+            .lock()
+            .unwrap()
+            .get_session_by_id(sid)
+            .unwrap()
+            .unwrap()
+            .form_draft
+            .is_some());
+        expire_and_purge(&st, now_unix() + DRAFT_TTL_SECS + 1);
+        assert_eq!(
+            st.lock()
+                .unwrap()
+                .get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .form_draft,
+            None
+        );
     }
 
     #[test]

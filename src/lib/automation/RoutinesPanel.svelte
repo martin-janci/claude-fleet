@@ -315,7 +315,7 @@
   type Filter = 'failed' | 'working' | 'idle' | 'yours';
   const FILTERS: { id: Filter; label: string }[] = [
     { id: 'failed', label: 'Failed' },
-    { id: 'working', label: 'Running' },
+    { id: 'working', label: 'Working' },
     { id: 'idle', label: 'Paused' },
     { id: 'yours', label: 'Yours only' },
   ];
@@ -331,6 +331,8 @@
     title: string;
     meta: string;
     line: string;
+    /** Why a loop keeps running on Pause all (redesign step 8.1). */
+    why?: string;
     state: OfState;
   }
 
@@ -358,7 +360,8 @@
         name: l.name,
         title: l.label,
         meta: paused && l.pausable ? 'Paused' : (loopEvery(l) ?? ''),
-        line: `System · ${l.pausable ? 'acts on its own' : 'observes'} · ${loopLine(l, nowSec, paused)}`,
+        line: `System · ${l.pausable ? 'acts on its own' : 'keeps running on Pause all'} · ${loopLine(l, nowSec, paused)}`,
+        why: l.pausable ? undefined : (l.keeps_running ?? undefined),
         state: loopState(l),
       }),
     ),
@@ -373,7 +376,7 @@
   const STATE_SECTIONS: { state: OfState; label: string }[] = [
     { state: 'failed', label: 'Failed' },
     { state: 'waiting', label: 'Needs you' },
-    { state: 'working', label: 'Running' },
+    { state: 'working', label: 'Working' },
     { state: 'done', label: 'On' },
     { state: 'idle', label: 'Paused' },
   ];
@@ -426,6 +429,7 @@
       <span class="body">
         <span class="l1"><span class="title">{it.title}</span>{#if it.meta}<span class="meta tnum">{it.meta}</span>{/if}</span>
         <span class="line" class:f={it.state === 'failed'}>{it.line}</span>
+        {#if it.why}<span class="line" data-testid="automation-loop-why">{it.why}</span>{/if}
       </span>
     </button>
   </li>
@@ -551,7 +555,7 @@
       {@const stands = paused && loop.pausable}
       <div class="main" data-testid="automation-loop-detail">
         <header class="head">
-          <p class="kicker">Routine · built in · {loop.pausable ? 'acts on its own' : 'only observes'}</p>
+          <p class="kicker">Routine · built in · {loop.pausable ? 'acts on its own' : 'keeps running on Pause all'}</p>
           <div class="title-bar">
             <h3>{loop.label}</h3>
             {#if loop.result === 'error'}<StatusChip state="failed" />{:else if stands}<StatusChip state="idle" label="Paused" />{:else}<span class="state">On</span>{/if}
@@ -568,7 +572,7 @@
         <p class="note">
           {loop.pausable
             ? 'Pause all, at the foot of the list, stops it until you resume.'
-            : 'It keeps running under Pause all: it only reads the fleet, it changes nothing.'}
+            : `It keeps running under Pause all: ${loop.keeps_running ?? 'it only reads the fleet, it changes nothing.'}`}
         </p>
       </div>
     {:else if detail}
@@ -783,9 +787,9 @@
   .meta { font-size: var(--text-xs); line-height: 16px; color: var(--fg-muted); }
   .tnum { font-variant-numeric: tabular-nums; }
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
-  .muted { color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
-  .empty { color: var(--fg-muted); font-size: var(--text-sm, 12.5px); margin: var(--space-2) var(--space-3); }
-  .err { color: var(--danger); font-size: var(--text-xs, 11.5px); margin: var(--space-2) var(--space-3); }
+  .muted { color: var(--fg-muted); font-size: var(--text-xs); }
+  .empty { color: var(--fg-muted); font-size: var(--text-sm); margin: var(--space-2) var(--space-3); }
+  .err { color: var(--danger); font-size: var(--text-xs); margin: var(--space-2) var(--space-3); }
   .head .err { margin: var(--space-2) 0 0; }
   .detail { display: flex; min-width: 0; min-height: 0; }
   .fill .detail { overflow: hidden; }
@@ -826,12 +830,12 @@
   .of-sec.flat { padding: 0; }
   .inspector-foot { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; }
   .confirm { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); font-size: var(--text-xs); }
-  .editor { flex: 1; min-width: 0; overflow: auto; padding: var(--space-4) var(--space-6); max-width: 720px; display: flex; flex-direction: column; gap: var(--space-2, 8px); }
+  .editor { flex: 1; min-width: 0; overflow: auto; padding: var(--space-4) var(--space-6); max-width: 720px; display: flex; flex-direction: column; gap: var(--space-2); }
   .editor h3 { font-size: var(--text-lg); }
-  .editor label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-sm, 12.5px); }
-  .editor .hint { color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
-  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2, 8px); }
-  .actions { display: flex; justify-content: flex-end; gap: var(--space-2, 8px); }
+  .editor label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-sm); }
+  .editor .hint { color: var(--fg-muted); font-size: var(--text-xs); }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
+  .actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
   @media (max-width: 1180px) {
     .detail { flex-direction: column; overflow: auto; }
     .main { overflow: visible; flex: none; }

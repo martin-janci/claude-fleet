@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   // The Hosts page table (Orbit Fleet redesign step 4.6, Accounts board →
   // "Hosts"). One row per host with its connection, sessions, disk, agent
   // version and the accounts signed in, and the probe facts under its name.
@@ -106,8 +107,8 @@
           {#if h.alias === 'local'}<span class="muted">this machine</span>{/if}
           {#if h.hidden}<span class="muted">hidden</span>{/if}
           {#if info?.attention}
-            <span class="attention" title={info.attention.title} aria-label={info.attention.title} data-testid="hosts-table-attention"
-              >{info.attention.glyph}</span
+            <span class="attention" title={info.attention.title} role="img" aria-label={info.attention.title} data-testid="hosts-table-attention"
+              ><Icon name={info.attention.icon} size={12} /></span
             >
           {/if}
         </span>

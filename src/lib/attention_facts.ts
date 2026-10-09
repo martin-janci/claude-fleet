@@ -69,7 +69,9 @@ export const attentionFacts: Readable<AttentionFacts> = stable(
 );
 
 /** The reason line of a Blocked row (step 2.4), as the Main board words it:
- *  "Paused · weekly limit on tech.silvester". `null` for any other bucket. */
+ *  "Paused · weekly limit on tech.silvester". Blocked is not a status word:
+ *  a row blocked on its host or its sign-in reads "Needs you · …" with what
+ *  it is blocked on. `null` for any other bucket. */
 export function blockedLine(
   bucket: string,
   sess: { host_alias: string; account_uuid: string | null },
@@ -78,14 +80,14 @@ export function blockedLine(
 ): string | null {
   switch (bucket) {
     case 'host_down':
-      return `Blocked · ${sess.host_alias} is down`;
+      return `Needs you · blocked on ${sess.host_alias}, which is down`;
     case 'account_limit': {
       const uuid = sess.account_uuid ?? '';
       const w = facts?.limited_accounts?.[uuid]?.window === 'five_hour' ? '5-hour' : 'weekly';
       return `Paused · ${w} limit on ${accountName(uuid)}`;
     }
     case 'no_credentials':
-      return `Blocked · ${accountName(sess.account_uuid ?? '')} is signed out`;
+      return `Needs you · blocked on ${accountName(sess.account_uuid ?? '')}, which is signed out`;
     default:
       return null;
   }

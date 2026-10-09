@@ -261,7 +261,9 @@ pub async fn spawn_author_session(
             // own person — this is the desktop's own catalog work and there is
             // no source row to inherit from. See
             // `crate::service::sessions::hub_personal_owner`.
+            over_limit_ok: false,
             owner_person_id: crate::service::sessions::hub_personal_owner(store),
+            start_token: None,
         },
         store,
         ssh,

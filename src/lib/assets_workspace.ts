@@ -46,6 +46,8 @@ export interface ChangesetSummary {
   withdrawn?: boolean;
   /** The hosts whose copies its apply held back (final review I1); absent from an older hub. */
   held_hosts?: string[];
+  /** `catalog.auto` synced it on its own (redesign 8.7); absent from an older hub. */
+  auto?: boolean;
 }
 
 /** Why a host's copy was held back by a card's apply (R1). */

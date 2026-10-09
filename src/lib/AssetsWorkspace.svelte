@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { viewKey } from './shortcuts';
   import Loader from './Loader.svelte';
   import ListLoading from './ListLoading.svelte';
   import { tick, untrack, type Snippet } from 'svelte';
@@ -442,7 +443,10 @@
     // A plan or a review covers the list: its rows take no keys (Esc is
     // taken by `onPlanEsc`, below).
     if (planOpen) return;
-    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key === 'Enter') {
+    // The keys are the registry's `assets` rows (step 0.1).
+    const act = viewKey('assets', e);
+    if (!act) return;
+    if (act === 'assets.primary') {
       // The region's one primary (R18, R-C): the selected card's verb when
       // it applies (a review verb only selects, so there is nothing to run),
       // else Sync fleet.
@@ -463,35 +467,34 @@
       }
       return;
     }
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
     // `a`, `s`, `e` and `i` act on the selection from the list, the Inspector
     // or the workspace itself: not from the footer's chips or the rail, where
     // a letter typed is not a request to sync or edit something.
     const inScope = !!target && (!!listEl?.contains(target) || !!inspEl?.contains(target) || target === rootEl);
-    if (!inScope && (e.key === 'a' || e.key === 's' || e.key === 'e' || e.key === 'i')) return;
+    const onSelection = act === 'assets.adopt' || act === 'assets.sync' || act === 'assets.edit' || act === 'assets.ignore';
+    if (!inScope && onSelection) return;
     const key = focusedKey() ?? selectedKey;
     const sel = key ? parseKey(key) : null;
     // The arrows move rows in the list only; elsewhere (the Inspector's
     // scrolling tab panel) they keep scrolling natively.
     const inList = !!target && !!listEl?.contains(target);
-    switch (e.key) {
-      case 'j':
-      case 'ArrowDown':
+    switch (act) {
+      case 'assets.down':
+        // (An arrow, unlike `j`, scrolls natively outside the list.)
         if (e.key === 'ArrowDown' && !inList) break;
         e.preventDefault();
         move(1);
         break;
-      case 'k':
-      case 'ArrowUp':
+      case 'assets.up':
         if (e.key === 'ArrowUp' && !inList) break;
         e.preventDefault();
         move(-1);
         break;
-      case '/':
+      case 'assets.search':
         e.preventDefault();
         queryEl?.focus();
         break;
-      case 'a': {
+      case 'assets.adopt': {
         if (readOnly || sel?.type !== 'identity' || !listing) break;
         // A New card that covers the identity is the one adopt: apply it
         // rather than opening Import for the same copy. One that needs a
@@ -516,19 +519,19 @@
         }
         break;
       }
-      case 's': {
+      case 'assets.sync': {
         const a = busy === '' ? ownAsset(key) : null;
         if (!a) break;
         e.preventDefault();
         onsync({ kind: a.kind, name: a.name });
         break;
       }
-      case 'e':
+      case 'assets.edit':
         if (!key || !ownAsset(key)) break;
         e.preventDefault();
         void editAsset(key);
         break;
-      case 'i': {
+      case 'assets.ignore': {
         // Ignore: reject a card's pending items — the selected card's, or the
         // New card that covers the selected identity. A person's verdict:
         // it sticks until the content changes.
@@ -792,7 +795,7 @@
   /* Narrow: the rail shrinks to icons (its buttons keep their names), then the
      Inspector stacks under the list. */
   @media (max-width: 1100px) {
-    .ws { grid-template-columns: 56px minmax(0, 1fr) minmax(280px, 340px); }
+    .ws { grid-template-columns: 56px minmax(0, 1fr) minmax(var(--inspector-min), var(--list-w)); }
   }
   @media (max-width: 860px) {
     .ws {

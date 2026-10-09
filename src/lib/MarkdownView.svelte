@@ -124,13 +124,13 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.15rem 0.4rem 0.15rem 0.6rem;
+    padding: 0.15rem 0.4rem 0.15rem var(--space-2);
     border-bottom: 1px solid var(--border);
     font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .md-lang {
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-family: var(--mono);
   }
   .md-copy {
     background: none;
@@ -147,9 +147,9 @@
   }
   .md-pre {
     margin: 0;
-    padding: 0.55rem 0.7rem;
+    padding: var(--space-2) 0.7rem;
     overflow-x: auto;
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-family: var(--mono);
     font-size: var(--text-2xs);
     line-height: 1.5;
     white-space: pre;

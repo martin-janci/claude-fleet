@@ -78,6 +78,8 @@ export const THEME: Record<'light' | 'dark', Record<string, string>> = {
     'loader-accent': '#60a5fa',
     'comet-head': '#2563eb',
     'agent-claude': '#d97757',
+    'term-bg': '#0a0a0a',
+    'term-fg': '#e8e8e8',
     // App tokens the manual adopted in review r10 (aliases resolved).
     'usage-ok': '#17723e',
     'usage-warn': '#8f520b',
@@ -140,6 +142,8 @@ export const THEME: Record<'light' | 'dark', Record<string, string>> = {
     'loader-accent': '#60a5fa',
     'comet-head': '#f2f4f7',
     'agent-claude': '#d97757',
+    'term-bg': '#0a0a0a',
+    'term-fg': '#e8e8e8',
     // App tokens the manual adopted in review r10 (aliases resolved).
     'usage-ok': '#5dd17a',
     'usage-warn': '#d29b4a',
@@ -168,6 +172,7 @@ export const CONTRAST_PAIRS: ContrastPair[] = [
   { fg: 'fg', bg: 'bg-hover', min: 4.5, note: 'a hovered row title' },
   { fg: 'fg', bg: 'accent-soft', min: 4.5, note: 'a selected row title, and the draft over a drag tint' },
   { fg: 'fg-2', bg: 'chip-bg', min: 4.5, note: 'chip text' },
+  { fg: 'term-fg', bg: 'term-bg', min: 4.5, note: 'terminal text on its own ground, both themes' },
   { fg: 'fg', bg: 'count-bg', min: 4.5, note: 'count badges' },
   { fg: 'fg-2', bg: 'count-bg', min: 4.5, note: '.count-badge text' },
   { fg: 'status-working', bg: 'chip-bg', min: 4.5, note: '.state-chip--working' },

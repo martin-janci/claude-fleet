@@ -1,14 +1,17 @@
 //! Every background loop reports (redesign step 8.1): one registry holds,
 //! per loop, when it last ran, when it runs next and how that went, and
-//! `fleet_health.loops` reads it. A loop that touches the fleet on its own
-//! (missions, GC, catalog scans, playbooks, repairs, syncs) also asks
-//! [`gate`] first, which answers "paused" while `automation.paused` is on:
-//! the one switch a person flips to stop every automatic write at once.
+//! `fleet_health.loops` reads it. Every loop that acts on the person's
+//! behalf (missions, GC, catalog scans, playbooks, the PR shepherd, repairs,
+//! syncs, routines, host refresh) also asks [`gate`] first, which answers
+//! "paused" while `automation.paused` is on: the one switch a person flips
+//! to stop every automatic action at once. Each of them is proven to stop
+//! by a behaviour test next to its pass (`pause_all_stops_*`).
 //!
-//! Loops that only observe (reconcile, usage, update checks) keep running
-//! while paused, since they are what tells a person the state of the fleet,
-//! and still report. [`LOOPS`] says which loop is which; its order is the
-//! order `fleet_health` lists them in.
+//! The rest keep running while paused, each with the reason it says in
+//! [`LoopSpec::keeps_running`] (shown in the Automation view): they observe
+//! (reconcile, usage polls, update checks), keep the hub's links open, or
+//! keep bookkeeping that only records what already happened. [`LOOPS`] says
+//! which loop is which; its order is the order `fleet_health` lists them in.
 //!
 //! The registry is per process, like [`crate::service::tick::tick_stats`]:
 //! a desktop that does not run a loop lists it with no run at all.
@@ -27,40 +30,81 @@ pub struct LoopSpec {
     pub label: &'static str,
     /// Stops while `automation.paused` is on.
     pub pausable: bool,
+    /// Why a loop that is not pausable keeps running on Pause all, in a
+    /// short sentence the Automation view shows. `None` exactly when
+    /// [`Self::pausable`].
+    pub keeps_running: Option<&'static str>,
 }
 
-const fn spec(name: &'static str, label: &'static str, pausable: bool) -> LoopSpec {
+/// A loop that acts on the person's behalf: Pause all stops it.
+const fn acts(name: &'static str, label: &'static str) -> LoopSpec {
     LoopSpec {
         name,
         label,
-        pausable,
+        pausable: true,
+        keeps_running: None,
+    }
+}
+
+/// A loop that keeps running on Pause all, and `why`.
+const fn keeps(name: &'static str, label: &'static str, why: &'static str) -> LoopSpec {
+    LoopSpec {
+        name,
+        label,
+        pausable: false,
+        keeps_running: Some(why),
     }
 }
 
 /// Every loop, in the order health lists them. A name here must be
 /// reported by its loop, and a pausable one gated
-/// (`tests::every_loop_reports_and_every_pausable_one_is_gated`).
+/// (`tests::every_loop_reports_and_every_pausable_one_is_gated`) and
+/// stopped (each loop's `pause_all_stops_*` test).
 pub const LOOPS: &[LoopSpec] = &[
-    spec("reconcile", "Reconcile", false),
-    spec("stale_working", "Stale working", false),
-    spec("forms", "Chat forms expiry", false),
-    spec("playbooks", "Stuck playbooks", true),
-    spec("pr_shepherd", "PR shepherd", true),
-    spec("gc", "Garbage collection", true),
-    spec("usage", "Session usage", false),
-    spec("tasks", "Task sweep", false),
-    spec("reports", "Error reports", false),
-    spec("repair", "Worktree repair", true),
-    spec("worktree_prune", "Worktree prune", true),
-    spec("account_usage", "Account usage", false),
-    spec("trackers", "Tracker sync", true),
-    spec("missions", "Missions", true),
-    spec("routines", "Routines", true),
-    spec("catalog_scan", "Catalog sync", true),
-    spec("local_sync", "Local folder sync", true),
-    spec("reprovision", "Host refresh", true),
-    spec("peers", "Hub links", false),
-    spec("updates", "Update check", false),
+    keeps(
+        "reconcile",
+        "Reconcile",
+        "Only reads what each host runs; it starts and stops nothing.",
+    ),
+    keeps(
+        "stale_working",
+        "Stale working",
+        "Only bookkeeping: a session nothing has moved for a while reads Idle.",
+    ),
+    keeps(
+        "forms",
+        "Chat forms expiry",
+        "Expires unanswered forms and deletes their secrets from hosts; pausing would leave secrets behind.",
+    ),
+    acts("playbooks", "Stuck playbooks"),
+    acts("pr_shepherd", "PR shepherd"),
+    acts("gc", "Garbage collection"),
+    keeps("usage", "Session usage", "Only reads token usage."),
+    keeps(
+        "tasks",
+        "Task sweep",
+        "Only bookkeeping: a task whose worker is gone reads Failed.",
+    ),
+    keeps(
+        "reports",
+        "Error reports",
+        "Only collects this hub's own errors and ages old ones out.",
+    ),
+    acts("repair", "Worktree repair"),
+    acts("worktree_prune", "Worktree prune"),
+    keeps("account_usage", "Account usage", "Only reads account limits."),
+    acts("trackers", "Tracker sync"),
+    acts("missions", "Missions"),
+    acts("routines", "Routines"),
+    acts("catalog_scan", "Catalog sync"),
+    acts("local_sync", "Local folder sync"),
+    acts("reprovision", "Host refresh"),
+    keeps(
+        "peers",
+        "Hub links",
+        "Keeps linked hubs connected; what comes over a link is a person's request.",
+    ),
+    keeps("updates", "Update check", "Only checks for updates; it installs nothing."),
 ];
 
 /// [`LoopHealth::result`] values.
@@ -75,6 +119,9 @@ pub struct LoopHealth {
     pub label: String,
     #[serde(default)]
     pub pausable: bool,
+    /// [`LoopSpec::keeps_running`]: why it runs on while paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keeps_running: Option<String>,
     /// When it last ran or was skipped as paused (unix seconds).
     #[serde(default)]
     pub last_run_at: Option<i64>,
@@ -172,6 +219,7 @@ impl Registry {
                     name: spec.name.into(),
                     label: spec.label.into(),
                     pausable: spec.pausable,
+                    keeps_running: spec.keeps_running.map(str::to_string),
                     last_run_at: st.last_run_at,
                     next_run_at: st.next_run_at,
                     result: st.result.map(str::to_string),
@@ -293,6 +341,23 @@ mod tests {
             row(&rows, "catalog_scan").result.as_deref(),
             Some(RESULT_PAUSED)
         );
+    }
+
+    /// Every loop is either stopped by Pause all or says why it is not.
+    #[test]
+    fn every_loop_that_keeps_running_says_why() {
+        for l in LOOPS {
+            assert_eq!(l.pausable, l.keeps_running.is_none(), "{}", l.name);
+            if let Some(why) = l.keeps_running {
+                assert!(why.ends_with('.') && why.len() < 120, "{}: {why}", l.name);
+            }
+        }
+        let rows = registry().snapshot();
+        assert_eq!(
+            row(&rows, "reconcile").keeps_running.as_deref(),
+            LOOPS[0].keeps_running
+        );
+        assert_eq!(row(&rows, "gc").keeps_running, None);
     }
 
     #[test]

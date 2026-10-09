@@ -660,7 +660,13 @@ The host downloads the release for its platform and checks it against
 into `fleet-agent install --user` (no systemd: `fleet-agent run` under
 `nohup`, which does not survive a reboot), and the host moves onto the agent
 once it says hello; no hello within 120 s puts it back on SSH.
-`agent_installs` shows each job's step and outcome. `FLEET_AGENT_DIST` on the
+`agent_installs` shows each job's step and outcome. A paired desktop (a
+trusted full device) starts the same job from Host detail: on an SSH host the
+health checklist's fleet-agent row reads *not installed* with an *Install
+<version>* button, and the job's step shows beside the Hex field until the
+host is on its agent (the `install_agent` / `agent_installs` commands route
+to the hub; a standalone desktop accepts no agents and says *not needed*).
+Nothing installs without that click. `FLEET_AGENT_DIST` on the
 hub replaces the GitHub release URL (a mirror). The steps below are for a
 host the hub cannot reach.
 
@@ -2397,8 +2403,9 @@ moved, and `session:killed` by the facts it carries — that frame fires after
 the row is deleted, so it brings its own `host_alias`, `visibility` and
 `owner_person_id` along, as additional keys next to the `id` every client has
 always read. Every other kind (`host:*`, `project:*`, `worktree:*`,
-`account*`, `asset_inventory:*`, `catalog:*`, `sync:*`) carries no session
-content and is not narrowed per person; `work:*`, `settings:*`, `update:*` and
+`account*`, `asset_inventory:*`, `catalog:*`, `sync:*`, and `start:progress`,
+which carries only the opaque `start_token` the starting client minted and a
+step name) carries no session content and is not narrowed per person; `work:*`, `settings:*`, `update:*` and
 `grant:changed` never reach a per-host token or a client bound to an org at
 all.
 
@@ -3181,6 +3188,15 @@ at a hub, so the fleet is the hub's. An app that quietly started reconciling
 it again would be a second brain for the same hosts, and that is the failure
 this mode exists to prevent. With no `hub.remote_url` at all, the app is
 standalone exactly as before.
+
+**When the hub does not answer at launch.** The splash chases the hub, and
+after 6 s reads Signal lost with three choices: Retry, Hub settings…, and
+Open offline. Open offline lists this computer's own tmux sessions and
+nothing of the hub's fleet (`offline_local_sessions`, which reads this
+machine's tmux server and writes nothing), with Copy attach command and Open
+in VS Code for each. It is not standalone: no reconcile, no host the hub
+manages, no `state.db` row. When the hub answers, the offline view steps aside
+for the app.
 
 ### What is different from standalone
 
