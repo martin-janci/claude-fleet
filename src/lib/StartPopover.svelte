@@ -69,6 +69,8 @@
   // svelte-ignore state_referenced_locally
   let ruleOffer = $state.raw(initial.rule_offer ?? null);
   let ruleAdded = $state<string | null>(null);
+  /** The person picked a repository: Jev's ring comes off (ai.md, r15 F15). */
+  let projectTouched = $state(false);
   let branch = $state('');
   let showBrief = $state(false);
   let busy = $state(false);
@@ -254,8 +256,12 @@
     <select
       data-field="project"
       data-testid="start-popover-project"
+      class:ai-pre={suggested != null && choice.project_id === suggested && !projectTouched}
       value={choice.project_id ?? ''}
-      onchange={(e) => setProject((e.currentTarget as HTMLSelectElement).value)}
+      onchange={(e) => {
+        projectTouched = true;
+        setProject((e.currentTarget as HTMLSelectElement).value);
+      }}
     >
       {#if choice.project_id == null}<option value="">Pick a repository…</option>{/if}
       {#each preview.projects as p (p.id)}

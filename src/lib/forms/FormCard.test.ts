@@ -264,11 +264,25 @@ describe('FormCard', () => {
     render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
     const qa = await screen.findByTestId('form-field-env-qa');
     expect(qa).toHaveAttribute('aria-checked', 'true');
+    expect(qa).toHaveClass('ai-pre');
     expect(screen.getAllByRole('radio').map((r) => r.textContent?.trim())).toEqual(['1 QA', '2 Staging']);
     expect(screen.getByTestId('form-proposed-env')).toHaveTextContent('Proposed by Jev');
     await fireEvent.click(screen.getByTestId('form-proposed-env-change'));
     expect(qa).toHaveAttribute('aria-checked', 'false');
+    expect(qa).not.toHaveClass('ai-pre');
     expect(screen.getAllByRole('radio').map((r) => r.textContent?.trim())).toEqual(['1 Staging', '2 QA']);
+  });
+
+  // Review r15 F14: the field's meaning counts, not only its option words.
+  it('never pre-selects a field that asks what AI never decides', async () => {
+    const v = view({ proposal: { field: 'env', value: 'high', source: 'jev', confidence_pct: 95 } });
+    v.spec.steps[0].fields[0].label = 'Priority';
+    v.spec.steps[0].fields[0].options = [['low', 'Low'], ['high', 'High']];
+    inv.mockImplementation(async () => v);
+    render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    expect(await screen.findByTestId('form-field-env-high')).toHaveAttribute('aria-checked', 'false');
+    expect(screen.queryByTestId('form-proposed-env')).toBeNull();
+    expect(screen.getAllByRole('radio').map((r) => r.textContent?.trim())).toEqual(['1 Low', '2 High']);
   });
 
   it('never moves a risky option or a weak proposal', async () => {

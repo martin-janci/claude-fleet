@@ -171,11 +171,9 @@ pub(super) fn map_value(v: &Value, f: &dyn Fn(&str) -> String) -> Value {
     match v {
         Value::String(s) => Value::String(f(s)),
         Value::Array(a) => Value::Array(a.iter().map(|x| map_value(x, f)).collect()),
-        Value::Object(o) => Value::Object(
-            o.iter()
-                .map(|(k, x)| (k.clone(), map_value(x, f)))
-                .collect(),
-        ),
+        // Keys too: an adapter that keys its state by a URL or an address
+        // would otherwise send it as written (review r15 F08).
+        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (f(k), map_value(x, f))).collect()),
         other => other.clone(),
     }
 }

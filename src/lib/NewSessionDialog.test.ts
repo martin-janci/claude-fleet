@@ -1902,9 +1902,11 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
       const chip = screen.getByTestId('ticket-also-in-proposed');
       expect(chip.textContent).toContain('Proposed by Jev');
       expect(chip.textContent).toContain('81%');
+      expect(also.closest('label')).toHaveClass('ai-pre');
       await fireEvent.click(screen.getByTestId('ticket-also-in-proposed-change'));
       await tick();
       expect(also.checked).toBe(false);
+      expect(also.closest('label')).not.toHaveClass('ai-pre');
       expect(screen.queryByTestId('ticket-also-in-proposed')).toBeNull();
     } finally {
       uiLayout.set('classic');
@@ -2348,6 +2350,7 @@ describe('NewSessionDialog host placement', () => {
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await vi.waitFor(() => expect(screen.getByTestId('new-session-host-proposed')).toBeTruthy());
     expect(active()).toBe('mefistos');
+    expect(document.querySelector('[data-alias="mefistos"]')).toHaveClass('ai-pre');
     expect(screen.getByTestId('new-session-host-proposed').textContent).toContain('Proposed by Jev');
     expect(screen.getByTestId('new-session-host-proposed').textContent).toContain('80%');
     await vi.waitFor(() => expect(worktreeLabels()).toContain('main'));
