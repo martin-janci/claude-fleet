@@ -190,6 +190,7 @@
 //!   fails on. And the hub owner's trusted `full` phone may now call
 //!   `add_host`, `install_agent` and `work_admin`'s tracker actions
 //!   (Martin's "Owner's phone" and trackers "Allow on phone"); a phone
-//!   offers them from this revision on. The golden file pins
-//!   `ControlRoute`, `LostTarget` and `PlacedTranscript`.
+//!   offers them from this revision on. The desktop also routes
+//!   `session_summary_since` (11.11) to its tool. The golden file pins
+//!   `ControlRoute`, `LostTarget`, `PlacedTranscript` and `WatchSummary`.
 pub const CONTRACT_REVISION: u32 = 13;

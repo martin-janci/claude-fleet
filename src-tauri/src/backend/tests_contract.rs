@@ -979,6 +979,18 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             copied: true,
         }),
     );
+    put(
+        "WatchSummary",
+        wire_keys(&fleet_core::service::watch_summary::WatchSummary {
+            text: Some("Fixed the flake.".into()),
+            check: fleet_core::service::decide::summary_check::Check::Passed,
+            since: 1,
+            turns: 2,
+            model: "haiku".into(),
+            host_alias: "mefistos".into(),
+            at: 3,
+        }),
+    );
     let mut usage = fleet_core::service::account_usage::AccountUsageSnapshot::never_fetched("a");
     usage.usage = Some(Default::default());
     usage.subscription = Some("max".into());
