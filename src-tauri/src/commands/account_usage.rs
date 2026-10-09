@@ -79,7 +79,7 @@ pub async fn refresh_account_usage(
 /// Accounts page's history). Never fetches. `E_NOTFOUND` for an unknown
 /// account. Refused in remote mode like the two above: this app's store has
 /// no history while a hub owns the fleet.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn account_usage_history(
     args: AccountUsageHistoryArgs,
     backend: State<'_, Arc<FleetBackend>>,
@@ -106,7 +106,7 @@ pub async fn check_account_headroom(
 /// Live spend per account and per model since `since`, from the
 /// `usage_daily_account` roll-up (redesign step 4.2). Refused in remote mode:
 /// this app collects no usage while a hub owns the fleet.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn account_spend(
     args: AccountSpendArgs,
     backend: State<'_, Arc<FleetBackend>>,
@@ -135,7 +135,7 @@ pub async fn propose_host_placement(
 /// After a person's start of a project landed on a host: marks the decision
 /// model's host proposal confirmed or corrected (best effort, never fails a
 /// start). Refused in remote mode like the proposal.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn record_host_placement(
     args: RecordHostStartArgs,
     backend: State<'_, Arc<FleetBackend>>,
