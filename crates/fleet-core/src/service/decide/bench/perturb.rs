@@ -193,41 +193,7 @@ pub fn shuffle<T: Clone + PartialEq>(v: &[T], seed: u64) -> Vec<T> {
     out
 }
 
-/// PURE: `s` with every fenced code block (```` ``` ```` … ```` ``` ````, an
-/// unclosed one to the end) replaced by `[code: <lang>, N lines]` — the
-/// fence's language word (lower case) or `unknown`, and the block's line
-/// count. Inline code is kept (decision D42's placeholder A/B).
-pub fn code_placeholder(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(open) = rest.find("```") {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 3..];
-        let (info, body_start) = match after.find('\n') {
-            Some(nl) => (&after[..nl], nl + 1),
-            None => (after, after.len()),
-        };
-        let lang = info
-            .split_whitespace()
-            .next()
-            .map(str::to_lowercase)
-            .filter(|w| {
-                w.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '#' | '-' | '.'))
-            })
-            .unwrap_or_else(|| "unknown".to_string());
-        let body_and_rest = &after[body_start..];
-        let (body, next) = match body_and_rest.find("```") {
-            Some(close) => (&body_and_rest[..close], &body_and_rest[close + 3..]),
-            None => (body_and_rest, ""),
-        };
-        let lines = body.lines().filter(|l| !l.trim().is_empty()).count();
-        out.push_str(&format!("[code: {lang}, {lines} lines]"));
-        rest = next;
-    }
-    out.push_str(rest);
-    out
-}
+pub use crate::service::decide::code_placeholder;
 
 // --- the paired comparison ---------------------------------------------------------
 

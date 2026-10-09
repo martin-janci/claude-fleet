@@ -144,7 +144,7 @@ pub use org_members::{
 };
 pub use orgs::{
     normalize_rule, org_of_session, validate_org_color, validate_org_name, OrgRow, OrgRuleRow,
-    SessionOrgFacts, ORG_NAME_MAX_CHARS,
+    SessionOrgFacts, ORG_JEV_REPLY_KEY, ORG_NAME_MAX_CHARS,
 };
 pub use participants::{ParticipantRow, PARTICIPANT_REMOTE, RETIRED_RETENTION_SECS};
 pub use peer_links::{

@@ -79,6 +79,16 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.work_placement",
+          "hint": "Proposes a group for a new task nothing placed; you still place it."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.related_session",
+          "hint": "Marks another of your sessions that works on the same thing; nothing is stopped or merged."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.control_route",
           "hint": "Says which mission or session a message in Control is about; you can change it. A short message gets a question instead."
         },
@@ -89,12 +99,21 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.turn_outcome",
+          "hint": "Sends Claude's last reply, redacted, only for organisations that allow reply text. Hooks always win."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.mission_triage",
           "hint": "Proposes a stuck mission's outcome and next step; you still choose. It never completes a mission or sets Verified."
         },
         {
           "type": "field",
           "key": "decide.jev.unassigned"
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.unassigned_reply"
         }
       ]
     },

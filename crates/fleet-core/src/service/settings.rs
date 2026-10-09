@@ -553,12 +553,21 @@ pub const DECIDE_JEV_RESTORE_TARGET: &str = "decide.jev.restore_target";
 /// `duplicate`'s mode (flagging a proposed task that may duplicate an
 /// existing one, K4).
 pub const DECIDE_JEV_DUPLICATE: &str = "decide.jev.duplicate";
+/// `work_placement`'s mode (proposing a Work-view group for a task nobody
+/// placed, K5).
+pub const DECIDE_JEV_WORK_PLACEMENT: &str = "decide.jev.work_placement";
+/// `related_session`'s mode (noticing another session of the same person
+/// on the same work, N1).
+pub const DECIDE_JEV_RELATED_SESSION: &str = "decide.jev.related_session";
 /// `control_route`'s mode (K2: where a message typed in Control goes,
 /// redesign step 9.9).
 pub const DECIDE_JEV_CONTROL_ROUTE: &str = "decide.jev.control_route";
 /// `summary_check`'s mode (checking a watcher's summary against the
 /// transcript before it shows, J9).
 pub const DECIDE_JEV_SUMMARY_CHECK: &str = "decide.jev.summary_check";
+/// `turn_outcome`'s mode (J2: what a turn came to when hooks said nothing,
+/// read from the pane tail). Needs the reply-text consent (D48) on top.
+pub const DECIDE_JEV_TURN_OUTCOME: &str = "decide.jev.turn_outcome";
 /// `mission_triage`'s mode (K3: a stuck mission's outcome and next step,
 /// redesign step 9.10).
 pub const DECIDE_JEV_MISSION_TRIAGE: &str = "decide.jev.mission_triage";
@@ -608,6 +617,9 @@ pub const UPDATE_CHECK_INTERVAL_SECS: &str = "update.check_interval_secs";
 pub const UPDATE_CHECK_INTERVAL_MIN_SECS: u64 = 900;
 /// Sessions and items with no org may be sent too (D31). Off by default.
 pub const DECIDE_JEV_UNASSIGNED: &str = "decide.jev.unassigned";
+/// D48: sessions with no org may send reply text (J2) too, on top of
+/// [`DECIDE_JEV_UNASSIGNED`]. Off by default.
+pub const DECIDE_JEV_UNASSIGNED_REPLY: &str = "decide.jev.unassigned_reply";
 /// One call's whole budget, in milliseconds.
 pub const DECIDE_JEV_TIMEOUT_MS: &str = "decide.jev.timeout_ms";
 /// Consecutive failed calls that open the circuit breaker.
@@ -1374,6 +1386,24 @@ pub const SPECS: &[Spec] = &[
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
     Spec::new(
+        DECIDE_JEV_WORK_PLACEMENT,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: task group",
+        "Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_RELATED_SESSION,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: related session",
+        "Noticing another of your sessions working on the same thing. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
         DECIDE_JEV_CONTROL_ROUTE,
         "off",
         Kind::Choice(DECIDE_MODES),
@@ -1392,6 +1422,15 @@ pub const SPECS: &[Spec] = &[
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: check first")]),
     Spec::new(
+        DECIDE_JEV_TURN_OUTCOME,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: turn outcome",
+        "Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: set the state")]),
+    Spec::new(
         DECIDE_JEV_MISSION_TRIAGE,
         "off",
         Kind::Choice(DECIDE_MODES),
@@ -1409,6 +1448,15 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Experimental, Tag::Network])
     .danger("Sessions and tickets outside every organisation will be sent to TypeSafe too."),
+    Spec::new(
+        DECIDE_JEV_UNASSIGNED_REPLY,
+        "false",
+        Kind::Bool,
+        "Jev: send unassigned replies",
+        "Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all.",
+    )
+    .tags(&[Tag::Experimental, Tag::Network])
+    .danger("Claude's reply text from sessions outside every organisation will be sent to TypeSafe too."),
     Spec::new(
         DECIDE_JEV_TIMEOUT_MS,
         "1500",
@@ -2644,8 +2692,13 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_START_PROJECT, None), "off");
         assert_eq!(resolve(DECIDE_JEV_SIBLING_REPOS, None), "off");
         assert_eq!(resolve(DECIDE_JEV_DUPLICATE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_WORK_PLACEMENT, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_RELATED_SESSION, None), "off");
         assert_eq!(resolve(DECIDE_JEV_CONTROL_ROUTE, None), "off");
         assert_eq!(resolve(DECIDE_JEV_SUMMARY_CHECK, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_TURN_OUTCOME, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_UNASSIGNED_REPLY, None), "false");
+        assert!(validate(DECIDE_JEV_TURN_OUTCOME, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_MISSION_TRIAGE, None), "off");
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "assist").is_ok());
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "auto").is_err());

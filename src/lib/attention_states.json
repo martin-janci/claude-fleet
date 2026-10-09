@@ -52,6 +52,10 @@
     { "name": "an idle session whose account lost its login", "row": { "claude_status": "idle", "account_uuid": "acc" }, "facts": { "uncredentialed_accounts": ["acc"] }, "bucket": "no_credentials", "state": "blocked", "counted": true },
     { "name": "a session on another account is not blocked", "row": { "claude_status": "idle", "account_uuid": "other" }, "facts": { "limited_accounts": { "acc": { "window": "weekly", "resets_at": 5000 } }, "uncredentialed_accounts": ["acc"] }, "bucket": "idle", "state": "idle", "counted": false },
     { "name": "an external session never counts", "row": { "kind": "external", "claude_status": "blocked" }, "bucket": "idle", "state": "idle", "counted": false },
-    { "name": "a shell never counts", "row": { "kind": "shell", "claude_status": "failed" }, "bucket": "idle", "state": "idle", "counted": false }
+    { "name": "a shell never counts", "row": { "kind": "shell", "claude_status": "failed" }, "bucket": "idle", "state": "idle", "counted": false },
+    { "name": "Jev read a silent turn's end as a question", "row": { "claude_status": "idle", "turn_outcome": "asked" }, "bucket": "waiting", "state": "action_required", "counted": true },
+    { "name": "Jev read a silent turn's end as stuck", "row": { "claude_status": "idle", "turn_outcome": "stuck" }, "bucket": "stuck", "state": "action_required", "counted": true },
+    { "name": "Jev's finished leaves an idle row idle", "row": { "claude_status": "idle", "turn_outcome": "finished" }, "bucket": "idle", "state": "idle", "counted": false },
+    { "name": "a working row outranks a stale Jev answer", "row": { "claude_status": "working", "turn_outcome": "asked" }, "bucket": "working", "state": "working", "counted": false }
   ]
 }

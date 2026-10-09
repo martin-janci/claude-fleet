@@ -159,6 +159,10 @@
         {
           "type": "field",
           "key": "jev_allowed"
+        },
+        {
+          "type": "field",
+          "key": "jev_reply_allowed"
         }
       ]
     },
