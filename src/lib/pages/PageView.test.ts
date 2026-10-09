@@ -14,6 +14,8 @@ import PageView from './PageView.svelte';
 import { fleetSettings, SETTING_DEFAULTS } from '../fleet_settings';
 import { allDescriptors, bundle, registryRouter } from './testing';
 import type { Page } from './pages';
+import { expectAccessible } from '../a11y_check';
+import { uiLayout } from '../prefs';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 const descs = new Map(allDescriptors.map((d) => [d.key, d]));
@@ -419,5 +421,37 @@ describe('PageView — Updates lists every part of the fleet (11.9b)', () => {
     updates({ readonly: true, remote: true });
     const table = await screen.findByTestId('data-table-updates.targets');
     await waitFor(() => expect(within(table).getByText('Device 7')).toBeTruthy());
+  });
+});
+
+describe('PageView — accessibility', () => {
+  const mount = (id: string) =>
+    render(PageView, {
+      props: {
+        page: pageOf(id),
+        pages: bundle.pages,
+        descs,
+        values: defaults,
+        sources: bundle.sources,
+        onnavigate: vi.fn(),
+      },
+    });
+
+  it('a settings page and a data page, in the New layout, are accessible', async () => {
+    uiLayout.set('new');
+    try {
+      const settings = mount('settings.notifications');
+      expect(screen.getByTestId('settings-matrix')).toBeTruthy();
+      await expectAccessible(settings.container);
+      settings.unmount();
+
+      const data = mount('usage');
+      const table = await screen.findByTestId('data-table-usage.by_model');
+      await waitFor(() => expect(table.textContent).toContain('claude-opus-5'));
+      await screen.findByTestId('data-chart-usage.by_day');
+      await expectAccessible(data.container);
+    } finally {
+      uiLayout.set('classic');
+    }
   });
 });

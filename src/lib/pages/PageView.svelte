@@ -385,7 +385,9 @@
   .notice.danger {
     border-left-color: var(--usage-crit);
   }
+  /* A link on its own line, not in a sentence: it keeps the 24 px target. */
   .link {
+    min-block-size: var(--control-h);
     background: none;
     border: none;
     padding: 0.2rem 0;

@@ -47,6 +47,7 @@ import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
 import { resetAccessForTests, setMyGrants } from './access';
 import { session } from './hosts_fixture';
+import { expectAccessible } from './a11y_check';
 
 const mockedShare = shareSession as unknown as ReturnType<typeof vi.fn>;
 const mockedUnshare = unshareSession as unknown as ReturnType<typeof vi.fn>;
@@ -355,5 +356,17 @@ describe('ShareSheet', () => {
     await settle();
     expect(screen.queryByTestId('share-sheet')).toBeNull();
     expect(mockedList).not.toHaveBeenCalled();
+  });
+});
+
+describe('ShareSheet: accessibility', () => {
+  it('the Share sheet with grants is accessible', async () => {
+    mockedList.mockResolvedValue({
+      ok: true,
+      value: [grant(), grant({ person_id: 3, person_name: 'cy', person_display_name: 'Cy', level: 'drive' })],
+    });
+    render(ShareSheet);
+    await settle();
+    await expectAccessible(screen.getByTestId('share-sheet'));
   });
 });
