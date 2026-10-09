@@ -1325,10 +1325,11 @@ fn planner_wanted(
 const RUN_STEPS: &[&str] = &["run", "retry", "review", "test", "integrate"];
 
 /// The account a loop run of `step` would bill, when it is at or past
-/// `accounts.pause_at` (redesign 8.7): on the grant's first host, else the
-/// host the project last ran on (where the start would land), under the
-/// grant's login. `None` when the run's host cannot be told yet: the start
-/// then decides, as before.
+/// `accounts.pause_at` (redesign 8.7): on the grant's first host, else where
+/// the start would land (`tickets::seen_place` / `seen_host`, the start's
+/// own choice: a start rule, the key's history, the project's last host),
+/// under the grant's login. `None` when the run's host cannot be told yet:
+/// the start then decides, as before.
 fn run_over_limit(
     s: &Store,
     m: &MissionRow,
@@ -1344,10 +1345,19 @@ fn run_over_limit(
     };
     let host = match start.host_alias {
         Some(h) => Some(h),
-        None => match start.project_id {
-            Some(p) => s.last_host_for_project(p)?,
-            None => None,
-        },
+        None => {
+            // A work item with no key cannot be started: nothing to hold.
+            let Some(key) = s.get_work_item(item_id)?.and_then(|i| i.key) else {
+                return Ok(None);
+            };
+            let item_org = s.item_org(item_id)?;
+            let (_, seen, _) =
+                crate::service::trackers::tickets::seen_place(s, &key, item_org, start.project_id)?;
+            match start.project_id.or(seen.as_ref().map(|p| p.0)) {
+                Some(p) => crate::service::trackers::tickets::seen_host(s, seen, p)?,
+                None => None,
+            }
+        }
     };
     let Some(host) = host else {
         return Ok(None);
