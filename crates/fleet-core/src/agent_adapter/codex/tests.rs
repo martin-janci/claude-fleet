@@ -308,3 +308,102 @@ fn a_rollout_tail_starting_mid_turn_still_reads() {
         }
     );
 }
+
+#[test]
+fn a_tool_call_detail_reads_its_command_and_failed_output() {
+    let d = codex()
+        .tool_detail(ROLLOUT, "call_resp_0")
+        .expect("the call is in the rollout");
+    assert_eq!(d.name, "exec_command");
+    assert_eq!(d.command.as_deref(), Some("curl -sI https://example.com"));
+    assert!(d.input.contains("\"cmd\""), "{}", d.input);
+    assert!(d.is_error, "curl exited 56");
+    assert!(d.result.is_some_and(|r| r.contains("exited with code 56")));
+    assert!(codex().tool_detail(ROLLOUT, "call_nope").is_none());
+}
+
+#[test]
+fn the_context_is_the_last_token_count() {
+    let c = codex()
+        .context_usage(ROLLOUT)
+        .expect("the rollout counts tokens");
+    assert!(c.tokens > 0 && c.window > c.tokens, "{c:?}");
+    assert_eq!(codex().context_usage("{\"type\":\"event_msg\"}"), None);
+}
+
+#[test]
+fn rollout_lookup_lines_carry_the_id_from_the_file_name() {
+    let path = format!("/h/.codex/sessions/2026/10/08/rollout-2026-10-08T22-40-02-{ID}.jsonl");
+    let out = format!("cdx\tdev-x\t{path}\ncdx\tdev-y\t/h/x/rollout-bogus.jsonl\nnoise\n");
+    let found = super::parse_rollouts(&out);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found["dev-x"].id, ID);
+    assert_eq!(found["dev-x"].path, path);
+    assert!(super::rollouts_script(&[]).is_none());
+}
+
+/// The lookup run as the host runs it: a stand-in `tmux` answers each
+/// pane's cwd, and the newest rollout naming that cwd wins.
+#[cfg(unix)]
+#[test]
+fn the_rollout_lookup_finds_each_panes_newest_rollout_for_its_cwd() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // `-t '=name:'` → `/work/<name>`.
+    std::fs::write(
+        bin.join("tmux"),
+        "#!/bin/sh\nfor a; do t=\"$a\"; case \"$prev\" in -t) n=\"${a#=}\"; n=\"${n%:}\";; esac; prev=\"$a\"; done\n\
+         [ \"$n\" = gone ] && exit 1\nprintf '/work/%s\\n' \"$n\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("tmux"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let day = dir.path().join("codex/sessions/2026/10/08");
+    std::fs::create_dir_all(&day).unwrap();
+    let ids = [
+        "01a11dac-0000-7000-8000-000000000001",
+        "01a11dac-0000-7000-8000-000000000002",
+        "01a11dac-0000-7000-8000-000000000003",
+    ];
+    let write = |n: usize, cwd: &str, age: u64| {
+        let f = day.join(format!("rollout-2026-10-08T22-40-0{n}-{}.jsonl", ids[n]));
+        std::fs::write(
+            &f,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":\"{cwd}\"}}}}\n",
+                ids[n]
+            ),
+        )
+        .unwrap();
+        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(age);
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    };
+    write(0, "/work/dev-a", 300);
+    write(1, "/work/dev-a", 10);
+    write(2, "/work/dev-b-other", 5);
+    let script = super::rollouts_script(&["dev-a", "dev-b", "gone"]).unwrap();
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("CODEX_HOME", dir.path().join("codex"))
+        .output()
+        .unwrap();
+    let found = super::parse_rollouts(&String::from_utf8_lossy(&out.stdout));
+    assert_eq!(
+        found.len(),
+        1,
+        "{found:?} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(found["dev-a"].id, ids[1], "the newer of dev-a's two");
+}

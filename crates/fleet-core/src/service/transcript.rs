@@ -1829,7 +1829,7 @@ pub async fn fetch_conversation_for_row(
         None => resolve_args(store, row, turns, max_chars)?,
     };
     let claude_id = args.claude_session_id.clone();
-    let mut conv = fetch_conversation(args, ssh).await?;
+    let mut conv = fetch_conversation_as(args, row_adapter(row), ssh).await?;
     if let Ok(s) = lock(store) {
         // Zero means the caller draws no timeline, so the query is skipped
         // rather than run and thrown away — one fewer statement under the
@@ -2014,7 +2014,8 @@ pub async fn fetch_tool_detail(
         TOOL_DETAIL_READ_BYTES,
     );
     let lines = read_tail(&args, &script, ssh).await?;
-    parse_tool_detail(&lines, tool_use_id)
+    row_adapter(row)
+        .tool_detail(&lines, tool_use_id)
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "tool call not in transcript"))
 }
 
@@ -2460,21 +2461,36 @@ pub async fn fetch_conversation(
     args: TranscriptArgs,
     ssh: &Arc<SshClient>,
 ) -> Result<Conversation, IpcError> {
+    fetch_conversation_as(args, crate::agent_adapter::claude(), ssh).await
+}
+
+/// The agent whose transcript a row's conversation is: the row's adapter,
+/// Claude Code's for a row with none (a shell row has no conversation to
+/// read, and reads as before).
+fn row_adapter(row: &SessionRow) -> &'static dyn crate::agent_adapter::AgentAdapter {
+    crate::agent_adapter::for_session(&row.kind, Some(&row.agent))
+        .unwrap_or_else(crate::agent_adapter::claude)
+}
+
+/// [`fetch_conversation`] for a transcript `agent` wrote.
+async fn fetch_conversation_as(
+    args: TranscriptArgs,
+    agent: &dyn crate::agent_adapter::AgentAdapter,
+    ssh: &Arc<SshClient>,
+) -> Result<Conversation, IpcError> {
     let script = conversation_read_script(&args)?;
     let text = read_tail(&args, &script, ssh).await?;
     // The Conversation tab may ask for a wider window than the MCP text
     // tool's cap; its own ceiling applies here.
     let mut conv = trim_conversation(
-        crate::agent_adapter::claude().parse_transcript(&text),
+        agent.parse_transcript(&text),
         args.turns.max(1),
         args.max_chars.clamp(1, CONV_MAX_CHARS_CEILING),
     );
     // A tail that filled the byte budget started mid-file: older history
     // exists even when the parsed turns fit the window.
     conv.truncated |= text.len() >= conv_read_bytes(args.turns);
-    conv.context = crate::service::context::context_from_jsonl(&text)
-        .as_ref()
-        .map(ContextView::from);
+    conv.context = agent.context_usage(&text).as_ref().map(ContextView::from);
     Ok(conv)
 }
 
