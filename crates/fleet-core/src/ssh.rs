@@ -377,7 +377,7 @@ impl SshClient {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
         }
-        dir.join(format!("cm-{host}.sock"))
+        control_socket(&dir, host, "")
     }
 
     /// The `-o` flags shared by every multiplexed ssh invocation.
@@ -428,8 +428,9 @@ impl SshClient {
     /// The attached terminal's own ControlPath: a probe's master reset must
     /// never take the user's terminal down with it.
     pub fn control_path_for_pty(&self, host: &str) -> PathBuf {
-        self.control_path(host)
-            .with_file_name(format!("cm-{host}-tty.sock"))
+        let path = self.control_path(host);
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        control_socket(&dir, host, "-tty")
     }
 
     /// `mux_opts` for the interactive attach: its own socket, and a keepalive
@@ -1972,6 +1973,26 @@ fn spawn_error_message(host: &str, e: &std::io::Error) -> String {
     format!("ssh spawn {host}: {e}")
 }
 
+/// The longest socket path OpenSSH can bind, less the `.` and 16 random
+/// characters a master first listens on: `sun_path` is 104 bytes on macOS
+/// (108 on Linux), one of them the NUL.
+const MAX_CONTROL_PATH: usize = 104 - 1 - 17;
+
+/// `dir/cm-<host><suffix>.sock`, or `dir/cm-<hash><suffix>.sock` when that
+/// would not fit a Unix socket path (r18-W4): a long alias from
+/// `~/.ssh/config` otherwise fails every ssh call with exit 255. The hash is
+/// of the alias, so the name stays the same from call to call.
+fn control_socket(dir: &Path, host: &str, suffix: &str) -> PathBuf {
+    let plain = dir.join(format!("cm-{host}{suffix}.sock"));
+    if plain.as_os_str().len() <= MAX_CONTROL_PATH {
+        return plain;
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(host.as_bytes());
+    let short: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    dir.join(format!("cm-{short}{suffix}.sock"))
+}
+
 fn cache_dir() -> PathBuf {
     crate::home::cache_dir()
 }
@@ -2048,6 +2069,29 @@ mod tests {
         let e = home_from_output("h", &out("garbage\n")).unwrap_err();
         assert_eq!(e.code, codes::E_SSH);
         assert!(home_from_output("h", &out("  \n")).is_err());
+    }
+
+    /// r18-W4: a long alias still gets a socket path a Unix socket can bind,
+    /// the same one every call, distinct for the terminal.
+    #[test]
+    fn a_long_alias_gets_a_control_path_that_fits_a_socket() {
+        let dir = Path::new("/Users/martinjanci/Library/Caches/claude-fleet");
+        let host = "ip-172-31-45-123.eu-central-1.compute.internal";
+        let p = control_socket(dir, host, "");
+        let tty = control_socket(dir, host, "-tty");
+        assert!(p.as_os_str().len() <= MAX_CONTROL_PATH, "{}", p.display());
+        assert!(
+            tty.as_os_str().len() <= MAX_CONTROL_PATH,
+            "{}",
+            tty.display()
+        );
+        assert_ne!(p, tty);
+        assert_eq!(p, control_socket(dir, host, ""));
+        assert_ne!(
+            p,
+            control_socket(dir, "ip-172-31-45-124.eu-central-1.compute.internal", "")
+        );
+        assert!(control_socket(dir, "mercury", "").ends_with("cm-mercury.sock"));
     }
 
     #[test]

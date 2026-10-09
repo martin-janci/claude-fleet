@@ -491,6 +491,15 @@ pub fn report(
                         return Ok(true);
                     }
                 }
+            } else if !this_attempt.is_empty() && prev_attempt == this_attempt {
+                // Within one attempt a delayed report of an earlier phase
+                // (a `downloading` retried after `installed`) is history too
+                // (r18-U6).
+                if let (Some(this), Some(seen)) = (attempt_rank(phase), attempt_rank(&p.phase)) {
+                    if this < seen {
+                        return Ok(true);
+                    }
+                }
             }
         }
         s.upsert_update_observed(&UpdateObservedRow {
@@ -509,6 +518,22 @@ pub fn report(
             last_checked_at: None,
         })?;
         Ok(recorded)
+    })
+}
+
+/// Where `phase` falls in one attempt's run, for ordering its reports;
+/// `None` for a phase outside an attempt (idle, checking, available).
+fn attempt_rank(phase: &str) -> Option<u8> {
+    Some(match phase {
+        "downloading" => 1,
+        "verifying" => 2,
+        "ready" => 3,
+        "installing" => 4,
+        "validating" => 5,
+        "success" | "failed" => 6,
+        "rolling_back" => 7,
+        "recovered" | "rollback_failed" => 8,
+        _ => return None,
     })
 }
 
