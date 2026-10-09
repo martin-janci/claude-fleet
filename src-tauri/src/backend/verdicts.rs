@@ -713,6 +713,11 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "remove_download",
         },
     ),
+    // Control's Library (9.7) is indexed on the machine that owns the
+    // fleet, the hub when paired, beside the downloads; one tool by action.
+    ("list_library", Verdict::Routed { tool: "library" }),
+    ("add_library_items", Verdict::Routed { tool: "library" }),
+    ("remove_library_item", Verdict::Routed { tool: "library" }),
     // Saving reads the row through `list_downloads` (refusing a file that
     // is not ready or not this client's), then streams the bytes from the
     // hub's `GET /downloads/<id>` into the file this machine's save dialog

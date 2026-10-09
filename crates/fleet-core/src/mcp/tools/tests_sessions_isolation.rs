@@ -366,7 +366,8 @@ fn tier(reach: Reach, who: Who) -> Out {
 /// * `list_downloads`, because listing and removing sent files is a
 ///   person's half of the downloads feature — a host's Claude only SENDS one
 ///   (`send_file`, which is deliberately NOT here: the session's own agent
-///   is that tool's headline caller).
+///   is that tool's headline caller). `library` (Control's Library, 9.7) is
+///   the index beside it, a person's for the same reason.
 const NEVER_A_HOST_TOKENS: &[&str] = &[
     "session_share",
     "session_unshare",
@@ -375,6 +376,7 @@ const NEVER_A_HOST_TOKENS: &[&str] = &[
     "my_grants",
     "session_presence",
     "list_downloads",
+    "library",
 ];
 
 /// The one tool a per-host token is the only caller of (`Access::HostToken`,
@@ -456,6 +458,9 @@ struct Fx {
     /// to hide. Without it that row would assert over an empty page and
     /// measure nothing.
     download: i64,
+    /// A `library_items` row placed beside `row`, so `library`'s list has
+    /// something to hide.
+    library_item: i64,
 }
 
 /// Set the process-global downloads directory, which
@@ -623,6 +628,21 @@ fn fixture() -> Fx {
         .unwrap()
         .id;
     s.finish_download(download, "da39a3ee").unwrap();
+    // One file a person put beside the private row (Control's Library):
+    // its `session_name` is the same MARKER.
+    let library_item = s
+        .insert_library_item(&crate::store::NewLibraryItem {
+            kind: crate::service::library::KIND_UPLOAD,
+            host_alias: HOST,
+            session_id: Some(row),
+            session_name: Some(LEAK_TMUX),
+            org_id: None,
+            path: "/src/acme/wt/.claude-fleet-attachments/spec.pdf",
+            name: "spec.pdf",
+            size: Some(7),
+        })
+        .unwrap()
+        .id;
 
     let t = FleetTools::new(
         Arc::new(Mutex::new(s)),
@@ -646,6 +666,7 @@ fn fixture() -> Fx {
         task,
         link,
         download,
+        library_item,
     }
 }
 
@@ -768,6 +789,8 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         // ---- downloads.rs -------------------------------------------------
         "send_file" => fx.t.send_file(ext, p!()).await,
         "list_downloads" => fx.t.list_downloads(ext, p!()).await,
+        // ---- library.rs ---------------------------------------------------
+        "library" => fx.t.library(ext, p!()).await,
         // ---- fleet.rs -----------------------------------------------------
         "fleet_health" => fx.t.fleet_health(ext).await,
         "usage_report" => fx.t.usage_report(ext, p!()).await,
@@ -1633,6 +1656,60 @@ async fn run_matrix() {
             text(&a).contains("\"total_bytes\":11"),
             "the machine's budget is nobody's secret: {a:?}"
         );
+    }
+    // Control's Library (9.7): the same `own` tier as `list_downloads`, for
+    // the same reason (its rows name paths on the owner's host). `list` is a
+    // filter, so a session the caller does not own answers an empty page;
+    // `add` names one row, so it refuses everybody but the owner with
+    // `E_NOTFOUND`, the answer an id that is not theirs gets.
+    m.row("library", |_, _| json!({ "action": "list" }), no_host_token)
+        .await;
+    m.row(
+        "library",
+        |fx, _| json!({ "action": "list", "session_id": fx.row }),
+        no_host_token,
+    )
+    .await;
+    for &who in EVERYONE {
+        for args in [
+            json!({ "action": "list" }),
+            json!({ "action": "list", "session_id": fx.row }),
+        ] {
+            let a = call(&fx, who, "library", args.clone()).await;
+            if who.is_host() {
+                assert_eq!(code(&a), codes::E_FORBIDDEN, "{who:?}: {a:?}");
+                continue;
+            }
+            if who == Who::Owner {
+                assert!(
+                    text(&a).contains(&format!("\"id\":{}", fx.library_item))
+                        && text(&a).contains(LEAK_TMUX),
+                    "the owner's own file must still be listed ({args}): {a:?}"
+                );
+                continue;
+            }
+            assert!(
+                text(&a).contains("\"items\":[]"),
+                "{who:?} does not own the session, so the page must be EMPTY \
+                 ({args}): {a:?}"
+            );
+        }
+        let add = json!({
+            "action": "add",
+            "kind": "upload",
+            "session_id": fx.row,
+            "files": [{ "path": "/src/acme/wt/x.txt" }],
+        });
+        let a = call(&fx, who, "library", add).await;
+        match who {
+            w if w.is_host() => assert_eq!(code(&a), codes::E_FORBIDDEN, "{who:?}: {a:?}"),
+            Who::Owner => assert_eq!(code(&a), "OK", "the owner records its own file: {a:?}"),
+            _ => assert_eq!(
+                code(&a),
+                codes::E_NOTFOUND,
+                "{who:?} adds beside a session it does not own: {a:?}"
+            ),
+        }
     }
     m.row(
         "list_worktrees",

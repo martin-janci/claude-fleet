@@ -42,6 +42,7 @@ mod devices;
 mod downloads;
 mod fleet;
 mod forms;
+mod library;
 mod lifecycle;
 mod list_changed;
 mod messaging;
@@ -374,6 +375,7 @@ impl FleetTools {
             + Self::prs_router()
             + Self::routines_router()
             + Self::presence_router()
+            + Self::library_router()
     }
 }
 

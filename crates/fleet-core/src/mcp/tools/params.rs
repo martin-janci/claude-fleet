@@ -1257,6 +1257,30 @@ pub struct RoutinesParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct LibraryParams {
+    /// list | add | remove.
+    pub action: String,
+    /// list: only this session's files; add: the session they were put beside.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// list: only this host's files.
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// list: at most this many, newest first (default and cap 200).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// add: upload | attachment.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// add: the files, already on the session's host.
+    #[serde(default)]
+    pub files: Option<Vec<crate::service::library::LibraryFile>>,
+    /// remove: the row's id.
+    #[serde(default)]
+    pub id: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RemoveDownloadParams {
     /// The download's id (`list_downloads`).
     pub id: i64,

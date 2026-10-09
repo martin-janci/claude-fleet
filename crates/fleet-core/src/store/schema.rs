@@ -1621,6 +1621,9 @@ const MIGRATIONS: &[Migration] = &[
         140,
         include_str!("../../migrations/140_control_handoffs.sql"),
     ),
+    // Orbit Fleet 9.7: Control's Library indexes the files a person put on
+    // a host (one CREATE TABLE IF NOT EXISTS, idempotent as written).
+    Migration::plain(141, include_str!("../../migrations/141_library_items.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

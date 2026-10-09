@@ -811,6 +811,18 @@ Index by area (names only; see the reference for details):
   bytes are `GET /downloads/<id>` (bearer, not a tool result). Events:
   `download:changed { id }`, ids only, never on a host- or org-bound
   stream. See `docs/hub.md` → *File downloads*.
+- **Library** — `library`, by `action` (Orbit Fleet 9.7): the files a
+  person put on a host, by Control's Library Upload… or as a prompt's
+  attachment (`library_items`). `list { session_id?, host_alias?, limit? }`
+  answers `{ items }`, newest first; `add { kind: upload | attachment,
+  session_id, files: [{ path, name?, size? }] }` records files already on
+  the session's host (the desktop puts them there over its own ssh), taking
+  the host, session name and org from the session's row; `remove { id }`
+  drops a row and never the file. A row names a path on the owner's host,
+  so it is the downloads' `own` tier: a grantee or another person sees an
+  empty page and `add` answers `E_NOTFOUND`. Never served to a per-host
+  token. The Library lists downloads and repos beside these from
+  `list_downloads` and the sessions it already has.
 - **Routines** — `routines`, by `action` (Orbit Fleet 8.5): a person's
   saved prompt that starts a session on a cron schedule (`trigger: cron`,
   five fields read at the `utc_offset_min` the device had when it was

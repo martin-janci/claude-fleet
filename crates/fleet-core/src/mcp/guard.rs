@@ -543,6 +543,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Control's Library (Orbit Fleet 9.7): the files a person put on a
+    // host. A person's, like the downloads it sits beside, so a host's token
+    // is not served it (`NOT_FOR_HOST_TOKENS`).
+    ToolPolicy {
+        name: "library",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Debug devices: a host's Claude uses the devices it may see (its own
     // host's, and those a person shared within its org); a person also
     // labels, shares and forgets them (refused to host tokens in the
@@ -1481,7 +1491,8 @@ pub fn is_client_tool(name: &str) -> bool {
 /// `list` included (R25 amended). `list_downloads` / `remove_download` are a
 /// person's: a host's Claude only sends files.
 /// `routines` (Orbit Fleet 8.5) is a person's too: a session does not
-/// schedule sessions.
+/// schedule sessions. `library` (9.7) is the index beside the downloads, a
+/// person's for the same reason.
 ///
 /// The five sharing surfaces joined them in multi-user M1 (T12) for a
 /// different reason: a per-host token proves no PERSON
@@ -1493,6 +1504,7 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "catalog_admin",
     "import_assets",
     "changesets",
+    "library",
     "list_downloads",
     "remove_download",
     "routines",

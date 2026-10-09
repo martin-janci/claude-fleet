@@ -28,6 +28,7 @@ mod hosts_accounts;
 mod item_deps;
 mod item_verify;
 mod layers;
+mod library;
 mod local_workspaces;
 mod mission_loop;
 mod nl_census;
@@ -113,6 +114,7 @@ pub use item_verify::{
     VERIFY_NOTE_MAX_CHARS,
 };
 pub use layers::HostLayerRow;
+pub use library::{LibraryItemRow, NewLibraryItem, KEEP as LIBRARY_KEEP};
 pub(crate) use local_workspaces::paths_overlap;
 pub use local_workspaces::{
     BaseEntry, FileStat, LocalActivityRow, LocalConflictRow, LocalPassWrite, LocalWorkspaceRow,

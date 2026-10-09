@@ -696,6 +696,22 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     put("AccountRow", wire_keys(&sample_account()));
     put("SessionEvent", wire_keys(&sample_event()));
     put("TaskRow", wire_keys(&sample_task()));
+    // Control's Library (9.7): `library`'s rows, every optional key set.
+    put(
+        "LibraryItemRow",
+        wire_keys(&fleet_core::store::LibraryItemRow {
+            id: 3,
+            at: 1,
+            kind: "upload".into(),
+            host_alias: "trn".into(),
+            session_id: Some(4),
+            session_name: Some("demo".into()),
+            org_id: Some(2),
+            path: "/w/.claude-fleet-attachments/a.pdf".into(),
+            name: "a.pdf".into(),
+            size: Some(3),
+        }),
+    );
     put("ProjectTreeRow", wire_keys(&sample_project_tree()));
     put("ProjectRow", wire_keys(&sample_project_row()));
     // The New session picker's choices (`project_picks` / `set_project_pick`).

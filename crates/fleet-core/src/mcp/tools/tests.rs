@@ -2400,6 +2400,7 @@ fn router_sum_serves_every_tool() {
         include_str!("prs.rs"),
         include_str!("routines.rs"),
         include_str!("presence.rs"),
+        include_str!("library.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -10340,6 +10341,17 @@ pub(super) const NO_PER_ROW_GATE: &[(&str, &str)] = &[
          the session each row came out of — the same `own` tier `send_file` \
          gates one row with. A `session_id` this caller does not own matches \
          no row rather than refusing, so it is no existence oracle either",
+    ),
+    (
+        "library",
+        "`list` is a FILTER, the same shape as `list_downloads`: the page is \
+         cut by `service::library::visible`, which asks `ViewScope::may_own` \
+         on each row's session, so a `session_id` this caller does not own \
+         matches nothing. `add` names one row and its gate is in the service, \
+         not a threaded Reach: `service::library::add` takes the session only \
+         when `may_own` holds (the `own` tier `send_file` is at) and answers \
+         `E_NOTFOUND` otherwise; `only_the_owner_sees_or_adds_a_sessions_files` \
+         and the session matrix hold it",
     ),
     (
         "peer_exchange",
