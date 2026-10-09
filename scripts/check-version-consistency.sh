@@ -44,6 +44,7 @@ cd "$ROOT"
 EXEMPT=(
   "crates/fleet-core/Cargo.toml|fleet-core|0.1.0|internal library crate, consumed only by path inside this workspace; excluded from scripts/release.sh's VERSION_FILES"
   "crates/fleet-update/Cargo.toml|fleet-update|0.1.0|internal library crate (the update engine), consumed only by path inside this workspace; excluded from scripts/release.sh's VERSION_FILES"
+  "crates/fleet-updater/Cargo.toml|fleet-updater|0.1.0|the hub's update sidecar, shipped only as the fleet-updater image, which hub-image.yml tags with the release version; excluded from scripts/release.sh's VERSION_FILES"
   "crates/fleet-agent-e2e/Cargo.toml|fleet-agent-e2e|0.1.0|test-only crate (the hub and the real fleet-agent end to end), never built into anything; excluded from scripts/release.sh's VERSION_FILES"
 )
 
@@ -304,13 +305,15 @@ else
       problem "$file installs dtolnay/rust-toolchain@$ref, expected @$TOOLCHAIN (rust-toolchain.toml)"
     fi
   done < <(grep -oH 'dtolnay/rust-toolchain@[^[:space:]]*' .github/workflows/*.yml || true)
-  IMAGE="$(sed -n 's/^FROM rust:\([^ ]*\)-bookworm.*/\1/p' crates/fleet-hub/Dockerfile)"
-  if [[ "$IMAGE" == "$TOOLCHAIN" ]]; then
-    printf '  ok    %-32s %s\n' "crates/fleet-hub/Dockerfile" "rust:$IMAGE"
-  else
-    printf '  WRONG %-32s %s\n' "crates/fleet-hub/Dockerfile" "rust:${IMAGE:-<none>}"
-    problem "crates/fleet-hub/Dockerfile builds with rust:${IMAGE:-<none>}, expected rust:$TOOLCHAIN-bookworm (rust-toolchain.toml)"
-  fi
+  for dockerfile in crates/fleet-hub/Dockerfile crates/fleet-updater/Dockerfile; do
+    IMAGE="$(sed -n 's/^FROM rust:\([^ ]*\)-bookworm.*/\1/p' "$dockerfile")"
+    if [[ "$IMAGE" == "$TOOLCHAIN" ]]; then
+      printf '  ok    %-32s %s\n' "$dockerfile" "rust:$IMAGE"
+    else
+      printf '  WRONG %-32s %s\n' "$dockerfile" "rust:${IMAGE:-<none>}"
+      problem "$dockerfile builds with rust:${IMAGE:-<none>}, expected rust:$TOOLCHAIN-bookworm (rust-toolchain.toml)"
+    fi
+  done
 fi
 
 # --- verdict -----------------------------------------------------------------

@@ -400,6 +400,18 @@ hub's operator, privacy holds against colleagues and against anyone whose
 authority comes only through the application, and not against the person who
 runs the machine.
 
+### Automatic updates with fleet-updater
+
+The `auto-update` compose profile adds `fleet-updater`, which does the same
+sequence on its own when the hub's update policy says so (by default only
+for a version an operator pins with `update_admin`): pull by the signed
+digest, back up, swap the container, check that the new build comes up
+ready as the right build and stays so, and otherwise go back to the
+previous one — restoring the pre-update backup when the new build migrated
+the database. Setup, what it decides, what a rollback loses, and the
+systemd-timer alternative to mounting the Docker socket in a long-running
+container: `docs/updates.md` → *fleet-updater*.
+
 ## Backups
 
 `state.db` carries the master token, every host, every session and the

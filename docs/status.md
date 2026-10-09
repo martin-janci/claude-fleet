@@ -654,6 +654,26 @@ recorded into `update_observed` on `last_seen_at`'s once-a-minute beat in
 `update_check_for`. Left: the per-target `update:decision` push, hub-e2e
 section U, rollouts (S9).
 
+**S6 is landed, opt-in:** `crates/fleet-updater` (image
+`ghcr.io/martin-janci/fleet-updater`, built beside the hub's by
+`hub-image.yml`) and the compose profile `auto-update` in both compose
+files, plus `deploy/hub/fleet-updater.{service,timer}` for running one pass
+from systemd instead of keeping the Docker socket in a long-running
+container (owner's §13.4 answer: ship both). It asks `/update/check` as
+`hub:self`, verifies the target, pulls by the signed digest, backs up
+through `fleet-hub backup`, recreates the hub container on the new image,
+gates it (running, healthy, `healthcheck --ready --json`, the manifest's
+version / commit / build, the soak) and otherwise rolls back, restoring the
+backup when the candidate may have migrated (§13.5: the validation window's
+writes are lost and reported). Under `update.hub.mode=notify` (§13.6: the
+default stays `notify`) it installs only a pin, a required update or a
+rollback. It keeps the previous build's config and image id in its state
+file instead of a renamed `-prev` container, so compose never sees two
+containers for one service. `scripts/updater-e2e.sh` (CI hub-headless,
+`ci-local.sh --updater-e2e`) runs it against a real Docker daemon. Not
+built: the `/events` push that would wake it early (S4b), its own
+self-update.
+
 **S3 is landed:** `service::update::git_check` (Git mode: a `GitCheck`
 from the hub's own settings, pin and last-seen sequence) and `fleet-hub
 update check [--track] [--json]`, which reads the published channel and
@@ -668,8 +688,8 @@ release since. `FLEET_UPDATE_E2E_KEYS`
 (read by `e2e` builds only) is reserved for S4b's hub-e2e section U;
 nothing uses it yet. `update.track` offers `stable` / `beta` only until S2b
 publishes `nightly` (a stored `nightly` resolves to `stable`). S2b
-(nightly), the rest of S4b and S6–S9 are not built; the
-other §13 questions wait on the owner.
+(nightly), the rest of S4b and S7–S9 are not built; §13 questions 2, 3
+and 7 wait on the owner.
 
 Debug devices' first slice is landed (`docs/debug-devices.md`): per-host
 inventory of Android phones, emulators and AVDs, iOS simulators and paired

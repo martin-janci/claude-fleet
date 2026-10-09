@@ -14,10 +14,13 @@ and the phones. Design and rationale:
 > *Update manifest and channels*). The release key exists and every build
 > from 0.4.1 trusts it. The first channel was published with v0.4.1, and
 > `stable` and `beta` list every release since. `fleet-hub update check` asks the
-> channel directly (slice S3). `fleet-updater`, the desktop and the phone
-> install nothing yet (slices S6–S8): on a standalone desktop the Settings
-> → Updates rows have no effect. A hub that cannot verify a channel still
-> offers nothing, and there is no `nightly` channel yet (S2b).
+> channel directly (slice S3). The Docker hub updates itself through
+> `fleet-updater` (slice S6, below): opt-in, and under the default
+> `update.hub.mode=notify` it installs only what an operator pins. The
+> desktop and the phone install nothing yet (slices S7–S8): on a standalone
+> desktop the Settings → Updates rows have no effect. A hub that cannot
+> verify a channel still offers nothing, and there is no `nightly` channel
+> yet (S2b).
 
 ## Who decides what
 
@@ -110,6 +113,154 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   including the signed documents it rests on. It exits 1 when there is no
   answer: no channel published yet, a document no trusted key signed, or
   GitHub unreachable.
+
+## fleet-updater: the Docker hub updates itself
+
+`fleet-updater` is a small sidecar for the compose deployment
+(`crates/fleet-updater`, image `ghcr.io/martin-janci/fleet-updater`). It
+asks the hub what the hub itself should run, and when the answer is an
+install it carries it through and checks the result. It is off unless you
+opt in; `deploy/hub/upgrade.sh` stays the manual path.
+
+### What it installs, and when
+
+It asks `/update/check` as `hub:self` (an `updater` token) on start and then
+every `next_check_secs` the hub names (`update.check_interval_secs`). It
+installs when the decision is:
+
+- `update_required`: below the signed or the policy minimum, withdrawn, or
+  a mandatory release past its deadline;
+- `rollback`: an operator pinned a version below what runs;
+- an operator's pin above what runs (`update_admin { action: pin,
+  component: hub, version }`): this is how a person says "install it" under
+  `notify`;
+- anything `update_available`, only when `update.hub.mode` is `automatic`.
+
+Under the default `notify` it reports `available` once per version and
+waits. `manual` holds everything but pins.
+
+Before anything is touched it verifies the target against the release key
+(the signed channel and manifest the hub relays, `verify_target`), pulls the
+image **by the digest in that signed manifest**, and checks that the pulled
+image's `RepoDigests` names it. The hub cannot make it run anything the
+publisher did not sign.
+
+### One update, step by step
+
+| phase | what happens |
+|---|---|
+| `downloading` | `docker pull <image>@<digest>` |
+| `verifying` | the pulled image carries that digest |
+| `ready` | `fleet-hub backup --prefix pre-<version> --json` in the running hub; the copy must be visible through the updater's mount of the data volume, or it stops here |
+| `installing` | the hub container is stopped and removed, and created again with the same name, labels, env, volumes, networks and restart policy on the new image (the image's own defaults — `ENV`, `CMD`, `HEALTHCHECK` — come from the new image) |
+| `validating` | the health gates below |
+| `success` | it is kept; the previous build's config and image id stay in the state file for the next rollback |
+
+Every step is reported to the hub (`update_status`, `fleet_health.updates`).
+Reports the hub cannot take while it restarts are kept in the state file
+and sent in order once it answers.
+
+**The health gates.** Within `FLEET_UPDATER_READY_TIMEOUT_SECS` (90 s) the
+new container must be running and not restarting, `healthy` by the image's
+`HEALTHCHECK`, and `fleet-hub healthcheck --ready --json` (run through
+`docker exec`, nothing on the network) must say ready, live and fresh, with
+the version, commit and build id of the signed manifest, on the image id
+just pulled. Then it must stay so for `FLEET_UPDATER_SOAK_SECS` (120 s),
+with no more than one new failed reconcile pass.
+
+### Rollback, and what is lost
+
+A candidate that fails the gates is stopped, its last 500 log lines are
+kept in the state volume (`failed-<version>-<time>.log`), and the version
+goes on the updater's bad list so it is never retried by itself. Then:
+
+- **It did not migrate the database** (its reported schema, or its
+  manifest's, is the one the backup has): the previous build is started
+  again on the same data. Nothing is lost. Reported `recovered`.
+- **It migrated it** (or nothing says it did not): the previous build would
+  refuse that database, so `state.db*` is moved aside to
+  `failed-<version>-<time>/` in the data volume (never deleted), the
+  pre-update backup is copied in its place, and the previous build is
+  started on it. Reported `recovered` with `data_restored: true`. **What the
+  candidate wrote while it was being validated — at most the ready timeout
+  plus the soak, about 3.5 minutes — is lost**, and so is anything written
+  between the backup and the stop (seconds).
+- **The previous build does not come back either**: `rollback_failed`. The
+  updater stops the hub, leaves every container and file where it is, and
+  does nothing more until an operator has sorted it out and run
+  `docker compose run --rm updater clear`. It never loops.
+
+After a `success` there is no automatic rollback. Going back is an
+operator's pin to the older version.
+
+### Turning it on
+
+```bash
+cd /opt/fleet-hub                                   # the compose directory
+docker compose exec fleet-hub fleet-hub pair --name updater --mode updater
+# it prints https://<your hub>/pair#<code>; redeem it into the updater's volume:
+docker compose --profile auto-update run --rm updater pair 'https://<your hub>/pair#<code>'
+docker compose --profile auto-update up -d
+docker compose logs -f updater
+```
+
+The code works once and expires in 10 minutes. The token lands in the
+updater's state volume (`token`, mode 0600); `FLEET_UPDATER_TOKEN` in
+`fleet-updater.env` overrides it. `fleet-updater.env.example` lists the
+other knobs, all optional. The `updater` token reaches `/update/*` and
+nothing else; `fleet-hub client revoke updater` takes it away. The service mounts
+`/var/run/docker.sock` — **root on that machine** — the hub's data volume
+(for the backup and the restore) and its own state volume
+(`/var/lib/fleet-updater/state.json`, written atomically).
+
+**Without a long-running container holding the socket**: install
+`deploy/hub/fleet-updater.service` and `fleet-updater.timer` (set
+`WorkingDirectory` to the compose directory) and do not start the profile's
+service. The timer runs one pass, `docker compose --profile auto-update run
+--rm updater once`, every 6 hours; the socket is mounted only for that run.
+
+**After it has updated the hub**, the version pinned in
+`docker-compose.yml` (or `FLEET_HUB_TAG` in `.env` behind a proxy) is no
+longer what runs. Set it to what `docker compose run --rm updater status`
+reports (`current.version`) before your next `docker compose up -d`, or
+compose recreates the hub on the older build — on a database the newer one
+may have migrated, which the older build refuses to open.
+
+**A Docker host with no hub above it** (`FLEET_UPDATER_STANDALONE=1`): the
+updater reads the published channel itself, verifies it the same way, and
+decides with `FLEET_UPDATER_TRACK`, `FLEET_UPDATER_MODE` and
+`FLEET_UPDATER_PIN` from its environment.
+
+### Commands and environment
+
+```text
+fleet-updater [run]   the loop (the compose service)
+fleet-updater once    one pass; exits 1 if it failed or rolled back
+fleet-updater status  the state file: what runs, the previous build, the bad list, queued reports
+fleet-updater clear   after a rollback_failed is sorted out: clears the phase and the bad list
+fleet-updater pair <url-or-code>   redeem `fleet-hub pair --mode updater`'s code; keeps the token
+```
+
+| variable | default | what it does |
+|---|---|---|
+| `FLEET_UPDATER_TOKEN` / `_TOKEN_FILE` | `<state dir>/token` (from `fleet-updater pair`) | the `updater` token |
+| `FLEET_UPDATER_HUB_URL` | `http://fleet-hub:4180` | where the hub answers |
+| `FLEET_UPDATER_HUB_HOST` | the host of `FLEET_HUB_PUBLIC_URL` | the `Host:` it sends: a public hub accepts only its own names (`fleet-hub.env` is read for this) |
+| `FLEET_UPDATER_HUB_CONTAINER` | the compose service `fleet-hub` of its own project | the container it updates |
+| `FLEET_UPDATER_HUB_SERVICE` | `fleet-hub` | the compose service to look for |
+| `FLEET_UPDATER_HUB_DATA` | `/hub-data` | where the hub's data volume is mounted in the updater |
+| `FLEET_UPDATER_STATE_DIR` | `/var/lib/fleet-updater` | the state file, the replay guard, failed logs |
+| `FLEET_UPDATER_READY_TIMEOUT_SECS` | `90` | time to become ready |
+| `FLEET_UPDATER_SOAK_SECS` | `120` | time to stay ready |
+| `FLEET_UPDATER_KEEP_BACKUPS` | `3` | `pre-*.db` backups kept in the data volume |
+| `FLEET_UPDATER_INTERVAL_SECS` | `21600` | the longest wait between checks |
+| `FLEET_UPDATER_STANDALONE` | off | read the channel instead of a hub |
+| `FLEET_UPDATER_TRACK` / `_MODE` / `_PIN` | `stable` / `notify` / — | the standalone policy |
+| `DOCKER_HOST` | `unix:///var/run/docker.sock` | the Docker socket (`unix://` only) |
+
+`scripts/updater-e2e.sh` (`scripts/ci-local.sh --updater-e2e`, and CI's
+hub-headless job) drives a real Docker daemon through a good image, one that
+crashes on start and one that migrates and never gets ready.
 
 ## What the hub knows without being asked
 

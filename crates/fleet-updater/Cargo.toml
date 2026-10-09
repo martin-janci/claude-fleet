@@ -1,0 +1,39 @@
+[package]
+name = "fleet-updater"
+version = "0.1.0"
+# Like fleet-update: not versioned in step with the app (scripts/release.sh
+# excludes it) and never published; scripts/check-version-consistency.sh
+# holds it to this exception. Its image is tagged with the release version by
+# hub-image.yml all the same.
+publish = false
+description = "The claude-fleet hub's update sidecar: pulls a signed release by digest, swaps the hub container, gates it on readiness, and rolls back (with the database) when it fails"
+authors = ["martin-janci"]
+edition = "2021"
+license = "MIT"
+
+# Design: docs/superpowers/specs/2026-09-28-update-channel-design.md §8 (S6).
+#
+# Small and auditable on purpose: fleet-update for the decision and the
+# signatures, a hand-written HTTP/1.1 client for the Docker Engine API over
+# its unix socket and for the hub, and no fleet-core (F5: no fleet business
+# logic here). Every crate below is already in the workspace's Cargo.lock.
+[dependencies]
+fleet-update = { path = "../fleet-update" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1.92"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "fs", "signal"] }
+# The same feature set as fleet-hub's and fleet-agent's: an https:// hub URL
+# and `--standalone`'s GitHub fetches. Roots from the image's CA bundle.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "fs", "test-util"] }
+fleet-update = { path = "../fleet-update", features = ["testkit"] }
+
+[features]
+# Trust FLEET_UPDATE_E2E_KEYS beside the release key, for an end-to-end run
+# against a channel signed by a throwaway key. Never in a published image.
+e2e = []

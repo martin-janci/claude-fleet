@@ -55,12 +55,18 @@
 #                  fleet-agent processes and, for one of its three hubs,
 #                  manages this machine's own tmux server directly, which a
 #                  developer may already have a real hub or session on.
+#   updater-e2e:   scripts/updater-e2e.sh, opt-in via --updater-e2e: fleet-updater
+#                  against this machine's Docker daemon and a local registry
+#                  (a good image, one that crashes on start, one that migrates
+#                  and never gets ready). Skipped with a message without a
+#                  reachable Docker daemon or minisign.
 #
 # Usage:
 #   scripts/ci-local.sh                 # everything (rust first, then frontend)
 #   scripts/ci-local.sh --rust-only
 #   scripts/ci-local.sh --frontend-only
 #   scripts/ci-local.sh --hub-e2e       # also run scripts/hub-e2e.sh (opt-in; see above)
+#   scripts/ci-local.sh --updater-e2e   # also run scripts/updater-e2e.sh (opt-in; see above)
 #
 # Opt in to a fast subset of this before each commit (fmt + clippy for rust
 # changes, the full frontend job for frontend changes; see .githooks/pre-commit):
@@ -82,17 +88,19 @@ cd "$ROOT"
 RUN_RUST=1
 RUN_FRONTEND=1
 RUN_HUB_E2E=0
+RUN_UPDATER_E2E=0
 for arg in "$@"; do
   case "$arg" in
     --rust-only) RUN_FRONTEND=0 ;;
     --frontend-only) RUN_RUST=0 ;;
     --hub-e2e) RUN_HUB_E2E=1 ;;
+    --updater-e2e) RUN_UPDATER_E2E=1 ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
-      echo "ci-local: unknown argument '$arg' (expected --rust-only, --frontend-only or --hub-e2e)" >&2
+      echo "ci-local: unknown argument '$arg' (expected --rust-only, --frontend-only, --hub-e2e or --updater-e2e)" >&2
       exit 2
       ;;
   esac
@@ -193,6 +201,15 @@ run_hub_e2e() {
   BIN="$bin" ABIN="$abin" WBIN="$target_dir/e2e/debug/fleet-hub" step bash scripts/hub-e2e.sh
 }
 
+# --- updater end-to-end script (opt-in: --updater-e2e) ----------------------
+run_updater_e2e() {
+  if ! docker info >/dev/null 2>&1 || ! command -v minisign >/dev/null 2>&1; then
+    echo "ci-local: no reachable Docker daemon or no minisign; skipping --updater-e2e" >&2
+    return
+  fi
+  step bash scripts/updater-e2e.sh
+}
+
 # --- frontend job ----------------------------------------------------------
 run_frontend() {
   need node "Install Node >= 20 (see .node-version)"
@@ -270,5 +287,6 @@ fi
 [[ "$RUN_RUST" == 1 ]] && run_rust
 [[ "$RUN_FRONTEND" == 1 ]] && run_frontend
 [[ "$RUN_HUB_E2E" == 1 ]] && run_hub_e2e
+[[ "$RUN_UPDATER_E2E" == 1 ]] && run_updater_e2e
 
 printf '\n\033[1;32mci-local: all selected checks passed\033[0m\n'
