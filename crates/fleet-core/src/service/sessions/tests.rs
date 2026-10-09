@@ -7909,3 +7909,34 @@ fn reconcile_learns_a_codex_panes_conversation_from_its_rollout() {
         Some(path.as_str())
     );
 }
+
+/// Review r05 F8: a credential profile that could not be saved at start
+/// fails the start, since a later restart would run under the host's own
+/// login; a failed model / effort write stays soft.
+#[test]
+fn a_failed_profile_write_at_start_is_an_error_and_a_model_write_is_not() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("dev-f8", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER boom BEFORE UPDATE ON sessions \
+             BEGIN SELECT RAISE(ABORT, 'injected store fault'); END;",
+        )
+        .unwrap();
+    let model_only = crate::tmux::ClaudeLaunch {
+        model: Some("opus".into()),
+        ..Default::default()
+    };
+    assert!(store_start_launch(&s, id, "dev-f8", &model_only).is_ok());
+    let with_profile = crate::tmux::ClaudeLaunch {
+        profile: Some("work".into()),
+        ..Default::default()
+    };
+    let e = store_start_launch(&s, id, "dev-f8", &with_profile).unwrap_err();
+    assert_eq!(e.code, "E_INTERNAL");
+    assert!(e.message.contains("profile"), "{}", e.message);
+    assert!(!e.message.contains("injected"), "{}", e.message);
+}

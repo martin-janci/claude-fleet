@@ -1132,17 +1132,13 @@ pub(super) async fn new_session_inner(
     let worktree_id =
         link_new_session_worktree(&s, row.id, &args, &path.to_string_lossy(), fixed.is_some())?;
     let derived_friendly = derive_friendly_name(&s, &args, worktree_id.or(row.worktree_id))?;
-    // Soft-fail: the pane already runs with them; a failed write only means
-    // a later recreate / restart uses the host's defaults.
     if !is_shell {
         let launch = crate::tmux::ClaudeLaunch {
             model: args.model.clone(),
             effort: args.effort.clone(),
             profile: args.profile.clone(),
         };
-        if let Err(e) = store_launch(&s, row.id, &launch) {
-            tracing::warn!(session = %args.name, error = %e, "[new_session] storing the launch options failed");
-        }
+        store_start_launch(&s, row.id, &args.name, &launch)?;
     }
     // Not soft: a Codex or agy pane on a row that says Claude would be resumed,
     // read and answered as Claude's.
@@ -2114,6 +2110,36 @@ pub(crate) fn store_launch(
     s.set_session_launch_model(session_id, launch.model.as_deref())?;
     s.set_session_profile(session_id, launch.profile.as_deref())?;
     s.set_session_effort(session_id, launch.effort.as_deref())
+}
+
+/// [`store_launch`] for a session just started. Soft for model and effort:
+/// the pane already runs with them, and a failed write only means a later
+/// recreate / restart uses the host's defaults. Not soft for a profile
+/// (review r05 F8): that later restart would run under the host's own login
+/// and silently bill another account, so the start reports the failure.
+pub(crate) fn store_start_launch(
+    s: &Store,
+    session_id: i64,
+    name: &str,
+    launch: &crate::tmux::ClaudeLaunch,
+) -> Result<(), IpcError> {
+    match store_launch(s, session_id, launch) {
+        Ok(()) => Ok(()),
+        Err(e) if launch.profile.is_some() => {
+            tracing::warn!(session = %name, error = %e, "[new_session] storing the credential profile failed");
+            Err(IpcError::new(
+                codes::E_INTERNAL,
+                format!(
+                    "session {name} started, but its credential profile was not saved; \
+                     restart it with the profile chosen again so it keeps that login"
+                ),
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(session = %name, error = %e, "[new_session] storing the launch options failed");
+            Ok(())
+        }
+    }
 }
 
 /// The model / effort / profile a session was started or last switched to, checked
