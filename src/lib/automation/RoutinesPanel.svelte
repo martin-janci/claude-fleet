@@ -8,6 +8,7 @@
   // (the fleet's own loops) are 8.4's.
   import { onDestroy, onMount } from 'svelte';
   import { hosts } from '../hosts';
+  import { accountByUuid } from '../accounts';
   import { projects } from '../projects';
   import { push, pushError } from '../toasts';
   import {
@@ -22,6 +23,7 @@
     loadFailing,
     microsOf,
     morningPrSweep,
+    routineAccountLabel,
     routineStateWords,
     routinesRequest,
     runRoutineNow,
@@ -349,7 +351,7 @@
       {@const r = detail.routine}
       <header>
         <p class="kicker">
-          Routine{detail.account ? ` · runs as ${detail.account.login?.profile ?? detail.account.login?.account_uuid ?? 'its account'} on ${r.host_alias}` : ` · on ${r.host_alias}`}
+          Routine{detail.account ? ` · runs as ${routineAccountLabel(detail.account, $accountByUuid.get(detail.account.account_uuid))} on ${r.host_alias}` : ` · on ${r.host_alias}`}
         </p>
         <h3 data-testid="routine-title">{r.name}</h3>
         <div class="bar">

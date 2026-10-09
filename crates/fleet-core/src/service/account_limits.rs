@@ -497,4 +497,42 @@ mod tests {
         settings::set(&s, settings::ACCOUNTS_PAUSE_AT, "99").unwrap();
         assert_eq!(over_limit(&s, "mac", None, NOW).unwrap(), None);
     }
+
+    /// Review r05 F4: `LoginAccount` is FLAT on the wire (its `HostLogin`
+    /// is flattened in), which `RoutineAccount` in `src/lib/routines.ts`
+    /// reads; a nested `login` object left the routine header saying
+    /// "its account".
+    #[test]
+    fn a_login_account_is_flat_on_the_wire() {
+        let a = LoginAccount {
+            host_alias: "mac".into(),
+            login: HostLogin {
+                profile: Some("work".into()),
+                account_uuid: "u1".into(),
+                used_pct: Some(12.0),
+            },
+            email: Some("me@x.com".into()),
+            over: false,
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "host_alias": "mac",
+                "profile": "work",
+                "account_uuid": "u1",
+                "used_pct": 12.0,
+                "email": "me@x.com",
+                "over": false,
+            })
+        );
+        assert_eq!(serde_json::from_value::<LoginAccount>(v).unwrap(), a);
+        let ts = crate::repo_files::read("src/lib/routines.ts");
+        let start = ts.find("export interface RoutineAccount {").unwrap();
+        let body = &ts[start..start + ts[start..].find("\n}").unwrap()];
+        for field in ["host_alias", "profile?", "account_uuid", "email?", "over"] {
+            assert!(body.contains(&format!("  {field}:")), "{field} in {body}");
+        }
+        assert!(!body.contains("  login"), "{body}");
+    }
 }
