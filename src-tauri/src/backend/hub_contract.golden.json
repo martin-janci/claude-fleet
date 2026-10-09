@@ -1,5 +1,5 @@
 {
-  "revision": 11,
+  "revision": 12,
   "types": {
     "AccountRow": [
       "display_name",
@@ -11,6 +11,16 @@
       "organization_uuid",
       "seat_tier",
       "uuid"
+    ],
+    "AccountUsageSnapshot": [
+      "account_uuid",
+      "detail",
+      "fetched_at",
+      "next_try_at",
+      "source_host",
+      "status",
+      "subscription",
+      "usage"
     ],
     "BlameHunk": [
       "author",
@@ -29,6 +39,16 @@
       "merged",
       "name",
       "tipHash",
+      "upstream"
+    ],
+    "BranchDiff": [
+      "aheadOfBase",
+      "base",
+      "baseFiles",
+      "branch",
+      "truncated",
+      "unpushed",
+      "unpushedFiles",
       "upstream"
     ],
     "ChangedFile": [
@@ -53,6 +73,28 @@
       "files",
       "hash",
       "subject"
+    ],
+    "ConfirmRequest": [
+      "asked_at",
+      "caller",
+      "nonce",
+      "operator",
+      "summary",
+      "tool"
+    ],
+    "ControlHandoffRow": [
+      "at",
+      "id",
+      "item",
+      "items",
+      "kind",
+      "mission_id",
+      "mission_name",
+      "mission_state",
+      "preview",
+      "session_id",
+      "task_id",
+      "tool"
     ],
     "ConvItem::Bash": [
       "command",
@@ -232,6 +274,17 @@
       "worktree_id",
       "worktree_key"
     ],
+    "DeferredPromptRow": [
+      "attempts",
+      "body",
+      "cancelled_at",
+      "created_at",
+      "delivered_at",
+      "error",
+      "failed_at",
+      "id",
+      "session_id"
+    ],
     "FileBlame": [
       "hunks",
       "path",
@@ -261,6 +314,13 @@
       "language",
       "name_with_owner",
       "updated_at"
+    ],
+    "HandoffItem": [
+      "accepted_at",
+      "id",
+      "proposal_state",
+      "status",
+      "title"
     ],
     "Health": [
       "by_status",
@@ -388,6 +448,36 @@
       "level",
       "session_id"
     ],
+    "PeerLinkSummary": [
+      "fleet_id",
+      "id",
+      "last_error",
+      "last_exchange_at",
+      "latency_ms",
+      "messages_today",
+      "messages_total",
+      "pending",
+      "revoked_at",
+      "role",
+      "state",
+      "url"
+    ],
+    "PrList": [
+      "items",
+      "total"
+    ],
+    "PresenceView": [
+      "heartbeat_secs",
+      "session_id",
+      "viewers"
+    ],
+    "PresenceView.viewers": [
+      "device",
+      "name",
+      "person_id",
+      "since",
+      "you"
+    ],
     "ProjectPickRow": [
       "grp",
       "owner",
@@ -408,8 +498,33 @@
       "project",
       "worktrees"
     ],
+    "PullRequestRow": [
+      "ci_status",
+      "draft",
+      "first_seen_at",
+      "head_ref",
+      "host_alias",
+      "id",
+      "merge_state",
+      "merged_at",
+      "number",
+      "project_id",
+      "repo",
+      "review_decision",
+      "session_id",
+      "session_name",
+      "state",
+      "title",
+      "updated_at",
+      "url"
+    ],
     "PurgeImpact": [
       "keys"
+    ],
+    "QueuePromptResult": [
+      "delivered",
+      "queued_id",
+      "session_id"
     ],
     "RepoTree": [
       "entries",
@@ -453,6 +568,29 @@
       "mode",
       "ok",
       "reason"
+    ],
+    "RunRow": [
+      "cost_micros",
+      "duration_ms",
+      "ended_at",
+      "error",
+      "host",
+      "id",
+      "kind",
+      "mission_id",
+      "model",
+      "org_id",
+      "outcome",
+      "owner",
+      "routine_id",
+      "session_ids",
+      "source",
+      "started_at",
+      "summary"
+    ],
+    "RunsPage": [
+      "runs",
+      "total"
     ],
     "SessionEvent": [
       "at",
@@ -554,6 +692,16 @@
       "run_id",
       "source",
       "value"
+    ],
+    "ShellTerminalsResult": [
+      "host_alias",
+      "opened",
+      "session_id",
+      "terminals"
+    ],
+    "ShellTerminalsResult.terminals": [
+      "n",
+      "tmux_name"
     ],
     "TaskRow": [
       "created_at",

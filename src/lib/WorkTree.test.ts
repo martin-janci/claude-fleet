@@ -9,6 +9,7 @@ import { get } from 'svelte/store';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkTree from './WorkTree.svelte';
+import { expectAccessible } from './a11y_check';
 import { uiLayout } from './prefs';
 import { workBoardOpen } from './app_views';
 import { sessions } from './sessions';
@@ -696,5 +697,23 @@ describe('WorkTree', () => {
     expect(get(workLayout)).toBe('grouped');
     expect(screen.getByText('Receipts')).toBeTruthy();
     expect(get(revealTaskRequest)).toBeNull();
+  });
+
+  it('is accessible', async () => {
+    uiLayout.set('new');
+    try {
+      selectSession(get(sessions)[0]);
+      const { container } = render(WorkTree);
+      await flush();
+      await expectAccessible(container);
+      await fireEvent.click(screen.getByTestId('work-review-count'));
+      await flush();
+      await expectAccessible(container);
+      workLayout.set('list');
+      await flush();
+      await expectAccessible(container);
+    } finally {
+      uiLayout.set('classic');
+    }
   });
 });

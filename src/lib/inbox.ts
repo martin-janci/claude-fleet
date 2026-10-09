@@ -20,6 +20,7 @@ import { effectiveScope, scopeOf } from './orgs';
 import { sessions, showBgAgents, type SessionRow } from './sessions';
 import { sessionVisible } from './sidebar_index';
 import { attentionFacts } from './attention_facts';
+import { failingCount } from './routines';
 
 /** The rows that need you, worst first (`byTriage`). */
 export function inboxRows(rows: readonly SessionRow[], opts: AttentionOptions): SessionRow[] {
@@ -60,13 +61,14 @@ export function notWaitingText(n: NotWaiting): string {
 }
 
 /** The rail's Inbox count: the Needs you pill's number, under the same host,
- *  background-agent and organisation filters. */
+ *  background-agent and organisation filters, plus the routines whose
+ *  newest run failed (redesign 8.6: a failed run raises the badge). */
 export const inboxCount = derived(
-  [sessions, effectiveHostFilter, showBgAgents, effectiveScope, scopeOf, attentionIdleMinutes],
-  ([$sessions, $host, $bg, $scope, $of, $idle]) => {
+  [sessions, effectiveHostFilter, showBgAgents, effectiveScope, scopeOf, attentionIdleMinutes, failingCount],
+  ([$sessions, $host, $bg, $scope, $of, $idle, $failing]) => {
     const scope = $scope === 'all' ? null : { id: $scope, of: $of };
     const visible = $sessions.filter((s) => sessionVisible(s, $host, $bg, null, scope));
-    return countNeedsYou(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000) });
+    return countNeedsYou(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000) }) + $failing;
   },
 );
 

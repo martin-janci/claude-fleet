@@ -1846,6 +1846,86 @@
         "level": "none"
       },
       "default": "off",
+      "help": "Prefilling the project when you adopt a pane fleet did not start. Shadow only records; assist suggests.",
+      "key": "decide.jev.adopt_target",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: adopt into",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Prefilling the project when you restore a conversation found on a host. Shadow only records; assist suggests.",
+      "key": "decide.jev.restore_target",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: restore into",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
       "help": "Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests.",
       "key": "decide.jev.duplicate",
       "kind": {
@@ -3288,6 +3368,16 @@
             {
               "hint": "Puts the likely option first in an agent's question or a form; you still answer. Never a push or a permission.",
               "key": "decide.jev.quick_answer",
+              "type": "field"
+            },
+            {
+              "hint": "Prefills the project when you adopt a pane fleet did not start; you still press Adopt.",
+              "key": "decide.jev.adopt_target",
+              "type": "field"
+            },
+            {
+              "hint": "Prefills the project when you restore a conversation found on a host; you still press Restore.",
+              "key": "decide.jev.restore_target",
               "type": "field"
             },
             {

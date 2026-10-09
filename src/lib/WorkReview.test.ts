@@ -9,6 +9,7 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkReview from './WorkReview.svelte';
+import { expectAccessible } from './a11y_check';
 import { get } from 'svelte/store';
 import { sessions } from './sessions';
 import { session } from './hosts_fixture';
@@ -452,6 +453,28 @@ describe('WorkReview', () => {
     render(WorkReview);
     await flush();
     expect(screen.getByTestId('work-review-error').textContent).toContain('Needs a newer hub');
+  });
+
+  it('is accessible', async () => {
+    pending = [
+      item({
+        confidence: 90,
+        rule: 'R12',
+        proposed_by: { source: 'jev', reason: 'from the first prompt', confidence_pct: 82 },
+      }),
+      ...items.slice(1),
+    ];
+    uiLayout.set('new');
+    try {
+      const { container } = render(WorkReview);
+      await flush();
+      await expectAccessible(container);
+      await fireEvent.click(within(screen.getAllByTestId('work-review-item')[0]).getByTestId('work-review-proposed-by-change'));
+      await flush();
+      await expectAccessible(container);
+    } finally {
+      uiLayout.set('classic');
+    }
   });
 });
 

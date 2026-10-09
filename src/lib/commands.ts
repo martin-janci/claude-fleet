@@ -13,11 +13,12 @@ import { get } from 'svelte/store';
 import { settingsOpen, requestHostsView, shortcutSheetOpen } from './app_views';
 import { goTo } from './destination';
 import { pauseAllMissions } from './missions';
-import { sessionView } from './prefs';
+import { sessionView, uiLayout } from './prefs';
 import type { SessionView } from './session_view';
 import { theme, cycleTheme, type Theme } from './theme';
 import { openToday } from './control';
-import { toggleSidebarView } from './work_view';
+import { sidebarView, toggleSidebarView } from './work_view';
+import { openRoutines } from './routines';
 import { pendingInputFor, type AnswerView } from './pending_input';
 import { sendAnswer } from './answer_send';
 import { hubActionBlocked, hubStatus } from './hub';
@@ -133,6 +134,13 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
       description: `Now ${get(theme)}`, synonyms: ['theme', 'dark', 'light', 'auto', 'appearance'] },
     { id: 'app.shortcuts', label: 'Keyboard shortcuts', section: 'Commands', description: 'Every chord',
       synonyms: ['keys', 'keyboard', 'shortcuts', 'help'], shortcut: 'shortcut-sheet' },
+  );
+  // Redesign 8.6: the Routines, until 8.4's Automation screen has a rail item.
+  if (get(uiLayout) === 'new') {
+    out.push({ id: 'app.routines', label: 'Routines…', section: 'Commands', description: 'Automation',
+      synonyms: ['routines', 'routine', 'schedule', 'cron', 'automation', 'morning pr sweep'] });
+  }
+  out.push(
     // Pause all lands as missions today; step 8.1 turns it into
     // `automation.paused`, and the label follows.
     { id: 'app.pause-all', label: 'Pause all missions', section: 'Commands', description: 'Automation',
@@ -225,6 +233,11 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
       return;
     case 'app.shortcuts':
       shortcutSheetOpen.set(true);
+      return;
+    case 'app.routines':
+      // The Inbox hosts the Routines dialog until 8.4's Automation screen.
+      sidebarView.set('inbox');
+      openRoutines();
       return;
     case 'app.pause-all': {
       const r = await pauseAllMissions();

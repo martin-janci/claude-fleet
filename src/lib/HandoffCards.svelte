@@ -8,7 +8,10 @@
   (`handoffs.ts`); nothing here is inferred from the transcript's text.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import Loader from './Loader.svelte';
+  import { durationMs, effectiveMotion } from './motion';
+  import { fliesIn } from './handoff_flight';
   import Button from './kit/Button.svelte';
   import QuestionCard from './kit/QuestionCard.svelte';
   import StatusChip from './kit/StatusChip.svelte';
@@ -39,6 +42,34 @@
     const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 15_000);
     return () => clearInterval(t);
   });
+
+  // Step 9.13: a session receipt that arrives while the chat is open flies
+  // in as a comet, then its chip settles. `animationend` lands it; the timer
+  // is the fallback for a hidden window, where no animation runs.
+  const openedAt = Math.floor(Date.now() / 1000) - 1;
+  const seen = new Set<number>();
+  let flying = $state<number[]>([]);
+  let settled = $state<number[]>([]);
+
+  $effect(() => {
+    const list = $recentHandoffs;
+    const motion = $effectiveMotion;
+    untrack(() => {
+      for (const h of list) {
+        if (seen.has(h.id)) continue;
+        seen.add(h.id);
+        if (!fliesIn(h, openedAt, motion)) continue;
+        flying = [...flying, h.id];
+        setTimeout(() => land(h.id), durationMs('slow') + 300);
+      }
+    });
+  });
+
+  function land(id: number) {
+    if (!flying.includes(id)) return;
+    flying = flying.filter((x) => x !== id);
+    settled = [...settled, id];
+  }
 
   /** Unticked proposals, per receipt: everything starts ticked. */
   let unticked = $state<Record<number, number[]>>({});
@@ -95,9 +126,19 @@
     {#each $recentHandoffs as h (h.id)}
       {#if h.kind === 'session'}
         {@const c = sessionChip(h, $sessions)}
+        {@const inFlight = flying.includes(h.id)}
+        <div class="slot">
+        {#if inFlight}
+          <span class="flight" data-testid="handoff-flight" aria-hidden="true" onanimationend={() => land(h.id)}>
+            <Loader name="comet" size={12} delay={0} testid="handoff-comet" />
+          </span>
+        {/if}
         <button
           type="button"
           class="handoff"
+          class:in-flight={inFlight}
+          class:settled={settled.includes(h.id)}
+          data-flight={inFlight ? 'flying' : settled.includes(h.id) ? 'landed' : undefined}
           data-testid="handoff-session"
           title={h.preview ?? undefined}
           onclick={() => openSession(h)}
@@ -106,6 +147,7 @@
           <span class="target">{c.name}</span>
           {#if c.state}<StatusChip state={c.state} />{:else}<span class="what">ended</span>{/if}
         </button>
+        </div>
       {:else if h.kind === 'mission'}
         <button
           type="button"
@@ -207,12 +249,59 @@
     padding: 4px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm, 6px);
-    background: var(--surface-2, transparent);
+    background: var(--bg-raise);
     color: var(--fg);
     font: inherit;
     font-size: var(--text-xs);
     text-align: left;
     cursor: pointer;
+  }
+  /* Step 9.13: the comet crosses from the transcript onto the chip, which
+     is hidden until it lands and then settles. */
+  .slot {
+    position: relative;
+    display: flex;
+  }
+  .slot > .handoff {
+    flex: 1;
+  }
+  .flight {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    display: inline-flex;
+    transform: translate(-100%, -50%);
+    pointer-events: none;
+    animation: handoff-fly var(--dur-slow) ease-out forwards;
+  }
+  @keyframes handoff-fly {
+    from {
+      left: 0;
+      opacity: 0;
+    }
+    30% {
+      opacity: 1;
+    }
+    to {
+      left: 100%;
+      opacity: 1;
+    }
+  }
+  .handoff.in-flight {
+    opacity: 0;
+  }
+  .handoff.settled {
+    animation: handoff-settle var(--dur-base) ease-out;
+  }
+  @keyframes handoff-settle {
+    from {
+      opacity: 0.4;
+      transform: scale(0.96);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
   }
   .handoff:disabled,
   .handoff.done {

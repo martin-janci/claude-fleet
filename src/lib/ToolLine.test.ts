@@ -9,6 +9,7 @@ vi.mock('./conversation', async () => {
 });
 import { toolDetail, type ToolLine as Line, type ToolDetail } from './conversation';
 import ToolLine from './ToolLine.svelte';
+import { expectAccessible } from './a11y_check';
 
 vi.mock('./clipboard', async () => {
   const actual = await vi.importActual<typeof import('./clipboard')>('./clipboard');
@@ -278,5 +279,15 @@ describe('ToolLine state mark (redesign 5.14, New layout)', () => {
   it('Classic has no state mark', () => {
     render(ToolLine, { line: line({ done: false, ended_at: null }), sessionId: 1, claudeSessionId: 'c1', nowMs: 0, live: true });
     expect(screen.queryByTestId('conv-tool-state')).toBeNull();
+  });
+
+  it('is accessible', async () => {
+    uiLayout.set('new');
+    mockedDetail.mockResolvedValue({ ok: true, value: detail() });
+    const { container } = render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: 'c1', nowMs: 0, live: true });
+    await expectAccessible(container);
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    await expectAccessible(container);
   });
 });

@@ -263,3 +263,36 @@ describe('SessionRowItem accessibility (7.2)', () => {
     expect(screen.getByRole('img', { name: 'Status: running' })).toBeTruthy();
   });
 });
+
+describe('SessionRowItem: a session ⌘N just started (step 5.14)', () => {
+  it('shows the Pulse sequence on the new row, on its agent step, and nothing else waits on it', async () => {
+    const { uiLayout } = await import('./prefs');
+    const { sessions, startedIds } = await import('./sessions');
+    const { resetStarting } = await import('./session_starting');
+    const row = session('mercury', 'pd-3011', { id: 41, status: 'running', claude_status: null, lost_at: null });
+    uiLayout.set('new');
+    sessions.set([row]);
+    startedIds.set(new Set([41]));
+    try {
+      const { unmount } = render(SessionRowItem, { props: baseProps(row) });
+      await tick();
+      expect(screen.getByTestId('row-starting').textContent).toContain('Worktree ✓ · tmux ✓ · Claude Code starting');
+      const sats = screen.getAllByTestId('pulse-sat').map((s) => s.getAttribute('data-state'));
+      expect(sats).toEqual(['done', 'done', 'active']);
+      // The pulse is the one thing animating on the row.
+      expect(document.querySelectorAll('.ofl, .sat--active').length).toBe(1);
+      unmount();
+
+      // The agent reports: the row is an ordinary row again.
+      const up = { ...row, claude_status: 'working' as const };
+      sessions.set([up]);
+      render(SessionRowItem, { props: baseProps(up) });
+      await tick();
+      expect(screen.queryByTestId('row-starting')).toBeNull();
+    } finally {
+      resetStarting();
+      sessions.set([]);
+      uiLayout.set('classic');
+    }
+  });
+});
