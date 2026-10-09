@@ -1,12 +1,12 @@
 // What the Add host wizard's last button does (redesign step 10.12): the
-// same checks the guided wizard (4.9) runs, in its order, each reported as
-// it answers, then add the host. Nothing runs before the button; a host SSH
-// cannot reach is not added, every other check only informs.
-import { addHost, type HostRow, type SshHost } from '../../hosts';
-import { CHECK_KEYS, checkLoader, discardHostSetup, runHostSetupCheck, type SetupCheck } from '../../add_host_wizard';
-import type { Result } from '../../result';
-import type { Values } from '../forms';
-import { WIZARDS, withChoices, type Wizard } from '../wizards';
+// answers of `wizards/add_host.json` checked the way 4.9's guided wizard
+// checks a host, in its order, then added. Nothing runs before the button;
+// a host SSH cannot reach is not added, every other check only informs.
+import { addHost, type SshHost } from '../hosts';
+import { CHECK_KEYS, checkLoader, discardHostSetup, runHostSetupCheck, type SetupCheck } from '../add_host_wizard';
+import type { ChatFormOutcome } from './ChatForm.svelte';
+import type { Values } from './forms';
+import { WIZARDS, withChoices, type Wizard } from './wizards';
 
 /** The `pick` value that means "type the alias". An SSH alias is never `*`
  *  (that is a config wildcard, which discovery leaves out). */
@@ -18,7 +18,8 @@ export function addHostWizard(discovered: readonly SshHost[]): Wizard {
     .filter((h) => h.alias !== TYPED)
     .slice(0, 49)
     .map((h) => [h.alias, h.hostname ? `${h.alias} · ${h.user ? `${h.user}@` : ''}${h.hostname}` : h.alias]);
-  return withChoices(WIZARDS.add_host, 'pick', [...picks, [TYPED, 'Another alias']]);
+  const w = WIZARDS.add_host;
+  return { ...w, spec: withChoices(w.spec, { pick: [...picks, [TYPED, 'Another alias']] }) };
 }
 
 /** The SSH alias and the fleet name the answers name. */
@@ -29,16 +30,11 @@ export function addHostTarget(v: Values): { sshAlias: string; alias: string } {
   return { sshAlias, alias };
 }
 
-export interface AddHostOutcome {
-  host: HostRow;
-  checks: SetupCheck[];
-}
-
 /** Check, then add. `onprogress` gets the line beside the wizard's loader
  *  while each check waits. */
-export async function runAddHost(v: Values, onprogress?: (text: string) => void): Promise<Result<AddHostOutcome>> {
+export async function runAddHost(v: Values, onprogress?: (text: string) => void): Promise<ChatFormOutcome> {
   const { sshAlias, alias } = addHostTarget(v);
-  if (!sshAlias) return { ok: false, error: { code: 'E_VALIDATE', message: 'Name the SSH alias to add.' } };
+  if (!sshAlias) return { ok: false, problems: [{ field: 'ssh_alias', problem: 'Name the SSH alias to add.' }] };
   const checks: SetupCheck[] = [];
   for (const key of CHECK_KEYS) {
     onprogress?.(checkLoader(key, sshAlias)!.text);
@@ -46,13 +42,14 @@ export async function runAddHost(v: Values, onprogress?: (text: string) => void)
     const c: SetupCheck = r.ok ? r.value : { key, state: 'fail', label: key, detail: r.error.message };
     checks.push(c);
     if (key === 'ssh' && c.state !== 'ok') {
-      return { ok: false, error: { code: 'E_SSH', message: `Fleet can't reach ${sshAlias} over SSH: ${c.detail || 'no answer'}` } };
+      return { ok: false, error: `Fleet can't reach ${sshAlias} over SSH: ${c.detail || 'no answer'}` };
     }
   }
   onprogress?.(`Adding ${alias}…`);
   const added = await addHost(alias, sshAlias);
-  if (!added.ok) return added;
+  if (!added.ok) return { ok: false, error: added.error.message };
   // The checks keep a draft for the guided wizard to resume; this one is done.
   await discardHostSetup(sshAlias);
-  return { ok: true, value: { host: added.value, checks } };
+  const ok = checks.filter((c) => c.state === 'ok').length;
+  return { ok: true, summary: `${alias} added, ${ok} of ${CHECK_KEYS.length} checks ok` };
 }

@@ -21,7 +21,7 @@
   import { uiLayout } from '../prefs';
   import WizardDialog from '../forms/WizardDialog.svelte';
   import type { Values } from '../forms/forms';
-  import { pairDeviceWizard, runPairDevice } from '../forms/wizards/pair_device_run';
+  import { pairDevice, pairDeviceWizard } from '../forms/pair_device_wizard';
   import type { Page } from './pages';
   import {
     afterChange,
@@ -80,7 +80,7 @@
   async function pairFromWizard(v: Values) {
     wizardBusy = true;
     wizardError = null;
-    const r = await runPairDevice(v);
+    const r = await pairDevice(v);
     wizardBusy = false;
     if (!r.ok) {
       wizardError = r.error.message;
