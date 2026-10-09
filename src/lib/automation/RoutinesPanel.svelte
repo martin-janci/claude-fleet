@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import { tablistKeys } from '../tablist_keys';
   // The Automation screen's Routines tab (Orbit Fleet redesign 8.6, the
   // Automation board): the routines on the left, one routine on the right
@@ -243,10 +244,19 @@
   onDestroy(unsub);
 
   onMount(() => void reload());
+
+  // Automation's own column (UX audit 2026-10-09): with `fill`, the list is
+  // the page's left column and carries Automation's head and foot.
+  let {
+    listHead,
+    listFoot,
+    fill = false,
+  }: { listHead?: Snippet; listFoot?: Snippet; fill?: boolean } = $props();
 </script>
 
-<div class="routines" data-testid="routines-panel">
+<div class="routines" class:fill data-testid="routines-panel">
   <div class="list">
+    {@render listHead?.()}
     <div class="list-head">
       <span class="title">Routines <span class="count">{list.length}</span></span>
       <div class="new">
@@ -292,6 +302,7 @@
         {error}
         <button type="button" class="btn btn--quiet" data-testid="routines-retry" onclick={() => void reload()}>Retry</button>
       </p>{/if}
+    {@render listFoot?.()}
   </div>
 
   <div class="detail">
@@ -508,6 +519,9 @@
   .empty { color: var(--fg-muted); font-size: var(--text-sm, 12.5px); }
   .err { color: var(--danger); font-size: var(--text-xs, 11.5px); margin: 0; }
   .detail { display: flex; flex-direction: column; gap: var(--space-3, 12px); min-width: 0; }
+  .routines.fill { grid-template-columns: var(--list-w) minmax(0, 1fr); gap: 0; height: 100%; min-height: 0; }
+  .fill .list { min-height: 0; overflow: auto; padding: var(--space-3) var(--space-3) 0; background: var(--bg-pane); }
+  .fill .detail { min-height: 0; overflow: auto; padding: var(--space-4) var(--space-6); }
   .kicker { margin: 0; color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
   h3 { margin: 0; font-size: var(--text-lg, 15px); }
   .bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2, 8px); margin-top: var(--space-2, 8px); }
