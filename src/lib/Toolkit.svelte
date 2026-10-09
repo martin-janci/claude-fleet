@@ -10,15 +10,16 @@
   import { catalog, loadAssets } from './assets';
   import { requestAssetsView } from './app_views';
   import { skillMatrix, toolkitTab, TOOLKIT_KIND, type ToolkitTab } from './toolkit_skills';
-  import { openSettingsAt } from './app_views';
+  import { composerPresets } from './composer_presets';
   import { downloads, downloadsOpen } from './downloads';
   import { goTo } from './destination';
   import AssetsPanel from './AssetsPanel.svelte';
+  import PromptsSnippets from './PromptsSnippets.svelte';
   import Button from './kit/Button.svelte';
 
   let { visible }: { visible: boolean } = $props();
 
-  type MatrixTab = Exclude<ToolkitTab, 'assets'>;
+  type MatrixTab = Exclude<ToolkitTab, 'assets' | 'prompts'>;
   const PAGES: Record<MatrixTab, { title: string; noun: string; col: string }> = {
     skills: { title: 'Skills', noun: 'skill', col: 'Skill' },
     mcp: { title: 'MCP servers', noun: 'MCP server', col: 'Server' },
@@ -29,18 +30,22 @@
     { id: 'mcp', label: 'MCP servers' },
     { id: 'hooks', label: 'Hooks' },
     { id: 'assets', label: 'Assets catalog' },
+    { id: 'prompts', label: 'Prompts & snippets' },
   ];
-  const matrix = $derived(skillMatrix($catalog, $toolkitTab === 'assets' ? 'skill' : TOOLKIT_KIND[$toolkitTab]));
-  const counts = $derived<Partial<Record<ToolkitTab, number>>>(
-    $catalog
+  const matrix = $derived(
+    skillMatrix($catalog, $toolkitTab === 'assets' || $toolkitTab === 'prompts' ? 'skill' : TOOLKIT_KIND[$toolkitTab]),
+  );
+  const counts = $derived<Partial<Record<ToolkitTab, number>>>({
+    ...($catalog
       ? {
           skills: skillMatrix($catalog, 'skill').rows.length,
           mcp: skillMatrix($catalog, 'mcp_server').rows.length,
           hooks: skillMatrix($catalog, 'hook').rows.length,
           assets: $catalog.assets.length,
         }
-      : {},
-  );
+      : {}),
+    prompts: $composerPresets.length,
+  });
   const activeDownloads = $derived($downloads.filter((d) => d.state === 'fetching').length);
 
   // The catalog is primed at launch; refresh it quietly when Toolkit opens.
@@ -73,15 +78,6 @@
         </li>
       {/each}
       <li>
-        <button
-          type="button"
-          class="nav-item"
-          data-testid="toolkit-prompts"
-          title="Your prompt chips live in Settings › Sessions & agents"
-          onclick={() => openSettingsAt('sessions')}>Prompts & snippets ↗</button
-        >
-      </li>
-      <li>
         <button type="button" class="nav-item" data-testid="toolkit-downloads" onclick={() => downloadsOpen.set(true)}
           >Downloads…{#if activeDownloads > 0}<span class="n">{activeDownloads} active</span>{/if}</button
         >
@@ -96,7 +92,11 @@
     </div>
   </nav>
 
-  {#if $toolkitTab === 'assets'}
+  {#if $toolkitTab === 'prompts'}
+    <div class="body skills" role="region" aria-label="Prompts & snippets" data-testid="toolkit-prompts">
+      <PromptsSnippets />
+    </div>
+  {:else if $toolkitTab === 'assets'}
     <div class="body assets" role="region" aria-label="Assets catalog">
       <AssetsPanel {visible} />
     </div>
