@@ -282,7 +282,7 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'budget.org_daily_usd': '0',
   'budget.org_monthly_usd': '0',
   'notify.desktop': 'needs_you,failed,blocked,routine_failed',
-  'notify.phone': 'needs_you,failed,routine_failed',
+  'notify.phone': 'needs_you,failed,blocked,routine_failed',
   'notify.sound': 'needs_you',
   'notify.quiet_hours': '',
   'notify.quiet_except': 'failed',

@@ -1565,7 +1565,10 @@ pub const SPECS: &[Spec] = &[
     .labels(NOTIFY_STATE_LABELS),
     Spec::new(
         NOTIFY_PHONE,
-        "needs_you,failed,routine_failed",
+        // Blocked too: before the matrix a phone announced a stuck session,
+        // a host down and an account at its limit, and still does unless
+        // someone unticks it (Martin, 2026-10-09).
+        "needs_you,failed,blocked,routine_failed",
         Kind::ChoiceSet(NOTIFY_STATES),
         "Phone",
         "The session states the phone shows a notification for.",
