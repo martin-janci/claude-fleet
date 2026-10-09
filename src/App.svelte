@@ -114,6 +114,7 @@
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import { get } from 'svelte/store';
   import { destination, goTo, leave } from './lib/destination';
+  import { tablistKeys } from './lib/tablist_keys';
 
   const isNumber = (v: unknown): v is number => typeof v === 'number';
   const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
@@ -1260,7 +1261,7 @@
         oninspector={toggleInspector}
       />
     {:else}
-    <div class="view-tabs" role="tablist">
+    <div class="view-tabs" role="tablist" aria-label="Views" use:tablistKeys>
       <button
         class="view-tab"
         class:active={sessionTabActive && !boardMode}
