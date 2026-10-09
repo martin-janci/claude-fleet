@@ -42,7 +42,7 @@
 
   function label(r: Receipt): string | null {
     const opt = shownOption(r);
-    if (opt === CONTROL) return 'For Control itself';
+    if (opt === CONTROL) return 'New topic';
     const t = targetOf(r.route, opt);
     return t ? `About ${t.name}` : null;
   }
@@ -87,7 +87,14 @@
             >
           {/if}
         {:else}
-          <span class="ask" data-testid="control-route-ask">Which mission or session is this about?</span>
+          <!-- Board MissionControl: "Which thread? two open threads fit, so
+               nothing is picked", then the threads and New topic. -->
+          <span class="ask" data-testid="control-route-ask">Which thread?</span>
+          {#if r.route.targets.length > 1 && changing !== r.key}
+            <span class="why" data-testid="control-route-ask-why"
+              >{r.route.targets.length} open threads fit, so nothing is picked</span
+            >
+          {/if}
           <div class="choices">
             {#each r.route.targets as t (optionOf(t))}
               <button type="button" class="choice" data-testid="control-route-choice" onclick={() => pick(r, optionOf(t))}
@@ -95,7 +102,7 @@
               >
             {/each}
             <button type="button" class="choice" data-testid="control-route-choice-control" onclick={() => pick(r, CONTROL)}
-              >Control itself</button
+              >New topic</button
             >
           </div>
         {/if}
@@ -129,6 +136,10 @@
     color: var(--accent);
     cursor: pointer;
     font: inherit;
+  }
+  .ask {
+    color: var(--fg);
+    font-weight: 600;
   }
   .choices {
     display: flex;

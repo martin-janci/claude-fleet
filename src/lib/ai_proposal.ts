@@ -108,6 +108,16 @@ export function preselect(
   return proposal.value;
 }
 
+/** At or above this a shown proposal reads "likely"; below it, "possible". */
+export const LIKELY_PCT = 80;
+
+/** A model answer's confidence as one word (board AIPatterns: "a confidence
+ *  word, never a percentage"). Empty for a rule, which has none. */
+export function confidenceWord(pct: number | null | undefined): '' | 'likely' | 'possible' {
+  if (pct == null) return '';
+  return pct >= LIKELY_PCT ? 'likely' : 'possible';
+}
+
 /** The pill text for a source. */
 export function proposedByLabel(source: ProposalSource): string {
   switch (source) {

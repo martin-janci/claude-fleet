@@ -5,7 +5,7 @@
   proposal appears when ready or not at all.
 -->
 <script lang="ts">
-  import { preselect, proposedByLabel, type ProposalLike } from './ai_proposal';
+  import { confidenceWord, preselect, proposedByLabel, type ProposalLike } from './ai_proposal';
 
   let {
     proposal,
@@ -34,8 +34,12 @@
 {#if shown}
   <div class="why" data-testid={testid} data-source={shown.source}>
     <span class="pill">{proposedByLabel(shown.source)}</span>
+    <!-- Board AIPatterns: a confidence word before the evidence, never a
+         percentage ("likely · PD-* started in papaya-pos 6×"). -->
+    {#if confidenceWord(shown.confidence_pct)}<span class="conf" data-testid="{testid}-confidence"
+        >{confidenceWord(shown.confidence_pct)}</span
+      >{#if shown.reason}<span aria-hidden="true">·</span>{/if}{/if}
     {#if shown.reason}<span class="reason">{shown.reason}</span>{/if}
-    {#if shown.confidence_pct != null}<span class="pct" title="Confidence">{shown.confidence_pct}%</span>{/if}
     {#if onchange}
       <span aria-hidden="true">·</span>
       <button type="button" class="link" data-testid="{testid}-change" onclick={() => onchange?.()}
@@ -72,8 +76,8 @@
     content: '\2726';
     font-size: var(--text-2xs);
   }
-  .pct {
-    font-variant-numeric: tabular-nums;
+  .conf {
+    color: var(--fg-2);
   }
   .link {
     font: inherit;

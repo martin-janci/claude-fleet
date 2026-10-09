@@ -147,7 +147,7 @@ describe('WorkReview', () => {
     const pill = within(rows[0]).getByTestId('work-review-proposed-by');
     expect(pill.textContent).toContain('Proposed by Jev');
     expect(pill.textContent).toContain('from the first prompt');
-    expect(pill.textContent).toContain('82%');
+    expect(pill.textContent).toContain('likely');
     // A rule's own reading says nothing about Jev.
     expect(within(rows[1]).queryByTestId('work-review-proposed-by')).toBeNull();
     // Jev's 60 never joins the one-click high-confidence confirm.

@@ -69,7 +69,7 @@ describe('Control routing receipts', () => {
     expect(inv).toHaveBeenCalledWith('control_route_propose', { text: 'How far did the federation handshake get?' });
     expect(screen.getByTestId('control-route-target').textContent).toBe('About Hub federation v2');
     expect(screen.getByTestId('control-route-proposed').textContent).toContain('Proposed by Jev');
-    expect(screen.getByTestId('control-route-proposed').textContent).toContain('86%');
+    expect(screen.getByTestId('control-route-proposed').textContent).toContain('likely');
   });
 
   it('only messages sent while Control shows are routed, each once', async () => {
@@ -97,7 +97,7 @@ describe('Control routing receipts', () => {
     await fireEvent.click(screen.getByTestId('control-route-change'));
     await fireEvent.click(screen.getByTestId('control-route-choice-control'));
     await tick();
-    expect(screen.getByTestId('control-route-target').textContent).toBe('For Control itself');
+    expect(screen.getByTestId('control-route-target').textContent).toBe('New topic');
     expect(inv.mock.calls.filter((c) => c[0] === 'control_route_follow')).toHaveLength(1);
   });
 
@@ -105,7 +105,8 @@ describe('Control routing receipts', () => {
     route = { outcome: 'ask', targets: TARGETS };
     render(ControlRouteReceipts, { sessionId: 1 });
     await send(msg('a', 'yes, that one'));
-    expect(screen.getByTestId('control-route-ask').textContent).toBe('Which mission or session is this about?');
+    expect(screen.getByTestId('control-route-ask').textContent).toBe('Which thread?');
+    expect(screen.getByTestId('control-route-ask-why').textContent).toBe('2 open threads fit, so nothing is picked');
     expect(screen.queryByTestId('control-route-proposed')).toBeNull();
     await fireEvent.click(screen.getAllByTestId('control-route-choice')[0]);
     await tick();

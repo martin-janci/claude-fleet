@@ -13,6 +13,7 @@ import type { SessionRow } from './sessions';
 import type { SettingProposal } from './pages/review';
 import {
   NEVER_DECIDES,
+  confidenceWord,
   draftedBy,
   neverDecides,
   neverDecidesField,
@@ -153,9 +154,18 @@ describe('ProposedBy', () => {
     const row = screen.getByTestId('proposed-by');
     expect(row.textContent).toContain('Proposed by Jev');
     expect(row.textContent).toContain('same repo, 2 idle slots');
-    expect(row.textContent).toContain('82%');
+    expect(row.textContent).toContain('likely');
+    expect(row.textContent).not.toContain('%');
     await fireEvent.click(screen.getByTestId('proposed-by-change'));
     expect(onchange).toHaveBeenCalledOnce();
+  });
+  it('says possible below the likely line, and a rule says no confidence word', () => {
+    render(ProposedBy, { proposal: jev('p3', 62), field: 'project', testid: 'a' });
+    expect(screen.getByTestId('a-confidence').textContent).toBe('possible');
+    render(ProposedBy, { proposal: { value: 'p3', source: 'rule', reason: 'R1' }, field: 'project', testid: 'b' });
+    expect(screen.queryByTestId('b-confidence')).toBeNull();
+    expect(confidenceWord(80)).toBe('likely');
+    expect(confidenceWord(79)).toBe('possible');
   });
   it('shows nothing under the floor', () => {
     render(ProposedBy, { proposal: jev('p3', 40), field: 'project' });
