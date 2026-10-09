@@ -126,6 +126,11 @@ pub enum RowChange {
     /// Ids only — a client re-reads `update_status`. Kind `update`, so never
     /// sent to a host-bound or org-bound stream (it names every target).
     UpdateChanged(UpdateChanged),
+    /// What the hub would tell one target changed (update-channel design
+    /// §6.4): a pin, a new channel, or a policy setting moved its decision.
+    /// The target, its new status and version — no documents; a client that
+    /// is that target checks again (`POST /update/check`). Kind `update`.
+    UpdateDecision(UpdateDecision),
     /// A file download's row was added, moved state, was fetched or was
     /// removed (migration 095). The id only — a client re-reads
     /// `list_downloads`. Kind `download`, so never sent to a host-bound or
@@ -159,6 +164,18 @@ pub struct UpdateChanged {
     /// pinned target; absent for a component-wide pin and the channel.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+}
+
+/// The payload of `update:decision`.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct UpdateDecision {
+    /// `client:3`, `agent:h`, `hub:self`.
+    pub target: String,
+    /// The decision's status (`update_available`, `update_required`, …).
+    pub status: String,
+    /// The version it now names, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// The payload of `grant:changed` (multi-user M1, T9): one change to one
@@ -485,6 +502,7 @@ impl RowChange {
             RowChange::SettingsChanged(_) => "settings:changed",
             RowChange::GrantChanged(_) => "grant:changed",
             RowChange::UpdateChanged(_) => "update:changed",
+            RowChange::UpdateDecision(_) => "update:decision",
             RowChange::DownloadChanged(_) => "download:changed",
             RowChange::LocalWorkspaceChanged(_) => "local_workspace:changed",
             RowChange::ConfirmChanged => "confirm:changed",
@@ -546,6 +564,7 @@ impl RowChange {
             RowChange::SettingsChanged(key) => serde_json::json!({ "key": key }),
             RowChange::GrantChanged(g) => to_value(g),
             RowChange::UpdateChanged(u) => to_value(u),
+            RowChange::UpdateDecision(u) => to_value(u),
             RowChange::DownloadChanged(id) => serde_json::json!({ "id": id }),
             RowChange::LocalWorkspaceChanged(id) => serde_json::json!({ "id": id }),
             RowChange::ConfirmChanged | RowChange::HandoffChanged => serde_json::json!({}),
@@ -880,6 +899,7 @@ pub const EVENT_NAMES: [&str; 32] = [
     "work:changed",
     "settings:changed",
     "update:changed",
+    "update:decision",
     "download:changed",
     "grant:changed",
     "local_workspace:changed",
@@ -1249,6 +1269,7 @@ impl EventBus for RecordingEventBus {
             RowChange::UpdateChanged(u) => {
                 format!("{}:{}", u.what, u.target.as_deref().unwrap_or_default())
             }
+            RowChange::UpdateDecision(u) => format!("{}:{}", u.target, u.status),
             RowChange::DownloadChanged(id) | RowChange::LocalWorkspaceChanged(id) => id.to_string(),
             RowChange::ConfirmChanged | RowChange::HandoffChanged => String::new(),
         };
@@ -1453,6 +1474,7 @@ mod tests {
                 RowChange::SettingsChanged(_) => pinned_name!("settings:changed"),
                 RowChange::GrantChanged(_) => pinned_name!("grant:changed"),
                 RowChange::UpdateChanged(_) => pinned_name!("update:changed"),
+                RowChange::UpdateDecision(_) => pinned_name!("update:decision"),
                 RowChange::DownloadChanged(_) => pinned_name!("download:changed"),
                 RowChange::LocalWorkspaceChanged(_) => pinned_name!("local_workspace:changed"),
                 RowChange::ConfirmChanged => pinned_name!("confirm:changed"),

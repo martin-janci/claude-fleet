@@ -15,8 +15,9 @@ for hosts the hub cannot reach — depends on `fleet-proto` only, never `fleet-c
 `crates/fleet-agent-e2e` (tests only: the hub against the real agent over a socket,
 through fleet-core's `testkit` feature), `crates/fleet-update` (the Tauri-free update
 engine shared by every component — manifests, signatures, the update state machine —
-with no `fleet-core` dependency; also the `fleet-release` binary), `src-tauri` (the
-desktop app).
+with no `fleet-core` dependency; also the `fleet-release` binary), `crates/fleet-updater`
+(the Docker hub's update sidecar, on `fleet-update` only — no `fleet-core`; see
+`docs/updates.md`), `src-tauri` (the desktop app).
 
 ## Build & test
 

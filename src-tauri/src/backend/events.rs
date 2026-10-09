@@ -720,6 +720,7 @@ pub fn payload_fits(name: &str, payload: &Value) -> Result<(), String> {
         | "work:tracker_removed" => integer("id"),
         "host:added" | "host:probed" | "host:removed" => string("alias"),
         "work:changed" | "update:changed" => string("what"),
+        "update:decision" => string("target").and_then(|()| string("status")),
         // `grant:changed` (multi-user M1): `src/lib/access.ts` reads both
         // ids as numbers and drops the frame otherwise, so the bridge
         // checks what the consumer requires. `level` is deliberately not

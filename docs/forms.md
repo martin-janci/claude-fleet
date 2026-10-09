@@ -29,7 +29,7 @@ back as the result of the agent's tool call. The design is
 
 Before a long form is whole, the agent may show it building: each `draft`
 call replaces the session's draft (at most 16 KiB, not validated, migration
-151), the session row carries it as `form_draft`, and the Conversation panel
+153), the session row carries it as `form_draft`, and the Conversation panel
 draws it in (`ChatForm` in its Building state: a small Atom, "Building a form
 · reading …", the title and a skeleton for each field once its name, type
 and label are whole; `partial_spec.ts`). It answers at once,

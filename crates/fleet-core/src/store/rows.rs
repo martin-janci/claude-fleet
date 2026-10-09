@@ -16,7 +16,7 @@ pub struct PendingForm {
 }
 
 /// The form a session's agent is still writing (`ask { draft }`, migration
-/// 151): the JSON so far, which the chat draws in as skeleton fields.
+/// 153): the JSON so far, which the chat draws in as skeleton fields.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FormDraft {
     pub draft: String,

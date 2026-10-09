@@ -3363,7 +3363,8 @@
       "kind": {
         "options": [
           "stable",
-          "beta"
+          "beta",
+          "nightly"
         ],
         "type": "choice"
       },
@@ -3457,6 +3458,45 @@
       "widgets": [
         "number",
         "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "text",
+      "key": "update.window",
+      "kind": {
+        "type": "time_range"
+      },
+      "label": "Maintenance window",
+      "widgets": [
+        "text",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "update.rollout_wave_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 300,
+        "type": "secs"
+      },
+      "label": "Rollout wave soak",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "update.mirror",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Mirror release files",
+      "widgets": [
+        "switch",
         "readonly"
       ]
     },

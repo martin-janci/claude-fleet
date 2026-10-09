@@ -18,9 +18,21 @@
           "key": "update.check_interval_secs"
         },
         {
+          "type": "field",
+          "key": "update.window"
+        },
+        {
+          "type": "field",
+          "key": "update.rollout_wave_secs"
+        },
+        {
+          "type": "field",
+          "key": "update.mirror"
+        },
+        {
           "type": "notice",
           "tone": "info",
-          "text": "Nothing installs itself yet: fleet-updater, the desktop and the phone arrive in later slices (S6–S8), so on a standalone desktop these rows have no effect. There is no nightly track until it is published (S2b)."
+          "text": "This desktop updates itself (paired, its hub decides; standalone, these rows do), only to a release the release key signed. The Docker hub updates itself through fleet-updater (opt-in). nightly: the hub on each green main push, the desktop once a day."
         }
       ]
     },
@@ -30,7 +42,7 @@
         {
           "type": "notice",
           "tone": "info",
-          "text": "This desktop installs nothing yet: these rows say what the fleet follows, and the desktop updater is slice S6. See docs/updates.md."
+          "text": "The desktop row is also this desktop's own: notify offers a restart to update, automatic installs at the next launch, manual installs only a pin. See docs/updates.md."
         },
         {
           "type": "field",

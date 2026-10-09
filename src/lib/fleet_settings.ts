@@ -109,6 +109,9 @@ export const SETTING_KEYS = {
   updateDesktopMode: 'update.desktop.mode',
   updateMobileMode: 'update.mobile.mode',
   updateCheckIntervalSecs: 'update.check_interval_secs',
+  updateWindow: 'update.window',
+  updateRolloutWaveSecs: 'update.rollout_wave_secs',
+  updateMirror: 'update.mirror',
   budgetOrgDailyUsd: 'budget.org_daily_usd',
   budgetOrgMonthlyUsd: 'budget.org_monthly_usd',
   notifyDesktop: 'notify.desktop',
@@ -122,9 +125,8 @@ export const SETTING_KEYS = {
  *  (`auto` is not offered, decision D36). */
 export const DECIDE_MODES = ['off', 'shadow', 'assist'] as const;
 
-/** Mirror of `settings::UPDATE_TRACKS`: the release track the hub follows.
- *  No `nightly` until S2b publishes that channel. */
-export const UPDATE_TRACKS = ['stable', 'beta'] as const;
+/** Mirror of `settings::UPDATE_TRACKS`: the release track the hub follows. */
+export const UPDATE_TRACKS = ['stable', 'beta', 'nightly'] as const;
 /** Mirror of `settings::UPDATE_MODES`. */
 export const UPDATE_MODES = ['manual', 'notify', 'automatic'] as const;
 /** Mirror of `settings::UPDATE_MOBILE_MODES`: a phone never installs silently. */
@@ -301,6 +303,9 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'update.desktop.mode': 'notify',
   'update.mobile.mode': 'notify',
   'update.check_interval_secs': '21600',
+  'update.window': '',
+  'update.rollout_wave_secs': '3600',
+  'update.mirror': 'false',
   'budget.org_daily_usd': '0',
   'budget.org_monthly_usd': '0',
   'notify.desktop': 'needs_you,failed,blocked,routine_failed',

@@ -96,7 +96,22 @@ if [ -n "${RELEASE_ID:-}" ] && [ -n "${REPO:-}" ]; then
   done
 fi
 
-# 4. Write, sign, and check the signature against the compiled-in key.
+printf '%s\n' "$RELEASE_SIGNING_KEY" >"$work/key"
+
+# 4. The desktop's updater bundles, signed by the release key for
+#    tauri-plugin-updater (S7). The signature rides in the signed manifest
+#    (`tauri_signature`), not as an asset of its own. Its trusted comment
+#    names the version, which the app requires (`requireSignedVersion`), so
+#    an older bundle's signature cannot be replayed as a newer one's.
+mkdir -p "$work/tauri-sigs"
+for name in "claude-fleet_${version}_aarch64.app.tar.gz" "claude-fleet_${version}_x64.app.tar.gz" \
+  "claude-fleet_${version}_amd64.AppImage" "claude-fleet_${version}_x64-setup.exe"; do
+  [ -f "$ASSETS_DIR/$name" ] || continue
+  minisign -S -s "$work/key" -m "$ASSETS_DIR/$name" -x "$work/tauri-sigs/$name.minisig" \
+    -t "$(printf 'timestamp:%s\tfile:%s\tversion:%s' "$(date +%s)" "$name" "$version")" >/dev/null
+done
+
+# 5. Write, sign, and check the signature against the compiled-in key.
 "$FLEET_RELEASE" manifest \
   --version "$version" \
   --commit "${GIT_SHA:-unknown}" \
@@ -107,9 +122,9 @@ fi
   --compat "$work/compat.json" \
   --desktop-accepts "$dmin,$dmax" \
   --hub-image "$hub_image" \
+  --tauri-sigs "$work/tauri-sigs" \
   --out release-manifest.json
 
-printf '%s\n' "$RELEASE_SIGNING_KEY" >"$work/key"
 minisign -S -s "$work/key" -m release-manifest.json -x release-manifest.json.minisig \
   -t "claude-fleet $TAG release manifest" >/dev/null
 "$here/release-verify-sig.sh" "$work/pubkeys" release-manifest.json release-manifest.json.minisig manifest

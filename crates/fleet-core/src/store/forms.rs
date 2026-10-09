@@ -238,7 +238,7 @@ impl Store {
     }
 
     /// Write the form `session_id`'s agent is still writing (migration
-    /// 151): the session's row carries it as `form_draft`, so its chat draws
+    /// 153): the session's row carries it as `form_draft`, so its chat draws
     /// the form in. Replaces the session's previous draft.
     pub fn set_form_draft(&self, session_id: i64, draft: &str, why: Option<&str>) -> Result<()> {
         self.conn.execute(
@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(bus.names(), vec!["session:updated"]);
     }
 
-    /// Migration 151: a draft bumps and announces its session's row each
+    /// Migration 153: a draft bumps and announces its session's row each
     /// write, and goes with its deleted session.
     #[test]
     fn a_draft_bumps_its_row_and_goes_with_its_session() {

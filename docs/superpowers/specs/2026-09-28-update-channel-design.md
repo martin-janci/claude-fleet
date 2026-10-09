@@ -5,9 +5,11 @@ side: `/update/*`, the `updater` token, the desired / observed tables,
 `update_status` / `update_admin`, the channel refresh tick), **S2** (CI
 signs `release-manifest.json` and writes the `stable` / `beta` channels on
 `update-channels`), **S3** (`fleet-hub update check`, Git mode over
-fleet-core's HTTPS client), **the first half of S4b** (`X-Fleet-Client`,
+fleet-core's HTTPS client), **S4b** (`X-Fleet-Client`, `update:decision`, hub-e2e section U,
 `update:changed`, `fleet_health.updates`, `update_status { target }`)
-**and S5** (`fleet-hub healthcheck --ready --json`, `fleet-hub backup`). The rest is not built. What S2 and S4 still owe is
+**S5** (`fleet-hub healthcheck --ready --json`, `fleet-hub backup`) **and S6**
+(`fleet-updater`, the `auto-update` compose profile), **S2b** (`nightly.yml`)
+**and S7** (the desktop updates itself). The rest is not built. What S2 and S4 still owe is
 listed under S2b and S4b in §12.
 
 It answers two findings of the release-process review
@@ -731,6 +733,12 @@ CREATE TABLE update_rollouts (
    `stop_grace_period`). Rename it `fleet-hub-prev`, replacing an older
    `-prev`. Create `fleet-hub` from the same config (env, volumes, networks,
    labels) with `image@digest`, then start it.
+   - **As built (S6):** the old container is removed, not renamed: a
+     stopped `-prev` would still carry compose's service labels, so compose
+     would see two containers for one service. The previous build's create
+     config and image id are kept in the state file instead (`previous`),
+     which brings it back as fast; the failed candidate's log is kept in
+     the state volume rather than as a `-failed-<v>` container.
    - The hub cannot run blue/green: SQLite has a single writer, and there
      is one port. So "candidate" means *replaces*, and the old container is
      kept stopped for a fast rollback.
@@ -934,15 +942,15 @@ Each slice lands on its own, green, with its tests.
 |---|---|---|---|---|
 | **S1** ✅ | 1, 2 | `fleet-update` crate: manifest + channel types, serde, minisign verify, `decide()`, `UpdatePhase`, `UpdateChannel` trait, the fixture `decide_cases.json` | `crates/fleet-update/` | the fixture cases pass; the verify tests cover a bad signature, a lower sequence, expiry, rotation |
 | **S2** ✅ | 3, 7 | CI writes, signs and uploads `release-manifest.json` from 0.4.1 (`manifest` job, before `checksums`; `verify-release` requires it through the `manifest` leg of `release-assets.sh`); `fleet-hub compat` (the windows the shipped binary states); `build_info` (U11, with S5); the `update-channels` branch written only by `scripts/update-channels.sh` — `add` after `publish` (stable → stable + beta, rc → beta), `edit` and the weekly `resign` from `update-channels.yml`; every document checked by `fleet-release verify` against `keys.rs` before it leaves the runner; `scripts/release-key.sh` for the owner | `release.yml`, `update-channels.yml`, `fleet-update` `publish.rs` + `bin/fleet-release.rs`, `scripts/release-manifest.sh`, `scripts/update-channels.sh`, `scripts/release-key.sh`, `scripts/release-assets.sh` | `scripts/release-update-scripts-test.sh` (CI hub-headless): a manifest and channels signed by a throwaway key verify with the fleet's verifier, an rc moves only `beta.json`, a key `keys.rs` does not name pushes nothing |
-| **S2b** | 3 | what S2 left: `nightly.yml` (hub image + agent/hub tarballs on green `main`, `-dev.N.g<sha>`; desktop nightly in Open question 3) and `nightly.json`; the ruleset that lets only CI push `update-channels` (the owner's, in the repository settings) | `nightly.yml`, `hub-image.yml` | a `main` push moves `nightly.json` |
+| **S2b** ✅ | 3 | what S2 left: `nightly.yml` (hub image + agent/hub tarballs on green `main`, `-dev.N.g<sha>`; desktop nightly in Open question 3) and `nightly.json`; the ruleset that lets only CI push `update-channels` (the owner's, in the repository settings) | `nightly.yml`, `hub-image.yml` | a `main` push moves `nightly.json` |
 | **S3** ✅ | 3 | `service::update::git_check` (a `GitCheck` from the hub's settings, pin and last-seen sequence, over `HttpsFetch`), `hub_self_request`; `fleet-hub update check [--track] [--json]` prints the decision for the running hub, verified, and installs nothing | `fleet-core` `service/update/`, `crates/fleet-hub/src/update.rs` | a standalone hub reports `update_available` against a signed fixture channel, `up_to_date` on the newest, its own pin as a rollback, and refuses an untrusted key or a replayed channel (`service/update/tests.rs`) |
 | **S4a** ✅ | 4, 5 | migration 079 (desired / observed / events / the signed-document cache `update_docs`); `/update/check` + `/update/report` (`mcp/update_route.rs`); the `updater` token mode (`fleet-hub pair --mode updater`, no tool, no `/events`); `update_status` / `update_admin { pin \| unpin \| refresh }`; the `update.*` settings with `docs/updates.md`; the refresh tick in `fleet-hub serve` (records `hub:self`); `HubUpdateChannel` (S1) | `fleet-core` `mcp/update_route.rs`, `service/update/`, `store/update.rs` | unit + route tests against signed test documents; checked on a real hub |
-| **S4b** (half ✅) | 4, 5 | **built:** `X-Fleet-Client` recorded into `update_observed` on `last_seen_at`'s beat (`fleet_update::client_header`, written there and not to `client_tokens`, so migration 060's auth-epoch trigger needs no exemption); `update:changed` (ids only, kind `update`, hidden from scoped streams); `fleet_health.updates` with `update_required`, `update_failed`, `update_rolled_back`, `rollback_failed`, `channel_stale`; `update_check_for` as `update_status { target }` (one tool fewer on the definition budget). **Left:** `update:decision` pushed per target on `/events`; `hub-e2e.sh` section U; `update_rollouts`, the admin rollout actions and `rollout_paused` (with S9); the org-scoped policy rows | `fleet-core` | `hub-e2e.sh` section U: a fake client and a fake agent see `update_available`, `update_required` and `client_too_new` from a channel signed by an e2e key (`FLEET_UPDATE_E2E_KEYS`, `e2e` builds only) |
+| **S4b** ✅ (rollouts with S9) | 4, 5 | **built:** `X-Fleet-Client` recorded into `update_observed` on `last_seen_at`'s beat (`fleet_update::client_header`, written there and not to `client_tokens`, so migration 060's auth-epoch trigger needs no exemption); `update:changed` (ids only, kind `update`, hidden from scoped streams); `fleet_health.updates` with `update_required`, `update_failed`, `update_rolled_back`, `rollback_failed`, `channel_stale`; `update_check_for` as `update_status { target }` (one tool fewer on the definition budget). `update:decision` on `/events` (`push_decisions`; delivered to the same streams as `update:changed`, so a scoped caller keeps to its interval); `hub-e2e.sh` section U (a paired desktop; no agent leg). Rollouts landed with S9. **Left:** the org-scoped policy rows | `fleet-core` | `hub-e2e.sh` section U: a fake client and a fake agent see `update_available`, `update_required` and `client_too_new` from a channel signed by an e2e key (`FLEET_UPDATE_E2E_KEYS`, `e2e` builds only) |
 | **S5** ✅ | 8 | `fleet-hub healthcheck --ready --json`, `fleet-hub backup --to` | `crates/fleet-hub/src/serve.rs`, `fleet-core::store` | a test drives both against a real store |
-| **S6** | 6, 9 | `fleet-updater`: Docker adapter, the state file, the gates, rollback with and without migration; compose `auto-update` profile; image publish | `crates/fleet-updater/`, `deploy/hub/` | a docker e2e (opt-in, like `--hub-e2e`) against a local registry with three images: good, crash-on-start, and migrates-then-unready. All three end in the right state, and the third restores the backup. |
-| **S7** | 10 | desktop: `tauri-plugin-updater` wired to `Decision`; `TAURI_SIGNING_PRIVATE_KEY` = the release key; `update_check` / `update_install` commands + verdict rows; the Updates view; footer shows both versions; contract-gate exemption | `src-tauri`, `src/lib/updates.ts`, `src/components/UpdatesView.svelte` | a standalone desktop updates itself from `nightly`; a paired one from its hub |
-| **S8** | 11 | fleet-mobile: `X-Fleet-Client`, `/update/check`, the Updates row and required screen; Android `PackageInstaller` adapter; release job publishes a versioned APK + sums and dispatches the manifest amendment | fleet-mobile | see its spec |
-| **S9** | 12 | rollouts (waves, auto-advance, halt), maintenance window, per-org policy, the agent's binary adapter, the bare-binary hub, the hub-served artifact mirror | | |
+| **S6** ✅ | 6, 9 | `fleet-updater`: Docker adapter, the state file, the gates, rollback with and without migration; compose `auto-update` profile; image publish | `crates/fleet-updater/`, `deploy/hub/` | a docker e2e (opt-in, like `--hub-e2e`) against a local registry with three images: good, crash-on-start, and migrates-then-unready. All three end in the right state, and the third restores the backup. |
+| **S7** ✅ | 10 | desktop: `tauri-plugin-updater` wired to `Decision`; `TAURI_SIGNING_PRIVATE_KEY` = the release key; `update_check` / `update_install` commands + verdict rows; the Updates view; footer shows both versions; contract-gate exemption | `src-tauri`, `src/lib/updates.ts`, `src/components/UpdatesView.svelte` | a standalone desktop updates itself from `nightly`; a paired one from its hub |
+| **S8** ✅ | 11 | fleet-mobile: `X-Fleet-Client`, `/update/check`, the Updates row and required screen; Android `PackageInstaller` adapter; release job publishes a versioned APK + sums and dispatches the manifest amendment | fleet-mobile | see its spec |
+| **S9** ✅ | 12 | **built:** rollouts (migration 151 `update_rollouts`; waves default `[10, 50, 100]`, auto-advance after `update.rollout_wave_secs` on the decision pusher's five-minute beat, halt at `halt_failure_ratio` with `rollout_paused`; a wave's failure ratio counts in-cohort targets whose last report is a failed install against those that run the release), the maintenance window (`update.window`, UTC, holding only `automatic` components, since an offer a person accepts is theirs to time); per-org policy (migration 152 `update_org_policy`: mode, floor, window and pin per org; `set_policy` / `clear_policy`, master only); the hub-served mirror (`update.mirror`, `/update/artifact/<sha256>`, `target.mirror`, fetched once and checked against the signed sha256; used by the binary target, not yet by the desktop or the phone); the binary target (`fleet_updater::binary` + `systemd`: versioned dirs, a `current` symlink, the unit restarted onto it, gates, rollback with the database) behind `fleet-agent update` (`install --auto-update`) and `fleet-hub update apply` (`fleet-hub-update.timer`). The agent updates from a timer, not from a pushed `Desired` frame | `fleet-core` `service::update::{rollout,mirror}`, `fleet-updater` lib, `fleet-agent`, `fleet-hub` | `service::update::tests`, `report_route` (mirror route), `fleet-updater` `binary::tests` (good, never ready, restart in soak, tampered, mirror then GitHub, notify, hub restore) |
 
 **Tests the whole design leans on:**
 
@@ -973,23 +981,33 @@ Per the repository's rule, a decision-gated slice starts only on the owner's
    signed amendment (§4, recommended: the phone stays built in its own
    repo), or `release.yml` waits for the APK and writes one manifest. The
    latter couples the two runs.
+   **Answered (2026-10-09): the signed amendment**, as recommended.
 3. **Nightly desktop bundles.** A macOS + Windows + Linux build per `main`
    push costs about 25 runner-minutes on macOS each.
    *Recommendation:* hub image + tarballs per push, desktop bundles once a
    day from the newest green `main` under the same `-dev.N` scheme.
+   **Answered (2026-10-09): as recommended.** Built in S2b: per push
+   `-dev.N.g<sha>` (at most every two hours), daily
+   `-dev.N.desktop.g<sha>`.
 4. **Docker socket for the updater.** Mounting `/var/run/docker.sock` is
    root-equivalent on the NAS. The alternative is a host-side
    `fleet-updater` run from a systemd timer, with the same code and no
    container. *Recommendation:* ship both. The compose profile is the
    default, and the docs name the trade-off.
+   **Answered (2026-10-09): both**, as recommended. Built in S6: the
+   `auto-update` profile and `deploy/hub/fleet-updater.{service,timer}`.
 5. **Hub data in a rollback.** Is losing the candidate's writes during the
    validation window (at most `ready_timeout + soak`, about 3.5 min)
    acceptable? The alternative is to put the hub into a read-only
    "validating" mode during the soak (refuse writes with
    `E_HUB_UNAVAILABLE`). That is safer, but a longer outage.
    *Recommendation:* accept the loss, keep the window short, and report it.
+   **Answered (2026-10-09): accept the loss**, as recommended; the
+   `recovered` report carries `data_restored` and says what was lost.
 6. **Default modes.** `notify` everywhere (proposed), or `automatic` for the
    hub once `auto-update` is enabled.
+   **Answered (2026-10-09): `notify` everywhere.** Under `notify`,
+   `fleet-updater` installs only a pin, a required update or a rollback.
 7. **The contract window.** Today the desktop accepts exactly one hub
    contract, so every bump strands paired desktops until they update. U4
    makes that recoverable, because the update itself still flows. Should

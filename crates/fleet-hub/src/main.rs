@@ -212,7 +212,9 @@ enum Cmd {
     },
     /// This hub's own updates. `check` reads the published release channel
     /// and says what this build should run, verified against the release
-    /// key; it needs no running hub and installs nothing. See docs/updates.md.
+    /// key; it needs no running hub and installs nothing. `apply` installs
+    /// it on a hub run from fleet-hub.service (no Docker). See
+    /// docs/updates.md.
     Update {
         #[command(subcommand)]
         cmd: update::UpdateCmd,

@@ -41,9 +41,10 @@ impl FleetTools {
         ok_json_compact(&st)
     }
 
-    #[tool(description = "Update admin, master only: pin a version for a \
-        component or target (below installed = rollback), unpin, or \
-        refresh the signed channel. E_INVALID, E_UPDATE_UNVERIFIED.")]
+    #[tool(description = "Update admin, master only: pin a version (below \
+        installed = rollback), unpin, refresh the channel, rollout_* in \
+        waves, or one org's policy (set_policy / clear_policy). E_INVALID, \
+        E_CONFLICT, E_UPDATE_UNVERIFIED.")]
     pub(super) async fn update_admin(
         &self,
         Parameters(p): Parameters<UpdateAdminParams>,
@@ -99,9 +100,70 @@ impl FleetTools {
                     .map_err(to_mcp_err)?;
                 ok_json_compact(&o)
             }
+            "set_policy" | "clear_policy" => {
+                let org_id = p.org_id.ok_or_else(|| {
+                    mcp_err(
+                        codes::E_INVALID,
+                        format!("{} needs an org_id", p.action),
+                        None,
+                    )
+                })?;
+                if p.action == "clear_policy" {
+                    let removed = update::clear_org_policy(&self.store, org_id, component()?)
+                        .map_err(to_mcp_err)?;
+                    return ok_json_compact(&serde_json::json!({ "removed": removed }));
+                }
+                let row = update::set_org_policy(
+                    &self.store,
+                    org_id,
+                    component()?,
+                    update::OrgPolicyInput {
+                        mode: p.mode.clone(),
+                        minimum: p.minimum.clone(),
+                        window: p.window.clone(),
+                        pin_version: p.version.clone(),
+                        pin_mandatory: p.mandatory.unwrap_or(false),
+                        reason: p.reason.clone(),
+                    },
+                    now,
+                )
+                .map_err(to_mcp_err)?;
+                tracing::info!(org_id, component = %row.component, "[mcp] set an org's update policy");
+                ok_json_compact(&row)
+            }
+            "rollout_start" => {
+                let version = p.version.as_deref().ok_or_else(|| {
+                    mcp_err(codes::E_INVALID, "rollout_start needs a version", None)
+                })?;
+                let row = update::rollout_start(
+                    &self.store,
+                    component()?,
+                    version,
+                    p.waves.clone(),
+                    p.halt_failure_ratio,
+                    &update::trusted_keys(),
+                    now,
+                )
+                .map_err(to_mcp_err)?;
+                tracing::info!(component = %row.component, version = %row.version, waves = ?row.waves, "[mcp] started an update rollout");
+                ok_json_compact(&row)
+            }
+            "rollout_pause" => ok_json_compact(
+                &update::rollout_pause(&self.store, component()?, p.reason.as_deref(), now)
+                    .map_err(to_mcp_err)?,
+            ),
+            "rollout_resume" => ok_json_compact(
+                &update::rollout_resume(&self.store, component()?, now).map_err(to_mcp_err)?,
+            ),
+            "rollout_abort" => ok_json_compact(
+                &update::rollout_abort(&self.store, component()?, now).map_err(to_mcp_err)?,
+            ),
             other => Err(mcp_err(
                 codes::E_INVALID,
-                format!("action must be pin | unpin | refresh, got {other:?}"),
+                format!(
+                    "action must be pin | unpin | refresh | rollout_start | rollout_pause | \
+                     rollout_resume | rollout_abort | set_policy | clear_policy, got {other:?}"
+                ),
                 None,
             )),
         }

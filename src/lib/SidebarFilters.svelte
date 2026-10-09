@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { accounts, accountLabel as accountName } from './accounts';
+  import type { Snippet } from 'svelte';
   // The sidebar's chrome, in four layers so a filter never looks like a
   // setting and a setting never looks like an action:
   //
@@ -25,7 +25,7 @@
   import { diskMeter } from './hosts_view';
   import { hosts, hostFilter, effectiveHostFilter } from './hosts';
   import { hintAnchor } from './hints';
-  import { accountByUuid } from './accounts';
+  import { accountByUuid, accounts, accountLabel as accountName } from './accounts';
   import { attentionIdleMinutes } from './notify';
   import Attention from './Attention.svelte';
   import ScopeAttention from './ScopeAttention.svelte';
@@ -75,6 +75,7 @@
     loadError,
     onRefresh,
     onCollapse,
+    headActions,
     needsYouCount,
     selectMode,
     toggleSelectMode,
@@ -101,6 +102,8 @@
     loadError: string | null;
     onRefresh: () => void;
     onCollapse?: () => void;
+    /** The list's own actions beside its title (UX audit L4: + New ⌘N). */
+    headActions?: Snippet;
     needsYouCount: number;
     selectMode: boolean;
     toggleSelectMode: () => void;
@@ -482,6 +485,7 @@
       <h2 class="list-title" data-testid="list-title" title={`All sessions (${workViewChord} for Work)`}>All sessions</h2>
     {/if}
     <span class="spacer"></span>
+    {@render headActions?.()}
     <button
       class="btn btn--quiet btn--icon"
       onclick={refresh}
@@ -671,6 +675,7 @@
     line-height: 22px;
     font-weight: 600;
     color: var(--fg);
+    white-space: nowrap;
   }
   .tab-badge {
     margin-left: var(--space-1);

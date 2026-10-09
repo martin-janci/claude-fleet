@@ -797,9 +797,9 @@ Parameters: `id`
 
 ### `update_admin`
 
-Update admin, master only: pin a version for a component or target (below installed = rollback), unpin, or refresh the signed channel. E_INVALID, E_UPDATE_UNVERIFIED.
+Update admin, master only: pin a version (below installed = rollback), unpin, refresh the channel, rollout_* in waves, or one org's policy (set_policy / clear_policy). E_INVALID, E_CONFLICT, E_UPDATE_UNVERIFIED.
 
-Parameters: `action`, `component`, `mandatory`, `reason`, `target`, `version`
+Parameters: `action`, `component`, `halt_failure_ratio`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `target`, `version`, `waves`, `window`
 
 ### `update_status`
 
@@ -1069,6 +1069,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::federation::link_peer_hub`
 - `commands::federation::unlink_peer_hub`
 - `commands::updates::list_update_targets`
+- `commands::updates::update_check`
+- `commands::updates::update_install`
 - `commands::debug_devices::list_debug_devices`
 - `commands::debug_devices::scan_debug_devices`
 - `commands::debug_devices::update_debug_device`

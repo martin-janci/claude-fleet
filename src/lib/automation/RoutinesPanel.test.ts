@@ -67,7 +67,9 @@ describe('Routines (8.6)', () => {
   it('lists the routines and shows one with its runs, a failed one carrying Fix, Retry and Pause', async () => {
     render(RoutinesPanel);
     expect((await screen.findByTestId('routine-title')).textContent).toBe('Morning PR sweep');
-    expect(screen.getByTestId('routine-row').textContent).toContain('Weekdays 07:30');
+    const row = screen.getByTestId('routine-row');
+    expect(row.textContent).toContain('07:30');
+    expect(row.textContent).toContain('Weekdays');
     const runs = screen.getAllByTestId('routine-run');
     expect(runs.map((r) => r.dataset.state)).toEqual(['done', 'failed']);
     expect(runs[1].textContent).toContain('Failed: gh token expired on mac');
@@ -130,6 +132,69 @@ describe('Routines (8.6)', () => {
     expect(screen.queryByTestId('routine-run-pause')).toBeNull();
     await fireEvent.click(screen.getByTestId('routine-tab-limits'));
     expect(screen.getByTestId('routine-limits').textContent).toContain('$2.00');
+  });
+});
+
+describe('the Automation board (list, detail, inspector)', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const loops = [
+    { name: 'catalog_scan', label: 'Catalog refresh', pausable: true, last_run_at: now - 60, next_run_at: now + 3600, result: 'ok', runs: 9, failures: 0 },
+    { name: 'reconcile', label: 'Reconcile', pausable: false, last_run_at: now - 120, result: 'error', last_error: 'ssh: refused', runs: 4, failures: 1 },
+  ];
+
+  it('lists yours, then the built-in routines, and opens a built-in one', async () => {
+    render(RoutinesPanel, { props: { loops, nowSec: now } });
+    await screen.findByTestId('routine-title');
+    expect(screen.getByTestId('routine-section-yours').textContent).toContain('Yours');
+    expect(screen.getByTestId('routine-section-built-in').textContent).toContain('Built in');
+    const builtIn = screen.getAllByTestId('automation-loop');
+    expect(builtIn.map((r) => r.dataset.loop)).toEqual(['catalog_scan', 'reconcile']);
+    await fireEvent.click(builtIn[1]);
+    const d = await screen.findByTestId('automation-loop-detail');
+    expect(d.textContent).toContain('Reconcile');
+    expect(d.textContent).toContain('keeps running on Pause all');
+    expect(screen.getByTestId('automation-loop-error').textContent).toBe('ssh: refused');
+  });
+
+  it('Filters narrow the list, and Group by state puts the failed first', async () => {
+    render(RoutinesPanel, { props: { loops, nowSec: now } });
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-filters'));
+    await fireEvent.click(screen.getByTestId('routine-filter-failed'));
+    expect(screen.queryAllByTestId('routine-row')).toHaveLength(0);
+    expect(screen.getAllByTestId('automation-loop').map((r) => r.dataset.loop)).toEqual(['reconcile']);
+    await fireEvent.click(screen.getByTestId('routine-filter-failed'));
+    await fireEvent.click(screen.getByTestId('routine-group'));
+    expect(screen.getByTestId('routine-group').textContent).toContain('state');
+    expect(document.querySelector('[data-testid^="routine-section-"]')?.textContent).toContain('Failed');
+  });
+
+  it('the inspector says the limits, with the day spent against its budget, and Duplicate saves a copy', async () => {
+    route([{ ...sweep, budget_day_micros: 5_000_000 }], [{ ...ok, started_at: now - 60, finished_at: now }]);
+    render(RoutinesPanel, { props: { nowSec: now } });
+    const ins = await screen.findByTestId('routine-inspector');
+    expect(ins.textContent).toContain('$2.00');
+    expect(ins.textContent).toContain('$0.38 of $5.00');
+    expect(ins.textContent).toContain('Skip if the last run is still going');
+    await fireEvent.click(screen.getByTestId('routine-duplicate'));
+    expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Morning PR sweep copy');
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    await waitFor(() => expect(argsOf('save')).toBeDefined());
+    expect(argsOf('save').routine_id).toBeUndefined();
+    expect(argsOf('save').routine.name).toBe('Morning PR sweep copy');
+  });
+
+  it('a run reads its state in words: needs you and nothing to do', async () => {
+    route([sweep], [
+      { ...ok, id: 5, outcome: 'needs_person' },
+      { ...ok, id: 6, outcome: 'nothing' },
+    ]);
+    render(RoutinesPanel, { props: { nowSec: now } });
+    const runs = await screen.findAllByTestId('routine-run');
+    expect(runs[0].textContent).toContain('Needs you');
+    expect(runs[0].textContent).toContain('waits for you in the Inbox');
+    expect(runs[1].textContent).toContain('Nothing to do');
+    expect(screen.getByTestId('routine-stats').textContent).toContain('2 OK');
   });
 });
 

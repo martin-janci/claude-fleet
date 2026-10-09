@@ -315,9 +315,10 @@ jobs:
         if: runner.os == 'Linux'
 
   # Windows is a desktop CLIENT for a Linux/macOS fleet (docs/windows.md):
-  # the desktop crates must build, lint and test there. fleet-agent and
-  # fleet-hub are Unix-only by design (a systemd service on a fleet host, a
-  # Linux daemon), so they are left out; fmt and cargo-deny read nothing
+  # the desktop crates must build, lint and test there. fleet-agent,
+  # fleet-hub and fleet-updater are Unix-only by design (a systemd service on
+  # a fleet host, a Linux daemon, and the update sidecar both of them use),
+  # so they are left out; fmt and cargo-deny read nothing
   # platform-specific and stay on the Linux leg of `rust` above.
   rust-windows:
     needs: changes
@@ -337,7 +338,7 @@ jobs:
       # Clippy runs in the `clippy` job below, in parallel with these tests.
       # --no-fail-fast: every crate's failures in one run, not only the first
       # failing test binary's.
-      - run: cargo test --workspace --exclude fleet-agent --exclude fleet-hub --no-fail-fast
+      - run: cargo test --workspace --exclude fleet-agent --exclude fleet-hub --exclude fleet-updater --no-fail-fast
 
   # CLIPPY ON macOS AND WINDOWS, BESIDE THEIR TESTS RATHER THAN BEFORE THEM.
   # In one job, clippy's check build ran first and added ~1:45 to the two
@@ -448,7 +449,7 @@ jobs:
       - run: cargo build -p fleet-hub --locked
       - run: cargo test -p fleet-core -p fleet-hub --locked
       - run: cargo build -p fleet-agent --locked
-      - run: cargo test -p fleet-proto -p fleet-agent -p fleet-update --locked
+      - run: cargo test -p fleet-proto -p fleet-agent -p fleet-update -p fleet-updater --locked
       # The update-publishing scripts (slice S2) end to end: a throwaway
       # minisign key, a fake `gh` and a local bare remote, the real fleet-hub
       # (for `fleet-hub compat`) in a release tarball, and every document
@@ -519,6 +520,13 @@ jobs:
           path: hub-e2e-logs.tar.gz
           if-no-files-found: ignore
           retention-days: 7
+      # fleet-updater against the runner's Docker daemon (slice S6): a local
+      # registry, a good image, one that crashes on start and one that
+      # migrates and never gets ready, each ending in the right state, the
+      # last with the pre-update backup restored. minisign is installed above.
+      - name: Run the updater end-to-end script
+        timeout-minutes: 10
+        run: bash scripts/updater-e2e.sh
 
   # THE HUB IMAGE, BUILT BEFORE A TAG NEEDS IT. hub-image.yml builds
   # crates/fleet-hub/Dockerfile only for a pushed v* tag, so a Dockerfile the
@@ -557,6 +565,24 @@ jobs:
           out="$(docker run --rm fleet-hub:ci --version)"
           echo "$out"
           case "$out" in "fleet-hub "*) ;; *) echo "unexpected --version output"; exit 1 ;; esac
+      # The updater's image, for the same reason: hub-image.yml builds it only
+      # for a tag.
+      - name: Build crates/fleet-updater/Dockerfile
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/fleet-updater/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: fleet-updater:ci
+          cache-from: type=gha,scope=updater-linux/amd64
+      - name: Run the updater image
+        run: |
+          set -euo pipefail
+          out="$(docker run --rm fleet-updater:ci --version)"
+          echo "$out"
+          case "$out" in "fleet-updater "*) ;; *) echo "unexpected --version output"; exit 1 ;; esac
 
   frontend:
     needs: changes

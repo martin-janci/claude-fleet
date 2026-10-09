@@ -137,6 +137,9 @@ jobs:
     outputs:
       desktop: ${{ steps.matrices.outputs.desktop }}
       bins: ${{ steps.matrices.outputs.bins }}
+      # `false` for a per-push nightly (`-dev.N.g<sha>`, nightly.yml): no
+      # desktop legs, and release-assets.sh expects none.
+      has_desktop: ${{ steps.matrices.outputs.has_desktop }}
     steps:
       - uses: actions/checkout@v4
       - name: Derive the build matrices from the release asset manifest
@@ -148,6 +151,7 @@ jobs:
           {
             echo "desktop=$(scripts/release-assets.sh matrix desktop)"
             echo "bins=$(scripts/release-assets.sh matrix bins)"
+            echo "has_desktop=$(scripts/release-assets.sh has-desktop "${REF_NAME#v}")"
           } >>"$GITHUB_OUTPUT"
           echo "Assets this release must end up with:"
           scripts/release-assets.sh assets "${REF_NAME#v}"
@@ -250,7 +254,7 @@ jobs:
             return data.id;
 
   build:
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' && needs.plan.outputs.has_desktop == 'true'
     # version-consistency named explicitly, not just inherited through
     # create-release: this leg's bundle filenames come from tauri.conf.json, so
     # the tag-vs-carrier assertion is a direct precondition of it.
@@ -755,6 +759,8 @@ jobs:
       # nothing, the state is exactly what it is today: run docs.yml by hand
       # from the Actions tab.
       - name: Ask docs.yml to build rustdoc for this tag (best effort)
+        # Not for a nightly: one rustdoc build per main push is noise.
+        if: ${{ !contains(github.ref_name, '-dev.') }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
