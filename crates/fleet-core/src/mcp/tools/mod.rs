@@ -53,6 +53,7 @@ mod present;
 mod prs;
 mod repo;
 mod routines;
+mod runs;
 mod session_ops;
 mod sharing;
 mod support;
@@ -66,6 +67,8 @@ mod tests_changesets;
 mod tests_isolation;
 #[cfg(test)]
 mod tests_read_pool;
+#[cfg(test)]
+mod tests_runs;
 #[cfg(test)]
 mod tests_sessions_isolation;
 mod updates;
@@ -374,6 +377,7 @@ impl FleetTools {
             + Self::prs_router()
             + Self::routines_router()
             + Self::presence_router()
+            + Self::runs_router()
     }
 }
 
