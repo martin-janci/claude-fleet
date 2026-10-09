@@ -160,16 +160,16 @@
   }
   h3 {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
   .chips { display: flex; gap: 0.25rem; flex-wrap: wrap; }
   .chip {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.1rem 0.45rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg-muted);
@@ -183,7 +183,7 @@
     padding: 0;
     max-height: 18rem;
     overflow-y: auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .ev {
     display: grid;
@@ -194,7 +194,7 @@
     border-bottom: 1px solid var(--border);
   }
   time {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     color: var(--fg-muted);
     white-space: nowrap;
   }
@@ -207,6 +207,6 @@
     white-space: nowrap;
     color: var(--fg-muted);
   }
-  .muted { color: var(--fg-muted); font-style: italic; font-size: 11px; margin: 0; }
-  .err { color: var(--danger); font-size: 11px; margin: 0; }
+  .muted { color: var(--fg-muted); font-style: italic; font-size: var(--text-2xs); margin: 0; }
+  .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
 </style>

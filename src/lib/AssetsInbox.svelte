@@ -158,13 +158,13 @@
 </div>
 
 <style>
-  .inbox { display: flex; flex-direction: column; font-size: 13px; }
+  .inbox { display: flex; flex-direction: column; font-size: var(--text-sm); }
   .grp {
     display: flex; align-items: center; gap: 8px; margin: 0; padding: 12px 14px 6px;
-    font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-muted);
+    font-size: var(--text-2xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-muted);
   }
   .grp .n { font-variant-numeric: tabular-nums; letter-spacing: 0; }
-  .fold { border: 0; background: none; cursor: pointer; text-align: left; font: inherit; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-muted); }
+  .fold { border: 0; background: none; cursor: pointer; text-align: left; font: inherit; font-size: var(--text-2xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-muted); }
   .fold:focus-visible, .row:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: calc(-1 * var(--ring-w)); }
   .tri { display: inline-block; width: 8px; }
   .row {
@@ -174,5 +174,5 @@
   }
   .row:hover { background: var(--bg-pane); }
   .row.selected { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
-  .quiet, .note { margin: 0; padding: 10px 14px; color: var(--fg-muted); font-size: 12px; }
+  .quiet, .note { margin: 0; padding: 10px 14px; color: var(--fg-muted); font-size: var(--text-xs); }
 </style>

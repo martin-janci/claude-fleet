@@ -63,7 +63,7 @@ describe('WorkChip', () => {
     });
     const chip = screen.getByTestId('work-chip');
     expect(chip.className).toContain('unbound');
-    expect(chip.title).toContain('connect its tracker in Settings → Work to see ZED-9');
+    expect(chip.title).toContain('connect its tracker in Settings → Trackers to see ZED-9');
   });
 
   it('a plain key without a tracker item is just a key', () => {
@@ -98,7 +98,7 @@ describe('WorkChip', () => {
     // whose status the dot is, and what connecting a tracker would ADD —
     // never "connect a tracker to see its status" beside a status dot.
     expect(chip.title).toContain(
-      "the dot is fleet's own status; connect its tracker in Settings → Work to see ZED-9's too",
+      "the dot is fleet's own status; connect its tracker in Settings → Trackers to see ZED-9's too",
     );
     expect(chip.title).not.toContain("to see ZED-9's status");
   });

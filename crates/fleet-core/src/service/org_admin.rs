@@ -625,6 +625,23 @@ fn require_org_device(s: &Store, row: &ClientTokenRow, me: Me<'_>) -> Result<(),
     Ok(())
 }
 
+/// Whether `person` already has an identity on this hub beyond `org`: a
+/// device (live or revoked, so sessions it owned stay theirs) or a live
+/// membership of another org. An org admin may invite a new person and pair
+/// that person's first device; taking over someone who already exists would
+/// let them mint a token that IS that person (review r04 F1, F2).
+pub fn has_identity_beyond(s: &Store, person: i64, org: i64) -> Result<bool, IpcError> {
+    let devices = s
+        .list_client_tokens(true)?
+        .iter()
+        .any(|c| c.person_id == Some(person));
+    let elsewhere = s
+        .memberships_of(person)?
+        .iter()
+        .any(|m| m.is_live() && m.org_id != org);
+    Ok(devices || elsewhere)
+}
+
 /// A person named in `args` (`person_id`, else `person` by name). `create`:
 /// a new name becomes a person (an admin inviting a colleague).
 fn person_of(s: &Store, args: &OrgAdminArgs, create: bool) -> Result<i64, IpcError> {
@@ -935,6 +952,16 @@ pub fn run(
             let role = need(&args.role, name, "role")?;
             let person = person_of(&s, args, true)?;
             require_other_member(&s, person, me)?;
+            // Changing a member's role is the admin's; pulling in a person
+            // who already has devices or another company is the hub owner's.
+            if matches!(me.authority, Authority::Org { .. })
+                && !s.org_member(org, person)?.is_some_and(|m| m.is_live())
+                && has_identity_beyond(&s, person, org)?
+            {
+                return Err(forbidden(
+                    "which company a person who already has a device belongs to",
+                ));
+            }
             s.set_org_member(org, person, role, me.person)?;
             tracing::info!(org, person, role = %role, "[org_admin] set a member");
             to_json(&list_members(&s, org)?)

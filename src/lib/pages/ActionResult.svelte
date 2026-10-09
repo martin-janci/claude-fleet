@@ -60,7 +60,7 @@
   }
   h5 {
     margin: 0;
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
   }
   .row {
     display: flex;
@@ -68,7 +68,7 @@
   }
   .meta {
     margin: 0;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     line-height: 1.4;
   }
@@ -76,7 +76,7 @@
     margin: 0;
     max-height: 22rem;
     overflow: auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 1.35;
     white-space: pre-wrap;
     word-break: break-all;

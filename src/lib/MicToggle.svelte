@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   import type { SessionRow } from './sessions';
   import { voiceState, claimVoice, releaseVoice, voiceSupported } from './voice';
   import { uiLayout } from './prefs';
@@ -22,7 +23,7 @@
 </script>
 
 <button class="mic" class:on data-testid="mic-toggle" disabled={!voiceSupported(transport)} {title} onclick={toggle}>
-  🎤{#if mine && $voiceState.state === 'capturing'}<span class="live" data-testid="mic-live"></span>{/if}
+  <Icon name="mic" size={14} />{#if mine && $voiceState.state === 'capturing'}<span class="live" data-testid="mic-live"></span>{/if}
 </button>
 {#if $uiLayout === 'new' && mine && $voiceState.state === 'capturing'}
   <!-- Redesign 5.14 (LoadersInFlows, Chat · Voice input): the Sonar
@@ -41,11 +42,11 @@
 {/if}
 
 <style>
-  .mic { background: none; border: 1px solid transparent; border-radius: 4px; cursor: pointer; opacity: 0.5; position: relative; }
+  .mic { background: none; border: 1px solid transparent; border-radius: var(--radius-sm); cursor: pointer; opacity: 0.5; position: relative; }
   .mic.on { opacity: 1; border-color: var(--accent); }
   .mic:disabled { cursor: not-allowed; opacity: 0.25; }
   .live { position: absolute; top: 1px; right: 1px; width: 6px; height: 6px; border-radius: 50%; background: var(--status-failed); }
-  .tip { font-size: 11px; opacity: 0.8; margin-left: 4px; }
-  .voice-loader { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; font-size: 11px; color: var(--fg-muted); }
+  .tip { font-size: var(--text-2xs); opacity: 0.8; margin-left: 4px; }
+  .voice-loader { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; font-size: var(--text-2xs); color: var(--fg-muted); }
   .sonar { display: inline-flex; transform: scale(calc(0.75 + var(--level, 0) * 0.5)); transition: transform var(--dur-fast) linear; }
 </style>

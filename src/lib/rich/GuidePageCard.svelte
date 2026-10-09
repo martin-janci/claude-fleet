@@ -74,18 +74,18 @@
     margin: 0.4em 0 0.7em;
     padding: 0.65rem 0.8rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
   }
   .open {
     position: absolute;
     top: 0.65rem;
     right: 0.8rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .done, .muted {
     margin: 0;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .muted { color: var(--fg-muted); }
   .link {

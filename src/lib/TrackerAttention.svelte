@@ -1,7 +1,8 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   // Work graph M12.4 / decision D22: a failing tracker (an expired token, a
   // refused credential) raises ONE Attention item per tracker in the
-  // attention strip — "Reconnect Jira (acme)" — which opens Settings → Work.
+  // attention strip — "Reconnect Jira (acme)" — which opens Settings → Trackers.
   // One failing because it keeps skipping items it cannot store (M13.1)
   // reads "Sync skipping items — Jira (acme)" instead.
   // A degraded tracker (rate limited, briefly unreachable) does not: the
@@ -43,7 +44,7 @@
   <div class="trackers" data-testid="tracker-attention">
     {#each budgets as b (b.key)}
       <button class="pill hot" data-testid="org-budget-item" title={b.detail} onclick={() => openSettingsAt(b.page)}>
-        ⚠ {b.label} →
+        <Icon name="warning" size={12} /> {b.label} →
       </button>
     {/each}
     {#if jev}
@@ -53,7 +54,7 @@
         title={jev.detail}
         onclick={() => openSettingsAt(jev.section)}
       >
-        ⚠ {jev.label} →
+        <Icon name="warning" size={12} /> {jev.label} →
       </button>
     {/if}
     {#each items as it (it.key)}
@@ -64,7 +65,7 @@
         title={it.detail}
         onclick={() => openSettingsAt(it.section)}
       >
-        ⚠ {it.label} →
+        <Icon name="warning" size={12} /> {it.label} →
       </button>
     {/each}
   </div>
@@ -77,9 +78,9 @@
     gap: 0.3rem;
   }
   .pill {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.1rem 0.45rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);

@@ -163,7 +163,7 @@
   }
   h5 {
     margin: 0 0 0.35rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -195,7 +195,7 @@
   }
   .name {
     font-weight: 600;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     background: none;
     border: none;
     padding: 0;
@@ -209,11 +209,11 @@
   }
   .key,
   .meta {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .tag {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0 0.35rem;
     border-radius: var(--radius-sm);
     background: var(--bg);
@@ -225,7 +225,7 @@
   .note,
   .empty {
     margin: 0.2rem 0 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .empty,
   .note {
@@ -237,7 +237,7 @@
     padding: 0.2rem 0;
     color: var(--accent);
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     cursor: pointer;
   }
   .link:focus-visible,
@@ -247,7 +247,7 @@
   .preview {
     margin: 0.2rem 0 0.2rem 1.1rem;
     padding: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 1.45;
   }
   .preview ul {

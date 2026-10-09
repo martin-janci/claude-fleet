@@ -1053,13 +1053,32 @@ impl FleetTools {
                         )
                     })?;
                 let s = lock(&self.store).map_err(to_mcp_err)?;
-                let member = match s.get_person_by_name(person).map_err(to_mcp_err)? {
+                let found = s.get_person_by_name(person).map_err(to_mcp_err)?;
+                let member = match &found {
                     Some(p) => {
                         s.personal_owner_id().map_err(to_mcp_err)? != Some(p.id)
                             && s.org_role(org, p.id).map_err(to_mcp_err)?.is_some()
                     }
                     None => false,
                 };
+                // An org admin pairs a member's first device. A second
+                // device of someone who already has one would be a token
+                // that is that person, their private sessions included;
+                // that is the hub owner's (review r04 F1).
+                if let Some(p) = found.filter(|_| member) {
+                    if crate::service::org_admin::has_identity_beyond(&s, p.id, org)
+                        .map_err(to_mcp_err)?
+                    {
+                        return Err(mcp_err(
+                            "E_FORBIDDEN",
+                            format!(
+                                "{person:?} already has a device or belongs to another org; \
+                                 the hub owner pairs their next device"
+                            ),
+                            None,
+                        ));
+                    }
+                }
                 if !member {
                     return Err(mcp_err(
                         "E_FORBIDDEN",

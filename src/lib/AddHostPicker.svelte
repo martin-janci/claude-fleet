@@ -147,8 +147,8 @@
     flex-direction: column;
     gap: 0.6rem;
   }
-  .dialog h3 { margin: 0; font-size: 1rem; }
-  .muted { color: var(--fg-muted); font-size: 0.85rem; }
+  .dialog h3 { margin: 0; font-size: var(--text-md); }
+  .muted { color: var(--fg-muted); font-size: var(--text-xs); }
 
   .hosts-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.25rem; }
   .host-row {
@@ -156,7 +156,7 @@
     text-align: left;
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     padding: 0.45rem 0.6rem;
     color: var(--fg);
     cursor: pointer;
@@ -166,18 +166,18 @@
   }
   .host-row:hover:not(:disabled) { border-color: var(--accent); background: var(--bg-pane); }
   .host-row:disabled { opacity: 0.6; cursor: progress; }
-  .alias { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; }
-  .desc { color: var(--fg-muted); font-size: 0.8rem; flex: 1; }
+  .alias { font-family: var(--font-mono); font-weight: 600; }
+  .desc { color: var(--fg-muted); font-size: var(--text-2xs); flex: 1; }
 
-  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
   .actions button {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.8rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .preview {
@@ -188,11 +188,11 @@
   }
   .preview dt {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  .preview dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+  .preview dd { margin: 0; font-family: var(--font-mono); font-size: var(--text-sm); }
   .actions button.primary {
     border-color: var(--accent);
     color: var(--fg);

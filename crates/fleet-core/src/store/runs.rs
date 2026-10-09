@@ -35,10 +35,24 @@ use serde::{Deserialize, Serialize};
 /// - `mission`: a mission's run: a task that is an attempt at one of its
 ///   items, or an action / brake of its loop;
 /// - `jev`: a decision Jev was asked for;
-/// - `planner`, `summary`: fleet's own `claude -p` runs, by origin;
+/// - `planner`, `summary`, `commit_message`, `release_note`,
+///   `morning_brief`, `brief`, `watch_summary`, `triage`: fleet's own
+///   `claude -p` runs, by origin ([`super::AUX_ORIGINS`]);
 /// - `routine`: a routine's fire (a schedule, an event or Run now).
 pub const RUN_KINDS: &[&str] = &[
-    "operator", "task", "mission", "jev", "planner", "summary", "routine",
+    "operator",
+    "task",
+    "mission",
+    "jev",
+    "planner",
+    "summary",
+    "commit_message",
+    "release_note",
+    "morning_brief",
+    "brief",
+    "watch_summary",
+    "triage",
+    "routine",
 ];
 
 /// Every [`RunRow::outcome`], in plain words.
@@ -392,7 +406,7 @@ fn branch_can_match(src: &str, f: &RunsFilter) -> bool {
         ),
         "orchestration" => (&["mission"], &["ok", "failed", "needs_person"]),
         "jev" => (&["jev"], &["ok", "failed", "needs_person", "nothing_to_do"]),
-        "aux" => (&["planner", "summary"], &["ok"]),
+        "aux" => (super::AUX_ORIGINS, &["ok"]),
         _ => (&["routine"], &["ok", "failed", "nothing_to_do", "running"]),
     };
     f.kind.as_deref().is_none_or(|k| kinds.contains(&k))

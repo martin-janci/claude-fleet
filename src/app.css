@@ -68,6 +68,8 @@
   --comet-head: var(--accent);
   --agent-claude: #d97757;
   --shadow-pop: 0 6px 18px rgba(24,24,27,0.12);
+  --scrim: rgba(24,24,27,0.4);
+  --scrim-strong: rgba(24,24,27,0.62);
 
   /* App tokens the manual does not name. The usage severities are the
      status colours, so the context meter and the status chips share one
@@ -240,6 +242,8 @@
     --comet-head: var(--brand-light);
     --agent-claude: #d97757;
     --shadow-pop: 0 6px 18px rgba(0,0,0,0.35);
+    --scrim: rgba(0,0,0,0.4);
+    --scrim-strong: rgba(0,0,0,0.62);
 
     /* App tokens the manual does not name. The usage severities are the
        status colours, so the context meter and the status chips share one
@@ -319,6 +323,8 @@
   --comet-head: var(--accent);
   --agent-claude: #d97757;
   --shadow-pop: 0 6px 18px rgba(24,24,27,0.12);
+  --scrim: rgba(24,24,27,0.4);
+  --scrim-strong: rgba(24,24,27,0.62);
 
   /* App tokens the manual does not name. The usage severities are the
      status colours, so the context meter and the status chips share one
@@ -397,6 +403,8 @@
   --comet-head: var(--brand-light);
   --agent-claude: #d97757;
   --shadow-pop: 0 6px 18px rgba(0,0,0,0.35);
+  --scrim: rgba(0,0,0,0.4);
+  --scrim-strong: rgba(0,0,0,0.62);
 
   /* App tokens the manual does not name. The usage severities are the
      status colours, so the context meter and the status chips share one

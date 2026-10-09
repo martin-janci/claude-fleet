@@ -26,7 +26,7 @@ registries don't know.
 1. Write `crates/fleet-core/pages/<id>.json`. The file is named after the
    page's `id`.
 2. List the file in `PAGE_FILES` in `crates/fleet-core/src/pages/mod.rs`.
-3. Run `cargo test -p fleet-core pages::`. Each problem is reported with the
+3. Run `cargo fleet-test -- pages::`. Each problem is reported with the
    page and where in it, for example
    `settings.work › tab 1 › section 2 › item 3: `work.nope` is not a registered setting`.
 4. Give it a leaf in `SETTINGS_TREE` (`src/lib/settings_tree.ts`) when it
@@ -45,7 +45,7 @@ The two generated files are what you write a spec against:
 
 Regenerate both, together with the frontend tests' fixture, after changing
 the model, the catalog, a setting or a source:
-`REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current`.
+`REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current`.
 
 ## Shape
 
@@ -450,7 +450,7 @@ desktop the guides are the hub's (`list_guides`, `decide_guide`,
    label, help, unit and the rest (see `every_spec_has_consistent_metadata`).
 2. Place the setting as a `field` on the right page.
 3. Regenerate the settings docs:
-   `REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current`.
+   `REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current`.
 4. Regenerate the page docs (see above).
 
 ## Add a data source
@@ -461,9 +461,9 @@ desktop the guides are the hub's (`list_guides`, `decide_guide`,
 2. Add its reader to `fetch`.
 
 `every_source_has_a_reader_that_returns_its_shape` holds the reader to the
-declared shape. A **live** source (`live: { command, event }`, today only
-`accounts.usage`) has no reader: the app loads it with `command` and keeps
-it current from the `event` row kind, so `fetch_page_source` refuses it and
+declared shape. A **live** source (`live: { command, event }`, today
+`accounts.usage` and `updates.targets`) has no reader: the app loads it
+with `command` and keeps it current from the `event` row kind, so `fetch_page_source` refuses it and
 `resource_commands_exist` holds `command` to the handler list. A source is read-only; changes are made through actions
 (design P4). Every source reads the whole fleet, so it is only for whatever
 owns the fleet. An org-scoped view is a new source, not a parameter.

@@ -43,7 +43,7 @@
     gap: 0.35rem;
     padding: 1rem 0.75rem;
     color: var(--fg-muted);
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .empty-state.first {
     align-items: flex-start;

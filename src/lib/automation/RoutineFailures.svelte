@@ -74,12 +74,12 @@
 
 <style>
   .failures { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px; }
-  .item { display: flex; gap: 8px; align-items: flex-start; padding: 6px 4px; border-radius: 6px; }
+  .item { display: flex; gap: 8px; align-items: flex-start; padding: 6px 4px; border-radius: var(--radius-md); }
   .item:hover { background: var(--bg-hover); }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--status-failed); margin-top: 5px; flex: none; }
   .text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .name { border: 0; background: none; padding: 0; color: var(--fg); font: inherit; font-weight: 500; text-align: left; cursor: pointer; }
-  .chip { font-size: 11px; color: var(--fg-muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; font-weight: 400; }
+  .chip { font-size: var(--text-2xs); color: var(--fg-muted); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0 6px; font-weight: 400; }
   .line { color: var(--fg-muted); font-size: var(--text-xs, 11.5px); overflow-wrap: anywhere; }
   .actions { display: flex; gap: 6px; margin-top: 4px; }
 </style>

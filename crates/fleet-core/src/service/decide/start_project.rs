@@ -67,6 +67,31 @@ pub struct Candidate {
     pub repo: String,
 }
 
+/// Review r15: the candidates the model may read about a subject of
+/// `org_id`: a project in that org, or one whose own org consented to
+/// `feature` (`decide.jev.unassigned` for a project in no org). A project
+/// whose org cannot be read stays home. The person is still offered all.
+pub fn fenced(
+    s: &crate::store::Store,
+    feature: super::Feature,
+    org_id: Option<i64>,
+    candidates: &[Candidate],
+) -> Vec<Candidate> {
+    candidates
+        .iter()
+        .filter(|c| {
+            let org = s.get_project(c.project_id).ok().flatten().and_then(|p| {
+                super::host_placement::project_org(s, &p.owner, &p.repo, &p.base_path).ok()
+            });
+            match org {
+                Some(org) => org == org_id || super::consents(s, feature, org),
+                None => false,
+            }
+        })
+        .cloned()
+        .collect()
+}
+
 /// What the adapter asks about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartInput {

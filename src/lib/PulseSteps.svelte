@@ -125,7 +125,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px 10px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .step--done {

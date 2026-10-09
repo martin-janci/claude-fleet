@@ -100,16 +100,16 @@
 <style>
   .summarize {
     flex: none;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 1px 6px;
   }
   .summary {
     flex-basis: 100%;
     margin-top: 4px;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     padding: 4px 6px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .summary .head {
     display: flex;

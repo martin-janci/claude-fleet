@@ -181,8 +181,10 @@ domain, and this is a liveness check to `127.0.0.1` carrying no credential).
 port nor the TLS mode is read from `state.db`: the probe runs beside a live
 `serve` and never opens the database.
 
-`/healthz` is the one route that needs no bearer token and no `Host`
-allowlist entry, because it reveals nothing: it never opens `state.db` and
+`/healthz` and `/pair` are the only routes outside the bearer token and the
+`Host` allowlist (`/pair` is guarded by its single-use code instead — see
+[control-api.md](control-api.md)). `/healthz` is there because it reveals
+nothing: it never opens `state.db` and
 never names a version, a host, a session or a setting — the fixed body only
 means "this process is accepting HTTP". Every other route stays behind the
 token. Probes therefore leave no rejected-request lines in the log.
@@ -346,10 +348,13 @@ the 30 s grace applies, and only then takes the backup (`backup.sh`, kept as
 of the stopped hub, so no write between the backup and the upgrade is lost
 by a rollback. It then moves `FLEET_HUB_TAG`, starts the hub, waits for the
 image's own healthcheck, and checks `fleet-hub --version`. With a readonly
-client token in `readonly.token` beside the compose file (`fleet-hub pair
---mode readonly upgrade-check`) it also asks `fleet_health` over the public
+client token in `readonly.token` beside the compose file it also asks `fleet_health` over the public
 URL — never the master token, and passed to `curl` on stdin, not its command
-line. On any failure after the stop it prints the rollback, naming the image
+line. To make that token, mint a code with `fleet-hub pair --mode readonly
+--name upgrade-check`, redeem it with `curl -s -X POST <public-url>/pair -H
+'Content-Type: application/json' -d '{"code":"<code>"}'` and save the
+answer's `token` field in `readonly.token` (`pair` prints a pairing code, never
+a token). On any failure after the stop it prints the rollback, naming the image
 that ran before: a tag can be re-pushed, so if `<old tag>` no longer points
 at it, the printed `docker tag <image id> <repo>:<old tag>` puts it back
 before the `up -d`. If the backup itself fails, the script starts the old
@@ -368,8 +373,8 @@ upgrade before the hub is touched (point `FLEET_HUB_DATA` at the right
 directory) — it never migrates without a backup. An upgrade never prunes an older
 version's `pre-<version>-*.db` (see *Backups*).
 
-**Order across the three binaries.** Today (contract 7 on both sides,
-proto 1 on both sides) the order is a habit: hub, then desktop, then the
+**Order across the three binaries.** Today (contract 13 on both sides,
+proto 1 on both sides; `fleet-hub compat` prints a build's windows) the order is a habit: hub, then desktop, then the
 agents. When a release bumps `CONTRACT_REVISION`, upgrade the **hub first,
 then the desktop in the same window** — there is no mixed window, the desktop
 refuses with `E_HUB_CONTRACT` until it is updated, hooks and the phone keep
@@ -379,7 +384,7 @@ older `fleet-agent` keeps connecting until it is reinstalled. A hub upgrade
 never needs the agents restarted.
 
 **Upgrading to multi-user M1 is three steps, not two.** That release takes
-`CONTRACT_REVISION` to 7, so the first two are the rule above — hub, then the
+`CONTRACT_REVISION` to 8, so the first two are the rule above — hub, then the
 desktop, in the same window. The third is **a full re-provisioning of every
 host**: `provision_hosts` from a client, or `fleet-hub provision --host <alias>`
 per host, and *not* `--content-only`, which by contract never rewrites
@@ -2319,8 +2324,10 @@ falling back to a rule of its own.
 
 The `ready` frame also carries `contract`, the wire-contract revision of the
 row shapes and tool results this hub sends (`fleet_core::wire_contract`,
-starting at `1`). It moves only when a client's assumptions about the wire
-would actually break — a field removed or renamed, never an addition — and a
+starting at `1`). It moves when a client's assumptions about the wire would
+break — a field removed or renamed, a new enum variant a client may decode as
+closed, or a new tool the desktop routes to; a purely additive field does not
+move it — and a
 hub built before this field existed sends nothing, which a client reads as
 revision `0`. See *Version skew* below for what a client does with it.
 
@@ -3077,7 +3084,7 @@ On Windows this is the recommended setup: Windows' `ssh` cannot multiplex,
 so a standalone Windows desktop pays a fresh SSH connection per command. See
 [windows.md](windows.md).
 
-Settings → **Hub**. On the hub, mint a code and paste it:
+Settings → **Hub & sync**. On the hub, mint a code and paste it:
 
 ```bash
 fleet-hub pair --name laptop     # prints a code; it dies on first use
@@ -3235,7 +3242,7 @@ standalone exactly as before.
 - **The setup checklist** is about the machine that owns the fleet, so it
   shows the reason instead of its panel.
 - **A revoked or rotated token** comes back `E_UNAUTHORIZED` on every call;
-  the error says to pair again in Settings → Hub.
+  the error says to pair again in Settings → Hub & sync.
 
 ### What a hub client refuses
 
@@ -3361,15 +3368,16 @@ the user's click need not probe again. Anything that got an answer out of the
 hub leaves calls alone, because `GET /events` and `POST /mcp` are separate
 sockets and a hub whose stream is unhappy can still serve every call.
 
-**Upgrade a desktop and its hub together from contract revision 3.**
-Revision 2 is the release where `move_session` answers a tagged result
-(`kind: moved | preview`) and honours `dry_run`. Revision 3 adds a `when`
-argument (`now` | `idle` | `cancel`): `idle` waits for the source to go idle
-before moving, `cancel` ends a pending wait instead of moving anything. Both
-ends require the current revision: a new desktop refuses an older hub
-(revision 0, 1 or 2, "update the hub"), and an older desktop refuses a newer
-hub ("update this app"). There is no mixed window in which the two work
-together.
+**Upgrade a desktop and its hub together.** Both ends require the current
+revision: a new desktop refuses an older hub (any revision below
+`MIN_HUB_CONTRACT`, today 13: "update the hub"), and an older desktop refuses
+a newer hub ("update this app"). There is no mixed window in which the two
+work together. Revisions 2 and 3 are why `move_session`'s preview and wait
+are guarded below: revision 2 is the release where `move_session` answers a
+tagged result (`kind: moved | preview`) and honours `dry_run`, and revision 3
+adds a `when` argument (`now` | `idle` | `cancel`): `idle` waits for the
+source to go idle before moving, `cancel` ends a pending wait instead of
+moving anything.
 
 Two things wait for more than the absence of a skew: a Transfer preview
 (`move_session` with `dry_run: true`) and a call whose `when` is not `now`. A
@@ -3421,15 +3429,6 @@ the missing parameters, route it then.
 - **Projects and worktrees are not re-listed on reconnect**, because their
   list tools answer a different shape from their events. They refresh when
   the window regains focus.
-- **A hub older than this app cannot list a remote host's existing
-  worktrees** for the New session dialog: `list_host_worktrees` is the hub
-  tool it asks for. A hub that does not serve it refuses the call as
-  `E_FORBIDDEN` — the tool gates run before the router and fail closed on the
-  tool name, so a name that hub has no policy row for is "not a
-  client-callable tool" rather than "no such tool" — or, on a hub older than
-  that gate, as `E_HUB_PROTOCOL`. The dialog treats either as "this hub can't
-  list them", says so, and offers "+ new worktree" or the project root, which
-  works on any host either way.
 - **Partly accepted live.** A macOS desktop has run in this mode against a
   remote hub since 2026-09-25: launch, the keychain token, reconnect after a
   lost network or a hub restart, and gap replay are observed. Steering,

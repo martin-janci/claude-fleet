@@ -53,7 +53,7 @@
     flex-wrap: wrap;
   }
   .help {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
 </style>

@@ -100,8 +100,8 @@
     height: 12px;
     line-height: 12px;
     border: 1px solid currentColor;
-    border-radius: 2px;
-    font-size: 11px;
+    border-radius: var(--radius-xs);
+    font-size: var(--text-2xs);
     text-align: center;
   }
   .sr {

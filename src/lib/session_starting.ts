@@ -4,21 +4,28 @@
 // `startingSessions` holds the rows it made until their agent reports a
 // status. Both move only on events (the command returning, a row update);
 // nothing here times out.
-import { derived, get } from 'svelte/store';
+import { derived, get, type Readable } from 'svelte/store';
+import { sameSet, stable } from './stable_store';
 import { creatingStart, sessions, startedIds } from './sessions';
 
 export { creatingStart };
 
 /** Rows still starting: their agent has no status yet. A row that gained
  *  one, or went away, drops out on the next row event. */
-export const startingSessions = derived([startedIds, sessions], ([$ids, $rows]) => {
-  const out = new Set<number>();
-  for (const id of $ids) {
-    const row = $rows.find((r) => r.id === id);
-    if (row && row.claude_status === null) out.add(id);
-  }
-  return out as ReadonlySet<number>;
-});
+// `stable`: every row reads this, and a new equal Set on each row event
+// re-rendered all of them on every flush (review r16).
+export const startingSessions: Readable<ReadonlySet<number>> = stable(
+  derived([startedIds, sessions], ([$ids, $rows]) => {
+    const out = new Set<number>();
+    if ($ids.size === 0) return out as ReadonlySet<number>;
+    for (const id of $ids) {
+      const row = $rows.find((r) => r.id === id);
+      if (row && row.claude_status === null) out.add(id);
+    }
+    return out as ReadonlySet<number>;
+  }),
+  sameSet,
+);
 
 // Forget the ids that finished, so the set never grows.
 startingSessions.subscribe(($s) => {

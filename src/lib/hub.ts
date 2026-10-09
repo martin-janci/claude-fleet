@@ -272,7 +272,7 @@ export function unavailableReason(status: HubStatus): string | null {
   if (!status.unavailable) return null;
   // Not "do it on the hub": the hub is the problem, and every action is
   // refused until it is fixed.
-  return `Not available: ${status.unavailable}. This app is set to use that hub, so it manages no fleet of its own until that is fixed — pair again, or Disconnect, in Settings → Hub.`;
+  return `Not available: ${status.unavailable}. This app is set to use that hub, so it manages no fleet of its own until that is fixed — pair again, or Disconnect, in Settings → Hub & sync.`;
 }
 
 /**
@@ -518,7 +518,7 @@ export function hubNextStep(
     case 'E_CONFIRM_REQUIRED':
       return `${where} is holding this until someone confirms it there, and this desktop's confirmation dialog answers only its own queue, which is empty. Approve it on the hub — this window will follow.`;
     case 'E_UNAUTHORIZED':
-      return `${where} no longer accepts this desktop's client token. Pair again in Settings → Hub.`;
+      return `${where} no longer accepts this desktop's client token. Pair again in Settings → Hub & sync.`;
     default:
       return null;
   }

@@ -144,11 +144,13 @@ interface Snapshot {
   type: {
     families: Record<'sans' | 'mono', string>;
     groups: { styles: { name: string; fontSize: string; lineHeight: string; fontWeight: number }[] }[];
+    aliases: Tok<string>[];
   };
   spacing: { tokens: Tok<string>[] };
   radius: { tokens: Tok<string>[] };
   shadow: { tokens: Tok<Record<'light' | 'dark', string>>[] };
   duration: { tokens: Tok<string>[] };
+  size: { tokens: Tok<string>[] };
 }
 
 const snapshot: Snapshot = JSON.parse(readFileSync('docs/design/tokens.json', 'utf8'));
@@ -212,12 +214,41 @@ describe('app.css and THEME follow the design manual (docs/design/tokens.json)',
         expected[`${n}-weight`] = String(s.fontWeight);
       }
     }
-    for (const t of [...snapshot.spacing.tokens, ...snapshot.radius.tokens, ...snapshot.duration.tokens]) {
+    for (const t of [...snapshot.spacing.tokens, ...snapshot.radius.tokens, ...snapshot.duration.tokens, ...snapshot.size.tokens]) {
       expected[t.name] = t.value;
     }
+    // An alias resolves to what it names (parseThemeBlock follows var()).
+    for (const t of snapshot.type.aliases) expected[t.name] = expected[t.value.slice(1, -1)];
     for (const [name, value] of Object.entries(expected)) {
       expect(root[name], `--${name} is not declared in :root`).toBeTruthy();
       expect(norm(root[name]!), `--${name}`).toBe(norm(value));
+    }
+  });
+
+  // The other direction (review r10): a token app.css adds without the
+  // manual drifts from it unseen, so every custom property the four theme
+  // blocks declare is one the snapshot names.
+  it('app.css declares no token the snapshot does not name', () => {
+    const named = new Set<string>([
+      'font-sans',
+      'font-mono',
+      ...snapshot.color.tokens.map((t) => t.name),
+      ...snapshot.shadow.tokens.map((t) => t.name),
+      ...[snapshot.spacing, snapshot.radius, snapshot.duration, snapshot.size].flatMap((s) => s.tokens.map((t) => t.name)),
+      ...snapshot.type.aliases.map((t) => t.name),
+      ...snapshot.type.groups.flatMap((g) =>
+        g.styles.flatMap((s) => {
+          const n = s.name.startsWith('text-') ? s.name : `text-${s.name}`;
+          return [n, `${n}-lh`, `${n}-weight`];
+        }),
+      ),
+    ]);
+    for (const mode of ['light', 'dark'] as const) {
+      for (const marker of BLOCKS[mode]) {
+        const declared = parseThemeBlock(appCss, appCss.indexOf(marker) + marker.lastIndexOf('{'));
+        const extra = Object.keys(declared).filter((n) => !named.has(n));
+        expect(extra, `declared in ${marker.trim().split('\n')[0]} but not in docs/design/tokens.json`).toEqual([]);
+      }
     }
   });
 

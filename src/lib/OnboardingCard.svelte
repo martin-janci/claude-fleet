@@ -219,7 +219,7 @@
   .card {
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 9px;
+    border-radius: var(--radius-lg);
     padding: 11px 12px;
     margin: 0 0 10px;
   }
@@ -230,7 +230,7 @@
     margin-bottom: 4px;
   }
   .top b {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
@@ -239,17 +239,17 @@
     border: none;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .prog {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     margin-bottom: 7px;
   }
   .pbar {
     height: 4px;
     background: var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     overflow: hidden;
     margin-bottom: 9px;
   }
@@ -270,7 +270,7 @@
     border-top: 1px solid var(--border);
     padding: 6px 0;
     cursor: pointer;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     color: var(--fg);
   }
   .step:first-of-type {
@@ -291,7 +291,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     margin-top: 1px;
   }
   .ic.done {
@@ -311,21 +311,21 @@
     gap: 1px;
   }
   .opt {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     border: 1px solid var(--border);
-    border-radius: 9px;
+    border-radius: var(--radius-lg);
     padding: 0 5px;
     margin-left: 6px;
   }
   .sub {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .badge {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 1px 6px;
-    border-radius: 10px;
+    border-radius: var(--radius-lg);
     margin-top: 3px;
     align-self: flex-start;
   }
@@ -338,20 +338,20 @@
     color: var(--status-waiting);
   }
   .err {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--status-failed);
     margin: 6px 0 0;
   }
   .done-msg {
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
     margin: 4px 0 8px;
   }
   .dismiss-all {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     background: var(--accent);
     color: var(--accent-fg);
     border: none;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     padding: 5px 10px;
     cursor: pointer;
   }
@@ -360,7 +360,7 @@
     align-items: center;
     gap: 8px;
     padding: 4px 0 4px 26px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     border-top: 1px solid var(--border);
     flex-wrap: wrap;
@@ -371,14 +371,14 @@
     gap: 4px;
   }
   .mcp-lbl {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     opacity: 0.7;
   }
   .mcp-token {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
   }
   .mcp-copy {
     background: transparent;
@@ -386,8 +386,8 @@
     color: var(--fg-muted);
     cursor: pointer;
     padding: 1px 6px;
-    font-size: 11px;
-    border-radius: 4px;
+    font-size: var(--text-2xs);
+    border-radius: var(--radius-sm);
     margin-left: auto;
   }
   .mcp-copy:hover { border-color: var(--accent); color: var(--fg); }
