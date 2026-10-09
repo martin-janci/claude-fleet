@@ -1841,6 +1841,46 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests.",
+      "key": "decide.jev.duplicate",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: duplicate task",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -3189,6 +3229,11 @@
               "type": "field"
             },
             {
+              "hint": "Marks a proposed task that may repeat an existing one; you still merge or keep both.",
+              "key": "decide.jev.duplicate",
+              "type": "field"
+            },
+            {
               "key": "decide.jev.unassigned",
               "type": "field"
             }
@@ -3970,6 +4015,17 @@
             }
           ],
           "title": "Per component"
+        },
+        {
+          "items": [
+            {
+              "source": {
+                "id": "updates.targets"
+              },
+              "type": "table"
+            }
+          ],
+          "title": "What runs where"
         }
       ],
       "spec": "fleet.page/1",
@@ -6575,6 +6631,49 @@
       },
       "params": [],
       "shape": "account_usage"
+    },
+    {
+      "columns": [
+        {
+          "id": "device",
+          "label": "Device",
+          "ty": "text"
+        },
+        {
+          "id": "part",
+          "label": "Part",
+          "ty": "text"
+        },
+        {
+          "id": "version",
+          "label": "Version",
+          "ty": "text"
+        },
+        {
+          "id": "update",
+          "label": "Update",
+          "ty": "text"
+        },
+        {
+          "id": "offers",
+          "label": "Offered",
+          "ty": "text"
+        },
+        {
+          "id": "reported_at",
+          "label": "Reported",
+          "ty": "time"
+        }
+      ],
+      "help": "The hub, every host's agent, each desktop and the phone: the version each runs and what the hub would tell it now (`update_status`).",
+      "id": "updates.targets",
+      "label": "What runs where",
+      "live": {
+        "command": "list_update_targets",
+        "event": "update"
+      },
+      "params": [],
+      "shape": "rows"
     },
     {
       "fields": [

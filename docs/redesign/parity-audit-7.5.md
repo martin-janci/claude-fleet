@@ -42,11 +42,11 @@ change.
 | H1, H2, H3 | the same `QuickSwitcher` (pin, hide and groups are not layout-gated) | copy the Ctrl+P, Ctrl+Backspace and Ctrl+G / fold tests into its New describe |
 | H7, H8 | Friendly names and Row details sit in the ⋯ view options in both layouts (`SidebarFilters.svelte`) | toggle each under New, beside `filter_schema.test.ts` › Group picks the grouping, and Select is in ⋯ |
 
-## Real gap
+## Real gap, now closed
 
 | Row | Gap |
 |---|---|
-| P19 | Complete, Mark failed and Cancel are still the flat `mission-move-*` buttons in both layouts (`WorkMissions.svelte`); the ⋯ menu beside Edit and Pause was never built. The row's Step 6.2 is the Work filters step in the plan, so the row names no step that builds it. It works in New (`WorkMissions.test.ts` renders the New layout) but has no New test of a move. Either build the ⋯ menu under a step the coordinator assigns, or accept the buttons as its New home and add the test. |
+| P19 | Complete, Mark failed and Cancel were flat `mission-move-*` buttons in both layouts; the ⋯ menu beside Edit and Pause was never built, and the row's Step 6.2 is the Work filters step. Closed in the PR after this audit: New puts them in a ⋯ menu beside Edit and Pause, each behind a confirm; Classic keeps the buttons. |
 
 ## Open PRs that add rows
 
@@ -62,6 +62,5 @@ key table matches its handler, and the scopes match.
 ## What is left for sign-off
 
 1. The New-layout tests in the table above: test only, one PR.
-2. A decision on P19.
-3. Martin's week on New, which can start now: nothing on the checklist is
-   missing from New except P19's menu.
+2. Martin's week on New, which can start now: nothing on the checklist is
+   missing from New.

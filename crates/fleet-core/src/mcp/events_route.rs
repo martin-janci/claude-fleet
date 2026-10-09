@@ -401,6 +401,7 @@ pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &[
     "download",
     "local_workspace",
     "confirm",
+    "handoff",
 ];
 
 /// Narrow the requested kinds for a host-bound caller; everyone else keeps
@@ -566,6 +567,15 @@ pub(crate) const KIND_FENCES: &[(&str, KindFence)] = &[
             read through `mcp_confirms`, which answers the hub's personal owner on their \
             own paired device only; anyone else learns that SOME confirmation queue moved \
             and nothing more. Host-bound hidden besides",
+        ),
+    ),
+    (
+        "handoff",
+        KindFence::NoSessionContent(
+            "nothing: `RowChange::HandoffChanged` is an empty object. What Control's agent \
+            sent where is read through `control_handoffs`, which answers the hub's personal \
+            owner on their own paired device only; anyone else learns that SOME receipt was \
+            written and nothing more. Host-bound hidden besides",
         ),
     ),
 ];

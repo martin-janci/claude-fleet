@@ -232,3 +232,25 @@ describe('terminals helpers', () => {
     expect(nextTerminalTab(null, [])).toBeNull();
   });
 });
+
+describe('pop out (step 5.4)', () => {
+  it('Pop out opens a window for the picked tab, and the tab stays here', async () => {
+    uiLayout.set('new');
+    open = [1];
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-tab-1'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-popout'));
+    await settle();
+    expect(args(calls('open_terminal_window')[0])).toEqual({ session_id: 1, shell: 1, title: 'api · Shell 1' });
+    expect(screen.getByTestId('terminal-tab-1').getAttribute('aria-selected')).toBe('true');
+
+    await fireEvent.click(screen.getByTestId('terminal-tab-agent'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-popout'));
+    await settle();
+    expect(args(calls('open_terminal_window')[1])).toEqual({ session_id: 1, shell: null, title: 'api' });
+  });
+});

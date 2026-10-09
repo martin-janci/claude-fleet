@@ -117,12 +117,18 @@
   const summary = $derived(filterSummary(page, filterValues));
   /** Data items read this app's store: a paired desktop shows none. */
   const showData = $derived(!readonly && !remote);
+  /** A live source reads through its own command, which routes to the hub
+   *  (11.9b): its items show on a paired desktop too. */
+  const isLive = (i: Section['items'][number]) =>
+    (i.type === 'stat' || i.type === 'record' || i.type === 'table' || i.type === 'chart') &&
+    sourceOf(i.source.id)?.live !== undefined;
   const isData = (i: Section['items'][number]) =>
-    i.type === 'stat' ||
-    i.type === 'record' ||
-    i.type === 'table' ||
-    i.type === 'chart' ||
-    i.type === 'account_usage';
+    (i.type === 'stat' ||
+      i.type === 'record' ||
+      i.type === 'table' ||
+      i.type === 'chart' ||
+      i.type === 'account_usage') &&
+    !isLive(i);
 
   let root = $state<HTMLElement>();
 
@@ -291,7 +297,7 @@
         {#if action && !readonly && !remote}<PageActionButton {action} onran={() => dataTick++} />{/if}
       {:else if item.type === 'account_usage'}
         {#if showData}<AccountsUsage view={item.view} />{/if}
-      {:else if showData}
+      {:else if showData || isLive(item)}
         {@const spec = sourceOf(item.source.id)}
         <DataItem
           {item}

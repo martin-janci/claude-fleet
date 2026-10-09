@@ -111,9 +111,11 @@
     >
   </div>
   {#if open}
-    {#each fold.rows as s (s.id)}
-      {@render row(s)}
-    {/each}
+    <div role="tree" aria-label="Stopped on {fold.host}">
+      {#each fold.rows as s (s.id)}
+        {@render row(s)}
+      {/each}
+    </div>
   {/if}
 </div>
 

@@ -12,7 +12,7 @@
     type DiffRange,
     type RepoTree,
   } from './files';
-  import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoCreateBranch, repoDeleteBranch, repoDeleteMergedBranches, repoStage, repoUnstage, repoCommitCreate, type Commit, type CommitDetail, type Branch } from './history';
+  import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoCreateBranch, repoDeleteBranch, repoDeleteMergedBranches, repoStage, repoUnstage, repoCommitCreate, draftCommitMessage, type Commit, type CommitDetail, type Branch } from './history';
   import type { Result } from './result';
   import { readPref, writePref, uiLayout } from './prefs';
   import { openPathRequest } from './app_views';
@@ -484,6 +484,7 @@
             enableStaging={true}
             onStageToggle={stageToggle}
             onCommit={commitStaged}
+            draftCommit={$uiLayout === 'new' ? () => draftCommitMessage(session.id) : undefined}
             {writeBlocked}
             branch={mode === 'changes' && $uiLayout === 'new' ? branch : null}
             {selectedRange}

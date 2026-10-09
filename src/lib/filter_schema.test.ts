@@ -10,7 +10,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import SidebarFilters from './SidebarFilters.svelte';
 import WorkFiltersBar from './WorkFiltersBar.svelte';
-import { sessions, sidebarGroupBy, showBgAgents, type SessionRow } from './sessions';
+import { sessions, sidebarGroupBy, showBgAgents, showFriendlyNames, showRowDetails, type SessionRow } from './sessions';
 import { projects, type ProjectTreeRow } from './projects';
 import { orgs, scopeFilter } from './orgs';
 import { trackers } from './trackers';
@@ -182,6 +182,28 @@ describe('Sessions: the Filters section (New layout)', () => {
     expect(screen.queryByTestId('group-by-project')).toBeNull();
     await fireEvent.click(screen.getByTestId('select-mode'));
     expect(toggle).toHaveBeenCalled();
+  });
+
+  it('Friendly names and Row details are switches in ⋯ that flip their prefs and persist', async () => {
+    showFriendlyNames.set(true);
+    showRowDetails.set(true);
+    render(SidebarFilters, { props });
+    await fireEvent.click(screen.getByTestId('view-options-open'));
+    const menu = screen.getByTestId('view-options');
+    const friendly = within(menu).getByTestId('friendly-name-toggle');
+    const details = within(menu).getByTestId('toggle-row-details');
+    expect(friendly.getAttribute('aria-checked')).toBe('true');
+    expect(details.getAttribute('aria-checked')).toBe('true');
+    await fireEvent.click(friendly);
+    expect(get(showFriendlyNames)).toBe(false);
+    expect(friendly.getAttribute('aria-checked')).toBe('false');
+    expect(JSON.parse(localStorage.getItem('cf:pref:show-friendly-names')!)).toBe(false);
+    await fireEvent.click(details);
+    expect(get(showRowDetails)).toBe(false);
+    expect(details.getAttribute('aria-checked')).toBe('false');
+    expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(false);
+    showFriendlyNames.set(true);
+    showRowDetails.set(true);
   });
 
   it('Needs you, now in the panel, shows in the strip while on', () => {
