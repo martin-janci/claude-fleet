@@ -15,6 +15,7 @@ import AddProjectDialog from './AddProjectDialog.svelte';
 import { hosts } from './hosts';
 import { hubStatus, STANDALONE } from './hub';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
+import { expectAccessible } from './a11y_check';
 
 const mockedInvoke = invoke as ReturnType<typeof vi.fn>;
 const mockedOpen = open as ReturnType<typeof vi.fn>;
@@ -812,5 +813,27 @@ describe('on a hub client', () => {
     dlg.dispatchEvent(new Event('close'));
     await flush();
     expect(onCancel).toHaveBeenCalled();
+  });
+});
+
+describe('AddProjectDialog: accessibility', () => {
+  it('the dialog, on From GitHub with a ticked repo and on Clone, is accessible', async () => {
+    route({
+      list_github_repos: () => [
+        { name_with_owner: 'o/alpha', description: 'first', is_private: true, updated_at: null },
+        { name_with_owner: 'o/beta', description: null, is_private: false, updated_at: null },
+      ],
+    });
+    mount();
+    await tick();
+    await fireEvent.click(screen.getByTestId('add-mode-github'));
+    await vi.waitFor(() => expect(screen.getAllByTestId('gh-repo-row')).toHaveLength(2));
+    await fireEvent.click(screen.getAllByTestId('gh-repo-check')[0]);
+    await tick();
+    await expectAccessible(screen.getByTestId('add-project-dialog'));
+    await fireEvent.click(screen.getByTestId('add-mode-clone'));
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'https://github.com/o/r' } });
+    await tick();
+    await expectAccessible(screen.getByTestId('add-project-dialog'));
   });
 });

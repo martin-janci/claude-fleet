@@ -854,6 +854,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "routines",
+            "routines",
+            json!({ "action": "failing" }),
+            r#"[]"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::routines::routed::routines(
+                    b,
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                    commands::routines::RoutinesArgs {
+                        action: "failing".into(),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "get_form",
             "ask",
             json!({ "get": "f_a" }),
@@ -2226,9 +2245,9 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
     use fleet_core::service::safe_kill::SafeKillSessionArgs;
     use fleet_core::service::sessions::{
         AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
-        NewSessionArgs, RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs,
-        RestoreHostSessionsArgs, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
-        TouchSessionViewedArgs,
+        LostTargetArgs, NewSessionArgs, PlaceTranscriptArgs, RecreateSessionArgs,
+        RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs, SendPromptArgs,
+        SetFriendlyNameArgs, SpawnReviewArgs, TouchSessionViewedArgs,
     };
 
     vec![
@@ -2712,6 +2731,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         ..Default::default()
                     },
                     s,
+                    &ssh(),
                 ))
                 .map(|_| ())
             }),
@@ -3217,6 +3237,47 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "lost_target",
+            "lost_target",
+            json!({ "session_id": 7 }),
+            "{}",
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::lost_target(
+                    b,
+                    LostTargetArgs {
+                        session_id: Some(7),
+                        ..Default::default()
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "place_transcript",
+            "place_transcript",
+            json!({
+                "host_alias": "trn",
+                "claude_session_id": "44366faf-ae97-426a-91cd-beaf3c74f1d7",
+                "project_id": 3,
+            }),
+            r#"{"project_id":3,"tmux_name":"dev-o-r","copied":true}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::place_transcript(
+                    b,
+                    PlaceTranscriptArgs {
+                        host_alias: "trn".into(),
+                        claude_session_id: "44366faf-ae97-426a-91cd-beaf3c74f1d7".into(),
+                        project_id: 3,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "dismiss_ghost_session",
             "dismiss_ghost_session",
             json!({ "session_id": 7 }),
@@ -3240,7 +3301,9 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     b,
                     AdoptSessionArgs {
                         session_id: 7,
+                        project_id: None,
                         owner_person_id: Some(1),
+                        decider: Default::default(),
                     },
                     s,
                 ))
@@ -6233,6 +6296,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/updates.rs"),
     ),
     ("commands/runs.rs", include_str!("../commands/runs.rs")),
+    (
+        "commands/routines.rs",
+        include_str!("../commands/routines.rs"),
+    ),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",

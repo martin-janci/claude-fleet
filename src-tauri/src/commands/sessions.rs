@@ -35,6 +35,7 @@ use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::service::bg_sessions::{
     self, DismissAgentArgs, NewBgSessionArgs, PurgeProjectArgs,
 };
+use fleet_core::service::decide::lost_target::LostTarget;
 use fleet_core::service::repair::{self, RepairReport};
 use fleet_core::service::rewind::{self, RewindArgs};
 use fleet_core::service::safe_kill::{
@@ -42,9 +43,9 @@ use fleet_core::service::safe_kill::{
 };
 use fleet_core::service::sessions::{
     self, AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
-    LostCandidate, NewSessionArgs, RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs,
-    RestoreHostSessionsArgs, RestoreReport, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
-    TouchSessionViewedArgs,
+    LostCandidate, LostTargetArgs, NewSessionArgs, PlaceTranscriptArgs, PlacedTranscript,
+    RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs,
+    RestoreReport, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs, TouchSessionViewedArgs,
 };
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{DeferredPromptRow, SessionRow, Store};
@@ -284,6 +285,30 @@ pub async fn adopt_session(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<SessionRow, IpcError> {
     routed::adopt_session(&backend, args, &store).await
+}
+
+/// The project a Lost and found entry would go into, to prefill Adopt or
+/// Restore (step 4.12). Read-only.
+#[tauri::command]
+pub async fn lost_target(
+    args: LostTargetArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<LostTarget, IpcError> {
+    routed::lost_target(&backend, args, &store, &ssh).await
+}
+
+/// Restore into a project: copy a found conversation where `claude
+/// --resume` in the project's root finds it (step 4.12).
+#[tauri::command]
+pub async fn place_transcript(
+    args: PlaceTranscriptArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<PlacedTranscript, IpcError> {
+    routed::place_transcript(&backend, args, &store, &ssh).await
 }
 
 /// Remove an inactive background agent (`kind='bg'`, not working) from the
@@ -892,6 +917,34 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("discover_lost_sessions", &args).await,
             None => sessions::discover_lost_sessions(args, store, ssh).await,
+        }
+    }
+
+    pub async fn lost_target(
+        backend: &FleetBackend,
+        args: LostTargetArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<LostTarget, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("lost_target", &args).await,
+            None => {
+                let ctx = fleet_core::service::decide::DecideCtx::jev(Arc::clone(store));
+                sessions::lost_target_over_ssh(args, store, ssh, &ctx).await
+            }
+        }
+    }
+
+    pub async fn place_transcript(
+        backend: &FleetBackend,
+        args: PlaceTranscriptArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<PlacedTranscript, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("place_transcript", &args).await,
+            // The desktop's commands are a person's.
+            None => sessions::place_transcript_over_ssh(args, store, ssh, true).await,
         }
     }
 

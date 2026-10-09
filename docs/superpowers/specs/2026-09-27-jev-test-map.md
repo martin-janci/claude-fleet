@@ -228,6 +228,11 @@ runs. Changing one after seeing results needs a new decision row.
 
 - A Noul per project.
 - Low volume, weak.
+- **[built]** (redesign 4.12) as a Choice over the person's projects rather
+  than a Noul per project, behind `decide.jev.restore_target`, with N4's
+  pane case behind `decide.jev.adopt_target`: `service/decide/lost_target.rs`
+  (questions `restore_target.v1` / `adopt_target.v1`), only where no
+  directory rule places the entry. See `docs/decisions.md`.
 
 ### K1–K5 — candidates found after the test map (owner, 2026-10-07)
 

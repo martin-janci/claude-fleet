@@ -413,7 +413,8 @@
     font-size: 0.85rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border);
     background: transparent; color: var(--fg); border-radius: 4px; cursor: pointer;
   }
-  .link { border: none; padding: 0; text-align: left; color: var(--accent); }
+  /* A draft row's own link, not one inside a sentence: it keeps the 24 px target. */
+  .link { border: none; padding: 0; text-align: left; color: var(--accent); min-block-size: var(--control-h); }
   .quiet { align-self: flex-start; font-size: 0.8rem; padding: 0.2rem 0.6rem; }
   .actions button.primary { border-color: var(--accent); }
   button:disabled { opacity: 0.5; cursor: default; }

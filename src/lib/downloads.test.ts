@@ -3,13 +3,20 @@ import { get } from 'svelte/store';
 
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
-const push = vi.fn();
-vi.mock('./toasts', () => ({ push: (...a: unknown[]) => push(...a) }));
+const push = vi.fn((_o: { message: string; kind?: string; action?: { label: string; run?: () => void }; [k: string]: unknown }) => 0);
+const dismiss = vi.fn();
+const setToastProgress = vi.fn((..._a: unknown[]) => true);
+vi.mock('./toasts', () => ({
+  push: (o: { message: string }) => push(o),
+  dismiss: (...a: unknown[]) => dismiss(...a),
+  setToastProgress: (...a: unknown[]) => setToastProgress(...a),
+}));
 const reveal = vi.fn((_p: string) => Promise.resolve());
 vi.mock('@tauri-apps/plugin-opener', () => ({ revealItemInDir: (p: string) => reveal(p) }));
 
 import {
   downloads,
+  downloadsOpen,
   finished,
   loadDownloads,
   retryDownload,
@@ -49,6 +56,9 @@ describe('downloads', () => {
   beforeEach(() => {
     invoke.mockReset();
     push.mockReset();
+    dismiss.mockReset();
+    setToastProgress.mockReset();
+    setToastProgress.mockReturnValue(true);
     _resetDownloadsForTests();
   });
 
@@ -75,6 +85,31 @@ describe('downloads', () => {
     await sendFile(4, 'out/a.pdf');
     expect(invoke).toHaveBeenCalledWith('send_file', { args: { session_id: 4, path: 'out/a.pdf' } });
     expect(get(downloads)[0].id).toBe(9);
+  });
+
+  // Step 10.10: a copy of known size keeps its toast up with a Progress
+  // ring that each re-read moves, until the copy is done.
+  it('a copy of known size carries a moving ring until it is done', async () => {
+    push.mockReturnValue(42);
+    invoke.mockResolvedValueOnce({ ...row(9, 'fetching'), fetched_bytes: 0 });
+    await sendFile(4, 'out/a.pdf');
+    expect(push).toHaveBeenCalledWith(expect.objectContaining({ sticky: true, progress: 0 }));
+    // Its action opens the job: the Downloads sheet.
+    push.mock.calls[0][0].action?.run?.();
+    expect(get(downloadsOpen)).toBe(true);
+    invoke.mockResolvedValueOnce(list([{ ...row(9, 'fetching'), fetched_bytes: 5 }]));
+    await loadDownloads();
+    expect(setToastProgress).toHaveBeenCalledWith(42, 0.5);
+    invoke.mockResolvedValueOnce(list([row(9, 'ready')]));
+    await loadDownloads();
+    expect(dismiss).toHaveBeenCalledWith(42);
+  });
+
+  it('a copy of unknown size says so once, with no ring', async () => {
+    invoke.mockResolvedValueOnce(row(9, 'fetching'));
+    await sendFile(4, 'out/a.pdf');
+    expect(push.mock.calls[0][0]).not.toHaveProperty('progress');
+    expect(push.mock.calls[0][0]).not.toHaveProperty('sticky');
   });
 
   it('formats sizes', () => {
@@ -143,7 +178,7 @@ describe('downloads, progress, retry and reveal (10.7)', () => {
     invoke.mockResolvedValueOnce('/Users/m/Downloads/f1.pdf');
     await saveDownload(1);
     expect(get(savedTo).get(1)).toBe('/Users/m/Downloads/f1.pdf');
-    expect(push.mock.calls[0][0].action.label).toMatch(/^Show in /);
+    expect(push.mock.calls[0][0].action?.label).toMatch(/^Show in /);
     await revealSaved(1);
     expect(reveal).toHaveBeenCalledWith('/Users/m/Downloads/f1.pdf');
   });

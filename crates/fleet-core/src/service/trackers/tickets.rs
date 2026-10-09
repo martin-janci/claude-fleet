@@ -1824,6 +1824,10 @@ pub struct StartPreview {
     /// PD-* → papaya-pos?". Accept or dismiss it with `start_rules`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_offer: Option<crate::store::StartRuleRow>,
+    /// The brief above was drafted by a model (redesign 6.10, `draft_brief`):
+    /// by which, on which host, from how many notes. `None` for the template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief_draft: Option<crate::service::work::brief_draft::BriefDraft>,
 }
 
 /// The projects `key` ran in before, other than `chosen`: ended links'
@@ -2148,6 +2152,7 @@ pub async fn preview_start(
         proposal: None,
         suggested_sibling: None,
         rule_offer,
+        brief_draft: None,
     };
     let plan = match plan_resolved(store, &planned, view, &ticket) {
         Ok(p) => p,

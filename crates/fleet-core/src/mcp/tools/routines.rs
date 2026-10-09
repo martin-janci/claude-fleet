@@ -10,7 +10,8 @@ use crate::service::routines;
 impl FleetTools {
     #[tool(description = "Routines: a saved prompt that starts a session \
         on a cron schedule, a session event or Run now. list; get \
-        {routine_id}: with its last runs; runs {routine_id, limit?}; save \
+        {routine_id}: with its last runs; runs {routine_id, limit?}; failing: \
+        each routine whose newest run failed, for the Inbox; save \
         {routine, routine_id?}: the whole routine; delete; set_enabled \
         {enabled}; skip_next {skip?}; run_now. Pause all stops the \
         schedule, not run_now. E_NOTFOUND, E_INVALID.")]
@@ -44,6 +45,7 @@ impl FleetTools {
         match p.action.as_str() {
             "list" => ok_json_compact(&routines::list(store, &scope).map_err(to_mcp_err)?),
             "get" => ok_json_compact(&routines::get(store, &scope, id()?).map_err(to_mcp_err)?),
+            "failing" => ok_json_compact(&routines::failing(store, &scope).map_err(to_mcp_err)?),
             "runs" => {
                 ok_json_compact(&routines::runs(store, &scope, id()?, p.limit).map_err(to_mcp_err)?)
             }
@@ -83,7 +85,7 @@ impl FleetTools {
             other => Err(mcp_err(
                 codes::E_INVALID,
                 format!(
-                    "action must be list | get | runs | save | delete | set_enabled | \
+                    "action must be list | get | runs | failing | save | delete | set_enabled | \
                      skip_next | run_now, got {other:?}"
                 ),
                 None,
