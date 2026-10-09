@@ -34,8 +34,13 @@ impl FleetTools {
             p.host_alias.as_deref(),
             p.tmux_name.as_deref(),
             // `drive`: a pane write is exactly what a `drive` grant is for (spec
-            // §4.3, invariant 5's closing paragraph).
-            Reach::Drive,
+            // §4.3, invariant 5's closing paragraph). A key alone is `answer`
+            // (Orbit Fleet 11.7), narrowed below for a caller who cannot drive.
+            if p.keys.is_some() {
+                Reach::Answer
+            } else {
+                Reach::Drive
+            },
             "the session to prompt",
         )?;
         if let Some(k) = p.keys.as_deref() {
@@ -55,6 +60,23 @@ impl FleetTools {
                     "keys and a non-empty prompt cannot be sent together",
                     None,
                 ));
+            }
+            let drives = {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                reaches_row(&s, &caller, &row, Reach::Drive)?
+            };
+            if !drives {
+                // An `answer` grant: the key must answer the dialog a FRESH
+                // read of the pane shows, not the row's (up to a tick old).
+                // The dialog can still close between this read and the press,
+                // exactly as it can for the owner's card; what the read rules
+                // out is pressing into a pane that shows no dialog at all.
+                answer_key_kind(key).map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))?;
+                let probe = sessions::session_activity(&self.store, &self.ssh, row.id)
+                    .await
+                    .map_err(to_mcp_err)?;
+                answer_key_allowed(key, probe.pending_input.as_ref())
+                    .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))?;
             }
             sessions::send_keys(&row.host_alias, &row.tmux_name, key, &self.store, &self.ssh)
                 .await
@@ -888,5 +910,95 @@ mod limit_tests {
         assert_eq!(bounded_limit(Some(-1), 50), READ_LIMIT_MAX);
         assert_eq!(bounded_limit(Some(i64::MIN), 50), READ_LIMIT_MAX);
         assert_eq!(bounded_limit(Some(i64::MAX), 50), READ_LIMIT_MAX);
+    }
+}
+
+/// May an `answer` grantee press `key` on a pane showing `dialog` (Orbit
+/// Fleet 11.7)? PURE, so the rule is tested without a pane.
+///
+/// Only while a dialog is on screen, and only a key that answers one: a
+/// digit the dialog numbers, Enter (the highlighted option), Escape (cancel)
+/// and Tab (a multi-select question's next step). Never `C-c`, which
+/// interrupts the session rather than answering it.
+pub(crate) fn answer_key_allowed(
+    key: crate::tmux::NamedKey,
+    dialog: Option<&crate::service::pane_intel::PendingInput>,
+) -> Result<(), String> {
+    use crate::tmux::NamedKey;
+    answer_key_kind(key)?;
+    let Some(dialog) = dialog else {
+        return Err("an answer grant only answers a dialog, and the pane shows none".into());
+    };
+    match key {
+        NamedKey::Digit(d) if !dialog.options.iter().any(|o| o.n == d.get()) => {
+            Err(format!("the dialog on the pane has no option {}", d.get()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The half of [`answer_key_allowed`] that needs no pane: refused before the
+/// pane is read, so a key no dialog takes costs no round trip.
+fn answer_key_kind(key: crate::tmux::NamedKey) -> Result<(), String> {
+    match key {
+        crate::tmux::NamedKey::CtrlC => {
+            Err("an answer grant presses a dialog's keys, not C-c".into())
+        }
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod answer_key_tests {
+    use super::answer_key_allowed;
+    use crate::service::pane_intel::{PendingInput, PendingOption};
+    use crate::tmux::NamedKey;
+
+    fn dialog(n: u8) -> PendingInput {
+        PendingInput {
+            kind: "permission".into(),
+            question: Some("Do you want to proceed?".into()),
+            options: (1..=n)
+                .map(|i| PendingOption {
+                    n: i,
+                    label: format!("option {i}"),
+                    selected: i == 1,
+                    checked: false,
+                })
+                .collect(),
+            multi: false,
+            detail: None,
+        }
+    }
+
+    fn key(s: &str) -> NamedKey {
+        NamedKey::parse(s).expect("a key")
+    }
+
+    #[test]
+    fn an_answer_grant_presses_the_dialogs_own_keys() {
+        let d = dialog(3);
+        for k in ["1", "2", "3", "Enter", "Escape", "Tab"] {
+            assert_eq!(answer_key_allowed(key(k), Some(&d)), Ok(()), "{k}");
+        }
+    }
+
+    #[test]
+    fn an_answer_grant_presses_nothing_else() {
+        let d = dialog(3);
+        assert!(
+            answer_key_allowed(key("4"), Some(&d)).is_err(),
+            "no option 4"
+        );
+        assert!(
+            answer_key_allowed(key("C-c"), Some(&d)).is_err(),
+            "C-c interrupts"
+        );
+        for k in ["1", "Enter", "Escape", "Tab"] {
+            assert!(
+                answer_key_allowed(key(k), None).is_err(),
+                "{k} with no dialog"
+            );
+        }
     }
 }

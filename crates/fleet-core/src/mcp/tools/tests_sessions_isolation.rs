@@ -10,13 +10,14 @@
 //! side by side and neither may be relaxed for the other.
 //!
 //! **What this pins.** One private session, owned by a person who is *not*
-//! the hub's personal owner, against nine callers:
+//! the hub's personal owner, against ten callers:
 //!
 //! | Who | What it is |
 //! |---|---|
 //! | `Owner` | the owning person's own paired device |
 //! | `Watcher` | a second person's device, holding a `watch` grant |
 //! | `Driver` | a third person's device, holding a `drive` grant |
+//! | `Answerer` | a sixth person's device, holding an `answer` grant (Orbit Fleet 11.7) |
 //! | `Stranger` | a fourth person's device, holding nothing |
 //! | `HostPane` | the row's host's token, its request proving the row's pane |
 //! | `HostNoPane` | the same token with no `X-Fleet-Pane` on the request |
@@ -69,7 +70,7 @@
 
 use super::*;
 use crate::ipc_error::codes;
-use crate::store::{GrantRecipient, GRANT_DRIVE, GRANT_WATCH};
+use crate::store::{GrantRecipient, GRANT_ANSWER, GRANT_DRIVE, GRANT_WATCH};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -105,6 +106,7 @@ const PERSON_OWNER: &str = "ada";
 const PERSON_WATCHER: &str = "bob";
 const PERSON_DRIVER: &str = "cho";
 const PERSON_STRANGER: &str = "dee";
+const PERSON_ANSWERER: &str = "fay";
 /// The person the sharing rows grant to. It is **not** one of the nine
 /// callers on purpose: the owner's own `session_share` row succeeds, so
 /// granting to `dee` would turn the Stranger column into a watcher for every
@@ -138,6 +140,7 @@ enum Who {
     Owner,
     Watcher,
     Driver,
+    Answerer,
     Stranger,
     HostPane,
     HostNoPane,
@@ -150,6 +153,7 @@ const EVERYONE: &[Who] = &[
     Who::Owner,
     Who::Watcher,
     Who::Driver,
+    Who::Answerer,
     Who::Stranger,
     Who::HostPane,
     Who::HostNoPane,
@@ -187,6 +191,7 @@ impl Who {
             Who::Owner => device(Some(fx.owner)),
             Who::Watcher => device(Some(fx.watcher)),
             Who::Driver => device(Some(fx.driver)),
+            Who::Answerer => device(Some(fx.answerer)),
             Who::Stranger => device(Some(fx.stranger)),
             Who::HostPane => host(HOST, Some(PANE)),
             Who::HostNoPane => host(HOST, None),
@@ -209,7 +214,7 @@ impl Who {
     fn may_read_the_row(self) -> bool {
         matches!(
             self,
-            Who::Owner | Who::Watcher | Who::Driver | Who::HostPane
+            Who::Owner | Who::Watcher | Who::Driver | Who::Answerer | Who::HostPane
         )
     }
 }
@@ -337,6 +342,11 @@ fn tier(reach: Reach, who: Who) -> Out {
             Reach::Read => Out::Pass,
             _ => Out::Gate(codes::E_FORBIDDEN),
         },
+        // Orbit Fleet 11.7: reads, answers a dialog, and nothing wider.
+        Who::Answerer => match reach {
+            Reach::Read | Reach::Answer => Out::Pass,
+            _ => Out::Gate(codes::E_FORBIDDEN),
+        },
         Who::Driver => match reach {
             Reach::Own => Out::Gate(codes::E_FORBIDDEN),
             _ => Out::Pass,
@@ -366,7 +376,8 @@ fn tier(reach: Reach, who: Who) -> Out {
 /// * `list_downloads`, because listing and removing sent files is a
 ///   person's half of the downloads feature — a host's Claude only SENDS one
 ///   (`send_file`, which is deliberately NOT here: the session's own agent
-///   is that tool's headline caller).
+///   is that tool's headline caller). `library` (Control's Library, 9.7) is
+///   the index beside it, a person's for the same reason.
 const NEVER_A_HOST_TOKENS: &[&str] = &[
     "session_share",
     "session_unshare",
@@ -375,6 +386,7 @@ const NEVER_A_HOST_TOKENS: &[&str] = &[
     "my_grants",
     "session_presence",
     "list_downloads",
+    "library",
     // The Automation screen's Runs list (Orbit Fleet 8.3): a person's.
     "runs",
 ];
@@ -439,6 +451,7 @@ struct Fx {
     owner: i64,
     watcher: i64,
     driver: i64,
+    answerer: i64,
     stranger: i64,
     /// The private row every tier row addresses.
     row: i64,
@@ -458,6 +471,9 @@ struct Fx {
     /// to hide. Without it that row would assert over an empty page and
     /// measure nothing.
     download: i64,
+    /// A `library_items` row placed beside `row`, so `library`'s list has
+    /// something to hide.
+    library_item: i64,
 }
 
 /// Set the process-global downloads directory, which
@@ -510,11 +526,12 @@ fn fixture() -> Fx {
     let watcher = s.create_person(PERSON_WATCHER, None).unwrap().id;
     let driver = s.create_person(PERSON_DRIVER, None).unwrap().id;
     let stranger = s.create_person(PERSON_STRANGER, None).unwrap().id;
+    let answerer = s.create_person(PERSON_ANSWERER, None).unwrap().id;
     s.create_person(PERSON_SPARE, None).unwrap();
     assert_eq!(
         s.sole_enabled_person().unwrap(),
         None,
-        "six people: the single-person carve-out must be off for everyone"
+        "seven people: the single-person carve-out must be off for everyone"
     );
 
     let project = s.upsert_project("acme", "api", "/src/acme").unwrap();
@@ -591,6 +608,8 @@ fn fixture() -> Fx {
     // The two grants, made by the owner — the only caller who may make one.
     s.grant_session(row, GrantRecipient::Person(watcher), GRANT_WATCH, owner)
         .unwrap();
+    s.grant_session(row, GrantRecipient::Person(answerer), GRANT_ANSWER, owner)
+        .unwrap();
     s.grant_session(row, GrantRecipient::Person(driver), GRANT_DRIVE, owner)
         .unwrap();
 
@@ -625,6 +644,21 @@ fn fixture() -> Fx {
         .unwrap()
         .id;
     s.finish_download(download, "da39a3ee").unwrap();
+    // One file a person put beside the private row (Control's Library):
+    // its `session_name` is the same MARKER.
+    let library_item = s
+        .insert_library_item(&crate::store::NewLibraryItem {
+            kind: crate::service::library::KIND_UPLOAD,
+            host_alias: HOST,
+            session_id: Some(row),
+            session_name: Some(LEAK_TMUX),
+            org_id: None,
+            path: "/src/acme/wt/.claude-fleet-attachments/spec.pdf",
+            name: "spec.pdf",
+            size: Some(7),
+        })
+        .unwrap()
+        .id;
 
     let t = FleetTools::new(
         Arc::new(Mutex::new(s)),
@@ -639,6 +673,7 @@ fn fixture() -> Fx {
         owner,
         watcher,
         driver,
+        answerer,
         stranger,
         row,
         unclaimed,
@@ -648,6 +683,7 @@ fn fixture() -> Fx {
         task,
         link,
         download,
+        library_item,
     }
 }
 
@@ -721,6 +757,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "session_transcript" => fx.t.session_transcript(ext, p!()).await,
         "session_conversation" => fx.t.session_conversation(ext, p!()).await,
         "session_tool_detail" => fx.t.session_tool_detail(ext, p!()).await,
+        "session_summary_since" => fx.t.session_summary_since(ext, p!()).await,
         "run_prompt" => fx.t.run_prompt(ext, p!()).await,
         "dispatch_task" => fx.t.dispatch_task(ext, p!()).await,
         "wait_for_task" => fx.t.wait_for_task(ext, p!()).await,
@@ -772,6 +809,8 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         // ---- downloads.rs -------------------------------------------------
         "send_file" => fx.t.send_file(ext, p!()).await,
         "list_downloads" => fx.t.list_downloads(ext, p!()).await,
+        // ---- library.rs ---------------------------------------------------
+        "library" => fx.t.library(ext, p!()).await,
         // ---- runs.rs ------------------------------------------------------
         "runs" => fx.t.runs(ext, p!()).await,
         // ---- fleet.rs -----------------------------------------------------
@@ -913,6 +952,7 @@ fn assert_declared(tool: &str, reach: Reach) {
         .unwrap_or_else(|| panic!("{tool} has no SESSION_REACH row"));
     let want = match reach {
         Reach::Read => "Read",
+        Reach::Answer => "Answer",
         Reach::Drive => "Drive",
         Reach::Own => "Own",
     };
@@ -1043,7 +1083,9 @@ async fn run_matrix() {
         |fx, _| json!({ "worktree_id": fx.worktree, "force": true }),
         |who| match who {
             Who::Owner => Out::Pass,
-            Who::Watcher | Who::Driver | Who::HostPane => Out::Code(codes::E_FORBIDDEN),
+            Who::Watcher | Who::Driver | Who::Answerer | Who::HostPane => {
+                Out::Code(codes::E_FORBIDDEN)
+            }
             _ => Out::Code(codes::E_WORKTREE_BUSY),
         },
     )
@@ -1151,7 +1193,7 @@ async fn run_matrix() {
     let task_cells = |reach: Reach| {
         move |who: Who| match who {
             Who::Owner | Who::HostPane | Who::Driver => Out::Pass,
-            Who::Watcher => match reach {
+            Who::Watcher | Who::Answerer => match reach {
                 Reach::Read => Out::Pass,
                 _ => Out::Gate(codes::E_FORBIDDEN),
             },
@@ -1320,6 +1362,12 @@ async fn run_matrix() {
     .await;
     m.gated("session_transcript", Reach::Read, row).await;
     m.gated(
+        "session_summary_since",
+        Reach::Read,
+        |fx, _| json!({ "session_id": fx.row, "since": 0 }),
+    )
+    .await;
+    m.gated(
         "wait_for_reply",
         Reach::Read,
         |fx, _| json!({ "session_id": fx.row, "timeout_s": 1 }),
@@ -1447,7 +1495,7 @@ async fn run_matrix() {
         "related_sessions",
         |fx, _| json!({ "session_id": fx.row }),
         |who| match who {
-            Who::Owner | Who::Watcher | Who::Driver | Who::HostPane => Out::Pass,
+            Who::Owner | Who::Watcher | Who::Driver | Who::Answerer | Who::HostPane => Out::Pass,
             _ => Out::Gate(codes::E_NOTFOUND),
         },
     )
@@ -1459,7 +1507,7 @@ async fn run_matrix() {
         // `find_session_by_tmux_name_scoped` resolves through the view
         // scope, so the answer is a miss and not a refusal of a row.
         |who| match who {
-            Who::Owner | Who::Watcher | Who::Driver | Who::HostPane => Out::Pass,
+            Who::Owner | Who::Watcher | Who::Driver | Who::Answerer | Who::HostPane => Out::Pass,
             _ => Out::Code(codes::E_NOTFOUND),
         },
     )
@@ -1654,6 +1702,60 @@ async fn run_matrix() {
             "the machine's budget is nobody's secret: {a:?}"
         );
     }
+    // Control's Library (9.7): the same `own` tier as `list_downloads`, for
+    // the same reason (its rows name paths on the owner's host). `list` is a
+    // filter, so a session the caller does not own answers an empty page;
+    // `add` names one row, so it refuses everybody but the owner with
+    // `E_NOTFOUND`, the answer an id that is not theirs gets.
+    m.row("library", |_, _| json!({ "action": "list" }), no_host_token)
+        .await;
+    m.row(
+        "library",
+        |fx, _| json!({ "action": "list", "session_id": fx.row }),
+        no_host_token,
+    )
+    .await;
+    for &who in EVERYONE {
+        for args in [
+            json!({ "action": "list" }),
+            json!({ "action": "list", "session_id": fx.row }),
+        ] {
+            let a = call(&fx, who, "library", args.clone()).await;
+            if who.is_host() {
+                assert_eq!(code(&a), codes::E_FORBIDDEN, "{who:?}: {a:?}");
+                continue;
+            }
+            if who == Who::Owner {
+                assert!(
+                    text(&a).contains(&format!("\"id\":{}", fx.library_item))
+                        && text(&a).contains(LEAK_TMUX),
+                    "the owner's own file must still be listed ({args}): {a:?}"
+                );
+                continue;
+            }
+            assert!(
+                text(&a).contains("\"items\":[]"),
+                "{who:?} does not own the session, so the page must be EMPTY \
+                 ({args}): {a:?}"
+            );
+        }
+        let add = json!({
+            "action": "add",
+            "kind": "upload",
+            "session_id": fx.row,
+            "files": [{ "path": "/src/acme/wt/x.txt" }],
+        });
+        let a = call(&fx, who, "library", add).await;
+        match who {
+            w if w.is_host() => assert_eq!(code(&a), codes::E_FORBIDDEN, "{who:?}: {a:?}"),
+            Who::Owner => assert_eq!(code(&a), "OK", "the owner records its own file: {a:?}"),
+            _ => assert_eq!(
+                code(&a),
+                codes::E_NOTFOUND,
+                "{who:?} adds beside a session it does not own: {a:?}"
+            ),
+        }
+    }
     m.row(
         "list_worktrees",
         |fx, _| json!({ "project_id": fx.project, "summary": false }),
@@ -1810,6 +1912,55 @@ fn every_session_addressed_tool_has_a_matrix_row() {
             "{name} is in the covered set but the router serves no such tool"
         );
     }
+}
+
+/// **The Answer level (Orbit Fleet 11.7), as its own row.** `send_prompt`
+/// is one tool at two tiers: a prompt is `drive`, a key alone is `answer`.
+/// The matrix row above pins the prompt; this pins the key, for every
+/// caller, plus the two refusals only an answer grant can meet — `C-c`, and
+/// a prompt.
+#[tokio::test]
+async fn an_answer_grant_presses_a_key_and_nothing_wider() {
+    let fx = fixture();
+    let key = |k: &str| json!({ "session_id": fx.row, "prompt": "", "keys": k });
+    for who in EVERYONE.iter().copied() {
+        let a = call(&fx, who, "send_prompt", key("1")).await;
+        let want = tier(Reach::Answer, who);
+        match want {
+            // The gate let it through; the fixture host has no SSH, so the
+            // pane read (or the press) fails for a reason that is not access.
+            Out::Pass => assert!(!gate_refused(&a), "{who:?} answers: {a:?}"),
+            Out::Gate(c) => {
+                assert_eq!(code(&a), c, "{who:?}: {a:?}");
+                assert!(gate_refused(&a), "{who:?} is refused by the gate: {a:?}");
+            }
+            Out::GateAny(cs) => {
+                assert!(cs.contains(&code(&a)), "{who:?}: {a:?}");
+                assert!(gate_refused(&a), "{who:?} is refused by the gate: {a:?}");
+            }
+            Out::Code(c) => assert_eq!(code(&a), c, "{who:?}: {a:?}"),
+        }
+    }
+    // A watcher is told the level it lacks, and it is `answer`.
+    let w = call(&fx, Who::Watcher, "send_prompt", key("1")).await;
+    assert!(text(&w).contains("answer"), "{w:?}");
+    // C-c interrupts rather than answers: refused before the pane is read.
+    let c = call(&fx, Who::Answerer, "send_prompt", key("C-c")).await;
+    assert_eq!(code(&c), codes::E_FORBIDDEN, "{c:?}");
+    assert!(text(&c).contains("not C-c"), "{c:?}");
+    // The driver keeps C-c: its tier is `drive`, not the answer rule.
+    let d = call(&fx, Who::Driver, "send_prompt", key("C-c")).await;
+    assert!(!text(&d).contains("not C-c"), "{d:?}");
+    // And a prompt is `drive`, which an answer grant is not.
+    let p = call(
+        &fx,
+        Who::Answerer,
+        "send_prompt",
+        json!({ "session_id": fx.row, "prompt": "go" }),
+    )
+    .await;
+    assert_eq!(code(&p), codes::E_FORBIDDEN, "{p:?}");
+    assert!(text(&p).contains("drive"), "{p:?}");
 }
 
 /// The two refusals are different on purpose, and this is the pin: a WATCHER

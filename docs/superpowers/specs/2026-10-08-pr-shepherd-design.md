@@ -1,6 +1,6 @@
 # PR shepherd: design
 
-Status: step 1 built, off until a person grants a rule (2026-10-08).
+Status: steps 1 and 3 built, off until a person grants a rule (2026-10-08).
 Asked for by the owner in the Claude Fleet project ("a Jev-like optimizer
 … Dev can babysit … conflict solving and resolving issues faster").
 
@@ -78,7 +78,7 @@ rule** per project (`pr_shepherd_rules`):
 |---------|------------------------------------------------------------|
 | `watch` | records episodes, sends nothing                            |
 | `nudge` | also sends the fix prompt                                  |
-| `merge` | also merges green PRs through the merge queue (step 3; until then, `nudge`) |
+| `merge` | also merges green PRs through the merge queue (step 3)       |
 
 No row, no shepherd: a project without a rule is never even read. A rule
 can expire (`expires_at`); an expired rule is absent. Only a person writes
@@ -101,16 +101,25 @@ write, and `fleet_health.loops` shows its last run.
    with a *Send fix* button, and per `skipped:budget`. Builds on 6.4's
    `pull_requests` table (#524) instead of reading `sessions.pr_evidence`
    directly. Contract bump through Lane A.
-3. **Merge queue** (`merge` level). Per repository, at most one merge in
-   flight: the oldest PR whose head has every check `success` (none
-   pending, none skipped that is required), `mergeStateStatus = CLEAN`,
-   review not `CHANGES_REQUESTED`, not draft. Merged with
-   `gh pr merge --merge --match-head-commit <sha>` on the session's host,
-   never GitHub auto-merge (with no required checks on `main` it merges
-   without waiting). The next PR is taken only after the others have
-   re-read their merge state against the new base: serialising merges is
-   what stops one merge from making every other PR conflict and then
-   another merge landing before they recover.
+3. **Merge queue** (`merge` level, built: `service/pr_shepherd/merge.rs`,
+   migration 145 `pr_shepherd_merges`). Per project, at most one merge per
+   `MERGE_SPACING_SECS` (180 s), lowest PR number first, among PRs whose
+   stored reading is open, not draft, `mergeStateStatus = CLEAN`, review
+   not `CHANGES_REQUESTED`, at least one check and none pending or
+   failing, and no unpushed local commits. Right before merging, the
+   session's host asks GitHub again (`gh pr view`), and the merge goes
+   ahead only if that live answer agrees on all of it and on the head
+   commit. Then `gh pr merge --merge --match-head-commit <sha>`, so a push
+   in between makes GitHub refuse. Never GitHub auto-merge (with no
+   required checks on `main` it merges without waiting). A merge or a
+   failed attempt is final for that head; a live refusal (`skipped:<why>`)
+   is retried after one probe period and does not count as the project's
+   last merge. The spacing gives GitHub time to recompute the other PRs
+   against the new base, and the nudges time to fix the ones that now
+   conflict, before the next merge lands. Not covered: two PRs that are
+   green apart and broken together, since CI is not re-run on the merged
+   result; a strict mode that requires each head to contain the current
+   base is a possible follow-up.
 4. **Jev `pr_triage`, shadow.** A closed-set question per red check:
    `fix_in_pr | regenerate | merge_base | flaky_rerun | not_this_pr |
    needs_person`, recorded through the decision envelope

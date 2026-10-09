@@ -16,8 +16,14 @@ describe('rail', () => {
     ]);
   });
 
-  it('hides every item whose step has not landed', () => {
-    expect(visibleRailItems().map((i) => i.id)).toEqual(['control', 'inbox', 'sessions', 'work', 'accounts', 'toolkit', 'settings']);
+  it('shows every item whose step has landed (Automation since 8.4)', () => {
+    expect(visibleRailItems().map((i) => i.id)).toEqual(['control', 'inbox', 'sessions', 'work', 'automation', 'accounts', 'toolkit', 'settings']);
+    expect(visibleRailItems([...RAIL_ITEMS.slice(0, 4), { ...RAIL_ITEMS[4], landed: false }]).map((i) => i.id)).toEqual([
+      'control',
+      'inbox',
+      'sessions',
+      'work',
+    ]);
   });
 
   it('names only shortcuts the registry has', () => {
@@ -34,5 +40,6 @@ describe('rail', () => {
     expect(currentRailItem('session', 'inbox')).toBe('inbox');
     expect(currentRailItem('files', 'inbox')).toBe('inbox');
     expect(currentRailItem('control', 'work')).toBe('control');
+    expect(currentRailItem('automation', 'sessions')).toBe('automation');
   });
 });

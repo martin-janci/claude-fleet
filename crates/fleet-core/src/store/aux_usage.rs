@@ -13,8 +13,16 @@ pub const AUX_ORIGIN_SUMMARY: &str = "summary";
 /// [`NewAuxUsage::origin`] of a commit message drafted from a session's
 /// staged diff (Orbit Fleet 5.12).
 pub const AUX_ORIGIN_COMMIT_MESSAGE: &str = "commit_message";
+/// [`NewAuxUsage::origin`] of a finished mission's release note (redesign
+/// 9.11).
+pub const AUX_ORIGIN_RELEASE_NOTE: &str = "release_note";
+/// [`NewAuxUsage::origin`] of Today's morning brief (redesign 9.11).
+pub const AUX_ORIGIN_MORNING_BRIEF: &str = "morning_brief";
 /// [`NewAuxUsage::origin`] of a brief drafted from a ticket (redesign 6.10).
 pub const AUX_ORIGIN_BRIEF: &str = "brief";
+/// [`NewAuxUsage::origin`] of a watcher's "Since 13:20" summary of a
+/// session (Orbit Fleet 11.11).
+pub const AUX_ORIGIN_WATCH_SUMMARY: &str = "watch_summary";
 
 /// One run to book.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

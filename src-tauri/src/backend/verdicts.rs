@@ -398,6 +398,11 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::Routed { tool: "work_link" },
     ),
     ("pause_all_missions", Verdict::Routed { tool: "work_link" }),
+    (
+        "mission_release_note",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("today_brief", Verdict::Routed { tool: "work_link" }),
     // Work graph M3.1: trackers and their credentials are fleet
     // administration. The hub's `work_admin` is master-only, and a paired
     // desktop is a client, never the master (review C17).
@@ -513,6 +518,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("list_people", Verdict::Routed { tool: "org_admin" }),
     ("rename_person", Verdict::Routed { tool: "org_admin" }),
     ("disable_person", Verdict::Routed { tool: "org_admin" }),
+    (
+        "session_summary_since",
+        Verdict::Routed {
+            tool: "session_summary_since",
+        },
+    ),
     (
         "session_conversation",
         Verdict::Routed {
@@ -725,6 +736,11 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "remove_download",
         },
     ),
+    // Control's Library (9.7) is indexed on the machine that owns the
+    // fleet, the hub when paired, beside the downloads; one tool by action.
+    ("list_library", Verdict::Routed { tool: "library" }),
+    ("add_library_items", Verdict::Routed { tool: "library" }),
+    ("remove_library_item", Verdict::Routed { tool: "library" }),
     // Saving reads the row through `list_downloads` (refusing a file that
     // is not ready or not this client's), then streams the bytes from the
     // hub's `GET /downloads/<id>` into the file this machine's save dialog
@@ -840,6 +856,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     ("list_pull_requests", Verdict::Routed { tool: "prs" }),
+    // Start rules (Orbit Fleet 8.11): the hub decides and tallies its own
+    // starts, so its rules are the ones that count.
+    (
+        "start_rules",
+        Verdict::Routed {
+            tool: "start_rules",
+        },
+    ),
     (
         "session_presence",
         Verdict::Routed {
@@ -1311,6 +1335,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "operator_status",
         Verdict::Routed {
             tool: "operator_status",
+        },
+    ),
+    // Redesign step 9.9 (Jev K2): the hub decides where a Control message
+    // goes, since it owns the fleet and the decision envelope.
+    (
+        "control_route_propose",
+        Verdict::Routed {
+            tool: "control_route",
+        },
+    ),
+    (
+        "control_route_follow",
+        Verdict::Routed {
+            tool: "control_route",
         },
     ),
     // ── the pairing itself — about THIS process, either way ─────────────────

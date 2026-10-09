@@ -1966,6 +1966,86 @@
         "level": "none"
       },
       "default": "off",
+      "help": "Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests.",
+      "key": "decide.jev.control_route",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: Control routing",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support.",
+      "key": "decide.jev.summary_check",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: summary check",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: check first"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
       "help": "Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it.",
       "key": "decide.jev.turn_outcome",
       "kind": {
@@ -2498,7 +2578,7 @@
       "danger": {
         "level": "none"
       },
-      "default": "needs_you,failed,routine_failed",
+      "default": "needs_you,failed,blocked,routine_failed",
       "help": "The session states the phone shows a notification for.",
       "key": "notify.phone",
       "kind": {
@@ -2538,7 +2618,7 @@
       "restart": "none",
       "tags": [],
       "unit": "none",
-      "value": "needs_you,failed,routine_failed"
+      "value": "needs_you,failed,blocked,routine_failed"
     },
     {
       "ai": "suggest",
@@ -3383,6 +3463,16 @@
             {
               "hint": "Marks a proposed task that may repeat an existing one; you still merge or keep both.",
               "key": "decide.jev.duplicate",
+              "type": "field"
+            },
+            {
+              "hint": "Says which mission or session a message in Control is about; you can change it. A short message gets a question instead.",
+              "key": "decide.jev.control_route",
+              "type": "field"
+            },
+            {
+              "hint": "Checks a watcher's summary of a session against its transcript; in assist a summary it cannot confirm is not shown.",
+              "key": "decide.jev.summary_check",
               "type": "field"
             },
             {
