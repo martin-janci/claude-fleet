@@ -2,7 +2,7 @@
 // note and Today's morning brief. Both are on demand: opening Today reads the
 // brief drafted last and runs nothing; only Refresh (or Draft, the first
 // time) asks the hub to write a new one. Each run is booked on the hub with
-// its origin (`release_note`, `brief`).
+// its origin (`release_note`, `morning_brief`).
 import { invokeCmd, type Result } from './result';
 import { localMidnight } from './today';
 

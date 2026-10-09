@@ -63,18 +63,18 @@
   {#if showWork}
     {#if detail.notes}
       <section>
-        <h4>Brief</h4>
+        <h3>Brief</h3>
         <p class="text" data-testid="task-notes">{detail.notes}</p>
       </section>
     {/if}
 
     <section data-testid="task-subtasks">
-      <h4>
+      <h3>
         Subtasks <span class="n">{detail.subtasks?.length ?? 0}</span>
         {#if canAddSubtask}
           <button class="btn btn--quiet" type="button" data-testid="task-add-subtask" onclick={() => (adding = true)}>+ Add subtask</button>
         {/if}
-      </h4>
+      </h3>
       {#if adding}
         <input
           class="add"
@@ -120,7 +120,7 @@
 
     {#if (detail.proposals?.length ?? 0) > 0 || (detail.rejected_proposals?.length ?? 0) > 0}
       <section data-testid="task-proposals">
-        <h4>Proposals <span class="n">{detail.proposals?.length ?? 0}</span><span class="hint">agents propose, you decide</span></h4>
+        <h3>Proposals <span class="n">{detail.proposals?.length ?? 0}</span><span class="hint">agents propose, you decide</span></h3>
         {#each detail.proposals ?? [] as p (p.item_id)}
           <div class="prop-card" data-testid="task-proposal">
             <div><strong>{p.title}</strong> {#if p.key}<span class="key">{p.key}</span>{/if}</div>
@@ -205,7 +205,7 @@
 
     {#if (detail.jobs?.length ?? 0) > 0 || detail.job_result}
       <section data-testid="task-jobs">
-        <h4>Delegated jobs <span class="n">{detail.jobs?.length ?? 0}</span></h4>
+        <h3>Delegated jobs <span class="n">{detail.jobs?.length ?? 0}</span></h3>
         {#if detail.job_result}
           <p class="text result" data-testid="task-own-job-result">{detail.job_result}</p>
         {/if}
@@ -225,7 +225,7 @@
 
   {#if showSteps}
     <section data-testid="task-steps">
-      <h4>Agent steps <span class="hint">from Claude Code tasks · per the agent, not proof of done</span></h4>
+      <h3>Agent steps <span class="hint">from Claude Code tasks · per the agent, not proof of done</span></h3>
       {#each detail.steps ?? [] as g, i (g.claude_session_id)}
         {@const steps = g.steps ?? []}
         <details open={i === 0}>
@@ -253,7 +253,7 @@
     gap: 12px;
     margin: 0.6rem 0;
   }
-  h4 {
+  h3 {
     display: flex;
     gap: 6px;
     align-items: center;
@@ -263,7 +263,7 @@
     letter-spacing: 0.06em;
     color: var(--fg-muted);
   }
-  h4 .btn {
+  h3 .btn {
     margin-left: auto;
     text-transform: none;
     letter-spacing: 0;

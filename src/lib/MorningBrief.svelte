@@ -2,7 +2,7 @@
   Redesign step 9.11: Today's morning brief, an LLM draft of today's digest.
   It shows the brief drafted last with its time; it never drafts on open.
   Draft (the first time) and Refresh ask the hub for a new one, which runs
-  `claude -p` on a host of the brief's org and books the run as `brief`.
+  `claude -p` on a host of the brief's org and books the run as `morning_brief`.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';

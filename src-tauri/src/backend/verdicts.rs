@@ -661,6 +661,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "lost_target",
+        Verdict::Routed {
+            tool: "lost_target",
+        },
+    ),
+    (
+        "place_transcript",
+        Verdict::Routed {
+            tool: "place_transcript",
+        },
+    ),
+    (
         "dismiss_ghost_session",
         Verdict::Routed {
             tool: "dismiss_ghost_session",

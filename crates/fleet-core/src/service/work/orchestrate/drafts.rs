@@ -15,7 +15,7 @@
 //!   that org's most recent session.
 //! * **Booked with its origin.** Every run is an `aux_usage` row,
 //!   [`crate::store::AUX_ORIGIN_RELEASE_NOTE`] or
-//!   [`crate::store::AUX_ORIGIN_BRIEF`], with its cost when `claude` reported
+//!   [`crate::store::AUX_ORIGIN_MORNING_BRIEF`], with its cost when `claude` reported
 //!   one (redesign 8.2).
 //! * **Locked down and bounded.** The run is the planner's `claude -p`
 //!   ([`super::planner::planner_script`]: no tools, no MCP, no hooks); its
@@ -443,7 +443,7 @@ pub async fn brief(args: &WorkLinkArgs, deps: &Deps, scope: &ViewScope) -> Resul
         settings::get_string_for(&s, settings::WORK_SUMMARY_MODEL, org_id)
     };
     let run = Run {
-        origin: crate::store::AUX_ORIGIN_BRIEF,
+        origin: crate::store::AUX_ORIGIN_MORNING_BRIEF,
         host: &host,
         model: &model,
         mission_id: None,

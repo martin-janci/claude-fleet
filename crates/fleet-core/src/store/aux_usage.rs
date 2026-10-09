@@ -17,6 +17,8 @@ pub const AUX_ORIGIN_COMMIT_MESSAGE: &str = "commit_message";
 /// 9.11).
 pub const AUX_ORIGIN_RELEASE_NOTE: &str = "release_note";
 /// [`NewAuxUsage::origin`] of Today's morning brief (redesign 9.11).
+pub const AUX_ORIGIN_MORNING_BRIEF: &str = "morning_brief";
+/// [`NewAuxUsage::origin`] of a brief drafted from a ticket (redesign 6.10).
 pub const AUX_ORIGIN_BRIEF: &str = "brief";
 
 /// One run to book.

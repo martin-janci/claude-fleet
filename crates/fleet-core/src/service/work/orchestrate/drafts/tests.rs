@@ -247,7 +247,7 @@ fn every_draft_is_booked_with_its_origin() {
     book(
         &deps,
         &Run {
-            origin: crate::store::AUX_ORIGIN_BRIEF,
+            origin: crate::store::AUX_ORIGIN_MORNING_BRIEF,
             host: "venus",
             model: "haiku",
             mission_id: None,
@@ -269,7 +269,7 @@ fn every_draft_is_booked_with_its_origin() {
     let briefs: i64 = s
         .conn_for_test()
         .query_row(
-            "SELECT COUNT(*) FROM aux_usage WHERE origin = 'brief' AND mission_id IS NULL",
+            "SELECT COUNT(*) FROM aux_usage WHERE origin = 'morning_brief' AND mission_id IS NULL",
             [],
             |r| r.get(0),
         )

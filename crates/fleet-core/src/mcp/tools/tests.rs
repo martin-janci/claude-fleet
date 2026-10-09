@@ -10209,6 +10209,9 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("capture_session", &["Read"]),
     ("dismiss_ghost_session", &["Drive"]),
     ("adopt_session", &["Own"]),
+    // A pane's proposal is Adopt's own question, at Adopt's tier; a found
+    // conversation has no row (the person fence decides).
+    ("lost_target", &["Own"]),
     // Its `requester_session_id` is `dispatch_task`'s by another name: the
     // new row is stamped `parent_session_id`, so it shows in that session's
     // Conversations panel, and `inherit_worker_work` copies its work links.
@@ -10296,6 +10299,11 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
 /// reason. A row here is a claim a reviewer can check, not an exemption:
 /// each one has somewhere else the rule is applied.
 pub(super) const NO_PER_ROW_GATE: &[(&str, &str)] = &[
+    (
+        "place_transcript",
+        "a found conversation has no row to gate: `require_host` and the \
+         person fence on past conversations (`fence_lost_conversation`) decide",
+    ),
     (
         "list_sessions",
         "choke point 1 (T6): it FILTERS a page through `sees_session_row` \
