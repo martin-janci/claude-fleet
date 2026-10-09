@@ -91,7 +91,9 @@ Claude Code has two voice modes: `hold` (hold space to record) and `tap`
   (`Expired`, found lazily by the next capture). `/voice/source` closes a
   replaced socket with 4001 "microphone claimed elsewhere" and an expired one
   with 4002 "microphone idle — turn 🎤 on again"; it pings the device every
-  20 s so a proxy's idle timeout does not drop a claim. The owner's own
+  20 s so a proxy's idle timeout does not drop a claim. Each ping also
+  re-checks the caller: a device revoked or re-bound, or one whose grant no
+  longer drives the session, is closed with 4003 (review r04 K3). The owner's own
   release is not a revocation.
 - A claim ends on the desktop's `voice_release`, on its source going away
   (websocket closed, desktop detached), or after `voice.claim_ttl_secs`
