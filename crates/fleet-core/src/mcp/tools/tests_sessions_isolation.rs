@@ -377,6 +377,8 @@ const NEVER_A_HOST_TOKENS: &[&str] = &[
     "session_presence",
     "list_downloads",
     "library",
+    // The Automation screen's Runs list (Orbit Fleet 8.3): a person's.
+    "runs",
 ];
 
 /// The one tool a per-host token is the only caller of (`Access::HostToken`,
@@ -791,6 +793,8 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "list_downloads" => fx.t.list_downloads(ext, p!()).await,
         // ---- library.rs ---------------------------------------------------
         "library" => fx.t.library(ext, p!()).await,
+        // ---- runs.rs ------------------------------------------------------
+        "runs" => fx.t.runs(ext, p!()).await,
         // ---- fleet.rs -----------------------------------------------------
         "fleet_health" => fx.t.fleet_health(ext).await,
         "usage_report" => fx.t.usage_report(ext, p!()).await,
@@ -1607,6 +1611,19 @@ async fn run_matrix() {
     };
     m.row("list_downloads", |_, _| json!({}), no_host_token)
         .await;
+    // `runs` (Orbit Fleet 8.3) FILTERS too (`tests::NO_PER_ROW_GATE`): its
+    // union is cut in SQL by `service::runs::reach`, so a run in a session
+    // this caller may not see is not listed, and naming that session finds
+    // an empty page rather than a refusal. The leak check over both shapes is
+    // the checking of that claim. Never a per-host token's.
+    m.row("runs", |_, _| json!({ "action": "list" }), no_host_token)
+        .await;
+    m.row(
+        "runs",
+        |fx, _| json!({ "action": "list", "session_id": fx.row }),
+        no_host_token,
+    )
+    .await;
     m.row(
         "list_downloads",
         |fx, _| json!({ "session_id": fx.row }),

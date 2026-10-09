@@ -867,6 +867,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "list_runs",
+            "runs",
+            json!({ "action": "list", "since": 5, "kind": "jev", "limit": 20 }),
+            r#"{"runs":[{"id":"jev:1","source":"jev","kind":"jev","owner":"status_map","started_at":6,"outcome":"ok","session_ids":[]}],"total":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::runs::routed::list_runs(
+                    b,
+                    s,
+                    fleet_core::service::runs::RunsArgs {
+                        since: Some(5),
+                        kind: Some("jev".into()),
+                        limit: Some(20),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "get_form",
             "ask",
             json!({ "get": "f_a" }),
@@ -6245,6 +6264,7 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/updates.rs",
         include_str!("../commands/updates.rs"),
     ),
+    ("commands/runs.rs", include_str!("../commands/runs.rs")),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",

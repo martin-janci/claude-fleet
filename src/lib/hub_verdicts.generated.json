@@ -178,6 +178,7 @@
     "list_people",
     "list_projects",
     "list_pull_requests",
+    "list_runs",
     "list_sessions",
     "list_tasks",
     "list_trackers",

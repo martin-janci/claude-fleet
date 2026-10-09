@@ -22,4 +22,4 @@ CREATE TABLE IF NOT EXISTS library_items (
 );
 CREATE INDEX IF NOT EXISTS idx_library_items_at ON library_items(at);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (141);
+INSERT OR IGNORE INTO schema_version (version) VALUES (142);

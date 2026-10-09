@@ -1,6 +1,6 @@
 //! Control's Library (Orbit Fleet redesign step 9.7): the files a person put
 //! on a host, by the Library's Upload… or as a prompt's attachment
-//! (`library_items`, migration 141). The Library shows them beside the
+//! (`library_items`, migration 142). The Library shows them beside the
 //! downloads (`service::downloads`) and the repos the sessions work in; those
 //! two already have their own rows and are read from there, not copied here.
 //!

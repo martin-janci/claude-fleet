@@ -1,4 +1,4 @@
-//! Control's Library (migration 141): the files a person put on a host, by
+//! Control's Library (migration 142): the files a person put on a host, by
 //! Upload or as a prompt's attachment. Who sees a row is
 //! `service::library`'s; this is the rows.
 

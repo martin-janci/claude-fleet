@@ -882,6 +882,24 @@ Index by area (names only; see the reference for details):
   gone. A row is served to whoever may see the session that opened it; a PR
   whose session is gone only to the hub's own reader or the person of a
   one-person hub. A read: nothing here merges or closes a PR.
+- **Runs** — `runs`, by `action` (`list` today; Orbit Fleet 8.3). One
+  newest-first list of everything that ran on the fleet's behalf: dispatched
+  tasks, a mission's steps and brakes, Jev's decisions, fleet's own
+  `claude -p` runs (the planner, a summary) and routine fires. `list { since?, until?, kind?,
+  outcome?, org_id?, mission_id?, session_id?, routine_id?, limit? (≤ 200,
+  50), offset? }`
+  answers `{ runs, total }`; each run carries `id` (`<source>:<rowid>`),
+  `kind` (`operator` | `task` | `mission` | `jev` | `planner` | `summary` |
+  `routine`),
+  `owner`, `started_at`, `ended_at?`, `duration_ms?`, `outcome` (`ok` |
+  `failed` | `needs_person` | `nothing_to_do` | `running`), `error?`,
+  `cost_micros?`, `model?`, `host?`, `org_id?`, `mission_id?`,
+  `session_ids`, `summary?` and `routine_id?`. Jev rows are only the
+  decisions that called the provider. The list is cut to the caller's view scope
+  (`service::runs`): a task needs every session it names to be visible, a
+  mission's rows need the mission, a routine's fires the routine, and runs that belong to no session or
+  mission need whole-fleet spend. A person's, never served to a per-host
+  token.
 - **Chat forms** — `ask`. Chat forms: open a `fleet.form/1` form in your own session's chat and wait for a person's answers; the person's side lists, gets, answers and declines. See `docs/forms.md`.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
