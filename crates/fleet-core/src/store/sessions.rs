@@ -1102,6 +1102,25 @@ impl Store {
         Ok(())
     }
 
+    /// Drop the account link of a session on the HOST's own login
+    /// (`claude_profile IS NULL`), after its `claude` was relaunched. A
+    /// relaunched `claude` reads whatever login the host holds now (a `/login`
+    /// as another account since the pane started moves it), while reconcile
+    /// keeps an existing link forever; an empty one it fills from the host's
+    /// current account on the next pass. A profile session is left alone: its
+    /// link follows the profile's login. Emits `session_updated` on a change.
+    pub fn clear_host_login_account(&self, id: i64) -> Result<(), rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET account_uuid = NULL \
+             WHERE id = ?1 AND claude_profile IS NULL AND account_uuid IS NOT NULL",
+            [id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(())
+    }
+
     /// Record the model a session launches with (`None` = the host's
     /// default). Not client-visible, so no event.
     pub fn set_session_launch_model(

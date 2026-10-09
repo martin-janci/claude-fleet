@@ -2585,6 +2585,148 @@ async fn reconcile_never_gives_a_profile_session_the_hosts_account() {
     );
 }
 
+/// An `accounts` row for `uuid` (the sessions' link is a foreign key).
+fn seed_account(s: &Store, uuid: &str) {
+    s.upsert_account(&crate::store::AccountRow {
+        uuid: uuid.into(),
+        email: None,
+        display_name: None,
+        organization_name: None,
+        organization_uuid: None,
+        seat_tier: None,
+        last_seen_at: None,
+        nickname: None,
+        has_extra_usage: false,
+    })
+    .unwrap();
+}
+
+/// Review r05 F1: reconcile keeps a running session's account (the host's
+/// `/login` as someone else does not move a `claude` already running), but a
+/// relaunch reads the host's login afresh, so after a restart the row bills
+/// the account the host holds NOW, not the one it was first seen under.
+#[tokio::test]
+async fn a_relaunched_host_login_session_takes_the_hosts_current_account() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("h").unwrap();
+    let first = remote_account_deps(
+        vec![tmux_session("dev"), tmux_session("prof")],
+        Some(oauth_account("u1", "one@x.com")),
+    );
+    reconcile_sessions_with(&store, &first).await.unwrap();
+    let (dev, prof) = {
+        let s = store.lock().unwrap();
+        let dev = s.get_session("dev", "h").unwrap().unwrap().id;
+        let prof = s.get_session("prof", "h").unwrap().unwrap().id;
+        s.set_session_profile(prof, Some("work")).unwrap();
+        seed_account(&s, "u-work");
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET account_uuid = 'u-work' WHERE id = ?1",
+                [prof],
+            )
+            .unwrap();
+        (dev, prof)
+    };
+    // The host is relinked to u2; the running session keeps u1.
+    let second = remote_account_deps(
+        vec![tmux_session("dev"), tmux_session("prof")],
+        Some(oauth_account("u2", "two@x.com")),
+    );
+    reconcile_sessions_with(&store, &second).await.unwrap();
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .get_session_account("h", "dev")
+            .unwrap()
+            .as_deref(),
+        Some("u1")
+    );
+    // Restarted: the next reconcile attributes it to the host's u2. The
+    // profile session's link follows its profile, not the host.
+    {
+        let s = store.lock().unwrap();
+        super::lifecycle::record_relaunched_login(&s, dev, None).unwrap();
+        super::lifecycle::record_relaunched_login(&s, prof, None).unwrap();
+    }
+    reconcile_sessions_with(&store, &second).await.unwrap();
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.get_session_account("h", "dev").unwrap().as_deref(),
+        Some("u2")
+    );
+    assert_eq!(
+        s.get_session_account("h", "prof").unwrap().as_deref(),
+        Some("u-work")
+    );
+}
+
+/// Review r05 F2: a restart that switches the profile stores it only once
+/// the relaunch succeeded. A refused repair or a failed respawn leaves the
+/// row's (profile, account) as they were, since the pane still runs the old
+/// login; a successful one stores the profile and drops the old link.
+#[tokio::test]
+async fn a_failed_relaunch_keeps_the_rows_profile_and_account() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        s.upsert_session("dev", "h", None, None, 1, 100, "running", None)
+            .unwrap();
+        let id = s.get_session("dev", "h").unwrap().unwrap().id;
+        s.set_session_profile(id, Some("old")).unwrap();
+        seed_account(&s, "u-old");
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET account_uuid = 'u-old' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        id
+    };
+    let row = |store: &Mutex<Store>| {
+        let s = store.lock().unwrap();
+        let r = s.get_session_by_id(id).unwrap().unwrap();
+        (r.claude_profile, r.account_uuid)
+    };
+    for code in [codes::E_REPAIR_REQUIRED, codes::E_SSH] {
+        let e = super::lifecycle::relaunch_recording_login(
+            &store,
+            Some((id, Some(Some("new".to_string())))),
+            async move { Err(IpcError::new(code, "respawn-pane failed")) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.code, code);
+        assert_eq!(
+            row(&store),
+            (Some("old".to_string()), Some("u-old".to_string())),
+            "{code}"
+        );
+    }
+    super::lifecycle::relaunch_recording_login(
+        &store,
+        Some((id, Some(Some("new".to_string())))),
+        async { Ok(()) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(row(&store), (Some("new".to_string()), None));
+}
+
+/// `restart_session` itself never writes the profile before its relaunch:
+/// the write lives in [`super::lifecycle::relaunch_recording_login`] alone.
+#[test]
+fn restart_session_writes_no_profile_before_the_relaunch() {
+    let src = crate::repo_files::read("crates/fleet-core/src/service/sessions/lifecycle.rs");
+    let start = src.find("pub async fn restart_session(").unwrap();
+    let end = start + src[start..].find("\n}\n").unwrap();
+    let body = &src[start..end];
+    assert!(!body.contains("set_session_profile"), "{body}");
+    assert!(body.contains("relaunch_recording_login("), "{body}");
+}
+
 /// Once the host reports its profiles, a profile session is attributed to
 /// its profile's login, the account row exists for the usage poll, and the
 /// host row lists the profiles; a pass that cannot read them keeps both.

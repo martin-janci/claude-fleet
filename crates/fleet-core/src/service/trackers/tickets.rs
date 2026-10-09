@@ -919,6 +919,78 @@ fn already_running(
     }))
 }
 
+/// Where a start of `key` would land before any host is named: a start rule
+/// (redesign 8.11) first when the caller named no project (`project_id`
+/// `None`), before the key's history and so before Jev is ever asked; else
+/// where this kind of work last ran, a GitHub issue's own repository's
+/// project first, else the newest link with the same key prefix. The
+/// rule that decided, the `(project, host)` (host `""` when unknown) and the
+/// label an "ambiguous" refusal names. Reads only: the mission loop's
+/// over-limit hold asks it too, so it checks the host the start lands on.
+#[allow(clippy::type_complexity)]
+pub(crate) fn seen_place(
+    s: &Store,
+    key: &str,
+    item_org: Option<i64>,
+    project_id: Option<i64>,
+) -> Result<
+    (
+        Option<crate::store::StartRuleRow>,
+        Option<(i64, String)>,
+        String,
+    ),
+    IpcError,
+> {
+    let rule = match project_id {
+        None => crate::service::start_rules::matching(s, item_org, key)?,
+        Some(_) => None,
+    };
+    let (seen, label) = match crate::store::github_ref(key) {
+        _ if rule.is_some() => (
+            rule.as_ref()
+                .map(|r| (r.project_id, r.host_alias.clone().unwrap_or_default())),
+            String::new(),
+        ),
+        Some((repo, _)) => (
+            s.project_for_repo(repo)?.map(|pid| {
+                let host = s.last_host_for_project(pid).ok().flatten();
+                (pid, host.unwrap_or_default())
+            }),
+            repo.to_string(),
+        ),
+        None => {
+            let prefix = key
+                .split_once('-')
+                .map(|(p, _)| p.to_string())
+                .unwrap_or_default();
+            let label = if key.starts_with("asana:") {
+                "this Asana task".to_string()
+            } else {
+                format!("{prefix}-*")
+            };
+            (s.last_place_for_prefix(&prefix)?, label)
+        }
+    };
+    Ok((rule, seen, label))
+}
+
+/// The host a start in `project_id` lands on when none is named: the
+/// [`seen_place`] host when it is this project's, else the host the project
+/// last ran on.
+pub(crate) fn seen_host(
+    s: &Store,
+    seen: Option<(i64, String)>,
+    project_id: i64,
+) -> Result<Option<String>, IpcError> {
+    match seen
+        .filter(|p| p.0 == project_id && !p.1.is_empty())
+        .map(|p| p.1)
+    {
+        Some(h) => Ok(Some(h)),
+        None => Ok(s.last_host_for_project(project_id)?),
+    }
+}
+
 /// Plan where a resolved ticket's start lands. `E_EXISTS` (with the
 /// session) when the key already has a live session — in THIS project for a
 /// multi-repo start, where a live session on the start's branch counts too,
@@ -957,40 +1029,7 @@ pub fn plan_resolved(
     {
         return Err(already_running(&key, row, view, "", "jump to it"));
     }
-    // A start rule (redesign 8.11) decides first, when the caller named no
-    // project: before the key's history, and so before Jev is ever asked.
-    let rule = match args.project_id {
-        None => crate::service::start_rules::matching(&s, item_org, &key)?,
-        Some(_) => None,
-    };
-    // Where this kind of work last ran: a GitHub issue's own repository's
-    // project first, else the newest link with the same key prefix.
-    let (seen, prefix_label) = match crate::store::github_ref(&key) {
-        _ if rule.is_some() => (
-            rule.as_ref()
-                .map(|r| (r.project_id, r.host_alias.clone().unwrap_or_default())),
-            String::new(),
-        ),
-        Some((repo, _)) => (
-            s.project_for_repo(repo)?.map(|pid| {
-                let host = s.last_host_for_project(pid).ok().flatten();
-                (pid, host.unwrap_or_default())
-            }),
-            repo.to_string(),
-        ),
-        None => {
-            let prefix = key
-                .split_once('-')
-                .map(|(p, _)| p.to_string())
-                .unwrap_or_default();
-            let label = if key.starts_with("asana:") {
-                "this Asana task".to_string()
-            } else {
-                format!("{prefix}-*")
-            };
-            (s.last_place_for_prefix(&prefix)?, label)
-        }
-    };
+    let (rule, seen, prefix_label) = seen_place(&s, &key, item_org, args.project_id)?;
     let project_id = match args.project_id.or(seen.as_ref().map(|p| p.0)) {
         Some(pid) => {
             if !s.list_projects()?.iter().any(|p| p.id == pid) {
@@ -1020,11 +1059,7 @@ pub fn plan_resolved(
     let host_alias = match (&args.host_alias, scope.host()) {
         (Some(h), _) => h.clone(),
         (None, Some(h)) => h.to_string(),
-        (None, None) => match seen
-            .filter(|p| p.0 == project_id && !p.1.is_empty())
-            .map(|p| p.1)
-            .or(s.last_host_for_project(project_id)?)
-        {
+        (None, None) => match seen_host(&s, seen, project_id)? {
             Some(h) => h,
             None => {
                 let hosts: Vec<String> = s

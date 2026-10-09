@@ -1997,6 +1997,11 @@ pub async fn ensure_workspace_with(
             if report.tmux.as_deref() == Some("created") {
                 s.restore_session(sid)?;
             }
+            // A created or respawned pane runs a fresh `claude`, which reads
+            // the host's login as it is NOW (`clear_host_login_account`).
+            if report.tmux.is_some() {
+                crate::service::sessions::record_relaunched_login(&s, sid, None)?;
+            }
             if !report.actions.is_empty() {
                 if let Err(e) =
                     s.insert_session_event(sid, EVENT_REPAIRED, Some(&event_detail(&report)))
@@ -3502,6 +3507,29 @@ mod tests {
         (Mutex::new(s), sid, pid)
     }
 
+    /// Link session `sid` to a seeded account `u1`.
+    fn link_account(store: &Mutex<Store>, sid: i64) {
+        let s = store.lock().unwrap();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "u1".into(),
+            email: None,
+            display_name: None,
+            organization_name: None,
+            organization_uuid: None,
+            seat_tier: None,
+            last_seen_at: None,
+            nickname: None,
+            has_extra_usage: false,
+        })
+        .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET account_uuid = 'u1' WHERE id = ?1",
+                [sid],
+            )
+            .unwrap();
+    }
+
     fn spec_with_ids(sid: i64, pid: i64) -> WorkspaceSpec {
         let mut s = spec(true);
         s.session_id = Some(sid);
@@ -3512,6 +3540,7 @@ mod tests {
     #[tokio::test]
     async fn healthy_workspace_runs_one_probe_and_writes_nothing() {
         let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        link_account(&store, sid);
         let exec = FakeExec::new(vec![ok(HEALTHY_OUT)]);
         let rep = ensure_workspace(
             &spec_with_ids(sid, pid),
@@ -3531,11 +3560,18 @@ mod tests {
         let s = store.lock().unwrap();
         assert!(s.list_session_events(sid, 10).unwrap().is_empty());
         assert!(!rep.worktree_row_updated);
+        let row = s.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(
+            row.account_uuid.as_deref(),
+            Some("u1"),
+            "no pane, no relink"
+        );
     }
 
     #[tokio::test]
     async fn dir_deleted_end_to_end_prunes_adds_verifies_respawns_and_records() {
         let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        link_account(&store, sid);
         let exec = FakeExec::new(vec![
             ok(DIR_GONE_OUT),             // probe
             ok("outcome=branch_local\n"), // git steps
@@ -3588,6 +3624,9 @@ mod tests {
         let row = s.get_session_by_id(sid).unwrap().unwrap();
         assert_eq!(row.status, "running");
         assert!(row.worktree_id.is_some());
+        // Review r05 F1: the respawned `claude` reads the host's login
+        // afresh, so the row's old account link is dropped for reconcile.
+        assert_eq!(row.account_uuid, None);
     }
 
     #[tokio::test]
