@@ -87,7 +87,7 @@
     padding: 0.65rem 0.8rem;
     border: 1px solid var(--border);
     border-left: 3px solid var(--tone);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: color-mix(in srgb, var(--tone) 6%, var(--bg-pane));
   }
   .done { --tone: var(--usage-ok); }
@@ -103,7 +103,7 @@
   .summary { font-size: 0.92em; }
   h6 {
     margin: 0 0 0.2rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -122,16 +122,16 @@
   .ghost {
     background: none;
     border: 1px solid var(--control-border);
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm, var(--radius-sm));
     color: var(--control-fg-quiet, var(--fg-muted));
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0 0.4rem;
     cursor: pointer;
   }
   .ghost:hover { color: var(--fg); }
   .raw summary {
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     font-family: var(--mono, ui-monospace, monospace);
   }
@@ -140,7 +140,7 @@
     margin: 0.2rem 0 0;
     max-height: 18rem;
     overflow: auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     white-space: pre-wrap;
     word-break: break-word;
   }

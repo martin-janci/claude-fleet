@@ -1045,8 +1045,8 @@
     border: 1px solid var(--border);
     color: var(--fg-muted);
     padding: 0.25rem 0.5rem;
-    border-radius: 5px;
-    font-size: 0.9rem;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
     line-height: 1;
     cursor: pointer;
     min-width: var(--control-h);
@@ -1059,7 +1059,7 @@
   .icon-btn:disabled { opacity: 0.6; cursor: progress; }
   .icon-btn.small {
     padding: 0.1rem 0.35rem;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     min-width: var(--control-h);
     border-color: transparent;
   }
@@ -1075,39 +1075,39 @@
   .sess-row.stuck { background: color-mix(in srgb, var(--danger) 6%, transparent); }
 
   .host-badge {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     border: 1px solid var(--border);
     padding: 0.05rem 0.3rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     flex-shrink: 0;
   }
 
   .related-badge {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 0.05rem 0.3rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     flex-shrink: 0;
   }
 
-  .review-badge { font-size: 11px; margin-left: 0.2rem; }
-  .shell-badge { font-size: 11px; margin-left: 0.2rem; color: var(--fg-muted); }
-  .bg-badge { font-size: 11px; margin-left: 0.2rem; }
+  .review-badge { font-size: var(--text-2xs); margin-left: 0.2rem; }
+  .shell-badge { font-size: var(--text-2xs); margin-left: 0.2rem; color: var(--fg-muted); }
+  .bg-badge { font-size: var(--text-2xs); margin-left: 0.2rem; }
 
-  .err { color: var(--danger); font-size: 0.8rem; padding: 0.2rem 0; margin: 0; }
-  .inline-err { padding-left: 1.6rem; font-size: 11px; }
+  .err { color: var(--danger); font-size: var(--text-2xs); padding: 0.2rem 0; margin: 0; }
+  .inline-err { padding-left: 1.6rem; font-size: var(--text-2xs); }
 
   .sess-row {
     display: flex;
     align-items: center;
     gap: 0.4rem;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     padding: 0.22rem 0.4rem 0.22rem 1.4rem;
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
     user-select: none;
   }
@@ -1181,10 +1181,10 @@
      orphan a square, ghost a dashed ring. */
   .status-dot.status-running { background: var(--status-done); }
   .status-dot.status-frozen { background: transparent; box-shadow: inset 0 0 0 1.5px var(--status-working); }
-  .status-dot.status-orphan { background: var(--status-failed); border-radius: 1px; }
+  .status-dot.status-orphan { background: var(--status-failed); border-radius: var(--radius-xs); }
   .status-dot.status-ghost { background: transparent; border: 1.5px dashed var(--status-idle); box-sizing: border-box; opacity: 0.8; }
   .lost-at {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     opacity: 0.6;
     margin-left: auto;
     padding-right: 0.25rem;
@@ -1206,24 +1206,24 @@
   .lw-dot.tone-conflict,
   .lw-dot.tone-error { background: var(--usage-crit); }
   .lw-dot.tone-idle { border: 1.5px solid var(--fg-muted); box-sizing: border-box; }
-  .lw-changes { font-size: 11px; color: var(--usage-warn); }
+  .lw-changes { font-size: var(--text-2xs); color: var(--usage-warn); }
   .privacy-chip {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 0.05rem 0.28rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     border: 1px solid color-mix(in srgb, var(--fg-muted) 35%, transparent);
     color: var(--fg-muted);
     flex-shrink: 0;
     white-space: nowrap;
   }
   .form-chip {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 0.05rem 0.28rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     border: 1px solid color-mix(in srgb, var(--usage-warn) 45%, transparent);
     color: var(--usage-warn);
     flex-shrink: 0;
@@ -1235,7 +1235,7 @@
     flex-direction: column;
     gap: 0.3rem;
     width: 100%;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .why-link {
     display: flex;
@@ -1270,7 +1270,7 @@
     flex-wrap: wrap;
     gap: 0.3rem;
     align-items: center;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--status-waiting);
   }
   .work-menu {
@@ -1283,11 +1283,11 @@
   .work-input {
     flex: 1 1 8rem;
     min-width: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.1rem 0.3rem;
   }
   .work-btn {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.05rem 0.35rem;
     white-space: nowrap;
   }
@@ -1300,7 +1300,7 @@
     gap: 0.4rem;
     min-width: 0;
     padding-left: 0.85rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .blocked-line {
@@ -1309,7 +1309,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     padding-left: 0.85rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .starting-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1323,17 +1323,17 @@
   .sess-row.compact.selected .chips { display: contents; }
   .sess-row.compact .sess-name {
     font-family: var(--font-sans);
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
   }
   .sess-age {
     flex-shrink: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     font-variant-numeric: tabular-nums;
   }
   .sess-name {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1342,13 +1342,13 @@
 
   .rename-input {
     flex: 1;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     padding: 0.1rem 0.3rem;
     border: 1px solid var(--accent);
     background: var(--bg);
     color: var(--fg);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     outline: none;
     min-width: 0;
   }

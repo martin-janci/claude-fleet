@@ -172,7 +172,7 @@
 
 <style>
   .empty {
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .group {
@@ -181,7 +181,7 @@
   }
   h5 {
     margin: 0 0 0.35rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -218,7 +218,7 @@
   }
   .name {
     font-weight: 600;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     background: none;
     border: none;
     padding: 0;
@@ -231,14 +231,14 @@
     text-decoration: underline dotted;
   }
   .key {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .diff {
     display: flex;
     gap: 0.4rem;
     align-items: baseline;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     margin-top: 0.15rem;
     overflow-wrap: anywhere;
   }
@@ -253,7 +253,7 @@
   .meta,
   .note {
     margin: 0.2rem 0 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .meta {
     color: var(--fg-muted);

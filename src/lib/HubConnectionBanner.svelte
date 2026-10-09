@@ -89,7 +89,7 @@
     padding: 0.35rem 0.8rem;
     background: var(--waiting-faint);
     color: var(--fg);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     border-bottom: 1px solid var(--waiting-line);
   }
   .text {
@@ -112,7 +112,7 @@
     background: transparent;
     color: inherit;
     border: 1px solid currentColor;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     padding: 0.1rem 0.5rem;
     font: inherit;
     cursor: pointer;

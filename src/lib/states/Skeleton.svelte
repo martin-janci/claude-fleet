@@ -43,13 +43,13 @@
   }
   .bar {
     height: 0.7rem;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg-hover, var(--border));
     animation: pulse 1.6s ease-in-out infinite;
   }
   .slow {
     margin: 0.2rem 0 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   @keyframes pulse {

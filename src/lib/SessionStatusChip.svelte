@@ -37,9 +37,9 @@
 
 <style>
   .claude-chip {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.05rem 0.3rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     border: 1px solid;
     flex-shrink: 0;
     white-space: nowrap;

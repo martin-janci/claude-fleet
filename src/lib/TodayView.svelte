@@ -258,7 +258,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
   }
   header {
     display: flex;
@@ -268,11 +268,11 @@
   }
   h2 {
     margin: 0;
-    font-size: 1rem;
+    font-size: var(--text-md);
   }
   h3 {
     margin: 0.6rem 0 0.2rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
@@ -314,7 +314,7 @@
   .status,
   .meta {
     color: var(--fg-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .status {
     display: inline-flex;

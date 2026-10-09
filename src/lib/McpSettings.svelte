@@ -283,13 +283,13 @@
 <ControlApiTokens {active} />
 
 <style>
-  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
 
   .mcp-field .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     background: var(--bg-sunk);
     padding: 0.1rem 0.4rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -302,14 +302,14 @@
     color: var(--danger);
     border-color: var(--danger);
   }
-  .mcp-config { font-size: 0.8rem; margin-top: 0.3rem; }
+  .mcp-config { font-size: var(--text-2xs); margin-top: 0.3rem; }
   .mcp-config summary { cursor: pointer; color: var(--fg-muted); }
   .mcp-config pre {
     background: var(--bg-sunk);
     padding: 0.5rem;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     overflow: auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     margin: 0.4rem 0;
   }
   .mcp-config button {
@@ -318,37 +318,37 @@
     color: var(--fg);
     cursor: pointer;
     padding: 0.18rem 0.5rem;
-    font-size: 11px;
-    border-radius: 4px;
+    font-size: var(--text-2xs);
+    border-radius: var(--radius-sm);
   }
   .mcp-config button:hover { border-color: var(--accent); }
 
   .hook-desc {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--fg-muted);
   }
   .hook-ok {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--status-done);
     white-space: pre-wrap;
   }
   .hook-err {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--danger);
   }
 
   .provision-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     margin-top: 0.3rem;
   }
   .provision-table th {
     text-align: left;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
@@ -361,7 +361,7 @@
   }
   .provision-detail {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .provision-note {
     margin-top: 0.4rem;

@@ -43,7 +43,7 @@
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 0.88em;
     padding: 0.08em 0.35em;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: color-mix(in srgb, var(--fg) 8%, transparent);
     color: var(--syn-code);
     overflow-wrap: anywhere;

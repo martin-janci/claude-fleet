@@ -83,12 +83,12 @@
   }
   .title {
     margin: 0;
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
     font-weight: 600;
   }
   .hint {
     color: var(--fg-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

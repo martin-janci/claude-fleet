@@ -897,7 +897,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+    box-shadow: var(--shadow-pop);
   }
   .menu-label,
   .fgroup-label {
@@ -989,7 +989,7 @@
 
   .err {
     color: var(--usage-crit);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0;
     margin: 0;
   }

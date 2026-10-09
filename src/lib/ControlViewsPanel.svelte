@@ -301,7 +301,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg-pane);
-    box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
+    box-shadow: var(--shadow-pop);
     font-size: var(--text-sm);
   }
   .menu-head {

@@ -154,11 +154,11 @@
   }
   h5 {
     margin: 0;
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
   }
   .intro {
     margin: 0;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     word-break: break-all;
   }
@@ -168,7 +168,7 @@
     gap: 0.2rem;
   }
   label {
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
   }
   .check {
     display: flex;
@@ -179,19 +179,19 @@
   select,
   textarea {
     font: inherit;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     padding: 0.25rem 0.4rem;
   }
   textarea {
     font-family: var(--mono);
   }
   .help {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .err {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--usage-crit);
   }
   .row {

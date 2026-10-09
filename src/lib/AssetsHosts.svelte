@@ -96,13 +96,13 @@
   .hosts { display: grid; align-content: start; }
   .head { display: flex; align-items: baseline; gap: 10px; padding: 8px 12px; }
   .sentence { font-weight: 600; }
-  .hint { color: var(--fg-muted); font-size: 12px; }
+  .hint { color: var(--fg-muted); font-size: var(--text-xs); }
   .row { display: grid; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
   .row.selected { background: var(--accent-soft); }
   .row:focus-visible { outline: var(--ring-w, 2px) solid var(--ring, var(--accent)); outline-offset: -2px; }
   .who { display: flex; align-items: center; gap: 8px; }
   .cats { display: flex; flex-wrap: wrap; gap: 6px 14px; }
   .cat { display: inline-flex; align-items: center; gap: 6px; }
-  .role { font-size: 12px; color: var(--fg-muted); }
+  .role { font-size: var(--text-xs); color: var(--fg-muted); }
   .quiet { padding: 12px; color: var(--fg-muted); }
 </style>

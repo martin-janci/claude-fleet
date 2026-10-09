@@ -89,7 +89,7 @@
     box-sizing: border-box;
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg);
     font-size: var(--text-sm);
     padding: 0.4rem 0.55rem;
@@ -107,7 +107,7 @@
     gap: 0.6rem;
     min-height: 24px;
     padding: 0.2rem 0.5rem;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   li.active {
@@ -115,7 +115,7 @@
   }
   .name {
     font-family: var(--mono, ui-monospace, monospace);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg);
     white-space: nowrap;
   }
@@ -124,12 +124,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .hint {
     margin: 0.5rem 0 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
 </style>

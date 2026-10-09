@@ -401,13 +401,13 @@
 
 <style>
   .empty { padding: 14px; color: var(--fg-muted); }
-  .pad { margin: 0; padding: 12px 14px; font-size: 13px; }
+  .pad { margin: 0; padding: 12px 14px; font-size: var(--text-sm); }
   .hosts { list-style: none; display: grid; gap: 4px; }
-  .kv { display: grid; grid-template-columns: 92px 1fr; gap: 5px 10px; margin: 8px 0; font-size: 12px; }
+  .kv { display: grid; grid-template-columns: 92px 1fr; gap: 5px 10px; margin: 8px 0; font-size: var(--text-xs); }
   .kv dt { color: var(--fg-muted); }
   .kv dd { margin: 0; }
-  .commits { margin: 0; padding: 0 0 0 18px; display: grid; gap: 4px; font-size: 12px; }
-  .sha, .mono { font-family: ui-monospace, monospace; font-size: 11.5px; }
+  .commits { margin: 0; padding: 0 0 0 18px; display: grid; gap: 4px; font-size: var(--text-xs); }
+  .sha, .mono { font-family: var(--font-mono); font-size: var(--text-2xs); }
   .groups { list-style: none; display: flex; gap: 4px; flex-wrap: wrap; margin: 0; padding: 0; }
   .sentence { font-weight: 600; }
   .muted { color: var(--fg-muted); }

@@ -320,9 +320,9 @@
     padding: 0.05rem 0;
     background: none;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 1.5;
     color: var(--fg-muted);
     text-align: left;
@@ -364,7 +364,7 @@
   }
   .tick {
     color: var(--status-done);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .verb {
     flex: 0 0 auto;
@@ -378,7 +378,7 @@
   .dur {
     flex: 0 0 auto;
     margin-left: auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     opacity: 0.8;
   }
   .x {
@@ -395,9 +395,9 @@
     margin: 0.2rem 0 0.5rem 1.15rem;
     padding: 0.4rem 0.6rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .detail-error {
     display: flex;
@@ -413,7 +413,7 @@
     padding: 0.3rem 0.6rem;
     border-bottom: 1px solid var(--border);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .path {
     min-width: 0;
@@ -432,8 +432,8 @@
   .tag {
     flex: 0 0 auto;
     padding: 0 6px;
-    border-radius: 9px;
-    font-size: 11px;
+    border-radius: var(--radius-lg);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     border: 1px solid var(--border);
   }
@@ -462,10 +462,10 @@
     overflow: auto;
     overscroll-behavior: contain;
     padding: 0.25rem 0;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 1.5;
   }
   .code .row {
@@ -533,7 +533,7 @@
     gap: 0.4rem;
     padding: 0.08rem 0;
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;
@@ -552,7 +552,7 @@
     align-items: center;
     gap: 0.45rem;
     padding: 0.12rem 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .todos li.completed {
     color: var(--fg-muted);
@@ -599,7 +599,7 @@
     margin: 0.2rem 0 0.4rem 1.15rem;
     color: var(--fg-muted);
     font-style: italic;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .detail .muted {
     margin-left: 0;
@@ -609,7 +609,7 @@
     background: none;
     border: none;
     color: var(--accent);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     cursor: pointer;
   }
   @media (prefers-reduced-motion: reduce) {

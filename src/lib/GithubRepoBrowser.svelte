@@ -194,16 +194,16 @@
 {/if}
 
 <style>
-  .status { font-size: 0.8rem; color: var(--fg-muted); margin: 0; }
-  .err { color: var(--danger); font-size: 0.8rem; margin: 0; white-space: pre-wrap; }
+  .status { font-size: var(--text-2xs); color: var(--fg-muted); margin: 0; }
+  .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; white-space: pre-wrap; }
   .retry {
     align-self: flex-start;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.7rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .repos {
@@ -213,7 +213,7 @@
     max-height: 14rem;
     overflow-y: auto;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm, var(--radius-sm));
   }
   .repo {
     display: flex;
@@ -237,7 +237,7 @@
     font-size: var(--text-xs, 11.5px);
     color: var(--fg-muted);
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     padding: 0 var(--space-2, 8px);
     white-space: nowrap;
   }

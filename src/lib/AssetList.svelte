@@ -245,8 +245,8 @@
 
 <style>
   /* Scrolls inside its one home, the workspace's list body. */
-  .asset-list { font-size: 13px; }
-  .group-header { padding: 8px 10px 4px; color: var(--fg-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .asset-list { font-size: var(--text-sm); }
+  .group-header { padding: 8px 10px 4px; color: var(--fg-muted); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.04em; }
   .count { opacity: 0.7; margin-left: 4px; }
   .row {
     display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box; text-align: left;
@@ -261,8 +261,8 @@
   /* A static row nothing can open yet: no hover that promises a click. */
   .row.static.inert { cursor: default; }
   .row.static.inert:hover { background: none; }
-  .meta { color: var(--fg-muted); font-size: 11px; }
+  .meta { color: var(--fg-muted); font-size: var(--text-2xs); }
   .chips { display: flex; gap: 4px; margin-left: auto; }
-  .link { background: none; border: 0; color: var(--accent); cursor: pointer; font-size: 12px; }
-  .link.toggle { display: block; padding: 4px 10px; font-size: 11px; }
+  .link { background: none; border: 0; color: var(--accent); cursor: pointer; font-size: var(--text-xs); }
+  .link.toggle { display: block; padding: 4px 10px; font-size: var(--text-2xs); }
 </style>

@@ -242,7 +242,7 @@
     font-size: var(--text-xs);
     font-weight: 500;
     padding: 0 5px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg-sunk);
     color: var(--fg-2);
   }

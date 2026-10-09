@@ -1101,12 +1101,12 @@
       grid-template-columns: minmax(0, 1fr);
     }
   }
-  header h3 { margin: 0; font-size: 1rem; }
+  header h3 { margin: 0; font-size: var(--text-md); }
   .close {
     border: none;
     background: transparent;
     color: var(--fg-muted);
-    font-size: 1.2rem;
+    font-size: var(--text-lg);
     cursor: pointer;
     padding: 0 0.4rem;
   }
@@ -1121,19 +1121,19 @@
   }
   .hosts-line h4 {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
   }
-  .hosts-summary { flex: 1; font-size: 0.8rem; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+  .hosts-summary { flex: 1; font-size: var(--text-2xs); color: var(--fg-muted); font-variant-numeric: tabular-nums; }
   .hosts-line kbd {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
 
-  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
 
   .project-base-row { margin-bottom: 0.3rem; }
   .project-base-row .mcp-field { margin-bottom: 0.1rem; }
@@ -1149,7 +1149,7 @@
     flex: 1;
     min-width: 0;
     width: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
   }
   /* Qualified with .hook-desc: the preview span carries both classes, and the
      later `.hook-desc { margin: 0 }` used to win the equal-specificity tie and
@@ -1157,7 +1157,7 @@
   .hook-desc.project-preview {
     display: block;
     margin-left: 6.4rem;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     word-break: break-all;
   }
   /* Same tie, for the invalid-path message: .hook-desc's muted colour used to
@@ -1167,13 +1167,13 @@
     background: transparent;
     border: 1px solid var(--border);
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     padding: 0.2rem 0.4rem;
   }
 
   .hook-desc {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--fg-muted);
   }
 
