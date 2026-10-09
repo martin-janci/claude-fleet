@@ -28,6 +28,7 @@ use super::missions::{changeable, mission_id};
 use super::WorkLinkArgs;
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{codes, lock, IpcError};
+use crate::service::claude_print;
 use crate::service::settings;
 use crate::service::trackers::tickets::StartArgs;
 use crate::service::trackers::TrackerNet;
@@ -1062,6 +1063,11 @@ pub async fn run_planner(
             let (answer, usage) = planner::planner_answer(ran);
             let s = lock(&deps.store)?;
             book_planner_run(&s, m, &host, &model, usage.as_ref(), now_unix());
+            // Claude Code's own "Login expired" is not a malformed answer:
+            // say whose login it is and how to sign it in again.
+            if claude_print::run_signed_out(usage.as_ref(), &answer, &out.stderr) {
+                return Err(claude_print::signed_out_error(&host, None));
+            }
             answer
         }
         PlannerOutput::NoClaude => {
@@ -1069,6 +1075,9 @@ pub async fn run_planner(
                 codes::E_INVALID_STATE,
                 format!("claude is not on {host}'s PATH"),
             ))
+        }
+        PlannerOutput::Nothing if claude_print::run_signed_out(None, "", &out.stderr) => {
+            return Err(claude_print::signed_out_error(&host, None))
         }
         PlannerOutput::Nothing => {
             return Err(IpcError::new(

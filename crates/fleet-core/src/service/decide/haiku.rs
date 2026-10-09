@@ -90,6 +90,9 @@ pub mod reason {
     pub const NO_CLAUDE: &str = "noclaude";
     /// `claude` ran and failed, or said nothing readable.
     pub const CALL_FAILED: &str = "call_failed";
+    /// `claude` has no usable login on the host (its login expired): a
+    /// person runs `claude /login` there.
+    pub const SIGNED_OUT: &str = "signed_out";
     /// The prompt is over [`super::MAX_PROMPT_BYTES`].
     pub const TOO_LONG: &str = "too_long";
     /// The case's org is not the host's org: never sent.
@@ -502,6 +505,14 @@ impl Haiku<'_> {
                 reply.input_tokens = env.input_tokens;
                 reply.output_tokens = env.output_tokens;
                 reply.cost_microusd = env.cost_microusd;
+                if crate::service::claude_print::run_signed_out(
+                    Some(&env),
+                    &env.result,
+                    &out.stderr,
+                ) {
+                    reply.error = Some(reason::SIGNED_OUT);
+                    return reply;
+                }
                 if env.is_error {
                     reply.error = Some(reason::CALL_FAILED);
                     return reply;

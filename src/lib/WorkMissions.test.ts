@@ -533,6 +533,16 @@ describe('WorkMissions', () => {
       expect(plannerError({ code: 'E_INVALID_STATE', message: 'Payments is completed' }).text).toContain('has ended');
       expect(plannerError({ code: 'E_X', message: 'the mission loop is off (orchestrator.enabled)' }).text).toBe('The mission loop is off.');
       expect(plannerError({ code: 'E_X', message: 'boom' }).details).toBe('E_X · boom');
+      const out = plannerError({
+        code: 'E_CLAUDE_CLI',
+        message: 'Claude login expired on nas: run `claude /login` there, then retry',
+      });
+      expect(out.title).toBe("The planner's Claude login has expired");
+      expect(out.text).toBe("Claude Code on nas is signed out, so the planner can't run. Run claude /login there, then retry.");
+      const old = plannerRefusal('not a JSON array: the answer begins "Login expired · Run /login to sign in again"');
+      expect(old.title).toBe("The planner's Claude login has expired");
+      expect(old.details).toContain('Login expired');
+      expect(plannerRefusal('not a JSON array').title).toBe("The planner's answer couldn't be used");
       expect(plannerRefusal('bad').details).toBe('bad');
     });
 
