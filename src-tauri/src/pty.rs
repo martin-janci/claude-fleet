@@ -4,7 +4,7 @@ use fleet_core::ssh::SshClient;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -226,7 +226,15 @@ pub(crate) struct PtyShared {
     /// What the attachment runs, for the `[cf]` exit notes
     /// ([`attach_program_label`]): `ssh`, `wsl.exe` or `tmux attach`.
     program: &'static str,
+    /// This open's generation, unique in the process: `pty_open` returns it
+    /// and `pty_drain` may name it, so a drain issued for the previous
+    /// attach that the IPC layer reorders after a new open drains nothing
+    /// instead of eating the new attach's first output (review r06).
+    generation: u64,
 }
+
+/// The next [`PtyShared::generation`]. Starts at 1 so 0 never names an open.
+static NEXT_PTY_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Un-drained output plus the "we had to throw output away" latch.
 #[derive(Default)]
@@ -247,6 +255,7 @@ impl PtyShared {
             buffer: Mutex::new(PtyBuffer::default()),
             exited: AtomicBool::new(false),
             program,
+            generation: NEXT_PTY_GENERATION.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -797,12 +806,15 @@ pub struct PtyOpenArgs {
 /// anywhere; `TerminalView` does not offer an attach for one. A host this
 /// machine simply lacks a `Host` block for fails in `ssh` with ssh's own
 /// message, in the pane, which is more use than a refusal would be.
+///
+/// Returns the open's generation; `pty_drain` takes it back so a drain meant
+/// for an earlier attach under the same id drains nothing.
 #[tauri::command(async)]
 pub fn pty_open(
     args: PtyOpenArgs,
     state: State<'_, Mutex<PtyState>>,
     ssh: State<'_, std::sync::Arc<SshClient>>,
-) -> Result<(), IpcError> {
+) -> Result<u64, IpcError> {
     // Validate untrusted IPC input before it reaches `ssh` / `tmux`.
     validate_pty_id(&args.id)?;
     fleet_core::validate::host_alias(&args.host_alias)?;
@@ -871,6 +883,7 @@ pub fn pty_open(
     // bytes from the old session can never bleed into the new screen. The
     // old buffer is orphaned and freed once that thread observes EOF.
     let shared = Arc::new(PtyShared::for_program(program));
+    let generation = shared.generation;
     let input_tx = spawn_writer(writer, Arc::clone(&shared));
     let installed = {
         let mut s = state
@@ -922,7 +935,7 @@ pub fn pty_open(
         shared.exited.store(true, Ordering::Release);
     });
 
-    Ok(())
+    Ok(generation)
 }
 
 #[derive(Serialize)]
@@ -942,19 +955,35 @@ pub struct PtyDrainResult {
     pub overflowed: bool,
 }
 
-/// The id-only argument of `pty_drain` and `pty_close`.
+/// The id-only argument of `pty_close`.
 #[derive(Deserialize)]
 pub struct PtyIdArgs {
     pub id: String,
 }
 
+/// `pty_drain`'s argument: the id, and the generation `pty_open` returned
+/// for the attach the caller is drawing. Without one, whatever is open
+/// under the id is drained.
+#[derive(Deserialize)]
+pub struct PtyDrainArgs {
+    pub id: String,
+    #[serde(default)]
+    pub generation: Option<u64>,
+}
+
 #[tauri::command(async)]
 pub fn pty_drain(
-    args: PtyIdArgs,
+    args: PtyDrainArgs,
     state: State<'_, Mutex<PtyState>>,
 ) -> Result<PtyDrainResult, IpcError> {
     validate_pty_id(&args.id)?;
-    drain_from(&state, &args.id)
+    drain_open(&state, &args.id, args.generation)
+}
+
+/// [`drain_open`] with no generation, for the tests.
+#[cfg(test)]
+fn drain_from(state: &Mutex<PtyState>, id: &str) -> Result<PtyDrainResult, IpcError> {
+    drain_open(state, id, None)
 }
 
 /// Transport-agnostic body of `pty_drain`. Swaps the accumulated bytes out
@@ -968,20 +997,29 @@ pub fn pty_drain(
 /// session's bytes land in front of the new session's first output".
 ///
 /// An id that is not open drains nothing: no bytes, no EOF, as a closed
-/// single PTY always did.
-fn drain_from(state: &Mutex<PtyState>, id: &str) -> Result<PtyDrainResult, IpcError> {
+/// single PTY always did. Neither does a `generation` that is not the open
+/// one's: that drain was meant for an attach that has been replaced.
+fn drain_open(
+    state: &Mutex<PtyState>,
+    id: &str,
+    generation: Option<u64>,
+) -> Result<PtyDrainResult, IpcError> {
+    let nothing = || PtyDrainResult {
+        data: String::new(),
+        bytes: 0,
+        eof: false,
+        overflowed: false,
+    };
     let (raw, overflowed, eof) = {
         let mut map = state
             .lock()
             .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
         let Some(s) = map.entries.get_mut(id) else {
-            return Ok(PtyDrainResult {
-                data: String::new(),
-                bytes: 0,
-                eof: false,
-                overflowed: false,
-            });
+            return Ok(nothing());
         };
+        if generation.is_some_and(|g| g != s.shared.generation) {
+            return Ok(nothing());
+        }
         #[cfg(windows)]
         s.poll_child_exit(CHILD_EXIT_GRACE);
         let exited = s.shared.exited.load(Ordering::Acquire);
@@ -1915,6 +1953,29 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    // Review r06: a drain issued for the previous attach and run after a new
+    // `pty_open` under the same id must not eat the new attach's output.
+    #[test]
+    fn a_drain_for_a_replaced_open_drains_nothing_and_leaves_the_new_output() {
+        let state = Mutex::new(PtyState::new());
+        let old_gen = state.lock().unwrap().entry(ID).shared.generation;
+        // A re-open: the entry gets a fresh share, as `install` does.
+        let new = Arc::new(PtyShared::new());
+        state.lock().unwrap().entry(ID).shared = Arc::clone(&new);
+        assert_ne!(old_gen, new.generation);
+        new.note("first output");
+        let stale = drain_open(&state, ID, Some(old_gen)).unwrap();
+        assert_eq!(
+            (stale.data.as_str(), stale.bytes, stale.eof, stale.overflowed),
+            ("", 0, false, false)
+        );
+        let current = drain_open(&state, ID, Some(new.generation)).unwrap();
+        assert_eq!(current.data, "first output");
+        // No generation drains whatever is open, as before.
+        new.note("more");
+        assert_eq!(drain_open(&state, ID, None).unwrap().data, "more");
     }
 
     #[test]
