@@ -478,6 +478,8 @@ pub fn run() {
             commands::missions::grant_mission,
             commands::missions::revoke_mission_grant,
             commands::missions::pause_all_missions,
+            commands::missions::mission_release_note,
+            commands::missions::today_brief,
             commands::trackers::add_tracker,
             commands::trackers::update_tracker,
             commands::trackers::set_tracker_credential,

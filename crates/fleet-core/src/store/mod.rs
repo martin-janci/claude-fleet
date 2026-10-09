@@ -78,7 +78,10 @@ mod work_usage;
 mod work_view;
 
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
-pub use aux_usage::{AuxUsageRow, NewAuxUsage, AUX_ORIGIN_PLANNER, AUX_ORIGIN_SUMMARY};
+pub use aux_usage::{
+    AuxUsageRow, NewAuxUsage, AUX_ORIGIN_BRIEF, AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE,
+    AUX_ORIGIN_SUMMARY,
+};
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use changesets::{
     AppliedRecord, ChangesetItemRow, ChangesetRow, NewChangesetItem, TriageVerdictRow,

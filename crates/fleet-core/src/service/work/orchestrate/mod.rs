@@ -15,6 +15,7 @@
 //! Every step taken, refused or braked is a mission event, so the timeline
 //! says what the machine did and why it did not.
 
+pub mod drafts;
 pub mod guard;
 pub mod integrate;
 pub mod planner;

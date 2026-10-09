@@ -10,6 +10,11 @@ use rusqlite::params;
 pub const AUX_ORIGIN_PLANNER: &str = "planner";
 /// [`NewAuxUsage::origin`] of a past conversation's summary.
 pub const AUX_ORIGIN_SUMMARY: &str = "summary";
+/// [`NewAuxUsage::origin`] of a finished mission's release note (redesign
+/// 9.11).
+pub const AUX_ORIGIN_RELEASE_NOTE: &str = "release_note";
+/// [`NewAuxUsage::origin`] of Today's morning brief (redesign 9.11).
+pub const AUX_ORIGIN_BRIEF: &str = "brief";
 
 /// One run to book.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
