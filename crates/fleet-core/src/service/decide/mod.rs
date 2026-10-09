@@ -146,7 +146,7 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Feature; 15] = [
+    pub const ALL: &[Feature] = &[
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
@@ -185,7 +185,7 @@ impl Feature {
     }
 
     pub fn parse(s: &str) -> Option<Feature> {
-        Feature::ALL.into_iter().find(|f| f.as_str() == s)
+        Feature::ALL.iter().copied().find(|f| f.as_str() == s)
     }
 
     /// `decide.jev.<feature>`.
@@ -1129,7 +1129,8 @@ pub fn health(s: &Store, now: i64) -> Option<DecideHealth> {
     }
     let enabled = settings::get_bool(s, settings::DECIDE_JEV_ENABLED);
     let modes: BTreeMap<String, String> = Feature::ALL
-        .into_iter()
+        .iter()
+        .copied()
         .map(|f| (f, FeatureMode::of(s, f)))
         .filter(|(_, m)| *m != FeatureMode::Off)
         .map(|(f, m)| (f.as_str().to_string(), m.as_str().to_string()))
@@ -1259,7 +1260,8 @@ pub fn status(s: &Store, now: i64, days: i64) -> Result<DecideStatus, IpcError> 
         enabled: settings::get_bool(s, settings::DECIDE_JEV_ENABLED),
         owns_the_fleet: owns_the_fleet(s),
         modes: Feature::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .map(|f| {
                 (
                     f.as_str().to_string(),
