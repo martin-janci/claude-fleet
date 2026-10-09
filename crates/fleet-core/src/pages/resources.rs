@@ -703,6 +703,15 @@ const ORG: ResourceType = ResourceType {
         .badge(Badge::True { text: "sends to Jev" })
         .confirm("This org's redacted prompts and ticket titles will be sent to TypeSafe when Decisions (Jev) is on."),
         FieldSpec::new(
+            "jev_reply_allowed",
+            "Also allow Claude's reply text (turn outcome)",
+            "On top of Jev above: let the end of this org's sessions' screens — Claude's last reply, redacted, code replaced by placeholders, a few lines — go to TypeSafe's decision model, so Jev can tell a finished turn from a question when hooks say nothing. Off by default (D48).",
+            FieldKind::Bool { on_off: true, default: false },
+        )
+        .edit("jev_reply")
+        .badge(Badge::True { text: "sends replies to Jev" })
+        .confirm("The end of this org's sessions' screens (Claude's reply text, redacted) will be sent to TypeSafe when Decisions (Jev) and its turn outcome use case are on."),
+        FieldSpec::new(
             "bound_sees_unassigned",
             "Bound devices see unassigned",
             "Devices paired to this org (fleet-hub pair --org) also see work and sessions that belong to no org, as a host does. Off: only this org's own.",

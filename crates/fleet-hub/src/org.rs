@@ -81,6 +81,11 @@ pub enum OrgCmd {
         /// feature's mode allow it. Off by default.
         #[arg(long, value_enum)]
         jev: Option<OnOff>,
+        /// Also let this org's sessions' reply text (the end of the pane at
+        /// a turn's end, J2 turn_outcome) go to the decision model — on top
+        /// of --jev (decision D48). Off by default.
+        #[arg(long, value_enum)]
+        jev_reply: Option<OnOff>,
         /// Devices bound to this org (`pair --org`) also see unassigned work
         /// and sessions, as a host does (on, the default); off: only the
         /// org's own (decision D31).
@@ -245,6 +250,7 @@ fn admin_args(cmd: &OrgCmd) -> Result<Value, String> {
             isolate_sessions,
             auto_tidy,
             jev,
+            jev_reply,
             bound_sees_unassigned,
         } => {
             if name.is_none()
@@ -252,10 +258,11 @@ fn admin_args(cmd: &OrgCmd) -> Result<Value, String> {
                 && isolate_sessions.is_none()
                 && auto_tidy.is_none()
                 && jev.is_none()
+                && jev_reply.is_none()
                 && bound_sees_unassigned.is_none()
             {
                 return Err("nothing to set: pass --name, --color, --isolate-sessions, \
-                     --auto-tidy, --jev or --bound-sees-unassigned"
+                     --auto-tidy, --jev, --jev-reply or --bound-sees-unassigned"
                     .into());
             }
             let mut a = json!({ "action": "update_org", "org_id": id });
@@ -273,6 +280,9 @@ fn admin_args(cmd: &OrgCmd) -> Result<Value, String> {
             }
             if let Some(j) = jev {
                 a["jev"] = json!(if j.on() { "on" } else { "off" });
+            }
+            if let Some(j) = jev_reply {
+                a["jev_reply"] = json!(if j.on() { "on" } else { "off" });
             }
             if let Some(b) = bound_sees_unassigned {
                 a["bound_sees_unassigned"] = json!(b.on());
@@ -377,6 +387,10 @@ fn org_lines(o: &Value) -> Vec<String> {
                 }
             ) + if o["jev_allowed"].as_bool().unwrap_or(false) {
                 "  [sends to Jev]"
+            } else {
+                ""
+            } + if o["jev_reply_allowed"].as_bool().unwrap_or(false) {
+                "  [replies too]"
             } else {
                 ""
             } + if o["owns_hub"].as_bool().unwrap_or(false) {
@@ -657,6 +671,10 @@ mod tests {
         assert_eq!(
             args(&["set", "2", "--jev", "off"]),
             json!({ "action": "update_org", "org_id": 2, "jev": "off" })
+        );
+        assert_eq!(
+            args(&["set", "2", "--jev-reply", "on"]),
+            json!({ "action": "update_org", "org_id": 2, "jev_reply": "on" })
         );
         assert_eq!(
             args(&["set", "2", "--bound-sees-unassigned", "off"]),
