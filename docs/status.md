@@ -726,14 +726,22 @@ request), falls back to GitHub releases only against a hub with no
 `/update/check`, and checks the APK's sha256 and its signer against both the
 decision's `signer_sha256` and the installed app before Android's installer.
 
-**S9 is partly landed.** Built: staged rollouts (migration 151
-`update_rollouts`, `service::update::rollout`; `update_admin` `rollout_start`
-/ `rollout_pause` / `rollout_resume` / `rollout_abort`; waves advance on the
-decision pusher's five-minute beat after `update.rollout_wave_secs` and pause
-themselves at the halt ratio, `fleet_health` `rollout_paused`;
-`update_status.rollouts`) and the maintenance window (`update.window`, UTC,
-holds only `automatic` components). **Not built:** per-org policy rows, the
-fleet-agent binary adapter, the bare-binary hub, the hub-served artifact
+**S9 is landed.** Staged rollouts (migration 151 `update_rollouts`,
+`service::update::rollout`; `update_admin` `rollout_start` / `rollout_pause`
+/ `rollout_resume` / `rollout_abort`; waves advance on the decision pusher's
+five-minute beat after `update.rollout_wave_secs` and pause themselves at
+the halt ratio, `fleet_health` `rollout_paused`; `update_status.rollouts`);
+the maintenance window (`update.window`, UTC, holds only `automatic`
+components); per-org policy (migration 152 `update_org_policy`,
+`update_admin set_policy` / `clear_policy`: an org's mode, floor, window and
+pin for its clients and agent hosts; master only, an org owner cannot set
+its own yet); the artifact mirror (`update.mirror`, OFF by default;
+`GET /update/artifact/<sha256>`, `target.mirror`); and the binary target
+(`fleet_updater::binary`, now a library too): `fleet-agent update` with
+`install --auto-update`'s timer, and `fleet-hub update apply` / `pair` with
+`deploy/hub/fleet-hub-update.{service,timer}` for a hub without Docker. The
+binary loop is tested against a pretend machine (`binary::tests`); it has not
+run against a real systemd yet. The desktop and the phone do not use the
 mirror.
 
 Debug devices' first slice is landed (`docs/debug-devices.md`): per-host

@@ -105,6 +105,29 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   rollout per component (`E_CONFLICT` otherwise). `update_status.rollouts`
   lists the active ones and the five that ended last, each with its open
   wave's tally. A pin still wins over a rollout.
+- **Serve the files from the hub.** With `update.mirror` on, the hub
+  serves the release files its verified manifests list — the agent and hub
+  tarballs, the desktop bundles, the phone's APK — at
+  `GET /update/artifact/<sha256>` (any credential that may ask
+  `/update/check`; not a hub link), and every decision carries the path as
+  `target.mirror`. A file is fetched from its release the first time a
+  target asks, checked against the sha256 and size in the signed manifest
+  (a mismatch is `E_UPDATE_UNVERIFIED` and nothing is kept), kept under
+  `<data_dir>/update-mirror/`, and dropped once no kept manifest lists it.
+  The agent's and the bare hub's own updaters try the mirror first and
+  GitHub after it; the desktop and the phone still fetch from GitHub. A
+  container image is never mirrored: it is pulled by digest.
+- **One org's own policy.** `update_admin { action: set_policy, org_id,
+  component, mode?, minimum?, window?, version?, mandatory? }` overrides the
+  fleet's settings for the targets of one org: a paired client bound to it
+  and an agent host in it. `mode` replaces `update.<component>.mode`,
+  `minimum` is the org's floor (below it the update is required), `window`
+  replaces `update.window` (`""` is any time), and `version` pins the org:
+  a target's own pin still wins over it, and it wins over the
+  component-wide pin. Fields left out keep the fleet's value; a new
+  `set_policy` replaces the row whole. `clear_policy { org_id, component }`
+  removes it. `update_status.policies` lists the rows. Only the master sets
+  them.
 - **The transition log.** Every phase a target reports is also kept in
   `update_events` (90 days, the newest 200 per target) for the rollout
   view of slice S4b. Nothing reads it out yet: no tool or route exposes it.
@@ -342,6 +365,72 @@ fleet-updater pair <url-or-code>   redeem `fleet-hub pair --mode updater`'s code
 hub-headless job) drives a real Docker daemon through a good image, one that
 crashes on start and one that migrates and never gets ready.
 
+## The agent updates itself
+
+`fleet-agent update` is one pass of the same loop for an agent host (S9).
+It asks the hub with the host's own token (the hub knows it as
+`agent:<alias>`, so no pairing), and installs what the hub decides: a pin, a
+required update, a rollback, or anything under `update.agent.mode =
+automatic`. Under `notify` it says once that a release is available and
+installs nothing.
+
+```bash
+sudo fleet-agent install --hub https://fleet.example.com --token-file - --auto-update
+# or, for an agent installed earlier:  sudo fleet-agent update   (one pass, by hand)
+```
+
+`--auto-update` adds `fleet-agent-update.timer` (every six hours, spread
+over half an hour) and the oneshot `fleet-agent-update.service` it starts;
+the pass runs outside `fleet-agent.service`, so restarting the agent does
+not stop it halfway. One pass:
+
+1. The tarball for this host's architecture: the hub's mirror first (when
+   `update.mirror` is on), then the release on GitHub. Either way it must be
+   the size and sha256 the signed manifest names.
+2. It is unpacked, and the new `fleet-agent --version` must be the target.
+   It goes to `/opt/fleet-agent/<version>/` (`~/.local/lib/fleet-agent/`
+   for a `--user` unit).
+3. The first time, the binary the unit runs (`/usr/local/bin/fleet-agent`,
+   or wherever `install` was run from) moves into that layout and becomes a
+   symlink through `/opt/fleet-agent/current`.
+4. `current` switches to the new release and the unit restarts. The new
+   agent must be running that version and connected to its hub (its
+   `STATUS=` line) within 90 s, and stay so, with no restart, for two
+   minutes.
+5. Otherwise `current` goes back to the previous release and the unit
+   restarts on it; the release is not retried by itself. The tmux servers
+   and Claude sessions survive both restarts (`KillMode=process`).
+
+`fleet-agent update --status` prints the state (`/var/lib/fleet-agent-update/`);
+`--clear` forgets a rollback failure once an operator has sorted it out.
+The last two releases besides the running and the previous one are kept.
+
+## A hub without Docker updates itself
+
+`fleet-hub update apply` is the same pass for a hub run from
+`deploy/hub/fleet-hub.service` (the *Bare binary* install in `docs/hub.md`).
+It asks the running hub with an `updater` token, as `fleet-updater` does:
+
+```bash
+sudo -u fleet env FLEET_HUB_DATA_DIR=/var/lib/fleet-hub fleet-hub pair --name updater --mode updater
+sudo fleet-hub update pair '<the URL it printed>'
+sudo cp deploy/hub/fleet-hub-update.service deploy/hub/fleet-hub-update.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now fleet-hub-update.timer
+```
+
+Releases live in `/usr/local/lib/fleet-hub/<version>/`, and
+`/usr/local/bin/fleet-hub` becomes a symlink through `current`. Before the
+switch, `fleet-hub backup` runs as the unit's user. The new build must
+answer `fleet-hub healthcheck --ready --json` as ready, as its version,
+within 90 s and through a two-minute soak, with no restart. Otherwise
+`current` goes back, and when the new build may have migrated the database
+(its manifest's schema is newer, or it is unknown) the hub is stopped, its
+`state.db` set aside as `failed-<version>-<time>/` and the backup put in its
+place before the old build starts: the writes made while the new build was
+being validated are lost, as with `fleet-updater`. `fleet-hub update apply
+--status` / `--clear` as above; `--hub-url`, `--root`, `--link`, `--unit`,
+`--user` and `--env-file` change where things are.
+
 ## What the hub knows without being asked
 
 - **`X-Fleet-Client`.** A client names its build on every request:
@@ -395,4 +484,5 @@ crashes on start and one that migrates and never gets ready.
 | `update.mobile.mode` | `notify` | the phones: `manual` or `notify` (a phone never installs silently) |
 | `update.check_interval_secs` | `21600` | seconds between reading the release channel, at least 900 |
 | `update.window` | `` | a daily `HH:MM-HH:MM` in UTC (it may cross midnight) in which an `automatic` component installs; outside it the decision is `hold` (`outside_window`). An offer to a person is never held. Empty: any time |
+| `update.mirror` | `false` | serve the release files (agent and hub tarballs, desktop bundles, the APK) at `/update/artifact/<sha256>` for targets that cannot reach GitHub; each is fetched once and checked against the signed manifest |
 | `update.rollout_wave_secs` | `3600` | how long each rollout wave runs before the next opens, at least 300 |

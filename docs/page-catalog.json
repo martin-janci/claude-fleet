@@ -3490,6 +3490,18 @@
     },
     {
       "default_widget": "switch",
+      "key": "update.mirror",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Mirror release files",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "decide.jev.enabled",
       "kind": {
         "type": "bool"

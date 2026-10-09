@@ -18,22 +18,18 @@
 
 mod docker;
 mod engine;
-mod http;
-mod net;
 mod spec;
 mod state;
 
-use std::collections::BTreeMap;
+use fleet_updater::common::{self, trusted_keys, FileSequences};
+use fleet_updater::{http, net};
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use fleet_update::decide::{Pin, Policy};
-use fleet_update::{
-    GitUpdateChannel, HubUpdateChannel, Mode, SequenceStore, Track, TrustedKeys, UpdateChannel,
-    Version,
-};
+use fleet_update::{GitUpdateChannel, HubUpdateChannel, Mode, Track, UpdateChannel, Version};
 
 use crate::docker::{Docker, EngineDocker};
 use crate::engine::{log, Config, Outcome, Updater};
@@ -54,70 +50,6 @@ fn env_secs(key: &str, default: u64) -> Result<Duration, String> {
             .parse()
             .map(Duration::from_secs)
             .map_err(|_| format!("{key}={v}: not a number of seconds")),
-    }
-}
-
-/// The release keys: the compiled-in ones, plus `FLEET_UPDATE_E2E_KEYS` in an
-/// `e2e` build only (as the hub's `trusted_keys`).
-fn trusted_keys() -> TrustedKeys {
-    #[allow(unused_mut)]
-    let mut keys: Vec<String> = fleet_update::keys::RELEASE_KEYS
-        .iter()
-        .map(|k| k.to_string())
-        .collect();
-    #[cfg(feature = "e2e")]
-    if let Some(extra) = env("FLEET_UPDATE_E2E_KEYS") {
-        keys.extend(
-            extra
-                .split(',')
-                .map(str::trim)
-                .filter(|k| !k.is_empty())
-                .map(String::from),
-        );
-    }
-    TrustedKeys::from_base64(keys.iter().map(String::as_str))
-        .unwrap_or_else(|_| fleet_update::keys::release_keys())
-}
-
-/// The replay guard, kept beside the state file so a restart does not forget
-/// the newest channel it has seen.
-struct FileSequences {
-    path: PathBuf,
-    seen: Mutex<BTreeMap<Track, u64>>,
-}
-
-impl FileSequences {
-    fn open(dir: &Path) -> FileSequences {
-        let path = dir.join("sequences.json");
-        let seen = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        FileSequences {
-            path,
-            seen: Mutex::new(seen),
-        }
-    }
-}
-
-impl SequenceStore for FileSequences {
-    fn seen(&self, track: Track) -> u64 {
-        let m = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        m.get(&track).copied().unwrap_or(0)
-    }
-
-    fn record(&self, track: Track, sequence: u64) {
-        let mut m = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        let e = m.entry(track).or_insert(0);
-        if sequence > *e {
-            *e = sequence;
-            let tmp = self.path.with_extension("json.tmp");
-            if let Ok(b) = serde_json::to_vec(&*m) {
-                if std::fs::write(&tmp, b).is_ok() {
-                    let _ = std::fs::rename(&tmp, &self.path);
-                }
-            }
-        }
     }
 }
 
@@ -355,81 +287,13 @@ fn token(state_dir: &Path) -> Result<String, String> {
     }
 }
 
-/// The code out of what `fleet-hub pair` printed: the URL (`…/pair#CODE`)
-/// or the bare code.
-fn pairing_code(arg: &str) -> Result<String, String> {
-    let code = arg
-        .trim()
-        .rsplit_once('#')
-        .map_or(arg.trim(), |(_, c)| c)
-        .trim();
-    if code.is_empty() || !code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
-        return Err(format!("{arg:?} is not a pairing URL or code"));
-    }
-    Ok(code.to_string())
-}
-
 /// `fleet-updater pair <url-or-code>`: redeem the code at the hub's `/pair`
-/// (outside the bearer token and the Host allowlist by design: the code is
-/// the credential) and keep the token, readable by root only.
+/// and keep the token in the state volume, readable by root only.
 async fn pair(arg: &str) -> Result<ExitCode, String> {
-    let code = pairing_code(arg)?;
     let url = env("FLEET_UPDATER_HUB_URL").unwrap_or_else(|| "http://fleet-hub:4180".into());
-    let base = http::Url::parse(&url)?;
-    let client = http::Client::new(base.tls, Duration::from_secs(30))?;
-    let body = serde_json::json!({ "code": code }).to_string();
-    let r = client
-        .send(
-            "POST",
-            &format!("{}/pair", url.trim_end_matches('/')),
-            &[("Content-Type", "application/json")],
-            Some(body.as_bytes()),
-            1 << 16,
-        )
-        .await?;
-    if !r.ok() {
-        return Err(format!(
-            "the hub refused the code (HTTP {}): {} — codes work once and expire; mint another",
-            r.status,
-            r.text().trim()
-        ));
-    }
-    let v: serde_json::Value =
-        serde_json::from_slice(&r.body).map_err(|e| format!("pairing answer: {e}"))?;
-    let mode = v["mode"].as_str().unwrap_or_default();
-    if mode != "updater" {
-        return Err(format!(
-            "that code paired a `{mode}` client, not an updater; revoke it (fleet-hub client revoke) \
-             and mint one with --mode updater"
-        ));
-    }
-    let token = v["token"]
-        .as_str()
-        .ok_or("the pairing answer has no token")?;
-    let dir = state_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let path = dir.join(TOKEN_FILE);
-    let tmp = dir.join(format!("{TOKEN_FILE}.tmp"));
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)
-            .map_err(|e| format!("{}: {e}", tmp.display()))?;
-        f.write_all(token.as_bytes())
-            .and_then(|()| f.sync_all())
-            .map_err(|e| format!("{}: {e}", tmp.display()))?;
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))?;
-    log!(
-        "paired as `{}`; the token is in {}",
-        v["name"].as_str().unwrap_or("?"),
-        path.display()
-    );
+    let (token, name) = common::redeem(&url, arg).await?;
+    let path = common::save_token(&state_dir(), TOKEN_FILE, &token)?;
+    log!("paired as `{name}`; the token is in {}", path.display());
     Ok(ExitCode::SUCCESS)
 }
 
@@ -451,17 +315,6 @@ async fn shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pairing_codes() {
-        assert_eq!(
-            pairing_code("https://fleet.example.com/pair#ABCD1234").unwrap(),
-            "ABCD1234"
-        );
-        assert_eq!(pairing_code(" ABCD1234\n").unwrap(), "ABCD1234");
-        assert!(pairing_code("https://fleet.example.com/pair#").is_err());
-        assert!(pairing_code("x&y").is_err());
-    }
 
     #[test]
     fn the_token_comes_from_the_state_volume_when_nothing_else_names_one() {

@@ -1543,6 +1543,8 @@ version = "0.5.4"
 dependencies = [
  "clap",
  "fleet-proto",
+ "fleet-update",
+ "fleet-updater",
  "futures-util",
  "libc",
  "rcgen",
@@ -1623,6 +1625,7 @@ dependencies = [
  "fleet-core",
  "fleet-proto",
  "fleet-update",
+ "fleet-updater",
  "qrcode",
  "rcgen",
  "rustls-pki-types",

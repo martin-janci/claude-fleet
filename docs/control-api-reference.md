@@ -797,9 +797,9 @@ Parameters: `id`
 
 ### `update_admin`
 
-Update admin, master only: pin a version for a component or target (below installed = rollback), unpin, refresh the signed channel, or stage a rollout in waves (rollout_start / pause / resume / abort). E_INVALID, E_CONFLICT, E_UPDATE_UNVERIFIED.
+Update admin, master only: pin a version (below installed = rollback), unpin, refresh the channel, rollout_* in waves, or one org's policy (set_policy / clear_policy). E_INVALID, E_CONFLICT, E_UPDATE_UNVERIFIED.
 
-Parameters: `action`, `component`, `halt_failure_ratio`, `mandatory`, `reason`, `target`, `version`, `waves`
+Parameters: `action`, `component`, `halt_failure_ratio`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `target`, `version`, `waves`, `window`
 
 ### `update_status`
 

@@ -594,6 +594,115 @@ impl Store {
     }
 }
 
+/// One org's override of the fleet's update policy for one component
+/// (migration 152, update design S9). `None` keeps the fleet's value.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UpdateOrgPolicyRow {
+    pub org_id: i64,
+    pub component: String,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub minimum: Option<String>,
+    /// `HH:MM-HH:MM` in UTC; `""` = any time.
+    #[serde(default)]
+    pub window: Option<String>,
+    #[serde(default)]
+    pub pin_version: Option<String>,
+    #[serde(default)]
+    pub pin_mandatory: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub set_by: String,
+    pub set_at: i64,
+}
+
+const ORG_POLICY_COLUMNS: &str = "org_id, component, mode, minimum, update_window, pin_version, \
+    pin_mandatory, reason, set_by, set_at";
+
+fn org_policy_row(r: &rusqlite::Row) -> rusqlite::Result<UpdateOrgPolicyRow> {
+    Ok(UpdateOrgPolicyRow {
+        org_id: r.get(0)?,
+        component: r.get(1)?,
+        mode: r.get(2)?,
+        minimum: r.get(3)?,
+        window: r.get(4)?,
+        pin_version: r.get(5)?,
+        pin_mandatory: r.get::<_, i64>(6)? != 0,
+        reason: r.get(7)?,
+        set_by: r.get(8)?,
+        set_at: r.get(9)?,
+    })
+}
+
+impl Store {
+    /// Insert or replace one org's policy for one component.
+    pub fn set_update_org_policy(&self, row: &UpdateOrgPolicyRow) -> Result<(), IpcError> {
+        self.conn.execute(
+            &format!(
+                "INSERT INTO update_org_policy ({ORG_POLICY_COLUMNS}) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+                 ON CONFLICT(org_id, component) DO UPDATE SET mode = excluded.mode, \
+                   minimum = excluded.minimum, update_window = excluded.update_window, \
+                   pin_version = excluded.pin_version, pin_mandatory = excluded.pin_mandatory, \
+                   reason = excluded.reason, set_by = excluded.set_by, set_at = excluded.set_at"
+            ),
+            rusqlite::params![
+                row.org_id,
+                row.component,
+                row.mode,
+                row.minimum,
+                row.window,
+                row.pin_version,
+                i64::from(row.pin_mandatory),
+                row.reason,
+                row.set_by,
+                row.set_at
+            ],
+        )?;
+        self.emit_update_changed("policy", None);
+        Ok(())
+    }
+
+    /// `true` when a row was removed.
+    pub fn clear_update_org_policy(&self, org_id: i64, component: &str) -> Result<bool, IpcError> {
+        let n = self.conn.execute(
+            "DELETE FROM update_org_policy WHERE org_id = ?1 AND component = ?2",
+            rusqlite::params![org_id, component],
+        )?;
+        if n > 0 {
+            self.emit_update_changed("policy", None);
+        }
+        Ok(n > 0)
+    }
+
+    pub fn update_org_policy(
+        &self,
+        org_id: i64,
+        component: &str,
+    ) -> Result<Option<UpdateOrgPolicyRow>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {ORG_POLICY_COLUMNS} FROM update_org_policy \
+                     WHERE org_id = ?1 AND component = ?2"
+                ),
+                rusqlite::params![org_id, component],
+                org_policy_row,
+            )
+            .optional()?)
+    }
+
+    pub fn update_org_policies(&self) -> Result<Vec<UpdateOrgPolicyRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ORG_POLICY_COLUMNS} FROM update_org_policy ORDER BY org_id, component"
+        ))?;
+        let rows = stmt.query_map([], org_policy_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::store::{Store, UpdateDesiredRow, UpdateDocRow, UpdateObservedRow};

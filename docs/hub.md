@@ -796,6 +796,10 @@ the same loop, just in the foreground, under whatever supervises it instead.)
   everything else in the MCP API work. The interactive terminal does not.
 - **Offline.** A call for an agent host with no agent connected fails at
   once with `E_AGENT_OFFLINE`; it never waits out a timeout.
+- **Updates.** `install --auto-update` adds a timer that runs `fleet-agent
+  update`: the hub decides (`update.agent.mode`, pins), the agent installs
+  the signed release and goes back to the previous one when it does not
+  reconnect. See `docs/updates.md` → *The agent updates itself*.
 
 ### Protocol version negotiation
 
@@ -2607,6 +2611,11 @@ sudo cp deploy/hub/fleet-hub.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now fleet-hub
 ```
+
+To have it update itself (S9: a pin, a required update or, under
+`update.hub.mode = automatic`, every release), pair an updater and enable
+`deploy/hub/fleet-hub-update.timer`; see `docs/updates.md` → *A hub without
+Docker updates itself*.
 
 To print the master token again later, use the same user and data dir:
 

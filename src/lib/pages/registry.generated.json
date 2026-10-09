@@ -1617,6 +1617,24 @@
       "value": "3600"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Serve the agent and hub tarballs, desktop bundles and the phone's APK from this hub, for machines that cannot reach GitHub. Each file is fetched once and checked against the signed release.",
+      "key": "update.mirror",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Mirror release files",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -4507,6 +4525,10 @@
             },
             {
               "key": "update.rollout_wave_secs",
+              "type": "field"
+            },
+            {
+              "key": "update.mirror",
               "type": "field"
             },
             {

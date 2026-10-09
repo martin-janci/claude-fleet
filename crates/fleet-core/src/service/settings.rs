@@ -627,6 +627,9 @@ pub const UPDATE_WINDOW: &str = "update.window";
 /// How long a rollout wave soaks before the next one opens (S9).
 pub const UPDATE_ROLLOUT_WAVE_SECS: &str = "update.rollout_wave_secs";
 pub const UPDATE_ROLLOUT_WAVE_MIN_SECS: u64 = 300;
+/// Serve the release files the hub's verified manifests list at
+/// `/update/artifact/<sha256>` (S9), for targets that cannot reach GitHub.
+pub const UPDATE_MIRROR: &str = "update.mirror";
 /// Sessions and items with no org may be sent too (D31). Off by default.
 pub const DECIDE_JEV_UNASSIGNED: &str = "decide.jev.unassigned";
 /// D48: sessions with no org may send reply text (J2) too, on top of
@@ -1322,6 +1325,13 @@ pub const SPECS: &[Spec] = &[
         "How long each wave of a staged rollout runs before the next opens, if its failure ratio stays under the rollout's halt ratio.",
     )
     .unit(Unit::Hours),
+    Spec::new(
+        UPDATE_MIRROR,
+        "false",
+        Kind::Bool,
+        "Mirror release files",
+        "Serve the agent and hub tarballs, desktop bundles and the phone's APK from this hub, for machines that cannot reach GitHub. Each file is fetched once and checked against the signed release.",
+    ),
     Spec::new(
         DECIDE_JEV_ENABLED,
         "false",

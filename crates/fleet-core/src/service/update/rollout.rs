@@ -48,10 +48,19 @@ pub fn in_window(from: u16, until: u16, now: i64) -> bool {
 /// Decide rule 6's window: true when `mode` installs by itself and
 /// `update.window` is set and does not contain `now`.
 pub fn outside_window(store: &Store, mode: Mode, now: i64) -> bool {
+    outside(
+        &settings::get_string(store, settings::UPDATE_WINDOW),
+        mode,
+        now,
+    )
+}
+
+/// [`outside_window`] for a given `window` (an org's own, say).
+pub fn outside(window: &str, mode: Mode, now: i64) -> bool {
     if mode != Mode::Automatic {
         return false;
     }
-    match settings::parse_time_range(&settings::get_string(store, settings::UPDATE_WINDOW)) {
+    match settings::parse_time_range(window) {
         Some(Some((from, until))) => !in_window(from, until, now),
         _ => false,
     }

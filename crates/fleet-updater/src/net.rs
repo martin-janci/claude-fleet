@@ -12,6 +12,7 @@ use fleet_update::{Fetch, HubTransport, UpdateError};
 use crate::http::{Client, Url};
 
 /// `POST <hub>/update/*` with the updater's bearer token.
+#[derive(Clone)]
 pub struct HubHttp {
     base: String,
     token: String,
@@ -35,20 +36,69 @@ pub fn hub_host_header(explicit: Option<&str>, public_url: Option<&str>) -> Opti
 
 impl HubHttp {
     pub fn new(base: &str, token: &str, host_header: Option<String>) -> Result<HubHttp, String> {
-        let url = Url::parse(base)?;
+        Self::with_ca(base, token, host_header, None)
+    }
+
+    /// [`HubHttp::new`], trusting `ca_file` for an `https://` hub.
+    pub fn with_ca(
+        base: &str,
+        token: &str,
+        host_header: Option<String>,
+        ca_file: Option<&std::path::Path>,
+    ) -> Result<HubHttp, String> {
+        // An agent dials `wss://`; the update routes are the same host over
+        // `https://`.
+        let base = match base.trim() {
+            b if b.starts_with("wss://") => format!("https://{}", &b[6..]),
+            b if b.starts_with("ws://") => format!("http://{}", &b[5..]),
+            b => b.to_string(),
+        };
+        let url = Url::parse(&base)?;
         if token.trim().is_empty() {
             return Err("no updater token (fleet-hub pair --mode updater)".into());
         }
         Ok(HubHttp {
             base: base.trim_end_matches('/').to_string(),
             token: token.trim().to_string(),
-            client: Client::new(url.tls, Duration::from_secs(30))?.with_host_header(host_header),
+            client: Client::with_ca(url.tls, Duration::from_secs(120), ca_file)?
+                .with_host_header(host_header),
             client_header: format!(
                 "fleet-updater/{} (linux-{})",
                 env!("CARGO_PKG_VERSION"),
                 std::env::consts::ARCH
             ),
         })
+    }
+
+    /// `GET <hub><path>` with the bearer token: a file from the hub's
+    /// artifact mirror (`/update/artifact/<sha256>`).
+    pub async fn get(&self, path: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+        if !path.starts_with("/update/artifact/") {
+            return Err(format!("{path}: not a mirror path"));
+        }
+        let auth = format!("Bearer {}", self.token);
+        let r = self
+            .client
+            .send(
+                "GET",
+                &format!("{}{path}", self.base),
+                &[
+                    ("Authorization", &auth),
+                    ("Accept", "*/*"),
+                    ("User-Agent", &self.client_header),
+                ],
+                None,
+                max_bytes + (64 << 10),
+            )
+            .await?;
+        if !r.ok() {
+            return Err(format!(
+                "the hub's mirror answered HTTP {}: {}",
+                r.status,
+                r.text().chars().take(300).collect::<String>()
+            ));
+        }
+        Ok(r.body)
     }
 }
 

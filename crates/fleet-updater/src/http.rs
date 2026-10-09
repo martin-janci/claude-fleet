@@ -237,8 +237,18 @@ const CA_BUNDLES: [&str; 4] = [
 impl Client {
     /// `tls` loads the CA bundle now; without it an `https://` request fails.
     pub fn new(tls: bool, timeout: Duration) -> Result<Client, String> {
+        Self::with_ca(tls, timeout, None)
+    }
+
+    /// [`Client::new`], trusting the PEM bundle `ca_file` instead of the
+    /// host's (a hub with a private CA, as `fleet-agent`'s `ca_file`).
+    pub fn with_ca(
+        tls: bool,
+        timeout: Duration,
+        ca_file: Option<&std::path::Path>,
+    ) -> Result<Client, String> {
         Ok(Client {
-            tls: if tls { Some(connector()?) } else { None },
+            tls: if tls { Some(connector(ca_file)?) } else { None },
             timeout,
             host_header: None,
         })
@@ -286,13 +296,14 @@ impl Client {
     }
 }
 
-fn connector() -> Result<tokio_rustls::TlsConnector, String> {
+fn connector(ca_file: Option<&std::path::Path>) -> Result<tokio_rustls::TlsConnector, String> {
     use rustls_pki_types::pem::PemObject;
     use rustls_pki_types::CertificateDer;
     use tokio_rustls::rustls;
 
-    let bundle = std::env::var_os("SSL_CERT_FILE")
+    let bundle = ca_file
         .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("SSL_CERT_FILE").map(std::path::PathBuf::from))
         .or_else(|| {
             CA_BUNDLES
                 .iter()

@@ -12,6 +12,7 @@
 //! by anything but `refresh` is simply not a channel.
 
 mod fetch;
+pub mod mirror;
 pub mod rollout;
 #[cfg(test)]
 mod tests;
@@ -35,7 +36,9 @@ use serde::Serialize;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::mcp::auth::{Caller, TokenMode};
 use crate::service::settings;
-use crate::store::{Store, UpdateDesiredRow, UpdateDocRow, UpdateObservedRow, UpdateRolloutRow};
+use crate::store::{
+    Store, UpdateDesiredRow, UpdateDocRow, UpdateObservedRow, UpdateOrgPolicyRow, UpdateRolloutRow,
+};
 
 /// Where CI publishes the channel documents (design U10).
 pub const CHANNEL_BASE_URL: &str =
@@ -103,11 +106,7 @@ pub fn mode(store: &Store, c: Component) -> Mode {
         Component::Desktop => settings::UPDATE_DESKTOP_MODE,
         Component::Android | Component::Ios => settings::UPDATE_MOBILE_MODE,
     };
-    match settings::get_string(store, key).as_str() {
-        "manual" => Mode::Manual,
-        "automatic" => Mode::Automatic,
-        _ => Mode::Notify,
-    }
+    parse_mode(&settings::get_string(store, key))
 }
 
 pub fn check_interval_secs(store: &Store) -> u64 {
@@ -179,22 +178,73 @@ pub fn push_decisions(store: &Mutex<Store>, keys: &TrustedKeys, now: i64) -> Vec
     pushed
 }
 
-/// The policy for one target: the fleet's mode for its component, the
-/// operator's pin (its own, else the component's), and whether `now` is
-/// outside the maintenance window for it.
+/// The org a target belongs to: a paired client's binding, an agent host's
+/// `hosts.org_id`. The hub itself and an unbound client have none.
+pub fn target_org(store: &Store, target: &str) -> Result<Option<i64>, IpcError> {
+    if let Some(id) = target
+        .strip_prefix("client:")
+        .and_then(|s| s.parse::<i64>().ok())
+    {
+        return Ok(store.client_token_binding(id)?.and_then(|b| b.org_id));
+    }
+    if let Some(alias) = target.strip_prefix("agent:") {
+        return store.host_org(alias);
+    }
+    Ok(None)
+}
+
+fn parse_mode(s: &str) -> Mode {
+    match s {
+        "manual" => Mode::Manual,
+        "automatic" => Mode::Automatic,
+        _ => Mode::Notify,
+    }
+}
+
+/// The policy for one target: the fleet's `update.*` settings for its
+/// component, overridden by its org's row (S9) where it has one; the pin
+/// is the target's own, else its org's, else the component's.
 fn policy(store: &Store, c: Component, target: &str, now: i64) -> Result<Policy, IpcError> {
-    let pin = store.update_desired_for(c.as_str(), target)?.and_then(|d| {
-        Version::parse(&d.version).ok().map(|version| Pin {
-            version,
-            mandatory: d.mandatory,
-        })
+    let as_pin = |version: &str, mandatory: bool| {
+        Version::parse(version)
+            .ok()
+            .map(|version| Pin { version, mandatory })
+    };
+    let desired = store.update_desired_for(c.as_str(), target)?;
+    let own = desired
+        .as_ref()
+        .filter(|d| !d.target.is_empty())
+        .and_then(|d| as_pin(&d.version, d.mandatory));
+    let fleet_pin = desired
+        .as_ref()
+        .filter(|d| d.target.is_empty())
+        .and_then(|d| as_pin(&d.version, d.mandatory));
+    let org = match target_org(store, target)? {
+        Some(id) => store.update_org_policy(id, c.as_str())?,
+        None => None,
+    };
+    let org_pin = org.as_ref().and_then(|o| {
+        o.pin_version
+            .as_deref()
+            .and_then(|v| as_pin(v, o.pin_mandatory))
     });
-    let mode = mode(store, c);
+    let mode = org
+        .as_ref()
+        .and_then(|o| o.mode.as_deref())
+        .map(parse_mode)
+        .unwrap_or_else(|| mode(store, c));
+    let outside_window = match org.as_ref().and_then(|o| o.window.as_deref()) {
+        Some(w) => rollout::outside(w, mode, now),
+        None => rollout::outside_window(store, mode, now),
+    };
     Ok(Policy {
         mode,
-        minimum: None,
-        pin,
-        outside_window: rollout::outside_window(store, mode, now),
+        minimum: org
+            .as_ref()
+            .and_then(|o| o.minimum.as_deref())
+            .and_then(|v| Version::parse(v).ok()),
+        pin: own.or(org_pin).or(fleet_pin),
+        outside_window,
         check_interval_secs: check_interval_secs(store),
     })
 }
@@ -380,6 +430,11 @@ fn decide_for(
     });
     if let Some(c) = cached {
         attach_evidence(&mut d, &c.raw, &c.manifests.raw);
+    }
+    if mirror::enabled(store) {
+        if let Some(t) = d.target.as_mut() {
+            t.mirror = t.artifact.content().map(|(sha, _)| mirror::path_for(sha));
+        }
     }
     Ok(d)
 }
@@ -670,6 +725,9 @@ pub struct UpdateStatus {
     /// scoped caller.
     #[serde(default)]
     pub rollouts: Vec<RolloutStatus>,
+    /// Per-org overrides of the fleet's policy (S9); empty for a scoped caller.
+    #[serde(default)]
+    pub policies: Vec<UpdateOrgPolicyRow>,
 }
 
 /// One rollout and its open wave's tally so far.
@@ -818,6 +876,11 @@ pub fn status(
                     Ok(RolloutStatus { rollout: r, tally })
                 })
                 .collect::<Result<_, IpcError>>()?
+        },
+        policies: if own.is_some() {
+            Vec::new()
+        } else {
+            s.update_org_policies()?
         },
     })
 }
@@ -1100,6 +1163,103 @@ pub fn unpin(store: &Mutex<Store>, component: &str, target: &str) -> Result<bool
     let c = parse_component(component)?;
     validate_target(c, target)?;
     let removed = lock(store)?.clear_update_desired(c.as_str(), target)?;
+    decisions_may_have_changed();
+    Ok(removed)
+}
+
+/// What `update_admin { action: set_policy }` may set for one org.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OrgPolicyInput {
+    pub mode: Option<String>,
+    pub minimum: Option<String>,
+    pub window: Option<String>,
+    pub pin_version: Option<String>,
+    pub pin_mandatory: bool,
+    pub reason: Option<String>,
+}
+
+/// `update_admin { action: set_policy, org_id, component, … }`: one org's
+/// override of the fleet's update policy for one component (S9). Fields left
+/// out keep the fleet's value; the row replaces any earlier one whole.
+pub fn set_org_policy(
+    store: &Mutex<Store>,
+    org_id: i64,
+    component: &str,
+    input: OrgPolicyInput,
+    now: i64,
+) -> Result<UpdateOrgPolicyRow, IpcError> {
+    let c = parse_component(component)?;
+    let invalid = |m: String| IpcError::new(codes::E_INVALID, m);
+    if let Some(m) = input.mode.as_deref() {
+        let allowed: &[&str] = if matches!(c, Component::Android | Component::Ios) {
+            settings::UPDATE_MOBILE_MODES
+        } else {
+            settings::UPDATE_MODES
+        };
+        if !allowed.contains(&m) {
+            return Err(invalid(format!(
+                "mode for {} must be one of {}, got {m:?}",
+                c.as_str(),
+                allowed.join(" | ")
+            )));
+        }
+    }
+    let version = |what: &str, v: &Option<String>| -> Result<Option<String>, IpcError> {
+        v.as_deref()
+            .map(|v| {
+                Version::parse(v)
+                    .map(|v| v.to_string())
+                    .map_err(|e| invalid(format!("{what} {v:?}: {e}")))
+            })
+            .transpose()
+    };
+    let minimum = version("minimum", &input.minimum)?;
+    let pin_version = version("pin", &input.pin_version)?;
+    if let Some(w) = input.window.as_deref() {
+        if settings::parse_time_range(w).is_none() {
+            return Err(invalid(format!(
+                "window {w:?}: a daily HH:MM-HH:MM in UTC, or \"\" for any time"
+            )));
+        }
+    }
+    if input.mode.is_none() && minimum.is_none() && input.window.is_none() && pin_version.is_none()
+    {
+        return Err(invalid(
+            "set_policy needs at least one of mode, minimum, window, version".into(),
+        ));
+    }
+    let s = lock(store)?;
+    if s.get_org(org_id)?.is_none() {
+        return Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("no such org {org_id}"),
+        ));
+    }
+    let row = UpdateOrgPolicyRow {
+        org_id,
+        component: c.as_str().into(),
+        mode: input.mode,
+        minimum,
+        window: input.window.map(|w| w.trim().to_string()),
+        pin_version,
+        pin_mandatory: input.pin_mandatory,
+        reason: input.reason,
+        set_by: "operator".into(),
+        set_at: now,
+    };
+    s.set_update_org_policy(&row)?;
+    decisions_may_have_changed();
+    Ok(row)
+}
+
+/// `update_admin { action: clear_policy, org_id, component }`.
+pub fn clear_org_policy(
+    store: &Mutex<Store>,
+    org_id: i64,
+    component: &str,
+) -> Result<bool, IpcError> {
+    let c = parse_component(component)?;
+    let removed = lock(store)?.clear_update_org_policy(org_id, c.as_str())?;
     decisions_may_have_changed();
     Ok(removed)
 }
@@ -1392,6 +1552,13 @@ pub async fn refresh(
     }
     let keep: Vec<String> = wanted.iter().map(|v| v.to_string()).collect();
     let pruned = s.prune_update_manifests(&keep)?;
+    let dropped = mirror::prune(&s, keys, now);
+    if dropped > 0 {
+        tracing::info!(
+            files = dropped,
+            "[update] dropped mirrored artifacts no release lists"
+        );
+    }
     if channel.doc.sequence != seen
         || !fetched.raw.is_empty()
         || !amendments.is_empty()

@@ -1716,6 +1716,11 @@ const MIGRATIONS: &[Migration] = &[
         151,
         include_str!("../../migrations/151_update_rollouts.sql"),
     ),
+    // Update design S9: per-org update policy. `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        152,
+        include_str!("../../migrations/152_update_org_policy.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

@@ -155,6 +155,19 @@ pub enum Artifact {
 }
 
 impl Artifact {
+    /// The sha256 (lowercase hex) and size of a file artifact; `None` for an
+    /// image (pulled by digest), `notify` and an unknown kind. What a mirror
+    /// may serve: the bytes are trusted by this hash, wherever they come from.
+    pub fn content(&self) -> Option<(&str, u64)> {
+        match self {
+            Artifact::Tarball { sha256, size, .. }
+            | Artifact::Tauri { sha256, size, .. }
+            | Artifact::Download { sha256, size, .. }
+            | Artifact::Apk { sha256, size, .. } => Some((sha256.as_str(), *size)),
+            Artifact::Oci { .. } | Artifact::Notify { .. } | Artifact::Unknown => None,
+        }
+    }
+
     /// Whether this artifact installs on `p`.
     pub fn matches(&self, p: &Platform) -> bool {
         let variant_ok = |v: &Option<String>| v.as_deref().is_none_or(|v| v == p.variant);

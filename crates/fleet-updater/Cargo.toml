@@ -17,6 +17,17 @@ license = "MIT"
 # signatures, a hand-written HTTP/1.1 client for the Docker Engine API over
 # its unix socket and for the hub, and no fleet-core (F5: no fleet business
 # logic here). Every crate below is already in the workspace's Cargo.lock.
+# A library (`src/lib.rs`: the shared HTTP client, the hub channel, pairing,
+# and the binary target that `fleet-agent update` and `fleet-hub update
+# apply` run) and the Docker sidecar binary on top of it.
+[lib]
+name = "fleet_updater"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fleet-updater"
+path = "src/main.rs"
+
 [dependencies]
 fleet-update = { path = "../fleet-update" }
 serde = { version = "1", features = ["derive"] }

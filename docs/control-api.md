@@ -817,8 +817,9 @@ Index by area (names only; see the reference for details):
   needs a person: `update_required`, `update_failed`,
   `update_rolled_back`, `rollback_failed` per target, `channel_stale`, and
   `rollout_paused` per paused rollout (`rollout_start` / `rollout_pause` /
-  `rollout_resume` / `rollout_abort` stage a release in waves; see
-  `docs/updates.md`). Events: `update:changed` carries ids only — `{ what:
+  `rollout_resume` / `rollout_abort` stage a release in waves, and
+  `set_policy` / `clear_policy` override the policy for one org's targets;
+  see `docs/updates.md`). Events: `update:changed` carries ids only — `{ what:
   observed | pin | channel, target? }` — when a target's reported build or
   phase, a pin or the verified channel changes; a client re-reads
   `update_status`. It never reaches a per-host token or an org-bound

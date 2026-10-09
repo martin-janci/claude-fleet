@@ -1555,3 +1555,366 @@ async fn automatic_installs_wait_for_the_window_and_offers_do_not() {
     settings::set(&lock(&store).unwrap(), settings::UPDATE_WINDOW, "").unwrap();
     assert_eq!(ask(NOW).status, Status::UpdateAvailable);
 }
+
+// ── per-org policy (S9) ──
+
+/// A paired desktop bound to `org` (its id in the store), and its caller.
+fn org_desktop(store: &Mutex<Store>, name: &str, org: Option<i64>) -> Caller {
+    let s = lock(store).unwrap();
+    let row = s
+        .insert_client_token(name, &sha256_hex(name.as_bytes()), "full")
+        .unwrap();
+    s.set_client_org(name, org).unwrap();
+    client(row.id, TokenMode::Full, org)
+}
+
+#[tokio::test]
+async fn an_orgs_policy_overrides_the_fleets_for_its_targets_only() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    let acme = lock(&store)
+        .unwrap()
+        .add_org("acme", None, false)
+        .unwrap()
+        .id;
+    let inside = org_desktop(&store, "in-acme", Some(acme));
+    let outside = org_desktop(&store, "no-org", None);
+    let ask = |c: &Caller, v: &str| check(&store, c, &desktop_req(v), &k, NOW).unwrap();
+    assert_eq!(ask(&inside, "0.3.3").status, Status::UpdateAvailable);
+
+    // manual for acme: the offer is held there, and only there.
+    set_org_policy(
+        &store,
+        acme,
+        "desktop",
+        OrgPolicyInput {
+            mode: Some("manual".into()),
+            ..Default::default()
+        },
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(ask(&inside, "0.3.3").status, Status::Hold);
+    assert_eq!(ask(&outside, "0.3.3").status, Status::UpdateAvailable);
+
+    // The org's floor makes 0.3.3 required for acme.
+    set_org_policy(
+        &store,
+        acme,
+        "desktop",
+        OrgPolicyInput {
+            minimum: Some("0.3.4".into()),
+            ..Default::default()
+        },
+        NOW,
+    )
+    .unwrap();
+    let d = ask(&inside, "0.3.3");
+    assert_eq!(
+        (d.status, d.reason.code),
+        (
+            Status::UpdateRequired,
+            fleet_update::wire::ReasonCode::BelowPolicyMinimum
+        )
+    );
+    assert_eq!(ask(&outside, "0.3.3").status, Status::UpdateAvailable);
+
+    // An org pin wins over the fleet's, a target's own wins over both.
+    pin(&store, "desktop", "", "0.3.4", false, None, NOW).unwrap();
+    set_org_policy(
+        &store,
+        acme,
+        "desktop",
+        OrgPolicyInput {
+            pin_version: Some("0.3.3".into()),
+            ..Default::default()
+        },
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(ask(&inside, "0.3.4").status, Status::Rollback);
+    assert_eq!(ask(&outside, "0.3.3").status, Status::UpdateAvailable);
+    let own = inside.client.as_ref().unwrap().id;
+    pin(
+        &store,
+        "desktop",
+        &format!("client:{own}"),
+        "0.3.4",
+        false,
+        None,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(ask(&inside, "0.3.4").status, Status::UpToDate);
+
+    // status lists the rows; clear_policy removes them.
+    let st = status(&store, &Caller::master(), &k, NOW).unwrap();
+    assert_eq!(st.policies.len(), 1);
+    assert_eq!(st.policies[0].pin_version.as_deref(), Some("0.3.3"));
+    assert!(clear_org_policy(&store, acme, "desktop").unwrap());
+    assert!(!clear_org_policy(&store, acme, "desktop").unwrap());
+    assert!(status(&store, &Caller::master(), &k, NOW)
+        .unwrap()
+        .policies
+        .is_empty());
+}
+
+#[tokio::test]
+async fn an_orgs_window_and_an_agent_host_in_it() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    let acme = {
+        let s = lock(&store).unwrap();
+        let acme = s.add_org("acme", None, false).unwrap().id;
+        s.insert_host("box1", None).unwrap();
+        s.set_host_org("box1", Some(acme)).unwrap();
+        acme
+    };
+    assert_eq!(
+        target_org(&lock(&store).unwrap(), "agent:box1").unwrap(),
+        Some(acme)
+    );
+    assert_eq!(
+        target_org(&lock(&store).unwrap(), "hub:self").unwrap(),
+        None
+    );
+    set_org_policy(
+        &store,
+        acme,
+        "desktop",
+        OrgPolicyInput {
+            mode: Some("automatic".into()),
+            window: Some("02:00-05:00".into()),
+            ..Default::default()
+        },
+        NOW,
+    )
+    .unwrap();
+    let inside = org_desktop(&store, "in-acme", Some(acme));
+    let d = check(&store, &inside, &desktop_req("0.3.3"), &k, NOW).unwrap();
+    assert_eq!(d.reason.code, fleet_update::wire::ReasonCode::OutsideWindow);
+    // The fleet's own window does not apply to acme's targets: theirs does.
+    settings::set(
+        &lock(&store).unwrap(),
+        settings::UPDATE_WINDOW,
+        "10:00-11:00",
+    )
+    .unwrap();
+    let d = check(&store, &inside, &desktop_req("0.3.3"), &k, NOW).unwrap();
+    assert_eq!(d.reason.code, fleet_update::wire::ReasonCode::OutsideWindow);
+}
+
+#[tokio::test]
+async fn an_org_policy_is_validated() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let acme = lock(&store)
+        .unwrap()
+        .add_org("acme", None, false)
+        .unwrap()
+        .id;
+    let bad =
+        |c: &str, i: OrgPolicyInput| set_org_policy(&store, acme, c, i, NOW).unwrap_err().code;
+    assert_eq!(bad("desktop", OrgPolicyInput::default()), codes::E_INVALID);
+    assert_eq!(
+        bad(
+            "android",
+            OrgPolicyInput {
+                mode: Some("automatic".into()),
+                ..Default::default()
+            }
+        ),
+        codes::E_INVALID
+    );
+    assert_eq!(
+        bad(
+            "desktop",
+            OrgPolicyInput {
+                mode: Some("yolo".into()),
+                ..Default::default()
+            }
+        ),
+        codes::E_INVALID
+    );
+    assert_eq!(
+        bad(
+            "desktop",
+            OrgPolicyInput {
+                minimum: Some("soon".into()),
+                ..Default::default()
+            }
+        ),
+        codes::E_INVALID
+    );
+    assert_eq!(
+        bad(
+            "desktop",
+            OrgPolicyInput {
+                window: Some("late".into()),
+                ..Default::default()
+            }
+        ),
+        codes::E_INVALID
+    );
+    assert_eq!(
+        bad(
+            "toaster",
+            OrgPolicyInput {
+                mode: Some("manual".into()),
+                ..Default::default()
+            }
+        ),
+        codes::E_INVALID
+    );
+    let e = set_org_policy(
+        &store,
+        9999,
+        "desktop",
+        OrgPolicyInput {
+            mode: Some("manual".into()),
+            ..Default::default()
+        },
+        NOW,
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_NOTFOUND);
+    // An empty window is a valid "any time".
+    set_org_policy(
+        &store,
+        acme,
+        "desktop",
+        OrgPolicyInput {
+            window: Some(String::new()),
+            ..Default::default()
+        },
+        NOW,
+    )
+    .unwrap();
+}
+
+// ── the artifact mirror (S9) ──
+
+/// `publish`, with 0.3.4's agent tarball carrying `bytes`' real sha256.
+fn publish_agent_bytes(fetch: &MapFetch, key: &TestKey, bytes: &[u8]) -> String {
+    let hub_contract = crate::wire_contract::CONTRACT_REVISION;
+    let sha = sha256_hex(bytes);
+    let mut releases = Vec::new();
+    for v in ["0.3.3", "0.3.4"] {
+        let mut m: serde_json::Value = serde_json::from_str(&manifest_json(
+            v,
+            hub_contract,
+            [hub_contract, hub_contract],
+            fleet_proto::PROTO_VERSION,
+            [fleet_proto::MIN_SUPPORTED_PROTO, fleet_proto::PROTO_VERSION],
+        ))
+        .unwrap();
+        if v == "0.3.4" {
+            let a = &mut m["components"]["agent"]["artifacts"][0];
+            a["sha256"] = sha.clone().into();
+            a["size"] = (bytes.len() as u64).into();
+        }
+        let m = m.to_string();
+        let url = format!("https://github.com/martin-janci/claude-fleet/releases/download/v{v}/release-manifest.json");
+        fetch.put(&url, &m);
+        fetch.put(&format!("{url}.minisig"), &key.sign(m.as_bytes()));
+        releases.push(serde_json::json!({"version": v, "manifest": url, "manifest_sha256": sha256_hex(m.as_bytes())}));
+    }
+    let ch = serde_json::json!({
+        "schema": 1, "track": "stable", "sequence": 10,
+        "generated_at": "2026-09-30T00:00:00Z", "expires_at": "2026-10-14T00:00:00Z",
+        "current": "0.3.4", "recommended": "0.3.4", "releases": releases
+    })
+    .to_string();
+    fetch.put(&format!("{BASE}stable.json"), &ch);
+    fetch.put(
+        &format!("{BASE}stable.json.minisig"),
+        &key.sign(ch.as_bytes()),
+    );
+    sha
+}
+
+fn agent_req(version: &str) -> CheckRequest {
+    CheckRequest {
+        update_proto: 1,
+        component: Component::Agent,
+        platform: Platform::new("linux", "x86_64", "tarball"),
+        installed: Installed::version(Version::parse(version).unwrap()),
+        speaks: Speaks {
+            contract_accepts: None,
+            agent_proto: Some(fleet_proto::PROTO_VERSION),
+        },
+        phase: UpdatePhase::Idle,
+        attempt: None,
+    }
+}
+
+#[tokio::test]
+async fn the_mirror_serves_only_what_a_signed_manifest_lists() {
+    let key = TestKey::new(9);
+    let k = keys(&key);
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let fetch = MapFetch::default();
+    let bytes = b"fleet-agent 0.3.4 tarball bytes";
+    let sha = publish_agent_bytes(&fetch, &key, bytes);
+    refresh(&store, &fetch, BASE, &k, NOW).await.unwrap();
+    let tarball = "https://example.test/releases/download/v0.3.4/fleet-agent-0.3.4.tar.gz";
+
+    // Off by default: no mirror path, and the route knows nothing.
+    let d = check(&store, &host("box"), &agent_req("0.3.3"), &k, NOW).unwrap();
+    assert_eq!(d.status, Status::UpdateAvailable, "{:?}", d.reason);
+    assert_eq!(d.target.as_ref().unwrap().mirror, None);
+    let off = mirror::local_copy(&store, &fetch, &k, &sha, NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(off.code, codes::E_NOTFOUND);
+
+    let dir = std::env::temp_dir().join(format!("fleet-mirror-test-{}", std::process::id()));
+    let dir = mirror::init(&dir).unwrap();
+    settings::set(&lock(&store).unwrap(), settings::UPDATE_MIRROR, "true").unwrap();
+    let d = check(&store, &host("box"), &agent_req("0.3.3"), &k, NOW).unwrap();
+    assert_eq!(
+        d.target.as_ref().unwrap().mirror.as_deref(),
+        Some(format!("/update/artifact/{sha}").as_str())
+    );
+
+    // Tampered upstream bytes are refused and nothing is kept.
+    fetch.put(tarball, "not the signed bytes");
+    let bad = mirror::local_copy(&store, &fetch, &k, &sha, NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(bad.code, codes::E_UPDATE_UNVERIFIED);
+    assert!(!dir.join(&sha).exists());
+
+    // The real bytes are fetched once and then served from disk.
+    fetch.put(tarball, std::str::from_utf8(bytes).unwrap());
+    let path = mirror::local_copy(&store, &fetch, &k, &sha, NOW)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    fetch.0.lock().unwrap().remove(tarball);
+    assert_eq!(
+        mirror::local_copy(&store, &fetch, &k, &sha, NOW)
+            .await
+            .unwrap(),
+        path
+    );
+
+    // A sha no manifest lists, or not a sha at all, is not served.
+    for other in [
+        "0".repeat(64),
+        "../../etc/passwd".into(),
+        sha.to_uppercase(),
+    ] {
+        let e = mirror::local_copy(&store, &fetch, &k, &other, NOW)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_NOTFOUND, "{other}");
+    }
+    // A file the manifests no longer list is pruned.
+    std::fs::write(dir.join("f".repeat(64)), b"old").unwrap();
+    assert_eq!(mirror::prune(&lock(&store).unwrap(), &k, NOW), 1);
+    assert!(path.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}

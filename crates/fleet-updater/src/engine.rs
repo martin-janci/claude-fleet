@@ -25,8 +25,8 @@ use fleet_update::manifest::Artifact;
 use fleet_update::phase::BadEntry;
 use fleet_update::wire::{Installed, Speaks};
 use fleet_update::{
-    CheckOutcome, CheckRequest, Component, Decision, Mode, Platform, ReasonCode, Report, Status,
-    UpdateChannel, UpdatePhase, VerifiedTarget, Version, UPDATE_PROTO,
+    CheckOutcome, CheckRequest, Component, Decision, Platform, Report, Status, UpdateChannel,
+    UpdatePhase, VerifiedTarget, Version, UPDATE_PROTO,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -35,6 +35,8 @@ use tokio::time::Instant;
 use crate::docker::{self, Docker};
 use crate::spec;
 use crate::state::{Build, Previous, State};
+use fleet_updater::common::{attempt_id, known, prune_backups, safe, stamp};
+pub use fleet_updater::common::{now_unix, restore_db, wants_install};
 
 macro_rules! log {
     ($($t:tt)*) => {
@@ -42,13 +44,6 @@ macro_rules! log {
     };
 }
 pub(crate) use log;
-
-pub fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -171,17 +166,6 @@ pub struct Updater<D: Docker> {
     pub channel: Box<dyn UpdateChannel>,
     pub cfg: Config,
     pub state: State,
-}
-
-/// Whether a decision asks this updater to install. `notify` offers and
-/// waits for a person; a person saying so *is* a pin (`update_admin pin`),
-/// which arrives here as `Pinned`.
-pub fn wants_install(d: &Decision) -> bool {
-    match d.status {
-        Status::UpdateRequired | Status::Rollback => true,
-        Status::UpdateAvailable => d.mode == Mode::Automatic || d.reason.code == ReasonCode::Pinned,
-        _ => false,
-    }
 }
 
 impl<D: Docker> Updater<D> {
@@ -1107,93 +1091,6 @@ pub fn needs_restore(prev: &Previous, cand: Option<&Build>, cand_schema: Option<
         Some(after) => after > before,
         None => true,
     }
-}
-
-/// Move `state.db*` aside into `failed-<v>-<stamp>/` (never deleted) and put
-/// a copy of `backup` in their place, owned like the database it replaces.
-pub fn restore_db(data: &Path, backup: &Path, failed_version: &str) -> Result<(), String> {
-    let db = data.join("state.db");
-    let owner = std::fs::metadata(&db).ok().map(|m| {
-        use std::os::unix::fs::MetadataExt;
-        (m.uid(), m.gid())
-    });
-    let aside = data.join(format!("failed-{}-{}", safe(failed_version), stamp()));
-    std::fs::create_dir_all(&aside).map_err(|e| format!("{}: {e}", aside.display()))?;
-    for name in ["state.db", "state.db-wal", "state.db-shm"] {
-        let p = data.join(name);
-        if p.exists() {
-            std::fs::rename(&p, aside.join(name)).map_err(|e| format!("{}: {e}", p.display()))?;
-        }
-    }
-    let tmp = data.join("state.db.restore");
-    std::fs::copy(backup, &tmp).map_err(|e| format!("{}: {e}", backup.display()))?;
-    if let Some((uid, gid)) = owner {
-        // Only root may give a file away; an updater running as the hub's
-        // own user already owns it.
-        let _ = std::os::unix::fs::chown(&tmp, Some(uid), Some(gid));
-    }
-    std::fs::File::open(&tmp)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &db).map_err(|e| format!("{}: {e}", db.display()))?;
-    Ok(())
-}
-
-/// Keep the newest `keep` `pre-*.db` backups (and always `just_made`).
-fn prune_backups(dir: &Path, keep: usize, just_made: &Path) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut files: Vec<(std::time::SystemTime, PathBuf)> = rd
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("pre-") && n.ends_with(".db"))
-        })
-        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
-        .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    for (_, p) in files.into_iter().skip(keep.max(1)) {
-        if p != just_made {
-            let _ = std::fs::remove_file(&p);
-        }
-    }
-}
-
-/// A value the build left unknown is no value.
-fn known(s: &str) -> Option<String> {
-    let s = s.trim();
-    (!s.is_empty() && s != "unknown" && s != "local").then(|| s.to_string())
-}
-
-/// `[A-Za-z0-9._-]` only (a semver's `+build` included).
-fn safe(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
-fn stamp() -> String {
-    fleet_update::time::format_rfc3339(now_unix()).replace([':', '-'], "")
-}
-
-fn attempt_id() -> String {
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!(
-        "{:012x}{:08x}",
-        t.as_millis(),
-        t.subsec_nanos() ^ std::process::id()
-    )
 }
 
 #[cfg(test)]

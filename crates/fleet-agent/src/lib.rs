@@ -6,8 +6,9 @@
 //! `docs/superpowers/specs/2026-09-18-host-agent-design.md`.
 //!
 //! A library as well as a binary, so an end-to-end test can link the real
-//! agent against the real hub in one process. It still depends on
-//! `fleet-proto` and never on `fleet-core`.
+//! agent against the real hub in one process. It depends on `fleet-proto`
+//! (and, for `update`, `fleet-update` / `fleet-updater`) and never on
+//! `fleet-core`.
 
 pub mod cli;
 pub mod config;
@@ -15,6 +16,7 @@ pub mod conn;
 pub mod exec;
 pub mod install;
 pub mod report;
+pub mod update;
 
 /// Helpers the unit tests share.
 #[cfg(test)]

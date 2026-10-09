@@ -204,8 +204,8 @@ pub use trackers::{
     TRACKER_PROVIDERS, TRACKER_STATES,
 };
 pub use update::{
-    UpdateDesiredRow, UpdateDocRow, UpdateEventRow, UpdateObservedRow, UpdateRolloutRow,
-    UPDATE_EVENT_RETENTION_SECS,
+    UpdateDesiredRow, UpdateDocRow, UpdateEventRow, UpdateObservedRow, UpdateOrgPolicyRow,
+    UpdateRolloutRow, UPDATE_EVENT_RETENTION_SECS,
 };
 pub use work::{
     canonical_key, github_ref, normalize_work_ref, primary_conflict, split_github_repo, Decider,

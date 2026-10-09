@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use fleet_update::manifest::ReleaseManifest;
 use fleet_update::wire::{ChannelRef, DocRef, Reason, Target};
-use fleet_update::{Source, Track, UpdateError};
+use fleet_update::{Mode, ReasonCode, Source, Track, UpdateError};
 use serde_json::json;
 
 use super::*;
@@ -351,6 +351,7 @@ fn outcome(
                 channel: ChannelRef { sequence: 1 },
                 artifact: artifact.clone(),
                 url: None,
+                mirror: None,
                 evidence: None,
             }),
             reason: Reason {
