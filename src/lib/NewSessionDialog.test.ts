@@ -144,6 +144,32 @@ describe('NewSessionDialog', () => {
     expect((newSessionCall![1] as any).args.host_alias).toBe('mefistos');
   });
 
+  // Step 5.13: while the create runs, the new layout's dialog shows the
+  // Pulse on its worktree step; nothing shows in Classic.
+  it('new layout: the create in flight shows the Pulse on the worktree step', async () => {
+    uiLayout.set('new');
+    let finish!: () => void;
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockImplementation(async (args) => {
+      sessionsModule.creatingStart.set({ host_alias: args.host_alias, name: args.name, kind: 'work' });
+      await new Promise<void>((r) => (finish = r));
+      sessionsModule.creatingStart.set(null);
+      return { ok: false, error: { code: 'E_INVALID', message: 'stop here' } } as never;
+    });
+    try {
+      render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+      await tick();
+      await fireEvent.click(screen.getByText('Create'));
+      await tick();
+      const pulse = await screen.findByTestId('new-session-pulse');
+      expect(pulse.textContent).toContain('Setting up worktree · 1 of 3');
+      finish();
+      await vi.waitFor(() => expect(screen.queryByTestId('new-session-pulse')).toBeNull());
+    } finally {
+      spy.mockRestore();
+      uiLayout.set('classic');
+    }
+  });
+
   it('sends the picked model and effort for a Claude session, nothing for a shell', async () => {
     const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
       ok: false,

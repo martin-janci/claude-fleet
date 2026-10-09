@@ -1,0 +1,39 @@
+{
+  "spec": "fleet.form/1",
+  "title": "Add a host",
+  "intro": "Fleet connects over SSH and checks what sessions need: tmux, git, fleet-agent, disk space and the agents on PATH. Nothing is installed.",
+  "submit": "Check and add",
+  "steps": [
+    {
+      "title": "Connection",
+      "fields": [
+        {
+          "name": "pick",
+          "type": "select",
+          "label": "Host",
+          "required": true,
+          "value": "*",
+          "options": [["*", "Type an SSH alias"]],
+          "help": "The hosts in ~/.ssh/config, or any alias SSH can reach."
+        },
+        {
+          "name": "ssh_alias",
+          "type": "text",
+          "label": "SSH alias",
+          "required": true,
+          "max_len": 128,
+          "placeholder": "mercury",
+          "when": { "field": "pick", "eq": "*" }
+        },
+        {
+          "name": "alias",
+          "type": "text",
+          "label": "Name in fleet",
+          "max_len": 64,
+          "placeholder": "mercury",
+          "help": "Empty uses the SSH alias."
+        }
+      ]
+    }
+  ]
+}
