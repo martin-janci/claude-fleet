@@ -1,7 +1,7 @@
 // The task page's shared-work sections (design 2026-09-29 §4): notes,
 // subtasks, proposals, jobs and agent steps — text as text.
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -9,6 +9,7 @@ import { invoke } from '@tauri-apps/api/core';
 import TaskWorkSections from './TaskWorkSections.svelte';
 import { task } from './work_view_fixture';
 import type { TaskDetail } from './work_view';
+import { uiLayout } from './prefs';
 
 const detail: TaskDetail = {
   task: task({ task_id: 'item:110', item_id: 110, key: 'OM-110' }),
@@ -97,5 +98,74 @@ describe('TaskWorkSections', () => {
     render(TaskWorkSections, { detail, part: 'steps' });
     expect(screen.getByTestId('task-steps')).toBeTruthy();
     expect(screen.queryByTestId('task-subtasks')).toBeNull();
+  });
+  describe('Jev\'s "may duplicate" (redesign 6.9, K4)', () => {
+    const dupDetail: TaskDetail = {
+      ...detail,
+      proposals: [
+        {
+          ...detail.proposals![0],
+          duplicate: { item_id: 36, task_id: 'item:36', key: 'TASK-36', title: 'Pick the P0 owner', source: 'jev', confidence_pct: 82, run_id: 9 },
+        },
+      ],
+    };
+
+    it('shows May duplicate with Merge and Keep both in the New layout', async () => {
+      uiLayout.set('new');
+      render(TaskWorkSections, { detail: dupDetail });
+      const dup = screen.getByTestId('task-proposal-duplicate');
+      expect(dup.textContent).toContain('May duplicate TASK-36');
+      expect(screen.getByTestId('task-proposal-duplicate-by').textContent).toContain('82%');
+      expect(screen.queryByTestId('task-proposal-accept')).toBeNull();
+      await fireEvent.click(screen.getByTestId('task-proposal-merge'));
+      await flush();
+      expect(calls('reject_work_proposal')[0][1]).toEqual({ args: { item_id: 44 } });
+      await fireEvent.click(screen.getByTestId('task-proposal-keep-both'));
+      await flush();
+      expect(calls('accept_work_proposal')[0][1]).toEqual({ args: { item_id: 44 } });
+      uiLayout.set('classic');
+    });
+
+    it('keeps Accept and Reject, and no hint, in the classic layout', () => {
+      uiLayout.set('classic');
+      render(TaskWorkSections, { detail: dupDetail });
+      expect(screen.queryByTestId('task-proposal-duplicate')).toBeNull();
+      expect(screen.getByTestId('task-proposal-accept')).toBeTruthy();
+      expect(screen.getByTestId('task-proposal-reject')).toBeTruthy();
+    });
+
+    it('shows Accept and Reject when Jev flagged nothing', () => {
+      uiLayout.set('new');
+      render(TaskWorkSections, { detail });
+      expect(screen.queryByTestId('task-proposal-duplicate')).toBeNull();
+      expect(screen.getByTestId('task-proposal-accept')).toBeTruthy();
+      uiLayout.set('classic');
+    });
+  });
+});
+
+describe('TaskWorkSections in the New layout', () => {
+  beforeEach(() => uiLayout.set('new'));
+  afterEach(() => uiLayout.set('classic'));
+
+  it('+ Add subtask adds one under this task', async () => {
+    render(TaskWorkSections, { detail, part: 'work' });
+    await flush();
+    expect(screen.queryByTestId('task-subtask-start')).toBeNull(); // New starts through the split button
+    await fireEvent.click(screen.getByTestId('task-add-subtask'));
+    const input = screen.getByLabelText('Subtask title') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'Follow-up' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await flush();
+    expect(calls('create_work_task')[0][1]).toEqual({ args: { title: 'Follow-up', parent: 'item:110' } });
+  });
+
+  it('with no subtasks yet, + Add subtask stays a button', async () => {
+    render(TaskWorkSections, { detail: { ...detail, subtasks: [] }, part: 'work' });
+    await flush();
+    expect(screen.getByText('No subtasks yet.')).toBeTruthy();
+    expect(screen.getByTestId('task-add-subtask').tagName).toBe('BUTTON');
+    await fireEvent.click(screen.getByTestId('task-add-subtask'));
+    expect(screen.getByLabelText('Subtask title')).toBeTruthy();
   });
 });

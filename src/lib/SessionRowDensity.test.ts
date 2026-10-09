@@ -7,7 +7,9 @@ import { session } from './hosts_fixture';
 import { hubStatus, STANDALONE } from './hub';
 import { resetAccessForTests } from './access';
 import { showRowDetails, type SessionRow } from './sessions';
-import { COMPACT_ROW_PX, uiDensity } from './prefs';
+import { COMPACT_ROW_PX, uiDensity, uiLayout } from './prefs';
+import { accounts } from './accounts';
+import { ADMIN, fleetAccounts } from './hosts_fixture';
 
 // Redesign step 3.6: the density setting. Comfortable is 0.5.4's row with
 // every badge; Compact is the two-line row (sans title, one meta line, chips
@@ -130,5 +132,33 @@ describe('row density (redesign step 3.6)', () => {
     // draws around the list (280 px, generous for every layout).
     const chrome = 280;
     expect(20 * COMPACT_ROW_PX).toBeLessThanOrEqual(1080 - chrome);
+  });
+});
+
+// Parity P15: density, not layout, decides the badges. New keeps every 0.5.4
+// badge on a Comfortable row and adds the account pill (redesign step 4.3).
+describe('row density in the New layout', () => {
+  beforeEach(() => {
+    uiLayout.set('new');
+    accounts.set(fleetAccounts());
+  });
+  afterEach(() => {
+    uiLayout.set('classic');
+    accounts.set([]);
+  });
+
+  it('New layout: Comfortable shows every 0.5.4 badge, plus the account pill', async () => {
+    render(SessionRowItem, { props: props({ ...full, account_uuid: ADMIN.uuid }) });
+    await tick();
+    const row = screen.getByTestId('sess-row');
+    expect(row.dataset.density).toBe('comfortable');
+    expect(row.classList.contains('compact')).toBe(false);
+    expect(row.style.minHeight).toBe('');
+    for (const id of BADGES_054) expect(screen.queryByTestId(id), id).not.toBeNull();
+    expect(screen.getByText('high')).toBeTruthy();
+    expect(screen.getByText('PR↗')).toBeTruthy();
+    expect(screen.queryByTestId('sess-meta-line')).toBeNull();
+    expect(screen.queryByTestId('sess-age')).toBeNull();
+    expect(screen.getByTestId('account-pill')).toBeTruthy();
   });
 });

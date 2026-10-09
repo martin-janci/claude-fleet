@@ -799,6 +799,15 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "list_update_targets",
+            "update_status",
+            json!({}),
+            r#"{"targets":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::updates::routed::list_update_targets(b, s)).map(|_| ())
+            }),
+        ),
+        (
             "get_form",
             "ask",
             json!({ "get": "f_a" }),
@@ -2493,6 +2502,25 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         host_alias: "trn".into(),
                         name: "demo".into(),
                         force: true,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "shell_terminals",
+            "shell_terminals",
+            json!({ "session_id": 7, "action": "open", "n": 2 }),
+            r#"{"session_id":7,"host_alias":"trn","terminals":[{"n":2,"tmux_name":"demo--sh2"}],"opened":2}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::shell_terminals(
+                    b,
+                    fleet_core::service::sessions::ShellTerminalsArgs {
+                        session_id: 7,
+                        action: fleet_core::service::sessions::ShellTerminalAction::Open,
+                        n: Some(2),
                     },
                     s,
                     h,
@@ -6143,6 +6171,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/presence.rs",
         include_str!("../commands/presence.rs"),
+    ),
+    (
+        "commands/updates.rs",
+        include_str!("../commands/updates.rs"),
     ),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (

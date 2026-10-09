@@ -116,6 +116,10 @@ const NO_GIT_WRITE_TOOL: &str =
     "the hub exposes no git-write tool — a remote client must not stage or commit under a \
      running agent; do it in the session, or from a standalone app";
 
+const NO_DRAFT_TOOL: &str =
+    "the hub exposes no draft tool — a commit message is drafted where the commit is made: \
+     in the session, or from a standalone app";
+
 /// Every command in `generate_handler!`, grouped as there, with its verdict.
 pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── health and this app's own logs ──────────────────────────────────────
@@ -198,6 +202,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "kill_session",
         Verdict::Routed {
             tool: "kill_session",
+        },
+    ),
+    (
+        "shell_terminals",
+        Verdict::Routed {
+            tool: "shell_terminals",
         },
     ),
     (
@@ -809,6 +819,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "unlink_peer",
         },
     ),
+    // Settings → Updates (Orbit Fleet 11.9b): what each part of the fleet
+    // runs, from the hub's update picture.
+    (
+        "list_update_targets",
+        Verdict::Routed {
+            tool: "update_status",
+        },
+    ),
     ("list_pull_requests", Verdict::Routed { tool: "prs" }),
     (
         "session_presence",
@@ -1007,6 +1025,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "repo_commit_create",
         Verdict::LocalOnly {
             instead: NO_GIT_WRITE_TOOL,
+        },
+    ),
+    (
+        "draft_commit_message",
+        Verdict::LocalOnly {
+            instead: NO_DRAFT_TOOL,
         },
     ),
     (

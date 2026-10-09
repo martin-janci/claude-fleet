@@ -163,6 +163,13 @@ pub async fn new_bg_session_tracked(
     // Recorded before `claude --bg` runs so the by-name fallback can tell
     // this launch apart from an older agent listed under the same name.
     let launch_started = now_unix();
+    // Redesign 8.7: a background session bills the host's own login; say so
+    // when that account is past `accounts.pause_at`. A warning, not a
+    // refusal: a person or an agent asked for it now.
+    let over = {
+        let s = lock(store)?;
+        crate::service::account_limits::over_limit(&s, &host_alias, None, launch_started)?
+    };
     let mut res = new_bg_session(args, ssh).await?;
     if res.claude_session_id.is_none() {
         // `claude --bg` output did not carry the id; the agent is listed
@@ -171,6 +178,13 @@ pub async fn new_bg_session_tracked(
         if res.claude_session_id.is_some() {
             res.warning = None;
         }
+    }
+    if let Some(over) = over {
+        let line = format!("{}; it may stall at the limit", over.reason());
+        res.warning = Some(match res.warning.take() {
+            Some(w) => format!("{w}; {line}"),
+            None => line,
+        });
     }
     let Some(ref claude_id) = res.claude_session_id else {
         return Ok(res);

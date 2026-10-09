@@ -6,6 +6,7 @@
   import { untrack } from 'svelte';
   import Chart from './Chart.svelte';
   import { copyText } from '../clipboard';
+  import { subscribeToRowEvents } from '../events';
   import {
     fetchSource,
     formatCell,
@@ -44,7 +45,7 @@
   async function read(ref: SourceRef) {
     const mine = ++reads;
     copied = false;
-    const r = await fetchSource(ref);
+    const r = await fetchSource(ref, spec);
     if (mine !== reads) return;
     loaded = true;
     error = null;
@@ -58,6 +59,21 @@
   $effect(() => {
     void readKey;
     untrack(() => void read(source));
+  });
+
+  // A live `update` source re-reads on every `update:changed`.
+  $effect(() => {
+    if (spec?.live?.event !== 'update') return;
+    let stop: (() => void) | null = null;
+    let gone = false;
+    void subscribeToRowEvents({ onUpdateChanged: () => void read(untrack(() => source)) }).then((u) => {
+      if (gone) u();
+      else stop = u;
+    });
+    return () => {
+      gone = true;
+      stop?.();
+    };
   });
 
   async function copy() {
