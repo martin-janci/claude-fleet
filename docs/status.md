@@ -686,10 +686,17 @@ since a3033c2 / #384 (v0.4.1); the secret half is only the
 channel was published with v0.4.1 (2026-09-28); `stable` / `beta` list every
 release since. `FLEET_UPDATE_E2E_KEYS`
 (read by `e2e` builds only) is reserved for S4b's hub-e2e section U;
-nothing uses it yet. `update.track` offers `stable` / `beta` only until S2b
-publishes `nightly` (a stored `nightly` resolves to `stable`). S2b
-(nightly), the rest of S4b and S7–S9 are not built; §13 questions 2, 3
-and 7 wait on the owner.
+nothing uses it yet. **S2b is landed:** `nightly.yml` cuts a nightly of
+a green `main` commit (`scripts/cut-nightly.sh`: scripts/release.sh's own
+commit on top of it, never pushed to a branch, only its tag) and dispatches
+the same `release.yml` / `hub-image.yml` at it — per push at most every two
+hours `X.Y.Z-dev.N.g<sha>` (hub and tarballs; `release-assets.sh
+has-desktop` is false), once a day `X.Y.Z-dev.N.desktop.g<sha>` with the
+desktop bundles (owner's §13.3 answer). `update.track` offers `nightly`;
+Git mode scans past releases without the caller's artifact, and the hub
+keeps 20 manifests. Pruned to the newest 12 + 3. The rest of S4b and S7–S9
+are not built; §13 question 7 waits on the owner (2 is answered: a signed
+amendment).
 
 Debug devices' first slice is landed (`docs/debug-devices.md`): per-host
 inventory of Android phones, emulators and AVDs, iOS simulators and paired

@@ -586,9 +586,9 @@ pub const DECIDE_MODES: &[&str] = crate::store::DECISION_MODES;
 // ── update.* (application updates, update-channel design §7.3) ──
 /// The release track the hub follows for its fleet.
 pub const UPDATE_TRACK: &str = "update.track";
-/// `nightly` joins when S2b publishes it (`src/lib/fleet_settings.ts` keeps
-/// the same list).
-pub const UPDATE_TRACKS: &[&str] = &["stable", "beta"];
+/// `nightly` is every green `main` commit (nightly.yml, S2b);
+/// `src/lib/fleet_settings.ts` keeps the same list.
+pub const UPDATE_TRACKS: &[&str] = &["stable", "beta", "nightly"];
 /// Per component: `manual` (only pins), `notify` (offer), `automatic`
 /// (install at the next quiet point).
 pub const UPDATE_HUB_MODE: &str = "update.hub.mode";

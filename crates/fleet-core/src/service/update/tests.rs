@@ -717,16 +717,19 @@ async fn a_new_track_or_interval_wakes_the_refresh_tick() {
 }
 
 #[test]
-fn nightly_is_not_offered_until_it_is_published() {
+fn nightly_is_a_track_once_it_is_published() {
+    settings::validate(settings::UPDATE_TRACK, "nightly").unwrap();
     assert_eq!(
-        settings::validate(settings::UPDATE_TRACK, "nightly")
+        settings::validate(settings::UPDATE_TRACK, "hourly")
             .unwrap_err()
             .code,
         codes::E_INVALID
     );
     let s = Store::open_in_memory().unwrap();
-    // A value stored before nightly was withdrawn reads as the default.
     s.set_setting(settings::UPDATE_TRACK, "nightly").unwrap();
+    assert_eq!(track(&s), Track::Nightly);
+    // Anything else stored reads as the default.
+    s.set_setting(settings::UPDATE_TRACK, "hourly").unwrap();
     assert_eq!(track(&s), Track::Stable);
 }
 

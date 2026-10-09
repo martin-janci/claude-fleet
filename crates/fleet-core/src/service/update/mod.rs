@@ -43,7 +43,10 @@ pub const CHANNEL_BASE_URL: &str =
 /// documents come from: what is trusted is still the signature.
 pub const CHANNEL_URL_ENV: &str = "FLEET_UPDATE_CHANNEL_URL";
 /// How many of a track's newest releases the hub keeps manifests for.
-pub const MANIFESTS_KEPT: usize = 10;
+/// Twenty, not ten: on `nightly` most releases are per-push builds with no
+/// desktop bundle, and the newest one a desktop can install must still be
+/// among them (nightly.yml cuts at most one every two hours, S2b).
+pub const MANIFESTS_KEPT: usize = 20;
 /// Internal (not a registry setting): the last refresh's outcome.
 const LAST_REFRESH_KEY: &str = "update.last_refresh";
 
@@ -83,11 +86,11 @@ pub fn channel_base_url() -> String {
 
 // ── policy ──
 
-/// The track the hub follows. `nightly` is not offered until S2b publishes
-/// it, so a stored `nightly` resolves to the default, `stable`.
+/// The track the hub follows.
 pub fn track(store: &Store) -> Track {
     match settings::get_string(store, settings::UPDATE_TRACK).as_str() {
         "beta" => Track::Beta,
+        "nightly" => Track::Nightly,
         _ => Track::Stable,
     }
 }

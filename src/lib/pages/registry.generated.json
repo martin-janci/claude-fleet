@@ -1455,7 +1455,8 @@
       "kind": {
         "options": [
           "stable",
-          "beta"
+          "beta",
+          "nightly"
         ],
         "type": "choice"
       },
@@ -4463,7 +4464,7 @@
               "type": "field"
             },
             {
-              "text": "Nothing installs itself yet: fleet-updater, the desktop and the phone arrive in later slices (S6–S8), so on a standalone desktop these rows have no effect. There is no nightly track until it is published (S2b).",
+              "text": "The Docker hub updates itself through fleet-updater (opt-in, docs/updates.md). nightly is every green main commit: the hub and agents on each push, the desktop once a day.",
               "tone": "info",
               "type": "notice"
             }

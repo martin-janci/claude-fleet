@@ -3363,7 +3363,8 @@
       "kind": {
         "options": [
           "stable",
-          "beta"
+          "beta",
+          "nightly"
         ],
         "type": "choice"
       },

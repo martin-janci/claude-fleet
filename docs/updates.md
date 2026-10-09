@@ -19,8 +19,8 @@ and the phones. Design and rationale:
 > `update.hub.mode=notify` it installs only what an operator pins. The
 > desktop and the phone install nothing yet (slices S7–S8): on a standalone
 > desktop the Settings → Updates rows have no effect. A hub that cannot
-> verify a channel still offers nothing, and there is no `nightly` channel
-> yet (S2b).
+> verify a channel still offers nothing. `nightly` is published by
+> `nightly.yml` (slice S2b).
 
 ## Who decides what
 
@@ -45,7 +45,7 @@ A desktop with no hub reads the channel itself (Git mode) and applies its own
 |-------|-----------------|
 | `stable` | `vX.Y.Z` releases |
 | `beta` | `-rc.N` release candidates, and every stable release too |
-| `nightly` | every green `main` commit, as `X.Y.Z-dev.N.g<sha>` (not published yet, and not selectable in `update.track` until S2b) |
+| `nightly` | green `main` commits: the hub image and the agent/hub tarballs as `X.Y.Z-dev.N.g<sha>` (at most one every two hours), and once a day every component, the desktop too, as `X.Y.Z-dev.N.desktop.g<sha>`. A desktop on `nightly` is offered the newest one that carries its bundle. The newest 15 are kept |
 
 ## What the hub answers
 

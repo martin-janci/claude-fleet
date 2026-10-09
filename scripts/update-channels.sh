@@ -93,6 +93,8 @@ case "$cmd" in
     for t in $tracks; do
       args=(channel-add --track "$t" --manifest "$work/release-manifest.json" --manifest-url "$url" --out "$tree/$t.json")
       [ -f "$tree/$t.json" ] && args+=(--channel "$tree/$t.json")
+      # nightly.yml keeps only the newest 15 nightly releases; list no more.
+      [ "$t" = nightly ] && args+=(--keep 15)
       "$FLEET_RELEASE" "${args[@]}"
       sign "$t"
     done

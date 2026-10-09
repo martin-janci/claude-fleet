@@ -121,6 +121,25 @@ check "an rc lands on beta" test "$(json "$t/beta.json" 'd["current"]')" = "$rc"
 chan stable
 check "and not on stable" test "$(json "$t/stable.json" 'd["current"]')" = "$v"
 
+# A per-push nightly (nightly.yml, S2b): the hub tarball only, no desktop
+# bundles, and it moves nightly.json alone.
+nv="0.4.2-dev.7.gabc1234"
+check "a per-push nightly builds no desktop legs" test "$("$here/release-assets.sh" has-desktop "$nv")" = false
+check "a daily nightly does" test "$("$here/release-assets.sh" has-desktop "0.4.2-dev.8.desktop.gabc1234")" = true
+nassets="$t/assets-nightly"
+mkdir -p "$nassets" "$t/published/v$nv" "$t/pack/fleet-hub-$nv"
+cp "$FLEET_HUB" "$t/pack/fleet-hub-$nv/fleet-hub"
+tar -czf "$nassets/fleet-hub-${nv}-x86_64-unknown-linux-gnu.tar.gz" -C "$t/pack" "fleet-hub-$nv"
+(cd "$t" && DRY_RUN=1 TAG="v$nv" HUB_IMAGE_WAIT_SECS=0 ASSETS_DIR="$nassets" "$here/release-manifest.sh" 2>/dev/null)
+check "a nightly's manifest is on the nightly track" test "$(json "$t/release-manifest.json" 'd["release"]["track"]')" = nightly
+check "and carries no desktop artifact" test "$(json "$t/release-manifest.json" 'len(d["components"].get("desktop", {}).get("artifacts", []))')" = 0
+cp "$t/release-manifest.json" "$t/release-manifest.json.minisig" "$t/published/v$nv/"
+before_beta="$(git -C "$t/remote.git" show update-channels:beta.json)"
+uc add "v$nv"
+check "a nightly lands on nightly" chan nightly
+check "nightly lists it as current" test "$(json "$t/nightly.json" 'd["current"]')" = "$nv"
+check "and beta did not move" test "$(git -C "$t/remote.git" show update-channels:beta.json)" = "$before_beta"
+
 seq="$(json "$t/stable.json" 'd["sequence"]')"
 uc edit stable minimum "$v" hub
 chan stable
