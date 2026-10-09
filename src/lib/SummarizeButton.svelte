@@ -4,6 +4,8 @@
   // host with no tools; the reply is kept in the work journal, where the next
   // resume brief shows it. Here it is shown once, below the row, as text.
   import Loader from './Loader.svelte';
+  import DraftedLabel from './DraftedLabel.svelte';
+  import { draftedBy } from './ai_proposal';
   import { linkSessionId, summarizePastWork, type WorkLink } from './work';
   import { plainUntrusted } from './tracker_health';
   import { hubActionBlocked, hubStatus } from './hub';
@@ -24,6 +26,8 @@
   let busy = $state(false);
   let text = $state<string | null>(null);
   let truncated = $state(false);
+  /** Who wrote it, as a draft says (design-system/ai.md). */
+  let origin = $state('');
 
   const blocked = $derived(hubActionBlocked('summarize_past_work', $hubStatus, $hubConnection));
   /**
@@ -69,6 +73,7 @@
     }
     text = plainUntrusted(r.value.summary);
     truncated = r.value.truncated === true;
+    origin = draftedBy(r.value.model, r.value.host_alias, 'from the transcript');
   }
 
   function close(e: MouseEvent) {
@@ -90,7 +95,11 @@
 {#if text !== null}
   <div class="summary" data-testid="past-summary" role="note" aria-label="Summary of {workKey}">
     <div class="head">
-      <span>Written by Claude from the transcript{truncated ? ' (cut to 4,000 characters)' : ''}</span>
+      <span class="drafted"
+        ><DraftedLabel testid="past-summary-drafted" /><span data-testid="past-summary-meta"
+          >{origin}{truncated ? ' (cut to 4,000 characters)' : ''}</span
+        ></span
+      >
       <button type="button" class="x" aria-label="Close the summary" data-testid="past-summary-close" onclick={close}>×</button>
     </div>
     <pre>{text}</pre>
@@ -116,6 +125,12 @@
     justify-content: space-between;
     gap: 6px;
     opacity: 0.75;
+  }
+  .drafted {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
   }
   .summary pre {
     margin: 4px 0 0;
