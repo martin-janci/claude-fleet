@@ -508,6 +508,38 @@ pub async fn run_with(store: &Mutex<Store>, exec: &dyn ShepherdExec, now: i64) -
     recorded
 }
 
+/// Reconcile-tick hook: [`run`] in its own single-flight task, as
+/// `gc::spawn_sweep` and `usage::spawn_collect` do. A merge awaits two `gh`
+/// calls over SSH with 60 s bounds, and inline they held the tick body, which
+/// skips missed ticks, so every session's status went stale behind a slow
+/// GitHub (review r16). A spawn while one is still running is a no-op.
+pub fn spawn_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>, period: std::time::Duration) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    struct Flight;
+    impl Drop for Flight {
+        fn drop(&mut self) {
+            RUNNING.store(false, Ordering::SeqCst);
+        }
+    }
+    if RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    let flight = Flight;
+    let (store, ssh) = (Arc::clone(store), Arc::clone(ssh));
+    tokio::spawn(async move {
+        let _flight = flight;
+        let n = run(&store, &ssh).await;
+        if n > 0 {
+            tracing::info!("pr shepherd: recorded {n} episode(s)");
+        }
+        crate::service::loops::report("pr_shepherd", Ok::<_, String>(()), Some(period));
+    });
+}
+
 /// Tick entry point with the real executor.
 pub async fn run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> usize {
     let exec = RealShepherdExec {

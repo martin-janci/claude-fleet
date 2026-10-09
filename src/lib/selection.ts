@@ -32,10 +32,22 @@ export interface SessionRef {
 
 const selectedRef = writable<SessionRef | null>(null);
 
-export const selectedSession: Readable<SessionRow | null> = derived(
-  [sessions, selectedRef],
-  ([$sessions, $ref]) => ($ref ? (findSession($sessions, $ref) ?? null) : null),
-);
+// Not a `derived`: a svelte store treats every object as changed, so a
+// derived row re-notified every reader on each row event anywhere in the
+// fleet, and the panes keyed on it (WatchView's capture poll, TicketCard's
+// history read, WatchSummary) re-ran on every flush (review r16). This one
+// notifies only when the row object itself changes; untouched rows keep their
+// identity through `sessions`.
+const selectedRow = writable<SessionRow | null>(null);
+function syncSelectedRow(): void {
+  const ref = get(selectedRef);
+  const next = ref ? (findSession(get(sessions), ref) ?? null) : null;
+  if (next !== get(selectedRow)) selectedRow.set(next);
+}
+sessions.subscribe(syncSelectedRow);
+selectedRef.subscribe(syncSelectedRow);
+
+export const selectedSession: Readable<SessionRow | null> = { subscribe: selectedRow.subscribe };
 
 // When the selected row leaves the store (killed, dismissed, dropped by a
 // full re-fetch) the selection is cleared — not merely hidden — so a later

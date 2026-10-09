@@ -239,3 +239,22 @@ describe('onSessionOpened', () => {
     expect(opened).toEqual(['dev-a']);
   });
 });
+
+describe('selectedSession notifies only when its own row changes (review r16)', () => {
+  it('stays silent while other rows change, and speaks when its row does', () => {
+    const a = makeSession({ id: 1, tmux_name: 'a' });
+    const b = makeSession({ id: 2, tmux_name: 'b' });
+    sessions.set([a, b]);
+    selectSession(a);
+    let calls = 0;
+    const stop = selectedSession.subscribe(() => calls++);
+    const base = calls;
+    // Another row's event: a new array, but `a` keeps its identity.
+    sessions.set([a, { ...b, status: 'idle' }]);
+    expect(calls).toBe(base);
+    sessions.set([{ ...a, status: 'idle' }, b]);
+    expect(calls).toBe(base + 1);
+    expect(get(selectedSession)?.status).toBe('idle');
+    stop();
+  });
+});

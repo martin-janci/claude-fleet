@@ -12,7 +12,7 @@
 
 use crate::ipc_error::{codes, IpcError};
 use crate::service::view_scope::ViewScope;
-use crate::store::{LibraryItemRow, NewLibraryItem, Store};
+use crate::store::{LibraryItemRow, NewLibraryItem, SessionRow, Store};
 
 /// `kind` values.
 pub const KIND_UPLOAD: &str = "upload";
@@ -74,14 +74,20 @@ pub struct LibraryList {
 
 /// Whether `scope` sees `row`: the download rule, for a path on a host.
 pub fn visible(s: &Store, scope: &ViewScope, row: &LibraryItemRow) -> bool {
+    let sess = row
+        .session_id
+        .and_then(|id| s.get_session_by_id(id).ok().flatten());
+    visible_with(scope, row, sess.as_ref())
+}
+
+/// [`visible`] with `row`'s session already read (`None`: it has none, or
+/// it is gone).
+fn visible_with(scope: &ViewScope, row: &LibraryItemRow, sess: Option<&SessionRow>) -> bool {
     if scope.host.as_deref().is_some_and(|h| h != row.host_alias) {
         return false;
     }
-    match row
-        .session_id
-        .and_then(|id| s.get_session_by_id(id).ok().flatten())
-    {
-        Some(sess) => scope.may_own(&sess),
+    match sess {
+        Some(sess) => scope.may_own(sess),
         // The session is gone: the org answer is the whole of the fence, as
         // for a download whose session was reaped. The person half is
         // `may_own` in the arm above; a reaped session leaves nobody to ask,
@@ -93,12 +99,25 @@ pub fn visible(s: &Store, scope: &ViewScope, row: &LibraryItemRow) -> bool {
 
 pub fn list(s: &Store, scope: &ViewScope, args: &ListArgs) -> Result<LibraryList, IpcError> {
     let limit = args.limit.unwrap_or(LIST_LIMIT).clamp(1, LIST_LIMIT);
+    // One session read per session, not per item: many items share one, and
+    // a member who sees few of up to `KEEP` rows walks them all (review r16).
+    let mut sessions: std::collections::HashMap<i64, Option<SessionRow>> =
+        std::collections::HashMap::new();
     let items = s
         .library_items()?
         .into_iter()
         .filter(|r| args.session_id.is_none_or(|id| r.session_id == Some(id)))
         .filter(|r| args.host_alias.as_deref().is_none_or(|h| r.host_alias == h))
-        .filter(|r| visible(s, scope, r))
+        .filter(|r| {
+            let sess = match r.session_id {
+                Some(id) => sessions
+                    .entry(id)
+                    .or_insert_with(|| s.get_session_by_id(id).ok().flatten())
+                    .as_ref(),
+                None => None,
+            };
+            visible_with(scope, r, sess)
+        })
         .take(limit)
         .collect();
     Ok(LibraryList { items })
