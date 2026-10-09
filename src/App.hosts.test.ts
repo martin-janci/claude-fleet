@@ -152,7 +152,8 @@ describe('App: the Hosts view', () => {
     expect(hostsView()).not.toBeNull();
     expect(get(hostsViewOpen)).toBe(true);
     expect(screen.getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
-    expect(screen.getByTestId('stab-conversation').getAttribute('aria-selected')).toBe('false');
+    // Hosts is Accounts' page: the session tabs are not over it (UX audit N1).
+    expect(screen.queryByTestId('session-tabs')).toBeNull();
     // ⌘I again, from inside the view.
     await cmdI(screen.getByTestId('hosts-list'));
     await tick();
@@ -281,7 +282,7 @@ describe('App: the Hosts view', () => {
 
   it('Hosts opens with no session selected; the Sessions rail item leaves the view', async () => {
     await mountApp();
-    expect((screen.getByTestId('stab-files') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByTestId('stab-files')).toBeNull();
     await cmdI(window);
     await tick();
     expect(hostsView()).not.toBeNull();
@@ -300,11 +301,15 @@ describe('App: the Hosts view', () => {
     await cmdI(grid);
     await tick();
     expect(hostsView()).not.toBeNull();
-    expect(selected('stab-files')).toBe('false');
+    expect(get(destination)).toBe('hosts');
+    expect(screen.queryByTestId('stab-files')).toBeNull();
     expect(screen.getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
-    await fireEvent.click(screen.getByTestId('stab-files'));
+    // Leaving Hosts brings the session back, and Files is one click away again.
+    await fireEvent.click(screen.getByTestId('rail-sessions'));
     await tick();
     expect(hostsView()).toBeNull();
+    await fireEvent.click(screen.getByTestId('stab-files'));
+    await tick();
     expect(selected('stab-files')).toBe('true');
     expect(screen.getByTestId('rail-accounts').getAttribute('aria-current')).toBeNull();
   });

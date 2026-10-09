@@ -73,11 +73,14 @@ const inspectorChord = () =>
     : { key: 'b', code: 'KeyB', ctrlKey: true, altKey: true });
 
 describe('App: session tabs and the inspector (step 3.5)', () => {
-  it('no session fills the right column with Details, and the tabs wait', async () => {
+  it('no session: a quiet empty state, and no session header or tabs (UX audit N1, N4)', async () => {
     await mountApp();
     expect(screen.getByTestId('details-view')).toBeTruthy();
+    expect(screen.getByTestId('no-session')).toBeTruthy();
+    expect(screen.queryByText('Morning brief')).toBeNull();
     expect(screen.queryByTestId('inspector')).toBeNull();
-    expect((screen.getByTestId('stab-conversation') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByTestId('session-head')).toBeNull();
+    expect(screen.queryByTestId('stab-conversation')).toBeNull();
   });
 
   it('a selected session gets its header, the agent tab and the inspector beside it', async () => {
