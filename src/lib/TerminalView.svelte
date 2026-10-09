@@ -1925,12 +1925,6 @@
   .cursor.blink {
     animation: cf-cursor-blink 1.1s steps(1, end) infinite;
   }
-  /* Reduced and Off motion (motion.ts) hold the cursor steady: a blink is a
-     loop, and the cursor's place is what matters (review r11). */
-  :global(:root[data-motion='reduced']) .cursor.blink,
-  :global(:root[data-motion='off']) .cursor.blink {
-    animation: none;
-  }
   @keyframes cf-cursor-blink {
     50% { opacity: 0; }
   }

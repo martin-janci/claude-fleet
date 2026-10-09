@@ -91,8 +91,6 @@ const RING_ELSEWHERE: Record<string, string> = {
   'src/lib/ConversationPanel.svelte .composer-input:focus': 'the composer shell draws the ring (.composer-shell:focus-within)',
   'src/lib/QueryInput.svelte .field': 'the query box draws the ring (.query:focus-within)',
   'src/lib/TerminalView.svelte .ime-proxy': 'the terminal grid draws the ring (.grid.kb-focus, keyboard focus only)',
-  // Lane C's style PR adds `.scroller:focus-visible`; drop this row with it.
-  'src/lib/ConversationPanel.svelte .scroller:focus': 'pending: the transcript ring lands with the ConversationPanel style PR',
 };
 
 function appStyleFiles(): string[] {
