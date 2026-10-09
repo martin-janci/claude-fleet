@@ -35,8 +35,8 @@ use crate::ipc_error::lock;
 #[tool_router(router = sharing_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(description = "Share a session you OWN with a person, or an org \
-        you are in (its members from now), at watch (read) or drive (also \
-        prompt). Owner only; never 'own' or a terminal. Returns the row. \
+        you are in (its members from now), at watch (read), answer (also a \
+        dialog's keys) or drive (also prompt). Owner only; never 'own' or a terminal. Returns the row. \
         Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.")]
     pub(super) async fn session_share(
         &self,
@@ -102,8 +102,8 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Lower a person's or org's grant on your session from \
-        drive to watch (owner only). Nothing raises one: revoke and share \
+    #[tool(description = "Lower a person's or org's grant on your session to \
+        watch (owner only). Nothing raises one: revoke and share \
         again. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.")]
     pub(super) async fn session_narrow(
         &self,

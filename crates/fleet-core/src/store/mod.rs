@@ -161,8 +161,8 @@ pub use schema::known_schema_version;
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use schema::{is_newer_schema_error, open_failure_advice};
 pub use session_grants::{
-    grant_generation, validate_grant_level, GrantRecipient, SessionGrantRow, GRANT_DRIVE,
-    GRANT_LEVELS, GRANT_WATCH,
+    grant_generation, validate_grant_level, GrantRecipient, SessionGrantRow, GRANT_ANSWER,
+    GRANT_DRIVE, GRANT_LEVELS, GRANT_WATCH,
 };
 pub use sessions::PromptAckState;
 pub use setting_review::{

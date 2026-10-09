@@ -503,9 +503,10 @@ fn run_direct(
                     let n = store.narrow_person_grants_in_org(p, *org).map_err(e)?;
                     out::line(&format!("narrowed {n} grant(s) to {name} to watch"));
                 } else {
-                    let (watch, drive) = store.person_grants_in_org(p, *org).map_err(e)?;
+                    let (watch, answer, drive) = store.person_grants_in_org(p, *org).map_err(e)?;
                     out::line(&format!(
-                        "{name} holds {watch} watch and {drive} drive grant(s) on org {org}'s sessions"
+                        "{name} holds {watch} watch, {answer} answer and {drive} drive grant(s) \
+                         on org {org}'s sessions"
                     ));
                 }
             }

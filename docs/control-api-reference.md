@@ -613,7 +613,7 @@ Parameters: `fresh_for`, `limit`, `session_id`
 
 ### `session_narrow`
 
-Lower a person's or org's grant on your session from drive to watch (owner only). Nothing raises one: revoke and share again. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
+Lower a person's or org's grant on your session to watch (owner only). Nothing raises one: revoke and share again. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
 
 Parameters: `org`, `person`, `session_id`
 
@@ -625,7 +625,7 @@ Parameters: `leaving`, `session_id`
 
 ### `session_share`
 
-Share a session you OWN with a person, or an org you are in (its members from now), at watch (read) or drive (also prompt). Owner only; never 'own' or a terminal. Returns the row. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.
+Share a session you OWN with a person, or an org you are in (its members from now), at watch (read), answer (also a dialog's keys) or drive (also prompt). Owner only; never 'own' or a terminal. Returns the row. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.
 
 Parameters: `level`, `org`, `person`, `session_id`
 

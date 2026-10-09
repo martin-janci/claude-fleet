@@ -8,16 +8,16 @@ vi.mock('./conversation', async () => {
 });
 vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
-  return { ...actual, sendPrompt: vi.fn() };
+  return { ...actual, answerDialog: vi.fn() };
 });
 
 import AnswerPrompt from './AnswerPrompt.svelte';
 import { sessionActivity, type ActivityProbe } from './conversation';
-import { sendPrompt, type SessionRow } from './sessions';
+import { answerDialog, type SessionRow } from './sessions';
 import { pendingInputFor, type AnswerView, type PendingInput } from './pending_input';
 
 const mockedAct = vi.mocked(sessionActivity);
-const mockedSend = vi.mocked(sendPrompt);
+const mockedSend = vi.mocked(answerDialog);
 
 const DIALOG: PendingInput = {
   kind: 'permission',
@@ -101,7 +101,7 @@ describe('AnswerPrompt', () => {
     await settle();
 
     expect(mockedAct).toHaveBeenCalledWith(7);
-    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '', { keys: '2' });
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '2');
   });
 
   it('sends nothing when the pane is now showing a different dialog', async () => {
@@ -194,7 +194,7 @@ describe('AnswerPrompt', () => {
     await fireEvent.click(screen.getByTestId('answer-esc'));
     await settle();
 
-    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '', { keys: 'Escape' });
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', 'Escape');
   });
 
   it('opens the terminal when asked', async () => {
@@ -306,13 +306,13 @@ describe('AnswerPrompt, multi-select', () => {
     render(AnswerPrompt, { session: session({ pending_input: MULTI }), view: view(MULTI) });
     await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
     await settle();
-    expect(mockedSend).toHaveBeenLastCalledWith('local', 'dev-foo', '', { keys: '1' });
+    expect(mockedSend).toHaveBeenLastCalledWith('local', 'dev-foo', '1');
     expect(screen.queryByTestId('answer-sent')).toBeNull();
     expect(screen.getAllByTestId('answer-option')[0].getAttribute('aria-checked')).toBe('true');
 
     await fireEvent.click(screen.getAllByTestId('answer-option')[2]);
     await settle();
-    expect(mockedSend).toHaveBeenLastCalledWith('local', 'dev-foo', '', { keys: '3' });
+    expect(mockedSend).toHaveBeenLastCalledWith('local', 'dev-foo', '3');
     expect(screen.queryByTestId('answer-stale')).toBeNull();
   });
 
@@ -327,7 +327,7 @@ describe('AnswerPrompt, multi-select', () => {
     render(AnswerPrompt, { session: session({ pending_input: MULTI }), view: view(MULTI) });
     await fireEvent.click(screen.getAllByTestId('answer-option')[2]);
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '', { keys: '3' });
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '3');
     expect(screen.queryByTestId('answer-stale')).toBeNull();
   });
 
@@ -335,7 +335,7 @@ describe('AnswerPrompt, multi-select', () => {
     render(AnswerPrompt, { session: session({ pending_input: MULTI }), view: view(MULTI) });
     await fireEvent.click(screen.getByTestId('answer-continue'));
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '', { keys: 'Tab' });
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', 'Tab');
     expect(screen.getByTestId('answer-sent').textContent).toContain('Logging');
   });
 
@@ -373,7 +373,7 @@ describe('AnswerPrompt 1–9 (redesign step 3.8)', () => {
     await fireEvent.keyDown(document.body, { key: '2' });
     await settle();
     expect(mockedSend).toHaveBeenCalledTimes(1);
-    expect(mockedSend.mock.calls[0][3]).toEqual({ keys: '2' });
+    expect(mockedSend.mock.calls[0][2]).toBe('2');
     expect(screen.getByTestId('answer-sent').textContent).toContain("Yes, and don't ask again");
   });
 
@@ -423,7 +423,7 @@ describe('AnswerPrompt quick answer (redesign step 10.9)', () => {
     expect(screen.getByTestId('answer-proposed')).toHaveTextContent('Proposed by Jev');
     await fireEvent.keyDown(document.body, { key: '1' });
     await settle();
-    expect(mockedSend.mock.calls[0][3]).toEqual({ keys: '2' });
+    expect(mockedSend.mock.calls[0][2]).toBe('2');
   });
 
   it('never moves a risky option, a weak or unsure proposal, or anything on a permission', () => {
@@ -452,7 +452,7 @@ describe('AnswerPrompt quick answer (redesign step 10.9)', () => {
       expect(screen.getByTestId('answer-proposed')).toHaveTextContent('Proposed by Jev');
       await fireEvent.keyDown(document.body, { key: '1' });
       await settle();
-      expect(mockedSend.mock.calls[0][3]).toEqual({ keys: '2' });
+      expect(mockedSend.mock.calls[0][2]).toBe('2');
     } finally {
       uiLayout.set('classic');
     }
@@ -474,7 +474,7 @@ describe('AnswerPrompt in the New layout (redesign 5.9)', () => {
     expect(screen.queryByTestId('question-own-words')).toBeNull();
     await fireEvent.click(screen.getAllByTestId('answer-option')[2]);
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '', { keys: '3' });
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '3');
     expect(onAnswered).toHaveBeenCalledWith('No, and tell Claude what to do differently');
     expect(screen.getByTestId('answer-sent').textContent).toContain('No, and tell Claude');
   });

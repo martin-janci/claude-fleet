@@ -307,10 +307,10 @@ Index by area (names only; see the reference for details):
   agent's own session, idempotent), `operator_status` (why it cannot work,
   if it cannot).
 - **Sharing & ownership** (multi-user M1) — `session_share` (give one
-  person `watch` or `drive` on a session you own — or, with `org` instead of
+  person `watch`, `answer` or `drive` on a session you own — or, with `org` instead of
   `person`, an org you are a member of: its members and admins as of now,
   never a later joiner or a viewer), `session_unshare` (take it
-  back), `session_narrow` (`drive` → `watch`; there is deliberately no tool
+  back), `session_narrow` (`drive` or `answer` → `watch`; there is deliberately no tool
   that raises a grant — widen by revoking and sharing again),
   `session_access` (who holds a live grant on your session), `my_grants`
   (who *you* are on this fleet and every live grant to you, which is what a
@@ -323,6 +323,11 @@ Index by area (names only; see the reference for details):
   claim is `fleet-hub session claim <id> --person <name>`, beside
   `fleet-hub session unclaimed`. Sharing never confers a terminal: a
   terminal is this machine's own SSH, which no revoke could reach.
+  `answer` (Orbit Fleet 11.7) sits between the two: it reads like `watch`
+  and may also answer the dialog on the pane — `send_prompt` with an empty
+  `prompt` and one of `keys` Enter, Escape, Tab or a digit the dialog
+  numbers, accepted only while a fresh read of the pane shows a dialog. Any
+  prompt text, and `C-c`, still need `drive`.
 - **Presence** (redesign 11.7b) — `session_presence` (`session_id`,
   `leaving?`): say you have a session open, again every `heartbeat_secs`
   (20), and once with `leaving: true` when you close it; the answer is who
@@ -827,20 +832,15 @@ Index by area (names only; see the reference for details):
   `failed` on an error, a lost or removed session, six quiet hours, or a
   session past the run budget (which also turns the routine off with
   `paused_reason`), and `skipped` when the last run is still going under
-<<<<<<< origin/main
   `overlap: skip`, today's budget is spent, the account its login bills
   is at or past `accounts.pause_at` (Orbit Fleet 8.7, read from the stored
   usage readings), or a person skipped it.
-  `automation.paused` (Pause all) stops the schedule and event fires,
-=======
-  `overlap: skip`, today's budget is spent, or a person skipped it.
   A finished run also carries an `outcome` (8.10): `did_work`, `nothing`,
   `failed` or `needs_person`, with `outcome_source` `exit` (a failed run,
   which nothing overrides), `rule` (an open question or a wedged session is
   `needs_person`, a pull request `did_work`) or `jev`; a run no rule can
   read has none until Jev answers. A `nothing` run marks its session seen,
   so it stays out of the Inbox. `automation.paused` (Pause all) stops the schedule and event fires,
->>>>>>> HEAD
   never `run_now`. Read and changed by the owner and the org's admins, read
   by the org's members, never served to a per-host token; the routine's
   org is its host's.
@@ -962,7 +962,7 @@ Index by area (names only; see the reference for details):
   `set_member { org, person | person_id, role: admin|member|viewer }` (adds,
   or changes a role; a new name becomes a person), `remove_member { org,
   person, keep_grants }` (revokes what was shared with them on the org's
-  sessions unless `keep_grants`), `member_grants` (`{ watch, drive }`
+  sessions unless `keep_grants`), `member_grants` (`{ watch, answer, drive }`
   counts), `revoke_member_grants` and `narrow_member_grants` — downward
   only. An org admin never changes their own membership or the hub owner's.
   Hub owner only: `set_hub_org { org }` (no org: none), and `update_org`'s

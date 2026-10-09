@@ -10148,7 +10148,8 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // `resolve_row_and_gate` with `Reach::Drive` — spelled as its own helper
     // because `to_addr` can name the same row by address.
     ("send_message", &["Drive"]),
-    ("send_prompt", &["Drive"]),
+    // A key alone is `answer` (Orbit Fleet 11.7); a prompt is `drive`.
+    ("send_prompt", &["Answer", "Drive"]),
     ("queue_prompt", &["Drive"]),
     ("queued_prompts", &["Drive"]),
     ("session_conversations", &["Read"]),
@@ -10590,7 +10591,7 @@ fn tool_blocks() -> std::collections::BTreeMap<String, String> {
 
 /// The reaches one span of handler source threads.
 fn reaches_in(code: &str) -> Vec<String> {
-    let mut found: Vec<String> = ["Read", "Drive", "Own"]
+    let mut found: Vec<String> = ["Read", "Answer", "Drive", "Own"]
         .iter()
         .filter(|r| code.contains(&format!("Reach::{r}")))
         .map(|r| (*r).to_string())
@@ -11848,7 +11849,7 @@ fn the_reaches_the_desktop_decided_are_the_ones_the_hub_enforces() {
     assert_eq!(reach_of("rewind_conversation"), vec!["Own"]);
     // `request_work_handover` types into the pane like
     // `send_message { deliver, submit }`: both `drive`.
-    assert_eq!(reach_of("send_prompt"), vec!["Drive"]);
+    assert_eq!(reach_of("send_prompt"), vec!["Answer", "Drive"]);
     // The per-session work-graph writes — `set_primary_work`,
     // `decide_work_batch`, `reconsider_work_link`, `ack_work_link` — all
     // ride `work_link`'s drive arm.

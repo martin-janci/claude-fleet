@@ -972,8 +972,8 @@ pub fn run(
                     "narrowed": s.narrow_person_grants_in_org(person, org)?
                 })),
                 _ => {
-                    let (watch, drive) = s.person_grants_in_org(person, org)?;
-                    Ok(serde_json::json!({ "watch": watch, "drive": drive }))
+                    let (watch, answer, drive) = s.person_grants_in_org(person, org)?;
+                    Ok(serde_json::json!({ "watch": watch, "answer": answer, "drive": drive }))
                 }
             }
         }

@@ -71,6 +71,8 @@ export const shareSheetFor = writable<number | null>(null);
  *    server and is not in that list (T7: "anything the spec's §4.3 `own`
  *    invariant names is `Own`; anything that writes … is `Drive`; the rest is
  *    `Read`").
+ *  - **`answer`** — pressing a dialog's own keys (Orbit Fleet 11.7): one
+ *    row, `answer_dialog`, the answer card's and ⌘K Approve's write.
  *  - **`watch`** — a read. Nothing in this table needs it, because a control
  *    that only reads has nothing to disable; the entries exist so a reader can
  *    see that the omission is deliberate.
@@ -184,6 +186,12 @@ const SESSION_TIER = {
   archive_session_work: 'drive',
   unarchive_session_work: 'drive',
 
+  // Orbit Fleet 11.7: pressing one of a dialog's own keys (a numbered option,
+  // Enter, Escape, Tab) — the answer card and ⌘K Approve. The hub's
+  // `send_prompt` admits it at `answer` for a key alone, after a fresh read of
+  // the pane shows a dialog; a prompt stays `drive`.
+  answer_dialog: 'answer',
+
   // ── reads: nothing to disable, listed so the gap is visibly deliberate ──
   capture_session: 'watch',
   session_conversation: 'watch',
@@ -205,12 +213,15 @@ export const SESSION_ACTIONS: readonly SessionAction[] = Object.keys(
 
 /** The tier `action` needs — read by the sweep test, which checks the four
  *  tiers F2a added against the plan rather than against the table itself. */
-export function sessionTierOf(action: SessionAction): 'watch' | 'drive' | 'own' {
+export function sessionTierOf(action: SessionAction): SessionTier {
   return SESSION_TIER[action];
 }
 
-/** The tiers, widest first — the order a level is allowed to satisfy. */
-const RANK: Record<'watch' | 'drive' | 'own', number> = { watch: 1, drive: 2, own: 3 };
+/** A tier an action needs: a grant level, or `own`. */
+export type SessionTier = GrantLevel | 'own';
+
+/** The tiers, narrowest first — the order a level is allowed to satisfy. */
+const RANK: Record<SessionTier, number> = { watch: 1, answer: 2, drive: 3, own: 4 };
 
 /**
  * Why `action` is unavailable on `session` **because of who this client is**,
@@ -261,9 +272,15 @@ export function sessionActionBlocked(
   const need = SESSION_TIER[action];
   if (RANK[access] >= RANK[need]) return null;
   if (need === 'own') {
-    return 'Only the session’s owner can do this. A share grants watch or drive; starting, stopping, moving, renaming, re-creating, summarising or re-sharing a session stays with the owner.';
+    return 'Only the session’s owner can do this. A share grants watch, answer or drive; starting, stopping, moving, renaming, re-creating, summarising or re-sharing a session stays with the owner.';
   }
-  // `need` is `drive` and `access` is `watch` — the one remaining gap.
+  if (access === 'answer') {
+    return 'Shared with you to answer. Answer lets you reply to the questions the session asks; sending a prompt, typing into the pane or changing the row needs drive, which only the owner can grant.';
+  }
+  if (need === 'answer') {
+    return 'Shared with you to watch. Watch is read-only: answering the session’s questions needs answer or drive, which only the owner can grant.';
+  }
+  // `need` is `drive` and `access` is `watch`.
   return 'Shared with you to watch. Watch is read-only: sending a prompt, typing into the pane or changing the row needs drive, which only the owner can grant.';
 }
 
