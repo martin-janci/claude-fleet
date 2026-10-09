@@ -49,6 +49,9 @@ pub mod jev;
 pub mod lost_target;
 #[cfg(test)]
 mod lost_target_tests;
+pub mod pr_triage;
+#[cfg(test)]
+mod pr_triage_tests;
 pub mod quick_answer;
 #[cfg(test)]
 mod quick_answer_tests;
@@ -128,10 +131,12 @@ pub enum Feature {
     SummaryCheck,
     /// What a turn came to when hooks said nothing, from the pane tail (J2).
     TurnOutcome,
+    /// What a PR shepherd episode most likely needs (PR shepherd step 4).
+    PrTriage,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 12] = [
+    pub const ALL: [Feature; 13] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
@@ -144,6 +149,7 @@ impl Feature {
         Feature::ControlRoute,
         Feature::SummaryCheck,
         Feature::TurnOutcome,
+        Feature::PrTriage,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -160,6 +166,7 @@ impl Feature {
             Feature::ControlRoute => "control_route",
             Feature::SummaryCheck => "summary_check",
             Feature::TurnOutcome => "turn_outcome",
+            Feature::PrTriage => "pr_triage",
         }
     }
 
@@ -182,6 +189,7 @@ impl Feature {
             Feature::ControlRoute => settings::DECIDE_JEV_CONTROL_ROUTE,
             Feature::SummaryCheck => settings::DECIDE_JEV_SUMMARY_CHECK,
             Feature::TurnOutcome => settings::DECIDE_JEV_TURN_OUTCOME,
+            Feature::PrTriage => settings::DECIDE_JEV_PR_TRIAGE,
         }
     }
 

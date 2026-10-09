@@ -562,6 +562,8 @@ pub const DECIDE_JEV_SUMMARY_CHECK: &str = "decide.jev.summary_check";
 /// `turn_outcome`'s mode (J2: what a turn came to when hooks said nothing,
 /// read from the pane tail). Needs the reply-text consent (D48) on top.
 pub const DECIDE_JEV_TURN_OUTCOME: &str = "decide.jev.turn_outcome";
+/// `pr_triage`'s mode (what a PR shepherd episode most likely needs).
+pub const DECIDE_JEV_PR_TRIAGE: &str = "decide.jev.pr_triage";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -1403,6 +1405,15 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: set the state")]),
+    Spec::new(
+        DECIDE_JEV_PR_TRIAGE,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: PR triage",
+        "Guessing what a stuck pull request needs (a fix, a regenerate, a base merge, a re-run, or a person) when the PR shepherd finds it conflicting or red. Sends the PR's check names and states, no code. Shadow only records; assist is recorded the same way for now.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: record only")]),
     Spec::new(
         DECIDE_JEV_UNASSIGNED,
         "false",

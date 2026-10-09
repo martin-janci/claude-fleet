@@ -485,6 +485,28 @@ transition plan.
 |---|---|---|
 | D48 | May Claude's reply text (J2's pane tail / last reply) go to Jev? | **Yes, per org, only where the org consents to reply text: a consent of its own, separate from D31 and required on top of it, off by default.** Decided by the owner on 2026-10-08. Built as the org's `decide.jev.reply_consent` row in `org_settings` (never inherited from a fleet value; *Also allow Claude's reply text* in Organisations, `fleet-hub org set <id> --jev-reply on`) and `decide.jev.unassigned_reply` for sessions with no org |
 
+## `pr_triage` — what a stuck pull request needs (PR shepherd step 4)
+
+`decide.jev.pr_triage` on, each time the PR shepherd
+(`docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`) records a new
+episode, meaning one condition (`conflict`, `behind`, `ci_red`) on one
+pushed commit. It asks once per episode, in a task of its own, so the
+shepherd never waits for it.
+
+- **Question.** A choice: `fix_in_pr | regenerate | merge_base |
+  flaky_rerun | not_this_pr | needs_person`.
+- **What is sent.** The condition, GitHub's merge state, the failing check
+  names (at most 10, redacted), the counts, the review decision, the draft
+  flag and the number of unpushed commits. No log, diff, code or URL.
+- **Baseline.** The shepherd's fixed choice: `merge_base` for a conflict or
+  a stale branch, `fix_in_pr` for red CI.
+- **Modes.** Shadow records. Assist is recorded the same way for now. When
+  it is wired, it would only choose which prompt the shepherd sends. It
+  never sends, merges, skips or re-runs anything itself.
+
+Code: `service/decide/pr_triage.rs`, `ShepherdExec::triage` in
+`service/pr_shepherd/mod.rs`.
+
 ## `work_link` — the work item of a session no rule could link (J1)
 
 When three turns of a conversation have gone by and nothing linked the
@@ -600,6 +622,7 @@ Code: `service/decide/duplicate.rs`, `duplicate_hint` in
 | `decide.jev.control_route` | `off` | `off` / `shadow` / `assist` | Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.summary_check` | `off` | `off` / `shadow` / `assist` | Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support. Experimental. |
 | `decide.jev.turn_outcome` | `off` | `off` / `shadow` / `assist` | Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it. Experimental. |
+| `decide.jev.pr_triage` | `off` | `off` / `shadow` / `assist` | Guessing what a stuck pull request needs (a fix, a regenerate, a base merge, a re-run, or a person) when the PR shepherd finds it conflicting or red. Sends the PR's check names and states, no code. Shadow only records; assist is recorded the same way for now. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.unassigned_reply` | `false` | on / off | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
