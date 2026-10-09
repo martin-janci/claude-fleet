@@ -275,3 +275,24 @@ fn a_missions_lines_decide_its_root_and_show_on_the_graph() {
     .unwrap_err();
     assert_eq!(e.code, codes::E_NOTFOUND);
 }
+
+#[test]
+fn a_review_or_test_before_the_latest_implementation_is_pending() {
+    let (st, me, item) = fixture();
+    set(&st, &me, item, &["review", "test"]);
+    run(&st, item, "implement", "done", &[]);
+    run(&st, item, "review", "changes_requested", &[]);
+    run(&st, item, "test", "done", &[]);
+    let v = now_check(&st, item, 0);
+    assert_eq!(check_of(&v, "review").state, "fail");
+    assert_eq!(check_of(&v, "test").state, "pass");
+    // The retry rewrote the work: neither old verdict holds for it.
+    run(&st, item, "implement", "done", &[]);
+    let v = now_check(&st, item, 0);
+    assert_eq!(check_of(&v, "review").state, "pending");
+    assert_eq!(check_of(&v, "test").state, "pending");
+    assert_eq!(v.state, "unverified");
+    run(&st, item, "review", "done", &[]);
+    let v = now_check(&st, item, 0);
+    assert_eq!(check_of(&v, "review").state, "pass");
+}
