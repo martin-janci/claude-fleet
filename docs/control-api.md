@@ -925,8 +925,9 @@ Index by area (names only; see the reference for details):
   outcome?, org_id?, mission_id?, session_id?, routine_id?, limit? (≤ 200,
   50), offset? }`
   answers `{ runs, total }`; each run carries `id` (`<source>:<rowid>`),
-  `kind` (`operator` | `task` | `mission` | `jev` | `planner` | `summary` |
-  `routine`),
+  `kind` (`operator` | `task` | `mission` | `jev` | `routine`, or a fleet
+  `claude -p` origin: `planner` | `summary` | `commit_message` |
+  `release_note` | `morning_brief` | `brief` | `watch_summary` | `triage`),
   `owner`, `started_at`, `ended_at?`, `duration_ms?`, `outcome` (`ok` |
   `failed` | `needs_person` | `nothing_to_do` | `running`), `error?`,
   `cost_micros?`, `model?`, `host?`, `org_id?`, `mission_id?`,
