@@ -4,8 +4,11 @@
 // runs as `/<name>`. Read through the Files tab's `repo_tree` / `repo_file`,
 // so a hub client reads them on the hub like any other worktree file, and
 // cached per session: the menu asks on every keystroke.
+import { get } from 'svelte/store';
 import type { SlashCommand } from './conversation';
 import { repoFile, repoTree } from './files';
+import { CONTROL_COMMANDS } from './control_commands';
+import { operatorSession } from './operator';
 
 /** How long one read of a session's skills is reused. */
 export const PROJECT_SKILLS_TTL_MS = 60_000;
@@ -70,6 +73,9 @@ async function read(sessionId: number): Promise<SlashCommand[]> {
  *  read (no worktree, an older hub) is an empty list, not an error: the
  *  built-ins are still there. */
 export function projectSkills(sessionId: number, now = Date.now()): Promise<SlashCommand[]> {
+  // Control's agent: its commands are fleet's own (redesign 9.6), and its
+  // directory has no worktree to list.
+  if (get(operatorSession)?.id === sessionId) return Promise.resolve([...CONTROL_COMMANDS]);
   const hit = cache.get(sessionId);
   if (hit && now - hit.at < PROJECT_SKILLS_TTL_MS) return hit.list;
   const list = read(sessionId).catch(() => []);

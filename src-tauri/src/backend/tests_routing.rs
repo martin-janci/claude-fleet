@@ -768,6 +768,15 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "control_handoffs",
+            "control_handoffs",
+            json!({ "limit": 5 }),
+            r#"[{"id":1,"at":1,"kind":"session","tool":"send_prompt","session_id":3}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::mcp::routed::control_handoffs(b, s, Some(5))).map(|_| ())
+            }),
+        ),
+        (
             "mcp_pending_confirms",
             "mcp_confirms",
             json!({}),
@@ -4445,7 +4454,13 @@ fn stop_waiting_on_a_hub_client_abandons_add_project() {
     use fleet_core::cancel::CancellationRegistry;
     use fleet_core::service::add_project::{AddProjectArgs, AddProjectSource};
     for (source, github) in [
-        (AddProjectSource::Clone { url: "o/r".into() }, false),
+        (
+            AddProjectSource::Clone {
+                url: "o/r".into(),
+                existing: false,
+            },
+            false,
+        ),
         (
             AddProjectSource::New {
                 owner: "o".into(),
@@ -6225,6 +6240,10 @@ const SOURCES: &[(&str, &str)] = &[
     ("commands/tray.rs", include_str!("../commands/tray.rs")),
     ("commands/upload.rs", include_str!("../commands/upload.rs")),
     ("commands/voice.rs", include_str!("../commands/voice.rs")),
+    (
+        "commands/windows.rs",
+        include_str!("../commands/windows.rs"),
+    ),
     ("commands/work.rs", include_str!("../commands/work.rs")),
     (
         "commands/work_view.rs",

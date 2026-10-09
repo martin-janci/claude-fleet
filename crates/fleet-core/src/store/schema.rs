@@ -1615,10 +1615,16 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/139_routine_run_outcome.sql"),
         already_applied: Some(routine_runs_has_outcome_source),
     },
+    // Orbit Fleet 9.3: `control_handoffs`, what Control's agent sent where.
+    // A new table only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        140,
+        include_str!("../../migrations/140_control_handoffs.sql"),
+    ),
     // Orbit Fleet 8.3: the indexes behind `runs { list }` (one list over
     // tasks, mission actions, Jev, `claude -p` and routine runs). Indexes only,
     // `IF NOT EXISTS`, safe to re-run.
-    Migration::plain(140, include_str!("../../migrations/140_runs_indexes.sql")),
+    Migration::plain(141, include_str!("../../migrations/141_runs_indexes.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

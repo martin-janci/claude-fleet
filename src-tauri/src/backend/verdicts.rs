@@ -1269,6 +1269,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "mcp_confirms",
         },
     ),
+    // Redesign step 9.3: the receipts of what the agent handed on live
+    // where the agent runs, which on a hub-backed desktop is the hub.
+    (
+        "control_handoffs",
+        Verdict::Routed {
+            tool: "control_handoffs",
+        },
+    ),
     // ── the UX agent's operator session ─────────────────────────────────────
     //
     // Both route unconditionally. The operator panel is the same panel on a
@@ -1751,6 +1759,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "the same story as pty_open: VS Code and the `ssh` that asks the pane \
                   for its folder are this machine's, built from the alias and tmux name \
                   passed in; it reads no state.db and the hub is not in the path",
+        },
+    ),
+    (
+        "open_terminal_window",
+        Verdict::SameInBoth {
+            why: "a window of this app, whose pane attaches through pty_open like the \
+                  main window's; it reads no state.db and the hub is not in the path",
         },
     ),
     // ── the voice relay's microphone claim ──────────────────────────────────

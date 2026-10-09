@@ -85,7 +85,7 @@ pub struct GrantRow {
     pub budget_micros: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_parallel: Option<i64>,
-    /// The login its runs bill (migration 140): a credential profile on
+    /// The login its runs bill (migration 141): a credential profile on
     /// the run's host; `None` = the host's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
