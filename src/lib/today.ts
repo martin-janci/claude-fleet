@@ -207,3 +207,20 @@ export function standupText(v: TodayView): string {
 export function isEmptyView(v: TodayView): boolean {
   return v.waiting.length + v.inProgress.length + v.shipped.length + v.stale.length === 0;
 }
+
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+/** The day as the Today boards write it: "Thursday 8 October", or short
+ *  "Thu 8 Oct". Local time, English words, whatever the locale. */
+export function dayLabel(nowMs: number, short = false): string {
+  const d = new Date(nowMs);
+  const day = WEEKDAYS[d.getDay()];
+  const month = MONTHS[d.getMonth()];
+  return short ? `${day.slice(0, 3)} ${d.getDate()} ${month.slice(0, 3)}` : `${day} ${d.getDate()} ${month}`;
+}
+
+/** Sessions in a list of groups. */
+export function sessionCount(groups: readonly TodayGroup[]): number {
+  return groups.reduce((n, g) => n + g.sessions.length, 0);
+}

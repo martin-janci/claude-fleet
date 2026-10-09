@@ -1,7 +1,7 @@
 // Control's Views panel (Orbit Fleet redesign step 9.4, boards MissionControl
 // and MCViews): the column beside the chat. Its views come from this chat's
-// fleet (Needs you, the session in focus, Pull requests, Library, Today
-// briefing); "+" toggles and reorders them. What lives in another place
+// fleet (Needs you, Tasks, the session in focus, Pull requests, Library,
+// Today briefing); "+" toggles and reorders them. What lives in another place
 // (Tasks and Missions in Work, Routines in Automation, Hosts and usage in
 // Accounts) is a link there, not a copy. The layout is a local pref.
 import { writable } from 'svelte/store';
@@ -10,7 +10,7 @@ import { readPref, writePref } from './prefs';
 import { goTo, leave } from './destination';
 import { sidebarView } from './work_view';
 
-export type ControlViewId = 'needs-you' | 'session' | 'prs' | 'library' | 'today';
+export type ControlViewId = 'needs-you' | 'tasks' | 'session' | 'prs' | 'library' | 'today';
 
 export interface ControlViewDef {
   id: ControlViewId;
@@ -24,24 +24,26 @@ export interface ControlViewDef {
 
 export const CONTROL_VIEWS: readonly ControlViewDef[] = [
   { id: 'needs-you', label: 'Needs you', glyph: '▤', step: '9.4', landed: true },
+  // Board MCTasks: the work you track, by status; a row opens it in Work.
+  { id: 'tasks', label: 'Tasks', glyph: '☑', step: '9.4', landed: true },
   { id: 'session', label: 'Session in focus', glyph: '▢', step: '9.4', landed: true },
   { id: 'prs', label: 'Pull requests', glyph: '⑂', step: '9.4', landed: true },
   { id: 'library', label: 'Library', glyph: '◧', step: '9.7', landed: true },
   { id: 'today', label: 'Today briefing', glyph: '☀', step: '9.4', landed: true },
 ];
 
-export type ElsewhereId = 'tasks' | 'missions' | 'hosts';
+export type ElsewhereId = 'tasks' | 'missions' | 'routines' | 'hosts';
 
 export interface ElsewhereLink {
   id: ElsewhereId;
   label: string;
 }
 
-/** "Not views here, open them where they live." Routines in Automation
- *  joins them with the Automation rail item (8.4). */
+/** "Not views here, open them where they live." */
 export const ELSEWHERE: readonly ElsewhereLink[] = [
   { id: 'tasks', label: 'Tasks in Work' },
   { id: 'missions', label: 'Missions in Work' },
+  { id: 'routines', label: 'Routines in Automation' },
   { id: 'hosts', label: 'Hosts and usage in Accounts' },
 ];
 
@@ -49,6 +51,10 @@ export const ELSEWHERE: readonly ElsewhereLink[] = [
 export function openElsewhere(id: ElsewhereId): void {
   if (id === 'hosts') {
     goTo('accounts');
+    return;
+  }
+  if (id === 'routines') {
+    goTo('automation');
     return;
   }
   sidebarView.set('work');

@@ -20,16 +20,16 @@ import { sidebarView } from './work_view';
 beforeEach(() => controlViews.set(defaultLayout()));
 
 describe('control views layout', () => {
-  it('starts on Needs you with every view shown, Library included (9.7)', () => {
+  it('starts on Needs you with every view shown, Library (9.7) and Tasks included', () => {
     const l = defaultLayout();
-    expect(l.order).toEqual(['needs-you', 'session', 'prs', 'library', 'today']);
+    expect(l.order).toEqual(['needs-you', 'tasks', 'session', 'prs', 'library', 'today']);
     expect(l.active).toBe('needs-you');
     expect(l.open).toBe(true);
   });
 
   it('makes a stored layout whole: unknown ids dropped, new views appended, a hidden active replaced', () => {
     const l = normalizeLayout({ order: ['today', 'bogus', 'today', 'library'], hidden: ['today', 'x'], active: 'today', open: false });
-    expect(l.order).toEqual(['today', 'library', 'needs-you', 'session', 'prs']);
+    expect(l.order).toEqual(['today', 'library', 'needs-you', 'tasks', 'session', 'prs']);
     expect(l.hidden).toEqual(['today']);
     expect(l.active).toBe('library');
     expect(l.open).toBe(false);
@@ -38,8 +38,9 @@ describe('control views layout', () => {
 
   it('"+" turns views off and on, and never the last one', () => {
     toggleView('prs');
-    expect(shownViews(get(controlViews)).map((v) => v.id)).toEqual(['needs-you', 'session', 'library', 'today']);
+    expect(shownViews(get(controlViews)).map((v) => v.id)).toEqual(['needs-you', 'tasks', 'session', 'library', 'today']);
     toggleView('needs-you');
+    toggleView('tasks');
     toggleView('session');
     toggleView('library');
     expect(get(controlViews).active).toBe('today');
@@ -51,7 +52,7 @@ describe('control views layout', () => {
 
   it('"+" reorders within the strip and stops at its ends', () => {
     moveView('today', -1);
-    expect(get(controlViews).order).toEqual(['needs-you', 'session', 'prs', 'today', 'library']);
+    expect(get(controlViews).order).toEqual(['needs-you', 'tasks', 'session', 'prs', 'today', 'library']);
     moveView('needs-you', -1);
     expect(get(controlViews).order[0]).toBe('needs-you');
   });
@@ -74,5 +75,8 @@ describe('control views layout', () => {
     destination.set('control');
     openElsewhere('hosts');
     expect(get(destination)).toBe('accounts');
+    destination.set('control');
+    openElsewhere('routines');
+    expect(get(destination)).toBe('automation');
   });
 });
