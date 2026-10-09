@@ -14,6 +14,12 @@ export type RunKind =
   | 'jev'
   | 'planner'
   | 'summary'
+  | 'commit_message'
+  | 'release_note'
+  | 'morning_brief'
+  | 'brief'
+  | 'watch_summary'
+  | 'triage'
   | 'routine';
 
 /** How it ended, in plain words (`RUN_OUTCOMES`). */

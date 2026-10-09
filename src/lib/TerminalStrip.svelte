@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   /**
    * The session's terminal tabs (redesign step 5.3, Terminals board): the
    * agent's own screen, then shell terminals 1..N, with + New, Split and
@@ -43,7 +44,7 @@
   const full = $derived(shells.length >= MAX_SHELL_TERMINALS);
 </script>
 
-<div class="strip" role="tablist" aria-label="Terminals" data-testid="terminal-strip">
+<div class="strip" role="tablist" aria-label="Terminals" data-testid="terminal-strip" use:tablistKeys>
   <button
     type="button"
     role="tab"
@@ -120,13 +121,13 @@
     padding: 0.25rem 0.5rem;
     border-bottom: 1px solid var(--border);
     background: var(--bg-pane);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     overflow-x: auto;
   }
   .tab-wrap {
     display: inline-flex;
     align-items: center;
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
   }
   .tab,
   .act,
@@ -135,7 +136,7 @@
     background: transparent;
     border: 1px solid transparent;
     color: var(--fg-muted);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     padding: 0.15rem 0.5rem;
     cursor: pointer;
     white-space: nowrap;
@@ -167,7 +168,7 @@
   }
   kbd {
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     margin-left: 0.2rem;
   }

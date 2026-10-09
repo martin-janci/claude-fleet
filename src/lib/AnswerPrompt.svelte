@@ -399,7 +399,7 @@
   .answer-new .sent,
   .answer-new .stale,
   .answer-new .err {
-    font-size: 12px;
+    font-size: var(--text-xs);
   }
   .answer {
     display: flex;
@@ -409,9 +409,9 @@
     padding: 0.5rem 0.75rem;
     border: 1px solid var(--usage-warn);
     border-left-width: 3px;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: color-mix(in srgb, var(--usage-warn) 10%, var(--bg-pane));
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .question {
     margin: 0;
@@ -442,7 +442,7 @@
     flex: none;
     min-width: 1.15em;
     padding: 0 0.15em;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     background: color-mix(in srgb, currentColor 16%, transparent);
     font-variant-numeric: tabular-nums;
     text-align: center;
@@ -456,7 +456,7 @@
     height: 0.95em;
     line-height: 0.95em;
     border: 1px solid currentColor;
-    border-radius: 2px;
+    border-radius: var(--radius-xs);
     font-size: 0.85em;
     text-align: center;
     opacity: 0.8;
@@ -516,7 +516,7 @@
     gap: 0.3rem;
     margin: 0.2rem 0 0;
     padding: 0.3rem 0.4rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .answer.compact .question {
     overflow: hidden;

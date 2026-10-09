@@ -136,7 +136,7 @@
 <style>
   .foot {
     display: flex; align-items: center; gap: 10px; min-height: 26px; padding: 0 12px;
-    border-top: 1px solid var(--border); background: var(--bg-pane); color: var(--fg-muted); font-size: 11.5px;
+    border-top: 1px solid var(--border); background: var(--bg-pane); color: var(--fg-muted); font-size: var(--text-2xs);
   }
   .grow { flex: 1; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; border: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

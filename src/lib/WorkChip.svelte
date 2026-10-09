@@ -124,11 +124,11 @@
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-family: var(--font-mono, ui-monospace, monospace);
     padding: 0 0.3rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     white-space: nowrap;
   }
@@ -178,11 +178,11 @@
     background: var(--status-done);
   }
   .stale {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     opacity: 0.8;
   }
   .prov {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-weight: 600;
     opacity: 0.7;
     margin-right: 0.15rem;

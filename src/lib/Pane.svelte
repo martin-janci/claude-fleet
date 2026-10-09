@@ -47,7 +47,7 @@
   .pane-terminal { border-right: none; }
   .pane-header {
     padding: 0.5rem 0.75rem;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     font-weight: 600;
     color: var(--fg-muted);
     border-bottom: 1px solid var(--border);
@@ -64,6 +64,6 @@
   }
   .empty {
     color: var(--fg-muted);
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
   }
 </style>

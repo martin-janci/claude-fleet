@@ -63,7 +63,7 @@
   }
   h4 {
     margin: 0 0 0.25rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     font-weight: 600;
   }
@@ -80,7 +80,7 @@
     align-items: center;
     gap: 0.4rem;
     min-width: 0;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .link {
     background: none;

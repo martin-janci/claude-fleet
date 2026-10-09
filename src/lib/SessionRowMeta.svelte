@@ -43,7 +43,7 @@
     gap: 0.3rem;
     min-width: 0;
     padding-left: 0.85rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;

@@ -176,15 +176,16 @@
   }
   .filter {
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     margin: 0.5rem;
     padding: 0.25rem 0.45rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg-pane);
     color: var(--fg);
   }
   .filter:focus { outline: none; border-color: var(--accent); }
+  .filter:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
   .list {
     flex: 1;
     min-height: 0;
@@ -192,7 +193,7 @@
     outline: none;
     padding-bottom: 0.5rem;
   }
-  .list:focus-visible .host-row.selected { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .list:focus-visible .host-row.selected { outline: var(--ring-w) solid var(--ring); outline-offset: calc(-1 * var(--ring-w)); }
   .group + .group { margin-top: 0.4rem; }
   .group-header {
     display: flex;
@@ -200,7 +201,7 @@
     gap: 0.15rem;
     padding: 0.4rem 0.6rem 0.3rem;
     border-top: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .group-title {
     display: flex;
@@ -214,19 +215,19 @@
     align-items: center;
     gap: 0.4rem;
     padding: 0.25rem 0.6rem 0.25rem 1rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     cursor: pointer;
   }
   .host-row:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); }
   .host-row.selected { background: color-mix(in srgb, var(--accent) 18%, transparent); }
   .host-row.hidden-host .alias { color: var(--fg-muted); }
-  .glyph { font-size: 11px; color: var(--fg); }
+  .glyph { font-size: var(--text-2xs); color: var(--fg); }
   .glyph.off { color: var(--fg-muted); }
   .alias { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .word-offline { color: var(--usage-warn); font-size: 11px; }
-  .word-hidden { color: var(--fg-muted); font-size: 11px; }
-  .word-agent { color: var(--accent); font-size: 11px; }
+  .word-offline { color: var(--usage-warn); font-size: var(--text-2xs); }
+  .word-hidden { color: var(--fg-muted); font-size: var(--text-2xs); }
+  .word-agent { color: var(--accent); font-size: var(--text-2xs); }
   .spacer { flex: 1; }
-  .attention { font-size: 11px; cursor: help; }
+  .attention { font-size: var(--text-2xs); cursor: help; }
   .counts { color: var(--fg-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 </style>

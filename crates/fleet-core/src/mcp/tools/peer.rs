@@ -55,7 +55,7 @@ impl FleetTools {
 
     #[tool(description = "List this hub's links to other fleets' hubs: \
         fleet, role, state, pending count, last exchange and error. Never a \
-        token. Read-only, master token only.")]
+        token. Read-only; the master or the hub owner's own device.")]
     pub(super) async fn list_peer_links(&self) -> Result<CallToolResult, McpError> {
         audit("list_peer_links", "");
         let rows = lock(&self.store)

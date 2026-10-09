@@ -8,6 +8,8 @@
 // simply gets the in-app toast + aria-live announcement.
 import { writable } from 'svelte/store';
 import { readPref, writePref } from './prefs';
+import { attentionState, type AttentionOptions, type AttentionState } from './attention';
+import type { SessionRow } from './sessions';
 
 const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
 const isNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
@@ -113,4 +115,77 @@ export function notificationAllowed(
   if (!list(settings[`notify.${channel}`]).has(state)) return false;
   const quiet = inQuietHours(parseQuietHours(settings['notify.quiet_hours']), at.getHours() * 60 + at.getMinutes());
   return !quiet || list(settings['notify.quiet_except']).has(state);
+}
+
+/** The matrix's row for an attention state (`attention.ts`); null for the
+ *  states no channel announces (working, idle, paused). The phone files its
+ *  attention reasons the same way (fleet-mobile `notifyStateOf`). */
+export function notifyStateOf(state: AttentionState): NotifyState | null {
+  switch (state) {
+    case 'action_required':
+      return 'needs_you';
+    case 'failed':
+    case 'blocked':
+    case 'done':
+      return state;
+    default:
+      return null;
+  }
+}
+
+/** Each row's attention state, for the next diff. `external` rows never
+ *  announce, so they are left out. */
+export function notifySnapshot(rows: readonly SessionRow[], opts: AttentionOptions): Map<number, AttentionState> {
+  const m = new Map<number, AttentionState>();
+  for (const s of rows) if (s.kind !== 'external') m.set(s.id, attentionState(s, opts));
+  return m;
+}
+
+/** Rows that moved into a state the matrix lists since `prev`, with that
+ *  state. A row new to the snapshot counts (a session that starts out
+ *  needing you is news); a row that stays put does not. */
+export function newlyNotifiable(
+  prev: ReadonlyMap<number, AttentionState>,
+  rows: readonly SessionRow[],
+  opts: AttentionOptions,
+): { row: SessionRow; state: NotifyState }[] {
+  const out: { row: SessionRow; state: NotifyState }[] = [];
+  for (const s of rows) {
+    // A stuck row is the stuck watcher's (Attention.svelte), which files it
+    // under Blocked and announces it already.
+    if (s.kind === 'external' || s.stuck_kind) continue;
+    const now = attentionState(s, opts);
+    if (prev.get(s.id) === now) continue;
+    const state = notifyStateOf(now);
+    if (!state) continue;
+    out.push({ row: s, state });
+  }
+  return out;
+}
+
+/** A short two-note chime through Web Audio, for the matrix's Sound column.
+ *  Guarded like the OS notification: a webview without `AudioContext` plays
+ *  nothing. Returns true when it played. */
+export function playChime(): boolean {
+  const g = globalThis as { AudioContext?: new () => AudioContext };
+  if (typeof g.AudioContext !== 'function') return false;
+  try {
+    const ctx = new g.AudioContext();
+    const t = ctx.currentTime;
+    for (const [i, hz] of [880, 1320].entries()) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.value = hz;
+      gain.gain.setValueAtTime(0.0001, t + i * 0.12);
+      gain.gain.exponentialRampToValueAtTime(0.15, t + i * 0.12 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.12 + 0.2);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t + i * 0.12);
+      osc.stop(t + i * 0.12 + 0.22);
+    }
+    setTimeout(() => void ctx.close(), 600);
+    return true;
+  } catch {
+    return false;
+  }
 }

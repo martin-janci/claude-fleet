@@ -18,6 +18,7 @@
     waitOut,
     type HostLogin,
   } from './account_limits';
+  import { nowTick } from './now_tick';
 
   let {
     sess,
@@ -37,7 +38,16 @@
   );
   let busy = $state(false);
   let target = $state<HostLogin | null>(null);
-  const waiting = $derived($waitingOut.get(sess.id));
+  // A wait holds for the limit it was chosen for: while its reset is ahead,
+  // or it is this limit's reset. A later limit (the row paused again after
+  // the reset) asks afresh rather than "Waiting until <past time>".
+  const waiting = $derived.by(() => {
+    const w = $waitingOut.get(sess.id);
+    if (w == null) return undefined;
+    void $nowTick;
+    const now = Math.floor(Date.now() / 1000);
+    return w > now || (resetsAt != null && w >= resetsAt) ? w : undefined;
+  });
 
   async function propose(e: MouseEvent) {
     e.stopPropagation();
@@ -102,7 +112,7 @@
     flex-wrap: wrap;
     padding-left: 0.85rem;
     margin-top: 0.2rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .ask,
   .waiting {

@@ -63,7 +63,7 @@
 <style>
   .nudge h3 {
     margin: 0 0 4px;
-    font-size: 13px;
+    font-size: var(--text-sm);
   }
   ul {
     list-style: none;

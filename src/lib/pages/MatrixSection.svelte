@@ -73,7 +73,7 @@
   .matrix {
     border-collapse: collapse;
     width: 100%;
-    font-size: 13px;
+    font-size: var(--text-sm);
   }
   th,
   td {

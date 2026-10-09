@@ -253,7 +253,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .choices {

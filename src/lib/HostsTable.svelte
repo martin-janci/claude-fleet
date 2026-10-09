@@ -156,45 +156,45 @@
     align-items: center;
     gap: 0.75rem;
     padding: 0.4rem 1rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     border-bottom: 1px solid var(--border);
     cursor: pointer;
   }
   .row.head {
     cursor: default;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
   .row:not(.head):hover { background: color-mix(in srgb, var(--fg) 5%, transparent); }
   .row.selected { background: color-mix(in srgb, var(--accent) 18%, transparent); }
-  .hosts-table:focus-visible .row.selected { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .hosts-table:focus-visible .row.selected { outline: var(--ring-w) solid var(--ring); outline-offset: calc(-1 * var(--ring-w)); }
   .row.off .alias { color: var(--fg-muted); }
   .host { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
   .name { display: flex; align-items: baseline; gap: 0.4rem; min-width: 0; }
   .alias { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .glyph { font-size: 11px; }
+  .glyph { font-size: var(--text-2xs); }
   .row.off .glyph { color: var(--fg-muted); }
-  .muted, .machine { color: var(--fg-muted); font-size: 11px; }
+  .muted, .machine { color: var(--fg-muted); font-size: var(--text-2xs); }
   .machine { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .mono { font-variant-numeric: tabular-nums; white-space: nowrap; }
   .warn, .needs, .update { color: var(--usage-warn); }
   .crit, .failed { color: var(--usage-crit); }
   .accounts { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .attention { font-size: 11px; cursor: help; }
+  .attention { font-size: var(--text-2xs); cursor: help; }
   .open-cell { text-align: right; }
   .open {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.15rem 0.5rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--fg);
     cursor: pointer;
   }
   .open:hover { border-color: var(--accent); }
-  .empty { margin: 1rem; color: var(--fg-muted); font-size: 0.85rem; }
+  .empty { margin: 1rem; color: var(--fg-muted); font-size: var(--text-xs); }
   .sr-only {
     position: absolute;
     width: 1px;

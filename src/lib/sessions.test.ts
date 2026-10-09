@@ -450,7 +450,8 @@ describe('optimistic merge guard', () => {
     applySessionEvents([{ type: 'created', row: { ...base, id: 7, tmux_name: 'new', row_version: 1 } }]);
     answer([{ ...base, id: 1, row_version: 1 }]);
     await p;
-    expect(get(sessions).map((s) => s.id)).toEqual([7, 1]);
+    // Kept after the listed rows (`applyList`); the next list places it.
+    expect(get(sessions).map((s) => s.id)).toEqual([1, 7]);
   });
 
   it('loadSessions still drops a row an event touched only before the call began', async () => {

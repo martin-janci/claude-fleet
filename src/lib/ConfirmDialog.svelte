@@ -62,25 +62,25 @@
 <style>
   .message {
     margin: 0;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     color: var(--fg-muted);
     line-height: 1.4;
   }
   .message :global(code) {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     background: var(--bg-pane);
     padding: 0.1rem 0.3rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     color: var(--fg);
   }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
   .actions button {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.8rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .actions button:disabled { opacity: 0.5; cursor: not-allowed; }

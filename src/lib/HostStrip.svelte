@@ -28,7 +28,7 @@
   .present, .in_sync { background: var(--usage-ok); }
   .differs { background: linear-gradient(90deg, var(--usage-warn) 50%, transparent 50%); box-shadow: inset 0 0 0 1.5px var(--usage-warn); }
   .absent, .missing { box-shadow: inset 0 0 0 1.5px var(--control-border-strong); }
-  .na { width: 6px; height: 2px; margin: 0 1.5px; border-radius: 1px; background: var(--border); }
+  .na { width: 6px; height: 2px; margin: 0 1.5px; border-radius: var(--radius-xs); background: var(--border); }
   .stale {
     background: repeating-linear-gradient(135deg, var(--control-border-strong) 0 1.5px, transparent 1.5px 3.5px);
     box-shadow: inset 0 0 0 1px var(--control-border-strong);
@@ -40,7 +40,7 @@
     top: -1px;
     width: 2px;
     height: 11px;
-    border-radius: 1px;
+    border-radius: var(--radius-xs);
     background: var(--usage-crit);
     transform: rotate(45deg);
   }

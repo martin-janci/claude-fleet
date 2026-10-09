@@ -109,7 +109,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+    box-shadow: var(--shadow-pop);
   }
   .mi {
     display: flex;
@@ -121,7 +121,7 @@
     background: transparent;
     color: var(--fg);
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     text-align: left;
     border-radius: var(--radius-sm);
     cursor: pointer;
@@ -129,7 +129,12 @@
   .mi:hover:not(:disabled),
   .mi:focus-visible {
     background: var(--accent-soft);
-    outline: none;
+  }
+  /* The tint alone is ~1.1:1 on the menu: keyboard focus keeps the ring,
+     inset so the menu's edge does not clip it (review r11). */
+  .mi:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
   }
   .mi:disabled {
     color: var(--fg-muted);

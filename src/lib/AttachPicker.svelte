@@ -205,15 +205,15 @@
     border-radius: var(--radius-md);
     background: var(--bg);
     color: var(--fg);
-    box-shadow: 0 6px 24px color-mix(in srgb, #000 18%, transparent);
-    font-size: 12px;
+    box-shadow: var(--shadow-pop);
+    font-size: var(--text-xs);
   }
   .attach-pop:focus-visible {
     outline: var(--ring-w) solid var(--ring);
   }
   .head {
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--text-xs);
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -240,7 +240,7 @@
     width: 100%;
     padding: 3px 6px;
     border: 0;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: none;
     color: var(--fg);
     font: inherit;
@@ -259,14 +259,14 @@
   }
   .dot {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .dot.working {
     color: var(--accent);
   }
   .task {
     font-family: var(--mono);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .muted {
     color: var(--fg-muted);
@@ -278,7 +278,7 @@
     margin: 0;
     padding: 4px 6px;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .mode legend {
     padding: 0 4px;
@@ -306,6 +306,6 @@
   .why {
     margin-right: auto;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
 </style>

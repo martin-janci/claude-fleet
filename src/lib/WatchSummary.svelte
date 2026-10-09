@@ -98,24 +98,24 @@
   }
   h3 {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--text-xs);
   }
   .text {
     margin: 0;
     white-space: pre-wrap;
-    font-size: 12px;
+    font-size: var(--text-xs);
     line-height: 1.45;
     padding: 6px 8px;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
   }
   .muted {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .error {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--danger);
   }
 </style>
