@@ -52,6 +52,14 @@ pub struct ChangedFile {
     pub staged: bool,
     /// For renames/copies, the path the file came from.
     pub orig_path: Option<String>,
+    /// Lines added (M15 G1.10, the Files tab's per-file +N). Absent for a
+    /// binary file, a file git does not diff (an untracked one), and from an
+    /// older hub, so `#[serde(default)]` unlike the fields above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added: Option<u32>,
+    /// Lines removed (the −N), absent as `added` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<u32>,
 }
 
 /// Flat worktree listing — tracked files plus untracked, gitignore respected.
@@ -135,6 +143,10 @@ pub struct CommitDetail {
     pub author: String,
     pub date: String,
     pub files: Vec<ChangedFile>,
+    /// Whether a remote-tracking branch contains the commit (M15 G1.10:
+    /// "pushed" / "not pushed"). Absent from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed: Option<bool>,
 }
 
 /// One run of consecutive lines last changed by the same commit.
@@ -199,6 +211,8 @@ pub(crate) fn parse_status_z(raw: &[u8]) -> Vec<ChangedFile> {
             status: status.to_string(),
             staged,
             orig_path,
+            added: None,
+            removed: None,
         });
     }
     out
@@ -391,6 +405,8 @@ fn parse_name_status_z(raw: &[u8]) -> Vec<ChangedFile> {
                 status: status.to_string(),
                 staged: false,
                 orig_path: Some(orig),
+                added: None,
+                removed: None,
             });
         } else if i < tokens.len() {
             let path = tokens[i].to_string();
@@ -400,10 +416,74 @@ fn parse_name_status_z(raw: &[u8]) -> Vec<ChangedFile> {
                 status: status.to_string(),
                 staged: false,
                 orig_path: None,
+                added: None,
+                removed: None,
             });
         }
     }
     out
+}
+
+/// Parse `git diff/show --numstat -z`: per path, (lines added, lines
+/// removed), `None` for a binary file (`-`). A plain entry is
+/// `A\tR\tpath\0`; a rename or copy is `A\tR\t\0old\0new\0`, keyed by the
+/// new path as `ChangedFile.path` is.
+fn parse_numstat_z(raw: &[u8]) -> std::collections::HashMap<String, (Option<u32>, Option<u32>)> {
+    let text = String::from_utf8_lossy(raw);
+    let mut tokens = text.split('\0');
+    let mut out = std::collections::HashMap::new();
+    while let Some(tok) = tokens.next() {
+        let tok = tok.trim_start_matches('\n');
+        let mut f = tok.splitn(3, '\t');
+        let (Some(a), Some(r), Some(path)) = (f.next(), f.next(), f.next()) else {
+            continue;
+        };
+        let path = if path.is_empty() {
+            // Rename / copy: the old path, then the new.
+            let _old = tokens.next();
+            match tokens.next() {
+                Some(p) => p,
+                None => break,
+            }
+        } else {
+            path
+        };
+        out.insert(path.to_string(), (a.parse().ok(), r.parse().ok()));
+    }
+    out
+}
+
+/// Set each file's `added` / `removed` from a `parse_numstat_z` map.
+fn apply_numstat(files: &mut [ChangedFile], raw: &[u8]) {
+    let counts = parse_numstat_z(raw);
+    for f in files {
+        if let Some(&(a, r)) = counts.get(&f.path) {
+            f.added = a;
+            f.removed = r;
+        }
+    }
+}
+
+/// `repo_changes`' script: the porcelain status, an RS byte, then the
+/// worktree's line counts against HEAD (staged and unstaged together, as
+/// the Files tab shows one row per file); none on an unborn HEAD.
+fn changes_body() -> &'static str {
+    "git -C \"$root\" status --porcelain=v1 -z --untracked-files=all\n\
+     printf '\\036'\n\
+     if git -C \"$root\" rev-parse -q --verify HEAD >/dev/null 2>&1; then\n\
+       git -C \"$root\" diff --numstat -z HEAD\n\
+     fi"
+}
+
+/// Split `changes_body`'s output into the changed files with their counts.
+fn parse_changes(raw: &[u8]) -> Vec<ChangedFile> {
+    let (status, numstat) = match raw.iter().position(|&b| b == 0x1e) {
+        Some(i) => (&raw[..i], &raw[i + 1..]),
+        None => (raw, &[][..]),
+    };
+    let mut files = parse_status_z(status);
+    apply_numstat(&mut files, numstat);
+    files
 }
 
 // ─── changes / tree / file / diff ────────────────────────────────────────
@@ -416,14 +496,8 @@ pub async fn repo_changes(
     ssh: &Arc<SshClient>,
 ) -> Result<Vec<ChangedFile>, IpcError> {
     let (host, name) = session_target(store, args.session_id)?;
-    let out = run_git(
-        ssh,
-        &host,
-        &name,
-        "git -C \"$root\" status --porcelain=v1 -z --untracked-files=all",
-    )
-    .await?;
-    Ok(parse_status_z(&out.stdout))
+    let out = run_git(ssh, &host, &name, changes_body()).await?;
+    Ok(parse_changes(&out.stdout))
 }
 
 /// Flat worktree listing (tracked + untracked, gitignore respected).
@@ -859,32 +933,55 @@ pub async fn repo_commit(
 ) -> Result<CommitDetail, IpcError> {
     crate::validate::commit_hash(&args.hash)?;
     let (host, name) = session_target(store, args.session_id)?;
-    let h = quote(&args.hash);
-    // Two git calls: metadata (US-separated) then NUL name-status. `set -e`
-    // (from repo_script) aborts on a bad hash.
-    let body = format!(
+    let out = run_git(ssh, &host, &name, &commit_body(&args.hash)).await?;
+    Ok(parse_commit(&out.stdout))
+}
+
+/// `repo_commit`'s script: metadata (US-separated), then RS and the NUL
+/// name-status, RS and the NUL numstat (M15 G1.10), RS and `1` / `0` for
+/// whether a remote-tracking branch contains the commit. `set -e` (from
+/// repo_script) aborts on a bad hash.
+fn commit_body(hash: &str) -> String {
+    let h = quote(hash);
+    format!(
         "git -C \"$root\" show -s --date=iso-strict \
            --pretty=format:%H%x1f%s%x1f%b%x1f%an%x1f%aI {h}; \
          printf '\\036'; \
-         git -C \"$root\" show --first-parent --name-status -z --pretty=format: {h}"
-    );
-    let out = run_git(ssh, &host, &name, &body).await?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    // Split metadata from name-status on the RS byte we printed between them.
-    let (meta, names) = match text.split_once('\u{1e}') {
-        Some(p) => p,
-        None => (text.as_ref(), ""),
-    };
+         git -C \"$root\" show --first-parent --name-status -z --pretty=format: {h}; \
+         printf '\\036'; \
+         git -C \"$root\" show --first-parent --numstat -z --pretty=format: {h}; \
+         printf '\\036'; \
+         if [ -n \"$(git -C \"$root\" for-each-ref --count=1 --format=x --contains {h} refs/remotes)\" ]; \
+         then echo 1; else echo 0; fi"
+    )
+}
+
+fn parse_commit(raw: &[u8]) -> CommitDetail {
+    let text = String::from_utf8_lossy(raw);
+    // Sections split on the RS bytes printed between them.
+    let mut parts = text.split('\u{1e}');
+    let meta = parts.next().unwrap_or("");
+    let names = parts.next().unwrap_or("");
+    let numstat = parts.next();
+    let pushed = parts.next().and_then(|p| match p.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    });
     let f: Vec<&str> = meta.splitn(5, '\u{1f}').collect();
-    let detail = CommitDetail {
+    let mut files = parse_name_status_z(names.trim_start_matches('\n').as_bytes());
+    if let Some(n) = numstat {
+        apply_numstat(&mut files, n.as_bytes());
+    }
+    CommitDetail {
         hash: f.first().unwrap_or(&"").to_string(),
         subject: f.get(1).unwrap_or(&"").to_string(),
         body: f.get(2).unwrap_or(&"").trim_end().to_string(),
         author: f.get(3).unwrap_or(&"").to_string(),
         date: f.get(4).unwrap_or(&"").trim().to_string(),
-        files: parse_name_status_z(names.trim_start_matches('\n').as_bytes()),
-    };
-    Ok(detail)
+        files,
+        pushed,
+    }
 }
 
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -951,6 +1048,10 @@ pub struct BranchDiff {
     pub ahead_of_base: u32,
     /// The files HEAD changes against its merge base with the base branch.
     pub base_files: Vec<ChangedFile>,
+    /// Commits on the base since HEAD left it (`HEAD..base`, M15 G1.10: "N
+    /// behind main"). Absent without a base, and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind_base: Option<u32>,
 }
 
 /// Shell that sets `$up` (HEAD's upstream, or empty), `$from` (where the
@@ -978,15 +1079,16 @@ if [ -n "$base" ]; then mb="$(git -C "$root" merge-base "$base" HEAD 2>/dev/null
 /// records start with RS, so RS cannot split them).
 const GS: u8 = 0x1d;
 
-/// Five GS-separated sections: `branch\nupstream\nbase\n`, the unpushed log
-/// (`LOG_FORMAT`), their name-status, the count ahead of the base, and the
-/// base diff's name-status. An unborn HEAD prints the header and empties.
+/// Six GS-separated sections: `branch\nupstream\nbase\n`, the unpushed log
+/// (`LOG_FORMAT`), their name-status, the count ahead of the base, the base
+/// diff's name-status, and the count behind the base (empty without one).
+/// An unborn HEAD prints the header and empties.
 fn branch_diff_body() -> String {
     format!(
         "{base}\
          br=\"$(git -C \"$root\" symbolic-ref -q --short HEAD || true)\"\n\
          if ! git -C \"$root\" rev-parse -q --verify HEAD >/dev/null 2>&1; then\n\
-           printf '%s\\n\\n%s\\n\\035\\035\\035\\035' \"$br\" \"$base\"; exit 0\n\
+           printf '%s\\n\\n%s\\n\\035\\035\\035\\035\\035' \"$br\" \"$base\"; exit 0\n\
          fi\n\
          {range}\
          printf '%s\\n%s\\n%s\\n\\035' \"$br\" \"$up\" \"$base\"\n\
@@ -1000,7 +1102,9 @@ fn branch_diff_body() -> String {
          printf '\\035'\n\
          if [ -n \"$mb\" ]; then git -C \"$root\" rev-list --count \"$mb..HEAD\"; else echo 0; fi\n\
          printf '\\035'\n\
-         if [ -n \"$mb\" ]; then git -C \"$root\" diff --name-status -z \"$mb\" HEAD; fi",
+         if [ -n \"$mb\" ]; then git -C \"$root\" diff --name-status -z \"$mb\" HEAD; fi\n\
+         printf '\\035'\n\
+         if [ -n \"$mb\" ]; then git -C \"$root\" rev-list --count \"HEAD..$base\"; fi",
         base = BASE_BRANCH_SH,
         range = RANGE_SH,
         fmt = quote(LOG_FORMAT),
@@ -1029,6 +1133,9 @@ fn parse_branch_diff(raw: &[u8]) -> BranchDiff {
         .parse()
         .unwrap_or(0);
     let base_files = parse_name_status_z(parts.next().unwrap_or(&[]));
+    let behind_base = parts
+        .next()
+        .and_then(|p| String::from_utf8_lossy(p).trim().parse().ok());
     BranchDiff {
         branch,
         upstream,
@@ -1038,6 +1145,7 @@ fn parse_branch_diff(raw: &[u8]) -> BranchDiff {
         base,
         ahead_of_base,
         base_files,
+        behind_base,
     }
 }
 
@@ -1668,6 +1776,146 @@ mod branch_diff_tests {
         assert!(diff(DiffRange::Base, "x.txt").contains("+x"));
         // A path with a shell metacharacter stays one argument.
         assert_eq!(diff(DiffRange::Base, "a b;$(true).txt"), "");
+    }
+
+    // --- M15 G1.10: what the phone's Files tab shows per file and commit.
+
+    fn counts(files: &[ChangedFile]) -> Vec<(&str, Option<u32>, Option<u32>)> {
+        files
+            .iter()
+            .map(|f| (f.path.as_str(), f.added, f.removed))
+            .collect()
+    }
+
+    #[test]
+    fn the_branch_counts_commits_behind_its_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = two_ahead(tmp.path());
+        assert_eq!(diff_of(&work).behind_base, Some(0));
+        // main moves on by two commits on the remote.
+        git(&work, &["checkout", "-q", "main"]);
+        commit_file(&work, "m1.txt", "1\n", "m1");
+        commit_file(&work, "m2.txt", "2\n", "m2");
+        git(&work, &["push", "-q", "origin", "main"]);
+        git(&work, &["checkout", "-q", "feat"]);
+        let d = diff_of(&work);
+        assert_eq!((d.ahead_of_base, d.behind_base), (2, Some(2)));
+        // An unborn HEAD has no base to be behind.
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        git(&empty, &["init", "-q"]);
+        assert_eq!(diff_of(&empty).behind_base, None);
+    }
+
+    #[test]
+    fn the_worktree_changes_carry_their_line_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = two_ahead(tmp.path());
+        std::fs::write(work.join("x.txt"), "x\nmore\nand more\n").unwrap();
+        std::fs::write(work.join("y.txt"), "").unwrap();
+        git(&work, &["add", "y.txt"]);
+        git(&work, &["mv", "a.txt", "b c.txt"]);
+        std::fs::write(work.join("bin.dat"), [0u8, 1, 2, 0, 255]).unwrap();
+        git(&work, &["add", "bin.dat"]);
+        std::fs::write(work.join("new.txt"), "n\n").unwrap();
+        let mut files = parse_changes(&run_body(&work, changes_body()).stdout);
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(
+            counts(&files),
+            [
+                ("b c.txt", Some(0), Some(0)),
+                ("bin.dat", None, None),
+                ("new.txt", None, None),
+                ("x.txt", Some(2), Some(0)),
+                ("y.txt", Some(0), Some(1)),
+            ]
+        );
+        assert_eq!(files[0].orig_path.as_deref(), Some("a.txt"));
+        assert_eq!(files[2].status, "untracked");
+        // An unborn HEAD lists its files, with no counts.
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        git(&empty, &["init", "-q"]);
+        std::fs::write(empty.join("f.txt"), "f\n").unwrap();
+        let files = parse_changes(&run_body(&empty, changes_body()).stdout);
+        assert_eq!(counts(&files), [("f.txt", None, None)]);
+    }
+
+    #[test]
+    fn a_commit_carries_its_line_counts_and_whether_it_is_pushed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = two_ahead(tmp.path());
+        std::fs::write(work.join("x.txt"), "x2\nx3\n").unwrap();
+        git(&work, &["add", "x.txt"]);
+        git(&work, &["rm", "-q", "y.txt"]);
+        git(
+            &work,
+            &[
+                "-c",
+                "user.name=Ada",
+                "commit",
+                "-q",
+                "-m",
+                "rework\n\nbody",
+            ],
+        );
+        let show = |rev: &str| {
+            let hash = String::from_utf8(
+                crate::proc::std_command("git")
+                    .arg("-C")
+                    .arg(&work)
+                    .args(["rev-parse", rev])
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap();
+            parse_commit(&run_body(&work, &commit_body(hash.trim())).stdout)
+        };
+        let c = show("HEAD");
+        assert_eq!((c.subject.as_str(), c.body.as_str()), ("rework", "body"));
+        let mut files = c.files.clone();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(
+            counts(&files),
+            [("x.txt", Some(2), Some(1)), ("y.txt", Some(0), Some(1))]
+        );
+        assert_eq!(c.pushed, Some(false), "feat was never pushed");
+        assert_eq!(show("main").pushed, Some(true), "main is on origin");
+    }
+
+    #[test]
+    fn numstat_reads_renames_and_binaries() {
+        let raw = b"3\t1\tsrc/a.rs\0-\t-\tlogo.png\0\x30\t2\t\0old.rs\0new.rs\0";
+        let m = parse_numstat_z(raw);
+        assert_eq!(m.get("src/a.rs"), Some(&(Some(3), Some(1))));
+        assert_eq!(m.get("logo.png"), Some(&(None, None)));
+        assert_eq!(m.get("new.rs"), Some(&(Some(0), Some(2))));
+        assert!(!m.contains_key("old.rs"));
+    }
+
+    /// An older hub sends none of the new fields; a newer one leaves them
+    /// out when unknown, so the desktop and the phone read both.
+    #[test]
+    fn the_new_fields_are_optional_on_the_wire() {
+        let f: ChangedFile = serde_json::from_str(
+            r#"{"path":"a","status":"modified","staged":false,"orig_path":null}"#,
+        )
+        .unwrap();
+        assert_eq!((f.added, f.removed), (None, None));
+        let v = serde_json::to_value(&f).unwrap();
+        assert!(v.get("added").is_none() && v.get("removed").is_none());
+        let d: BranchDiff = serde_json::from_str(
+            r#"{"branch":null,"upstream":null,"unpushed":[],"unpushedFiles":[],
+                "truncated":false,"base":null,"aheadOfBase":0,"baseFiles":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(d.behind_base, None);
+        let c: CommitDetail = serde_json::from_str(
+            r#"{"hash":"h","subject":"s","body":"","author":"a","date":"d","files":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(c.pushed, None);
     }
 
     #[test]

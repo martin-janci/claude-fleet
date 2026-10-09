@@ -654,6 +654,9 @@ fn sample_changed_file() -> ChangedFile {
         status: "renamed".into(),
         staged: true,
         orig_path: Some("src/old.rs".into()),
+        // Set, so the golden pins the Files tab's +/- names (M15 G1.10).
+        added: Some(1),
+        removed: Some(1),
     }
 }
 
@@ -896,6 +899,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             base: Some("origin/main".into()),
             ahead_of_base: 1,
             base_files: vec![],
+            behind_base: Some(1),
         }),
     );
     let terms = fleet_core::service::sessions::ShellTerminalsResult {
@@ -1242,6 +1246,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             author: "A Person".into(),
             date: "2026-09-18".into(),
             files: vec![sample_changed_file()],
+            pushed: Some(true),
         }),
     );
     c

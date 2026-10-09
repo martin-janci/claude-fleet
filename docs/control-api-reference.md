@@ -481,7 +481,7 @@ Parameters: `path`, `session_id`
 
 ### `repo_branch_diff`
 
-What a session's branch carries: the commits no remote has and the files they change, and the files it changes against the base branch: {branch, upstream, unpushed, unpushedFiles, truncated, base, aheadOfBase, baseFiles}.
+What a session's branch carries: the commits no remote has and the files they change, and the files it changes against the base branch: {branch, upstream, unpushed, unpushedFiles, truncated, base, aheadOfBase, baseFiles, behindBase}.
 
 Parameters: `session_id`
 
@@ -493,13 +493,13 @@ Parameters: `session_id`
 
 ### `repo_changes`
 
-A session's changed files (git status) in its worktree.
+A session's changed files (git status) in its worktree, each with added/removed line counts against HEAD when git diffs it.
 
 Parameters: `session_id`
 
 ### `repo_commit`
 
-One commit's metadata + changed files: {hash, subject, body, author, date, files}.
+One commit's metadata + changed files with added/removed line counts: {hash, subject, body, author, date, files, pushed}.
 
 Parameters: `hash`, `session_id`
 

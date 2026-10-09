@@ -48,6 +48,8 @@ export interface CommitDetail {
   author: string;
   date: string;
   files: ChangedFile[];
+  /** A remote-tracking branch contains it; absent from an older hub. */
+  pushed?: boolean;
 }
 
 export function repoLog(

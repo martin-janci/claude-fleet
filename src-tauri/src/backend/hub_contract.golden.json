@@ -45,6 +45,7 @@
       "aheadOfBase",
       "base",
       "baseFiles",
+      "behindBase",
       "branch",
       "truncated",
       "unpushed",
@@ -52,8 +53,10 @@
       "upstream"
     ],
     "ChangedFile": [
+      "added",
       "orig_path",
       "path",
+      "removed",
       "staged",
       "status"
     ],
@@ -72,6 +75,7 @@
       "date",
       "files",
       "hash",
+      "pushed",
       "subject"
     ],
     "ConfirmRequest": [
