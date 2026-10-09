@@ -1,4 +1,4 @@
-import { writable, type Writable } from 'svelte/store';
+import { writable, type Writable } from "svelte/store";
 
 /**
  * The one merge/remove core behind the row stores (sessions, hosts,
@@ -25,6 +25,10 @@ export interface RowStoreOptions<T, K> {
   isStale?: (incoming: T, current: T) => boolean;
   /** Applied to the array after every change (e.g. to keep a sort order). */
   normalize?: (arr: T[]) => T[];
+  /** What tells two rows that share a key apart (a reused SQLite id). With it,
+   *  `mergeCreatedInto` lets a row the backend says is NEW past the tombstone
+   *  of a removed row whose identity differs. */
+  identity?: (row: T) => string;
 }
 
 /** Where the frames stood when a re-list was asked for. */
@@ -99,6 +103,11 @@ export interface RowStore<T, K> {
   store: Writable<T[]>;
   /** Pure upsert step, shared by the single-row and batched paths. */
   mergeInto(arr: T[], row: T): T[];
+  /** Pure upsert step for a row the backend reports as newly created: clears
+   *  the key's tombstone first when the removed row's identity differs (the
+   *  key was reused), then merges. A late `created` for the removed row itself
+   *  is still dropped. */
+  mergeCreatedInto(arr: T[], row: T): T[];
   /** Pure remove step; tombstones the key. */
   removeFrom(arr: T[], key: K): T[];
   merge(row: T | null | undefined): void;
@@ -119,9 +128,12 @@ export interface RowStore<T, K> {
   resetTombstonesForTests(): void;
 }
 
-export function createRowStore<T, K>(opts: RowStoreOptions<T, K>): RowStore<T, K> {
+export function createRowStore<T, K>(
+  opts: RowStoreOptions<T, K>,
+): RowStore<T, K> {
   const store = writable<T[]>([]);
-  const tombstones = new Map<K, number>();
+  /** When the key was removed, and the removed row's identity when we held it. */
+  const tombstones = new Map<K, { at: number; ident?: string }>();
   const normalize = opts.normalize ?? ((arr: T[]) => arr);
   // Every merge or remove is a touch, so a re-list can tell which rows
   // changed while it was in flight.
@@ -131,7 +143,7 @@ export function createRowStore<T, K>(opts: RowStoreOptions<T, K>): RowStore<T, K
     if (opts.tombstoneMs === undefined) return false;
     const t = tombstones.get(key);
     if (t === undefined) return false;
-    if (Date.now() - t > opts.tombstoneMs) {
+    if (Date.now() - t.at > opts.tombstoneMs) {
       tombstones.delete(key);
       return false;
     }
@@ -151,8 +163,32 @@ export function createRowStore<T, K>(opts: RowStoreOptions<T, K>): RowStore<T, K
     return normalize(next);
   }
 
+  function mergeCreatedInto(arr: T[], row: T): T[] {
+    if (!row) return arr;
+    const key = opts.key(row);
+    const t = tombstones.get(key);
+    // Unknown identity (the removed row was never held) stays blocked: we
+    // cannot tell a reused key from a late event for the removed row.
+    if (
+      opts.identity &&
+      t?.ident !== undefined &&
+      t.ident !== opts.identity(row)
+    ) {
+      tombstones.delete(key);
+    }
+    return mergeInto(arr, row);
+  }
+
   function removeFrom(arr: T[], key: K): T[] {
-    if (opts.tombstoneMs !== undefined) tombstones.set(key, Date.now());
+    if (opts.tombstoneMs !== undefined) {
+      const held = opts.identity
+        ? arr.find((r) => opts.key(r) === key)
+        : undefined;
+      tombstones.set(key, {
+        at: Date.now(),
+        ident: held && opts.identity?.(held),
+      });
+    }
     race.touch(key);
     const next = arr.filter((r) => opts.key(r) !== key);
     return next.length === arr.length ? arr : next;
@@ -161,6 +197,7 @@ export function createRowStore<T, K>(opts: RowStoreOptions<T, K>): RowStore<T, K
   return {
     store,
     mergeInto,
+    mergeCreatedInto,
     removeFrom,
     merge(row) {
       if (!row) return;
