@@ -1,5 +1,5 @@
 {
-  "revision": 12,
+  "revision": 13,
   "types": {
     "AccountRow": [
       "display_name",
@@ -95,6 +95,12 @@
       "session_id",
       "task_id",
       "tool"
+    ],
+    "ControlRoute": [
+      "outcome",
+      "run_id",
+      "target",
+      "targets"
     ],
     "ConvItem::Bash": [
       "command",
@@ -451,6 +457,14 @@
       "session_name",
       "size"
     ],
+    "LostTarget": [
+      "confidence_pct",
+      "project_id",
+      "reason",
+      "run_id",
+      "source",
+      "unsure"
+    ],
     "MyGrants": [
       "grants",
       "person_id"
@@ -472,6 +486,11 @@
       "role",
       "state",
       "url"
+    ],
+    "PlacedTranscript": [
+      "copied",
+      "project_id",
+      "tmux_name"
     ],
     "PrList": [
       "items",
@@ -732,6 +751,15 @@
       "cost_micros",
       "input_tokens",
       "output_tokens"
+    ],
+    "WatchSummary": [
+      "at",
+      "check",
+      "host_alias",
+      "model",
+      "since",
+      "text",
+      "turns"
     ],
     "WorkLinkRow": [
       "claude_session_id",
