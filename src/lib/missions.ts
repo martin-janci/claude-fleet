@@ -806,6 +806,13 @@ export function plannerError(e: { code: string; message: string }): HumanError {
       details,
     };
   }
+  if ((hit = m.match(/^Claude login expired on (.+?): run `(.+?)` there/))) {
+    return {
+      title: "The planner's Claude login has expired",
+      text: `Claude Code on ${hit[1]} is signed out, so the planner can't run. Run ${hit[2]} there, then retry.`,
+      details,
+    };
+  }
   if ((hit = m.match(/^claude is not on (.+?)'s PATH/))) {
     return { title, text: `Claude Code isn't installed on ${hit[1]}, so the planner has nowhere to run.`, details };
   }
@@ -824,8 +831,20 @@ export function plannerError(e: { code: string; message: string }): HumanError {
   return { title, text: sentence(m) || 'Something went wrong. Retry, or look at Details.', details };
 }
 
+/** Claude Code's own words for a run with no usable login. */
+const SIGNED_OUT = /login expired|run \/login|invalid api key|not logged in|oauth token has (?:expired|been revoked)/i;
+
 /** The planner ran but its answer could not be used (`PlanOutcome.refused`). */
 export function plannerRefusal(why: string): HumanError {
+  // A hub before 0.6.1 hands Claude Code's own "Login expired · Run /login"
+  // back as a refused answer; it is a signed-out host, not a bad answer.
+  if (SIGNED_OUT.test(why)) {
+    return {
+      title: "The planner's Claude login has expired",
+      text: "Claude Code on the planner's host is signed out. Run claude /login there, then retry.",
+      details: why,
+    };
+  }
   return {
     title: "The planner's answer couldn't be used",
     text: 'Nothing was changed. Retry to ask again; Details shows what was wrong with the answer.',
