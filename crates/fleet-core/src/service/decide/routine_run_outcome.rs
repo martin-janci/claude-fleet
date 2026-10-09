@@ -320,8 +320,8 @@ pub fn spawn_pass(store: &Arc<Mutex<Store>>, panes: Arc<dyn PaneReader>, now: i6
     }
     let ctx = DecideCtx::jev(Arc::clone(store));
     let spawned = crate::rt::try_spawn(async move {
+        let _flight = crate::rt::ClearOnDrop::of_static(&IN_FLIGHT);
         read_pending(&ctx, panes.as_ref()).await;
-        IN_FLIGHT.store(false, Ordering::SeqCst);
     });
     if spawned.is_none() {
         IN_FLIGHT.store(false, Ordering::SeqCst);

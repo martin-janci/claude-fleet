@@ -163,6 +163,9 @@ pub fn has_live_work(s: &Store, item_id: i64) -> Result<bool, IpcError> {
     }
 }
 
+/// The runs between their check and their task row, by item and role.
+static STARTING: crate::rt::KeySet = std::sync::Mutex::new(None);
+
 /// `work_link { run }` end to end over the real start path.
 pub async fn run_item(
     store: &Arc<Mutex<Store>>,
@@ -193,16 +196,35 @@ pub async fn run_item_with(
     let item_id = start
         .item_id
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "run needs item_id"))?;
-    let checked = precheck(&*lock(store.as_ref())?, view, item_id, role)?;
-    let attempt = match checked {
-        Precheck::Existing(task) => {
-            return Ok(RunOutcome {
-                session_id: task.worker_session_id,
-                task: *task,
-                existing: true,
-            })
-        }
-        Precheck::Fresh { attempt } => attempt,
+    // The task is recorded only once its worker exists: a second start of
+    // the same item and role in that gap (the mission loop's step and a
+    // person's "start next steps", a double click) would pass `precheck`
+    // too and start a second worker. The claim is taken under the same lock
+    // as the check (review r06 F2).
+    let (attempt, _starting) = {
+        let s = lock(store.as_ref())?;
+        let attempt = match precheck(&s, view, item_id, role)? {
+            Precheck::Existing(task) => {
+                return Ok(RunOutcome {
+                    session_id: task.worker_session_id,
+                    task: *task,
+                    existing: true,
+                })
+            }
+            Precheck::Fresh { attempt } => attempt,
+        };
+        let claim = crate::rt::claim(
+            &STARTING,
+            Arc::as_ptr(store) as usize,
+            format!("{item_id}:{role}"),
+        )
+        .ok_or_else(|| {
+            IpcError::new(
+                codes::E_INVALID_STATE,
+                format!("a {role} run on this item is already starting"),
+            )
+        })?;
+        (attempt, claim)
     };
     // A run always starts its own worker: a live session already on the
     // item (another role's run, a failed attempt's session that lives on,
@@ -400,5 +422,41 @@ mod tests {
             review.ends_with("Your role on this task: review."),
             "{review}"
         );
+    }
+
+    /// Review r06 F2: while one start of an item and role is between its
+    /// check and its task row, a second start of the same pair is refused
+    /// before it reaches a host, rather than starting a second worker.
+    #[tokio::test]
+    async fn a_second_start_of_a_starting_run_is_refused() {
+        let (s, _worker, item) = store_with_item();
+        let store = Arc::new(Mutex::new(s));
+        let first = crate::rt::claim(
+            &STARTING,
+            Arc::as_ptr(&store) as usize,
+            format!("{item}:implement"),
+        )
+        .expect("free");
+        let start = StartArgs {
+            item_id: Some(item),
+            ..Default::default()
+        };
+        let err = run_item_with(
+            &store,
+            &Arc::new(crate::ssh::SshClient::new()),
+            &crate::cancel::CancellationRegistry::new(),
+            &start,
+            "implement",
+            &ViewScope::internal(),
+            &crate::service::trackers::TrackerNet::fake(Arc::new(
+                crate::net::https::FakeTransport::new(),
+            )),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID_STATE);
+        assert!(err.message.contains("already starting"), "{}", err.message);
+        drop(first);
     }
 }

@@ -3211,6 +3211,36 @@ async fn concurrent_list_sessions_share_one_reconcile_pass() {
     assert_eq!(rows[0].tmux_name, "s1");
 }
 
+/// Review r06 (r17 F4): a forced listing while another pass holds the gate
+/// waits for it and then runs its own, so a session started after that pass
+/// probed its host is in the answer.
+#[tokio::test]
+async fn a_forced_listing_during_a_pass_runs_its_own_after_it() {
+    use std::time::Duration;
+    let store = Arc::new(Mutex::new(Store::open_in_memory().expect("store")));
+    let gate = Arc::new(ReconcileGate::new());
+    let (deps, probes) = scripted_deps(
+        vec![tmux_session("s1")],
+        Duration::from_millis(0),
+        Duration::from_secs(5),
+    );
+    let window = Duration::from_secs(60);
+    // Another caller's pass is running.
+    let held = gate.try_begin().expect("free");
+    let forced = {
+        let (store, deps, gate) = (Arc::clone(&store), Arc::clone(&deps), Arc::clone(&gate));
+        tokio::spawn(async move { list_sessions_with(&store, &deps, &gate, window, true).await })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!forced.is_finished(), "it waits for the running pass");
+    assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(held);
+    let rows = forced.await.unwrap().expect("forced listing");
+    assert_eq!(gate.passes(), 1, "its own pass ran");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tmux_name, "s1");
+}
+
 /// Hub store latency, task 7: once a pass has completed, a listing served
 /// from the store reads through the reader it is handed (the hub's read
 /// pool) — so it answers while the writer's mutex is held by a reconcile
