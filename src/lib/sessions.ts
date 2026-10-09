@@ -1039,12 +1039,39 @@ export interface QueuedPrompt {
   failed_at?: number | null;
   error?: string | null;
   cancelled_at?: number | null;
+  /** Send later: not typed before this unix second. */
+  not_before?: number | null;
+  /** Held while the session's account is at its usage limit. */
+  until_limit_reset?: boolean;
+  /** Dropped instead if the session is archived first. */
+  skip_if_archived?: boolean;
+  skipped_at?: number | null;
+}
+
+/** Send later's time choices (M15 G1.8). Every field is optional: none set
+ *  is the plain "when it is idle". */
+export interface SendLaterTiming {
+  /** Unix seconds before which the prompt is not typed. */
+  notBefore?: number;
+  /** Wait until the session's account is under its usage limit again. */
+  untilLimitReset?: boolean;
+  /** Skip it if the session is archived first. */
+  skipIfArchived?: boolean;
 }
 
 /** Send a prompt as a new turn: now when the session is idle, else once its
- *  turn ends (never into a dialog). */
-export function queuePrompt(sessionId: number, prompt: string): Promise<Result<QueuePromptResult>> {
-  return invokeCmd<QueuePromptResult>('queue_prompt', { args: { session_id: sessionId, prompt } });
+ *  turn ends (never into a dialog). `timing` holds it for later. */
+export function queuePrompt(
+  sessionId: number,
+  prompt: string,
+  timing: SendLaterTiming = {},
+): Promise<Result<QueuePromptResult>> {
+  const args: Record<string, unknown> = { session_id: sessionId, prompt };
+  // Only what is set goes on the wire, so an older hub reads the call it knows.
+  if (timing.notBefore !== undefined) args.not_before = Math.floor(timing.notBefore);
+  if (timing.untilLimitReset) args.until_limit_reset = true;
+  if (timing.skipIfArchived) args.skip_if_archived = true;
+  return invokeCmd<QueuePromptResult>('queue_prompt', { args });
 }
 
 export function queuedPrompts(sessionId: number): Promise<Result<QueuedPrompt[]>> {

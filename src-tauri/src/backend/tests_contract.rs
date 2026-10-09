@@ -873,6 +873,11 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             failed_at: Some(1),
             error: Some("e".into()),
             cancelled_at: Some(1),
+            // Set, so the golden pins Send later's names (M15 G1.8).
+            not_before: Some(1),
+            until_limit_reset: true,
+            skip_if_archived: true,
+            skipped_at: Some(1),
         }),
     );
     put(

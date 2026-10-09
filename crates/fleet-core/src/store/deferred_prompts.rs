@@ -1,7 +1,10 @@
 //! Deferred prompts (`deferred_prompts`, migration 133, redesign step 5.10):
 //! prompts for a session that was busy when they were sent, typed in once it
 //! is idle. The decisions (send now or keep, when to type, retries) are
-//! `service::sessions::deferred`'s; this is the table.
+//! `service::sessions::deferred`'s; this is the table. Migration 155 (M15
+//! step G1.8) adds Send later's time choices: a time before which a prompt
+//! is not typed, a wait for its account's usage limit to reset, and dropping
+//! it when its session is archived first.
 
 use super::Store;
 use rusqlite::{OptionalExtension, Result};
@@ -27,12 +30,41 @@ pub struct DeferredPromptRow {
     pub error: Option<String>,
     #[serde(default)]
     pub cancelled_at: Option<i64>,
+    /// Not typed before this unix second (migration 155). Absent from an
+    /// older hub, and when the prompt waits only for an idle moment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before: Option<i64>,
+    /// Not typed while the session's account is at or past
+    /// `accounts.pause_at`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub until_limit_reset: bool,
+    /// Dropped, not typed, once the session is archived.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skip_if_archived: bool,
+    /// When it was dropped because the session was archived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_at: Option<i64>,
 }
 
-const COLS: &str =
-    "id, session_id, body, created_at, delivered_at, attempts, failed_at, error, cancelled_at";
+fn is_false(b: &bool) -> bool {
+    !*b
+}
 
-const PENDING: &str = "delivered_at IS NULL AND failed_at IS NULL AND cancelled_at IS NULL";
+/// When a deferred prompt may be typed, besides "the session is idle".
+/// `Default` is the plain step 5.10 prompt: the next idle moment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeferredTiming {
+    pub not_before: Option<i64>,
+    pub until_limit_reset: bool,
+    pub skip_if_archived: bool,
+}
+
+const COLS: &str = "id, session_id, body, created_at, delivered_at, attempts, failed_at, error, \
+                    cancelled_at, not_before, until_limit_reset, skip_if_archived, skipped_at";
+
+/// The partial index `deferred_prompts_pending` (migration 155) says the same.
+const PENDING: &str = "delivered_at IS NULL AND failed_at IS NULL AND cancelled_at IS NULL \
+                       AND skipped_at IS NULL";
 
 fn row(r: &rusqlite::Row<'_>) -> Result<DeferredPromptRow> {
     Ok(DeferredPromptRow {
@@ -45,18 +77,70 @@ fn row(r: &rusqlite::Row<'_>) -> Result<DeferredPromptRow> {
         failed_at: r.get(6)?,
         error: r.get(7)?,
         cancelled_at: r.get(8)?,
+        not_before: r.get(9)?,
+        until_limit_reset: r.get(10)?,
+        skip_if_archived: r.get(11)?,
+        skipped_at: r.get(12)?,
     })
 }
 
 impl Store {
     /// Keep a prompt for `session_id` until it is idle; answers the row id.
     pub fn insert_deferred_prompt(&self, session_id: i64, body: &str, now: i64) -> Result<i64> {
+        self.insert_deferred_prompt_timed(session_id, body, DeferredTiming::default(), now)
+    }
+
+    /// [`Self::insert_deferred_prompt`] with Send later's time choices.
+    pub fn insert_deferred_prompt_timed(
+        &self,
+        session_id: i64,
+        body: &str,
+        timing: DeferredTiming,
+        now: i64,
+    ) -> Result<i64> {
         self.conn
             .prepare_cached(
-                "INSERT INTO deferred_prompts (session_id, body, created_at) VALUES (?1, ?2, ?3)",
+                "INSERT INTO deferred_prompts (session_id, body, created_at, not_before, \
+                 until_limit_reset, skip_if_archived) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?
-            .execute(rusqlite::params![session_id, body, now])?;
+            .execute(rusqlite::params![
+                session_id,
+                body,
+                now,
+                timing.not_before,
+                timing.until_limit_reset,
+                timing.skip_if_archived
+            ])?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// The session's waiting prompts whose time has come at `now` (no
+    /// `not_before`, or one at or before `now`), oldest first. The limit
+    /// wait is the service's to apply.
+    pub fn due_deferred_prompts(
+        &self,
+        session_id: i64,
+        now: i64,
+    ) -> Result<Vec<DeferredPromptRow>> {
+        let mut st = self.conn.prepare_cached(&format!(
+            "SELECT {COLS} FROM deferred_prompts \
+             WHERE session_id = ?1 AND {PENDING} \
+               AND (not_before IS NULL OR not_before <= ?2) ORDER BY id"
+        ))?;
+        let rows = st.query_map(rusqlite::params![session_id, now], row)?;
+        rows.collect()
+    }
+
+    /// Drop the session's waiting prompts that were to be skipped once it is
+    /// archived; answers how many.
+    pub fn skip_archived_deferred_prompts(&self, session_id: i64, now: i64) -> Result<usize> {
+        self.conn
+            .prepare_cached(&format!(
+                "UPDATE deferred_prompts SET skipped_at = ?2, \
+                 error = 'skipped: the session was archived first' \
+                 WHERE session_id = ?1 AND skip_if_archived = 1 AND {PENDING}"
+            ))?
+            .execute(rusqlite::params![session_id, now])
     }
 
     /// The oldest prompt still waiting for `session_id`.
@@ -153,12 +237,13 @@ impl Store {
     }
 
     /// What is waiting, and what failed, for one session or for every
-    /// session; delivered and cancelled rows are history and left out.
+    /// session; delivered, cancelled and skipped rows are history and left
+    /// out.
     pub fn list_deferred_prompts(&self, session_id: Option<i64>) -> Result<Vec<DeferredPromptRow>> {
         let mut st = self.conn.prepare_cached(&format!(
             "SELECT {COLS} FROM deferred_prompts \
              WHERE (?1 IS NULL OR session_id = ?1) \
-               AND delivered_at IS NULL AND cancelled_at IS NULL \
+               AND delivered_at IS NULL AND cancelled_at IS NULL AND skipped_at IS NULL \
              ORDER BY id"
         ))?;
         let rows = st.query_map([session_id], row)?;
@@ -236,6 +321,61 @@ mod tests {
         assert!(!s.claim_deferred_prompt(id, 13).unwrap());
         assert!(s.sessions_with_deferred_prompts().unwrap().is_empty());
         assert!(s.list_deferred_prompts(Some(sid)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_timed_prompt_is_due_only_from_its_time() {
+        let (s, sid) = store_with_session();
+        let timed = DeferredTiming {
+            not_before: Some(100),
+            ..Default::default()
+        };
+        let later = s
+            .insert_deferred_prompt_timed(sid, "later", timed, 10)
+            .unwrap();
+        let now = s.insert_deferred_prompt(sid, "now", 11).unwrap();
+        let due = |at| -> Vec<i64> {
+            s.due_deferred_prompts(sid, at)
+                .unwrap()
+                .iter()
+                .map(|r| r.id)
+                .collect()
+        };
+        assert_eq!(due(99), vec![now], "the timed one is not due yet");
+        assert_eq!(due(100), vec![later, now], "then oldest first");
+        let r = s.get_deferred_prompt(later).unwrap().unwrap();
+        assert_eq!(
+            (r.not_before, r.until_limit_reset, r.skip_if_archived),
+            (Some(100), false, false)
+        );
+    }
+
+    #[test]
+    fn only_prompts_marked_skip_are_dropped_when_archived() {
+        let (s, sid) = store_with_session();
+        let skip = DeferredTiming {
+            skip_if_archived: true,
+            ..Default::default()
+        };
+        let a = s.insert_deferred_prompt_timed(sid, "a", skip, 10).unwrap();
+        let b = s.insert_deferred_prompt(sid, "b", 11).unwrap();
+        assert_eq!(s.skip_archived_deferred_prompts(sid, 20).unwrap(), 1);
+        assert_eq!(s.skip_archived_deferred_prompts(sid, 21).unwrap(), 0);
+        assert!(
+            !s.claim_deferred_prompt(a, 22).unwrap(),
+            "a skipped row is not pending"
+        );
+        assert_eq!(
+            s.get_deferred_prompt(a).unwrap().unwrap().skipped_at,
+            Some(20)
+        );
+        let listed: Vec<i64> = s
+            .list_deferred_prompts(Some(sid))
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(listed, vec![b]);
     }
 
     #[test]

@@ -7,7 +7,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { sessions, loadSessions, killSession, renameSession, restartSession, rewindConversation, repairSession, restoreHostSessions, discoverLostSessions, adoptSession, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests, applySessionEvents } from './sessions';
-import { formatCostMicros, formatTokens, sessionUsageTokens, lostReasonLabel, sessionAgent } from './sessions';
+import { formatCostMicros, formatTokens, sessionUsageTokens, lostReasonLabel, sessionAgent, queuePrompt } from './sessions';
 import type { SessionRow } from './sessions';
 
 beforeEach(() => {
@@ -531,5 +531,24 @@ describe('sessionAgent', () => {
     expect(sessionAgent({ kind: 'work' })).toBe('claude');
     expect(sessionAgent({ kind: 'bg' })).toBe('claude');
     expect(sessionAgent({ kind: 'shell' })).toBe('shell');
+  });
+});
+
+describe('queuePrompt (Send later, M15 G1.8)', () => {
+  const sent = () => (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], (c[1] as { args: unknown }).args]);
+
+  it('sends only the plain call when no time is chosen', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ session_id: 4, delivered: true });
+    const r = await queuePrompt(4, 'status?');
+    expect(r.ok).toBe(true);
+    expect(sent()).toEqual([['queue_prompt', { session_id: 4, prompt: 'status?' }]]);
+  });
+
+  it('carries the time, the limit wait and skip-if-archived when chosen', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ session_id: 4, delivered: false, queued_id: 2 });
+    await queuePrompt(4, 'rebase', { notBefore: 1_800_003_600.7, untilLimitReset: true, skipIfArchived: true });
+    expect(sent()).toEqual([
+      ['queue_prompt', { session_id: 4, prompt: 'rebase', not_before: 1_800_003_600, until_limit_reset: true, skip_if_archived: true }],
+    ]);
   });
 });

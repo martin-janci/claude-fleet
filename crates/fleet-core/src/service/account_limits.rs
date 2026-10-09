@@ -249,6 +249,20 @@ pub fn over_limit(
         }))
 }
 
+/// Whether the account `account_uuid` is at or past `accounts.pause_at` at
+/// `now`, from the store's newest usage snapshot (as [`login_account`]).
+/// `false` without a reading or once its windows have reset: Send later's
+/// "when the limit resets" (M15 step G1.8) holds a prompt only while the
+/// limit is known to be hit.
+pub fn account_over_line(s: &Store, account_uuid: &str, now: i64) -> Result<bool, IpcError> {
+    let used = s
+        .latest_usage_snapshots()?
+        .into_iter()
+        .find(|r| r.account_uuid == account_uuid)
+        .and_then(|r| used_pct_of(&r.usage, Some(r.fetched_at), now));
+    Ok(used.is_some_and(|u| u >= pause_at_pct(s)))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "CheckAccountHeadroomParams")]
 pub struct CheckAccountHeadroomArgs {

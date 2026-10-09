@@ -315,6 +315,18 @@ fn trackers_has_settings(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 155: `deferred_prompts` already has
+/// its `not_before` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn deferred_prompts_has_not_before(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('deferred_prompts') WHERE name = 'not_before'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 052: `work_links` already has its
 /// `archived_at` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
@@ -1721,6 +1733,13 @@ const MIGRATIONS: &[Migration] = &[
         152,
         include_str!("../../migrations/152_update_org_policy.sql"),
     ),
+    // M15 step G1.8: Send later's time choices on `deferred_prompts` — ADD
+    // COLUMNs, so a guard.
+    Migration {
+        version: 155,
+        sql: include_str!("../../migrations/155_deferred_prompt_timing.sql"),
+        already_applied: Some(deferred_prompts_has_not_before),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

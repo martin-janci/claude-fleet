@@ -411,9 +411,9 @@ Parameters: `action`, `limit`, `project_id`, `state`
 
 ### `queue_prompt`
 
-Send a prompt as a new turn when the session is idle: typed now if it is, else kept and typed once its turn ends (never into a dialog). Marked untrusted unless raw=true (master only). Returns { session_id, delivered, queued_id }.
+Send a prompt as a new turn when the session is idle: typed now if it is, else kept and typed once its turn ends (never into a dialog). Send later: not_before (unix secs) holds it until then, until_limit_reset while the account is at its limit, skip_if_archived drops it if the session is archived first. Marked untrusted unless raw=true (master only). Returns { session_id, delivered, queued_id }.
 
-Parameters: `confirm_nonce`, `prompt`, `raw`, `session_id`
+Parameters: `confirm_nonce`, `not_before`, `prompt`, `raw`, `session_id`, `skip_if_archived`, `until_limit_reset`
 
 ### `queued_prompts`
 

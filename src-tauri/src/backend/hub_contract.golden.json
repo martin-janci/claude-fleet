@@ -289,7 +289,11 @@
       "error",
       "failed_at",
       "id",
-      "session_id"
+      "not_before",
+      "session_id",
+      "skip_if_archived",
+      "skipped_at",
+      "until_limit_reset"
     ],
     "FileBlame": [
       "hunks",
