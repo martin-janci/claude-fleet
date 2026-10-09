@@ -317,7 +317,8 @@ pub const CONTROL_COMMANDS: [(&str, &str); 5] = [
          ---\n\
          Assign as asked: \"$ARGUMENTS\". Link the session to the task with \
          `work_link` action `link`, then brief the session on it with \
-         `send_prompt`. If the task or the session is unclear, ask first.\n",
+         `send_prompt` (the person approves the brief on the card). If the task \
+         or the session is unclear, ask first.\n",
     ),
     (
         "start",
@@ -327,8 +328,9 @@ pub const CONTROL_COMMANDS: [(&str, &str); 5] = [
          ---\n\
          Start work on \"$ARGUMENTS\": pick the project and host it belongs to, \
          start a session with `new_session` (the person approves it on the card), \
-         link it to the task and brief it with `send_prompt`. Say which host and \
-         project you picked and why, in one line.\n",
+         link it to the task and brief it with `send_prompt` (the person approves \
+         the brief on the card too). Say which host and project you picked and \
+         why, in one line.\n",
     ),
 ];
 
@@ -365,8 +367,9 @@ pub fn claude_md() -> &'static str {
      Two rules.\n\
      \n\
      1. **Destructive work is proposed, never assumed.** Starting or killing\n\
-     a session, deleting, moving, broadcasting and committing stop for a\n\
-     confirmation you do not control. Say plainly what you are about to do and let the dialog do its\n\
+     a session, deleting, moving, broadcasting, committing and every prompt\n\
+     you type into another session stop for a confirmation you do not\n\
+     control. Say plainly what you are about to do and let the dialog do its\n\
      job; do not try to route around a refusal.\n\
      \n\
      2. **This directory is not a repository and you do not write code in\n\

@@ -65,6 +65,32 @@ describe('rows slide between groups', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('only Full reads where the rows are', () => {
+    let reads = 0;
+    const counted = (id: number) => {
+      const el = rowAt(id, 300);
+      el.getBoundingClientRect = () => {
+        reads++;
+        return { top: 300, left: 0, width: 200, height: 30 } as DOMRect;
+      };
+      return el;
+    };
+    const root = document.createElement('div');
+    root.append(counted(8), counted(9));
+    motionPref.set('off');
+    snapshotRows(root);
+    motionPref.set('reduced');
+    snapshotRows(root);
+    expect(reads).toBe(0);
+    slideIn(rowAt(8, 100), 8);
+    expect(calls).toEqual([{ keyframes: [{ opacity: 0 }, { opacity: 1 }], opts: { duration: 80 } }]);
+    motionPref.set('full');
+    slideIn(rowAt(9, 100), 9);
+    expect(calls).toHaveLength(1);
+    snapshotRows(root);
+    expect(reads).toBe(2);
+  });
+
   it('Reduced fades the row in over 80 ms; Off does nothing', () => {
     const root = document.createElement('div');
     root.append(rowAt(4, 300), rowAt(5, 300));

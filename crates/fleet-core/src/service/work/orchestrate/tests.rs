@@ -566,3 +566,43 @@ fn the_hold_checks_the_host_a_start_rule_picks() {
     let why = e.payload.as_ref().unwrap()["why"].as_str().unwrap();
     assert!(why.contains("mac's own login"), "{why}");
 }
+
+/// Review round 15, F19: what makes a mission due rests partly on agents'
+/// own reports, so completing it is a person's act at every level. The
+/// loop's step is not its own to take, the planner's card is not applied by
+/// the loop, and the loop is refused if it tries; a person still can.
+#[tokio::test]
+async fn the_loop_never_completes_a_mission() {
+    for level in 0..=3 {
+        assert!(
+            !loop_applies_card("complete", level),
+            "the planner's complete card waits for a person at L{level}"
+        );
+        assert!(!loop_applies_card("ask", level));
+    }
+    assert!(loop_applies_card("run", AUTO_LEVEL));
+    let fx = fixture();
+    let step = Step {
+        kind: "complete".into(),
+        item_id: Some(fx.root),
+        role: None,
+        reason: "every task is done".into(),
+        context: None,
+        auto: true,
+    };
+    let m = mission_now(&fx);
+    let r = apply_step(&fx.deps, &m, &step, &Actor::Loop, &ViewScope::internal()).await;
+    assert!(!r.ok, "{}", r.detail);
+    assert!(r.detail.contains("a person completes"), "{}", r.detail);
+    assert_eq!(mission_now(&fx).state, "active");
+    let r = apply_step(
+        &fx.deps,
+        &m,
+        &step,
+        &Actor::Person("person:1".into()),
+        &fx.me,
+    )
+    .await;
+    assert!(r.ok, "{}", r.detail);
+    assert_eq!(mission_now(&fx).state, "completed");
+}

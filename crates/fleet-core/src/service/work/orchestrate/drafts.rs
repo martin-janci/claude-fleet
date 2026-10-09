@@ -23,7 +23,7 @@
 //!   host at a time.
 
 use super::planner::{self, PlannerOutput};
-use super::{changeable, mission_id, planner_host, Deps};
+use super::{changeable, host_sees_org, mission_id, planner_host, Deps};
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::settings;
 use crate::service::view_scope::ViewScope;
@@ -232,13 +232,20 @@ fn org_part(g: &TodayGroup, org: Option<i64>) -> Option<TodayGroup> {
 
 /// PURE: the org a brief covers and the host it runs on: the org of the
 /// most recently active session in today's digest, and that session's host.
-/// `wanted` narrows it to one org.
-pub fn brief_target(today: &Today, wanted: Option<i64>) -> Option<(Option<i64>, String)> {
+/// `wanted` narrows it to one org; `host_sees(host, org)` keeps only a
+/// session whose host may be sent that org's text, so a brief never runs on
+/// another org's host (transition plan, risk "Org text leaves the org").
+pub fn brief_target(
+    today: &Today,
+    wanted: Option<i64>,
+    host_sees: impl Fn(&str, Option<i64>) -> bool,
+) -> Option<(Option<i64>, String)> {
     today
         .groups
         .iter()
         .flat_map(|g| g.sessions.iter().map(move |s| (g, s)))
         .filter(|(g, s)| wanted.is_none() || brief_org(g, s) == wanted)
+        .filter(|(g, s)| host_sees(&s.host_alias, brief_org(g, s)))
         .max_by_key(|(_, s)| s.last_activity_at)
         .map(|(g, s)| (brief_org(g, s), s.host_alias.clone()))
 }
@@ -454,12 +461,28 @@ pub async fn brief(args: &WorkLinkArgs, deps: &Deps, scope: &ViewScope) -> Resul
         return Ok(briefs.get(&key).cloned().unwrap_or_default());
     }
     let today = crate::service::work::today::today(&deps.store, args.since, scope)?;
-    let (org_id, host) = brief_target(&today, args.org_id).ok_or_else(|| {
-        IpcError::new(
-            codes::E_INVALID_STATE,
-            "no session is running today, so there is no host to draft the brief on",
-        )
-    })?;
+    let target = {
+        let s = lock(&deps.store)?;
+        brief_target(&today, args.org_id, |host, org| {
+            host_sees_org(&s, host, org).unwrap_or(false)
+        })
+    };
+    let (org_id, host) = match target {
+        Some(t) => t,
+        None if brief_target(&today, args.org_id, |_, _| true).is_some() => {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "today's sessions all run on hosts of another organisation, so the \
+                 brief has no host it may be drafted on",
+            ))
+        }
+        None => {
+            return Err(IpcError::new(
+                codes::E_INVALID_STATE,
+                "no session is running today, so there is no host to draft the brief on",
+            ))
+        }
+    };
     let (prompt, from) = brief_prompt(&today, org_id).ok_or_else(|| {
         IpcError::new(codes::E_INVALID_STATE, "nothing in today's digest to brief")
     })?;
