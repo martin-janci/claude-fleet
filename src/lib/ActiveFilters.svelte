@@ -104,7 +104,7 @@
   }
   .x {
     color: var(--control-fg-quiet);
-    font-size: 14px;
+    font-size: var(--text-md);
   }
   .facet:hover .x {
     color: var(--control-fg);

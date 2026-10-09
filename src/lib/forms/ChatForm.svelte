@@ -170,26 +170,26 @@
 {/if}
 
 <style>
-  .card { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.7rem 0.8rem; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; background: color-mix(in srgb, var(--accent) 6%, var(--bg-pane)); }
+  .card { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.7rem 0.8rem; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius-md); background: color-mix(in srgb, var(--accent) 6%, var(--bg-pane)); }
   header { display: flex; gap: 0.5rem; align-items: baseline; }
-  .who, .meta, .rule { font-size: 11px; color: var(--fg-muted); }
+  .who, .meta, .rule { font-size: var(--text-2xs); color: var(--fg-muted); }
   .why, .intro, .rule { margin: 0; }
-  .why, .intro { font-size: 0.8rem; }
-  .building { display: flex; gap: 0.5rem; align-items: center; font-size: 11px; color: var(--fg-muted); }
+  .why, .intro { font-size: var(--text-2xs); }
+  .building { display: flex; gap: 0.5rem; align-items: center; font-size: var(--text-2xs); color: var(--fg-muted); }
   .field { display: flex; flex-direction: column; gap: 0.2rem; }
-  .label { font-size: 0.82rem; }
-  .skel { display: block; height: 1.4rem; border-radius: 4px; background: color-mix(in srgb, var(--fg-muted) 14%, transparent); }
+  .label { font-size: var(--text-2xs); }
+  .skel { display: block; height: 1.4rem; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--fg-muted) 14%, transparent); }
   .skel.short { width: 30%; height: 0.8rem; }
   .foot { display: flex; gap: 0.5rem; align-items: center; }
   .decline { display: flex; gap: 0.4rem; flex: 1; }
-  .decline input { flex: 1; font: inherit; font-size: 0.8rem; }
-  .link { align-self: flex-start; min-block-size: var(--control-h); background: none; border: none; padding: 0; color: var(--fg-muted); text-decoration: underline; cursor: pointer; font-size: 11px; }
-  .err { margin: 0; font-size: 11px; color: var(--usage-crit); }
-  .receipt { display: flex; flex-direction: column; gap: 0.25rem; padding: 0.55rem 0.8rem; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem; }
+  .decline input { flex: 1; font: inherit; font-size: var(--text-2xs); }
+  .link { align-self: flex-start; min-block-size: var(--control-h); background: none; border: none; padding: 0; color: var(--fg-muted); text-decoration: underline; cursor: pointer; font-size: var(--text-2xs); }
+  .err { margin: 0; font-size: var(--text-2xs); color: var(--usage-crit); }
+  .receipt { display: flex; flex-direction: column; gap: 0.25rem; padding: 0.55rem 0.8rem; border: 1px solid var(--border); border-radius: var(--radius-md); font-size: var(--text-2xs); }
   .receipt .line { display: flex; gap: 0.5rem; align-items: baseline; }
   .receipt strong { flex: 1; }
   .mark.answered { color: var(--usage-ok); }
   .mark.declined { color: var(--usage-crit); }
   .summary { color: var(--fg-muted); overflow-wrap: anywhere; }
-  .starting { display: flex; gap: 0.5rem; align-items: center; font-size: 0.8rem; color: var(--fg-muted); }
+  .starting { display: flex; gap: 0.5rem; align-items: center; font-size: var(--text-2xs); color: var(--fg-muted); }
 </style>

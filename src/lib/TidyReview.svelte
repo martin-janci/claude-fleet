@@ -565,7 +565,7 @@
     align-items: center;
     gap: 10px;
     padding: 6px 8px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   /* Segments of the attention line (SidebarFilters' .attention-line). */
@@ -575,7 +575,7 @@
     background: none;
     padding: 0.1rem 0.15rem;
     font: inherit;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     cursor: pointer;
     border-radius: var(--radius-sm);
@@ -596,12 +596,12 @@
     box-sizing: border-box;
     margin: 0.25rem 0;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     padding: 0.3rem;
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     outline: none;
   }
   .tidy-sheet:focus-visible {
@@ -619,14 +619,14 @@
   }
   .group-head {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding-top: 0.2rem;
   }
   .hint {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     flex: 1;
   }
   .only {
@@ -641,7 +641,7 @@
     gap: 0.4rem;
     align-items: center;
     padding: 0.15rem 0.3rem;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .tidy-row.cursor {
     background: var(--bg-hover);
@@ -654,7 +654,7 @@
   }
   /* Jev's mark on a `same_work` row (6.9), as ProposedBy draws it. */
   .jev {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 16px;
     font-weight: 500;
     color: var(--accent);
@@ -668,7 +668,7 @@
   }
   .warn {
     color: var(--usage-warn);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .badge {
     color: var(--accent);

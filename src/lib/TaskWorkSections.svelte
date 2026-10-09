@@ -258,7 +258,7 @@
     gap: 6px;
     align-items: center;
     margin: 0 0 6px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -306,12 +306,12 @@
   }
   .key {
     font-family: var(--mono);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .chip {
-    font-size: 11px;
-    border-radius: 999px;
+    font-size: var(--text-2xs);
+    border-radius: var(--radius-pill);
     padding: 0 6px;
     white-space: nowrap;
   }
@@ -325,7 +325,7 @@
   }
   .prop-card {
     border: 1px dashed var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     padding: 8px 10px;
     display: grid;
     gap: 4px;
@@ -340,7 +340,7 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--fg-2);
   }
   .dup .link {
@@ -382,7 +382,7 @@
   }
   details {
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     padding: 4px 8px;
     margin-bottom: 4px;
   }
@@ -415,7 +415,7 @@
     margin: 0;
   }
   .small {
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .err {
     color: var(--usage-crit);

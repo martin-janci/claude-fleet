@@ -402,41 +402,41 @@
   .lw { display: flex; flex-direction: column; gap: 0.4rem; }
   .lw h3 {
     margin: 0 0 0.2rem 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  .hint { margin: 0; font-size: 0.85rem; color: var(--fg-muted); line-height: 1.4; }
-  .muted { margin: 0; color: var(--fg-muted); font-size: 0.85rem; }
-  .small { font-size: 11px; }
+  .hint { margin: 0; font-size: var(--text-xs); color: var(--fg-muted); line-height: 1.4; }
+  .muted { margin: 0; color: var(--fg-muted); font-size: var(--text-xs); }
+  .small { font-size: var(--text-2xs); }
   .row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
   .path {
     flex: 1;
     min-width: 12rem;
     font-family: var(--mono);
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.35rem 0.5rem;
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     background: var(--bg);
     color: var(--fg);
   }
   .ghost, .primary {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.35rem 0.8rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
-  .ghost.small { font-size: 11px; padding: 0.15rem 0.5rem; }
+  .ghost.small { font-size: var(--text-2xs); padding: 0.15rem 0.5rem; }
   .ghost:hover:not(:disabled) { border-color: var(--accent); }
   .primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
   button:disabled { opacity: 0.55; cursor: default; }
-  .status { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; }
-  .ago { color: var(--fg-muted); font-size: 0.8rem; }
+  .status { display: flex; align-items: center; gap: 0.4rem; font-size: var(--text-sm); }
+  .ago { color: var(--fg-muted); font-size: var(--text-2xs); }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
   .tone-ok { background: var(--usage-ok); }
   .tone-pending { background: var(--usage-warn); }
@@ -448,7 +448,7 @@
     grid-template-columns: max-content 1fr;
     gap: 0.15rem 0.6rem;
     margin: 0;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .paths dt { color: var(--fg-muted); }
   .paths dd { margin: 0; min-width: 0; }
@@ -456,24 +456,24 @@
     font-family: var(--mono);
     overflow-wrap: anywhere;
   }
-  .error { margin: 0; color: var(--usage-crit); font-size: 0.82rem; }
-  .warn { margin: 0; color: var(--usage-warn); font-size: 0.85rem; }
+  .error { margin: 0; color: var(--usage-crit); font-size: var(--text-2xs); }
+  .warn { margin: 0; color: var(--usage-warn); font-size: var(--text-xs); }
   .conflicts ul { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
-  .conflicts li { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; font-size: 0.82rem; }
+  .conflicts li { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; font-size: var(--text-2xs); }
   .kind { color: var(--fg-muted); }
   .cbtns { display: inline-flex; gap: 0.3rem; margin-left: auto; }
-  .driver, .activity { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; font-size: 0.85rem; }
+  .driver, .activity { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; font-size: var(--text-xs); }
   .activity span { color: var(--usage-warn); }
-  .chip { font-size: 11px; border: 1px solid var(--border); border-radius: 3px; padding: 0.05rem 0.4rem; }
+  .chip { font-size: var(--text-2xs); border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 0.05rem 0.4rem; }
   .driver-developer { border-color: var(--usage-warn); color: var(--usage-warn); }
   .driver-agent { border-color: var(--accent); color: var(--accent); }
   .excludes textarea {
     width: 100%;
     box-sizing: border-box;
     font-family: var(--mono);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     background: var(--bg);
     color: var(--fg);
     padding: 0.35rem;

@@ -41,7 +41,7 @@
 
 <style>
   .blurb {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .link {
@@ -51,7 +51,7 @@
     padding: 0;
     color: var(--accent);
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     cursor: pointer;
   }
   .link:focus-visible {

@@ -160,20 +160,20 @@
 {/if}
 
 <style>
-  .card { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.7rem 0.8rem; border: 1px solid var(--border); border-left: 3px solid var(--usage-warn); border-radius: 6px; background: color-mix(in srgb, var(--usage-warn) 10%, var(--bg-pane)); }
+  .card { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.7rem 0.8rem; border: 1px solid var(--border); border-left: 3px solid var(--usage-warn); border-radius: var(--radius-md); background: color-mix(in srgb, var(--usage-warn) 10%, var(--bg-pane)); }
   header { display: flex; gap: 0.5rem; align-items: baseline; }
-  .who { font-size: 11px; color: var(--fg-muted); }
-  .why, .intro { margin: 0; font-size: 0.8rem; }
-  .blocked { margin: 0; font-size: 11px; color: var(--fg-muted); }
+  .who { font-size: var(--text-2xs); color: var(--fg-muted); }
+  .why, .intro { margin: 0; font-size: var(--text-2xs); }
+  .blocked { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); }
   .decline { display: flex; gap: 0.4rem; }
-  .decline input { flex: 1; font: inherit; font-size: 0.8rem; }
-  .link { align-self: flex-start; background: none; border: none; padding: 0; color: var(--fg-muted); text-decoration: underline; cursor: pointer; font-size: 11px; }
-  .err { margin: 0; font-size: 11px; color: var(--usage-crit); }
+  .decline input { flex: 1; font: inherit; font-size: var(--text-2xs); }
+  .link { align-self: flex-start; background: none; border: none; padding: 0; color: var(--fg-muted); text-decoration: underline; cursor: pointer; font-size: var(--text-2xs); }
+  .err { margin: 0; font-size: var(--text-2xs); color: var(--usage-crit); }
   .foot { display: flex; gap: 0.5rem; align-items: center; }
   .foot .decline { flex: 1; }
   .expires { margin-left: auto; }
-  .meta { font-size: 11px; color: var(--fg-muted); }
-  .receipt { display: flex; flex-direction: column; gap: 0.25rem; padding: 0.55rem 0.8rem; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem; }
+  .meta { font-size: var(--text-2xs); color: var(--fg-muted); }
+  .receipt { display: flex; flex-direction: column; gap: 0.25rem; padding: 0.55rem 0.8rem; border: 1px solid var(--border); border-radius: var(--radius-md); font-size: var(--text-2xs); }
   .receipt .line { display: flex; gap: 0.5rem; align-items: baseline; }
   .receipt strong { flex: 1; }
   .mark { color: var(--fg-muted); }

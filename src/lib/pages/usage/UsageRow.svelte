@@ -117,7 +117,7 @@
     column-gap: 0.5rem;
     row-gap: 0.1rem;
     align-items: center;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .name { color: var(--fg-muted); }
   .nums {
@@ -131,7 +131,7 @@
   .left.stale { color: var(--fg-muted); }
   .used,
   .bucket { color: var(--fg-muted); }
-  .sev { font-weight: 600; font-size: 11px; }
+  .sev { font-weight: 600; font-size: var(--text-2xs); }
   .sev-caution { color: var(--usage-warn); }
   .sev-low,
   .sev-limit { color: var(--usage-crit); }
@@ -139,6 +139,6 @@
   .note {
     grid-column: 3;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
 </style>

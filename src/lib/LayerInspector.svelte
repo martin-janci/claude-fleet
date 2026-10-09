@@ -102,10 +102,10 @@
   .pad { display: grid; gap: 10px; padding: 12px 14px; align-content: start; }
   .meta { display: flex; align-items: center; gap: 8px; }
   .grow { flex: 1; }
-  .muted { margin: 0; color: var(--fg-muted); font-size: 12px; }
-  code { font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
+  .muted { margin: 0; color: var(--fg-muted); font-size: var(--text-xs); }
+  code { font-family: var(--mono); font-size: var(--text-2xs); overflow-wrap: anywhere; }
   .list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
   .list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .list li.why { display: grid; gap: 2px; justify-content: stretch; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .list li.why { display: grid; gap: 2px; justify-content: stretch; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: var(--text-xs); }
   .foot { display: flex; }
 </style>

@@ -102,7 +102,7 @@
     flex-wrap: wrap;
     padding-left: 0.85rem;
     margin-top: 0.2rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .ask,
   .waiting {

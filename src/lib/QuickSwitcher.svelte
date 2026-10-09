@@ -1040,12 +1040,12 @@
 <style>
   .query {
     font: inherit;
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
     padding: 0.45rem 0.6rem;
     border: 1px solid var(--border);
     background: var(--bg-pane);
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     width: 100%;
     box-sizing: border-box;
   }
@@ -1060,7 +1060,7 @@
   }
   .mode-chip {
     flex: 0 0 auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-weight: 600;
     padding: 0.15rem 0.5rem;
     border-radius: var(--radius-sm);
@@ -1093,7 +1093,7 @@
     justify-content: center;
     border: none;
     background: transparent;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     cursor: pointer;
   }
@@ -1110,13 +1110,13 @@
     gap: var(--space-2);
     padding: var(--space-1) var(--space-3);
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .hint {
     display: flex;
     flex-wrap: wrap;
     gap: 0.8rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
 </style>

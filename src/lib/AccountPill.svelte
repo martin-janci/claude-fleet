@@ -47,10 +47,10 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font: inherit;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 14px;
     padding: 0 6px;
-    border-radius: 7px;
+    border-radius: var(--radius-md);
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg-muted);

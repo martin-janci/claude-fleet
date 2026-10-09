@@ -84,13 +84,13 @@
     margin: 0;
   }
   .when {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-weight: 400;
     color: var(--fg-muted);
   }
   .error {
     color: var(--danger);
-    font-size: 12px;
+    font-size: var(--text-xs);
     margin: 0;
   }
 </style>

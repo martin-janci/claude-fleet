@@ -186,7 +186,7 @@
     color: var(--fg-muted);
     cursor: pointer;
     font: inherit;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.6rem;
   }
   .tabs button[aria-selected='true'] {
@@ -201,10 +201,10 @@
   .bar button {
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.55rem;
   }
   .bar button:disabled { opacity: 0.5; cursor: default; }
@@ -246,7 +246,7 @@
   .meta,
   .note,
   .state {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .err {
@@ -260,10 +260,10 @@
   .actions button {
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.55rem;
   }
   .actions button:hover {
@@ -274,7 +274,7 @@
     border-color: var(--accent, var(--border));
   }
   .hint {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
 </style>

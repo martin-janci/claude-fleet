@@ -369,10 +369,10 @@
     gap: 0.5rem;
     padding: 0.75rem;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     background: var(--bg-pane);
     color: var(--fg);
-    box-shadow: 0 4px 20px rgb(0 0 0 / 35%);
+    box-shadow: var(--shadow-pop);
     z-index: 39;
   }
   /* A size the person chose (drag / arrow keys), capped by the window so a
@@ -394,7 +394,7 @@
     width: 14px;
     height: 14px;
     cursor: nwse-resize;
-    border-top-left-radius: 8px;
+    border-top-left-radius: var(--radius-lg);
     /* Two short diagonal strokes: the corner reads as a handle. */
     background: linear-gradient(
       135deg,
@@ -420,7 +420,7 @@
   .who {
     margin-right: auto;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
@@ -428,11 +428,11 @@
     border: none;
     background: none;
     color: var(--fg-muted);
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
     line-height: 1;
     padding: 0.15rem 0.3rem;
     cursor: pointer;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .close:hover {
     color: var(--fg);
@@ -466,15 +466,15 @@
   .error {
     margin: 0;
     color: var(--usage-crit);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .chip {
     align-self: flex-start;
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--bg);
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.15rem 0.6rem;
     cursor: pointer;
   }

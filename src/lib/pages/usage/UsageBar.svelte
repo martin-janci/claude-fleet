@@ -75,7 +75,7 @@
     box-sizing: border-box;
     width: 7rem;
     height: 0.55rem;
-    border-radius: 2px;
+    border-radius: var(--radius-xs);
     border: 1px solid var(--border);
     background: color-mix(in srgb, var(--fg) 6%, transparent);
     overflow: hidden;

@@ -200,14 +200,14 @@
 {/if}
 
 <style>
-  .rules { display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.85rem; }
+  .rules { display: flex; flex-direction: column; gap: 0.5rem; font-size: var(--text-xs); }
   .bar { display: flex; gap: 0.4rem; }
   .bar input {
     flex: 1 1 auto;
     font: inherit;
     padding: 0.25rem 0.4rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg);
     color: var(--fg);
   }

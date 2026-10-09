@@ -109,7 +109,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+    box-shadow: var(--shadow-pop);
   }
   .mi {
     display: flex;
@@ -121,7 +121,7 @@
     background: transparent;
     color: var(--fg);
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     text-align: left;
     border-radius: var(--radius-sm);
     cursor: pointer;

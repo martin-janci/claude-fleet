@@ -232,8 +232,8 @@
 {/if}
 
 <style>
-  .muted { margin: 0; color: var(--fg-muted); font-size: 0.85rem; }
-  .small { font-size: 11px; }
+  .muted { margin: 0; color: var(--fg-muted); font-size: var(--text-xs); }
+  .small { font-size: var(--text-2xs); }
   .split {
     display: grid;
     grid-template-columns: minmax(14rem, 1fr) 2fr;
@@ -248,14 +248,14 @@
     padding: 0;
     overflow: auto;
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
   }
   .files li {
     display: flex;
     align-items: center;
     gap: 0.3rem;
     padding: 0.2rem 0.35rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .files li.current { background: var(--bg-hover); }
   .file {
@@ -274,9 +274,9 @@
   .file code { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .st { font-family: var(--mono); color: var(--fg-muted); width: 1.4rem; flex: none; }
   .origin {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0 0.35rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     border: 1px solid var(--border);
     color: var(--fg-muted);
   }
@@ -286,22 +286,22 @@
   .actions { display: flex; flex-direction: column; gap: 0.4rem; }
   .row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
   select, .msg, textarea {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.45rem;
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     background: var(--bg);
     color: var(--fg);
   }
   .msg { flex: 1; min-width: 12rem; }
   textarea { width: 100%; box-sizing: border-box; font-family: inherit; }
   .ghost, .primary {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.35rem 0.8rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .ghost:hover:not(:disabled) { border-color: var(--accent); }

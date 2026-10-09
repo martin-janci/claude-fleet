@@ -261,27 +261,27 @@
 <style>
   .plan-view { outline: 0; display: flex; flex-direction: column; gap: 10px; padding: 10px 14px; min-height: 100%; box-sizing: border-box; }
   .line { display: flex; align-items: center; gap: 10px; }
-  h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -0.005em; }
-  .counts { display: flex; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+  h2 { margin: 0; font-size: var(--text-md); font-weight: 600; letter-spacing: -0.005em; }
+  .counts { display: flex; gap: 6px; flex-wrap: wrap; font-size: var(--text-xs); }
   .hosts { display: flex; flex-direction: column; gap: 10px; }
-  .host-section { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
-  .host-header { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 4px; }
+  .host-section { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 6px 8px; }
+  .host-header { display: flex; align-items: center; gap: 8px; font-size: var(--text-xs); margin-bottom: 4px; }
   .harness, .status, .detail { color: var(--fg-muted); }
   .detail.warning { color: var(--usage-warn); }
-  .link.quiet { font-size: 11px; opacity: 0.75; }
-  .action-row { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 2px 0; flex-wrap: wrap; }
-  .asset { font-family: ui-monospace, monospace; }
+  .link.quiet { font-size: var(--text-2xs); opacity: 0.75; }
+  .action-row { display: flex; align-items: center; gap: 8px; font-size: var(--text-xs); padding: 2px 0; flex-wrap: wrap; }
+  .asset { font-family: var(--font-mono); }
   .backup { color: var(--usage-warn); } .secrets { color: var(--fg-muted); } .reason { color: var(--usage-crit); }
   /* A reason on a planned action: information (muted), or a caution (warn) for
      update/overwrite/plugin_update — a note, never an error. */
   .note { color: var(--fg-muted); }
   .note.caution { color: var(--usage-warn); }
-  .link { background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0; font-size: 12px; }
-  .restart { color: var(--usage-warn); font-size: 12px; margin: 0; }
-  .force-partial { display: flex; align-items: center; gap: 6px; font-size: 12px; }
-  .progress { font-size: 12px; color: var(--fg-muted); margin: 0; }
+  .link { background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0; font-size: var(--text-xs); }
+  .restart { color: var(--usage-warn); font-size: var(--text-xs); margin: 0; }
+  .force-partial { display: flex; align-items: center; gap: 6px; font-size: var(--text-xs); }
+  .progress { font-size: var(--text-xs); color: var(--fg-muted); margin: 0; }
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
   .actions button.danger { background: var(--usage-crit); border-color: var(--usage-crit); color: var(--accent-fg); }
-  .muted { color: var(--fg-muted); font-size: 12px; }
+  .muted { color: var(--fg-muted); font-size: var(--text-xs); }
   .error { color: var(--usage-crit); }
 </style>
