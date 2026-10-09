@@ -10,6 +10,7 @@
   import { setContextRedPct } from './lib/attention';
   import { trackersHealth, trackersSummary } from './lib/tracker_health';
   import Sidebar from './lib/Sidebar.svelte';
+  import { windowHidden } from './lib/window_hidden';
   import Details from './lib/Details.svelte';
   import SessionTabs, { type SessionTab } from './lib/SessionTabs.svelte';
   import { openInEditorIfAllowed } from './lib/editor';
@@ -476,6 +477,8 @@
     // pushes only real changes), so the chips' "synced … ago" and stale
     // clock read a copy refreshed here.
     trackerRefresh = setInterval(() => {
+      // Only feeds what is on screen (review r16 D7).
+      if (windowHidden()) return;
       void loadTrackers();
       void loadOrgs();
     }, 120_000);
