@@ -402,6 +402,30 @@ export function trailNodes(detail: MissionDetail): Set<number> {
   return new Set((detail.graph?.nodes ?? []).filter((n) => WORKING.has(n.state)).map((n) => n.item_id));
 }
 
+/** A running mission at a glance, for Control (redesign step 9.12): the
+ *  title of its current step (the first task it is working on), whether it
+ *  waits on a person, and whether that step carries Comet trails. */
+export interface MissionNow {
+  id: number;
+  name: string;
+  step: string | null;
+  waiting: boolean;
+  trails: boolean;
+}
+
+export function missionNow(detail: MissionDetail): MissionNow {
+  const nodes = trailNodes(detail);
+  const working = (detail.graph?.nodes ?? []).find((n) => WORKING.has(n.state));
+  const item = working ? (detail.items ?? []).find((i) => i.id === working.item_id) : undefined;
+  return {
+    id: detail.mission.id,
+    name: detail.mission.name,
+    step: item ? item.title : null,
+    waiting: waitsOnPerson(detail),
+    trails: working !== undefined && nodes.has(working.item_id),
+  };
+}
+
 /** The graph's nodes by wave, W1 first; items the graph leaves out (an
  *  older hub) land in one wave of their own. */
 export function wavesOf(detail: MissionDetail): { wave: number; nodes: GraphNode[] }[] {
