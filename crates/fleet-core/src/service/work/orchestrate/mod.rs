@@ -403,6 +403,13 @@ async fn apply_step_inner(
             Ok(("closed".into(), None))
         }
         "complete" => {
+            // A person completes a mission, never the loop (F19).
+            if matches!(actor, Actor::Loop) {
+                return Err(IpcError::new(
+                    codes::E_FORBIDDEN,
+                    "a person completes a mission; the loop only shows it is due",
+                ));
+            }
             let s = lock(&deps.store)?;
             if let Some(root) = m.root_item_id {
                 s.set_item_status(root, "done")?;
@@ -797,28 +804,79 @@ pub struct PlanOutcome {
 }
 
 /// The host the planner runs on: the policy's, the grant's first, else the
-/// host of the mission's latest worker.
+/// host of the mission's latest worker that may see the mission's org.
+///
+/// Every LLM run of a mission (the planner, its release note, its triage
+/// card) is sent the mission's text, so the host must be one of the
+/// mission's org (transition plan, risk "Org text leaves the org"): a policy
+/// or grant host that is not refuses with `E_FORBIDDEN`, and a worker on
+/// such a host is passed over.
 fn planner_host(s: &Store, m: &MissionRow, grant: Option<&GrantRow>) -> Result<String, IpcError> {
-    if let Some(h) = &m.policy.planner_host {
+    let named = m
+        .policy
+        .planner_host
+        .as_ref()
+        .map(|h| (h, "policy.planner_host"));
+    let granted = grant
+        .and_then(|g| g.hosts.as_ref())
+        .and_then(|h| h.first())
+        .map(|h| (h, "the grant's first host"));
+    if let Some((h, from)) = named.or(granted) {
+        require_host_sees_org(s, h, m.org_id, from)?;
         return Ok(h.clone());
     }
-    if let Some(h) = grant.and_then(|g| g.hosts.as_ref()).and_then(|h| h.first()) {
-        return Ok(h.clone());
-    }
+    let mut passed_over = None;
     for i in s.mission_items(m.id)? {
         for t in s.tasks_for_item(i.id)? {
             if let Some(w) = t
                 .worker_session_id
                 .and_then(|w| s.get_session_by_id(w).ok().flatten())
             {
-                return Ok(w.host_alias);
+                if host_sees_org(s, &w.host_alias, m.org_id)? {
+                    return Ok(w.host_alias);
+                }
+                passed_over.get_or_insert(w.host_alias);
             }
         }
+    }
+    if let Some(h) = passed_over {
+        return Err(other_org_host(&h, "its workers' host"));
     }
     Err(IpcError::new(
         codes::E_INVALID_STATE,
         "no host for the planner: set the mission's policy.planner_host",
     ))
+}
+
+/// Whether `host` may be sent text of `org`: the host's own org scope sees
+/// it (the rule the ticket brief keeps, `tickets::brief_visible_on`).
+fn host_sees_org(s: &Store, host: &str, org: Option<i64>) -> Result<bool, IpcError> {
+    Ok(crate::service::orgs::OrgScope::for_host(s, host)?.sees_org(org))
+}
+
+/// [`host_sees_org`], or `E_FORBIDDEN` naming the host and where it came
+/// from.
+fn require_host_sees_org(
+    s: &Store,
+    host: &str,
+    org: Option<i64>,
+    from: &str,
+) -> Result<(), IpcError> {
+    if host_sees_org(s, host, org)? {
+        Ok(())
+    } else {
+        Err(other_org_host(host, from))
+    }
+}
+
+fn other_org_host(host: &str, from: &str) -> IpcError {
+    IpcError::new(
+        codes::E_FORBIDDEN,
+        format!(
+            "{host} ({from}) is not a host of this mission's organisation, so the \
+             mission's text cannot be sent there; pick a host of the same organisation"
+        ),
+    )
 }
 
 /// Book a planner run's cost on its mission (redesign 8.2), so the budget
@@ -846,6 +904,17 @@ pub fn book_planner_run(
     };
     if let Err(e) = s.insert_aux_usage(&row) {
         tracing::warn!(mission = m.id, error = %e.message, "[orchestrate] planner cost not booked");
+    }
+}
+
+/// Whether the loop applies a planner card of `kind` itself at
+/// `auto_level`. Never `complete` (nor `ask`): those wait for a person at
+/// every level ([`steps::PERSON_ONLY_STEPS`]).
+fn loop_applies_card(kind: &str, auto_level: i64) -> bool {
+    match kind {
+        "create" => auto_level >= 1,
+        "run" | "retry" | "add_dep" | "remove_dep" | "hold" | "cancel" => auto_level >= AUTO_LEVEL,
+        _ => false,
     }
 }
 
@@ -963,14 +1032,7 @@ pub async fn run_planner(
     // What the autonomy covers is applied now; the rest waits for a person.
     let mut shown = Vec::with_capacity(cards.len());
     for c in cards {
-        let may = match c.kind.as_str() {
-            "create" => auto_level >= 1,
-            "run" | "retry" | "add_dep" | "remove_dep" | "hold" | "cancel" | "complete" => {
-                auto_level >= AUTO_LEVEL
-            }
-            _ => false,
-        };
-        if may {
+        if loop_applies_card(&c.kind, auto_level) {
             let res = apply_card(
                 deps,
                 m,

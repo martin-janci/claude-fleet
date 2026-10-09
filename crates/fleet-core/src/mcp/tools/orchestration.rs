@@ -400,6 +400,13 @@ impl FleetTools {
             Reach::Drive,
             "the session to prompt",
         )?;
+        // As `send_prompt`: the operator's text waits for a person (F21).
+        self.confirm_gate(
+            "run_prompt",
+            p.confirm_nonce.as_deref(),
+            &prompt_summary(&row, &p.prompt, None, true, false, p.raw),
+            &caller,
+        )?;
         // A stale-demoted row reads `idle` only because nothing moved; a
         // long tool call looks exactly like that. Ask the pane (S5 + F2).
         // The demotion's memory (`stale_demoted_at`), not the attention
@@ -539,8 +546,8 @@ impl FleetTools {
         };
         // Resolve or spawn the worker.
         let (worker, spawned) = match (p.worker_session_id, p.new_worker) {
-            (Some(id), _) => (
-                self.resolve_target_row(
+            (Some(id), _) => {
+                let row = self.resolve_target_row(
                     &caller,
                     Some(id),
                     None,
@@ -549,9 +556,21 @@ impl FleetTools {
                     // work — a prompt into its pane, by way of a task row.
                     Reach::Drive,
                     "the worker session",
-                )?,
-                false,
-            ),
+                )?;
+                // The task's prompt is typed into the worker's pane, so the
+                // operator's needs a person as its `send_prompt` does (F21).
+                self.confirm_gate(
+                    "dispatch_task",
+                    p.confirm_nonce.as_deref(),
+                    &format!(
+                        "worker requester_session_id={:?} {}",
+                        p.requester_session_id,
+                        prompt_summary(&row, &p.prompt, None, true, false, p.raw)
+                    ),
+                    &caller,
+                )?;
+                (row, false)
+            }
             (None, Some(spec)) => {
                 // An empty name is new_session's "pick one for me": the
                 // backend generates it (fill_session_name), so workers follow
@@ -1409,8 +1428,10 @@ impl FleetTools {
         }
         // A person's decision on many proposals at once (orchestration O2),
         // and taking it back. Scoped callers are refused inside, before any
-        // row; each item's mission is fenced on the whole `view_scope`.
+        // row; each item's mission is fenced on the whole `view_scope`. The
+        // operator is unscoped, so it is refused here, as for `accept`.
         if args.action == "accept_many" {
+            refuse_operator_decision(&caller)?;
             let view_scope = self.view_scope(&caller)?;
             return ok_json(
                 &crate::service::work::graph::accept_many(&args, &self.store, &view_scope)
@@ -1418,6 +1439,7 @@ impl FleetTools {
             );
         }
         if args.action == "undo_accept" {
+            refuse_operator_decision(&caller)?;
             let view_scope = self.view_scope(&caller)?;
             return ok_json(
                 &crate::service::work::graph::undo_accept(&args, &self.store, &view_scope)
@@ -1455,6 +1477,7 @@ impl FleetTools {
             );
         }
         if args.action == "verify" {
+            refuse_operator_decision(&caller)?;
             let view_scope = self.view_scope(&caller)?;
             return ok_json(
                 &crate::service::work::verify::verify(&args, &self.store, &view_scope)
@@ -1481,14 +1504,7 @@ impl FleetTools {
             // The operator is an unbound client, so its scope is `All` and
             // `decide`'s scope fence lets it through; but it is an agent, and
             // an agent never decides a proposal — not its own, not a worker's.
-            if caller.is_operator() {
-                return Err(mcp_err(
-                    "E_FORBIDDEN",
-                    "a person decides proposals, from the desktop or the phone; \
-                     the operator may only propose",
-                    None,
-                ));
-            }
+            refuse_operator_decision(&caller)?;
             return ok_json(
                 &crate::service::work::local::decide(
                     &args,
@@ -2480,4 +2496,21 @@ fn planned_item(
     }
     args.item_id
         .ok_or_else(|| mcp_err("E_INVALID", format!("{} needs item_id", args.action), None))
+}
+
+/// The operator is an unbound client, so its view scope is `All` and the
+/// scope fences of `decide`, `accept_many`, `undo_accept` and `verify` let it
+/// through; but it is an agent, and an agent never decides a proposal (not
+/// its own, not a worker's) nor records a check as verified: those are a
+/// person's acts (transition plan, "Where AI never decides").
+fn refuse_operator_decision(caller: &Caller) -> Result<(), McpError> {
+    if caller.is_operator() {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            "a person decides proposals and verifies work, from the desktop or \
+             the phone; the operator may only propose",
+            None,
+        ));
+    }
+    Ok(())
 }
