@@ -57,6 +57,13 @@ pub enum HubConnection {
     /// The hub did not accept a connection at all.
     Offline {
         attempt: u32,
+        /// Connects that failed in a row, counting no reconnect after a
+        /// stream that ended: what the call breaker (`remote.rs`
+        /// `offline_error`) arms on. `attempt` is the banner's count since
+        /// the stream last worked, which a stream ending also bumps, so one
+        /// failed connect after a blip already reads `attempt: 2`.
+        #[serde(skip)]
+        refused: u32,
         retry_in_secs: u64,
         reason: String,
     },
@@ -296,10 +303,12 @@ impl ConnectionReporter for HubConnectionStatus {
             },
             HubConnection::Offline {
                 attempt,
+                refused,
                 retry_in_secs,
                 reason,
             } => HubConnection::Offline {
                 attempt,
+                refused,
                 retry_in_secs,
                 reason: self.scrub(reason),
             },

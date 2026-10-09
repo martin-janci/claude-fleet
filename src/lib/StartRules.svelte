@@ -194,7 +194,7 @@
   .rules {
     display: grid;
     gap: 8px;
-    font-size: 12px;
+    font-size: var(--text-xs);
   }
   .head {
     display: flex;
@@ -204,7 +204,7 @@
   }
   .head h3 {
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--text-xs);
     font-weight: 600;
   }
   .sub,
@@ -231,7 +231,7 @@
     align-items: center;
     padding: 6px 8px;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .line {
     flex: 1 1 200px;
@@ -243,7 +243,7 @@
   }
   .meta {
     margin-left: 6px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .form {
     display: grid;

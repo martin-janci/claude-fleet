@@ -149,15 +149,15 @@
 {/if}
 
 <style>
-  .muted { margin: 0; color: var(--fg-muted); font-size: 0.85rem; }
-  .small { font-size: 11px; }
+  .muted { margin: 0; color: var(--fg-muted); font-size: var(--text-xs); }
+  .small { font-size: var(--text-2xs); }
   .links { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; max-height: 60vh; overflow: auto; }
-  .links li { border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.6rem; display: flex; flex-direction: column; gap: 0.25rem; }
-  .head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; font-size: 0.9rem; }
-  .label { margin-left: auto; font-size: 0.82rem; }
-  .chip { font-size: 11px; border: 1px solid var(--accent); color: var(--accent); border-radius: 3px; padding: 0 0.35rem; }
-  .path { font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
-  .stale { margin: 0; color: var(--usage-warn); font-size: 0.8rem; }
+  .links li { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 0.5rem 0.6rem; display: flex; flex-direction: column; gap: 0.25rem; }
+  .head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; font-size: var(--text-sm); }
+  .label { margin-left: auto; font-size: var(--text-2xs); }
+  .chip { font-size: var(--text-2xs); border: 1px solid var(--accent); color: var(--accent); border-radius: var(--radius-xs); padding: 0 0.35rem; }
+  .path { font-family: var(--mono); font-size: var(--text-2xs); overflow-wrap: anywhere; }
+  .stale { margin: 0; color: var(--usage-warn); font-size: var(--text-2xs); }
   .row { display: flex; gap: 0.3rem; flex-wrap: wrap; align-items: center; }
   .sep { width: 0.5rem; }
   .foot { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.6rem; }
@@ -169,15 +169,15 @@
   .tone-idle { background: transparent; border: 1.5px solid var(--fg-muted); }
   .tone-off { background: var(--border); }
   .ghost {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.35rem 0.8rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
-  .ghost.small { font-size: 11px; padding: 0.12rem 0.45rem; }
+  .ghost.small { font-size: var(--text-2xs); padding: 0.12rem 0.45rem; }
   .ghost:hover:not(:disabled) { border-color: var(--accent); }
   button:disabled { opacity: 0.55; cursor: default; }
 </style>

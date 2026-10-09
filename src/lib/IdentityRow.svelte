@@ -87,9 +87,9 @@
   .row { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 5px 10px; background: none; border: 0; color: var(--fg); }
   .row.unmanaged { cursor: default; }
   .row.unmanaged:hover { background: var(--bg-pane); }
-  .name { flex: 1; font-family: ui-monospace, monospace; }
-  .meta { color: var(--fg-muted); font-size: 11px; }
-  .link { background: none; border: 0; color: var(--accent); cursor: pointer; font-size: 12px; }
+  .name { flex: 1; font-family: var(--font-mono); }
+  .meta { color: var(--fg-muted); font-size: var(--text-2xs); }
+  .link { background: none; border: 0; color: var(--accent); cursor: pointer; font-size: var(--text-xs); }
 
   .line { display: flex; align-items: center; border-bottom: 1px solid var(--border); }
   .line .link { flex: none; padding: 0 14px; height: 34px; }

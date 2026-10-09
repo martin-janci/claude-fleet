@@ -7,13 +7,18 @@ lives in `docs/ux/2026-10-08-orbit-fleet-redesign/design-system/`.
 
 `src/app.css` declares every token here under the same name, and
 `src/lib/tokens.ts` holds the colours as data for the contrast suite.
-`src/lib/tokens.test.ts` fails when the three disagree, or when a documented
-pair falls below its WCAG floor in either theme.
+`src/lib/tokens.test.ts` fails when the three disagree, when `app.css`
+declares a token this file does not name, or when a documented pair falls
+below its WCAG floor in either theme. Besides the manual's sections the file
+has `size` (control padding, ring width, pane and button sizes), `type.aliases`
+(`mono`) and the scrims (`scrim` behind a dialog, `scrim-strong` for the
+tour), which the app had before the manual named them (review r10).
 
 To change a token: change it in the manual and this snapshot first, then in all
 four theme blocks of `app.css`, then in `tokens.ts`, and add any new pair it has
 to clear to `CONTRAST_PAIRS`. The phone's `FleetTheme.kt` follows the same
-snapshot (step 0.10).
+snapshot (step 0.10); fleet-mobile's copy of this file has not taken the r10
+additions yet, which name no token the phone draws.
 
 ## Loaders
 

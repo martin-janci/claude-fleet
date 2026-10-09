@@ -266,7 +266,7 @@ const SCOPE_GUARDS: &[Guard] = &[
         code: "OrgScope::All => true,",
         verdict: Verdict::OrgBoundary,
         why: "a SESSION predicate, and the `_org_only` in its name is the \
-              contract. SIX production call sites, each with its own person \
+              contract. SEVEN production call sites, each with its own person \
               half beside it: `sees_session_facts` (the person half is the \
               rest of that function), `sees_row_org_only` (a row-shaped \
               wrapper, org-only by its own name), `link_session_visible` \
@@ -279,7 +279,10 @@ const SCOPE_GUARDS: &[Guard] = &[
               `visible` (file downloads), whose person half is `may_own` in \
               the other arm of the same match: this call is the \
               session-is-GONE arm, where no person is left to ask and \
-              `DownloadRow.org_id` is the whole of the fence",
+              `DownloadRow.org_id` is the whole of the fence, and \
+              `visible_with` (the Library), the same session-is-GONE arm \
+              with `may_own` beside it and `LibraryItemRow.org_id` as the \
+              fence",
     },
     Guard {
         file: "crates/fleet-core/src/service/orgs.rs",
@@ -1933,7 +1936,7 @@ const ORG_HALF_SITES: &[OrgHalf] = &[
                       on `downloads` would change no answer here",
     },    OrgHalf {
         file: "crates/fleet-core/src/service/library.rs",
-        func: "visible",
+        func: "visible_with",
         nth: 0,
         code: "None => scope.org.sees_session_org_only(&row.host_alias, row.org_id),",
         person_half: "`may_own` in the OTHER arm of the same match, on the \

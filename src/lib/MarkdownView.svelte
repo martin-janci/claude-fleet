@@ -116,7 +116,7 @@
   .md-pre-wrap {
     margin: 0.5em 0 0.7em;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
     overflow: hidden;
   }
@@ -126,7 +126,7 @@
     justify-content: space-between;
     padding: 0.15rem 0.4rem 0.15rem 0.6rem;
     border-bottom: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .md-lang {
@@ -135,9 +135,9 @@
   .md-copy {
     background: none;
     border: 1px solid transparent;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.05rem 0.45rem;
     cursor: pointer;
   }
@@ -150,7 +150,7 @@
     padding: 0.55rem 0.7rem;
     overflow-x: auto;
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 1.5;
     white-space: pre;
     tab-size: 4;

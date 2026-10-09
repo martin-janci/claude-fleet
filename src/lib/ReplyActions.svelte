@@ -270,7 +270,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
   }
   .reply-actions :global(.btn--icon:hover:not(:disabled)) {

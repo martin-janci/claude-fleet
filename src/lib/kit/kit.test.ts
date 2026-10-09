@@ -401,7 +401,8 @@ describe('kit components follow the manual', () => {
     const h = screen.getByTestId('h');
     expect(h.querySelector('.of-mark')).toBeTruthy();
     expect(h.textContent).toContain('Orbit Fleet');
-    expect(h.querySelector('.of-kbd')!.textContent).toBe('Ctrl+K');
+    // The switcher's chord off the Mac (plain Ctrl+K is the terminal's).
+    expect(h.querySelector('.of-kbd')!.textContent).toBe('Ctrl+Shift+K');
     await fireEvent.click(screen.getByRole('button', { name: /Search or run a command/ }));
     expect(oncommand).toHaveBeenCalledOnce();
     check(h, 'AppHeader');

@@ -251,8 +251,10 @@ impl Facts {
     /// `last_pinged_at`); one never pinged is unknown, not down. An account
     /// is at its limit when its 5-hour or weekly window is fully used and
     /// has not reset yet (the weekly one wins: it is the longer wait). A
-    /// login counts as gone on `no_credentials`, `login_expired` and
-    /// `token_rejected`; an expired access token refreshes by itself.
+    /// login counts as gone on `login_expired` and `token_rejected` only: an
+    /// expired access token refreshes by itself, and `no_credentials` is the
+    /// usage script finding no token file, which on a macOS host (the token
+    /// lives in the Keychain) says nothing about the login.
     pub fn from_fleet(hosts: &[HostRow], usage: &[AccountUsageSnapshot], now: i64) -> Facts {
         let down_hosts = hosts
             .iter()
@@ -264,27 +266,34 @@ impl Facts {
         for snap in usage {
             if matches!(
                 snap.status,
-                UsageOutcomeKind::NoCredentials
-                    | UsageOutcomeKind::LoginExpired
-                    | UsageOutcomeKind::TokenRejected
+                UsageOutcomeKind::LoginExpired | UsageOutcomeKind::TokenRejected
             ) {
                 uncredentialed_accounts.insert(snap.account_uuid.clone());
             }
             let Some(u) = &snap.usage else { continue };
-            let at_limit = |w: &crate::service::account_usage::Window| {
-                w.utilization >= 100.0 && w.resets_at.is_none_or(|at| at > now)
+            use crate::service::account_usage::{FIVE_HOUR_SECS, WEEK_SECS};
+            let at_limit = |w: &crate::service::account_usage::Window, len: i64| {
+                w.utilization >= 100.0 && w.live_at(snap.fetched_at, len, now)
             };
-            let limit = u
+            // Both windows at their limit: the one that frees last decides,
+            // so the row does not unblock while the other still holds it
+            // (no reset time holds longest). Weekly wins a tie.
+            let weekly = u
                 .seven_day
                 .as_ref()
-                .filter(|w| at_limit(w))
-                .map(|w| (LimitWindow::Weekly, w))
-                .or_else(|| {
-                    u.five_hour
-                        .as_ref()
-                        .filter(|w| at_limit(w))
-                        .map(|w| (LimitWindow::FiveHour, w))
-                });
+                .filter(|w| at_limit(w, WEEK_SECS))
+                .map(|w| (LimitWindow::Weekly, w));
+            let five = u
+                .five_hour
+                .as_ref()
+                .filter(|w| at_limit(w, FIVE_HOUR_SECS))
+                .map(|w| (LimitWindow::FiveHour, w));
+            let frees = |w: &crate::service::account_usage::Window| w.resets_at.unwrap_or(i64::MAX);
+            let limit = match (weekly, five) {
+                (Some(wk), Some(fh)) if frees(fh.1) > frees(wk.1) => Some(fh),
+                (Some(wk), _) => Some(wk),
+                (None, fh) => fh,
+            };
             if let Some((window, w)) = limit {
                 limited_accounts.insert(
                     snap.account_uuid.clone(),
@@ -881,6 +890,36 @@ mod tests {
         );
     }
 
+    /// Review r05 F7: a full window with no reset time blocks only while the
+    /// reading is younger than the window; an 8-day-old weekly one does not.
+    #[test]
+    fn a_limit_with_no_reset_time_lapses_with_its_window() {
+        use crate::service::account_usage::{AccountUsage, Window};
+        let now = 1_000_000;
+        let snap = |fetched_at: i64| AccountUsageSnapshot {
+            account_uuid: "acc".into(),
+            usage: Some(AccountUsage {
+                five_hour: None,
+                seven_day: Some(Window {
+                    utilization: 100.0,
+                    resets_at: None,
+                }),
+                seven_day_opus: None,
+                seven_day_sonnet: None,
+            }),
+            subscription: None,
+            fetched_at: Some(fetched_at),
+            source_host: None,
+            status: UsageOutcomeKind::Ok,
+            detail: None,
+            next_try_at: 0,
+        };
+        let fresh = Facts::from_fleet(&[], &[snap(now - 86_400)], now);
+        assert_eq!(fresh.limited_accounts["acc"].window, LimitWindow::Weekly);
+        let old = Facts::from_fleet(&[], &[snap(now - 8 * 86_400)], now);
+        assert!(old.limited_accounts.is_empty(), "{old:?}");
+    }
+
     #[test]
     fn facts_come_from_pinged_hosts_and_the_usage_snapshots() {
         use crate::service::account_usage::{AccountUsage, Window};
@@ -956,6 +995,10 @@ mod tests {
                 snap("reset", UsageOutcomeKind::Ok, 100.0, 10.0, 500),
                 snap("fine", UsageOutcomeKind::Ok, 80.0, 99.0, 2_000),
                 snap("gone", UsageOutcomeKind::LoginExpired, 0.0, 0.0, 2_000),
+                snap("rejected", UsageOutcomeKind::TokenRejected, 0.0, 0.0, 2_000),
+                // Review r05 F3: no token file to read (a macOS host keeps
+                // it in the Keychain) is not a lost login.
+                snap("keychain", UsageOutcomeKind::NoCredentials, 0.0, 0.0, 2_000),
                 snap(
                     "refresh",
                     UsageOutcomeKind::AccessTokenExpired,
@@ -982,7 +1025,37 @@ mod tests {
         assert!(!f.limited_accounts.contains_key("fine"));
         assert_eq!(
             f.uncredentialed_accounts.iter().collect::<Vec<_>>(),
-            ["gone"]
+            ["gone", "rejected"]
+        );
+        // So an idle session on the Keychain host's account needs no one.
+        let mut r = row();
+        r.account_uuid = Some("keychain".into());
+        r.claude_status = Some("idle".into());
+        assert_eq!(needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &f), None);
+        r.account_uuid = Some("gone".into());
+        assert_eq!(
+            needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &f)
+                .unwrap()
+                .reason,
+            Reason::NoCredentials
+        );
+        // Both at their limit, the week freeing first: the 5-hour window
+        // still holds the account after the weekly reset.
+        let mut late = snap("late", UsageOutcomeKind::Ok, 100.0, 100.0, 3_000);
+        late.usage
+            .as_mut()
+            .unwrap()
+            .seven_day
+            .as_mut()
+            .unwrap()
+            .resets_at = Some(1_500);
+        let f = Facts::from_fleet(&[], &[late], 1_000);
+        assert_eq!(
+            f.limited_accounts.get("late"),
+            Some(&Limit {
+                window: LimitWindow::FiveHour,
+                resets_at: Some(3_000)
+            })
         );
     }
 }

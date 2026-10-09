@@ -32,17 +32,17 @@
   .logo {
     width: 40px;
     height: 40px;
-    border-radius: 10px;
+    border-radius: var(--radius-lg);
     background: linear-gradient(135deg, var(--accent), var(--loader-accent));
   }
   h2 {
     margin: 0;
-    font-size: 1.2rem;
+    font-size: var(--text-lg);
   }
   p {
     margin: 0;
     color: var(--fg-muted);
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
     line-height: 1.5;
   }
   .actions {
@@ -52,8 +52,8 @@
   }
   button {
     padding: 8px 14px;
-    border-radius: 7px;
-    font-size: 0.9rem;
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
     cursor: pointer;
   }
   .primary {

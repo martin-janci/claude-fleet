@@ -139,7 +139,7 @@
     color: var(--fg);
     background: var(--bg-sunk, var(--bg-pane));
     border: 1px solid var(--control-border, var(--border));
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm, var(--radius-sm));
     padding: var(--space-1, 4px) var(--space-2, 8px);
   }
   .sheet-fields :global(textarea) {

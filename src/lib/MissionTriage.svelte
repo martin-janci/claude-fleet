@@ -131,7 +131,7 @@
 <style>
   .triage {
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     padding: 8px 10px;
     display: flex;
     flex-direction: column;
@@ -153,12 +153,12 @@
     gap: 6px;
   }
   .small {
-    font-size: 12px;
+    font-size: var(--text-xs);
     margin: 0;
   }
   .error {
     color: var(--danger);
-    font-size: 12px;
+    font-size: var(--text-xs);
     margin: 0;
   }
 </style>

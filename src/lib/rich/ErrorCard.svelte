@@ -51,7 +51,7 @@
     padding: 0.65rem 0.8rem;
     border: 1px solid var(--border);
     border-left: 3px solid var(--usage-crit);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: color-mix(in srgb, var(--usage-crit) 6%, var(--bg-pane));
   }
   header {
@@ -61,13 +61,13 @@
     gap: 0.5rem;
   }
   .code {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--usage-crit);
     white-space: nowrap;
   }
   .detail summary {
     cursor: pointer;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .detail pre {
@@ -75,9 +75,9 @@
     padding: 0.4rem 0.5rem;
     max-height: 14rem;
     overflow: auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     background: var(--bg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     white-space: pre-wrap;
     word-break: break-word;
   }
@@ -93,21 +93,21 @@
     gap: 0.1rem;
     padding: 0.35rem 0.65rem;
     border: 1px solid var(--control-border, var(--border));
-    border-radius: var(--radius-md, 6px);
+    border-radius: var(--radius-md, var(--radius-md));
     background: var(--control-bg, var(--bg));
     color: var(--control-fg, var(--fg));
     font: inherit;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     cursor: pointer;
     text-align: left;
   }
   .option:hover:not(:disabled) { background: var(--control-bg-hover, var(--bg)); border-color: var(--accent); }
   .option:disabled { opacity: 0.6; cursor: default; }
   .option-label { font-weight: 600; }
-  .hint { font-size: 11px; color: var(--fg-muted); }
+  .hint { font-size: var(--text-2xs); color: var(--fg-muted); }
   .note {
     margin: 0;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
 </style>

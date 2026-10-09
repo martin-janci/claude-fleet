@@ -30,6 +30,6 @@
 
 <style>
   .job { display: inline-flex; align-items: center; gap: 6px; color: var(--fg); }
-  .bar { width: 60px; height: 4px; overflow: hidden; border-radius: 2px; background: var(--control-bg-active); }
+  .bar { width: 60px; height: 4px; overflow: hidden; border-radius: var(--radius-xs); background: var(--control-bg-active); }
   .bar i { display: block; height: 100%; background: var(--accent); }
 </style>

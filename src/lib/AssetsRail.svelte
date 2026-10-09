@@ -50,13 +50,13 @@
   .rail { display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; border-right: 1px solid var(--border); background: var(--bg-pane); }
   .rail button {
     display: flex; align-items: center; gap: 9px; height: 28px; padding: 0 8px; border: 0; border-radius: var(--radius-md);
-    background: none; color: var(--control-fg-quiet); font: inherit; font-size: 12.5px; cursor: pointer; text-align: left;
+    background: none; color: var(--control-fg-quiet); font: inherit; font-size: var(--text-xs); cursor: pointer; text-align: left;
   }
   .rail button:hover:not(:disabled) { background: var(--control-bg-hover); }
   .rail button:disabled { opacity: 0.5; cursor: default; }
   .rail button.on { background: var(--accent-soft); color: var(--fg); font-weight: 600; }
   .rail button:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
-  .ct { margin-left: auto; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--fg-muted); font-weight: 400; }
+  .ct { margin-left: auto; font-size: var(--text-2xs); font-variant-numeric: tabular-nums; color: var(--fg-muted); font-weight: 400; }
   .on .ct { color: var(--accent); }
   .sep { height: 1px; margin: 8px 4px; background: var(--border); }
   /* Narrow: an icon strip. The buttons keep their names (aria-label, title). */

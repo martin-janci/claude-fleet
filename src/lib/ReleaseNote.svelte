@@ -74,7 +74,7 @@
   }
   .error {
     color: var(--danger);
-    font-size: 12px;
+    font-size: var(--text-xs);
     margin: 0;
   }
 </style>

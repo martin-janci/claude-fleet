@@ -42,6 +42,53 @@ beforeEach(() => {
   localStorage.clear();
 });
 
+// r06: `loadHosts` used to `set` the list wholesale, undoing host events
+// applied while the call was in flight.
+describe('loadHosts vs. events in flight', () => {
+  function deferList() {
+    let answer!: (rows: (typeof sampleLocal)[]) => void;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation((cmd: string) =>
+      cmd === 'list_hosts' ? new Promise((res) => (answer = res)) : Promise.resolve(null),
+    );
+    return (rows: (typeof sampleLocal)[]) => answer(rows);
+  }
+  const box = { ...sampleLocal, alias: 'box', transport: 'ssh' as const };
+
+  it('a host removed while the list was in flight stays removed', async () => {
+    hosts.set([sampleLocal, box]);
+    const answer = deferList();
+    const p = loadHosts();
+    applyHostEvents([{ type: 'removed', alias: 'box' }]);
+    answer([sampleLocal, box]);
+    await p;
+    expect(get(hosts).map((h) => h.alias)).toEqual(['local']);
+  });
+
+  it('a probe applied while the list was in flight keeps its content, and a host added mid-call stays', async () => {
+    hosts.set([sampleLocal, box]);
+    const answer = deferList();
+    const p = loadHosts();
+    applyHostEvents([
+      { type: 'probed', row: { ...box, reachable: false, last_pinged_at: 9 } },
+      { type: 'added', row: { ...sampleLocal, alias: 'late' } },
+    ]);
+    answer([sampleLocal, box]);
+    await p;
+    const got = get(hosts);
+    expect(got.map((h) => h.alias).sort()).toEqual(['box', 'late', 'local']);
+    expect(got.find((h) => h.alias === 'box')?.reachable).toBe(false);
+  });
+
+  it('without events in flight the list is taken as is', async () => {
+    hosts.set([sampleLocal, box]);
+    const answer = deferList();
+    const p = loadHosts();
+    answer([{ ...box, reachable: false }]);
+    await p;
+    expect(get(hosts)).toEqual([{ ...box, reachable: false }]);
+  });
+});
+
 describe('hosts store', () => {
   // A probe that found the host exactly as it was sends three fields instead
   // of the whole row: reconcile probes every host every pass, so the full row

@@ -1431,7 +1431,7 @@ pub struct RunsParams {
     #[serde(default)]
     pub until: Option<i64>,
     /// operator | task | mission | jev | routine, or a fleet `claude -p`
-    /// origin: planner | summary | commit_message | release_note |
+    /// run: planner | summary | commit_message | release_note |
     /// morning_brief | brief | watch_summary | triage.
     #[serde(default)]
     pub kind: Option<String>,

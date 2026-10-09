@@ -7,6 +7,7 @@
 // desktop. Mirrors `fleet_core::store::RoutineRow` / `RoutineRunRow`.
 import { derived, get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import type { AccountRow } from './accounts';
 import { sessions } from './sessions';
 import { selectSessionExplicitly } from './selection';
 import { goTo } from './destination';
@@ -66,7 +67,33 @@ export interface RoutineDetail {
   routine: RoutineRow;
   runs: RoutineRunRow[];
   may_change: boolean;
-  account?: { host_alias: string; over?: boolean; login?: { profile?: string; account_uuid?: string } };
+  account?: RoutineAccount;
+}
+
+/** The account a routine's login bills (fleet-core
+ *  `account_limits::LoginAccount`): the login's own fields are flattened
+ *  into it, there is no nested `login`. */
+export interface RoutineAccount {
+  host_alias: string;
+  /** `null` / absent = the host's own login; else the profile's name. */
+  profile?: string | null;
+  account_uuid: string;
+  used_pct?: number | null;
+  email?: string;
+  /** At or past `accounts.pause_at`. */
+  over: boolean;
+}
+
+/** Who a routine runs as: the profile's name, else the account the way
+ *  `accountLabel` names it (nickname, email, then the uuid's first 8). */
+export function routineAccountLabel(a: RoutineAccount, row?: Pick<AccountRow, 'nickname' | 'email'> | null): string {
+  const profile = a.profile?.trim();
+  if (profile) return profile;
+  const nickname = row?.nickname?.trim();
+  if (nickname) return nickname;
+  const email = a.email?.trim() || row?.email?.trim();
+  if (email) return email;
+  return a.account_uuid.slice(0, 8);
 }
 
 /** `failing`: a routine whose newest run failed, for the Inbox. */

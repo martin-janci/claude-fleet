@@ -380,9 +380,9 @@
     margin: 0.35rem 0.5rem 0.35rem;
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.25rem 0.45rem;
     flex: 0 0 auto;
   }
@@ -393,7 +393,7 @@
   }
   .hint {
     color: var(--fg-muted);
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     padding: 0.5rem 0.7rem;
     margin: 0;
   }
@@ -406,7 +406,7 @@
     gap: 0.4rem;
     margin: 0;
     padding: 0.4rem 0.5rem 0.2rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-weight: 600;
     color: var(--fg-muted);
   }
@@ -443,7 +443,7 @@
     border: none;
     color: var(--fg);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.34rem 0.4rem;
     text-align: left;
   }
@@ -465,14 +465,14 @@
     flex: 0 0 auto;
     width: 0.95rem;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .ficon {
     flex: 0 0 auto;
     width: 1.2rem;
     overflow: hidden;
     text-align: center;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     line-height: 1;
   }
   .badge {
@@ -481,8 +481,8 @@
     height: 1.1rem;
     line-height: 1.1rem;
     text-align: center;
-    border-radius: 3px;
-    font-size: 11px;
+    border-radius: var(--radius-xs);
+    font-size: var(--text-2xs);
     font-weight: 700;
   }
   .b-mod {
@@ -533,18 +533,18 @@
   }
   .commit-footer .draft {
     align-self: flex-start;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .commit-footer .draft-error {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--danger);
   }
   .commit-footer textarea {
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-family: inherit;
     resize: vertical;
     padding: 0.25rem 0.4rem;
@@ -554,10 +554,10 @@
   .commit-footer button {
     background: color-mix(in srgb, var(--accent) 18%, var(--bg-pane));
     border: 1px solid var(--accent);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.25rem 0.5rem;
     text-align: center;
   }

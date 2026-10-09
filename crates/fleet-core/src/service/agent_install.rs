@@ -130,7 +130,10 @@ pub fn start_script(hub_url: &str, insecure: bool) -> String {
          else\n\
            cfg=\"${{XDG_CONFIG_HOME:-$HOME/.config}}/fleet-agent\"; mkdir -p \"$cfg\"\n\
            cat > \"$cfg/token\"\n\
-           if [ -f \"$cfg/agent.pid\" ]; then kill \"$(cat \"$cfg/agent.pid\")\" 2>/dev/null || true; fi\n\
+           old=$(cat \"$cfg/agent.pid\" 2>/dev/null || true)\n\
+           case \"$old\" in ''|*[!0-9]*) ;; *) \
+             case \"$(tr '\\0' ' ' < \"/proc/$old/cmdline\" 2>/dev/null)\" in \
+               *fleet-agent*) kill \"$old\" 2>/dev/null || true ;; esac ;; esac\n\
            nohup \"$bin\" run --hub \"$hub\"{ins} --token-file \"$cfg/token\" >\"$cfg/agent.log\" 2>&1 </dev/null &\n\
            echo $! > \"$cfg/agent.pid\"\n\
            echo started=nohup\n\
@@ -228,8 +231,33 @@ fn plan(store: &Mutex<Store>, args: &InstallAgentArgs) -> Result<Plan, IpcError>
         .filter(|u| !u.is_empty())
     {
         Some(u) => u.trim_end_matches('/').to_string(),
-        None => crate::service::hub::HubBase::read(&s)?.url,
+        None => {
+            // A loopback default would point the agent at its own machine:
+            // it reaches the hub only through a provisioning tunnel, which
+            // the hub stops keeping once the host is an agent host (r18-A1).
+            let base = crate::service::hub::HubBase::read(&s)?;
+            if !base.public {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "an agent dials the hub, so the hub needs a public URL: set hub.public_url, or pass hub_url",
+                ));
+            }
+            base.url
+        }
     };
+    // A readonly token is refused at the agent's upgrade; minting over it
+    // would also cut off the hooks already provisioned with it (r18-A2).
+    if let Some(t) = s.get_host_token(&host.alias)? {
+        if t.mode != "full" {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "{}'s control-API token is {}; an agent needs a full one, so set its mode to full first",
+                    host.alias, t.mode
+                ),
+            ));
+        }
+    }
     let insecure = needs_insecure(&hub_url)?;
     let version = args
         .version
@@ -545,7 +573,21 @@ mod tests {
 
         let script = start_script("http://127.0.0.1:9", true);
         assert!(!script.contains("tok-secret"));
+        // r18-A4: a stale pid file naming another process (after a reboot
+        // the number is reused) is never killed.
+        let mut bystander = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let cfg = home.path().join(".config/fleet-agent");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(cfg.join("agent.pid"), format!("{}\n", bystander.id())).unwrap();
         let out = bash(&script, home.path(), "tok-secret\n");
+        assert!(
+            bystander.try_wait().unwrap().is_none(),
+            "an unrelated process survives the restart"
+        );
+        let _ = bystander.kill();
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(
             out.status.success(),
@@ -648,6 +690,45 @@ mod tests {
             .agent_installs(None, 9)
             .unwrap()
             .is_empty());
+    }
+
+    /// r18-A1 / A2: no public URL and no hub_url, or a readonly token, is
+    /// refused before anything is written or rotated.
+    #[tokio::test]
+    async fn a_loopback_hub_or_a_readonly_token_is_refused_up_front() {
+        let store = store_with_ssh_host();
+        {
+            let s = store.lock().unwrap();
+            s.set_setting(crate::mcp::SETTING_TOKEN, "tok").unwrap();
+        }
+        let ssh: Arc<dyn SshExec> = Arc::new(crate::ssh_fake::FakeSsh::new());
+        let reg = Some(AgentRegistry::new());
+        let args = |url: Option<&str>| InstallAgentArgs {
+            alias: "mercury".into(),
+            hub_url: url.map(str::to_string),
+            version: Some("0.5.4".into()),
+        };
+        let e = start(store.clone(), ssh.clone(), reg.clone(), args(None)).unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert!(e.message.contains("public URL"), "{}", e.message);
+
+        let token = {
+            let s = store.lock().unwrap();
+            s.upsert_host_token("mercury", "old-token").unwrap();
+            s.set_host_token_mode("mercury", "readonly").unwrap();
+            s.set_setting(
+                crate::service::hub::SETTING_PUBLIC_URL,
+                "https://fleet.example.com",
+            )
+            .unwrap();
+            s.get_host_token("mercury").unwrap().unwrap().token
+        };
+        let e = start(store.clone(), ssh.clone(), reg.clone(), args(None)).unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert!(e.message.contains("readonly"), "{}", e.message);
+        let s = store.lock().unwrap();
+        assert_eq!(s.get_host_token("mercury").unwrap().unwrap().token, token);
+        assert!(s.agent_installs(None, 9).unwrap().is_empty());
     }
 
     #[tokio::test]
