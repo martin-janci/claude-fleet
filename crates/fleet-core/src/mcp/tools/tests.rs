@@ -18213,6 +18213,73 @@ async fn org_admin_refuses_a_device_that_administers_nothing() {
     );
 }
 
+/// Review r04 F1/F2: an org admin invites new people and pairs their first
+/// device; a person who already has a device, or another company, is the
+/// hub owner's. Otherwise the admin could mint a token that IS that person.
+#[tokio::test]
+async fn org_admin_never_takes_over_a_person_who_already_exists() {
+    let (tools, _guards, store) = client_tools();
+    let (acme, jane) = {
+        let s = store.lock().unwrap();
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        let beta = s.add_org("Beta", None, false).unwrap().id;
+        let jane = s.create_person("jane", None).unwrap().id;
+        let bob = s.create_person("bob", None).unwrap().id;
+        let eve = s.create_person("eve", None).unwrap().id;
+        let carl = s.create_person("carl", None).unwrap().id;
+        s.set_org_member(acme, jane, "admin", None).unwrap();
+        s.set_org_member(acme, bob, "member", None).unwrap();
+        s.set_org_member(beta, eve, "member", None).unwrap();
+        for (device, person) in [("bob-phone", bob), ("carl-phone", carl)] {
+            s.insert_client_token(device, &format!("digest-{device}"), "full")
+                .unwrap();
+            s.set_client_person(device, Some(person)).unwrap();
+        }
+        (acme, jane)
+    };
+    let call = |c: Caller, a: crate::service::org_admin::OrgAdminArgs| {
+        tools.org_admin(Extension(c), Parameters(a))
+    };
+    let mut admin = trusted(client_caller("jane-phone", TokenMode::Full));
+    if let Some(c) = admin.client.as_mut() {
+        c.person_id = Some(jane);
+        c.org_id = Some(acme);
+    }
+    admin.is_personal_owner = false;
+    let forbidden = |r: Result<CallToolResult, McpError>, what: &str| {
+        let e = r.expect_err(what);
+        assert!(format!("{e:?}").contains("E_FORBIDDEN"), "{what}: {e:?}");
+    };
+    for who in ["eve", "carl"] {
+        let mut add = org_admin_args("set_member");
+        add.org_id = Some(acme);
+        add.person = Some(who.into());
+        add.role = Some("member".into());
+        forbidden(call(admin.clone(), add).await, who);
+    }
+    // A new colleague is invited and paired; bob, who has a phone, is not.
+    let mut add = org_admin_args("set_member");
+    add.org_id = Some(acme);
+    add.person = Some("dana".into());
+    add.role = Some("member".into());
+    call(admin.clone(), add).await.expect("a new person");
+    let mut pair = org_admin_args("pair_device");
+    pair.device = Some("dana-phone".into());
+    pair.person = Some("dana".into());
+    call(admin.clone(), pair.clone())
+        .await
+        .expect("their first device");
+    pair.device = Some("bob-laptop".into());
+    pair.person = Some("bob".into());
+    forbidden(call(admin.clone(), pair).await, "bob already has a device");
+    // A role change for a member of the org stays the admin's.
+    let mut role = org_admin_args("set_member");
+    role.org_id = Some(acme);
+    role.person = Some("bob".into());
+    role.role = Some("viewer".into());
+    call(admin, role).await.expect("a member's role");
+}
+
 fn org_admin_args(action: &str) -> crate::service::org_admin::OrgAdminArgs {
     crate::service::org_admin::OrgAdminArgs::new(action)
 }
