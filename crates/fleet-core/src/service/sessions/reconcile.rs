@@ -307,6 +307,10 @@ pub(super) struct HostProbe {
     /// pass; `Some(None)` = asked, no answer (the stamp still moves);
     /// `Some(Some(kb))` = the size.
     pub(super) worktree_kb: Option<Option<i64>>,
+    /// `tmux_name → the rollout its Codex is writing`, for this host's live
+    /// Codex rows (`codex::rollouts_script`). A name absent from the map was
+    /// not found this pass and keeps its stored conversation.
+    pub(super) codex_rollouts: HashMap<String, crate::agent_adapter::codex::PaneRollout>,
 }
 
 /// Executor factory + probe budget for the reconcile core. Production uses
@@ -621,6 +625,17 @@ struct Prior {
     claude_session_id: Option<String>,
 }
 
+/// The rollout this pass found for `tmux_name`, when the stored row runs
+/// Codex (a first sighting is no Codex row yet).
+fn codex_rollout<'a>(
+    row: Option<&SessionRow>,
+    probe: &'a HostProbe,
+    tmux_name: &str,
+) -> Option<&'a crate::agent_adapter::codex::PaneRollout> {
+    row.filter(|r| r.agent == crate::store::AGENT_CODEX && r.kind != "shell")?;
+    probe.codex_rollouts.get(tmux_name)
+}
+
 /// Fallback rebind (spec §1.4): after the reconcile write, open the
 /// conversation of a row that `claude agents` moved onto another id (no
 /// hooks, or an old CLI), or first showed carrying one (a new row, or one
@@ -632,6 +647,7 @@ fn open_reconciled_conversation(
     host_alias: &str,
     row: &SessionRow,
     old_claude_id: Option<&str>,
+    transcript_path: Option<&str>,
 ) -> Result<(), IpcError> {
     let Some(new_id) = row.claude_session_id.as_deref() else {
         return Ok(());
@@ -642,7 +658,7 @@ fn open_reconciled_conversation(
     if old_claude_id == Some(new_id) {
         return Ok(());
     }
-    match s.rebind_conversation(row.id, new_id, StartSource::Unknown, None, None) {
+    match s.rebind_conversation(row.id, new_id, StartSource::Unknown, transcript_path, None) {
         Ok(_) => {
             if let Err(e) = s.insert_session_event_for(
                 row.id,
@@ -884,7 +900,11 @@ fn write_reachable_host(
             last_activity_at: sess.last_activity,
             account_uuid,
             worktree_key,
-            claude_session_id: agent.and_then(|a| a.session_id.clone()),
+            // A Codex pane's conversation is the rollout found for it; it
+            // has no `claude agents` row.
+            claude_session_id: agent
+                .and_then(|a| a.session_id.clone())
+                .or_else(|| codex_rollout(prior_row, probe, &sess.name).map(|r| r.id.clone())),
             claude_status,
             effort_level: None, // not in claude agents --json; reserved for future
             pr_url: pr.and_then(|p| p.pr_url.clone()),
@@ -1115,12 +1135,24 @@ fn write_reachable_host(
                 continue;
             }
         };
+        let rollout = codex_rollout(Some(&row), probe, tmux_name)
+            .filter(|r| row.claude_session_id.as_deref() == Some(r.id.as_str()));
         open_reconciled_conversation(
             s,
             &host.alias,
             &row,
             prior.as_ref().and_then(|p| p.claude_session_id.as_deref()),
+            rollout.map(|r| r.path.as_str()),
         )?;
+        // A Codex row's transcript is its rollout: stored, so every read
+        // goes straight to it (a no-op once it is).
+        if let Some(r) = rollout {
+            if let Err(e) = s.set_transcript_path_for_row(row.id, &r.id, &r.path) {
+                tracing::warn!(host = %host.alias, session = %row.tmux_name, error = %e.message,
+                    "[reconcile] codex rollout path write failed");
+                s.ensure_in_tx()?;
+            }
+        }
         let Some(prior) = prior else {
             continue;
         };
@@ -1694,6 +1726,7 @@ pub(super) async fn probe_with_timeout(
             identity,
             started_at,
             worktree_kb: None,
+            codex_rollouts: HashMap::new(),
         },
         Err(_elapsed) => {
             tracing::warn!(
@@ -1716,6 +1749,7 @@ pub(super) async fn probe_with_timeout(
                 identity: None,
                 started_at,
                 worktree_kb: None,
+                codex_rollouts: HashMap::new(),
             };
         }
     };
@@ -1766,8 +1800,32 @@ pub(super) async fn probe_with_timeout(
             });
         }
     }
+    // Codex conversations: Codex names its own, so each live Codex pane's
+    // id and rollout are looked up on the host, bounded on their own like
+    // the steps above. A failure finds nothing and the stored ids stay.
+    if let (Ok(live), Some((shell, _, paths))) = (&probe.result, pr_probe) {
+        let names: Vec<&str> = paths
+            .codex_panes
+            .iter()
+            .filter(|n| live.iter().any(|s| &s.name == *n))
+            .map(String::as_str)
+            .collect();
+        if let Some(script) = crate::agent_adapter::codex::rollouts_script(&names) {
+            if let Ok(Ok(out)) = tokio::time::timeout(
+                CODEX_ROLLOUT_TIMEOUT,
+                shell.run_script(&probe.host.alias, &script),
+            )
+            .await
+            {
+                probe.codex_rollouts = crate::agent_adapter::codex::parse_rollouts(&out);
+            }
+        }
+    }
     probe
 }
+
+/// Bound on the Codex rollout lookup of one host.
+const CODEX_ROLLOUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Full fleet pass: probe every non-hidden host in parallel and apply each
 /// host's result as its probe completes, under its own short store-lock

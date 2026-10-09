@@ -793,6 +793,23 @@ impl Store {
         Ok(())
     }
 
+    /// The tmux names of `host_alias`'s rows running `agent` (shell rows
+    /// aside). Reconcile asks the host where those of them that are live
+    /// keep their Codex conversations.
+    pub fn pane_names_running(
+        &self,
+        host_alias: &str,
+        agent: &str,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT tmux_name FROM sessions \
+             WHERE host_alias = ?1 AND agent = ?2 AND kind != 'shell' \
+             ORDER BY tmux_name",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![host_alias, agent], |r| r.get(0))?;
+        rows.collect()
+    }
+
     /// Mark a session as a review of `reviews_session_id` (or back to 'work' with
     /// None). Write-once at spawn_review time. Reconcile never touches these
     /// columns — they survive re-probe because upsert_session's ON CONFLICT clause
