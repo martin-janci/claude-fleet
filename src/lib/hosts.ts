@@ -166,8 +166,10 @@ export function effectiveHostOf(filter: string, list: readonly Pick<HostRow, 'al
 export const effectiveHostFilter = derived([hostFilter, hosts], ([f, list]) => effectiveHostOf(f, list));
 
 export async function loadHosts(): Promise<Result<HostRow[]>> {
+  const token = rows.beginList();
   const r = await invokeCmd<HostRow[]>('list_hosts');
-  if (r.ok) hosts.set(r.value);
+  // A probe or a remove that landed while the list was in flight wins.
+  if (r.ok) rows.applyList(r.value, token);
   return r;
 }
 

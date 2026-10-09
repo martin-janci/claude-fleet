@@ -285,6 +285,19 @@ impl FleetTools {
                 "quick replies are the person's: an agent token may read them, not replace them",
             )));
         }
+        // The list is fleet-wide (`ui.quick_replies`), so it is the hub
+        // owner's, like every fleet-wide setting since M1: a second
+        // person's device or an org-bound one reads it, never replaces it
+        // (review r04 F4).
+        if p.set.is_some()
+            && !(caller.is_master() || (caller.is_personal_owner && caller.is_person_device()))
+        {
+            return Err(to_mcp_err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "quick replies are the hub owner's: another person's or an org's device \
+                 may read them, not replace them",
+            )));
+        }
         let entries = match p.set {
             Some(entries) => {
                 quick_replies::replace(&self.store, entries, p.expected).map_err(to_mcp_err)?

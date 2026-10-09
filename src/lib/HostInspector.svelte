@@ -96,9 +96,9 @@
 
 <style>
   .pad { display: grid; gap: 10px; padding: 12px 14px; align-content: start; }
-  .muted { margin: 0; color: var(--fg-muted); font-size: 12px; }
-  .grp { margin: 0 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
+  .muted { margin: 0; color: var(--fg-muted); font-size: var(--text-xs); }
+  .grp { margin: 0 0 4px; font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
   .n { font-variant-numeric: tabular-nums; }
-  code { font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
-  .list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: 12px; }
+  code { font-family: var(--mono); font-size: var(--text-2xs); overflow-wrap: anywhere; }
+  .list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: var(--text-xs); }
 </style>

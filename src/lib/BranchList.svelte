@@ -102,14 +102,14 @@
 </div>
 
 <style>
-  .branches { font-size: 0.8rem; overflow: auto; height: 100%; }
+  .branches { font-size: var(--text-2xs); overflow: auto; height: 100%; }
   .bbar { padding: 0.4rem 0.5rem; display: flex; gap: 0.4rem; align-items: center; }
   .new, .chip {
-    background: transparent; border: 1px solid var(--border); border-radius: 4px;
-    color: var(--fg); cursor: pointer; font-size: 11px; padding: 0.2rem 0.5rem;
+    background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm);
+    color: var(--fg); cursor: pointer; font-size: var(--text-2xs); padding: 0.2rem 0.5rem;
   }
   .new:disabled { opacity: 0.5; cursor: not-allowed; }
-  .chip { color: var(--fg-muted); border-radius: 999px; }
+  .chip { color: var(--fg-muted); border-radius: var(--radius-pill); }
   .chip.on {
     color: var(--fg); border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 18%, transparent);
@@ -117,7 +117,7 @@
   .del-merged { margin-left: auto; }
   .del-merged:not(:disabled):hover { color: var(--danger); border-color: var(--danger); }
   .group-label {
-    color: var(--fg-muted); font-size: 11px; text-transform: uppercase;
+    color: var(--fg-muted); font-size: var(--text-2xs); text-transform: uppercase;
     padding: 0.4rem 0.6rem 0.2rem;
   }
   .gnote { text-transform: none; }
@@ -129,14 +129,14 @@
   .bname { flex: 1 1 auto; font-family: var(--mono, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cur .bname { color: var(--accent); }
   .merged {
-    flex: 0 0 auto; color: var(--fg-muted); font-size: 11px;
-    border: 1px solid var(--border); border-radius: 999px; padding: 0 0.4rem;
+    flex: 0 0 auto; color: var(--fg-muted); font-size: var(--text-2xs);
+    border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0 0.4rem;
   }
-  .track { flex: 0 0 auto; color: var(--fg-muted); font-size: 11px; }
+  .track { flex: 0 0 auto; color: var(--fg-muted); font-size: var(--text-2xs); }
   .bactions { flex: 0 0 auto; visibility: hidden; display: flex; gap: 0.3rem; }
   .bactions button {
-    background: transparent; border: 1px solid var(--border); border-radius: 3px;
-    color: var(--fg-muted); cursor: pointer; font-size: 11px; padding: 0 0.4rem;
+    background: transparent; border: 1px solid var(--border); border-radius: var(--radius-xs);
+    color: var(--fg-muted); cursor: pointer; font-size: var(--text-2xs); padding: 0 0.4rem;
   }
   .bactions button:hover { color: var(--fg); border-color: var(--accent); }
   .bactions button.del:hover { color: var(--status-failed); border-color: var(--status-failed); }

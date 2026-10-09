@@ -171,11 +171,11 @@
     min-width: 8rem;
   }
   .stat-label {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .stat-value {
-    font-size: 1.35rem;
+    font-size: var(--text-xl);
     font-weight: 600;
     font-variant-numeric: proportional-nums;
   }
@@ -183,7 +183,7 @@
     display: grid;
     grid-template-columns: auto 1fr;
     gap: 0.15rem 0.75rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     margin: 0;
   }
   .record dt {
@@ -196,7 +196,7 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     margin: 0 0 0.25rem;
   }
   .caption p {
@@ -204,12 +204,12 @@
   }
   .copy {
     font: inherit;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   th,
   td {
@@ -226,12 +226,12 @@
     font-variant-numeric: tabular-nums;
   }
   .empty {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     margin: 0;
   }
   .err {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--usage-crit);
   }
 </style>

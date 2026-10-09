@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   // The sidebar's chrome, in four layers so a filter never looks like a
   // setting and a setting never looks like an action:
   //
@@ -506,7 +507,7 @@
           >{/if}</span
       >
     {:else}
-      <div class="btn-group view-switch" role="tablist" aria-label="Sidebar view" data-testid="sidebar-view-switch">
+      <div class="btn-group view-switch" role="tablist" aria-label="Sidebar view" data-testid="sidebar-view-switch" use:tablistKeys>
         <button
           class="btn btn--chip btn--toggle"
           role="tab"
@@ -896,7 +897,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+    box-shadow: var(--shadow-pop);
   }
   .menu-label,
   .fgroup-label {
@@ -988,7 +989,7 @@
 
   .err {
     color: var(--usage-crit);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0;
     margin: 0;
   }

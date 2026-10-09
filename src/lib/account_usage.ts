@@ -111,10 +111,20 @@ export function severityBadge(
   }
 }
 
-/** The window with fewer % left (5-hour on a tie); `null` with neither. */
-export function bindingWindow(usage: AccountUsage | null): UsageWindowKind | null {
-  const five = usage?.five_hour ?? null;
-  const week = usage?.seven_day ?? null;
+/**
+ * The window with fewer % left (5-hour on a tie); `null` with neither. Given
+ * `now`, a window whose reset has passed no longer binds while the other has
+ * not (as `used_pct_of` in fleet-core's `account_limits.rs`): its number is
+ * gone, and the other window's may still stop the account.
+ */
+export function bindingWindow(usage: AccountUsage | null, now?: number): UsageWindowKind | null {
+  let five = usage?.five_hour ?? null;
+  let week = usage?.seven_day ?? null;
+  if (now !== undefined && five && week) {
+    const past = (w: UsageWindow) => w.resets_at != null && w.resets_at <= now;
+    if (past(five) && !past(week)) five = null;
+    else if (past(week) && !past(five)) week = null;
+  }
   if (five && week) return leftPct(week) < leftPct(five) ? 'weekly' : '5h';
   if (five) return '5h';
   if (week) return 'weekly';
@@ -279,7 +289,7 @@ export function chipLabel(
   timeZone?: string,
 ): string {
   if (!snapshot || (snapshot.status === 'never_fetched' && !snapshot.usage)) return 'checking…';
-  const kind = bindingWindow(snapshot.usage);
+  const kind = bindingWindow(snapshot.usage, now);
   const w = windowOf(snapshot.usage, kind ?? '5h');
   if (!kind || !w) return '? left';
   const fr = freshness(kind, snapshot.fetched_at, w.resets_at, now);

@@ -2231,6 +2231,33 @@ impl FleetTools {
                 ));
             }
             super::fleet::owner_device_admin(&caller, "managing trackers")?;
+            // Review r04 S1: a device sends the secret itself. A
+            // `credential_ref` makes the hub read one of its own files or
+            // environment variables and send it to the tracker's site; a
+            // private network or an extra CA reaches past the hub's network
+            // fence. All three stay the hub operator's.
+            if args.credential_ref.is_some() {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "a device sends the tracker's secret itself; a credential reference \
+                     (env: or file: on the hub) is the hub operator's",
+                    None,
+                ));
+            }
+            let fenced = |k: &str| {
+                args.settings
+                    .as_ref()
+                    .and_then(|s| s.get(k))
+                    .is_some_and(|v| !v.is_null() && *v != serde_json::json!(false))
+            };
+            if fenced("allow_private_network") || fenced("extra_ca") {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "allow_private_network and extra_ca reach past the hub's network \
+                     fence; they are the hub operator's",
+                    None,
+                ));
+            }
         }
         match action {
             // M11.4's sync metrics and M12.3's retention (rows, dry run,

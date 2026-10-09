@@ -14,6 +14,11 @@ pub const ROUTINE_LEASE_SECS: i64 = 120;
 pub const ROUTINE_TRIGGERS: [&str; 3] = ["cron", "event", "manual"];
 /// `routines.overlap` values.
 pub const ROUTINE_OVERLAPS: [&str; 2] = ["skip", "parallel"];
+/// `routines.paused_reason` when the routine's project was removed: it can
+/// no longer start a session there.
+pub const PAUSED_PROJECT_REMOVED: &str = "paused: its project was removed";
+/// `routines.paused_reason` when the routine's host was removed.
+pub const PAUSED_HOST_REMOVED: &str = "paused: its host was removed";
 /// `routine_runs.state` values; `running` is the only open one.
 pub const ROUTINE_RUN_STATES: [&str; 4] = ["running", "done", "failed", "skipped"];
 
@@ -610,5 +615,114 @@ impl Store {
         ))?;
         let rows = stmt.query_map(rusqlite::params![since, limit], run)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
+#[cfg(test)]
+mod orphan_tests {
+    use super::*;
+
+    /// A cron routine on `host`, in project `pid`, enabled, due at 100.
+    fn routine_on(s: &Store, host: &str, pid: i64) -> i64 {
+        s.conn
+            .execute(
+                "INSERT INTO routines (name, trigger, cron, host_alias, project_id, prompt, \
+                   next_run_at, created_at, updated_at) \
+                 VALUES ('r', 'cron', '0 9 * * *', ?1, ?2, 'go', 100, 1, 1)",
+                rusqlite::params![host, pid],
+            )
+            .unwrap();
+        s.conn.last_insert_rowid()
+    }
+
+    fn project(s: &Store, repo: &str) -> i64 {
+        s.conn
+            .execute(
+                "INSERT INTO projects (owner, repo, base_path) VALUES ('me', ?1, '/p/' || ?1)",
+                [repo],
+            )
+            .unwrap();
+        s.conn.last_insert_rowid()
+    }
+
+    /// Review r02: a routine whose project or host is removed stops with the
+    /// reason instead of failing on every fire; a merged host takes its
+    /// routines along; and migration 146 stops the ones already orphaned.
+    #[test]
+    fn a_routine_stops_when_its_project_or_host_goes_and_follows_a_merge() {
+        let s = Store::open_in_memory().unwrap();
+        for h in ["h1", "h2", "old", "new"] {
+            s.upsert_host(h).unwrap();
+        }
+        let (p1, p2) = (project(&s, "one"), project(&s, "two"));
+        let on_project = routine_on(&s, "h1", p1);
+        let on_host = routine_on(&s, "h2", p2);
+        let merged = routine_on(&s, "old", p2);
+        let bystander = routine_on(&s, "h1", p2);
+
+        s.delete_project(p1, &Default::default()).unwrap();
+        s.delete_host("h2").unwrap();
+        s.merge_host_alias("old", "new").unwrap();
+
+        let r = s.get_routine(on_project).unwrap().unwrap();
+        assert!(!r.enabled && r.next_run_at.is_none());
+        assert_eq!(r.paused_reason.as_deref(), Some(PAUSED_PROJECT_REMOVED));
+        let r = s.get_routine(on_host).unwrap().unwrap();
+        assert!(!r.enabled);
+        assert_eq!(r.paused_reason.as_deref(), Some(PAUSED_HOST_REMOVED));
+        let r = s.get_routine(merged).unwrap().unwrap();
+        assert!(r.enabled);
+        assert_eq!(r.host_alias, "new");
+        let r = s.get_routine(bystander).unwrap().unwrap();
+        assert!(r.enabled && r.paused_reason.is_none());
+    }
+
+    #[test]
+    fn migration_146_stops_routines_orphaned_before_it() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h1").unwrap();
+        let p = project(&s, "one");
+        let live = routine_on(&s, "h1", p);
+        let local = routine_on(&s, "local", p);
+        let no_project = routine_on(&s, "h1", 9_999);
+        let no_host = routine_on(&s, "gone", p);
+        s.conn
+            .execute("DELETE FROM schema_version WHERE version >= 146", [])
+            .unwrap();
+        s.migrate().unwrap();
+        let reason = |id| s.get_routine(id).unwrap().unwrap().paused_reason;
+        assert_eq!(reason(live), None);
+        assert_eq!(reason(local), None, "local is never removed");
+        assert_eq!(reason(no_project).as_deref(), Some(PAUSED_PROJECT_REMOVED));
+        assert_eq!(reason(no_host).as_deref(), Some(PAUSED_HOST_REMOVED));
+        assert!(!s.get_routine(no_host).unwrap().unwrap().enabled);
+    }
+
+    /// The scheduler's every-tick scan of unjudged runs reads its partial
+    /// index, not the whole run history.
+    #[test]
+    fn the_unjudged_runs_scan_uses_its_index() {
+        let s = Store::open_in_memory().unwrap();
+        let plan: Vec<String> = {
+            let mut stmt = s
+                .conn
+                .prepare(
+                    "EXPLAIN QUERY PLAN SELECT id FROM routine_runs \
+                     WHERE state = 'done' AND outcome IS NULL AND finished_at >= ?1 \
+                     ORDER BY finished_at DESC, id DESC LIMIT ?2",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map(rusqlite::params![0, 10], |r| r.get::<_, String>(3))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            rows
+        };
+        assert!(
+            plan.iter().any(|l| l.contains("routine_runs_unjudged")),
+            "{plan:?}"
+        );
+        assert!(!plan.iter().any(|l| l.contains("TEMP B-TREE")), "{plan:?}");
     }
 }

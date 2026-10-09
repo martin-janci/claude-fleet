@@ -430,7 +430,7 @@
   }
   h4 {
     margin: 0.35rem 0 0.1rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -477,7 +477,7 @@
   }
   .why {
     margin: 0 0 0 1.1rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .actions {
@@ -496,7 +496,7 @@
     font: inherit;
     padding: 0.25rem 0.4rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg);
     color: var(--fg);
   }
@@ -513,7 +513,7 @@
   }
   .notice {
     margin: 0 0 0.3rem;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .muted {
     color: var(--fg-muted);

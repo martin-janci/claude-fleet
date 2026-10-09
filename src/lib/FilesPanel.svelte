@@ -588,10 +588,10 @@
 {/if}
 
 <style>
-  .branch-notice { margin: 0; padding: 0.3rem 0.7rem; font-size: 11px; color: var(--fg-muted); }
-  .dlg-hint { margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
-  .dlg-hint code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .dlg-check { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; cursor: pointer; }
+  .branch-notice { margin: 0; padding: 0.3rem 0.7rem; font-size: var(--text-2xs); color: var(--fg-muted); }
+  .dlg-hint { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); }
+  .dlg-hint code { font-family: var(--font-mono); }
+  .dlg-check { display: flex; align-items: center; gap: 0.4rem; font-size: var(--text-2xs); cursor: pointer; }
   .panel-wrap {
     display: flex;
     flex-direction: column;
@@ -618,17 +618,17 @@
     border: 1px solid var(--border);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.4rem;
   }
   .modes button:first-child {
-    border-radius: 4px 0 0 4px;
+    border-radius: var(--radius-sm) 0 0 var(--radius-sm);
   }
   .modes button:not(:first-child) {
     border-left: none;
   }
   .modes button:last-child {
-    border-radius: 0 4px 4px 0;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   }
   .modes button.active {
     background: color-mix(in srgb, var(--accent) 18%, var(--bg-pane));
@@ -639,10 +639,10 @@
     flex: 0 0 auto;
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     width: 1.7rem;
     height: 1.6rem;
     padding: 0;
@@ -680,7 +680,7 @@
   }
   .hbar {
     padding: 0.3rem 0.6rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     flex: 0 0 auto;
     border-bottom: 1px solid var(--border);
     color: var(--fg-muted);
@@ -708,7 +708,7 @@
   }
   .hint {
     color: var(--fg-muted);
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     padding: 0.5rem 0.7rem;
     margin: 0;
   }
@@ -727,7 +727,7 @@
   }
   .gone-title {
     color: var(--fg);
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
     font-weight: 600;
     margin: 0;
   }
@@ -742,7 +742,7 @@
     border-top: 1px solid var(--border);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.4rem 0.7rem;
     text-align: center;
   }
@@ -760,7 +760,7 @@
     border: none;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0;
     margin-bottom: 0.2rem;
   }
@@ -768,14 +768,14 @@
     color: var(--fg);
   }
   .csub {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .cmeta {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     margin-top: 0.1rem;
   }

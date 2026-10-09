@@ -13,6 +13,7 @@
     checkedAgo,
     formatReset,
     formatResetShort,
+    freshness,
     leftPct,
     severity,
     severityBadge,
@@ -109,13 +110,20 @@
     badge: string | null;
     reset: string;
     resetShort: string;
+    /** The reading no longer holds (too old, or past its reset): `? left`. */
+    unknown: boolean;
   }
 
   function windowView(a: AccountSummary, kind: UsageWindowKind): WindowView {
     const w = windowOf(a.usage?.usage ?? null, kind);
     const title = kind === '5h' ? '5-hour window' : 'Week';
     if (!w) {
-      return { kind, title, left: null, level: 'none', badge: null, reset: 'no reading yet', resetShort: '' };
+      return { kind, title, left: null, level: 'none', badge: null, reset: 'no reading yet', resetShort: '', unknown: false };
+    }
+    // As `compactWindow`: a number past its reset or freshness limit is
+    // withheld, never shown as `0% left` with a LIMIT badge.
+    if (freshness(kind, a.usage?.fetched_at ?? null, w.resets_at, now) === 'expired') {
+      return { kind, title, left: null, level: 'none', badge: null, reset: '', resetShort: '', unknown: true };
     }
     const left = leftPct(w);
     const level = severity(kind, left, w.resets_at, now, a.account.has_extra_usage);
@@ -128,6 +136,7 @@
       badge: b ? `${b.glyph} ${b.word}` : null,
       reset: formatReset(kind, w.resets_at, now, locale, timeZone),
       resetShort: formatResetShort(kind, w.resets_at, now, locale, timeZone),
+      unknown: false,
     };
   }
 
@@ -193,7 +202,7 @@
               <div class="line" data-level={w.level}>
                 <span class="w-title">{w.title}</span>
                 <span class="w-val">
-                  {#if w.left === null}—{:else}{w.left}% left{#if w.resetShort} · {w.resetShort}{/if}{/if}
+                  {#if w.unknown}? left{:else if w.left === null}—{:else}{w.left}% left{#if w.resetShort} · {w.resetShort}{/if}{/if}
                 </span>
               </div>
             {/each}
@@ -239,7 +248,7 @@
               <div class="w-row">
                 <span class="w-title">{w.title}</span>
                 <span class="w-val">
-                  {#if w.left === null}no reading yet{:else}{w.left}% left{/if}
+                  {#if w.unknown}? left{:else if w.left === null}no reading yet{:else}{w.left}% left{/if}
                   {#if w.badge}<span class="badge">{w.badge}</span>{/if}
                 </span>
               </div>

@@ -9,6 +9,7 @@
   opens the full session.
 -->
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   import { selectSessionExplicitly, selectedSession } from './selection';
   import { sidebarView } from './work_view';
   import { leave } from './destination';
@@ -86,7 +87,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <aside class="views" aria-label="Views" data-testid="control-views" onkeydown={onKeydown}>
   <div class="strip">
-    <div class="tabs" role="tablist" aria-label="Views">
+    <div class="tabs" role="tablist" aria-label="Views" use:tablistKeys>
       {#each shown as v (v.id)}
         <button
           type="button"
@@ -300,7 +301,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg-pane);
-    box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
+    box-shadow: var(--shadow-pop);
     font-size: var(--text-sm);
   }
   .menu-head {

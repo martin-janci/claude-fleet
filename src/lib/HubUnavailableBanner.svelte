@@ -38,7 +38,7 @@
     padding: 0.5rem 0.8rem;
     background: var(--failed-soft);
     color: var(--fg);
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     border-bottom: 1px solid var(--failed-line);
   }
   .hub-unavailable p {
@@ -48,7 +48,7 @@
   .details {
     flex: none;
     max-width: 30%;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .details summary {
     cursor: pointer;
@@ -58,14 +58,14 @@
     overflow-wrap: anywhere;
   }
   .hub-unavailable code {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .hub-unavailable button {
     flex: none;
     background: transparent;
     color: inherit;
     border: 1px solid currentColor;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     padding: 0.2rem 0.6rem;
     cursor: pointer;
   }

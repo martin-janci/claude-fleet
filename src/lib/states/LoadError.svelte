@@ -44,7 +44,7 @@
     gap: 0.3rem;
     padding: 0.75rem;
     color: var(--fg-muted);
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .title {
     margin: 0;
@@ -55,7 +55,7 @@
     margin: 0;
   }
   .details {
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .details summary {
     cursor: pointer;

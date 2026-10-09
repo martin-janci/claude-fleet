@@ -387,7 +387,7 @@
 <style>
   .board-note {
     margin: 8px 0 0;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .board {
     display: flex;
@@ -396,7 +396,7 @@
     min-height: 0;
     background: var(--bg);
     color: var(--fg);
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   header {
     display: flex;
@@ -407,7 +407,7 @@
   }
   h2 {
     margin: 0;
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
   }
   /* The close button sits at the right edge whether or not a reason shows. */
   header [data-testid='work-board-close'] {
@@ -459,7 +459,7 @@
     align-items: center;
     margin: 0;
     padding: 8px 10px 4px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -484,7 +484,7 @@
   .empty {
     margin: 0;
     padding: 0 10px 10px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .card {
     width: 100%;
@@ -517,7 +517,7 @@
     background: var(--bg);
     color: var(--fg-muted);
     font: inherit;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     cursor: pointer;
     opacity: 0;
   }
@@ -551,22 +551,22 @@
     align-items: center;
   }
   .tb {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     padding: 0 0.2rem;
     color: var(--fg-muted);
   }
   .key {
     font-family: var(--mono);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .lock {
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .needs {
     color: var(--usage-crit);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     margin-left: auto;
   }
   .title {
@@ -585,7 +585,7 @@
     flex-wrap: wrap;
     gap: 0 8px;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .meta > span {
     white-space: nowrap;
@@ -594,7 +594,7 @@
     color: var(--accent);
   }
   .live {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--usage-ok);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -602,7 +602,7 @@
   }
   .card-err {
     margin: 2px 2px 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--usage-crit);
   }
   .ghost {
@@ -615,8 +615,8 @@
     border-radius: var(--radius-md);
     background: var(--bg);
     color: var(--fg);
-    font-size: 0.8rem;
-    box-shadow: 0 4px 12px rgb(0 0 0 / 0.2);
+    font-size: var(--text-2xs);
+    box-shadow: var(--shadow-pop);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

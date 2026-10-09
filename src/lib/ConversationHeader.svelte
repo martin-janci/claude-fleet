@@ -445,7 +445,7 @@
   .caret {
     flex: 0 0 auto;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .dot {
     flex: 0 0 auto;
@@ -473,7 +473,7 @@
     padding: 0.25rem 0;
     list-style: none;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg);
     box-shadow: 0 4px 16px color-mix(in srgb, var(--fg) 15%, transparent);
   }
@@ -483,7 +483,7 @@
     gap: 0.1rem;
     padding: 0.35rem 0.65rem;
     cursor: pointer;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .menu li:hover,
   .menu li.selected {
@@ -497,7 +497,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .facts,
   .find-inline {
@@ -564,7 +564,7 @@
     padding: 0.25rem 0;
     list-style: none;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg);
     box-shadow: 0 4px 14px color-mix(in srgb, var(--fg) 15%, transparent);
   }
@@ -581,7 +581,7 @@
     background: none;
     color: var(--fg);
     font: inherit;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-align: left;
     cursor: pointer;
   }
@@ -612,7 +612,7 @@
   }
   .bg-group {
     padding: 0.3rem 0.65rem 0.15rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
@@ -624,7 +624,7 @@
   }
   .bg-item-status {
     margin-left: auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .bg-item-status[data-status='running'] {
@@ -705,7 +705,7 @@
     flex: 0 0 auto;
     width: 44px;
     height: 4px;
-    border-radius: 2px;
+    border-radius: var(--radius-xs);
     overflow: hidden;
     background: var(--control-border);
   }

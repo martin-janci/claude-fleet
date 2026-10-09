@@ -37,9 +37,9 @@ use serde_json::Value;
 /// The `list_sessions` fields `view: "phone"` keeps.
 ///
 /// Derived from what the phone actually reads, not from what its model
-/// declares: `SessionRow.kt` deserialises 28 fields, but `branch`, `pr_url`,
-/// `lost_at`, `created_at`, `worktree_id` and `parent_session_id` have no
-/// reader on any screen. The ones here each have one:
+/// declares: `SessionRow.kt` deserialises more fields than this, but
+/// `branch`, `pr_url`, `worktree_id` and `parent_session_id` have no reader
+/// on any screen. The ones here each have one:
 ///
 /// * `id` — the row key and every action's address;
 /// * `tmux_name`, `friendly_name`, `last_prompt` — `SessionRow.displayName`
@@ -90,6 +90,17 @@ use serde_json::Value;
 ///   only; the labels come from `list_accounts`. Dropped by the first cut as
 ///   a column no screen read (~39 B a row); added back for the redesign's
 ///   step 4.10 on the phone.
+/// * `owner_person_id` — who owns the session: the phone's Share button
+///   (`MyAccess.owns`, redesign 11.10) and its Shared-with-me split. Projected
+///   away, every re-list hid Share from the owner until a `session:updated`
+///   frame carried the whole row back (review round 3, R3-1).
+/// * `work_rev`, `lost_at` — the work view's change signature
+///   (`workSignature`), which every `session:updated` frame carries in full.
+///   Without them a re-list read as a work change on the next frame, and a
+///   secondary link's change (`work_rev` alone moves) went unseen until then
+///   (review round 3, R3-2 and R3-4).
+/// * `created_at` — the Details sheet's "started" fallback for a session
+///   with no `started_at` (R3-3).
 ///
 /// Added 2026-09-23 when fleet-mobile's pager (its PR #19) began reading
 /// them: the first cut of this view was taken against the list screen alone.
@@ -103,6 +114,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "ci_status",
     "claude_status",
     "context_pct",
+    "created_at",
     "current_activity",
     "friendly_name",
     "host_alias",
@@ -113,8 +125,10 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "last_prompt",
     "last_stop_at",
     "last_turn_at",
+    "lost_at",
     "needs_attention",
     "org_id",
+    "owner_person_id",
     "pending_form",
     "pending_input",
     "project_id",
@@ -128,6 +142,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "usage_cost_micros",
     "usage_model",
     "work",
+    "work_rev",
     "work_suggested",
 ];
 

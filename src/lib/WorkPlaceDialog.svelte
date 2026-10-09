@@ -173,19 +173,19 @@
 </Modal>
 
 <style>
-  .form { display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.85rem; }
+  .form { display: flex; flex-direction: column; gap: 0.5rem; font-size: var(--text-xs); }
   .field { display: flex; flex-direction: column; gap: 0.2rem; }
-  .field span { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .field span { font-size: var(--text-2xs); color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .field input {
     font: inherit;
     padding: 0.3rem 0.45rem;
     border: 1px solid var(--border);
     background: var(--bg-pane);
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .what { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
-  .note { margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
+  .note { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); }
   .chips { display: flex; gap: 0.25rem; flex-wrap: wrap; }
   .err { color: var(--danger); margin: 0; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; flex-wrap: wrap; }

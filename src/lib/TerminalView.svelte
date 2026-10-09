@@ -1712,11 +1712,11 @@
     border-left: 1px solid var(--border);
   }
   .shell-tag {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     padding: 0.05rem 0.4rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .wrap {
     position: relative;
@@ -1738,7 +1738,7 @@
     box-sizing: border-box;
     text-align: center;
     color: var(--fg-muted);
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .no-attach-head {
     margin: 0;
@@ -1758,20 +1758,20 @@
     color: rgb(220, 130, 130);
     padding: 0.35rem 0.7rem;
     border: 1px solid rgba(220, 130, 130, 0.3);
-    border-radius: 5px;
-    font-size: 0.8rem;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-2xs);
     z-index: 5;
     display: flex;
     gap: 0.5rem;
     align-items: center;
   }
   .reconnect-banner button {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.15rem 0.5rem;
     background: transparent;
     border: 1px solid currentColor;
     color: inherit;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .header {
@@ -1782,37 +1782,37 @@
     padding: 0.4rem 0.6rem;
     border-bottom: 1px solid var(--border);
     background: var(--bg-pane);
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .name {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     color: var(--fg);
     font-weight: 600;
   }
   .size {
     margin-left: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     padding: 0.1rem 0.4rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .counters {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     padding: 0.1rem 0.4rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .reconnect {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.5rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg-muted);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .reconnect:hover { color: var(--fg); border-color: var(--accent); }
@@ -1833,7 +1833,7 @@
     padding: 4px;
     box-sizing: border-box;
     font-family: Menlo, ui-monospace, SFMono-Regular, monospace;
-    font-size: 13px;
+    font-size: var(--text-sm);
     line-height: 16px;
     /* Show focus ring subtly so the user knows where keyboard input lands. */
     outline: none;
@@ -1841,7 +1841,7 @@
   /* Keyboard focus only: the proxy is a text control, and a UA matches
      :focus-visible on those even for a plain mouse click. */
   .grid.kb-focus {
-    box-shadow: inset 0 0 0 1px var(--accent, #4f8fff);
+    box-shadow: inset 0 0 0 var(--ring-w) var(--ring);
   }
   /* Invisible, but NOT display:none / visibility:hidden and not off-screen —
      WebKit only opens an input-method session on an element it considers
@@ -1953,7 +1953,7 @@
     background: rgba(20, 30, 50, 0.55);
     border: 2px dashed var(--accent, #4f8fff);
     color: #e8e8e8;
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
     pointer-events: none;
   }
   .measure {
@@ -1985,13 +1985,13 @@
   }
   .empty-msg {
     margin: 0;
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
     letter-spacing: 0.01em;
   }
   .err {
     flex: 0 0 auto;
     color: var(--danger);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     padding: 0.3rem 0.6rem;
     border-top: 1px solid var(--danger);
   }
@@ -2007,7 +2007,7 @@
     min-width: 150px;
     background: #1c1c1c;
     border: 1px solid #3a3a3a;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     padding: 4px;
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
     display: flex;
@@ -2019,7 +2019,7 @@
     border: none;
     color: #e8e8e8;
     padding: 6px 10px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     font: inherit;
     cursor: pointer;
   }

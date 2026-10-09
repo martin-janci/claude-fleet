@@ -96,7 +96,7 @@
     padding: 0.4rem 0.7rem 0.45rem;
     border: 1px solid var(--border);
     border-left: 3px solid color-mix(in srgb, var(--accent) 55%, var(--border));
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
   }
   .subagent.err {
@@ -107,7 +107,7 @@
     align-items: baseline;
     gap: 0.4rem;
     min-width: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .sub-type {
@@ -124,7 +124,7 @@
   .sub-dur {
     flex: 0 0 auto;
     margin-left: auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .sub-dur.muted {
     font-style: italic;
@@ -132,7 +132,7 @@
   }
   .sub-status {
     flex: 0 0 auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   /* Without a duration beside it the status is the first thing on the
      right, so it takes over pushing the group there. */
@@ -149,7 +149,7 @@
     border: none;
     color: var(--accent);
     font: inherit;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     cursor: pointer;
   }
   .sub-open:hover {
@@ -162,7 +162,7 @@
   }
   .sub-result {
     margin-top: 0.3rem;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     line-height: 1.6;
     color: var(--fg);
   }
@@ -177,7 +177,7 @@
     background: none;
     border: none;
     color: var(--accent);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     cursor: pointer;
   }
 </style>

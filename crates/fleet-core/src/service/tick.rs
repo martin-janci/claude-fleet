@@ -265,12 +265,9 @@ pub fn spawn_reconcile_tick(
                 // sessions' conflicting or red PRs recorded, and nudged at
                 // `nudge`. No rule, no work: one indexed read and out. Stops
                 // while `automation.paused` is on.
+                // Detached and single-flight: its `gh` calls must not hold the tick.
                 if service::loops::gate("pr_shepherd", store, Some(period)) {
-                    let n = service::pr_shepherd::run(store, ssh).await;
-                    if n > 0 {
-                        tracing::info!("reconcile tick: recorded {n} PR shepherd episode(s)");
-                    }
-                    service::loops::report("pr_shepherd", Ok::<_, String>(()), Some(period));
+                    service::pr_shepherd::spawn_run(store, ssh, period);
                 }
                 // Step 5.10: a prompt queued for a busy session goes in once the
                 // session is idle; the Stop hook delivers it first, this catches
