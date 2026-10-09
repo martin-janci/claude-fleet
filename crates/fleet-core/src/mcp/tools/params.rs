@@ -1237,7 +1237,7 @@ pub struct UpdateAdminParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RoutinesParams {
-    /// list | get | runs | save | delete | set_enabled | skip_next | run_now.
+    /// list | get | runs | failing | save | delete | set_enabled | skip_next | run_now.
     pub action: String,
     /// Every action but list, and save of a change.
     #[serde(default)]
@@ -1254,6 +1254,30 @@ pub struct RoutinesParams {
     /// runs: how many, newest first (default 20, at most 200).
     #[serde(default)]
     pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct LibraryParams {
+    /// list | add | remove.
+    pub action: String,
+    /// list: only this session's files; add: the session they were put beside.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// list: only this host's files.
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// list: at most this many, newest first (default and cap 200).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// add: upload | attachment.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// add: the files, already on the session's host.
+    #[serde(default)]
+    pub files: Option<Vec<crate::service::library::LibraryFile>>,
+    /// remove: the row's id.
+    #[serde(default)]
+    pub id: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -1281,8 +1305,8 @@ pub struct SessionShareParams {
     /// Or an org.
     #[serde(default)]
     pub org: Option<String>,
-    /// watch (read it) or drive (also prompt it). Nothing else — "own" is
-    /// not a grantable level.
+    /// watch (read it), answer (also answer its dialogs) or drive (also
+    /// prompt it). Nothing else — "own" is not a grantable level.
     pub level: String,
 }
 

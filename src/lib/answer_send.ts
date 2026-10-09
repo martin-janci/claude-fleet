@@ -11,7 +11,7 @@ import { sessionActivity } from './conversation';
 import { hubActionBlocked, hubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import { sessionActionBlocked } from './share';
-import { sendPrompt, type SessionRow } from './sessions';
+import { answerDialog, type SessionRow } from './sessions';
 import { answerFingerprint, pendingInputFor, type AnswerView } from './pending_input';
 
 export type AnswerOutcome =
@@ -53,8 +53,8 @@ export async function sendAnswer(session: SessionRow, view: AnswerView, key: str
   if (answerFingerprint(fresh.view) !== answerFingerprint(view)) {
     return { ok: false, stale: 'The dialog changed — nothing was sent.' };
   }
-  const why = hubActionBlocked('send_prompt', get(hubStatus), get(hubConnection)) ?? sessionActionBlocked(session, 'send_prompt');
+  const why = hubActionBlocked('send_prompt', get(hubStatus), get(hubConnection)) ?? sessionActionBlocked(session, 'answer_dialog');
   if (why !== null) return { ok: false, blocked: why };
-  const r = await sendPrompt(session.host_alias, session.tmux_name, '', { keys: key });
+  const r = await answerDialog(session.host_alias, session.tmux_name, key);
   return r.ok ? { ok: true } : { ok: false, error: r.error.message };
 }
