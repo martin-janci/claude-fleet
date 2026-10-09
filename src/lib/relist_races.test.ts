@@ -11,6 +11,8 @@ import { createRowStore } from './row_store';
 import { sessions, loadSessions, applySessionEvents, resetTombstonesForTests, type SessionRow } from './sessions';
 import { hosts, loadHosts, applyHostEvents, type HostRow } from './hosts';
 import { loadMyGrants, applyGrantChanges, myGrants, setMyGrants } from './access';
+import { projects, loadProjects, applyProjectEvents, type ProjectTreeRow } from './projects';
+import { accountUsage, loadAccountUsage, applyAccountUsageEvents, type AccountUsageSnapshot } from './account_usage_store';
 
 /** The next call of `cmd` waits until the returned release is called. */
 function hold(cmd: string): (v: unknown) => void {
@@ -126,5 +128,31 @@ describe('the stores that re-list', () => {
       [6, 'watch'],
       [8, 'drive'],
     ]);
+  });
+
+  it('a worktree removed while list_projects is in flight stays removed', async () => {
+    const tree = (wts: number[]) =>
+      ({
+        project: { id: 3, owner: 'o', repo: 'r', base_path: '/p', last_session_at: null, adopted: false, system: false },
+        worktrees: wts.map((id) => ({ id, project_id: 3, host_alias: 'local', name: `w${id}`, path: `/p/w${id}`, branch: null })),
+      }) as ProjectTreeRow;
+    projects.set([tree([1, 2])]);
+    const release = hold('list_projects');
+    const p = loadProjects();
+    applyProjectEvents([{ type: 'worktree_removed', id: 2 }]);
+    release([tree([1, 2])]);
+    await p;
+    expect(get(projects)[0].worktrees.map((w) => w.id)).toEqual([1]);
+  });
+
+  it('a usage snapshot that lands while list_account_usage is in flight survives the list', async () => {
+    const snap = (at: number) => ({ account_uuid: 'u1', fetched_at: at, status: 'ok' }) as unknown as AccountUsageSnapshot;
+    accountUsage.set({ u1: snap(1) });
+    const release = hold('list_account_usage');
+    const p = loadAccountUsage();
+    applyAccountUsageEvents([snap(9)]);
+    release([snap(1)]);
+    await p;
+    expect(get(accountUsage).u1.fetched_at).toBe(9);
   });
 });
