@@ -1441,6 +1441,28 @@ describe('ConversationPanel live indicator', () => {
     }
   });
 
+  // Step 9.13: Control's chat answers its own loader and line.
+  it('new layout: thinkingAs replaces the Atom line with the host’s loader and words', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    uiLayout.set('new');
+    try {
+      const running = conv();
+      running.turns[0].items.push(tool('Read(hub/pair.rs)', { name: 'Read', target: 'hub/pair.rs', done: false }));
+      mockedConv.mockReturnValue(ok(running));
+      mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working' }) });
+      const thinkingAs = vi.fn(() => ({ loader: 'constellation' as const, label: 'Planning · sent work to 2 sessions' }));
+      render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true, thinkingAs });
+      await settle();
+      const ind = screen.getByTestId('conv-indicator');
+      expect(ind.textContent?.trim()).toBe('Planning · sent work to 2 sessions');
+      expect(ind.querySelector('[data-testid^="conv-constellation"]')).not.toBeNull();
+      expect(ind.querySelector('[data-testid^="conv-atom"]')).toBeNull();
+      expect(thinkingAs).toHaveBeenCalledWith(expect.objectContaining({ turns: expect.any(Array) }));
+    } finally {
+      uiLayout.set('classic');
+    }
+  });
+
   it('new layout: a session this window just started shows the Pulse until its agent is up', async () => {
     uiLayout.set('new');
     try {

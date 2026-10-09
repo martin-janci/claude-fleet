@@ -33,6 +33,7 @@
   import { facetSentence, workFacets } from './filter_facets';
   import WorkReview from './WorkReview.svelte';
   import WorkMissions from './WorkMissions.svelte';
+  import { missionOpenRequest } from './missions';
   import WorkPrs from './WorkPrs.svelte';
   import WorkRules from './WorkRules.svelte';
   import TaskList from './TaskList.svelte';
@@ -91,6 +92,11 @@
   const chord = workViewChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator));
 
   let tab = $state<'tasks' | 'review' | 'missions' | 'prs'>('tasks');
+  // A "Sent to a mission" chip in Control (redesign 9.3): the Missions tab,
+  // where WorkMissions opens the mission.
+  $effect(() => {
+    if ($missionOpenRequest) tab = 'missions';
+  });
   let page = $state.raw<WorkTreePage | null>(null);
   const archivedHidden = $derived(page?.archived_hidden ?? 0);
   function setArchived(on: boolean) {

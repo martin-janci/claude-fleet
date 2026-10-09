@@ -18,6 +18,10 @@
   import { orgs } from '../orgs';
   import { trackers } from '../trackers';
   import { push, pushError } from '../toasts';
+  import { uiLayout } from '../prefs';
+  import WizardDialog from '../forms/WizardDialog.svelte';
+  import type { Values } from '../forms/forms';
+  import { pairDevice, pairDeviceWizard } from '../forms/pair_device_wizard';
   import type { Page } from './pages';
   import {
     afterChange,
@@ -64,6 +68,31 @@
   let shown = $state<Shown | null>(null);
 
   const current = $derived(records.find((r) => idOf(resource, r) === selected) ?? null);
+
+  /** Redesign 10.12, New layout: "Pair a device" is the pair_device wizard
+   *  (one fleet.form/1 spec, the same one the chat shows) rather than the
+   *  inline create form; its answer is the same PairingResult. */
+  const pairWizard = $derived(resource.id === 'device' && $uiLayout === 'new');
+  let wizardOpen = $state(false);
+  let wizardBusy = $state(false);
+  let wizardError = $state<string | null>(null);
+
+  async function pairFromWizard(v: Values) {
+    wizardBusy = true;
+    wizardError = null;
+    const r = await pairDevice(v);
+    wizardBusy = false;
+    if (!r.ok) {
+      wizardError = r.error.message;
+      return;
+    }
+    wizardOpen = false;
+    pairing = r.value;
+    await reload();
+    await afterChange(resource);
+    const made = records.find((x) => titleOf(resource, x) === r.value.name);
+    if (made) selected = idOf(resource, made);
+  }
 
   async function reload() {
     const r = await listRecords(resource);
@@ -203,6 +232,24 @@
         <button type="button" class="btn" data-testid="resource-add" disabled={adding} onclick={() => (adding = true)}
           >Add {resource.label.toLowerCase()}</button
         >
+      {:else if !readonly && resource.create && pairWizard}
+        <button
+          type="button"
+          class="btn"
+          data-testid="resource-add"
+          onclick={() => {
+            wizardError = null;
+            wizardOpen = true;
+          }}>{resource.create.label}</button
+        >
+        {#if wizardOpen}
+          <WizardDialog
+            wizard={pairDeviceWizard($orgs)}
+            busy={wizardBusy}
+            error={wizardError}
+            run={(v) => void pairFromWizard(v)}
+            onclose={() => (wizardOpen = false)} />
+        {/if}
       {:else if !readonly && resource.create}
         {#if adding}
           <ActionForm action={resource.create} {busy} options={createOptions} onrun={(p) => void create(p)} testid="resource-create" />

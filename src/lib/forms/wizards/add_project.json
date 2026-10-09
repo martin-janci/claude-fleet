@@ -1,0 +1,63 @@
+{
+  "spec": "fleet.form/1",
+  "title": "Add project",
+  "intro": "Add a repository to the fleet on one host.",
+  "submit": "Add project",
+  "steps": [
+    {
+      "title": "Source",
+      "fields": [
+        {
+          "name": "source",
+          "type": "select",
+          "label": "From",
+          "required": true,
+          "value": "github",
+          "options": [
+            ["github", "From GitHub"],
+            ["clone", "Clone a URL"],
+            ["folder", "Existing folder"],
+            ["new", "New repo"]
+          ]
+        },
+        { "name": "host", "type": "select", "label": "Host", "required": true, "options": [["local", "This machine"]] }
+      ]
+    },
+    {
+      "title": "Repositories",
+      "when": { "field": "source", "eq": "github" },
+      "fields": [
+        { "name": "repos", "type": "multiselect", "label": "Repositories", "required": true, "options": [["owner/repo", "owner/repo"]] }
+      ]
+    },
+    {
+      "title": "Clone",
+      "when": { "field": "source", "eq": "clone" },
+      "fields": [
+        { "name": "url", "type": "text", "label": "Repository", "required": true, "placeholder": "owner/repo or a git URL" }
+      ]
+    },
+    {
+      "title": "Folder",
+      "when": { "field": "source", "eq": "folder" },
+      "fields": [
+        { "name": "path", "type": "text", "label": "Folder on the host", "required": true, "placeholder": "~/projects/my-app" }
+      ]
+    },
+    {
+      "title": "New repo",
+      "when": { "field": "source", "eq": "new" },
+      "fields": [
+        { "name": "owner", "type": "text", "label": "Owner", "required": true, "max_len": 39 },
+        {
+          "name": "repo",
+          "type": "text",
+          "label": "Name",
+          "required": true,
+          "max_len": 100,
+          "help": "A local repository only; create it on GitHub from Add project in the sidebar."
+        }
+      ]
+    }
+  ]
+}
