@@ -195,6 +195,12 @@ Kill a session: a tmux session, or a background agent row (`bg:<uuid>`, kind `bg
 
 Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
 
+### `library`
+
+Library: files a person put on a host (Upload or a prompt's attachment). list {session_id?, host_alias?, limit?}: {items}; add {kind: upload|attachment, session_id, files: [{path, name?, size?}]} records files already on the session's host; remove {id} drops a row, never the file. Downloads: list_downloads. E_NOTFOUND, E_INVALID.
+
+Parameters: `action`, `files`, `host_alias`, `id`, `kind`, `limit`, `session_id`
+
 ### `link_peer`
 
 Link this hub to another fleet's hub: redeem a peer code minted there (fleet-hub pair --mode peer) against its https URL. Answers the new link; it connects within seconds. The master, or the hub owner's trusted full device.
@@ -1004,6 +1010,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::quick_replies::quick_replies`
 - `commands::quick_replies::set_quick_replies`
 - `commands::downloads::list_downloads`
+- `commands::library::list_library`
+- `commands::library::add_library_items`
+- `commands::library::remove_library_item`
 - `commands::downloads::send_file`
 - `commands::downloads::remove_download`
 - `commands::downloads::save_download`

@@ -440,6 +440,17 @@
       "project_id",
       "worktrees"
     ],
+    "LibraryItemRow": [
+      "at",
+      "host_alias",
+      "id",
+      "kind",
+      "name",
+      "path",
+      "session_id",
+      "session_name",
+      "size"
+    ],
     "MyGrants": [
       "grants",
       "person_id"
