@@ -1832,7 +1832,7 @@ pub async fn restart_session(
         let gone_cwd = gone_pane_cwd(&s, row.as_ref(), &args.host_alias, &args.name)?;
         match row {
             Some(r) => {
-                if let Some(profile) = switch.as_ref() {
+                if switch.is_some() {
                     if r.kind == "shell"
                         || crate::store::has_no_pane(&r.kind)
                         || r.agent != crate::store::AGENT_CLAUDE
@@ -1842,9 +1842,15 @@ pub async fn restart_session(
                             "a credential profile applies to Claude sessions only",
                         ));
                     }
-                    s.set_session_profile(r.id, profile.as_deref())?;
                 }
-                let launch = stored_launch(&s, r.id);
+                // The new profile is launched from memory and stored only
+                // once the relaunch succeeded ([`relaunch_recording_login`]):
+                // written first, a refused repair or a failed respawn left the
+                // row naming a login the pane never ran under.
+                let mut launch = stored_launch(&s, r.id);
+                if let Some(profile) = switch.as_ref() {
+                    launch.profile = profile.clone();
+                }
                 (
                     r.kind,
                     r.agent,
@@ -1883,46 +1889,54 @@ pub async fn restart_session(
     let pane_cmd: String =
         recreate_pane_command(&kind, &agent, claude_id.as_deref(), &args.name, &launch);
     let tmux = exec_for(&args.host_alias, ssh);
-    // Automatic self-repair (create-only) before the pane is respawned, then
-    // respawn INTO the verified directory (a pane whose cwd was deleted keeps
-    // the dead inode until respawned with an explicit `-c`). A dead tmux
-    // session is created instead of failing with "can't find session". A
-    // workspace that needs more returns E_REPAIR_REQUIRED. Sessions with
-    // nothing to repair (orphans, bg rows) keep the plain respawn.
-    let repaired = match session_id {
-        Some(id) => match crate::service::repair::ensure_session_workspace(
-            id,
-            crate::service::repair::Entry::Restart,
-            store,
-            ssh,
-        )
-        .await
-        {
-            Ok(rep) => Some(rep),
-            Err(e) if e.code == codes::E_NOREPO || e.code == codes::E_BG_SESSION => None,
-            Err(e) => return Err(e),
-        },
-        None => None,
-    };
-    match repaired {
-        Some(rep) if !rep.tmux_alive => {
-            tmux.new_session(&args.name, std::path::Path::new(&rep.cwd), &pane_cmd)
+    // A Claude pane relaunched reads the login it runs under afresh.
+    let login = session_id
+        .filter(|_| agent == crate::store::AGENT_CLAUDE && kind != "shell")
+        .map(|id| (id, switch.clone()));
+    relaunch_recording_login(store, login, async {
+        // Automatic self-repair (create-only) before the pane is respawned, then
+        // respawn INTO the verified directory (a pane whose cwd was deleted keeps
+        // the dead inode until respawned with an explicit `-c`). A dead tmux
+        // session is created instead of failing with "can't find session". A
+        // workspace that needs more returns E_REPAIR_REQUIRED. Sessions with
+        // nothing to repair (orphans, bg rows) keep the plain respawn.
+        let repaired = match session_id {
+            Some(id) => match crate::service::repair::ensure_session_workspace(
+                id,
+                crate::service::repair::Entry::Restart,
+                store,
+                ssh,
+            )
+            .await
+            {
+                Ok(rep) => Some(rep),
+                Err(e) if e.code == codes::E_NOREPO || e.code == codes::E_BG_SESSION => None,
+                Err(e) => return Err(e),
+            },
+            None => None,
+        };
+        match repaired {
+            Some(rep) if !rep.tmux_alive => {
+                tmux.new_session(&args.name, std::path::Path::new(&rep.cwd), &pane_cmd)
+                    .await?
+            }
+            Some(rep) => {
+                tmux.respawn_pane_in(&args.name, std::path::Path::new(&rep.cwd), &pane_cmd)
+                    .await?
+            }
+            None if crate::store::has_no_pane(&kind) => {
+                tmux.restart_session(&args.name, &pane_cmd).await?
+            }
+            None => {
+                restart_unrepaired(&*tmux, &args.name, &pane_cmd, || {
+                    resolve_gone_pane_cwd(gone_cwd, &args.host_alias, ssh.as_ref())
+                })
                 .await?
+            }
         }
-        Some(rep) => {
-            tmux.respawn_pane_in(&args.name, std::path::Path::new(&rep.cwd), &pane_cmd)
-                .await?
-        }
-        None if crate::store::has_no_pane(&kind) => {
-            tmux.restart_session(&args.name, &pane_cmd).await?
-        }
-        None => {
-            restart_unrepaired(&*tmux, &args.name, &pane_cmd, || {
-                resolve_gone_pane_cwd(gone_cwd, &args.host_alias, ssh.as_ref())
-            })
-            .await?
-        }
-    }
+        Ok(())
+    })
+    .await?;
     // Any of the branches leaves a live tmux session under this name,
     // and the create branch may even have rebuilt it from nothing.
     record_tmux_created(store, &args.host_alias, &args.name);
@@ -1937,6 +1951,38 @@ pub async fn restart_session(
             ),
         )
     })
+}
+
+/// Run `relaunch` (a restart's repair + respawn), then record the login the
+/// relaunched pane runs under on `login`'s row: `Some(profile)` switches the
+/// stored profile, and a host-login row drops its account link either way
+/// ([`Store::clear_host_login_account`]) so the next reconcile takes the
+/// host's current account. On `Err` nothing is written: the pane still runs
+/// the old login, and the row must keep saying so.
+pub(super) async fn relaunch_recording_login(
+    store: &Mutex<Store>,
+    login: Option<(i64, Option<Option<String>>)>,
+    relaunch: impl std::future::Future<Output = Result<(), IpcError>>,
+) -> Result<(), IpcError> {
+    relaunch.await?;
+    if let Some((id, switch)) = login {
+        let s = lock(store)?;
+        record_relaunched_login(&s, id, switch.as_ref())?;
+    }
+    Ok(())
+}
+
+/// The store half of [`relaunch_recording_login`], for every path that
+/// relaunches a Claude pane (restart, recreate, repair).
+pub(crate) fn record_relaunched_login(
+    s: &Store,
+    session_id: i64,
+    switch: Option<&Option<String>>,
+) -> Result<(), rusqlite::Error> {
+    if let Some(profile) = switch {
+        s.set_session_profile(session_id, profile.as_deref())?;
+    }
+    s.clear_host_login_account(session_id)
 }
 
 /// `restart_session`'s controller guard: refuse to restart the registered
@@ -2196,6 +2242,10 @@ pub async fn recreate_session(
     // Mark the row live again and return it.
     let row = {
         let s = lock(store)?;
+        // The rebuilt `claude` reads the host's login afresh.
+        if sess.agent == crate::store::AGENT_CLAUDE && sess.kind != "shell" {
+            record_relaunched_login(&s, sess.id, None)?;
+        }
         let row = s
             .restore_session(sess.id)?
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "session vanished after restore"))?;
