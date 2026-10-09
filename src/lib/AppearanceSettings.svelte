@@ -11,8 +11,8 @@
   import { motionPref, type MotionPref } from './motion';
 
   const layouts = [
-    { id: 'classic', label: 'Classic' },
     { id: 'new', label: 'New' },
+    { id: 'classic', label: 'Classic' },
   ] as const satisfies readonly { id: UiLayout; label: string }[];
 
   const densities = [
@@ -43,7 +43,7 @@
       <span class="lbl">Layout</span>
       <p class="hook-desc">
         New uses the rail, the left list with filters and grouping, and the
-        inspector. Classic keeps 0.5.3's layout while the new one reaches parity.
+        inspector. Classic keeps 0.5.3's layout for this release only.
       </p>
     </div>
     <SegmentedControl
