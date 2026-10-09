@@ -1,5 +1,5 @@
 {
-  "revision": 13,
+  "revision": 14,
   "types": {
     "AccountRow": [
       "display_name",
@@ -328,6 +328,13 @@
       "status",
       "title"
     ],
+    "Headroom": [
+      "chosen",
+      "logins",
+      "over",
+      "pause_at_pct",
+      "suggestion"
+    ],
     "Health": [
       "by_status",
       "context_red",
@@ -403,6 +410,11 @@
       "tracker_id",
       "write_failures"
     ],
+    "HostLogin": [
+      "account_uuid",
+      "profile",
+      "used_pct"
+    ],
     "HostRow": [
       "account_uuid",
       "agent_version",
@@ -464,6 +476,32 @@
       "run_id",
       "source",
       "unsure"
+    ],
+    "MissionRow": [
+      "budget_micros",
+      "cost_micros",
+      "created_at",
+      "done",
+      "done_when",
+      "finished_at",
+      "goal",
+      "id",
+      "level",
+      "mode",
+      "name",
+      "next_wake_at",
+      "non_goals",
+      "org_id",
+      "owner_person_id",
+      "plan_version",
+      "policy",
+      "repos",
+      "root_item_id",
+      "started_at",
+      "state",
+      "total",
+      "updated_at",
+      "version"
     ],
     "MyGrants": [
       "grants",
@@ -599,6 +637,11 @@
       "ok",
       "reason"
     ],
+    "RunEstimate": [
+      "basis",
+      "micros",
+      "runs"
+    ],
     "RunRow": [
       "cost_micros",
       "duration_ms",
@@ -732,6 +775,16 @@
     "ShellTerminalsResult.terminals": [
       "n",
       "tmux_name"
+    ],
+    "ShepherdRuleView": [
+      "active",
+      "expires_at",
+      "granted_at",
+      "granted_by",
+      "level",
+      "project",
+      "project_id",
+      "recipes"
     ],
     "TaskRow": [
       "created_at",
