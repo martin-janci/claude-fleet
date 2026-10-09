@@ -1547,7 +1547,7 @@
     padding: 0 0.75rem;
     background: var(--bg-pane);
     border-top: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     display: flex;
     align-items: center;
@@ -1556,11 +1556,11 @@
   .footer-end {
     margin-left: auto;
   }
-  .status .err { color: #e64a4a; }
+  .status .err { color: var(--danger); }
   .hub-badge {
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     padding: 0 0.4rem;
     font: inherit;
     color: var(--fg-muted);
@@ -1587,7 +1587,7 @@
     border-right: 1px solid var(--border);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 1rem;
+    font-size: var(--text-md);
     line-height: 1;
     padding: 0;
     writing-mode: vertical-rl;
@@ -1620,10 +1620,10 @@
     padding: 0;
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
     line-height: 1;
     z-index: 2;
   }
@@ -1656,10 +1656,10 @@
     background: transparent;
     border: 1px solid transparent;
     border-bottom: none;
-    border-radius: 5px 5px 0 0;
+    border-radius: var(--radius-sm) var(--radius-sm) 0 0;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.25rem 0.8rem;
   }
   .view-tab:hover:not(:disabled) { color: var(--fg); }
@@ -1685,17 +1685,17 @@
     display: flex;
     gap: 1px;
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     padding: 1px;
     margin-bottom: 0.2rem;
   }
   .subtab {
     background: transparent;
     border: none;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.1rem 0.6rem;
   }
   .subtab:hover:not(:disabled) { color: var(--fg); }
@@ -1718,8 +1718,8 @@
     border-left: 1px solid var(--border);
   }
   .hosts-tab kbd {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     margin-left: 0.25rem;
   }
