@@ -405,7 +405,9 @@ pub enum HubFrame {
         /// See `proto` for why that matters so much in THIS direction.
         #[serde(default)]
         hub_version: String,
-        /// This hub's [`PROTO_VERSION`].
+        /// The protocol this connection speaks: the hub's [`PROTO_VERSION`]
+        /// capped at the agent's `hello.proto`, so an older agent inside
+        /// [`MIN_SUPPORTED_PROTO`] is never sent a version above its own.
         ///
         /// Optional on the wire too, defaulting to `0` — which
         /// [`judge_proto`] then refuses as below [`MIN_SUPPORTED_PROTO`],
