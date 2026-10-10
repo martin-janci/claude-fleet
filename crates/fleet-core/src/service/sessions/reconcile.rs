@@ -907,7 +907,12 @@ fn write_reachable_host(
         // itself shows a turn (`stale_working_veto`, F2).
         let claude_status = stale_working_veto(
             stale,
-            status_candidate(probe.agent_rows.is_some(), agent_status_typed, pane_status),
+            status_candidate(
+                probe.agent_rows.is_some(),
+                agent_status_typed,
+                pane_status,
+                prior_row.is_some_and(|p| p.claude_status.as_deref() == Some("blocked")),
+            ),
             pane_status,
         )
         .map(|s| s.as_str().to_string());
@@ -2354,18 +2359,32 @@ pub(super) fn known_agent_status(tmux_name: &str, status: Option<&str>) -> Optio
 /// upsert's `COALESCE(excluded.claude_status, claude_status)` keeps
 /// whatever is stored (a hook-stamped `idle`/`working` survives between
 /// agent fetches).
+///
+/// Two exceptions, both about a dialog, the one thing the pane sees better
+/// than anyone:
+///  - a pane showing a dialog (`Blocked`) wins even over `claude agents`:
+///    the CLI can report `working` while a permission dialog is up, and
+///    letting it win flipped the row every agents pass (and re-alerted a
+///    phone each time it came back);
+///  - a stored `blocked` (`stored_blocked`) whose pane now shows a turn or
+///    the input box is over: a dialog answered in the terminal fires no
+///    hook, so without this `blocked` (and its "needs you") lasted until the
+///    next agents pass or the Stop hook.
 pub(super) fn status_candidate(
     agents_asked: bool,
     agent_status: Option<crate::service::pane_intel::ClaudeStatus>,
     pane: Option<crate::service::pane_intel::ClaudeStatus>,
+    stored_blocked: bool,
 ) -> Option<crate::service::pane_intel::ClaudeStatus> {
+    use crate::service::pane_intel::ClaudeStatus;
+    if pane == Some(ClaudeStatus::Blocked) {
+        return pane;
+    }
     if agents_asked {
         return agent_status.or(pane);
     }
     match pane {
-        Some(crate::service::pane_intel::ClaudeStatus::Blocked) => {
-            Some(crate::service::pane_intel::ClaudeStatus::Blocked)
-        }
+        Some(ClaudeStatus::Working | ClaudeStatus::Idle) if stored_blocked => pane,
         _ => None,
     }
 }

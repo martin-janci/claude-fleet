@@ -33,16 +33,16 @@ fn skipped_agents_pass_only_lets_the_pane_report_blocked() {
     // pane guess must not overwrite the stored status — only `Blocked` (a
     // real dialog / stuck pane) is strong enough to surface immediately.
     assert_eq!(
-        status_candidate(false, None, Some(ClaudeStatus::Working)),
+        status_candidate(false, None, Some(ClaudeStatus::Working), false),
         None
     );
     assert_eq!(
-        status_candidate(false, None, Some(ClaudeStatus::Idle)),
+        status_candidate(false, None, Some(ClaudeStatus::Idle), false),
         None
     );
-    assert_eq!(status_candidate(false, None, None), None);
+    assert_eq!(status_candidate(false, None, None, false), None);
     assert_eq!(
-        status_candidate(false, None, Some(ClaudeStatus::Blocked)),
+        status_candidate(false, None, Some(ClaudeStatus::Blocked), false),
         Some(ClaudeStatus::Blocked)
     );
 
@@ -50,16 +50,49 @@ fn skipped_agents_pass_only_lets_the_pane_report_blocked() {
     // authoritative agent status wins, falling back to the pane only when
     // the agent gave nothing.
     assert_eq!(
-        status_candidate(true, Some(ClaudeStatus::Working), Some(ClaudeStatus::Idle)),
+        status_candidate(
+            true,
+            Some(ClaudeStatus::Working),
+            Some(ClaudeStatus::Idle),
+            false
+        ),
         Some(ClaudeStatus::Working),
         "the agent status wins over the pane"
     );
     assert_eq!(
-        status_candidate(true, None, Some(ClaudeStatus::Idle)),
+        status_candidate(true, None, Some(ClaudeStatus::Idle), false),
         Some(ClaudeStatus::Idle),
         "falls back to the pane when the agent gave nothing"
     );
-    assert_eq!(status_candidate(true, None, None), None);
+    assert_eq!(status_candidate(true, None, None, false), None);
+}
+
+#[test]
+fn a_dialog_on_the_pane_and_its_answer_are_the_panes_to_report() {
+    use crate::service::pane_intel::ClaudeStatus;
+    // `claude agents` saying `working` while a dialog is up must not flip
+    // the row away from `blocked` every agents pass.
+    assert_eq!(
+        status_candidate(
+            true,
+            Some(ClaudeStatus::Working),
+            Some(ClaudeStatus::Blocked),
+            false
+        ),
+        Some(ClaudeStatus::Blocked)
+    );
+    // Answered in the terminal (no hook): a stored `blocked` whose pane now
+    // shows a turn or the input box is over, even on a skipped agents pass.
+    assert_eq!(
+        status_candidate(false, None, Some(ClaudeStatus::Working), true),
+        Some(ClaudeStatus::Working)
+    );
+    assert_eq!(
+        status_candidate(false, None, Some(ClaudeStatus::Idle), true),
+        Some(ClaudeStatus::Idle)
+    );
+    // An unreadable pane still keeps what is stored.
+    assert_eq!(status_candidate(false, None, None, true), None);
 }
 
 /// F2: the cached `claude agents` status reports a session with live
