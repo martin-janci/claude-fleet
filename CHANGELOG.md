@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.6.3-dev.14.desktop.gfa5304d] - 2026-10-10
+
+### Added
+- **work:** task comments, and Activity lists what happened to a task
+- **work:** epics for local items, one level deep
+- **work:** scope the board to a sprint or the backlog
+- **work:** plan tasks into sprints and releases from the Work view
+
+### Changed
+- **accounts:** tolerate a closed pipe when a refused profile exits before reading stdin
+
+### Documentation
+- G6.2 bring status, the transition plan and the phone parity audit up to date
+- **redesign:** G6.1 re-run the canvas audit against main
 ## [0.6.2] - 2026-10-10
 
 ### Added
@@ -3503,6 +3517,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.6.3-dev.14.desktop.gfa5304d]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.3-dev.14.desktop.gfa5304d
 [0.6.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.2
 [0.6.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.1
 [0.6.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.0
