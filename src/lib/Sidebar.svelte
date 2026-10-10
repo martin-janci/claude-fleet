@@ -14,10 +14,24 @@
     sidebarGroupBy,
     sameSession,
     hasNoPane,
+    sessionAgent,
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
-  import { groupRows, isFlatGroupBy } from './row_groups';
+  import { capRows, groupRows, isFlatGroupBy, moreRunningText } from './row_groups';
+  import { startingSessions } from './session_starting';
+  import { tablistKeys } from './tablist_keys';
+  import {
+    agentFilter,
+    agentFilterLabel,
+    inScopeTab,
+    isSharedAccess,
+    scopeTab,
+    scopeTabCounts,
+    sharedByLine,
+    SCOPE_TAB_LABELS,
+    SCOPE_TABS,
+  } from './session_scope';
   import { inboxRows, notWaiting, notWaitingText } from './inbox';
   import RoutineFailures from './automation/RoutineFailures.svelte';
   import { failingCount } from './routines';
@@ -27,7 +41,7 @@
   import { selectedSession, selectSession, selectSessionExplicitly, revealSeq } from './selection';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import { readPref, writePref } from './prefs';
-  import { accessOf } from './access';
+  import { accessOf, backendMode } from './access';
   import AddProjectDialog from './AddProjectDialog.svelte';
   import { hostFilter, effectiveHostFilter, hosts, hostByAlias } from './hosts';
   import { bootstrapError } from './bootstrap_state';
@@ -49,6 +63,7 @@
     orgColorById,
     orgColorOf,
     projectOwners,
+    orgs as orgList,
     UNASSIGNED,
   } from './orgs';
   import { facetSentence, sessionFacets } from './filter_facets';
@@ -303,7 +318,13 @@
     // used to weigh only a project's newest session, and only in the tree).
     const r = recency;
     const recent: SessionPredicate = r === 'all' ? null : (s) => withinRecency(s.last_activity_at, r, opts.now);
-    return bothPredicates(bothPredicates(needsYouOnly ? (s) => needsYou(s, opts) : null, recent), work);
+    // "Agent: any" (Sessions board): only the rows that run the chosen agent.
+    const ag = $agentFilter;
+    const agent: SessionPredicate = ag === 'any' ? null : (s) => sessionAgent(s) === ag;
+    return bothPredicates(
+      bothPredicates(bothPredicates(needsYouOnly ? (s) => needsYou(s, opts) : null, recent), agent),
+      work,
+    );
   }
   const rowBase = $derived.by((): SessionPredicate => {
     if (focus) {
@@ -316,17 +337,34 @@
     return bothPredicates(unfolded, triagePredicate(workPredicate));
   });
   // ── Shared with me (redesign step 5.8) ──
-  // The sessions someone shared with this person (watch or drive) leave the
+  // The sessions someone shared with this person (at any level) leave the
   // tree and the groups for one group of their own, except in focus. An
   // unknown access (null) is not a share and stays put.
   const splitShared = $derived(!focus);
   function isSharedWithMe(s: SessionRow): boolean {
-    const a = $accessOf(s);
-    return a === 'watch' || a === 'drive';
+    return isSharedAccess($accessOf(s));
   }
-  const rowPredicate = $derived(
-    splitShared ? bothPredicates((s) => !isSharedWithMe(s), rowBase) : rowBase,
-  );
+  // ── All / Mine / Shared with me (Sessions board) ──
+  // Counted over what All would show; the tabs show on a fleet with people
+  // (a window onto a hub) or once something is shared, since a standalone
+  // desktop owns every row and the tabs would only repeat All.
+  const tabCounts = $derived.by(() => {
+    const q = viewSearch.toLowerCase();
+    const pool = $sessions.filter(
+      (s) => s.kind !== 'external' && sessionVisible(s, viewHost, viewBg, rowBase, viewScope) && sessionMatchesSearch(s, q),
+    );
+    return scopeTabCounts(pool, $accessOf);
+  });
+  const tabsShown = $derived(!focus && (backendMode($hubStatus) !== 'local' || tabCounts.shared > 0));
+  const tab = $derived(tabsShown ? $scopeTab : 'all');
+  const rowPredicate = $derived.by((): SessionPredicate => {
+    if (!splitShared) return rowBase;
+    // Shared with me: the tree and the groups hold nothing; the shared
+    // group below is the list.
+    if (tab === 'shared') return () => false;
+    const mine = tab === 'mine';
+    return bothPredicates((s) => (mine ? inScopeTab('mine', $accessOf(s)) : !isSharedWithMe(s)), rowBase);
+  });
 
   // What narrows the list, for the empty state (the chrome shows the same
   // facets as chips).
@@ -396,6 +434,7 @@
           scopeLabel:
             $effectiveScope === UNASSIGNED ? 'Unassigned' : $scopes.find((x) => x.id === $effectiveScope)?.label,
           host: $effectiveHostFilter,
+          agent: $agentFilter === 'any' ? undefined : agentFilterLabel($agentFilter),
           recency,
           search: searchQuery,
           needsYou: needsYouOnly,
@@ -407,6 +446,7 @@
   function clearListFilters() {
     hostFilter.set('all');
     scopeFilter.set('all');
+    agentFilter.set('any');
     recency = 'all';
     search = '';
     searchQuery = '';
@@ -935,7 +975,7 @@
   }
   const orphanSessions = $derived(orphansOf(treePredicate));
   const sharedWithMe = $derived.by((): SessionRow[] => {
-    if (!splitShared) return [];
+    if (!splitShared || tab === 'mine') return [];
     const q = viewSearch.toLowerCase();
     const base = rowBase;
     return $sessions.filter(
@@ -958,10 +998,16 @@
           [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions],
           flatBy,
           attentionOpts,
+          $startingSessions,
+          { scopeOf: $scopeOf, scopes: $scopes },
         )
       : [],
   );
   let collapsedFlat: Set<string> = $state(new Set());
+  // "4 more running ›" (Sessions board): the Working group shows its first
+  // rows; the line opens the rest. The selected row always shows.
+  let expandedFlat: Set<string> = $state(new Set());
+  const keepIds = $derived(new Set($selectedSession ? [$selectedSession.id] : []));
 
   // ── Inbox (redesign step 3.3) ──
   // The rows the list would show under the same filters, narrowed to what
@@ -976,7 +1022,7 @@
   // The footer's row count (UX audit L4): what this list holds right now.
   const listCountText = $derived.by(() => {
     if ($sidebarView === 'work') return '';
-    const n = $sidebarView === 'inbox' ? inboxList.length : visibleIds.size;
+    const n = $sidebarView === 'inbox' ? inboxList.length : visibleIds.size + sharedWithMe.length;
     return `${n} ${$sidebarView === 'inbox' ? 'waiting' : n === 1 ? 'session' : 'sessions'}`;
   });
   // Redesign step 7.4: a row whose state moves it to another group is a new
@@ -1530,6 +1576,24 @@
     </div>
   </div>
   {:else}
+  {#if tabsShown}
+    <!-- All / Mine / Shared with me (Sessions board), above the list. -->
+    <div class="scope-tabs" role="tablist" aria-label="Whose sessions" data-testid="scope-tabs" use:tablistKeys>
+      {#each SCOPE_TABS as t (t)}
+        <button
+          type="button"
+          role="tab"
+          class="scope-tab"
+          class:on={tab === t}
+          aria-selected={tab === t}
+          tabindex={tab === t ? 0 : -1}
+          data-testid="scope-tab-{t}"
+          onclick={() => scopeTab.set(t)}
+          >{SCOPE_TAB_LABELS[t]}{#if t !== 'mine' && tabCounts[t] > 0}<span class="count">{tabCounts[t]}</span>{/if}</button
+        >
+      {/each}
+    </div>
+  {/if}
   <div class="scroller">
     {#snippet pastRow(key: string, l: WorkLink)}
       <div
@@ -1736,10 +1800,20 @@
                   ontry={() => void onRefresh()}
                   trying={loading} />
               {/if}
+              {@const capped = capRows(g, expandedFlat, keepIds)}
               <div role="group">
-                {#each g.rows as sess (sess.id)}
+                {#each capped.shown as sess (sess.id)}
                   {@render sessionRow(sess)}
                 {/each}
+                {#if capped.hidden > 0}
+                  <button
+                    type="button"
+                    class="btn btn--quiet group-more"
+                    data-testid="group-more"
+                    onclick={() => (expandedFlat = toggleIn(expandedFlat, g.key))}
+                    >{moreRunningText(capped.hidden)} ›</button
+                  >
+                {/if}
               </div>
             {/if}
           </li>
@@ -1889,10 +1963,16 @@
           <span class="caret" class:collapsed={!sharedOpen}>▾</span>
           Shared with me ({sharedWithMe.length})
         </button>
-        {#if sharedOpen}
+        {#if sharedOpen || tab === 'shared'}
           <div class="tree" role="tree" aria-label="Shared with me">
             {#each sharedWithMe as sess (sess.id)}
-              {@render sessionRow(sess)}
+              {@const level = $accessOf(sess)}
+              {#snippet sharedBy()}
+                {#if isSharedAccess(level)}
+                  <div class="shared-by" data-testid="shared-by">{sharedByLine(sess, level, $orgList)}</div>
+                {/if}
+              {/snippet}
+              {@render sessionRow(sess, false, false, sharedBy)}
             {/each}
           </div>
         {/if}
@@ -2316,6 +2396,42 @@
   }
   .archived-row span { flex: 1; }
 
+  .scope-tabs {
+    display: flex;
+    gap: 14px;
+    padding: 0 12px;
+    border-bottom: 1px solid var(--border);
+    flex: none;
+  }
+  .scope-tab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 6px 0;
+    font: inherit;
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .scope-tab.on {
+    color: var(--fg);
+    border-bottom-color: var(--accent);
+    font-weight: 500;
+  }
+  .shared-by {
+    font-size: var(--text-xs);
+    line-height: 16px;
+    color: var(--fg-muted);
+    padding: 0 0 4px 28px;
+  }
+  .group-more {
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    margin: 0 0 2px 22px;
+  }
   .orphan-section {
     border-top: 1px solid var(--border);
     padding-top: 0.35rem;

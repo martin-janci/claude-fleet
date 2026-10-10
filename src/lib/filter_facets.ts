@@ -36,6 +36,7 @@ export interface Facet {
 export type SessionFacetId =
   | 'scope'
   | 'host'
+  | 'agent'
   | 'recency'
   | 'search'
   | 'needs-you'
@@ -51,6 +52,8 @@ export interface SessionFacetInput {
   scopeLabel?: string;
   /** The effective host filter (`all` = none). */
   host: string;
+  /** The agent filter's label (`undefined` = any agent). */
+  agent?: string;
   recency: Recency;
   search: string;
   needsYou: boolean;
@@ -65,6 +68,7 @@ export function sessionFacets(i: SessionFacetInput): (Facet & { id: SessionFacet
   if (i.needsYou) out.push({ id: 'needs-you', label: 'Needs you' });
   if (i.scope !== 'all') out.push({ id: 'scope', label: `Org: ${i.scopeLabel ?? i.scope}` });
   if (i.host !== 'all') out.push({ id: 'host', label: `Host: ${i.host}` });
+  if (i.agent) out.push({ id: 'agent', label: `Agent: ${i.agent}` });
   if (i.recency !== 'all') out.push({ id: 'recency', label: `Last ${i.recency}` });
   const q = i.search.trim();
   if (q) out.push({ id: 'search', label: `Search: “${q}”` });
