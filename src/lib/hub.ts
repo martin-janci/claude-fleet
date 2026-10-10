@@ -465,6 +465,9 @@ export const ROUTED_ACTIONS = [
   // grant or decline of one (both buttons, so both are writes here).
   'session_ask_access',
   'access_requests',
+  // Gap plan G7.11: the Share sheet's "Trust now" (a device's mode, through
+  // the hub's org_admin).
+  'update_device',
   // Orchestration O1: the Missions tab's writes.
   'save_mission',
   'set_mission_state',
