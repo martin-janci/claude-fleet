@@ -2225,7 +2225,9 @@ columns the phone app reads — the session list's `id`, `tmux_name`,
 `last_activity_at`, `ci_status`, `pending_input`, `needs_attention`, and the
 session card's `is_controller`, `tags`, `turn_seq`, `safe_kill_state`,
 `started_at`, `last_turn_at`, `last_stop_at`, `usage_cost_micros`,
-`usage_model`, plus the work graph's `work` (the row's primary work link). The first cut — the list's sixteen alone — measured
+`usage_model`, plus the work graph's `work` (the row's primary work link)
+and the PR fact, CI check count and Switch account's `pr_url`,
+`pr_evidence` and `claude_profile`. The first cut — the list's sixteen alone — measured
 **46 990 → 16 733 B of JSON (−64 %), 7 712 → 3 023 B gzipped** on the same
 44-session fleet; the card's nine are short scalars and do not change that
 picture. The first cut left the card's columns out, and a phone that

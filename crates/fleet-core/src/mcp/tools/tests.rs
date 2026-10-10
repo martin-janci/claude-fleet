@@ -5257,6 +5257,11 @@ fn one_full_row() -> serde_json::Value {
     // With live links, for the same reason: `work_rev` is skipped at 0, and a
     // first cut of review round 3 read that as "no such key" (R3-4).
     row.work_rev = 42;
+    // With a PR and a profile, for the same reason: `pr_evidence` and
+    // `claude_profile` are skipped when absent (M15 G5.5's phone fields).
+    row.pr_url = Some("https://github.com/o/r/pull/7".to_string());
+    row.pr_evidence = Some(crate::service::outcome::PrEvidence::default());
+    row.claude_profile = Some("work".to_string());
     // Through the constructor, so the derived `needs_attention` is stamped
     // the same way `list_sessions` stamps it — the view is pinned against
     // what the wire actually carries, not against a hand-built row.
@@ -5274,6 +5279,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
         &[
             "account_uuid",
             "ci_status",
+            "claude_profile",
             "claude_status",
             "context_pct",
             "created_at",
@@ -5293,6 +5299,8 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "owner_person_id",
             "pending_form",
             "pending_input",
+            "pr_evidence",
+            "pr_url",
             "project_id",
             "safe_kill_state",
             "started_at",
@@ -7186,6 +7194,21 @@ fn the_phone_view_keeps_tags_so_a_phone_edit_does_not_wipe_them() {
     rows[0]["tags"] = serde_json::json!(["mobile", "wip"]);
     project_rows(&mut rows, PHONE_SESSION_FIELDS);
     assert_eq!(rows[0]["tags"], serde_json::json!(["mobile", "wip"]));
+}
+
+/// fleet-mobile's CI check count reads `pr_evidence`, its PR fact `pr_url`
+/// and Switch account `claude_profile`: a re-list without them blanked all
+/// three until the next full frame (M15, from G5.5).
+#[test]
+fn the_phone_view_keeps_the_pr_and_the_profile() {
+    let mut rows = one_full_row();
+    project_rows(&mut rows, PHONE_SESSION_FIELDS);
+    assert_eq!(
+        rows[0]["pr_url"],
+        serde_json::json!("https://github.com/o/r/pull/7")
+    );
+    assert!(rows[0]["pr_evidence"].is_object(), "{}", rows[0]);
+    assert_eq!(rows[0]["claude_profile"], serde_json::json!("work"));
 }
 
 /// A projection that is not an array of rows is left alone rather than

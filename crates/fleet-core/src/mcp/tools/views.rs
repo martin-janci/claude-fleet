@@ -102,6 +102,11 @@ use serde_json::Value;
 /// * `created_at` — the Details sheet's "started" fallback for a session
 ///   with no `started_at` (R3-3).
 ///
+/// * `pr_url`, `pr_evidence`, `claude_profile` — the phone's PR fact, its
+///   CI check count and Switch account (fleet-mobile G5.5, M15). Projected
+///   away, each vanished on a full refresh until a `session:updated` frame
+///   carried the whole row back.
+///
 /// Added 2026-09-23 when fleet-mobile's pager (its PR #19) began reading
 /// them: the first cut of this view was taken against the list screen alone.
 ///
@@ -112,6 +117,7 @@ use serde_json::Value;
 pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "account_uuid",
     "ci_status",
+    "claude_profile",
     "claude_status",
     "context_pct",
     "created_at",
@@ -131,6 +137,8 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "owner_person_id",
     "pending_form",
     "pending_input",
+    "pr_evidence",
+    "pr_url",
     "project_id",
     "safe_kill_state",
     "started_at",
