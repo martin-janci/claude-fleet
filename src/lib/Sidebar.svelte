@@ -52,7 +52,7 @@
   import { openSettingsAt } from './app_views';
   import { openToday } from './control';
   import type { IpcError } from './result';
-  import { bulkTargets, sessionBlocked, sessionIdBlocked } from './share';
+  import { bulkTargets, sessionBlocked } from './share';
   import { moveToAccount } from './account_limits';
   import {
     effectiveScope,
@@ -129,7 +129,7 @@
   import { hubConnection, connectionBanner } from './hub_connection';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import KillDialog from './KillDialog.svelte';
-  import { archiveBlocked, archiveSessions, undoArchive } from './kill_check';
+  import { announceArchive, archiveBlocked, archiveSessions } from './kill_check';
   import BulkPromptDialog from './BulkPromptDialog.svelte';
   import NameWorkDialog from './NameWorkDialog.svelte';
   import SidebarFilters from './SidebarFilters.svelte';
@@ -572,20 +572,7 @@
       return;
     }
     clearSelected();
-    const { archived, skipped } = r.value;
-    const left = skipped.length > 0 ? ` · ${skipped.length} left as they were (${[...new Set(skipped.map((x) => x.why))].join(', ')})` : '';
-    if (archived.length === 0) {
-      push({ message: `Nothing archived${left}`, kind: 'info' });
-      return;
-    }
-    push({
-      message: `Archived ${archived.length} session${archived.length === 1 ? '' : 's'}${left}`,
-      kind: 'success',
-      action: {
-        label: 'Undo',
-        run: () => void undoArchive(archived.filter((id) => $sessionIdBlocked(id, 'unarchive_session_work') === null)),
-      },
-    });
+    announceArchive(r.value);
   }
   const bulkArchiveBlocked = $derived(archiveBlocked(selectedRows));
   /** Bulk Switch account (step 4.4): each selected row this person may

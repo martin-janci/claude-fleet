@@ -793,6 +793,51 @@ export function splitMarker(prompt: string): { from: string | null; text: string
   return m ? { from: m[1], text: prompt.slice(m[0].length) } : { from: null, text: prompt };
 }
 
+/**
+ * A conversation as Markdown, for Copy transcript (gap plan G1.11): each
+ * turn's prompt under "You" (without the hub's untrusted-client marker or
+ * the harness's reminders) and the reply's text under "Claude", with tool
+ * calls, commands and compactions as one line each. `title` heads it; a
+ * conversation whose older turns were not read says so at the top.
+ */
+export function transcriptMarkdown(conv: Pick<Conversation, 'turns' | 'truncated'>, title: string): string {
+  const out: string[] = [`# ${title}`];
+  if (conv.truncated) out.push('_Older turns are not included._');
+  for (const t of conv.turns) {
+    if (t.prompt != null && t.prompt.trim() !== '') out.push(`## You\n\n${splitMarker(t.prompt).text.trim()}`);
+    const reply: string[] = [];
+    for (const it of t.items) {
+      switch (it.kind) {
+        case 'text':
+          if (it.text.trim()) reply.push(it.text.trim());
+          break;
+        case 'tool':
+          reply.push(`- ${it.name}${it.target ? `: ${it.target}` : ''}${it.error ? ' (failed)' : ''}`);
+          break;
+        case 'subagent':
+          reply.push(`- Agent ${it.name}${it.description ? `: ${it.description}` : ''}`);
+          break;
+        case 'command':
+          reply.push(`- /${it.name.replace(/^\//, '')}${it.args ? ` ${it.args}` : ''}`);
+          break;
+        case 'bash':
+          reply.push(`- ! ${it.command}`);
+          break;
+        case 'compact':
+          reply.push('- (conversation compacted)');
+          break;
+        case 'interrupt':
+          reply.push('- (interrupted)');
+          break;
+        default:
+          break;
+      }
+    }
+    if (reply.length > 0) out.push(`## Claude\n\n${reply.join('\n\n').replace(/\n\n(?=- )/g, '\n')}`);
+  }
+  return `${out.join('\n\n')}\n`;
+}
+
 /** A prompt as the composer would have written it: no hub marker, LF line
  *  ends, no surrounding whitespace (the transcript parser trims too). */
 export function normalizePrompt(prompt: string): string {

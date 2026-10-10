@@ -34,6 +34,7 @@ import { valueInWords } from './pages/review';
 import type { Descriptor } from './pages/pages';
 import type { SessionRow } from './sessions';
 import { shortcutLabel } from './shortcuts';
+import { requestSessionAction, sessionMenuItems, type SessionActionId } from './session_actions';
 import type { SwitcherEntry } from './quick_switcher';
 
 export type PrefixMode = 'all' | 'commands' | 'work' | 'hosts';
@@ -123,6 +124,19 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
       description: name,
       synonyms: ['files', 'browse', 'tree'],
     });
+    // The session's own actions, from the one registry the row menu and
+    // Details read (`session_actions.ts`). Only the ones it may run now: a
+    // palette row cannot be disabled, and the menu and Details say why.
+    for (const a of get(sessionMenuItems)(s)) {
+      if (a.blocked !== null) continue;
+      out.push({
+        id: `${SESSION_ACTION}${a.id}`,
+        label: a.label,
+        section: 'This session',
+        description: name,
+        synonyms: [...(a.synonyms ?? [])],
+      });
+    }
     out.push({
       id: 'session.push',
       label: 'Push the branch',
@@ -209,9 +223,18 @@ export function settingRow(rest: string, descs: Iterable<Descriptor>, canWrite: 
   };
 }
 
+/** A palette id that runs a session action: `session.action.<id>`. */
+const SESSION_ACTION = 'session.action.';
+
 /** Run a palette command. Returns once the command has been handed off. */
 export async function runCommand(id: string, ctx: CommandContext): Promise<void> {
   const s = ctx.selected;
+  if (id.startsWith(SESSION_ACTION)) {
+    // Details runs it, with its own gate, confirm and dialog, as it does for
+    // the row menu; the request opens the inspector or the Details tab.
+    if (s && s.status !== 'ghost') requestSessionAction(s, id.slice(SESSION_ACTION.length) as SessionActionId);
+    return;
+  }
   switch (id) {
     case 'session.approve': {
       const v = approvable(s);

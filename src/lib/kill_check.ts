@@ -9,6 +9,7 @@ import { get } from 'svelte/store';
 import { hubActionBlocked, hubBlock, hubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import type { Result } from './result';
+import { push } from './toasts';
 import {
   discardKillSession,
   inspectSafeKill,
@@ -121,6 +122,21 @@ export async function archiveSessions(rows: readonly SessionRow[]): Promise<Resu
     else if (row) skipped.push({ row, why: x.error ?? 'refused' });
   }
   return { ok: true, value: { archived, skipped } };
+}
+
+/** Say what an Archive press did, with Undo when it archived anything. The
+ *  one toast for the bulk bar and a single session's Archive alike. */
+export function announceArchive({ archived, skipped }: ArchiveOutcome): void {
+  const left = skipped.length > 0 ? ` · ${skipped.length} left as they were (${[...new Set(skipped.map((x) => x.why))].join(', ')})` : '';
+  if (archived.length === 0) {
+    push({ message: `Nothing archived${left}`, kind: 'info' });
+    return;
+  }
+  push({
+    message: `Archived ${archived.length} session${archived.length === 1 ? '' : 's'}${left}`,
+    kind: 'success',
+    action: { label: 'Undo', run: () => void undoArchive(archived) },
+  });
 }
 
 /** Undo an Archive press: un-archive every session it archived. */
