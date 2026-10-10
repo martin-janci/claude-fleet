@@ -22,7 +22,11 @@
 //! `work_link { set_status }`, a person's status for a native item.
 //!
 //! Task editing: `edit_work_item` → `work_link { edit }`, a person's
-//! title, notes and assignees for a native item.
+//! title, notes, assignees and epic flag for a native item.
+//!
+//! Epics (sprints design 2026-09-28 §3): `set_work_parent` →
+//! `work_link { set_parent }`, a local item filed under an epic or a task,
+//! or taken out to the top.
 
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
@@ -269,6 +273,16 @@ pub struct EditWorkItemArgs {
     /// `YYYY-MM-DD`; `""` clears.
     #[serde(default)]
     pub due_at: Option<String>,
+    /// A top-level item is an epic (`true`) or a task (`false`).
+    #[serde(default)]
+    pub epic: Option<bool>,
+}
+
+/// `set_work_parent`: `parent` is `item:<id>`, or `""` for the top.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetWorkParentArgs {
+    pub item_id: i64,
+    pub parent: String,
 }
 
 #[tauri::command]
@@ -278,6 +292,15 @@ pub async fn edit_work_item(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<WorkItemRow, IpcError> {
     routed::edit_work_item(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn set_work_parent(
+    args: SetWorkParentArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::set_work_parent(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -735,6 +758,27 @@ pub(crate) mod routed {
         }
     }
 
+    /// `work_link { set_parent }`: a tracker item is refused by the service
+    /// (its tracker files it), naming the ticket.
+    pub async fn set_work_parent(
+        backend: &FleetBackend,
+        args: SetWorkParentArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorkItemRow, IpcError> {
+        let args = WorkLinkArgs {
+            action: "set_parent".into(),
+            item_id: Some(args.item_id),
+            parent: Some(args.parent),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("set_work_parent", &args).await,
+            None => {
+                work::local::set_parent(&args, store, &fleet_core::service::orgs::OrgScope::All)
+            }
+        }
+    }
+
     /// `work_link { edit }`: a tracker item is refused by the service (its
     /// text is its tracker's), naming the ticket.
     pub async fn edit_work_item(
@@ -749,6 +793,7 @@ pub(crate) mod routed {
             notes: args.notes,
             assignees: args.assignees,
             due_at: args.due_at,
+            epic: args.epic,
             ..Default::default()
         };
         match backend.hub() {

@@ -101,7 +101,7 @@ pub struct WorkRule {
     pub version: i64,
     pub conditions: RuleConditions,
     pub group: String,
-    /// "Its sessions start here" (migration 161): the host a start of a
+    /// "Its sessions start here" (migration 163): the host a start of a
     /// task it matches lands on when no start rule names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_alias: Option<String>,

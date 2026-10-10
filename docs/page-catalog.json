@@ -3567,6 +3567,18 @@
       ]
     },
     {
+      "default_widget": "switch",
+      "key": "work.members_plan_sprints",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Members plan sprints",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "select",
       "key": "work.summary_model",
       "kind": {
@@ -3578,6 +3590,24 @@
         "type": "choice"
       },
       "label": "Summary model",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "work.help_model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Context help model",
       "widgets": [
         "select",
         "radio",

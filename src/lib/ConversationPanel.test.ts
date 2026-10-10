@@ -2410,6 +2410,40 @@ describe('ConversationPanel prompt recall', () => {
     expect(box.value).toBe('second edited');
   });
 
+  it('? asks Haiku about the draft with the earlier prompts, and the proposal only fills the box', async () => {
+    const mocked = invoke as unknown as ReturnType<typeof vi.fn>;
+    const base = mocked.getMockImplementation() as ((cmd: string, payload?: unknown) => unknown) | undefined;
+    mocked.mockImplementation(async (cmd: string, payload?: unknown) =>
+      cmd === 'context_help'
+        ? { answer: 'Plan it first.', command: '/plan #FLEET-3', model: 'haiku', host_alias: 'local', history_items: 2, at: 1 }
+        : base?.(cmd, payload),
+    );
+    try {
+      const box = await mountWithHistory();
+      await fireEvent.input(box, { target: { value: 'split the parser' } });
+      await fireEvent.click(screen.getByTestId('conv-help-button'));
+      await settle();
+      await fireEvent.keyDown(screen.getByTestId('conv-help-question'), { key: 'Enter' });
+      await settle();
+      const asked = mocked.mock.calls.filter((c) => c[0] === 'context_help');
+      expect(asked).toHaveLength(1);
+      expect((asked[0][1] as { args: Record<string, unknown> }).args).toMatchObject({
+        surface: 'composer',
+        host_alias: 'local',
+        session_name: 'ctl',
+        line: 'split the parser',
+        history: ['first', 'second'],
+        question: '',
+      });
+      await fireEvent.click(screen.getByTestId('conv-help-insert'));
+      await settle();
+      expect(box.value).toBe('/plan #FLEET-3');
+      expect(mockedSend).not.toHaveBeenCalled();
+    } finally {
+      mocked.mockImplementation(base ?? (() => undefined));
+    }
+  });
+
   it('Enter sends the recalled prompt', async () => {
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
     const box = await mountWithHistory();

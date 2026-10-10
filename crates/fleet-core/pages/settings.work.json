@@ -43,6 +43,10 @@
             },
             {
               "type": "field",
+              "key": "work.members_plan_sprints"
+            },
+            {
+              "type": "field",
               "key": "work.trusted_branch_projects",
               "hint": "Set from the work popover; clear it here."
             }
@@ -54,6 +58,10 @@
             {
               "type": "field",
               "key": "work.summary_model"
+            },
+            {
+              "type": "field",
+              "key": "work.help_model"
             },
             {
               "type": "field",

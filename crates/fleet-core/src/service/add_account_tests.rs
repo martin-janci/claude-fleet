@@ -479,12 +479,17 @@ fn the_written_profile_is_listed_and_exported() {
         let account =
             serde_json::json!({"accountUuid": api_key_account_uuid(KEY), "displayName": "API"});
         use std::io::Write as _;
-        child
+        // A refused profile exits before reading stdin, so the write can
+        // race its exit and meet a closed pipe; the exit status says the rest.
+        match child
             .stdin
             .take()
             .unwrap()
             .write_all(&write_stdin(KEY, &account))
-            .unwrap();
+        {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            r => r.unwrap(),
+        }
         child.wait_with_output().unwrap()
     };
     let out = write("api");

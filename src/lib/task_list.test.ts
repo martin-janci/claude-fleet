@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { link, task } from './work_view_fixture';
 import {
+  nestUnderRoots,
   DONE_WINDOW_SECS,
   boardColumnOf,
   boardLaneOf,
@@ -209,5 +210,17 @@ describe('the board', () => {
       ),
     ).toEqual({ name: 'first', host: 'a', session_id: 7 });
     expect(boardLiveSession(task({ sessions: [link({ state: 'suggested' }), link({ state: 'ended', session_id: null })] }))).toBeNull();
+  });
+});
+
+describe('nestUnderRoots (local work three levels deep)', () => {
+  it('puts a subtask of a subtask under the topmost loaded ancestor', () => {
+    const epic = task({ task_id: 'item:1', parent_task_id: null });
+    const t = task({ task_id: 'item:2', parent_task_id: 'item:1' });
+    const sub = task({ task_id: 'item:3', parent_task_id: 'item:2' });
+    const orphan = task({ task_id: 'item:4', parent_task_id: 'item:99' });
+    const { roots, kids } = nestUnderRoots([sub, t, epic, orphan]);
+    expect(roots.map((r) => r.task_id)).toEqual(['item:1', 'item:4']);
+    expect((kids.get('item:1') ?? []).map((k) => k.task_id)).toEqual(['item:3', 'item:2']);
   });
 });

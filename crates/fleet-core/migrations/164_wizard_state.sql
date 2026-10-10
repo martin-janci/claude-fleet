@@ -40,4 +40,4 @@ INSERT OR IGNORE INTO wizard_state
 
 DROP TABLE IF EXISTS host_setups;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (162);
+INSERT OR IGNORE INTO schema_version (version) VALUES (164);

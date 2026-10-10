@@ -51,20 +51,19 @@ pub struct WizardStateArgs {
     /// list | get | save | clear.
     pub action: String,
     /// add_host | add_project | add_account | new_session | link_peer |
-    /// form. Every action but list, where it narrows the list.
+    /// form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// Which one of the kind (the SSH alias of an add-host wizard); absent
-    /// = the person's one wizard of that kind.
+    /// Which one of the kind; absent = your one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
-    /// save: the step it is on, from 1.
+    /// From 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<i64>,
-    /// save: the wizard's own answers object. Never a secret.
+    /// Never a secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answers: Option<serde_json::Value>,
-    /// save: what the resume line names ("acme/api").
+    /// What the resume line names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }

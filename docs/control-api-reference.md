@@ -881,7 +881,7 @@ Parameters: `tmux_name`
 
 ### `wizard_state`
 
-A wizard left half-way, kept so it resumes on another of your devices. kind: add_host | add_project | add_account | new_session | link_peer | form; key: which one of the kind (absent = your one wizard of it). list {kind?}: yours, newest first; get {kind, key?}: the row or null; save {kind, key?, step, answers, label?}: where you are (answers never hold a secret); clear {kind, key?}: finished or discarded. Each row names the device that saved it last. E_INVALID.
+A wizard left half-way, to resume on another of your devices: list {kind?} | get {kind, key?} | save {kind, key?, step, answers, label?} | clear {kind, key?}. Rows name the device that saved last. E_INVALID.
 
 Parameters: `action`, `answers`, `key`, `kind`, `label`, `step`
 
@@ -901,7 +901,7 @@ Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket
 
 Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. edit {item_id, title?, notes?, assignees?, due_at?}: a person edits work with no ticket. create {title, parent?, notes?, assignees?, due_at?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status} (paused reopens a finished one); mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check. mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours?, budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; missions_pause_all. mission_release_note {mission_id}: a drafted release note of a completed mission; today_brief {refresh?, org_id?, since?}: Today's morning brief, drafted only on refresh; mission_triage {mission_id, refresh?}: a stuck mission's card, Jev's proposed outcome and next step (never applied), and with refresh its drafted words. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
 
-Parameters: `ack_live`, `action`, `assignees`, `brief`, `bucket_id`, `budget_cents`, `card_id`, `confirm_nonce`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `item_id`, `item_ids`, `items`, `key`, `level`, `line`, `link_id`, `max_parallel`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `primary`, `profile`, `project_id`, `project_ids`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `step`, `task_id`, `title`, `tree`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
+Parameters: `ack_live`, `action`, `assignees`, `brief`, `bucket_id`, `bucket_op`, `budget_cents`, `card_id`, `comment_id`, `confirm_nonce`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `epic`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `item_id`, `item_ids`, `items`, `key`, `level`, `line`, `link_id`, `max_parallel`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `primary`, `profile`, `project_id`, `project_ids`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `step`, `task_id`, `title`, `tree`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -974,6 +974,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::create_work_task`
 - `commands::work::set_work_status`
 - `commands::work::edit_work_item`
+- `commands::work::set_work_parent`
 - `commands::work::accept_work_proposal`
 - `commands::work::reject_work_proposal`
 - `commands::work_view::work_tree`
@@ -995,6 +996,13 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work_view::delete_work_rule`
 - `commands::work_view::save_work_view`
 - `commands::work_view::delete_work_view`
+- `commands::work_view::comment_on_work`
+- `commands::work_view::delete_work_comment`
+- `commands::work_view::work_buckets`
+- `commands::work_view::work_bucket`
+- `commands::work_view::add_work_to_bucket`
+- `commands::work_view::remove_work_from_bucket`
+- `commands::work_view::work_bucket_admin`
 - `commands::missions::work_missions`
 - `commands::missions::work_mission`
 - `commands::missions::save_mission`
@@ -1292,6 +1300,7 @@ Frontend commands registered in `src/lib.rs`:
 - `pty::pty_drain`
 - `commands::editor::open_session_in_editor`
 - `commands::windows::open_terminal_window`
+- `commands::context_help::context_help`
 - `commands::voice::voice_claim`
 - `commands::voice::voice_release`
 - `cancel_command`
