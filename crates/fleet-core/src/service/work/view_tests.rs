@@ -2690,6 +2690,73 @@ fn a_task_serves_its_comments_and_withholds_their_author_from_a_scoped_caller() 
         .all(|c| c.author.is_empty() && c.author_person_id.is_none()));
 }
 
+/// Owner decision 2026-10-10: one person does not learn another's device
+/// names. A comment's author shows to its own person; a placement's author
+/// (a device label with no person) to nobody but the hub itself and the one
+/// person of a one-person hub.
+#[test]
+fn a_person_sees_their_own_device_names_and_no_one_elses() {
+    use crate::service::view_scope::{GrantSet, UnclaimedReach, ViewScope};
+    let w = world();
+    let (ana, bo) = {
+        let s = w.st.lock().unwrap();
+        let ana = s.create_person("ana", None).unwrap().id;
+        let bo = s.create_person("bo", None).unwrap().id;
+        s.add_comment(w.t1, "client:ana-phone", Some(ana), "mine")
+            .unwrap();
+        s.add_comment(w.t1, "client:bo-laptop", Some(bo), "theirs")
+            .unwrap();
+        (ana, bo)
+    };
+    let id = format!("item:{}", w.t1);
+    structure::place(
+        &w.st,
+        &vs(&OrgScope::All),
+        &id,
+        Some("Now"),
+        None,
+        Some(0),
+        "client:bo-laptop",
+    )
+    .unwrap();
+    let as_person = |p: i64, sole: bool| {
+        ViewScope::for_caller(
+            OrgScope::All,
+            Some(p),
+            GrantSet::default(),
+            None,
+            None,
+            sole,
+            UnclaimedReach::None,
+        )
+    };
+    let authors = |v: &ViewScope| -> Vec<String> {
+        task(&w.st, v, &id)
+            .unwrap()
+            .comments
+            .into_iter()
+            .map(|c| c.author)
+            .collect()
+    };
+    assert_eq!(authors(&as_person(ana, false)), ["client:ana-phone", ""]);
+    assert_eq!(authors(&as_person(bo, false)), ["", "client:bo-laptop"]);
+    let placed_by = |v: &ViewScope| task(&w.st, v, &id).unwrap().placement.unwrap().updated_by;
+    assert_eq!(placed_by(&as_person(bo, false)), None);
+    assert_eq!(
+        placed_by(&as_person(bo, true)).as_deref(),
+        Some("client:bo-laptop")
+    );
+    assert_eq!(
+        placed_by(&vs(&OrgScope::All)).as_deref(),
+        Some("client:bo-laptop")
+    );
+    // The one person of a one-person hub owns every device.
+    assert_eq!(
+        authors(&as_person(ana, true)),
+        ["client:ana-phone", "client:bo-laptop"]
+    );
+}
+
 #[test]
 fn an_unknown_grouping_is_refused_not_ignored() {
     let w = world();

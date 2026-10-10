@@ -312,8 +312,10 @@ item_id, notes }` (`comment_on_work`) and `{ comment_delete, comment_id }`
 org fence, `edit`'s person gate for writing — stays in fleet (never a
 tracker's), and is deleted by its author alone (the person when both sides
 prove one, else the caller's label). `work { task }` serves them oldest
-first with `mine`; who wrote one is withheld from a scoped caller as
-`Placement.updated_by` is (the same open device-identity question). The
+first with `mine`. Device names are their person's (owner decision
+2026-10-10): a comment's author shows to its own person only, and
+`Placement.updated_by` (a device label with no person) only to the hub
+itself and the one person of a one-person hub. The
 task page's Activity tab also lists each session that started, was
 suggested, turned down or stopped, and each comment. Not yet: comments on
 the phone.

@@ -780,28 +780,6 @@ const SCOPE_GUARDS: &[Guard] = &[
     },
     Guard {
         file: "crates/fleet-core/src/service/work/view.rs",
-        func: "task",
-        nth: 0,
-        code: "if !scope.is_all() {",
-        verdict: Verdict::OrgBoundary,
-        why: "`Placement.updated_by` is a DEVICE label, and an unassigned task \
-              is placed by bound clients of several orgs — the reason it is \
-              withheld is the org one. See T9c's owner decisions for the \
-              narrower question it leaves open",
-    },
-    Guard {
-        file: "crates/fleet-core/src/service/work/view.rs",
-        func: "task",
-        nth: 1,
-        code: "if !scope.is_all() {",
-        verdict: Verdict::OrgBoundary,
-        why: "`CommentRow.author` is a DEVICE label exactly as \
-              `Placement.updated_by` is, on the same shared work, and is \
-              withheld from a scoped caller for the same org reason — the \
-              same open question as #0",
-    },
-    Guard {
-        file: "crates/fleet-core/src/service/work/view.rs",
         func: "task_visible",
         nth: 1,
         code: "OrgScope::All => true,",
@@ -953,23 +931,10 @@ const OPEN_QUESTIONS: &[(&str, &str, usize, &str)] = &[
         "which work KEYS exist: for a person's own device no retention          runs, so `PurgeImpact.keys` is every key on the project and hosts,          other people's included — and a LOCAL item's key is a sentence a          person typed. T10 traced the residual T9b/T9c also attributed to          `orgs::require_key` / `require_key_bound` and decided those: they          answer an org question for a scoped caller and `Ok(())`          unconditionally for everybody else, so THIS is the whole of it.          Fencing it by person would fence the hub operator too (the          master's scope carries a person), which §4.5 does not do",
     ),
     (
-        "crates/fleet-core/src/service/work/view.rs",
-        "task",
-        0,
-        "does a PERSON's own device get to learn another person's DEVICE          LABEL? `Placement.updated_by` is withheld from a scoped caller          only, and the eight rules do not cover device identity",
-    ),
-    (
-        "crates/fleet-core/src/service/work/view.rs",
-        "task",
-        1,
-        "the same device-identity question as #0, for a comment's author: \
-         withheld from a scoped caller only",
-    ),
-    (
         "crates/fleet-core/src/service/update/mod.rs",
         "status",
         0,
-        "the same device-identity question as `view.rs::task`, in the          strictly LARGER case, and the page the `check_for` and `health`          guards follow: `update_status` is `Access::Client` and an UNBOUND          client is not scoped, so a person's own phone reads every observed          target — `client:<id>` / `agent:<host>` / `hub:self`, each with its          version, platform, phase and last error. An inventory of every          other person's devices",
+        "the device-identity question `view.rs::task` answered (owner decision          2026-10-10: one person does not see another's device names), in the          strictly LARGER case, and the page the `check_for` and `health`          guards follow: `update_status` is `Access::Client` and an UNBOUND          client is not scoped, so a person's own phone reads every observed          target — `client:<id>` / `agent:<host>` / `hub:self`, each with its          version, platform, phase and last error. An inventory of every          other person's devices",
     ),
 ];
 

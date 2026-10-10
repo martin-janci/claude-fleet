@@ -3213,22 +3213,14 @@ pub fn task(
         })
         .map(|r| r.id)
         .collect();
-    // Who placed it is the unrestricted caller's to read: a device name is
-    // not a scoped caller's to learn (an unassigned task is placed by
-    // bound clients of several orgs, M14.1c).
+    // A device name is its person's (owner decision 2026-10-10: one
+    // person does not learn another's device names). Who placed a task is
+    // a device label with no person beside it, so only a reader every
+    // device is known to be theirs sees it: the hub itself (a standalone
+    // desktop) and the one person of a one-person hub.
+    let sees_any_device = view.is_unrestricted() || view.is_sole_person();
     let placement = g.placements.get(&task.task_id).cloned().map(|mut p| {
-        // This is the org boundary, not a privacy fence: `Placement.updated_by` is a device
-        // label on shared work structure, and an unassigned task is placed by bound clients of
-        // several orgs — which is the reason it is withheld.
-        //
-        // **Open, and recorded as an owner decision** (T9c found it, T9d put
-        // it in the table: `scope_guard_tests::OPEN_QUESTIONS`, so the
-        // classification itself carries the question instead of only the
-        // prose beside it). The narrower question is whether a PERSON's own
-        // device should learn another person's DEVICE NAME: for such a
-        // caller `is_all()` is true and the label is withheld from nobody.
-        // The eight rules do not cover device identity.
-        if !scope.is_all() {
+        if !sees_any_device {
             p.updated_by = None;
         }
         p
@@ -3274,15 +3266,14 @@ pub fn task(
             grp
         })
         .collect();
-    // Who wrote a comment is a device label, as `Placement.updated_by` is,
-    // and withheld for the same reason; the text is fenced for an agent.
+    // Who wrote a comment is a device label: its author's own devices read
+    // it (and the readers above, who see every device), nobody else does.
+    // The text is fenced for an agent.
     let comments = comments
         .into_iter()
         .map(|mut c| {
-            // This is the org boundary, not a privacy fence: `CommentRow.author` is a device
-            // label on shared work, withheld from a scoped caller exactly as
-            // `Placement.updated_by` is (the same open owner decision).
-            if !scope.is_all() {
+            let own = matches!((c.author_person_id, view.person), (Some(a), Some(p)) if a == p);
+            if !(sees_any_device || own) {
                 c.author = String::new();
                 c.author_person_id = None;
             }
