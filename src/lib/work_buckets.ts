@@ -2,7 +2,8 @@
 // the reads (`work_buckets`, `work_bucket`), a person's membership
 // (`add_work_to_bucket`, `remove_work_from_bucket`, both routed) and the
 // buckets themselves (`work_bucket_admin`: create, update, close, delete —
-// `work_admin`, so a paired desktop is refused with `E_LOCAL_ONLY`).
+// `work_admin` standalone, `work_link`'s `bucket_admin` on a paired desktop,
+// where the hub decides who may plan and a bucket of no org is personal).
 import { writable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
 import { bumpWorkChanged, setWorkParent } from './work';
@@ -18,6 +19,8 @@ export interface BucketRow {
   kind: BucketKind | string;
   name: string;
   org_id?: number | null;
+  /** A personal bucket's person: theirs alone. Absent: the team's. */
+  owner_person_id?: number | null;
   /** sprint: planned | active | closed; release: planned | released */
   state: string;
   /** Unix seconds. */

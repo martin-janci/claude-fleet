@@ -2543,6 +2543,7 @@ fn a_tree_query_groups_by_sprint_and_release() {
                 kind,
                 name,
                 org_id: org,
+                owner_person_id: None,
                 starts_at: None,
                 ends_at: None,
                 goal: None,
@@ -2642,6 +2643,23 @@ fn a_tree_query_groups_by_epic_and_rolls_its_children_up() {
     assert_eq!(d.group.id, format!("epic:{}", epic.id));
     assert_eq!(d.parent_task_id, Some(format!("item:{}", epic.id)));
     assert_eq!(group_of(&p, &key(epic.id + 3)).label, "No epic");
+
+    // A subtask of an epic's task sits in the epic's section too, two
+    // levels down (owner decision 2026-10-10: three levels).
+    let sub = {
+        let s = w.st.lock().unwrap();
+        s.create_native_item(&crate::store::NativeItem {
+            title: "Edge case",
+            parent_id: Some(done_one.id),
+            project_id: None,
+            notes: None,
+        })
+        .unwrap()
+    };
+    let p = page(&w, &OrgScope::All, by("epic"));
+    let st = task_of(&p, &key(sub.id));
+    assert_eq!(st.group.id, format!("epic:{}", epic.id));
+    assert_eq!((st.level, task_of(&p, &key(epic.id)).level), (3, 1));
     assert_eq!(group_of(&p, "TK-1").id, "none");
 }
 
@@ -2670,6 +2688,80 @@ fn a_task_serves_its_comments_and_withholds_their_author_from_a_scoped_caller() 
         .comments
         .iter()
         .all(|c| c.author.is_empty() && c.author_person_id.is_none()));
+}
+
+/// Owner decision 2026-10-10: one person does not learn another's device
+/// names. A comment's author shows to its own person; a placement's author
+/// (a device label with no person) to nobody but the hub itself and the one
+/// person of a one-person hub.
+#[test]
+fn a_person_sees_their_own_device_names_and_no_one_elses() {
+    use crate::mcp::auth::{Caller, ClientRef, TokenMode};
+    use crate::service::view_scope::ViewScope;
+    // A person's paired device, scoped the way a request is.
+    let device = |w: &W, p: i64| -> ViewScope {
+        Caller {
+            api: None,
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 7,
+                name: "phone".into(),
+                trusted: false,
+                org_id: None,
+                person_id: Some(p),
+            }),
+            mode: TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
+        }
+        .view_scope(&w.st.lock().unwrap())
+        .unwrap()
+    };
+    let w = world();
+    let ana = w.st.lock().unwrap().create_person("ana", None).unwrap().id;
+    let id = format!("item:{}", w.t1);
+    w.st.lock()
+        .unwrap()
+        .add_comment(w.t1, "client:ana-phone", Some(ana), "mine")
+        .unwrap();
+    structure::place(
+        &w.st,
+        &vs(&OrgScope::All),
+        &id,
+        Some("Now"),
+        None,
+        Some(0),
+        "client:bo-laptop",
+    )
+    .unwrap();
+    let authors = |v: &ViewScope| -> Vec<String> {
+        task(&w.st, v, &id)
+            .unwrap()
+            .comments
+            .into_iter()
+            .map(|c| c.author)
+            .collect()
+    };
+    let placed_by = |v: &ViewScope| task(&w.st, v, &id).unwrap().placement.unwrap().updated_by;
+    // The hub itself sees every device.
+    assert_eq!(
+        placed_by(&vs(&OrgScope::All)).as_deref(),
+        Some("client:bo-laptop")
+    );
+    // Each person sees their own device names and no one else's.
+    let bo = w.st.lock().unwrap().create_person("bo", None).unwrap().id;
+    w.st.lock()
+        .unwrap()
+        .add_comment(w.t1, "client:bo-laptop", Some(bo), "theirs")
+        .unwrap();
+    assert_eq!(authors(&device(&w, ana)), ["client:ana-phone", ""]);
+    assert_eq!(authors(&device(&w, bo)), ["", "client:bo-laptop"]);
+    assert_eq!(placed_by(&device(&w, ana)), None);
+    assert_eq!(placed_by(&device(&w, bo)), None);
+    assert_eq!(
+        authors(&vs(&OrgScope::All)),
+        ["client:ana-phone", "client:bo-laptop"]
+    );
 }
 
 #[test]

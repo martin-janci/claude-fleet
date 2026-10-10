@@ -2,13 +2,15 @@
   // Sprints and releases (sprints design 2026-09-28 §5, §6): list them with
   // their roll-ups, create one, start a planned sprint, release a planned
   // release, close a sprint (E9: a person confirms which unfinished tasks
-  // carry over, all of them preselected) and delete one. Every write is
-  // `work_admin`, so a paired desktop shows why it cannot and leaves the
-  // list readable; putting tasks in a sprint is the Work view's selection.
+  // carry over, all of them preselected) and delete one. On a paired
+  // desktop every write routes to the hub, which decides who plans: a
+  // person's own personal buckets (created with no organisation), an org's
+  // as its admin — or member, when the org allows it. Putting tasks in a
+  // sprint is the Work view's selection.
   import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
   import Skeleton from './states/Skeleton.svelte';
-  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubStatus, hubActionBlocked, ownsTheFleet } from './hub';
   import { hubConnection } from './hub_connection';
   import { readErrorText, workTreeMeta } from './work_view';
   import {
@@ -39,6 +41,8 @@
 
   const adminBlocked = $derived(hubActionBlocked('work_bucket_admin', $hubStatus, $hubConnection));
   const orgs = $derived($workTreeMeta?.orgs ?? []);
+  /** Paired: a bucket of no organisation is the person's own. */
+  const personalOnHub = $derived(!ownsTheFleet($hubStatus));
 
   let buckets = $state<BucketRow[]>([]);
   let loaded = $state(false);
@@ -68,6 +72,8 @@
   const shown = $derived(buckets.filter((b) => showClosed || b.state !== 'closed'));
   const closedCount = $derived(buckets.filter((b) => b.state === 'closed').length);
   const orgName = (id: number | null | undefined) => (id == null ? 'Unassigned' : (orgs.find((o) => o.id === id)?.name ?? `Org ${id}`));
+  /** Where a bucket belongs, as its row says it. */
+  const ownerLabel = (b: BucketRow) => (b.owner_person_id != null ? 'Personal' : orgs.length > 0 ? orgName(b.org_id) : '');
 
   async function load() {
     const r = await workBuckets();
@@ -141,7 +147,7 @@
 
   /** Sprints the closing one may carry to: open, same org, not itself. */
   function targets(b: BucketRow): BucketRow[] {
-    return openBuckets(buckets, 'sprint').filter((o) => o.id !== b.id && (o.org_id ?? null) === (b.org_id ?? null));
+    return openBuckets(buckets, 'sprint').filter((o) => o.id !== b.id && (o.org_id ?? null) === (b.org_id ?? null) && (o.owner_person_id ?? null) === (b.owner_person_id ?? null));
   }
 
   function toggleCarry(id: number) {
@@ -258,11 +264,11 @@
             <!-- svelte-ignore a11y_autofocus -->
             <input type="text" bind:value={name} maxlength="120" required autofocus placeholder={kind === 'sprint' ? 'Sprint 24' : '0.3.0'} data-testid="bucket-name" />
           </label>
-          {#if orgs.length > 0}
+          {#if orgs.length > 0 || personalOnHub}
             <label class="field">
               <span>Organisation</span>
               <select bind:value={orgId} data-testid="bucket-org">
-                <option value={null}>Unassigned</option>
+                <option value={null}>{personalOnHub ? 'Personal (only you)' : 'Unassigned'}</option>
                 {#each orgs as o (o.id)}
                   <option value={o.id}>{o.name}</option>
                 {/each}
@@ -300,7 +306,7 @@
             <li data-testid="bucket-row" data-kind={b.kind} class:closed={b.state === 'closed'}>
               <div class="main">
                 <span class="name"><span class="kind">{b.kind === 'sprint' ? 'Sprint' : 'Release'}</span> {b.name}</span>
-                <span class="muted">{bucketSummary(b)}{orgs.length > 0 ? ` · ${orgName(b.org_id)}` : ''}</span>
+                <span class="muted">{bucketSummary(b)}{ownerLabel(b) ? ` · ${ownerLabel(b)}` : ''}</span>
                 {#if b.goal}<span class="muted goal">{b.goal}</span>{/if}
               </div>
               <div class="actions">

@@ -211,6 +211,9 @@ export interface WorkTask {
   parent_task_id?: string | null;
   /** An epic: a local item marked one, or a tracker's Epic (sprints design §3). */
   epic?: boolean;
+  /** How deep a local item sits: 1 at the top, at most 3 (epic → task →
+   *  subtask). Absent for a ticket or a bare key. */
+  level?: number;
   /** Its children (proposals and jobs aside) and how many are done: the
    *  roll-up. Absent when it has none. */
   children_total?: number;

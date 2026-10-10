@@ -44,6 +44,10 @@ pub struct BucketRow {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// A personal bucket's person (migration 162): only they read it, plan
+    /// into it and change it. `None`: the team's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_person_id: Option<i64>,
     /// sprint: planned | active | closed; release: planned | released.
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,6 +110,9 @@ pub struct ItemBucketRow {
     pub name: String,
     pub state: String,
     pub source: String,
+    /// A personal bucket's person: the caller shows it to them alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_person_id: Option<i64>,
 }
 
 /// What `create_bucket` writes.
@@ -114,6 +121,8 @@ pub struct NewBucket<'a> {
     pub kind: &'a str,
     pub name: &'a str,
     pub org_id: Option<i64>,
+    /// A personal bucket's person; `None` for the team's.
+    pub owner_person_id: Option<i64>,
     pub starts_at: Option<i64>,
     pub ends_at: Option<i64>,
     pub goal: Option<&'a str>,
@@ -128,6 +137,8 @@ pub struct BucketMembership {
     pub name: String,
     /// The bucket's organisation.
     pub org_id: Option<i64>,
+    /// A personal bucket's person.
+    pub owner_person_id: Option<i64>,
 }
 
 /// What `update_bucket` changes. `None` leaves a field; for the optional
@@ -161,7 +172,8 @@ const BUCKET_COLUMNS: &str = "b.id, b.kind, b.name, b.org_id, b.state, b.starts_
      b.shipped_at, b.shipped_ref, b.goal, b.created_at, b.updated_at, b.version, \
      (SELECT COUNT(*) FROM work_bucket_items m WHERE m.bucket_id = b.id AND m.removed_at IS NULL), \
      (SELECT COUNT(*) FROM work_bucket_items m JOIN work_items i ON i.id = m.item_id \
-       WHERE m.bucket_id = b.id AND m.removed_at IS NULL AND i.status_category = 'done')";
+       WHERE m.bucket_id = b.id AND m.removed_at IS NULL AND i.status_category = 'done'), \
+     b.owner_person_id";
 
 fn map_bucket(r: &rusqlite::Row<'_>) -> rusqlite::Result<BucketRow> {
     Ok(BucketRow {
@@ -169,6 +181,7 @@ fn map_bucket(r: &rusqlite::Row<'_>) -> rusqlite::Result<BucketRow> {
         kind: r.get(1)?,
         name: r.get(2)?,
         org_id: r.get(3)?,
+        owner_person_id: r.get(15)?,
         state: r.get(4)?,
         starts_at: r.get(5)?,
         ends_at: r.get(6)?,
@@ -247,7 +260,7 @@ fn name_taken(e: rusqlite::Error, kind: &str, name: &str) -> IpcError {
         {
             IpcError::new(
                 codes::E_EXISTS,
-                format!("this organisation already has a {kind} named {name:?}"),
+                format!("there is already a {kind} named {name:?} here"),
             )
         }
         e => e.into(),
@@ -273,9 +286,18 @@ impl Store {
         self.conn
             .execute(
                 "INSERT INTO work_buckets (kind, name, org_id, state, starts_at, ends_at, goal, \
-                   created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, 'planned', ?4, ?5, ?6, ?7, ?7)",
-                rusqlite::params![b.kind, name, b.org_id, b.starts_at, b.ends_at, goal, now],
+                   created_at, updated_at, owner_person_id) \
+                 VALUES (?1, ?2, ?3, 'planned', ?4, ?5, ?6, ?7, ?7, ?8)",
+                rusqlite::params![
+                    b.kind,
+                    name,
+                    b.org_id,
+                    b.starts_at,
+                    b.ends_at,
+                    goal,
+                    now,
+                    b.owner_person_id
+                ],
             )
             .map_err(|e| name_taken(e, b.kind, &name))?;
         self.require_bucket(self.conn.last_insert_rowid())
@@ -439,7 +461,7 @@ impl Store {
         self.require_bucket(id)
     }
 
-    /// Other sprints of the same org that are `active` — overlapping
+    /// Other sprints of the same org and owner that are `active` — overlapping
     /// sprints are a real practice, so the caller warns rather than refuses
     /// (§5).
     pub fn other_active_sprints(&self, id: i64) -> Result<Vec<BucketRow>, IpcError> {
@@ -447,7 +469,12 @@ impl Store {
         Ok(self
             .list_buckets(Some("sprint"))?
             .into_iter()
-            .filter(|o| o.id != id && o.state == "active" && o.org_id == b.org_id)
+            .filter(|o| {
+                o.id != id
+                    && o.state == "active"
+                    && o.org_id == b.org_id
+                    && o.owner_person_id == b.owner_person_id
+            })
             .collect())
     }
 
@@ -481,6 +508,12 @@ impl Store {
             if target.org_id != before.org_id {
                 return Err(invalid(
                     "carry unfinished work to a sprint of the same organisation",
+                ));
+            }
+            if target.owner_person_id != before.owner_person_id {
+                return Err(invalid(
+                    "carry unfinished work to a sprint of the same plan: a personal \
+                     sprint's to the same person's, the team's to the team's",
                 ));
             }
         } else if carry.is_some_and(|c| !c.is_empty()) {
@@ -552,8 +585,8 @@ impl Store {
     /// membership (an adopted one becomes the person's); a past one is
     /// reopened.
     ///
-    /// Refused: a closed sprint; a second current sprint (the refusal names
-    /// the one that holds the item); an item of another organisation than
+    /// Refused: a closed sprint; a second current sprint of the same owner
+    /// (the refusal names the one that holds the item); an item of another organisation than
     /// the bucket's — unassigned on either side is never a conflict, as for
     /// links.
     pub fn add_bucket_item(&self, bucket_id: i64, item_id: i64) -> Result<BucketRow, IpcError> {
@@ -585,7 +618,7 @@ impl Store {
             }
         }
         if b.kind == "sprint" {
-            if let Some(other) = self.current_sprint_of(item_id)? {
+            if let Some(other) = self.current_sprint_of(item_id, b.owner_person_id)? {
                 if other.bucket_id != bucket_id {
                     return Err(IpcError::new(
                         codes::E_CONFLICT,
@@ -672,7 +705,8 @@ impl Store {
     /// target date, then the oldest.
     pub fn bucket_membership(&self, kind: &str) -> Result<Vec<BucketMembership>, IpcError> {
         let mut stmt = self.conn.prepare(
-            "SELECT m.item_id, b.id, b.name, b.org_id FROM work_bucket_items m \
+            "SELECT m.item_id, b.id, b.name, b.org_id, b.owner_person_id \
+             FROM work_bucket_items m \
              JOIN work_buckets b ON b.id = m.bucket_id \
              WHERE b.kind = ?1 AND m.removed_at IS NULL \
              ORDER BY m.item_id, b.state <> 'planned', b.ends_at IS NULL, b.ends_at, b.id",
@@ -683,6 +717,7 @@ impl Store {
                 bucket_id: r.get(1)?,
                 name: r.get(2)?,
                 org_id: r.get(3)?,
+                owner_person_id: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -691,7 +726,8 @@ impl Store {
     /// An item's current memberships, sprints first.
     pub fn item_buckets(&self, item_id: i64) -> Result<Vec<ItemBucketRow>, IpcError> {
         let mut stmt = self.conn.prepare(
-            "SELECT b.id, b.kind, b.name, b.state, m.source FROM work_bucket_items m \
+            "SELECT b.id, b.kind, b.name, b.state, m.source, b.owner_person_id \
+             FROM work_bucket_items m \
              JOIN work_buckets b ON b.id = m.bucket_id \
              WHERE m.item_id = ?1 AND m.removed_at IS NULL \
              ORDER BY b.kind = 'release', b.id",
@@ -703,16 +739,24 @@ impl Store {
                 name: r.get(2)?,
                 state: r.get(3)?,
                 source: r.get(4)?,
+                owner_person_id: r.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    fn current_sprint_of(&self, item_id: i64) -> Result<Option<ItemBucketRow>, IpcError> {
+    /// The item's current sprint among `owner`'s (the team's when `None`):
+    /// one sprint at a time per owner, so a person's own plan never fights
+    /// the team's.
+    fn current_sprint_of(
+        &self,
+        item_id: i64,
+        owner: Option<i64>,
+    ) -> Result<Option<ItemBucketRow>, IpcError> {
         Ok(self
             .item_buckets(item_id)?
             .into_iter()
-            .find(|b| b.kind == "sprint"))
+            .find(|b| b.kind == "sprint" && b.owner_person_id == owner))
     }
 
     /// Link a bucket to a tracker's sprint (by the name its items report as
@@ -729,6 +773,12 @@ impl Store {
         external_name: Option<&str>,
     ) -> Result<BucketRow, IpcError> {
         let b = self.require_bucket(bucket_id)?;
+        if b.owner_person_id.is_some() {
+            return Err(invalid(
+                "a personal sprint or release adopts nothing from a tracker; \
+                 link a team one instead",
+            ));
+        }
         let external_id = external_id.trim();
         if external_id.is_empty() {
             return Err(invalid("adopt needs the tracker's sprint or version name"));
@@ -962,7 +1012,9 @@ impl Store {
                 .iter()
                 .any(|(b, kind, _, _)| *b == bucket && kind == "sprint");
             if is_sprint {
-                if let Some(other) = self.current_sprint_of(item_id)? {
+                // Adoption fills the team's sprints only (a personal
+                // bucket is never linked to a tracker).
+                if let Some(other) = self.current_sprint_of(item_id, None)? {
                     if other.bucket_id != bucket {
                         continue;
                     }

@@ -298,6 +298,10 @@ pub struct WorkTask {
     /// 2026-09-28 §3).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub epic: bool,
+    /// How deep a local item sits: 1 at the top, at most
+    /// `LOCAL_DEPTH_MAX`. Absent for a ticket or a bare key.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub level: u32,
     /// Its children (proposals and delegated jobs aside), and how many of
     /// them are done: an epic's roll-up, computed and never stored. A done
     /// set does not close the parent.
@@ -1212,9 +1216,10 @@ impl Graph {
     /// native subtask, which `insert_native` leaves with no `org_id` — its
     /// parent's. `Store::item_org` in memory (a test holds the two equal).
     ///
-    /// One level only, matching the SQL: `parent_for_new_child` refuses a
-    /// native parent that is itself a subtask, so there is no deeper chain to
-    /// walk and no cycle to guard against.
+    /// Up through local items with no org of their own, at most
+    /// `LOCAL_DEPTH_MAX` hops, exactly as the SQL walks: the first item that
+    /// answers wins — a tracker item with its tracker's org (unassigned
+    /// included), a local item with its own.
     ///
     /// **It asks no person fence, and that was checked rather than assumed**
     /// (multi-user M1, the review of main's new `Graph` fields). Everything
@@ -1227,12 +1232,29 @@ impl Graph {
     /// reports the org such an item already belongs to rather than lending it
     /// one.
     pub(crate) fn item_org(&self, item: &ViewItem) -> Option<i64> {
-        self.own_item_org(item).or_else(|| {
-            item.item
-                .parent_id
-                .and_then(|p| self.items.get(&p))
-                .and_then(|p| self.own_item_org(p))
-        })
+        let mut cur = item;
+        for _ in 0..=crate::store::LOCAL_DEPTH_MAX {
+            if cur.item.tracker_id.is_some() || cur.own_org.is_some() {
+                return self.own_item_org(cur);
+            }
+            cur = self.items.get(&cur.item.parent_id?)?;
+        }
+        None
+    }
+
+    /// How many local items stand in a row from `item` up (itself
+    /// included): `Store::local_depth` in memory.
+    pub(crate) fn local_depth(&self, item: &ViewItem) -> usize {
+        let mut n = 0;
+        let mut cur = Some(item);
+        while let Some(i) = cur {
+            if i.item.source != "local" || n > crate::store::LOCAL_DEPTH_MAX {
+                break;
+            }
+            n += 1;
+            cur = i.item.parent_id.and_then(|p| self.items.get(&p));
+        }
+        n
     }
 
     /// The org an item carries itself, with no parent fallback.
@@ -2116,6 +2138,7 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         .and_then(|i| i.item.parent_id)
         .map(|p| format!("item:{p}"));
     let epic = item.is_some_and(|i| crate::store::is_epic(&i.item));
+    let level = item.map_or(0, |i| g.local_depth(i) as u32);
     let (children_total, children_done) = item
         .and_then(|i| g.children.get(&i.item.id).copied())
         .unwrap_or_default();
@@ -2172,6 +2195,7 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         project_label,
         parent_task_id,
         epic,
+        level,
         children_total,
         children_done,
         job_state,
@@ -2534,14 +2558,19 @@ fn regroup(g: &Graph, s: &TaskSummary<'_>, by: &str) -> Option<GroupRef> {
         },
         "epic" => {
             let item = t.item_id.and_then(|i| g.items.get(&i));
+            // The nearest epic at or above the task. Its title names the
+            // section: only an epic of an org this caller sees (a child reads
+            // its org from it).
             let epic = item.and_then(|i| {
-                if crate::store::is_epic(&i.item) {
-                    return Some(i);
+                let mut cur = i;
+                for _ in 0..=crate::store::LOCAL_DEPTH_MAX {
+                    if crate::store::is_epic(&cur.item) {
+                        return (std::ptr::eq(cur, i) || g.scope.sees_org(g.item_org(cur)))
+                            .then_some(cur);
+                    }
+                    cur = g.items.get(&cur.item.parent_id?)?;
                 }
-                let p = g.items.get(&i.item.parent_id?)?;
-                // The epic's title names the section: only an epic of an
-                // org this caller sees (a child reads its org from it).
-                (crate::store::is_epic(&p.item) && g.scope.sees_org(g.item_org(p))).then_some(p)
+                None
             });
             match epic {
                 Some(e) => {
@@ -2952,7 +2981,20 @@ pub fn tree(
                 }
             }
             Some(kind @ ("sprint" | "release")) => {
-                for m in s.bucket_membership(kind)? {
+                // A personal bucket shows to its person alone, and wins over
+                // the team's: the reader's own plan is the one they group by.
+                let (mine, team): (Vec<_>, Vec<_>) = s
+                    .bucket_membership(kind)?
+                    .into_iter()
+                    .partition(|m| m.owner_person_id.is_some());
+                for m in mine {
+                    if view.may_own_person_row(m.org_id, m.owner_person_id) {
+                        g.buckets_by_item
+                            .entry(m.item_id)
+                            .or_insert((m.bucket_id, m.name));
+                    }
+                }
+                for m in team {
                     if scope.sees_org(m.org_id) {
                         g.buckets_by_item
                             .entry(m.item_id)
@@ -3171,22 +3213,14 @@ pub fn task(
         })
         .map(|r| r.id)
         .collect();
-    // Who placed it is the unrestricted caller's to read: a device name is
-    // not a scoped caller's to learn (an unassigned task is placed by
-    // bound clients of several orgs, M14.1c).
+    // A device name is its person's (owner decision 2026-10-10: one
+    // person does not learn another's device names). Who placed a task is
+    // a device label with no person beside it, so only a reader every
+    // device is known to be theirs sees it: the hub itself (a standalone
+    // desktop) and the one person of a one-person hub.
+    let sees_any_device = view.is_unrestricted() || view.is_sole_person();
     let placement = g.placements.get(&task.task_id).cloned().map(|mut p| {
-        // This is the org boundary, not a privacy fence: `Placement.updated_by` is a device
-        // label on shared work structure, and an unassigned task is placed by bound clients of
-        // several orgs — which is the reason it is withheld.
-        //
-        // **Open, and recorded as an owner decision** (T9c found it, T9d put
-        // it in the table: `scope_guard_tests::OPEN_QUESTIONS`, so the
-        // classification itself carries the question instead of only the
-        // prose beside it). The narrower question is whether a PERSON's own
-        // device should learn another person's DEVICE NAME: for such a
-        // caller `is_all()` is true and the label is withheld from nobody.
-        // The eight rules do not cover device identity.
-        if !scope.is_all() {
+        if !sees_any_device {
             p.updated_by = None;
         }
         p
@@ -3232,15 +3266,14 @@ pub fn task(
             grp
         })
         .collect();
-    // Who wrote a comment is a device label, as `Placement.updated_by` is,
-    // and withheld for the same reason; the text is fenced for an agent.
+    // Who wrote a comment is a device label: its author's own devices read
+    // it (and the readers above, who see every device), nobody else does.
+    // The text is fenced for an agent.
     let comments = comments
         .into_iter()
         .map(|mut c| {
-            // This is the org boundary, not a privacy fence: `CommentRow.author` is a device
-            // label on shared work, withheld from a scoped caller exactly as
-            // `Placement.updated_by` is (the same open owner decision).
-            if !scope.is_all() {
+            let own = matches!((c.author_person_id, view.person), (Some(a), Some(p)) if a == p);
+            if !(sees_any_device || own) {
                 c.author = String::new();
                 c.author_person_id = None;
             }

@@ -4362,6 +4362,25 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        (
+            "work_bucket_admin",
+            "work_link",
+            json!({ "session_id": null, "action": "bucket_admin", "key": null, "item_id": null,
+                    "link_id": null, "source": null,
+                    "bucket_op": { "action": "bucket_create", "kind": "sprint", "name": "Mine" } }),
+            r#"{"bucket":{"id":4,"kind":"sprint","name":"Mine","state":"planned","created_at":1,"updated_at":1,"version":1}}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_bucket_admin(
+                    b,
+                    serde_json::from_value(json!({
+                        "action": "bucket_create", "kind": "sprint", "name": "Mine"
+                    }))
+                    .unwrap(),
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // ── orchestration O1: missions ────────────────────────────────────
         (
             "save_mission",

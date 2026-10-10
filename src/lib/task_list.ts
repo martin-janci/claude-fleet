@@ -29,17 +29,33 @@ export function taskColumnOf(t: WorkTask): keyof StatusSections {
   return 'todo';
 }
 
-const newestFirst = (a: WorkTask, b: WorkTask) => (b.last_activity_at ?? 0) - (a.last_activity_at ?? 0);
-
-export function groupTasksByStatus(tasks: WorkTask[], nowSecs: number): StatusSections {
+/** Every task under the topmost ancestor the list has loaded: a subtask of
+ *  a subtask (local work goes three levels deep) shows under the card or
+ *  row of its root, never lost under a child that is not drawn itself. */
+export function nestUnderRoots(tasks: readonly WorkTask[]): { roots: WorkTask[]; kids: Map<string, WorkTask[]> } {
   const byId = new Map(tasks.map((t) => [t.task_id, t]));
   const kids = new Map<string, WorkTask[]>();
   const roots: WorkTask[] = [];
   for (const t of tasks) {
-    const p = t.parent_task_id ? byId.get(t.parent_task_id) : undefined;
-    if (p) kids.set(p.task_id, [...(kids.get(p.task_id) ?? []), t]);
+    let top: WorkTask | undefined;
+    let cur = t;
+    // Bounded: a chain is at most three deep, and a cycle never loops.
+    for (let i = 0; i < 4 && cur.parent_task_id; i++) {
+      const p = byId.get(cur.parent_task_id);
+      if (!p || p === t) break;
+      top = p;
+      cur = p;
+    }
+    if (top) kids.set(top.task_id, [...(kids.get(top.task_id) ?? []), t]);
     else roots.push(t);
   }
+  return { roots, kids };
+}
+
+const newestFirst = (a: WorkTask, b: WorkTask) => (b.last_activity_at ?? 0) - (a.last_activity_at ?? 0);
+
+export function groupTasksByStatus(tasks: WorkTask[], nowSecs: number): StatusSections {
+  const { roots, kids } = nestUnderRoots(tasks);
   const out: StatusSections = { todo: [], doing: [], done: [] };
   for (const t of [...roots].sort(newestFirst)) {
     const s = taskColumnOf(t);
@@ -126,14 +142,7 @@ export function groupTasksForBoard(
    *  everything it delivered. */
   doneWindow = true,
 ): BoardColumns {
-  const byId = new Map(tasks.map((t) => [t.task_id, t]));
-  const kids = new Map<string, WorkTask[]>();
-  const roots: WorkTask[] = [];
-  for (const t of tasks) {
-    const p = t.parent_task_id ? byId.get(t.parent_task_id) : undefined;
-    if (p) kids.set(p.task_id, [...(kids.get(p.task_id) ?? []), t]);
-    else roots.push(t);
-  }
+  const { roots, kids } = nestUnderRoots(tasks);
   const lanes = new Map<string, BoardLane>(
     BOARD_COLUMNS.map((c) => [c, { id: c, label: BOARD_COLUMN_LABELS[c], status: c }]),
   );

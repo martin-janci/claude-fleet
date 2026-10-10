@@ -7,8 +7,10 @@
 //! Sprints and releases (design 2026-09-28 §6a/§6b): `work_buckets` /
 //! `work_bucket` read `work`, `add_work_to_bucket` /
 //! `remove_work_from_bucket` write `work_link`, and `work_bucket_admin`
-//! (create, update, close, delete) is `work_admin`, master-only, so it
-//! refuses on a paired desktop.
+//! (create, update, close, delete) is `work_admin` here and, on a paired
+//! desktop, `work_link { action: bucket_admin }` — the hub decides whether
+//! this person may plan (their own personal buckets; an org's as its admin,
+//! or member when the org allows it).
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::codes;
@@ -290,27 +292,14 @@ pub async fn remove_work_from_bucket(
 
 /// Create, change, close or delete a sprint or release: `work_admin`'s
 /// `bucket_*` actions and no other (adoption stays with the hub's admin).
+/// Paired, it routes as `work_link { action: bucket_admin, bucket_op }`.
 #[tauri::command]
 pub async fn work_bucket_admin(
     args: WorkAdminArgs,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
-    backend.refuse_local_only("work_bucket_admin")?;
-    match BucketAction::parse(&args.action) {
-        Some(BucketAction::Create)
-        | Some(BucketAction::Update)
-        | Some(BucketAction::Close)
-        | Some(BucketAction::Delete) => tracker_admin::admin_sync(&args, &store),
-        _ => Err(IpcError::new(
-            codes::E_INVALID,
-            format!(
-                "work_bucket_admin is bucket_create, bucket_update, bucket_close or \
-                 bucket_delete, not {:?}",
-                args.action
-            ),
-        )),
-    }
+    routed::work_bucket_admin(&backend, args, &store).await
 }
 
 /// The standalone desktop's reader (multi-user M1): one person at the
@@ -857,7 +846,7 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_buckets", &wire).await,
-            None => buckets::buckets(store, &OrgScope::All, args.kind.as_deref()),
+            None => buckets::buckets(store, &internal_view(), args.kind.as_deref()),
         }
     }
 
@@ -872,7 +861,38 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_bucket", &wire).await,
-            None => buckets::bucket(store, &OrgScope::All, args.bucket_id),
+            None => buckets::bucket(store, &internal_view(), args.bucket_id),
+        }
+    }
+
+    pub async fn work_bucket_admin(
+        backend: &FleetBackend,
+        args: WorkAdminArgs,
+        store: &Mutex<Store>,
+    ) -> Result<serde_json::Value, IpcError> {
+        match BucketAction::parse(&args.action) {
+            Some(BucketAction::Create)
+            | Some(BucketAction::Update)
+            | Some(BucketAction::Close)
+            | Some(BucketAction::Delete) => match backend.hub() {
+                Some(hub) => {
+                    let wire = WorkLinkArgs {
+                        action: "bucket_admin".into(),
+                        bucket_op: Some(args),
+                        ..Default::default()
+                    };
+                    hub.route("work_bucket_admin", &wire).await
+                }
+                None => tracker_admin::admin_sync(&args, store),
+            },
+            _ => Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "work_bucket_admin is bucket_create, bucket_update, bucket_close or \
+                     bucket_delete, not {:?}",
+                    args.action
+                ),
+            )),
         }
     }
 
@@ -893,7 +913,7 @@ pub(crate) mod routed {
         let wire = member("bucket_add", &args);
         match backend.hub() {
             Some(hub) => hub.route("add_work_to_bucket", &wire).await,
-            None => buckets::bucket_add(&wire, store, &OrgScope::All),
+            None => buckets::bucket_add(&wire, store, &internal_view()),
         }
     }
 
@@ -905,7 +925,7 @@ pub(crate) mod routed {
         let wire = member("bucket_remove", &args);
         match backend.hub() {
             Some(hub) => hub.route("remove_work_from_bucket", &wire).await,
-            None => buckets::bucket_remove(&wire, store, &OrgScope::All),
+            None => buckets::bucket_remove(&wire, store, &internal_view()),
         }
     }
 
