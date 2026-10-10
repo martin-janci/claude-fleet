@@ -14,6 +14,7 @@
   import Button from './Button.svelte';
   import StatusDot from './StatusDot.svelte';
   import type { Answer } from './status';
+  import { questionEnter } from '../motion_catalog';
 
   let {
     question,
@@ -26,6 +27,7 @@
     label = 'Question from the session',
     compact = false,
     keys = true,
+    enter = false,
     children,
   }: {
     question: string;
@@ -46,11 +48,18 @@
     /** Answer 1–9 from the keyboard while focus is in the card. Off when
      *  the consumer handles the number keys itself. */
     keys?: boolean;
+    /** A question that just arrived (G4.9): it fades up 8 px and focus
+     *  moves to its first answer, unless the person is typing. */
+    enter?: boolean;
     /** Below the answers: what was sent, a stale or error line, more acts. */
     children?: Snippet;
   } = $props();
 
   const kbdOf = (a: Answer, i: number) => a.kbd ?? (i < 9 ? String(i + 1) : undefined);
+
+  function arrive(node: HTMLElement) {
+    if (enter) questionEnter(node);
+  }
 
   // The number keys answer while focus is in the card.
   function onkeydown(e: KeyboardEvent) {
@@ -65,7 +74,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<section class="of of-question" class:compact aria-label={label} {onkeydown} data-testid={testid}>
+<section class="of of-question" class:compact aria-label={label} {onkeydown} data-testid={testid} use:arrive>
   <div class="q">
     <StatusDot state="waiting" label={null} />
     <strong>{question}</strong>

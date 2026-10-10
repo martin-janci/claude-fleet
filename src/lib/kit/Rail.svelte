@@ -4,6 +4,7 @@
      count for the Inbox badge; every title names its shortcut. -->
 <script lang="ts">
   import Icon from './Icon.svelte';
+  import { countRoll } from '../motion_catalog';
   import type { OfIconName } from './icons';
 
   interface RailEntry {
@@ -52,7 +53,8 @@
         class="badge tnum"
         class:badge--quiet={item.badgeQuiet}
         aria-label="{item.badge} {item.badgeLabel ?? 'need you'}"
-        data-testid={testid ? `${item.id}-${testid}-count` : undefined}>{item.badge}</span
+        data-testid={testid ? `${item.id}-${testid}-count` : undefined}
+        ><span class="roll" use:countRoll={item.badge}>{item.badge}</span></span
       >{/if}</a
   >
 {/snippet}
@@ -64,6 +66,10 @@
 </nav>
 
 <style>
+  /* The number rolls when the count changes (G4.9); the badge stays put. */
+  .roll {
+    display: inline-block;
+  }
   /* A count the person chose to see, not a Needs you ask (G2.2). */
   .of-rail .badge.badge--quiet {
     background: var(--bg-hover);

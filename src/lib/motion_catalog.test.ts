@@ -5,7 +5,7 @@ import { render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
 import { motionPref } from './motion';
-import { WASH_MS, slideIn, snapshotRows, toastIn, toastOut, wash } from './motion_catalog';
+import { WASH_MS, countRoll, questionEnter, slideIn, snapshotRows, toastIn, toastOut, wash } from './motion_catalog';
 import { clearToasts, holdToast, push, releaseToast, toastCountdowns, toasts, INFO_TIMEOUT_MS } from './toasts';
 import Toasts from './Toasts.svelte';
 
@@ -208,5 +208,62 @@ describe('toasts', () => {
     render(Toasts);
     await tick();
     expect(screen.queryAllByTestId('toast-timer')).toHaveLength(0);
+  });
+});
+
+// G4.9: the Motion board's question card and Inbox count.
+describe('a question card arrives', () => {
+  function card(): HTMLElement {
+    const el = document.createElement('section');
+    el.innerHTML = '<button disabled>0</button><button>Approve</button><button>Deny</button>';
+    document.body.append(el);
+    return el;
+  }
+  afterEach(() => (document.body.innerHTML = ''));
+
+  it('fades up 8 px at Full and focus moves to the first answer', () => {
+    const el = card();
+    questionEnter(el);
+    expect(calls[0].keyframes[0]).toEqual({ opacity: 0, transform: 'translateY(8px)' });
+    expect(calls[0].opts.duration).toBe(160);
+    expect(document.activeElement?.textContent).toBe('Approve');
+  });
+
+  it('Reduced is a plain 80 ms fade; Off does not move', () => {
+    motionPref.set('reduced');
+    questionEnter(card());
+    expect(calls[0].keyframes).toEqual([{ opacity: 0 }, { opacity: 1 }]);
+    expect(calls[0].opts.duration).toBe(80);
+    motionPref.set('off');
+    questionEnter(card());
+    expect(calls).toHaveLength(1);
+  });
+
+  it('never takes focus from someone typing', () => {
+    const input = document.createElement('textarea');
+    document.body.append(input);
+    input.focus();
+    questionEnter(card());
+    expect(document.activeElement).toBe(input);
+  });
+});
+
+describe('the Inbox count rolls', () => {
+  it('rolls the new number in over 80 ms at Full, and never for the same number', () => {
+    const el = document.createElement('span');
+    const a = countRoll(el, 2);
+    a.update(2);
+    expect(calls).toEqual([]);
+    a.update(3);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].keyframes[0]).toEqual({ transform: 'translateY(60%)', opacity: 0 });
+    expect(calls[0].opts.duration).toBe(80);
+  });
+
+  it('Reduced swaps the number with no roll', () => {
+    motionPref.set('reduced');
+    const a = countRoll(document.createElement('span'), 2);
+    a.update(3);
+    expect(calls).toEqual([]);
   });
 });

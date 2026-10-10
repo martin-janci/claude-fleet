@@ -404,7 +404,7 @@ describe('WorkTaskDetail', () => {
     await flush();
     await flush();
     expect((screen.getByTestId('start-popover-project') as HTMLSelectElement).value).toBe('4');
-    expect(screen.getByTestId('start-popover-suggested').textContent).toMatch(/Proposed by Jev\s+88%/);
+    expect(screen.getByTestId('start-popover-suggested').textContent).toMatch(/Proposed by Jev\s+likely/);
     // The pre-selection is read back with its host and plan; nothing starts by itself.
     expect(calls('preview_start_work').at(-1)).toEqual({ item_id: 12, with_brief: true, project_id: 4 });
     expect(calls('start_work')).toHaveLength(0);
@@ -838,7 +838,7 @@ describe('WorkTaskDetail', () => {
       render(WorkTaskDetail, { props: { taskId: 'item:77' } });
       await flush();
       expect(screen.getByTestId('work-task-group-proposal').textContent).toContain('Jev proposes “Payments”');
-      expect(screen.getByTestId('work-task-group-proposed-by').textContent).toContain('77%');
+      expect(screen.getByTestId('work-task-group-proposed-by').textContent).toContain('likely');
       await fireEvent.click(screen.getByTestId('work-task-group-proposal-place'));
       await flush();
       expect(calls('place_work')[0]).toEqual({ task_id: 'item:77', group: 'Payments', expected_version: 0 });
