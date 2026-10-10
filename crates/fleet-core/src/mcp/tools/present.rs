@@ -129,6 +129,12 @@ pub(super) fn slim_schema(schema: &mut Map<String, Value>) {
     if schema.get("default").is_some_and(Value::is_null) {
         schema.remove("default");
     }
+    // `"minimum": 0` is what schemars says for every unsigned integer; a
+    // negative number fails deserialization with a clear error anyway.
+    if schema.get("minimum").and_then(Value::as_u64) == Some(0) && is_integer(schema) {
+        schema.remove("minimum");
+    }
+    drop_optional_null(schema);
     if let Some(Value::String(d)) = schema.get_mut("description") {
         *d = collapse_ws(d);
     }
@@ -151,6 +157,66 @@ pub(super) fn slim_schema(schema: &mut Map<String, Value>) {
             for item in items.iter_mut() {
                 if let Value::Object(o) = item {
                     slim_schema(o);
+                }
+            }
+        }
+    }
+}
+
+fn is_integer(schema: &Map<String, Value>) -> bool {
+    match schema.get("type") {
+        Some(Value::String(t)) => t == "integer",
+        Some(Value::Array(ts)) => ts.iter().any(|t| t == "integer"),
+        _ => false,
+    }
+}
+
+/// An `Option<T>` parameter is emitted as `"type": ["T", "null"]` (or an
+/// `anyOf` of `T` and `{"type": "null"}`), yet it is also left out of
+/// `required`: "may be omitted" already says everything the model needs, and
+/// omitting it is what a model does. `null` still deserializes to `None`, so
+/// a client that sends it is not refused. Only properties NOT in `required`
+/// are touched: a required nullable field keeps its `null`. On this server it
+/// was ~380 properties, ~3.4 KB of every client's definitions (2026-10-10).
+fn drop_optional_null(schema: &mut Map<String, Value>) {
+    let required: Vec<String> = match schema.get("required") {
+        Some(Value::Array(r)) => r
+            .iter()
+            .filter_map(Value::as_str)
+            .map(String::from)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let Some(Value::Object(props)) = schema.get_mut("properties") else {
+        return;
+    };
+    for (name, prop) in props.iter_mut() {
+        if required.contains(name) {
+            continue;
+        }
+        let Value::Object(prop) = prop else { continue };
+        if let Some(Value::Array(types)) = prop.get_mut("type") {
+            types.retain(|t| t != "null");
+            if types.len() == 1 {
+                let only = types.remove(0);
+                prop.insert("type".into(), only);
+            }
+        }
+        if let Some(Value::Array(variants)) = prop.get_mut("enum") {
+            variants.retain(|v| !v.is_null());
+        }
+        let is_null = |v: &Value| {
+            v.get("type").is_some_and(|t| t == "null")
+                && v.as_object().is_some_and(|o| o.len() == 1)
+        };
+        if let Some(Value::Array(any)) = prop.get("anyOf") {
+            if any.len() == 2 && any.iter().any(is_null) {
+                let keep = any.iter().find(|v| !is_null(v)).cloned();
+                if let Some(Value::Object(inner)) = keep {
+                    prop.remove("anyOf");
+                    for (k, v) in inner {
+                        prop.entry(k).or_insert(v);
+                    }
                 }
             }
         }
