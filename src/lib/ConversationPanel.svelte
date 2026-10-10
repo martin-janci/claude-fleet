@@ -141,6 +141,7 @@
   import { inboxQueue, nextInInbox } from './inbox';
   import { push as pushToast } from './toasts';
   import { projectSkills } from './project_skills';
+  import { overflowMark } from './overflow_mark';
 
   let {
     session,
@@ -183,6 +184,7 @@
     // (AgentPanel's removable context chip). Only shown when there IS a
     // composer to sit above.
     composerAbove,
+    composerTools,
     // The working indicator in another voice (redesign step
     // 9.13): Control's chat reads the running turn itself and answers the
     // loader and the line to show instead of the Atom's "Thinking · …".
@@ -205,6 +207,9 @@
     promptPrefix?: string | null;
     blockWhileBusy?: boolean;
     composerAbove?: Snippet;
+    /** Extra chips that join the quick-prompt row (Control's operator
+     *  commands), so one row of chips sits above the box, not two. */
+    composerTools?: Snippet;
     thinkingAs?: (conv: Conversation | null) => { loader: LoaderName; label: string } | null;
     runCommand?: (text: string) => boolean;
     composerHint?: string;
@@ -2488,7 +2493,19 @@
   {/if}
   </div>
   {#if composerAbove && showComposer && canPrompt && bgEntry === null}
-    <div class="composer-above">{@render composerAbove()}</div>
+    <!-- Capped and scrolled on its own (Control chat UX, 2026-10-10): a
+         stack of task cards here used to take the whole pane and leave the
+         transcript with no height and nothing to scroll. -->
+    <div
+      class="composer-above"
+      role="region"
+      aria-label="Activity above the box"
+      tabindex="-1"
+      data-testid="conv-composer-above"
+      use:overflowMark
+    >
+      {@render composerAbove()}
+    </div>
   {/if}
   {#if showComposer && canPrompt && bgEntry === null}
     <form
@@ -2581,18 +2598,22 @@
             >
           {/if}
         {/each}
+        {#if chipsExpanded || chipsHidden > 0}
+          <!-- Redesign 5.9: three chips, the rest under ⋯. -->
+          <button
+            type="button"
+            class="btn btn--chip chips-more"
+            data-testid="conv-chips-more"
+            aria-expanded={chipsExpanded}
+            aria-label={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
+            title={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
+            onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : '⋯'}</button>
+        {/if}
+        {#if composerTools}
+          <span class="chips-sep" aria-hidden="true"></span>
+          {@render composerTools()}
+        {/if}
       </div>
-      {#if chipsExpanded || chipsHidden > 0}
-        <!-- Redesign 5.9: three chips, the rest under ⋯. -->
-        <button
-          type="button"
-          class="btn btn--chip chips-more"
-          data-testid="conv-chips-more"
-          aria-expanded={chipsExpanded}
-          aria-label={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
-          title={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
-          onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : '⋯'}</button>
-      {/if}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="composer-shell"
@@ -2762,10 +2783,34 @@
 
 <style>
   .composer-above {
+    flex: 0 1 auto;
+    min-height: 0;
+    /* The transcript keeps the rest; the tray scrolls. */
+    max-height: min(40%, 22rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
     display: flex;
     flex-wrap: wrap;
+    align-content: flex-start;
     gap: 0.35rem;
-    padding: 0 var(--chat-inset);
+    padding: var(--space-1) var(--chat-inset);
+  }
+  /* Says there is more below while the tray overflows. */
+  .composer-above:global([data-overflow='true']) {
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--space-4)), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - var(--space-4)), transparent);
+  }
+  .composer-above:global([data-overflow='true'][data-at-end='true']) {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+  .composer-above:focus {
+    outline: none;
+  }
+  .composer-above:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
   }
   .conversation-panel {
     /* The reading column every part of the thread lines up with: the turns,
@@ -2845,9 +2890,18 @@
   }
   .chips {
     display: flex;
+    align-items: center;
     gap: var(--control-gap);
     margin: 0 0 6px;
     flex-wrap: wrap;
+  }
+  /* Between the quick prompts and the chips a host adds (Control's
+     operator commands). */
+  .chips-sep {
+    align-self: stretch;
+    width: 1px;
+    margin: 2px var(--space-1);
+    background: var(--border);
   }
   /* Marks an auto-send chip: a click sends rather than fills. */
   .chip-send {

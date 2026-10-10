@@ -19,7 +19,7 @@ vi.mock('@tauri-apps/api/event', () => {
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import HandoffCards from './HandoffCards.svelte';
-import { doneWhenWords, finishesWhen, resetHandoffsForTests, sessionState, taskUndoable, treeWaves, undoable, type ControlHandoff } from './handoffs';
+import { doneWhenWords, finishesWhen, resetHandoffsForTests, sessionState, splitTaskReceipts, taskSummary, taskUndoable, treeWaves, undoable, type ControlHandoff } from './handoffs';
 import { sessions, type SessionRow } from './sessions';
 import { sessionFocus } from './session_focus';
 import { missionOpenRequest } from './missions';
@@ -297,5 +297,58 @@ describe('the comet onto a "Sent to a session" chip', () => {
     expect(fliesIn({ ...h, at: now - 60 }, now, 'full')).toBe(false);
     expect(fliesIn({ ...h, kind: 'mission' }, now, 'full')).toBe(false);
     expect(fliesIn(h, now, 'off')).toBe(false);
+  });
+});
+
+// Control chat UX (2026-10-10): six task cards used to take the whole chat.
+describe('the task group', () => {
+  const task = (id: number, status: string, at = now - 3600): ControlHandoff => ({
+    id,
+    at,
+    kind: 'task',
+    tool: 'work_link',
+    item: { id: 100 + id, title: `Task ${id}`, status },
+  });
+
+  it('orders what needs a person first and finished work last, and counts them', () => {
+    const { tasks, others } = splitTaskReceipts([
+      task(1, 'done'),
+      { id: 9, at: now, kind: 'session', tool: 'session_send', session_id: 1 } as ControlHandoff,
+      task(2, 'in_progress'),
+      task(3, 'todo'),
+      task(4, 'blocked'),
+      task(5, 'in_progress'),
+    ]);
+    expect(tasks.map((h) => h.id)).toEqual([4, 2, 5, 3, 1]);
+    expect(others.map((h) => h.id)).toEqual([9]);
+    expect(taskSummary(tasks.map((h) => h.item!.status))).toBe('5 tasks · 1 need you · 2 working · 1 idle · 1 done');
+    expect(taskSummary(['todo'])).toBe('1 task · 1 idle');
+  });
+
+  it('opens by itself for a few tasks', async () => {
+    receipts = [task(1, 'todo'), task(2, 'done')];
+    render(HandoffCards);
+    const toggle = await screen.findByTestId('handoff-task-toggle');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(toggle.textContent).toContain('2 tasks · 1 idle · 1 done');
+  });
+
+  it('folds many tasks under the header until it is pressed', async () => {
+    receipts = [1, 2, 3, 4, 5, 6].map((i) => task(i, i % 2 ? 'in_progress' : 'todo'));
+    render(HandoffCards);
+    const toggle = await screen.findByTestId('handoff-task-toggle');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.getAllByTestId('handoff-task-card')[0].closest('ul')!.hidden).toBe(true);
+    await fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getAllByTestId('handoff-task-card')[0].closest('ul')!.hidden).toBe(false);
+  });
+
+  it('never folds a new task that still asks owner and due', async () => {
+    receipts = [1, 2, 3, 4, 5].map((i) => task(i, 'in_progress')).concat(task(6, 'todo', now - 30));
+    render(HandoffCards);
+    const toggle = await screen.findByTestId('handoff-task-toggle');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByTestId('handoff-task-owner')).toBeTruthy();
   });
 });
