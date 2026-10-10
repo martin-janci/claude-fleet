@@ -770,3 +770,71 @@ describe('WorkTree: New task on ⌘N', () => {
     expect(newTaskOwnsChord()).toBe(false);
   });
 });
+
+describe('WorkTree tab counts and hidden rows (G3.3)', () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    activeWorkViewId.set(null);
+    workViewFilters.set({});
+    workExpanded.set({});
+    sessions.set([]);
+  });
+
+  function hub(page: WorkTreePage) {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tree') return page;
+      if (cmd === 'work_review') return { items: [], total: 0, next_cursor: null };
+      if (cmd === 'work_missions')
+        return [
+          { id: 1, name: 'a', state: 'active' },
+          { id: 2, name: 'b', state: 'draft' },
+          { id: 3, name: 'c', state: 'completed' },
+        ];
+      if (cmd === 'list_pull_requests') return { items: [], total: 3 };
+      if (cmd === 'work_views') return [];
+      return null;
+    });
+  }
+
+  it('counts the tree’s tasks, the missions still moving and the open pull requests', async () => {
+    workLayout.set('grouped');
+    hub(firstPage);
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('work-tab-tasks-count').textContent).toBe('6');
+    expect(screen.getByTestId('work-tab-missions-count').textContent).toBe('2');
+    expect(screen.getByTestId('work-tab-prs-count').textContent).toBe('3');
+    expect(screen.getByTestId('work-tab-tasks').textContent).toBe('Tasks6');
+  });
+
+  it('a hub that refuses a list shows no number, not 0', async () => {
+    workLayout.set('grouped');
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tree') return firstPage;
+      if (cmd === 'work_missions' || cmd === 'list_pull_requests') throw { code: 'E_INVALID', message: 'unknown command' };
+      return null;
+    });
+    render(WorkTree);
+    await flush();
+    expect(screen.queryByTestId('work-tab-missions-count')).toBeNull();
+    expect(screen.queryByTestId('work-tab-prs-count')).toBeNull();
+  });
+
+  it('List: counts the rows not done, and Hidden by filters clears the filters but archived', async () => {
+    workLayout.set('list');
+    workViewFilters.set({ status: 'open', query: 'pay' });
+    hub({
+      ...firstPage,
+      tasks: [task({ task_id: 'item:1', stage: 'in_progress' }), task({ task_id: 'item:2', stage: 'done', status_category: 'done' })],
+      hidden_by_filters: 31,
+    });
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('work-tab-tasks-count').textContent).toBe('1');
+    const row = screen.getByTestId('work-hidden-by-filters');
+    expect(row.textContent).toContain('Hidden by filters 31');
+    await fireEvent.click(row);
+    expect(get(workViewFilters).status).toBeUndefined();
+    expect(get(workViewFilters).query).toBeUndefined();
+  });
+});
