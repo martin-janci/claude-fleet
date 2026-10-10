@@ -183,6 +183,10 @@ const REASONS = {
     'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker remove`',
   tracker_sync_metrics:
     'sync metrics live in the hub’s memory, and a client is never the fleet’s administrator — use `fleet-hub tracker status`',
+  // Sprints and releases (design 2026-09-28 §7): the buckets themselves are
+  // `work_admin`, master-only; putting tasks in them routes.
+  work_bucket_admin:
+    'a sprint or release reshapes what every client sees, and a client is never the fleet’s administrator — create and close them on the hub with work_admin bucket_*; adding tasks to them works here',
   // Jev's Asana section proposals: applying one is `work_admin update`.
   status_map_proposals:
     'section proposals are tracker administration, and a client is never the fleet’s administrator — use `fleet-hub decide proposals`',

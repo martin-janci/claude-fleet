@@ -119,6 +119,17 @@ pub struct NewBucket<'a> {
     pub goal: Option<&'a str>,
 }
 
+/// One current membership, as [`Store::bucket_membership`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BucketMembership {
+    pub item_id: i64,
+    pub bucket_id: i64,
+    /// The bucket's name.
+    pub name: String,
+    /// The bucket's organisation.
+    pub org_id: Option<i64>,
+}
+
 /// What `update_bucket` changes. `None` leaves a field; for the optional
 /// columns `Some(None)` clears it.
 #[derive(Debug, Clone, Default)]
@@ -650,6 +661,28 @@ impl Store {
                 source: r.get(n)?,
                 added_at: r.get(n + 1)?,
                 removed_at: r.get(n + 2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Every current membership of one kind: the Work view's group by
+    /// sprint or release reads it once per tree. An item in several
+    /// releases comes first under the one still planned, then the nearest
+    /// target date, then the oldest.
+    pub fn bucket_membership(&self, kind: &str) -> Result<Vec<BucketMembership>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.item_id, b.id, b.name, b.org_id FROM work_bucket_items m \
+             JOIN work_buckets b ON b.id = m.bucket_id \
+             WHERE b.kind = ?1 AND m.removed_at IS NULL \
+             ORDER BY m.item_id, b.state <> 'planned', b.ends_at IS NULL, b.ends_at, b.id",
+        )?;
+        let rows = stmt.query_map([kind], |r| {
+            Ok(BucketMembership {
+                item_id: r.get(0)?,
+                bucket_id: r.get(1)?,
+                name: r.get(2)?,
+                org_id: r.get(3)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

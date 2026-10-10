@@ -2530,6 +2530,81 @@ fn a_tree_query_groups_by_the_account_its_sessions_run_on() {
     assert_eq!(group_of(&p, "TK-3").id, "none");
 }
 
+/// Sprints design 2026-09-28 §6a: a group by sprint or release, named only
+/// for the buckets the caller may see.
+#[test]
+fn a_tree_query_groups_by_sprint_and_release() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        let bucket = |kind: &str, name: &str, org: Option<i64>| {
+            s.create_bucket(&crate::store::NewBucket {
+                kind,
+                name,
+                org_id: org,
+                starts_at: None,
+                ends_at: None,
+                goal: None,
+            })
+            .unwrap()
+            .id
+        };
+        let sprint = bucket("sprint", "Sprint 24", Some(w.org_a));
+        s.add_bucket_item(sprint, w.t1).unwrap();
+        // An unassigned sprint: a client bound to org A without unassigned
+        // work does not see it.
+        let secret = bucket("sprint", "Unassigned sprint", None);
+        s.add_bucket_item(secret, w.t2).unwrap();
+        // Two releases: the one still planned names the section.
+        let shipped = bucket("release", "0.2.0", Some(w.org_a));
+        s.add_bucket_item(shipped, w.t1).unwrap();
+        s.update_bucket(
+            shipped,
+            None,
+            &crate::store::BucketPatch {
+                state: Some("released".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let next = bucket("release", "0.3.0", Some(w.org_a));
+        s.add_bucket_item(next, w.t1).unwrap();
+    }
+    let p = page(&w, &OrgScope::All, by("sprint"));
+    assert_eq!(group_of(&p, "TK-1").label, "Sprint 24");
+    assert!(group_of(&p, "TK-1").id.starts_with("sprint:"));
+    assert_eq!(group_of(&p, "TK-1").source, "sprint");
+    assert_eq!(group_of(&p, "TK-3").id, "none");
+    assert_eq!(group_of(&p, "TK-3").label, "No sprint");
+
+    let p = page(&w, &OrgScope::All, by("release"));
+    assert_eq!(group_of(&p, "TK-1").label, "0.3.0");
+    assert_eq!(group_of(&p, "TK-3").label, "No release");
+
+    // A section of the grouping reads by itself.
+    let id = group_of(&page(&w, &OrgScope::All, by("sprint")), "TK-1")
+        .id
+        .clone();
+    let p = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            group: Some(id),
+            ..by("sprint")
+        },
+    );
+    assert_eq!(keys(&p), vec!["TK-1"]);
+
+    let p = page(&w, &OrgScope::All, by("sprint"));
+    assert_eq!(group_of(&p, "TK-2").label, "Unassigned sprint");
+    // Org A's client sees TK-2 but not the unassigned sprint: no name, no
+    // section.
+    let p = page(&w, &strict(w.org_a), by("sprint"));
+    assert_eq!(group_of(&p, "TK-2").id, "none");
+    let dump = serde_json::to_string(&p).unwrap();
+    assert!(!dump.contains("Unassigned sprint"), "{dump}");
+}
+
 #[test]
 fn an_unknown_grouping_is_refused_not_ignored() {
     let w = world();

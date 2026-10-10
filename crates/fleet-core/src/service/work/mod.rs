@@ -616,6 +616,11 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("delete_work_rule", "work_link", "rule_delete"),
     ("save_work_view", "work_link", "view_save"),
     ("delete_work_view", "work_link", "view_delete"),
+    // Sprints and releases (design 2026-09-28 §6a/§6b).
+    ("work_buckets", "work", "buckets"),
+    ("work_bucket", "work", "bucket"),
+    ("add_work_to_bucket", "work_link", "bucket_add"),
+    ("remove_work_from_bucket", "work_link", "bucket_remove"),
     // Orchestration O1: missions.
     ("work_missions", "work", "missions"),
     ("work_mission", "work", "mission"),

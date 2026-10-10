@@ -266,9 +266,19 @@ A native task is edited (title, description, status, assignees) from its
 card's ✎ or E, the List row's ✎ and the task page's *Edit*:
 `EditTaskDialog` writes `edit_work_item` → `work_link { edit }` and
 `set_work_status`; a tracker's ticket stays its tracker's to edit.
-It is not yet scoped to a sprint: the Work view's Sprint / Release axis and
-bulk assignment are not built, nor are epics for local items (phase 4). E9–E11 run on their
-defaults.
+The Work view's Sprint / Release axis (§6a) and bulk assignment (§6b) are
+built: `filters.group_by: sprint | release` (`view::regroup`, the bucket of
+each item read once per tree by `Store::bucket_membership`, fenced by
+`sees_org`), a section header with the bucket's roll-up, a selection in the
+Grouped tree that plans tasks into a sprint or release (moving one out of
+the sprint that held it) or takes them out, and *Sprints & releases*
+(`WorkBuckets.svelte`): create, start, release, close with the carry-over
+confirmed (E9) and delete. Desktop commands `work_buckets` / `work_bucket`
+(→ `work`) and `add_work_to_bucket` / `remove_work_from_bucket` (→
+`work_link`) route; `work_bucket_admin` is `work_admin`, so a paired desktop
+refuses it (`E_LOCAL_ONLY`) and plans only into buckets the hub's admin
+made. Not yet: the board scoped to a sprint, the phone, and epics for local
+items (phase 4). E9–E11 run on their defaults.
 
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub

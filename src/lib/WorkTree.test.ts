@@ -736,4 +736,44 @@ describe('WorkTree', () => {
     await flush();
     await expectAccessible(container);
   });
+  it('groups by sprint with its roll-up, and plans the selected tasks into a sprint', async () => {
+    const S24 = { id: 'sprint:4', label: 'Sprint 24', source: 'sprint' };
+    const sprints = [
+      { id: 4, kind: 'sprint', name: 'Sprint 24', state: 'active', total: 3, done: 1, created_at: 0, updated_at: 0, version: 1 },
+      { id: 5, kind: 'sprint', name: 'Sprint 25', state: 'planned', total: 0, done: 0, created_at: 0, updated_at: 0, version: 1 },
+      { id: 6, kind: 'sprint', name: 'Sprint 23', state: 'closed', total: 0, done: 0, created_at: 0, updated_at: 0, version: 2 },
+    ];
+    vi.mocked(invoke).mockImplementation(async (cmd: string, raw?: unknown) => {
+      const a = (raw as { args?: Record<string, unknown> } | undefined)?.args ?? {};
+      if (cmd === 'work_tree')
+        return {
+          ...firstPage,
+          tasks: [task({ task_id: 'item:20', item_id: 20, key: 'TASK-20', group: S24, org_id: 1, sessions: [] })],
+          groups: [{ org_id: 1, org_name: 'Acme', group: S24, count: 1 }],
+          next_cursor: null,
+        };
+      if (cmd === 'work_buckets') return sprints;
+      if (cmd === 'add_work_to_bucket') return { ...sprints[1], total: 1 };
+      if (cmd === 'work_review') return { items: [], total: 0, next_cursor: null };
+      void a;
+      return [];
+    });
+    workViewFilters.set({ group_by: 'sprint' });
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('work-group-bucket').textContent).toBe('Active · 1/3 done');
+
+    await fireEvent.click(screen.getByTestId('work-select-toggle'));
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-pick'));
+    const pick = screen.getByTestId('work-bulk-sprint') as HTMLSelectElement;
+    // A closed sprint is not offered.
+    expect(Array.from(pick.options).map((o) => o.textContent)).toEqual(['Add to sprint…', 'Sprint 24 (active)', 'Sprint 25 (planned)']);
+    pick.value = '5';
+    await fireEvent.change(pick);
+    await flush();
+    const adds = vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'add_work_to_bucket');
+    expect(adds.map((c) => c[1])).toEqual([{ args: { bucket_id: 5, item_id: 20 } }]);
+    expect(screen.getByTestId('work-bulk-notice').textContent).toBe('Planned 1 task into “Sprint 25”.');
+  });
 });

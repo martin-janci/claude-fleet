@@ -114,7 +114,8 @@ pub struct WorkTreeFilters {
     pub status_name: Option<String>,
     /// What a section under each org is: group (default; a person, rule,
     /// tracker container, repo or key), org (one section per org), person,
-    /// mission, account or repo.
+    /// mission, account, repo, sprint (its current sprint) or release (its
+    /// release still planned, else its latest).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_by: Option<String>,
     /// Any of these orgs (ids, or "none" for unassigned): the Work panel's
@@ -133,7 +134,9 @@ pub struct WorkTreeFilters {
 pub const STAGE_VALUES: [&str; 5] = ["backlog", "in_progress", "in_review", "blocked", "done"];
 
 /// [`WorkTreeFilters::group_by`]'s values.
-pub const GROUP_BY_VALUES: [&str; 6] = ["group", "org", "person", "mission", "account", "repo"];
+pub const GROUP_BY_VALUES: [&str; 8] = [
+    "group", "org", "person", "mission", "account", "repo", "sprint", "release",
+];
 
 /// Where a task sits and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -857,6 +860,10 @@ pub(crate) struct Graph {
     /// this caller may read: filled by [`tree`] only for a group by mission
     /// (redesign step 6.2), so every other read pays nothing for it.
     pub(crate) missions_by_item: HashMap<i64, (i64, String)>,
+    /// Item id → its sprint or release, `(id, name)`, for the buckets this
+    /// caller may see: filled by [`tree`] only for a group by sprint or
+    /// release (sprints design 2026-09-28 §6a).
+    pub(crate) buckets_by_item: HashMap<i64, (i64, String)>,
     /// Account uuid → how it is named (nickname, else email), filled by
     /// [`tree`] only for a group by account.
     pub(crate) account_labels: HashMap<String, String>,
@@ -1086,6 +1093,7 @@ impl Graph {
             deps,
             scope: scope.clone(),
             missions_by_item: HashMap::new(),
+            buckets_by_item: HashMap::new(),
             account_labels: HashMap::new(),
         })
     }
@@ -2321,7 +2329,8 @@ pub fn check_filters(f: &WorkTreeFilters) -> Result<(), IpcError> {
     if let Some(by) = f.group_by.as_deref() {
         if !GROUP_BY_VALUES.contains(&by) {
             return Err(bad(format!(
-                "filters.group_by is group, org, person, mission, account or repo, not {by:?}"
+                "filters.group_by is group, org, person, mission, account, repo, sprint or \
+                 release, not {by:?}"
             )));
         }
     }
@@ -2440,7 +2449,8 @@ fn hidden_as_archived(t: &WorkTask, f: &WorkTreeFilters) -> bool {
 /// (redesign step 6.2), under its org as always: one section per org
 /// (`org`), its first assignee (`person`), its mission (`mission`), the
 /// account its sessions run on (`account`, an active one first) or its repo
-/// (`repo`). `None` keeps its own group (`group`, the default). A task with
+/// (`repo`), its current sprint (`sprint`) or its release (`release`).
+/// `None` keeps its own group (`group`, the default). A task with
 /// nothing to group by sits in `none`, last.
 fn regroup(g: &Graph, s: &TaskSummary<'_>, by: &str) -> Option<GroupRef> {
     let t = &s.task;
@@ -2489,6 +2499,11 @@ fn regroup(g: &Graph, s: &TaskSummary<'_>, by: &str) -> Option<GroupRef> {
         "repo" => match t.repos.first().or(t.project_label.as_ref()) {
             Some(r) => mk(format!("repo:{r}"), r.clone(), "repo"),
             None => none("No repo"),
+        },
+        "sprint" | "release" => match t.item_id.and_then(|i| g.buckets_by_item.get(&i)) {
+            Some((id, name)) => mk(format!("{by}:{id}"), name.clone(), by),
+            None if by == "sprint" => none("No sprint"),
+            None => none("No release"),
         },
         _ => return None,
     })
@@ -2876,6 +2891,15 @@ pub fn tree(
                 for (item, mission) in s.mission_membership()? {
                     if let Some(name) = readable_missions.get(&mission) {
                         g.missions_by_item.insert(item, (mission, name.clone()));
+                    }
+                }
+            }
+            Some(kind @ ("sprint" | "release")) => {
+                for m in s.bucket_membership(kind)? {
+                    if scope.sees_org(m.org_id) {
+                        g.buckets_by_item
+                            .entry(m.item_id)
+                            .or_insert((m.bucket_id, m.name));
                     }
                 }
             }

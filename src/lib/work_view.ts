@@ -83,8 +83,9 @@ export const WORK_STAGE_LABELS: Record<WorkStage, string> = {
 
 /** `filters.group_by` (redesign step 6.2): the task's own group (a person,
  *  rule, tracker container, repo or key), one section per org, or its
- *  assignee, mission, account or repo. An older hub ignores it. */
-export const WORK_GROUP_BY = ['group', 'org', 'person', 'mission', 'account', 'repo'] as const;
+ *  assignee, mission, account, repo, sprint or release. An older hub
+ *  refuses `sprint` / `release` (`E_INVALID`, it lists what it knows). */
+export const WORK_GROUP_BY = ['group', 'org', 'person', 'mission', 'account', 'repo', 'sprint', 'release'] as const;
 export type WorkGroupBy = (typeof WORK_GROUP_BY)[number];
 
 export const STATUS_FILTERS = ['any', 'open', 'todo', 'in_progress', 'done'] as const;

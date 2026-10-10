@@ -1778,6 +1778,37 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Sprints and releases (design 2026-09-28 §6a).
+        (
+            "work_buckets",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "buckets", "kind": "sprint" }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_buckets(
+                    b,
+                    commands::work_view::WorkBucketsArgs {
+                        kind: Some("sprint".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_bucket",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "bucket", "bucket_id": 4 }),
+            r#"{"bucket":{"id":4,"kind":"sprint","name":"Sprint 24","state":"active","created_at":1,"updated_at":1,"version":1},"members":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_bucket(
+                    b,
+                    commands::work_view::WorkBucketArgs { bucket_id: 4 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "work_org_impact",
             "work",
@@ -4048,6 +4079,43 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     commands::work_view::DeleteWorkViewArgs {
                         view_id: 9,
                         expected_version: Some(1),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Sprints and releases (design 2026-09-28 §6b).
+        (
+            "add_work_to_bucket",
+            "work_link",
+            json!({ "session_id": null, "action": "bucket_add", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "bucket_id": 4 }),
+            r#"{"id":4,"kind":"sprint","name":"Sprint 24","state":"active","created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::add_work_to_bucket(
+                    b,
+                    commands::work_view::BucketMemberArgs {
+                        bucket_id: 4,
+                        item_id: 9,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_work_from_bucket",
+            "work_link",
+            json!({ "session_id": null, "action": "bucket_remove", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "bucket_id": 4 }),
+            r#"{"id":4,"kind":"sprint","name":"Sprint 24","state":"active","created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::remove_work_from_bucket(
+                    b,
+                    commands::work_view::BucketMemberArgs {
+                        bucket_id: 4,
+                        item_id: 9,
                     },
                     s,
                 ))

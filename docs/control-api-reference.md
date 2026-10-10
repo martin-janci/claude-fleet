@@ -949,6 +949,11 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work_view::delete_work_rule`
 - `commands::work_view::save_work_view`
 - `commands::work_view::delete_work_view`
+- `commands::work_view::work_buckets`
+- `commands::work_view::work_bucket`
+- `commands::work_view::add_work_to_bucket`
+- `commands::work_view::remove_work_from_bucket`
+- `commands::work_view::work_bucket_admin`
 - `commands::missions::work_missions`
 - `commands::missions::work_mission`
 - `commands::missions::save_mission`
