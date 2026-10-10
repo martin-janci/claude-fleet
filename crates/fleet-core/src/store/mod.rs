@@ -160,7 +160,10 @@ pub use pr_shepherd::{
     SHEPHERD_RECIPES_MAX_CHARS,
 };
 pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
-pub use pull_requests::{repo_and_number, PrSeenBy, PullRequestRow};
+pub use pull_requests::{
+    pr_events, repo_and_number, PrSeenBy, PullRequestRow, PR_EVENT_CI_FAILED, PR_EVENT_CI_PASSED,
+    PR_EVENT_MERGED, PR_EVENT_REVIEW,
+};
 pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};

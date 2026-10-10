@@ -9,7 +9,7 @@ use crate::service::routines;
 #[tool_router(router = routines_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(description = "Routines: a saved prompt that starts a session \
-        on a cron schedule, a session event or Run now. list; get \
+        on a cron schedule, a session or pull request event or Run now. list; get \
         {routine_id}: with its last runs; runs {routine_id, limit?}; failing: \
         each routine whose newest run failed, for the Inbox; save \
         {routine, routine_id?}: the whole routine; delete; set_enabled \

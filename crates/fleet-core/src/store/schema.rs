@@ -327,6 +327,17 @@ fn deferred_prompts_has_not_before(conn: &Connection) -> rusqlite::Result<bool> 
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 156: `routines` already has its
+/// `event_rate_secs` column (the last of the three it adds).
+fn routines_has_event_rate(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routines') WHERE name = 'event_rate_secs'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 052: `work_links` already has its
 /// `archived_at` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
@@ -1758,6 +1769,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 155,
         sql: include_str!("../../migrations/155_deferred_prompt_timing.sql"),
         already_applied: Some(deferred_prompts_has_not_before),
+    },
+    // M15 step G2.4: a routine's pull request triggers (repo, author, rate)
+    // on `routines` — ADD COLUMNs, so a guard.
+    Migration {
+        version: 156,
+        sql: include_str!("../../migrations/156_routine_triggers.sql"),
+        already_applied: Some(routines_has_event_rate),
     },
 ];
 

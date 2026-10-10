@@ -864,8 +864,18 @@ Index by area (names only; see the reference for details):
   saved), on a session timeline event (`trigger: event`, one of `turn_done`,
   `stop_failure`, `stuck`, `lost`, `task_done`, `task_failed`,
   `session_restore_failed`, `workspace_repair_failed`, written for a
-  session its owner owns and not started by a routine), or only when a
-  person presses `run_now` (`trigger: manual`). `list`; `get {
+  session its owner owns and not started by a routine), on a pull
+  request's review, checks or merge (`pr_review` when it gains an approval
+  or a request for changes, `pr_ci_failed`, `pr_ci_passed`, `pr_merged`:
+  written when reconcile's `pull_requests` row changes, on the timeline of
+  the session that opened it; M15 G2.4), or only when a person presses
+  `run_now` (`trigger: manual`). A pull request routine may narrow to
+  `event_repo` (`owner/name`, or `name` of any owner) and widen with
+  `event_author: anyone` from its owner's PRs to those of any session on a
+  host of its org, never one a routine's session opened; its run's prompt
+  ends with a line naming the PR. Any event routine may set
+  `event_rate_secs` (up to a week): at most one run per PR, or per
+  session, in that window; a fire inside it is dropped. `list`; `get {
   routine_id }` with its last runs; `runs { routine_id, limit? }`; `save {
   routine, routine_id? }` writes the whole routine (host, project,
   `profile` = the account it bills, prompt, `budget_run_micros`,

@@ -65,6 +65,10 @@ impl Store {
     /// - PR shepherd (`Store::record_shepherd_episode`): `pr_shepherd` (detail
     ///   is `<condition>:<outcome>`).
     /// - MCP call audit (`mcp::tools::support`): `mcp_call`.
+    /// - pull requests (`Store::upsert_pull_request_in_tx`, M15 G2.4):
+    ///   `pr_review`, `pr_ci_failed`, `pr_ci_passed`, `pr_merged` (detail is
+    ///   the PR's URL), on the session that opened it; written quietly in
+    ///   reconcile's transaction, for event routines.
     pub fn insert_session_event(
         &self,
         session_id: i64,

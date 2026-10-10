@@ -27,6 +27,7 @@
   import StatusDot from '../kit/StatusDot.svelte';
   import type { OfState } from '../kit/status';
   import NewRoutineMenu from './NewRoutineMenu.svelte';
+  import RoutineEventTrigger from './RoutineEventTrigger.svelte';
   import DestructiveConfirm from '../forms/DestructiveConfirm.svelte';
   import type { IpcError } from '../result';
   import { accountByUuid } from '../accounts';
@@ -39,7 +40,10 @@
     deleteRoutine,
     deviceOffsetMin,
     dollars,
-    eventWords,
+    eventFilterInput,
+    eventFilterOf,
+    eventFilterWords,
+    type EventFilter,
     fixRoutine,
     getRoutine,
     lastRunByRoutine,
@@ -100,6 +104,7 @@
     budget_run: string;
     budget_day: string;
     overlap: 'skip' | 'parallel';
+    filter: EventFilter;
   }
 
   const pickable = $derived($projects.filter((p) => !p.project.system));
@@ -204,6 +209,7 @@
       budget_run: dollarsField(i.budget_run_micros),
       budget_day: dollarsField(i.budget_day_micros),
       overlap: i.overlap === 'parallel' ? 'parallel' : 'skip',
+      filter: eventFilterOf(i),
     };
   }
 
@@ -232,6 +238,9 @@
         budget_run_micros: r.budget_run_micros,
         budget_day_micros: r.budget_day_micros,
         overlap: r.overlap === 'parallel' ? 'parallel' : 'skip',
+        event_repo: r.event_repo,
+        event_author: r.event_author === 'anyone' ? 'anyone' : undefined,
+        event_rate_secs: r.event_rate_secs,
       },
       copy ? undefined : r.id,
     );
@@ -264,6 +273,7 @@
       budget_run_micros: microsOf(d.budget_run),
       budget_day_micros: microsOf(d.budget_day),
       overlap: d.overlap,
+      ...eventFilterInput(d.trigger, d.event, d.filter),
     };
     busy = true;
     const r = await saveRoutine(input, d.id);
@@ -535,7 +545,7 @@
           >When
           <select data-testid="routine-trigger" bind:value={draft.trigger}>
             <option value="cron">On a schedule</option>
-            <option value="event">When a session event happens</option>
+            <option value="event">On an event</option>
             <option value="manual">Only with Run now</option>
           </select>
         </label>
@@ -545,12 +555,7 @@
             <span class="hint">{triggerWords({ trigger: 'cron', cron: draft.cron })} · minute hour day month weekday, your time</span>
           </label>
         {:else if draft.trigger === 'event'}
-          <label
-            >Event
-            <select data-testid="routine-event" bind:value={draft.event}>
-              {#each ['stuck', 'lost', 'turn_done'] as e (e)}<option value={e}>A session is {eventWords(e)}</option>{/each}
-            </select>
-          </label>
+          <RoutineEventTrigger bind:event={draft.event} bind:filter={draft.filter} repos={pickable.map((p) => `${p.project.owner}/${p.project.repo}`)} />
         {/if}
         <label
           >Host
@@ -718,7 +723,7 @@
           </section>
         {:else if tab === 'definition'}
           <dl class="of-kv" data-testid="routine-definition">
-            <dt>When</dt><dd>{triggerWords(r)}</dd>
+            <dt>When</dt><dd>{[triggerWords(r), eventFilterWords(r)].filter(Boolean).join(' · ')}</dd>
             <dt>Host</dt><dd>{r.host_alias}</dd>
             <dt>Project</dt><dd>{projectName(r.project_id)}</dd>
             <dt>Account</dt><dd>{r.profile ?? "the host's own"}</dd>

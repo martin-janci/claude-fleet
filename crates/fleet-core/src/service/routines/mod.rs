@@ -28,6 +28,14 @@
 //! routines cannot keep each other going). A fire that finds the routine
 //! busy or over budget is dropped, not recorded: a timeline event is far
 //! too frequent for a row each.
+//!
+//! **Pull request triggers** (M15 step G2.4) are [`PR_EVENTS`]: reconcile
+//! writes one on the timeline of the session that opened a PR when its
+//! `pull_requests` row gains a review, its checks turn failing or passing,
+//! or it merges. Such a routine may narrow to one repo (`event_repo`) and
+//! widen from its owner's PRs to its org's (`event_author: anyone`). Any
+//! event routine may hold a rate (`event_rate_secs`): at most one run per
+//! PR, or per session, in that window; a fire inside it is dropped.
 
 pub mod cron;
 pub mod outcome;
@@ -37,8 +45,8 @@ use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs;
 use crate::service::view_scope::ViewScope;
 use crate::store::{
-    NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, Store, ROUTINE_OVERLAPS,
-    ROUTINE_TRIGGERS,
+    NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, Store, PR_EVENT_CI_FAILED,
+    PR_EVENT_CI_PASSED, PR_EVENT_MERGED, PR_EVENT_REVIEW, ROUTINE_OVERLAPS, ROUTINE_TRIGGERS,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -46,7 +54,7 @@ use std::sync::Mutex;
 pub use tick::{spawn_routine_tick, tick_once, Deps, LiveSpawn, Spawn};
 
 /// The session timeline kinds an event routine may fire on.
-pub const EVENTS: [&str; 8] = [
+pub const EVENTS: [&str; 12] = [
     "turn_done",
     "stop_failure",
     "stuck",
@@ -55,7 +63,27 @@ pub const EVENTS: [&str; 8] = [
     "task_failed",
     "session_restore_failed",
     "workspace_repair_failed",
+    PR_EVENT_REVIEW,
+    PR_EVENT_CI_FAILED,
+    PR_EVENT_CI_PASSED,
+    PR_EVENT_MERGED,
 ];
+
+/// The [`EVENTS`] about a pull request: their detail is its URL, and only
+/// they take a repo filter or `event_author: anyone`.
+pub const PR_EVENTS: [&str; 4] = [
+    PR_EVENT_REVIEW,
+    PR_EVENT_CI_FAILED,
+    PR_EVENT_CI_PASSED,
+    PR_EVENT_MERGED,
+];
+
+/// `event_author` values: `me` (the same as absent) | `anyone`.
+pub const EVENT_AUTHORS: [&str; 2] = ["me", "anyone"];
+/// The longest event rate: a week.
+pub const EVENT_RATE_MAX_SECS: i64 = 7 * 24 * 3600;
+/// A repo filter, in characters.
+pub const EVENT_REPO_MAX_CHARS: usize = 200;
 
 /// Runs a `routines { get }` carries.
 pub const RUNS_SHOWN: i64 = 20;
@@ -84,7 +112,8 @@ pub struct RoutineInput {
     /// Minutes east of UTC the cron line is read at (the device's offset).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub utc_offset_min: Option<i64>,
-    /// For event: a session timeline kind (turn_done, stuck, lost, …).
+    /// For event: a timeline kind (turn_done, stuck, lost, pr_review,
+    /// pr_ci_failed, pr_ci_passed, pr_merged, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<String>,
     pub host_alias: String,
@@ -100,6 +129,15 @@ pub struct RoutineInput {
     /// skip (default) | parallel
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlap: Option<String>,
+    /// pr_* events: only this repo, owner/name or name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_repo: Option<String>,
+    /// pr_* events: me (default) | anyone in the routine's org.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_author: Option<String>,
+    /// At most one run per PR (or session) in this many seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_rate_secs: Option<i64>,
 }
 
 /// `routines { action: get }`.
@@ -336,6 +374,10 @@ fn check(
         }
         _ => None,
     };
+    let (event_repo, event_author, event_rate_secs) = match event.as_deref() {
+        Some(e) => event_filters(input, e)?,
+        None => (None, None, None),
+    };
     crate::validate::host_alias(&input.host_alias)?;
     if s.get_host_row(&input.host_alias)?.is_none() {
         return Err(host_not_found(&input.host_alias));
@@ -383,9 +425,86 @@ fn check(
             budget_run_micros: input.budget_run_micros,
             budget_day_micros: input.budget_day_micros,
             overlap: overlap.to_string(),
+            event_repo,
+            event_author,
+            event_rate_secs,
         },
         org,
     ))
+}
+
+/// An event routine's filters, checked: the repo (trimmed, `owner/name` or
+/// `name`), the author (`None` for me) and the rate. A repo or `anyone` on
+/// a session event is refused: a session event has no repo, and is only
+/// ever its owner's.
+#[allow(clippy::type_complexity)]
+fn event_filters(
+    input: &RoutineInput,
+    event: &str,
+) -> Result<(Option<String>, Option<String>, Option<i64>), IpcError> {
+    let invalid = |m: String| IpcError::new(codes::E_INVALID, m);
+    let on_pr = PR_EVENTS.contains(&event);
+    let repo = input
+        .event_repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty());
+    if let Some(r) = repo {
+        if !on_pr {
+            return Err(invalid(format!(
+                "a repo filter is for a pull request event, not {event}"
+            )));
+        }
+        let parts: Vec<&str> = r.split('/').collect();
+        let ok = r.chars().count() <= EVENT_REPO_MAX_CHARS
+            && parts.len() <= 2
+            && parts.iter().all(|p| {
+                !p.is_empty()
+                    && p.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            });
+        if !ok {
+            return Err(invalid(format!(
+                "event_repo is owner/name or name, got {r:?}"
+            )));
+        }
+    }
+    let author = match input.event_author.as_deref().map(str::trim) {
+        None | Some("") | Some("me") => None,
+        Some("anyone") if on_pr => Some("anyone".to_string()),
+        Some("anyone") => {
+            return Err(invalid(format!(
+                "a session event is its owner's; anyone is for a pull request event, not {event}"
+            )))
+        }
+        Some(a) => {
+            return Err(invalid(format!(
+                "event_author must be {}, got {a:?}",
+                EVENT_AUTHORS.join(" | ")
+            )))
+        }
+    };
+    if let Some(r) = input.event_rate_secs {
+        if !(1..=EVENT_RATE_MAX_SECS).contains(&r) {
+            return Err(invalid(format!(
+                "event_rate_secs must be 1 to {EVENT_RATE_MAX_SECS} (a week), or absent"
+            )));
+        }
+    }
+    Ok((repo.map(str::to_string), author, input.event_rate_secs))
+}
+
+/// Whether a PR's `owner/name` passes a routine's repo filter: the same
+/// `owner/name`, or the same `name` when the filter names no owner,
+/// without case. A PR whose repo is unknown passes no filter.
+pub fn repo_matches(filter: &str, repo: Option<&str>) -> bool {
+    let Some(repo) = repo else { return false };
+    if filter.contains('/') {
+        return filter.eq_ignore_ascii_case(repo);
+    }
+    repo.rsplit('/')
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case(filter))
 }
 
 /// The next cron fire of `f` after `now`; `None` for any other trigger, or

@@ -42,6 +42,12 @@ export interface RoutineRow {
   paused_reason?: string;
   created_at: number;
   updated_at: number;
+  /** A pull request event fires only for this repo: `owner/name` or `name` (M15 G2.4). */
+  event_repo?: string;
+  /** `anyone`: PRs of any session in its org; absent = its owner's. */
+  event_author?: string;
+  /** At most one run per PR (or session) in this many seconds. */
+  event_rate_secs?: number;
 }
 
 /** One run of a routine. */
@@ -120,6 +126,9 @@ export interface RoutineInput {
   budget_run_micros?: number;
   budget_day_micros?: number;
   overlap?: RoutineOverlap;
+  event_repo?: string;
+  event_author?: EventAuthor;
+  event_rate_secs?: number;
 }
 
 type Args = { action: string; routine_id?: number; routine?: RoutineInput; enabled?: boolean; skip?: boolean; limit?: number };
@@ -234,7 +243,10 @@ export function cronWords(cron: string | undefined): string {
 /** When it runs, in words. */
 export function triggerWords(r: Pick<RoutineRow, 'trigger' | 'cron' | 'event'>): string {
   if (r.trigger === 'cron') return cronWords(r.cron);
-  if (r.trigger === 'event') return `When a session is ${eventWords(r.event)}`;
+  if (r.trigger === 'event') {
+    if (isPrEvent(r.event)) return `When ${eventLabel(r.event).replace(/^A /, 'a ')}`;
+    return `When a session is ${eventWords(r.event)}`;
+  }
   return 'Run now only';
 }
 
@@ -246,6 +258,78 @@ const EVENT_WORDS: Record<string, string> = {
 };
 export function eventWords(e: string | undefined): string {
   return (e && EVENT_WORDS[e]) || e || 'event';
+}
+
+// Pull request triggers (M15 step G2.4; fleet-core `routines::PR_EVENTS`):
+// reconcile writes one on the timeline of the session that opened a PR when
+// its review, checks or state change. Only they take a repo filter and
+// `anyone`; every event may hold a rate.
+export type EventAuthor = 'me' | 'anyone';
+const PR_EVENT_LABELS: Record<string, string> = {
+  pr_review: 'A pull request gets a review',
+  pr_ci_failed: 'A pull request’s checks fail',
+  pr_ci_passed: 'A pull request’s checks pass',
+  pr_merged: 'A pull request is merged',
+};
+/** The events the editor offers, session ones first. */
+export const EVENT_CHOICES: readonly string[] = ['stuck', 'lost', 'turn_done', ...Object.keys(PR_EVENT_LABELS)];
+export function isPrEvent(e: string | undefined): boolean {
+  return !!e && e in PR_EVENT_LABELS;
+}
+/** An event as the editor's select names it. */
+export function eventLabel(e: string | undefined): string {
+  return (e && PR_EVENT_LABELS[e]) || `A session is ${eventWords(e)}`;
+}
+/** The rate choices: absent is "every time". */
+export const RATE_CHOICES: readonly { secs?: number; label: string }[] = [
+  { label: 'every time' },
+  { secs: 600, label: 'once per 10 minutes' },
+  { secs: 3600, label: 'once per hour' },
+  { secs: 86400, label: 'once per day' },
+];
+
+/** An event routine's filters, as the editor holds them. */
+export interface EventFilter {
+  repo: string;
+  author: EventAuthor;
+  /** Seconds as text, '' for every time. */
+  rate: string;
+}
+export function eventFilterOf(r: Pick<RoutineInput, 'event_repo' | 'event_author' | 'event_rate_secs'>): EventFilter {
+  return {
+    repo: r.event_repo ?? '',
+    author: r.event_author === 'anyone' ? 'anyone' : 'me',
+    rate: r.event_rate_secs ? String(r.event_rate_secs) : '',
+  };
+}
+/** The fields `save` sends for `event`: none for another trigger, and the
+ *  repo and author only for a pull request event (the hub refuses them on
+ *  a session one). */
+export function eventFilterInput(
+  trigger: string,
+  event: string | undefined,
+  f: EventFilter,
+): Pick<RoutineInput, 'event_repo' | 'event_author' | 'event_rate_secs'> {
+  if (trigger !== 'event') return {};
+  const rate = Number(f.rate);
+  const out: Pick<RoutineInput, 'event_repo' | 'event_author' | 'event_rate_secs'> =
+    Number.isInteger(rate) && rate > 0 ? { event_rate_secs: rate } : {};
+  if (!isPrEvent(event)) return out;
+  const repo = f.repo.trim();
+  if (repo) out.event_repo = repo;
+  if (f.author === 'anyone') out.event_author = 'anyone';
+  return out;
+}
+/** "only in acme/web · anyone's · once per PR per hour", or '' when nothing narrows it. */
+export function eventFilterWords(r: Pick<RoutineRow, 'event' | 'event_repo' | 'event_author' | 'event_rate_secs'>): string {
+  const pr = isPrEvent(r.event);
+  const parts: string[] = [];
+  if (pr && r.event_repo) parts.push(`only in ${r.event_repo}`);
+  if (pr) parts.push(r.event_author === 'anyone' ? 'anyone’s' : 'mine');
+  const rate = RATE_CHOICES.find((c) => c.secs === r.event_rate_secs);
+  if (r.event_rate_secs)
+    parts.push(rate ? rate.label.replace('once per', `once per ${pr ? 'PR' : 'session'} per`) : `once per ${r.event_rate_secs}s`);
+  return parts.join(' · ');
 }
 
 /** On / Paused / Paused by fleet, the routine's switch in words. */
