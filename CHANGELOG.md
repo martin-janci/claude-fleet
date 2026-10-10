@@ -8,6 +8,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.6.2-dev.106.desktop.g764356f] - 2026-10-10
+
+### Added
+- **agent:** proto 2 — payloads over 1 MiB cross the agent link in chunks
+- **tokens:** named Control API tokens with scope, expiry and host limit
+- **toolkit:** Command asset kind, Write it with Claude on a host, commit with file list, Import What, multi-host secret, Harness boxes
+- **approvals:** check and press a dialog answer in one step on the backend
+- **missions:** planner drafts the first tasks, Import a plan with a repo per row, answer a card on the mission page
+- **today:** KPI tiles, date and fleet line, inline Switch account and Wait, shipped provenance
+- **states:** Work without a tracker, Automation templates, Control first run
+- **control:** tasks in chat by wave, duplicate Merge or Keep, created-task and status card
+- **work:** board + per column, x select and s start, PR chip, Work button on the open card
+- **ai:** confidence as a word, correction line, Edited drafts, Undo on AI changes, Confirm N, question entry and count roll
+- **control:** Needs you folds and search, Tasks and Routines views, PR diffstat, Library table
+- **work:** task detail tabs, Delivery block, inline status and the start rule
+- **work:** tab counts and Hidden by filters in the List layout
+- **missions:** finished mission with Reopen, finish checks, PR block and Archive N sessions
+- **terminals:** pop-out Send keys, Clear view, Pop back in, what runs in each shell
+- **routines:** schedule picker with next run and zone, Account apart from Profile, dry run, Run once now
+- **sessions:** Details visibility badge, Link or Not related, reviews block
+- **tidy:** space freed, choice legend, row detail, Restore all, board wording
+- **control:** suggestion cards, slash commands, composer hint, hand-on receipts
+- **inbox:** state sections, +1 proposed, mission asks, Restore line, completed today
+- **work:** group combobox with counts, live rule match count, move-to-org impact, view count on the rail
+- **routines:** fire on a pull request's review, checks or merge
+- **sessions:** session forms for commit, branch, label, lost and send later
+- **forms:** ChatForm and FormWizard render the full form spec
+- **work:** New task dialog on Cmd+N with "start a session now", drafted name
+- **toasts:** limit-hit toast, two-button toasts with a second line, rule offer toast
+- **repo:** per-file line counts, behind-base count and pushed flag for Files
+- **sessions:** send later at a time, after the limit resets, or skip if archived
+- **attention:** mission asks and Jev 'probably waiting' class (G1.6)
+- **forms:** destructive confirm with typed name and a safer way out (G1.4)
+- **sessions:** All/Mine/Shared tabs, agent facet, group by organisation, running cap, shared-by rows
+- **missions:** the Missions board's list and detail (gap G3.6)
+- **forms:** wider fleet.form/1 spec — option objects, review step, Another…, save later (G1.1)
+- **tidy:** say how much space a tidy frees, from per-worktree sizes (M15 G1.9)
+- **work:** tasks carry a due date beside their assignees (M15 G1.7)
+- **sessions:** one session action registry with Fork, Rewind, Switch account, Change model, Copy transcript, Archive
+- **settings:** scope pill, changed-from line and batched Save on settings rows
+- **forms:** form kit behaviour from the FormsAnatomy board
+- **ui:** draw a work handover as a card in the Conversation view
+- **redesign:** 5.11 J8 warns in the agent tab when the rules cannot read the screen
+- **redesign:** 6.8 J6/J7 in Review and bench sets for every closed-choice Jev use case
+- **redesign:** 11.1/11.8/11.12 org overview tabs, Federation graph, Link two hubs wizard
+- **redesign:** 10.12 wizards in chat, 9.12 trails for a long search, 10.10 transfer loaders
+
+### Changed
+- **mcp:** optional parameters lose their null, the control skill indexes every tool
+- **hub-client:** keep connections to the hub alive across calls
+- **agent:** small frames overtake queued bulk ones on the agent's link
+- **events:** a broadcast ring of 2048, so a briefly slow phone is not re-listed
+- **reconcile:** one slow host no longer holds the pass, the tick and every other host
+- **approvals:** a dialog's buttons arrive with its hook, and leave with the answer
+- **pages:** regenerate the page registry after the main merge
+- **mcp:** raise BYTES_PER_TOOL to 815 from the merged surface
+- **backend:** start:progress crosses the bridge with its token; install_agent and agent_installs route under a case
+
+### Fixed
+- **mcp:** bring the tool surface back under its budget after #812 and #813 met
+- **pane_intel:** a wrapped option label is read whole; Codex digits answer, documented
+- **approvals:** a card is decided once; an expired confirm is announced
+- **reconcile:** a dialog on the pane wins, and an answered one ends `blocked`
+- **approvals:** a stale card cannot approve a different command; first confirm answer wins
+- **hub:** keep pr_url, pr_evidence and claude_profile in the phone view
+- **ci:** main green again — the handover card's status word, a feature-gated helper
+- **ui:** a blocked handover reads Needs you, not a seventh status word
+- **ui:** a blocked handover reads Needs you, not a seventh status word
+- bugs from a sweep of the last two days' PRs
+- **mcp:** trim this branch's tool and parameter docs back under the 800-byte budget
+- **redesign:** 8.1, 4.4, 4.12, 8.7, 12.3, 2.6, 11.5, 6.9 backend audit gaps
+- **redesign:** 14.14 send_prompt presses the arrows, BTab and a closed list of Ctrl keys
+- **redesign:** 5.13 start steps, 5.3 terminals, 0.1 registry keys, 3.6/1.4/4.5/3.2/3.17 tests, 1.5 hierarchy
+- **redesign:** 3.14, 3.15, 0.6 and layout tokens from the audit
+- **redesign:** 4.9 install fleet-agent from the desktop; 6.3 Blocked and $ per task; 4.1/4.2 spend per account; 6.8 J1 in the Details timeline
+- **redesign:** 3.9 push and open in VS Code in the palette; 3.11 the draft's Atom
+- **redesign:** 7.8, 0.9 design-manual conformance: six words, one icon set, the kit
+
+### Documentation
+- **redesign:** snapshot the 9 Forms boards and the canvas gap audit
 ## [0.6.1] - 2026-10-09
 
 ### Added
@@ -3413,6 +3493,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.6.2-dev.106.desktop.g764356f]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.2-dev.106.desktop.g764356f
 [0.6.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.1
 [0.6.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.0
 [0.5.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.4
