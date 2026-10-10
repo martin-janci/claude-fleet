@@ -486,7 +486,11 @@ and merge, read from the `pull_requests` changes reconcile records, with a
 repo filter, "me or anyone in its org" and a rate per PR. The scheduler stops on
 `automation.paused`, a fire past the routine's day budget is skipped, a run
 past its run budget fails and pauses the routine, and a run whose account
-is at or past `accounts.pause_at` is skipped (8.7). Each finished run
+is at or past `accounts.pause_at` is skipped (8.7). M15 G3.8 (migration
+159) adds the guards: a fleet daily budget for every routine's runs
+(`automation.daily_budget`), a per-run time cap, a fallback host, retry
+once, an autonomy line under the prompt, and a named fix on a failed run
+from its error code. Each finished run
 records what it came to (8.10; Jev N6 is off), and a failed run shows in
 the Inbox. `runs` (8.3, migration 141) lists tasks, missions, Jev,
 `claude -p` and routine runs in one list. Start rules (8.11,

@@ -36,6 +36,15 @@
   import { push, pushError } from '../toasts';
   import {
     averageRun,
+    AUTONOMY_CHOICES,
+    autonomyWords,
+    capSecsOf,
+    capWords,
+    fixLabel,
+    hostWords,
+    onFailureWords,
+    OUTCOME_ROUTING,
+    startedByWords,
     clockChange,
     cronParts,
     deviceZone,
@@ -120,6 +129,11 @@
     budget_day: string;
     overlap: 'skip' | 'parallel';
     filter: EventFilter;
+    /** Time cap in minutes; empty = none (G3.8). */
+    cap_min: string;
+    fallback_host: string;
+    retry_once: boolean;
+    autonomy: number;
   }
 
   const pickable = $derived($projects.filter((p) => !p.project.system));
@@ -228,6 +242,10 @@
       budget_day: dollarsField(i.budget_day_micros),
       overlap: i.overlap === 'parallel' ? 'parallel' : 'skip',
       filter: eventFilterOf(i),
+      cap_min: i.run_max_secs ? String(Math.round(i.run_max_secs / 60)) : '',
+      fallback_host: i.fallback_host ?? '',
+      retry_once: i.retry_once ?? false,
+      autonomy: i.autonomy ?? 2,
     };
   }
 
@@ -266,6 +284,10 @@
         event_repo: r.event_repo,
         event_author: r.event_author === 'anyone' ? 'anyone' : undefined,
         event_rate_secs: r.event_rate_secs,
+        run_max_secs: r.run_max_secs,
+        fallback_host: r.fallback_host,
+        retry_once: r.retry_once,
+        autonomy: r.autonomy,
       },
       copy ? undefined : r.id,
     ));
@@ -301,6 +323,11 @@
       budget_day_micros: microsOf(d.budget_day),
       overlap: d.overlap,
       ...eventFilterInput(d.trigger, d.event, d.filter),
+      ...(zone ? { time_zone: zone } : {}),
+      run_max_secs: capSecsOf(d.cap_min),
+      fallback_host: d.fallback_host || undefined,
+      retry_once: d.retry_once,
+      autonomy: d.autonomy < 2 ? d.autonomy : undefined,
     };
   }
 
@@ -396,7 +423,6 @@
     goTo('session');
   }
 
-  const STARTED_BY: Record<string, string> = { cron: 'its schedule', event: 'a session event', run_now: 'Run now' };
 
   // ---- requests from elsewhere (the Inbox's Fix, the palette) -----------------
 
@@ -694,6 +720,29 @@
           <label>Per run, $ <input data-testid="routine-budget-run" bind:value={draft.budget_run} placeholder="no limit" /></label>
           <label>Per day, $ <input data-testid="routine-budget-day" bind:value={draft.budget_day} placeholder="no limit" /></label>
         </div>
+        <div class="pair">
+          <label
+            >Time cap, min <input data-testid="routine-cap" bind:value={draft.cap_min} placeholder="no cap" inputmode="numeric" />
+          </label>
+          <label
+            >Fallback host
+            <select data-testid="routine-fallback" bind:value={draft.fallback_host}>
+              <option value="">None</option>
+              {#each $hosts.filter((h) => !h.hidden && h.alias !== draft!.host_alias) as h (h.alias)}<option value={h.alias}>{h.alias}</option>{/each}
+            </select>
+          </label>
+        </div>
+        <p class="hint">A run past its time cap is stopped and fails. The fallback host takes a run when its host is unreachable, its login is past the line, or its start fails.</p>
+        <label class="check"
+          ><input type="checkbox" data-testid="routine-retry-once" bind:checked={draft.retry_once} /> On failure, retry once before it goes to the Inbox</label
+        >
+        <label
+          >Autonomy
+          <select data-testid="routine-autonomy" bind:value={draft.autonomy}>
+            {#each AUTONOMY_CHOICES as c (c.level)}<option value={c.level}>{c.label}</option>{/each}
+          </select>
+          <span class="hint">Told to the agent under the prompt. Sessions run without permission prompts, so this is an instruction, not a sandbox.</span>
+        </label>
         <label
           >Overlap
           <select data-testid="routine-overlap" bind:value={draft.overlap}>
@@ -801,6 +850,7 @@
             </div>
             <div class="stat"><span class="meta">Average cost</span><span class="tnum">{avg ?? 'No runs yet'}</span></div>
             <div class="stat"><span class="meta">Next run</span><span class="tnum">{nextRunWords(r, nowSec)}</span></div>
+            <div class="stat"><span class="meta">Autonomy</span><span data-testid="routine-autonomy-stat">{autonomyWords(r.autonomy)}</span></div>
           </section>
 
           <section>
@@ -832,13 +882,16 @@
                     <span class="sub-line meta">Its session waits for you in the Inbox.</span>
                   {/if}
                   {#if failed(run) && detail.may_change}
+                    {@const named = (detail.fixes ?? []).find((x) => x.run_id === run.id)}
                     <span class="sub-line">
                       <Button
                         size="sm"
                         testid="routine-run-fix"
                         onclick={() => {
-                          if (fixRoutine({ routine: r, run, may_change: true }) === 'definition') tab = 'definition';
-                        }}>Fix</Button
+                          if (named?.action === 'edit') return edit(r);
+                          if (named?.action === 'retry') return void act('Retry', () => runRoutineNow(r.id));
+                          if (fixRoutine({ routine: r, run, may_change: true, fix: named }) === 'definition') tab = 'definition';
+                        }}>{fixLabel(named)}</Button
                       >
                       <Button size="sm" testid="routine-run-retry" disabled={busy} onclick={() => act('Retry', () => runRoutineNow(r.id))}>Retry</Button>
                       {#if r.enabled}
@@ -848,7 +901,8 @@
                       {/if}
                       <details class="why">
                         <summary class="meta">Details</summary>
-                        <span class="meta">Started by {STARTED_BY[run.trigger] ?? run.trigger}{run.trigger_ref ? ` (${run.trigger_ref})` : ''}{run.reason ? `: ${run.reason}` : ''}</span>
+                        {#if run.error_code}<span class="meta mono" data-testid="routine-run-code">{run.error_code}{run.host_alias ? ` · on ${run.host_alias}` : ''}</span>{/if}
+                        <span class="meta">Started by {startedByWords(run)}{run.reason ? `: ${run.reason}` : ''}</span>
                       </details>
                     </span>
                   {/if}
@@ -865,8 +919,8 @@
           </section>
         {:else if tab === 'definition'}
           <dl class="of-kv" data-testid="routine-definition">
-            <dt>When</dt><dd>{[triggerWords(r), eventFilterWords(r)].filter(Boolean).join(' · ')}</dd>
-            <dt>Host</dt><dd>{r.host_alias}</dd>
+            <dt>When</dt><dd>{[triggerWords(r), eventFilterWords(r)].filter(Boolean).join(' · ')}{r.trigger === 'cron' && r.time_zone ? ` · ${r.time_zone}` : ''}</dd>
+            <dt>Host</dt><dd>{hostWords(r)}</dd>
             <dt>Project</dt><dd>{projectName(r.project_id)}</dd>
             <dt>Account</dt><dd>{r.profile ?? "the host's own"}</dd>
           </dl>
@@ -875,7 +929,10 @@
           <dl class="of-kv" data-testid="routine-limits">
             <dt>Per run</dt><dd>{r.budget_run_micros !== undefined ? dollars(r.budget_run_micros) : 'No limit'}</dd>
             <dt>Per day</dt><dd>{r.budget_day_micros !== undefined ? dollars(r.budget_day_micros) : 'No limit'}</dd>
+            <dt>Time cap</dt><dd>{r.run_max_secs ? `${capWords(r.run_max_secs)} · then its turn is stopped and it fails` : 'No cap'}</dd>
             <dt>Overlap</dt><dd>{r.overlap === 'parallel' ? 'Runs alongside the last run' : 'Skip if the last run is still going'}</dd>
+            <dt>On failure</dt><dd>{onFailureWords(r)}</dd>
+            <dt>Autonomy</dt><dd>{autonomyWords(r.autonomy)}</dd>
             <dt>Over budget</dt><dd>The run fails, the routine pauses, and it lands in the Inbox</dd>
           </dl>
         {/if}
@@ -897,15 +954,23 @@
         <strong>Limits and kill switches</strong>
         <KeyValue
           items={[
-            { label: 'Per run', value: r.budget_run_micros !== undefined ? `${dollars(r.budget_run_micros)} · then it pauses` : 'No limit', tnum: true },
+            {
+              label: 'Per run',
+              value: [r.budget_run_micros !== undefined ? `${dollars(r.budget_run_micros)}` : 'No limit', r.run_max_secs ? capWords(r.run_max_secs) : null]
+                .filter(Boolean)
+                .join(' · '),
+              tnum: true,
+            },
             { label: 'Per day', content: perDay },
             {
               label: 'Account',
               value: `${detail.account ? routineAccountLabel(detail.account, $accountByUuid.get(detail.account.account_uuid)) : (r.profile ?? "the host's own")} · skips a run past ${pauseAt}% used`,
             },
-            { label: 'Host', value: r.host_alias },
+            { label: 'Host', value: hostWords(r) },
             { label: 'Overlap', value: r.overlap === 'parallel' ? 'Runs alongside the last run' : 'Skip if the last run is still going' },
-            { label: 'On failure', value: 'Inbox as Failed until you retry or pause it' },
+            { label: 'On failure', value: onFailureWords(r) },
+            { label: 'Autonomy', value: autonomyWords(r.autonomy) },
+            { label: 'Outcomes', value: OUTCOME_ROUTING },
           ]}
         />
         <div class="usage">
@@ -1017,6 +1082,7 @@
   .editor .hint.warn { color: var(--status-waiting, var(--fg-2)); }
   .dry { margin: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-pane); font-size: var(--text-xs); color: var(--fg-2); }
   .dry.bad { color: var(--status-failed); }
+  .editor label.check { flex-direction: row; align-items: center; gap: 6px; }
   .pair { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
   .actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
   @media (max-width: 1180px) {

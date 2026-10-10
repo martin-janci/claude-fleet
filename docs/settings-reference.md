@@ -33,6 +33,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
 | `automation.paused` | `false` | on / off | fleet | Stop every background job that acts on its own: missions, garbage collection, playbooks, repairs, tracker, catalog and folder syncs, and host refreshes. Reconcile, usage and update checks keep running, and health shows each job as paused. |
+| `automation.daily_budget` | `0` | 0–1000000 USD, `0` = none | fleet | What every routine's runs together may spend in one UTC day. Once they have spent it no routine starts a run, Run now included, until the next day. A run already going finishes. |
 
 ## orchestrator
 

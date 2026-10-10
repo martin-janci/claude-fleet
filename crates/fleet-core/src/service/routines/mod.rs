@@ -36,8 +36,19 @@
 //! widen from its owner's PRs to its org's (`event_author: anyone`). Any
 //! event routine may hold a rate (`event_rate_secs`): at most one run per
 //! PR, or per session, in that window; a fire inside it is dropped.
+//!
+//! **Guards** (M15 step G3.8, migration 159): the fleet's daily budget
+//! (`automation.daily_budget`, every routine's runs in one UTC day) stops
+//! new runs like a routine's own day budget; a time cap (`run_max_secs`)
+//! stops a run's turn and fails it; a fallback host (`fallback_host`)
+//! takes a run its host cannot (unreachable, its login past the line, or a
+//! start that failed); `retry_once` starts a failed run again on the next
+//! pass, once, and Pause all stops that too; `autonomy` adds a line to the
+//! prompt saying how far the run may go (report, ask before push, push). A
+//! failed run carries an error code, read as a named fix ([`fix`]).
 
 pub mod cron;
+pub mod fix;
 pub mod outcome;
 pub mod tick;
 
@@ -138,6 +149,46 @@ pub struct RoutineInput {
     /// At most one run per PR (or session) in this many seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_rate_secs: Option<i64>,
+    // The guards (G3.8): plain comments, not doc comments, so they stay
+    // out of the served schema's budget; docs/control-api.md says them.
+    // The IANA zone shown with the schedule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
+    // Stop the turn and fail the run after this many seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_max_secs: Option<i64>,
+    // The host for a run its own host cannot take.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_host: Option<String>,
+    // Start a failed run again, once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_once: Option<bool>,
+    // 0 report only | 1 ask before push | 2 push (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomy: Option<i64>,
+}
+
+/// The shortest time cap: a minute.
+pub const RUN_MAX_SECS_MIN: i64 = 60;
+/// A time zone name, in characters.
+pub const TIME_ZONE_MAX_CHARS: usize = 64;
+/// `autonomy` levels: what the run is told it may do.
+pub const AUTONOMY_LEVELS: [&str; 3] = ["report only", "ask before push", "push and open PRs"];
+
+/// The line `autonomy` adds under a run's prompt; `None` for level 2 (or
+/// none), which says nothing beyond the prompt.
+pub fn autonomy_line(level: Option<i64>) -> Option<&'static str> {
+    match level {
+        Some(0) => Some(
+            "Autonomy L0, report only: change no files, commit nothing and push nothing. \
+             Report what you found and what you would do.",
+        ),
+        Some(1) => Some(
+            "Autonomy L1, ask before push: you may change files and commit, but stop and ask \
+             before you push, open a pull request or merge.",
+        ),
+        _ => None,
+    }
 }
 
 /// `routines { action: get }`.
@@ -154,6 +205,9 @@ pub struct RoutineDetail {
     /// `None` when its login is on no known account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<crate::service::account_limits::LoginAccount>,
+    /// The named fix of each failed run in `runs` (G3.8).
+    #[serde(default)]
+    pub fixes: Vec<fix::RunFix>,
 }
 
 fn not_found(id: i64) -> IpcError {
@@ -229,8 +283,13 @@ pub fn list(store: &Mutex<Store>, scope: &ViewScope) -> Result<Vec<RoutineRow>, 
 pub fn get(store: &Mutex<Store>, scope: &ViewScope, id: i64) -> Result<RoutineDetail, IpcError> {
     let s = lock(store)?;
     let routine = visible(&s, scope, id)?;
+    let runs = s.routine_runs(id, RUNS_SHOWN)?;
     Ok(RoutineDetail {
-        runs: s.routine_runs(id, RUNS_SHOWN)?,
+        fixes: runs
+            .iter()
+            .filter_map(|run| fix::fix(&routine, run))
+            .collect(),
+        runs,
         may_change: may_change_routine(&s, scope, &routine)?,
         account: crate::service::account_limits::login_account(
             &s,
@@ -262,11 +321,14 @@ pub struct FailingRoutine {
     /// Whether this caller may Retry or Pause it: the UI's buttons.
     #[serde(default)]
     pub may_change: bool,
+    /// Its named fix (G3.8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<fix::RunFix>,
 }
 
 /// Whether a run failed: its state, or what it came to (8.10).
 fn run_failed(r: &RoutineRunRow) -> bool {
-    r.state == "failed" || r.outcome.as_deref() == Some("failed")
+    fix::failed(r)
 }
 
 /// `routines { action: failing }`: each routine this caller may read whose
@@ -293,6 +355,7 @@ pub fn failing(store: &Mutex<Store>, scope: &ViewScope) -> Result<Vec<FailingRou
         }
         out.push(FailingRoutine {
             may_change: may_change_routine(&s, scope, &r)?,
+            fix: fix::fix(&r, &run),
             routine: r,
             run,
         });
@@ -404,6 +467,7 @@ fn check(
             return Err(invalid(format!("{what} must be above 0 (or absent)")));
         }
     }
+    let guards = guards(s, scope, input, org)?;
     let overlap = input.overlap.as_deref().unwrap_or("skip");
     if !ROUTINE_OVERLAPS.contains(&overlap) {
         return Err(invalid(format!(
@@ -428,9 +492,132 @@ fn check(
             event_repo,
             event_author,
             event_rate_secs,
+            time_zone: guards.time_zone,
+            run_max_secs: guards.run_max_secs,
+            fallback_host: guards.fallback_host,
+            retry_once: guards.retry_once,
+            autonomy: guards.autonomy,
         },
         org,
     ))
+}
+
+/// A routine's guards (G3.8), checked.
+struct Guards {
+    time_zone: Option<String>,
+    run_max_secs: Option<i64>,
+    fallback_host: Option<String>,
+    retry_once: bool,
+    autonomy: Option<i64>,
+}
+
+/// The guards `input` writes: a zone name of letters, digits and `/_+-`; a
+/// time cap from a minute to the six hours after which any run fails; a
+/// fallback host this caller sees, in the routine's org and not its own
+/// host; an autonomy level 0 to 2.
+fn guards(
+    s: &Store,
+    scope: &ViewScope,
+    input: &RoutineInput,
+    org: Option<i64>,
+) -> Result<Guards, IpcError> {
+    let invalid = |m: String| IpcError::new(codes::E_INVALID, m);
+    let time_zone = input
+        .time_zone
+        .as_deref()
+        .map(str::trim)
+        .filter(|z| !z.is_empty());
+    if let Some(z) = time_zone {
+        let ok = z.chars().count() <= TIME_ZONE_MAX_CHARS
+            && z.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '+' | '-'));
+        if !ok {
+            return Err(invalid(format!(
+                "time_zone is a zone name such as Europe/Bratislava, got {z:?}"
+            )));
+        }
+    }
+    if let Some(cap) = input.run_max_secs {
+        if !(RUN_MAX_SECS_MIN..=tick::RUN_STALE_SECS).contains(&cap) {
+            return Err(invalid(format!(
+                "run_max_secs must be {RUN_MAX_SECS_MIN} to {} (six hours), or absent",
+                tick::RUN_STALE_SECS
+            )));
+        }
+    }
+    let fallback = input
+        .fallback_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty());
+    if let Some(h) = fallback {
+        crate::validate::host_alias(h)?;
+        if h == input.host_alias {
+            return Err(invalid(
+                "the fallback host is another host than the routine's".into(),
+            ));
+        }
+        if s.get_host_row(h)?.is_none() || !scope.org.sees_org(s.host_org(h)?) {
+            return Err(host_not_found(h));
+        }
+        if s.host_org(h)? != org {
+            return Err(invalid(format!(
+                "the fallback host {h} is in another organisation than {}",
+                input.host_alias
+            )));
+        }
+    }
+    if let Some(a) = input.autonomy {
+        if !(0..=2).contains(&a) {
+            return Err(invalid(format!(
+                "autonomy must be 0 (report only), 1 (ask before push) or 2 (push), got {a}"
+            )));
+        }
+    }
+    Ok(Guards {
+        time_zone: time_zone.map(str::to_string),
+        run_max_secs: input.run_max_secs,
+        fallback_host: fallback.map(str::to_string),
+        retry_once: input.retry_once.unwrap_or(false),
+        autonomy: input.autonomy.filter(|a| *a < 2),
+    })
+}
+
+/// `routines { action: budget }` (G3.8): what every routine's runs spent
+/// in this UTC day, against `automation.daily_budget`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetBudget {
+    /// Micro-USD, every routine's runs since `since`.
+    pub spent_micros: i64,
+    /// `automation.daily_budget` in micro-USD; absent = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_micros: Option<i64>,
+    /// The UTC day's start, unix seconds.
+    pub since: i64,
+}
+
+/// The UTC day's start at `now`.
+pub fn utc_day_start(now: i64) -> i64 {
+    now - now.rem_euclid(86_400)
+}
+
+/// The fleet's routine spend today and its budget. Every routine counts,
+/// whoever's: the budget is the fleet's. Any caller that reads routines may
+/// read it.
+pub fn fleet_budget(s: &Store, now: i64) -> Result<FleetBudget, IpcError> {
+    let since = utc_day_start(now);
+    let usd =
+        crate::service::settings::get_secs(s, crate::service::settings::AUTOMATION_DAILY_BUDGET);
+    Ok(FleetBudget {
+        spent_micros: s.routines_cost_since(since)?,
+        budget_micros: (usd > 0).then(|| (usd as i64).saturating_mul(1_000_000)),
+        since,
+    })
+}
+
+/// `routines { action: budget }`.
+pub fn budget(store: &Mutex<Store>, now: i64) -> Result<FleetBudget, IpcError> {
+    fleet_budget(&*lock(store)?, now)
 }
 
 /// An event routine's filters, checked: the repo (trimmed, `owner/name` or
@@ -778,6 +965,8 @@ pub(crate) fn record_skip(
         session_id: None,
         scheduled_for,
         at: now,
+        error_code: None,
+        host_alias: None,
     })
 }
 

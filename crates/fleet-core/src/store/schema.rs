@@ -338,6 +338,17 @@ fn routines_has_event_rate(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 159: `routine_runs` already has its
+/// `host_alias` column (the last column it adds).
+fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'host_alias'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 052: `work_links` already has its
 /// `archived_at` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
@@ -1776,6 +1787,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 156,
         sql: include_str!("../../migrations/156_routine_triggers.sql"),
         already_applied: Some(routines_has_event_rate),
+    },
+    // M15 step G3.8: a routine's guards (time zone, time cap, host fallback,
+    // retry, autonomy) and a run's error code and host — ADD COLUMNs, so a
+    // guard.
+    Migration {
+        version: 159,
+        sql: include_str!("../../migrations/159_routine_guards.sql"),
+        already_applied: Some(routine_runs_has_host),
     },
 ];
 

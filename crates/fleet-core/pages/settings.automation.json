@@ -16,6 +16,15 @@
       ]
     },
     {
+      "title": "Routines",
+      "items": [
+        {
+          "type": "field",
+          "key": "automation.daily_budget"
+        }
+      ]
+    },
+    {
       "title": "Playbooks",
       "items": [
         {

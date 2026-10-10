@@ -353,6 +353,9 @@ pub const PLAYBOOK_PRESS_ENTER: &str = "playbooks.press_enter";
 /// Pause all (redesign 8.1): every loop that acts on its own skips its
 /// passes while on (`service::loops`); the loops that only observe go on.
 pub const AUTOMATION_PAUSED: &str = "automation.paused";
+/// M15 G3.8: whole USD every routine's runs may spend in one UTC day
+/// before no new run starts; `0` is none.
+pub const AUTOMATION_DAILY_BUDGET: &str = "automation.daily_budget";
 /// Orchestration O4–O6: the missions' loop runs at all (the kill switch).
 pub const ORCHESTRATOR_ENABLED: &str = "orchestrator.enabled";
 /// Orchestration O6: the highest autonomy any mission's loop may take,
@@ -771,6 +774,18 @@ pub const SPECS: &[Spec] = &[
         "Pause all automation",
         "Stop every background job that acts on its own: missions, garbage collection, playbooks, repairs, tracker, catalog and folder syncs, and host refreshes. Reconcile, usage and update checks keep running, and health shows each job as paused.",
     ),
+    Spec::new(
+        AUTOMATION_DAILY_BUDGET,
+        "0",
+        Kind::Int {
+            min: 0,
+            max: 1_000_000,
+        },
+        "Routines daily budget",
+        "What every routine's runs together may spend in one UTC day. Once they have spent it no routine starts a run, Run now included, until the next day. A run already going finishes.",
+    )
+    .unit(Unit::Usd)
+    .zero("none"),
     Spec::new(
         ORCHESTRATOR_ENABLED,
         "true",

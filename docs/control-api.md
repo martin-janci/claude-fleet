@@ -898,6 +898,21 @@ Index by area (names only; see the reference for details):
   `overlap: skip`, today's budget is spent, the account its login bills
   is at or past `accounts.pause_at` (Orbit Fleet 8.7, read from the stored
   usage readings), or a person skipped it.
+  Guards (gap plan G3.8, migration 159), all optional in `save`:
+  `time_zone` (the IANA zone shown with the schedule; `utc_offset_min`
+  still drives it), `run_max_secs` (60 to 21600: a run still going after
+  it has its turn stopped with Escape and fails), `fallback_host` (a host
+  of the same org that takes a run when its host is unreachable, its login
+  is past `accounts.pause_at`, or its start failed; the run's `host_alias`
+  says where it ran), `retry_once` (a failed run starts again once on the
+  next pass, `trigger_ref` `retry:<run id>`, never while paused) and
+  `autonomy` (0 report only, 1 ask before push, 2 or absent push: a line
+  under the prompt, not a sandbox). `automation.daily_budget` (whole USD,
+  0 none) skips every routine's runs, `run_now` included, once all of them
+  spent it in the UTC day; `budget` answers `{ spent_micros,
+  budget_micros?, since }`. A failed run carries `error_code`, and `get`'s
+  `fixes` and `failing`'s `fix` name its fix `{ run_id, code, label,
+  action: edit | host | accounts | session | retry, host? }`.
   A finished run also carries an `outcome` (8.10): `did_work`, `nothing`,
   `failed` or `needs_person`, with `outcome_source` `exit` (a failed run,
   which nothing overrides), `rule` (an open question or a wedged session is

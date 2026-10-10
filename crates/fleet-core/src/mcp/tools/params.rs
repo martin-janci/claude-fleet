@@ -1351,7 +1351,7 @@ pub struct UpdateAdminParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RoutinesParams {
-    /// list | get | runs | failing | save | preview | delete | set_enabled | skip_next | run_now.
+    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now.
     pub action: String,
     /// Every action but list, and save or preview of a change.
     #[serde(default)]

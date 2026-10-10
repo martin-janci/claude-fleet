@@ -171,6 +171,28 @@
       "danger": {
         "level": "none"
       },
+      "default": "0",
+      "help": "What every routine's runs together may spend in one UTC day. Once they have spent it no routine starts a run, Run now included, until the next day. A run already going finishes.",
+      "key": "automation.daily_budget",
+      "kind": {
+        "max": 1000000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Routines daily budget",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "usd",
+      "value": "0",
+      "zero": "none"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "true",
       "help": "Let active missions take their next steps: keep their cards and brakes current and, under a person's grant, run what is ready. Off stops every mission's loop at once.",
       "key": "orchestrator.enabled",
@@ -3306,6 +3328,15 @@
             }
           ],
           "title": "Pause all"
+        },
+        {
+          "items": [
+            {
+              "key": "automation.daily_budget",
+              "type": "field"
+            }
+          ],
+          "title": "Routines"
         },
         {
           "items": [

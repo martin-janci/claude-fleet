@@ -2510,6 +2510,20 @@
       ]
     },
     {
+      "default_widget": "number",
+      "key": "automation.daily_budget",
+      "kind": {
+        "max": 1000000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Routines daily budget",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "switch",
       "key": "orchestrator.enabled",
       "kind": {

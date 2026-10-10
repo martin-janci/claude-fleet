@@ -32,6 +32,10 @@ struct FakeSpawn {
     started: Mutex<Vec<Started>>,
     n: AtomicUsize,
     fail: AtomicBool,
+    /// Only a start on this host fails (G3.8's fallback).
+    fail_on: Mutex<Option<String>>,
+    /// The turns a time cap stopped: `(host, tmux name)`.
+    stopped: Mutex<Vec<(String, String)>>,
 }
 
 #[async_trait::async_trait]
@@ -40,7 +44,9 @@ impl tick::Spawn for FakeSpawn {
         &self,
         args: crate::service::sessions::NewSessionArgs,
     ) -> Result<SessionRow, IpcError> {
-        if self.fail.load(Ordering::SeqCst) {
+        if self.fail.load(Ordering::SeqCst)
+            || self.fail_on.lock().unwrap().as_deref() == Some(args.host_alias.as_str())
+        {
             return Err(IpcError::new(codes::E_SSH, "host unreachable"));
         }
         let origin = args.origin.clone().expect("a routine names its origin");
@@ -68,6 +74,13 @@ impl tick::Spawn for FakeSpawn {
         s.claim_if_unclaimed(id, args.owner_person_id)?;
         s.set_session_origin(id, &origin)?;
         Ok(s.get_session_by_id(id)?.unwrap())
+    }
+    async fn stop_turn(&self, host_alias: &str, tmux_name: &str) -> Result<(), IpcError> {
+        self.stopped
+            .lock()
+            .unwrap()
+            .push((host_alias.to_string(), tmux_name.to_string()));
+        Ok(())
     }
 }
 
@@ -97,6 +110,8 @@ fn fx() -> Fx {
         started: Mutex::new(Vec::new()),
         n: AtomicUsize::new(0),
         fail: AtomicBool::new(false),
+        fail_on: Mutex::new(None),
+        stopped: Mutex::new(Vec::new()),
     });
     let deps = Deps {
         store: Arc::clone(&store),
@@ -1613,4 +1628,388 @@ fn preview_of_another_persons_routine_is_not_found() {
     let bo = person(&f.store, None, f.bo);
     let e = preview(&f.store, &bo, Some(r.id), &input(&f), OCT8).unwrap_err();
     assert_eq!(e.code, codes::E_NOTFOUND);
+}
+
+// ---- automation guards (M15 step G3.8) ---------------------------------------
+
+/// The plan's check: the fleet's daily budget stops every routine's new
+/// runs, Run now included, until the next UTC day.
+#[tokio::test]
+async fn the_fleet_budget_stops_every_routines_runs_until_tomorrow() {
+    let f = fx();
+    let a = new_routine(&f, input(&f));
+    let mut other = input(&f);
+    other.name = "Evening sweep".into();
+    let b = new_routine(&f, other);
+    lock(&f.store)
+        .unwrap()
+        .set_setting(crate::service::settings::AUTOMATION_DAILY_BUDGET, "3")
+        .unwrap();
+    let ana = person(&f.store, None, f.ana);
+    let first = run_now(&f.deps, &ana, a.id, OCT8 + 8 * H).await.unwrap();
+    spend(&f, first.session_id.unwrap(), 3_100_000);
+    event(&f, first.session_id.unwrap(), "turn_done");
+    tick_once(&f.deps, OCT8 + 8 * H + 20).await;
+    let b_now = budget(&f.store, OCT8 + 9 * H).unwrap();
+    assert_eq!(
+        b_now,
+        FleetBudget {
+            spent_micros: 3_100_000,
+            budget_micros: Some(3_000_000),
+            since: OCT8,
+        }
+    );
+    // The other routine's schedule and a person's Run now both stop.
+    due_at(&f, b.id, OCT8 + 9 * H);
+    tick_once(&f.deps, OCT8 + 9 * H).await;
+    let skipped = runs_of(&f, b.id);
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].state, "skipped");
+    assert_eq!(
+        skipped[0].reason.as_deref(),
+        Some("the fleet's routines spent $3.10 of today's $3.00 (automation.daily_budget)")
+    );
+    let refused = run_now(&f.deps, &ana, a.id, OCT8 + 10 * H).await.unwrap();
+    assert_eq!(refused.state, "skipped");
+    // A new UTC day.
+    let next = run_now(&f.deps, &ana, a.id, OCT8 + 24 * H + 60)
+        .await
+        .unwrap();
+    assert_eq!(next.state, "running");
+    // No budget (0) stops nothing.
+    lock(&f.store)
+        .unwrap()
+        .set_setting(crate::service::settings::AUTOMATION_DAILY_BUDGET, "0")
+        .unwrap();
+    assert_eq!(budget(&f.store, OCT8).unwrap().budget_micros, None);
+}
+
+/// The plan's check: Pause all still stops all, a retry included; the time
+/// cap's stop still runs, since it only brakes.
+#[tokio::test]
+async fn pause_all_still_stops_retries_and_fires() {
+    let f = fx();
+    let mut i = input(&f);
+    i.retry_once = Some(true);
+    i.run_max_secs = Some(600);
+    let r = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    f.fake.fail.store(true, Ordering::SeqCst);
+    let failed = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    assert_eq!(failed.state, "failed");
+    f.fake.fail.store(false, Ordering::SeqCst);
+    lock(&f.store)
+        .unwrap()
+        .set_setting(crate::service::settings::AUTOMATION_PAUSED, "true")
+        .unwrap();
+    due_at(&f, r.id, OCT8 + 20);
+    tick_once(&f.deps, OCT8 + 20).await;
+    assert_eq!(
+        runs_of(&f, r.id).len(),
+        1,
+        "no retry and no fire while paused"
+    );
+    // A person's run goes on, and its time cap still stops it.
+    lock(&f.store)
+        .unwrap()
+        .set_setting(crate::service::settings::AUTOMATION_PAUSED, "false")
+        .unwrap();
+    tick_once(&f.deps, OCT8 + 40).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(
+        runs[1].trigger_ref.as_deref(),
+        Some(&*format!("retry:{}", failed.id))
+    );
+    lock(&f.store)
+        .unwrap()
+        .set_setting(crate::service::settings::AUTOMATION_PAUSED, "true")
+        .unwrap();
+    tick_once(&f.deps, OCT8 + 40 + 601).await;
+    let capped = run_row(&f, runs[1].id);
+    assert_eq!(capped.state, "failed");
+    assert_eq!(capped.error_code.as_deref(), Some(fix::E_RUN_TIME_CAP));
+    assert_eq!(f.fake.stopped.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_failed_run_is_retried_once_and_never_again() {
+    let f = fx();
+    let mut i = input(&f);
+    i.retry_once = Some(true);
+    let r = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    f.fake.fail.store(true, Ordering::SeqCst);
+    let first = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    assert_eq!(first.error_code.as_deref(), Some(codes::E_SSH));
+    tick_once(&f.deps, OCT8 + 20).await;
+    tick_once(&f.deps, OCT8 + 40).await;
+    tick_once(&f.deps, OCT8 + 60).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 2, "one retry, which failed too: {runs:?}");
+    assert_eq!(runs[1].trigger, "run_now");
+    assert_eq!(
+        runs[1].trigger_ref.as_deref(),
+        Some(&*format!("retry:{}", first.id))
+    );
+    assert_eq!(runs[1].state, "failed");
+    // Without retry_once a failure stays as it is.
+    let plain = new_routine(&f, input(&f));
+    run_now(&f.deps, &ana, plain.id, OCT8 + 100).await.unwrap();
+    tick_once(&f.deps, OCT8 + 120).await;
+    assert_eq!(runs_of(&f, plain.id).len(), 1);
+    // A failure older than the retry window is not started again.
+    let mut late = input(&f);
+    late.retry_once = Some(true);
+    let late = new_routine(&f, late);
+    run_now(&f.deps, &ana, late.id, OCT8).await.unwrap();
+    tick_once(&f.deps, OCT8 + tick::RETRY_WITHIN_SECS + 60).await;
+    assert_eq!(runs_of(&f, late.id).len(), 1);
+}
+
+#[tokio::test]
+async fn a_run_past_its_time_cap_is_stopped_and_failed() {
+    let f = fx();
+    let mut i = input(&f);
+    i.run_max_secs = Some(20 * 60);
+    let r = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    tick_once(&f.deps, OCT8 + 19 * 60).await;
+    assert_eq!(run_row(&f, run.id).state, "running");
+    tick_once(&f.deps, OCT8 + 21 * 60).await;
+    let capped = run_row(&f, run.id);
+    assert_eq!(capped.state, "failed");
+    assert_eq!(
+        capped.reason.as_deref(),
+        Some("it ran past its 20 min time cap; its turn was stopped")
+    );
+    let name = lock(&f.store)
+        .unwrap()
+        .get_session_by_id(run.session_id.unwrap())
+        .unwrap()
+        .unwrap()
+        .tmux_name;
+    assert_eq!(
+        *f.fake.stopped.lock().unwrap(),
+        vec![("mac".to_string(), name)]
+    );
+    let d = get(&f.store, &ana, r.id).unwrap();
+    assert_eq!(d.fixes.len(), 1);
+    assert_eq!(
+        (d.fixes[0].label.as_str(), d.fixes[0].action.as_str()),
+        ("Raise its time cap", "edit")
+    );
+}
+
+fn reachable(f: &Fx, host: &str, up: bool) {
+    lock(&f.store)
+        .unwrap()
+        .update_host_probe(host, up, None, None, OCT8)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_fallback_host_takes_a_run_its_host_cannot() {
+    let f = fx();
+    let mut i = input(&f);
+    i.fallback_host = Some("nas".into());
+    i.overlap = Some("parallel".into());
+    let r = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    reachable(&f, "mac", true);
+    reachable(&f, "nas", true);
+    // Its own host, while it can.
+    let own = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    assert_eq!(own.host_alias.as_deref(), Some("mac"));
+    assert_eq!(own.reason, None);
+    // Unreachable: the fallback, saying why.
+    reachable(&f, "mac", false);
+    let moved = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    assert_eq!(moved.state, "running");
+    assert_eq!(moved.host_alias.as_deref(), Some("nas"));
+    assert_eq!(moved.reason.as_deref(), Some("on nas: mac was unreachable"));
+    // Its login past the line: the fallback.
+    reachable(&f, "mac", true);
+    {
+        let s = lock(&f.store).unwrap();
+        crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 95.0, OCT8);
+    }
+    let over = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    assert_eq!(over.host_alias.as_deref(), Some("nas"));
+    assert!(
+        over.reason.as_deref().unwrap().starts_with("on nas: "),
+        "{over:?}"
+    );
+    {
+        let s = lock(&f.store).unwrap();
+        crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 10.0, OCT8 + 1);
+    }
+    // A start on its host that fails: the fallback, once.
+    *f.fake.fail_on.lock().unwrap() = Some("mac".into());
+    let retried = run_now(&f.deps, &ana, r.id, OCT8 + 2).await.unwrap();
+    assert_eq!(retried.state, "running");
+    assert_eq!(retried.host_alias.as_deref(), Some("nas"));
+    assert!(
+        retried
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("the start on mac failed"),
+        "{retried:?}"
+    );
+    let hosts: Vec<String> = f
+        .fake
+        .started
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.host.clone())
+        .collect();
+    assert_eq!(hosts, ["mac", "nas", "nas", "nas"]);
+    // Both down: no fallback can take it, the run fails on its own host.
+    *f.fake.fail_on.lock().unwrap() = None;
+    f.fake.fail.store(true, Ordering::SeqCst);
+    let failed = run_now(&f.deps, &ana, r.id, OCT8 + 3).await.unwrap();
+    assert_eq!(failed.state, "failed");
+    assert_eq!(failed.host_alias.as_deref(), Some("nas"));
+}
+
+#[tokio::test]
+async fn autonomy_adds_its_line_to_the_runs_prompt() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    for (level, line) in [
+        (Some(0), Some("Autonomy L0, report only")),
+        (Some(1), Some("Autonomy L1, ask before push")),
+        (Some(2), None),
+        (None, None),
+    ] {
+        let mut i = input(&f);
+        i.autonomy = level;
+        let r = new_routine(&f, i);
+        assert_eq!(r.autonomy, level.filter(|l| *l < 2), "2 is stored as none");
+        let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+        let prompt = queued_prompt(&f, run.session_id.unwrap());
+        assert!(prompt.starts_with("Review my open PRs"), "{prompt}");
+        match line {
+            Some(l) => assert!(prompt.contains(l), "{prompt}"),
+            None => assert!(!prompt.contains("Autonomy"), "{prompt}"),
+        }
+    }
+}
+
+#[test]
+fn guards_are_checked() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    lock(&f.store)
+        .unwrap()
+        .insert_host("far", Some("far"))
+        .unwrap();
+    let org = lock(&f.store)
+        .unwrap()
+        .add_org("Acme", None, false)
+        .unwrap()
+        .id;
+    lock(&f.store)
+        .unwrap()
+        .set_host_org("far", Some(org))
+        .unwrap();
+    let refused = |change: &dyn Fn(&mut RoutineInput), says: &str| {
+        let mut i = input(&f);
+        change(&mut i);
+        let e = save(&f.store, &ana, None, &i).unwrap_err();
+        assert!(e.message.contains(says), "{says}: {}", e.message);
+    };
+    refused(
+        &|i| i.time_zone = Some("Europe/Bratislava; rm".into()),
+        "time_zone",
+    );
+    refused(&|i| i.run_max_secs = Some(30), "run_max_secs");
+    refused(
+        &|i| i.run_max_secs = Some(RUN_STALE_SECS + 1),
+        "run_max_secs",
+    );
+    refused(&|i| i.fallback_host = Some("mac".into()), "another host");
+    refused(&|i| i.fallback_host = Some("nowhere".into()), "not found");
+    refused(
+        &|i| i.fallback_host = Some("far".into()),
+        "another organisation",
+    );
+    refused(&|i| i.autonomy = Some(3), "autonomy");
+    let mut ok = input(&f);
+    ok.time_zone = Some("Europe/Bratislava".into());
+    ok.run_max_secs = Some(1200);
+    ok.fallback_host = Some(" nas ".into());
+    ok.retry_once = Some(true);
+    ok.autonomy = Some(1);
+    let r = save(&f.store, &ana, None, &ok).unwrap();
+    assert_eq!(
+        (
+            r.time_zone.as_deref(),
+            r.run_max_secs,
+            r.fallback_host.as_deref(),
+            r.retry_once,
+            r.autonomy
+        ),
+        (
+            Some("Europe/Bratislava"),
+            Some(1200),
+            Some("nas"),
+            true,
+            Some(1)
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_failed_run_names_its_fix() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let mut i = input(&f);
+    i.overlap = Some("parallel".into());
+    let r = new_routine(&f, i);
+    let auth = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    lock(&f.store)
+        .unwrap()
+        .insert_session_event(
+            auth.session_id.unwrap(),
+            "stop_failure",
+            Some("auth (authentication_error): HTTP 401"),
+        )
+        .unwrap();
+    tick_once(&f.deps, OCT8 + 20).await;
+    let run = run_row(&f, auth.id);
+    assert_eq!(run.error_code.as_deref(), Some(fix::E_TURN_AUTH));
+    assert_eq!(
+        run.reason.as_deref(),
+        Some("its turn ended in an error: auth (authentication_error): HTTP 401")
+    );
+    let failing = failing(&f.store, &ana).unwrap();
+    let fx_ = failing[0].fix.clone().unwrap();
+    assert_eq!(
+        (
+            fx_.code.as_str(),
+            fx_.label.as_str(),
+            fx_.action.as_str(),
+            fx_.host.as_deref()
+        ),
+        (fix::E_TURN_AUTH, "Log in again on mac", "host", Some("mac"))
+    );
+    // A start that failed names its host, and a fallback when there is none.
+    f.fake.fail.store(true, Ordering::SeqCst);
+    let down = run_now(&f.deps, &ana, r.id, OCT8 + 30).await.unwrap();
+    let d = get(&f.store, &ana, r.id).unwrap();
+    let named = d.fixes.iter().find(|x| x.run_id == down.id).unwrap();
+    assert_eq!(named.label, "Check mac, or give it a fallback host");
+    assert_eq!(named.code, codes::E_SSH);
+    // A run that did not fail has none.
+    assert!(d.fixes.iter().all(|x| x.run_id != auth.id + 1000));
+    assert_eq!(
+        fix::turn_code(Some("rate_limit (429)")),
+        fix::E_TURN_RATE_LIMIT
+    );
+    assert_eq!(fix::turn_code(None), fix::E_TURN_FAILED);
+    assert_eq!(tick::cap_words(90 * 60), "1 h 30 min");
+    assert_eq!(tick::cap_words(2 * H), "2 h");
 }
