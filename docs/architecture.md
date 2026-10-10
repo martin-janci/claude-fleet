@@ -476,7 +476,9 @@ bullet for the area you are about to change.
   never stored.
 - **Context help** (`service/context_help/`, `commands/context_help.rs`,
   `src/lib/context_help.ts`, `ContextHelp.svelte`): *Ask Haiku* on a shell
-  terminal's strip and the composer's `?` (Control's included). One request
+  terminal's strip and the composer's `?` (Control's included), behind
+  Writing help's `work.context_help` (off by default; the command checks
+  it too on a standalone desktop, whose state.db is the fleet's). One request
   shape for both surfaces — the question, the line being typed, history and
   the commands the line accepts — and one reply: a few lines plus at most
   one proposal, which the desktop puts on the prompt line (a shell gets

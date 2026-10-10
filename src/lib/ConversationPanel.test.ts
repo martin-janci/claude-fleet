@@ -57,6 +57,7 @@ import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { myGrants, myPersonId, type GrantLevel } from './access';
 import { hubConnection } from './hub_connection';
 import { invoke } from '@tauri-apps/api/core';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import type { PickedFile } from './attachments';
 import { outbox } from './outbox';
 import { toasts, clearToasts } from './toasts';
@@ -2377,6 +2378,11 @@ describe('ConversationPanel prompt recall', () => {
     expect(box.value).toBe('second edited');
   });
 
+  it('offers no ? while Writing help\'s Context help is off', async () => {
+    await mountWithHistory();
+    expect(screen.queryByTestId('conv-help-button')).toBeNull();
+  });
+
   it('? asks Haiku about the draft with the earlier prompts, and the proposal only fills the box', async () => {
     const mocked = invoke as unknown as ReturnType<typeof vi.fn>;
     const base = mocked.getMockImplementation() as ((cmd: string, payload?: unknown) => unknown) | undefined;
@@ -2385,6 +2391,7 @@ describe('ConversationPanel prompt recall', () => {
         ? { answer: 'Plan it first.', command: '/plan #FLEET-3', model: 'haiku', host_alias: 'local', history_items: 2, at: 1 }
         : base?.(cmd, payload),
     );
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.context_help': 'true' });
     try {
       const box = await mountWithHistory();
       await fireEvent.input(box, { target: { value: 'split the parser' } });
@@ -2408,6 +2415,7 @@ describe('ConversationPanel prompt recall', () => {
       expect(mockedSend).not.toHaveBeenCalled();
     } finally {
       mocked.mockImplementation(base ?? (() => undefined));
+      fleetSettings.set({ ...SETTING_DEFAULTS });
     }
   });
 

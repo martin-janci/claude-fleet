@@ -11,6 +11,7 @@
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::context_help::{self, ClaudeOnHost, HelpAnswer, HelpRequest, Surface};
+use fleet_core::service::settings;
 use fleet_core::ssh::SshClient;
 use fleet_core::store::Store;
 use std::sync::{Arc, Mutex};
@@ -52,6 +53,13 @@ pub async fn context_help(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<HelpAnswer, IpcError> {
+    // Writing help's "Context help" toggle. A paired desktop's state.db is
+    // not the fleet's, so there the window's own check (the hub's setting)
+    // is the gate.
+    if backend.hub().is_none() {
+        let s = fleet_core::ipc_error::lock(&store)?;
+        settings::require_writing_help(&s, settings::WORK_CONTEXT_HELP)?;
+    }
     let exec: &dyn fleet_core::ssh::SshExec = ssh.inner().as_ref();
     let scrollback = match (args.surface, args.terminal) {
         (Surface::Shell, Some(n)) => {

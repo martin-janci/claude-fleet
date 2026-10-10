@@ -37,7 +37,7 @@
   import SendLaterSheet from './SendLaterSheet.svelte';
   import ContextHelp from './ContextHelp.svelte';
   import { askContextHelp, commandLine, helpModel } from './context_help';
-  import { fleetSettings } from './fleet_settings';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
   import Icon from './kit/Icon.svelte';
   import { suggestedForkName } from './reply_actions';
   import {
@@ -1718,6 +1718,8 @@
   // context. It runs over this machine's ssh, as the terminal does, so it is
   // offered where the terminal is: on a session this client owns.
   let helpOpen = $state(false);
+  /** Writing help's "Context help" toggle, off by default. */
+  const helpOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workContextHelp));
   let helpCommands = $state<string[]>([]);
   const helpBlocked = $derived(
     $accessOf(session) !== 'own'
@@ -2553,7 +2555,7 @@
           {/each}
         </ul>
       {/if}
-      {#if helpOpen}
+      {#if helpOn && helpOpen}
         <ContextHelp
           model={helpModel($fleetSettings)}
           line={draft}
@@ -2723,15 +2725,17 @@
             {/each}
           </select>
           <span class="composer-hint" id={COMPOSER_HINT_ID} data-testid="conv-composer-hint">{composerHint}</span>
-          <button
-            type="button"
-            class="btn btn--icon btn--quiet"
-            data-testid="conv-help-button"
-            aria-label="Ask {helpModel($fleetSettings)} about this prompt"
-            aria-expanded={helpOpen}
-            title={helpBlocked ?? `Ask ${helpModel($fleetSettings)} about this prompt, with your earlier prompts as context`}
-            disabled={helpBlocked !== null}
-            onclick={() => (helpOpen ? (helpOpen = false) : openHelp())}>?</button>
+          {#if helpOn}
+            <button
+              type="button"
+              class="btn btn--icon btn--quiet"
+              data-testid="conv-help-button"
+              aria-label="Ask {helpModel($fleetSettings)} about this prompt"
+              aria-expanded={helpOpen}
+              title={helpBlocked ?? `Ask ${helpModel($fleetSettings)} about this prompt, with your earlier prompts as context`}
+              disabled={helpBlocked !== null}
+              onclick={() => (helpOpen ? (helpOpen = false) : openHelp())}>?</button>
+          {/if}
           <button
             type="button"
             class="btn btn--icon btn--quiet"
