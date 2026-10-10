@@ -242,7 +242,7 @@ describe('Organisations (master_detail over the org resource)', () => {
     await waitFor(() => expect(argsOf(inv, 'assign_host_org')).toEqual({ host_alias: 'hetzner-a', org_id: null }));
 
     await fireEvent.click(screen.getByTestId('record-delete'));
-    expect((await screen.findByTestId('confirm-dialog')).textContent).toContain('become unassigned');
+    expect((await screen.findByTestId('record-remove')).textContent).toContain('become unassigned');
     await fireEvent.click(screen.getByTestId('record-confirm'));
     await waitFor(() => expect(argsOf(inv, 'remove_org')).toEqual({ org_id: 1 }));
   });
@@ -296,5 +296,50 @@ describe('Organisations (master_detail over the org resource)', () => {
     await openRecordTab('Settings');
     expect(screen.getByTestId('value-isolate_sessions').textContent).toBe('Off');
     expect(calls(inv, 'org_suggestions')).toHaveLength(0);
+  });
+});
+
+describe('removing an organisation (G1.4, the destructive confirm)', () => {
+  it('says what it holds; a small org asks with the red verb alone', async () => {
+    const inv = route();
+    show();
+    await fireEvent.click((await screen.findAllByTestId('resource-row'))[0]);
+    await fireEvent.click(screen.getByTestId('record-delete'));
+    const dialog = await screen.findByTestId('record-remove');
+    expect(dialog.textContent).toContain('Remove organisation "Company A"?');
+    expect(dialog.textContent).toContain('Its rules go with it');
+    expect(dialog.textContent).toContain('It holds 2 rules · 1 host · 1 tracker.');
+    expect(screen.queryByTestId('destructive-typed-name')).toBeNull();
+    const go = screen.getByTestId('record-confirm');
+    expect(go.textContent).toBe('Remove organisation');
+    expect(go.classList.contains('btn--danger')).toBe(true);
+    await fireEvent.click(go);
+    await waitFor(() => expect(argsOf(inv, 'remove_org')).toEqual({ org_id: 1 }));
+  });
+
+  it('a large org asks for its name before Remove organisation turns on', async () => {
+    const big: OrgDetail = { ...acme, hosts: ['hetzner-a', 'hetzner-b', 'mac'] };
+    const inv = route({ list_orgs: [big] });
+    show();
+    await fireEvent.click((await screen.findAllByTestId('resource-row'))[0]);
+    await fireEvent.click(screen.getByTestId('record-delete'));
+    expect((await screen.findByTestId('record-remove')).textContent).toContain('Type the organisation name to confirm');
+    const go = screen.getByTestId('record-confirm') as HTMLButtonElement;
+    expect(go.disabled).toBe(true);
+    await fireEvent.click(go);
+    expect(calls(inv, 'remove_org')).toHaveLength(0);
+    await fireEvent.input(screen.getByTestId('destructive-typed-name'), { target: { value: 'Company A' } });
+    await fireEvent.click(go);
+    await waitFor(() => expect(argsOf(inv, 'remove_org')).toEqual({ org_id: 1 }));
+  });
+
+  it('Cancel removes nothing', async () => {
+    const inv = route();
+    show();
+    await fireEvent.click((await screen.findAllByTestId('resource-row'))[0]);
+    await fireEvent.click(screen.getByTestId('record-delete'));
+    await fireEvent.click(within(await screen.findByTestId('record-remove')).getByTestId('sheet-cancel'));
+    await waitFor(() => expect(screen.queryByTestId('record-remove')).toBeNull());
+    expect(calls(inv, 'remove_org')).toHaveLength(0);
   });
 });

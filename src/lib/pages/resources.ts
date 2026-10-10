@@ -499,3 +499,24 @@ export const RESOURCE_RELOADERS: Record<string, (() => Promise<unknown>)[]> = {
 export async function afterChange(r: ResourceType): Promise<void> {
   await Promise.all((RESOURCE_RELOADERS[r.id] ?? []).map((f) => f()));
 }
+
+/**
+ * What removing `record` takes with it, for the destructive confirm (G1.4):
+ * the items its lists hold (an org's rules, hosts, trackers, members, …),
+ * counted for the typed-name threshold and said as "3 rules · 2 hosts".
+ * The read-only roll-ups (what needs an admin, spend per person) are not
+ * lost with it and are left out.
+ */
+export function recordLoss(resource: ResourceType, record: ResourceRecord): { loss: number; line: string | null } {
+  const parts: string[] = [];
+  let loss = 0;
+  for (const f of resource.fields) {
+    if (f.type !== 'items' || f.item_label.type === 'admin_need' || f.item_label.type === 'person_spend') continue;
+    const n = itemsOf(f, record).length;
+    if (n === 0) continue;
+    loss += n;
+    const noun = f.label.toLowerCase();
+    parts.push(`${n} ${n === 1 ? noun.replace(/s$/, '') : noun}`);
+  }
+  return { loss, line: parts.length ? `It holds ${parts.join(' · ')}.` : null };
+}

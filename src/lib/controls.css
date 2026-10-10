@@ -74,6 +74,17 @@
   background: color-mix(in srgb, var(--fg) 18%, var(--accent));
 }
 
+/* A destructive verb (delete, remove) in a form's footer: the primary
+   shape, filled red (G1.4, FormsAnatomy "Destructive confirm"). */
+.btn--primary.btn--danger {
+  border-color: var(--danger-fill);
+  background: var(--danger-fill);
+  color: var(--on-danger);
+}
+.btn--primary.btn--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg) 10%, var(--danger-fill));
+}
+
 .btn--quiet {
   color: var(--control-fg-quiet);
 }

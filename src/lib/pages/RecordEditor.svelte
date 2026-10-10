@@ -6,6 +6,7 @@
   // The page spec lays the fields out in sections; the resource says what
   // each field is.
   import ConfirmDialog from '../ConfirmDialog.svelte';
+  import DestructiveConfirm from '../forms/DestructiveConfirm.svelte';
   import ActionForm from './ActionForm.svelte';
   import TrackerExtras from '../TrackerExtras.svelte';
   import OrgSettingsList from './OrgSettingsList.svelte';
@@ -29,6 +30,7 @@
     choiceLabel,
     fieldValue,
     rawOf,
+    recordLoss,
     updateArgs,
     idOf,
     itemKey,
@@ -175,15 +177,21 @@
     ask(action.label, action.confirm ? [action.confirm] : [], () => void exec(action, args));
   }
 
+  /** Removing the record asks through the destructive confirm (G1.4): the
+   *  red verb, what goes with it, and the typed name when that is a lot. */
+  let removing = $state(false);
+  const removeLoss = $derived(recordLoss(resource, record));
+
   function remove() {
+    if (resource.delete) removing = true;
+  }
+
+  async function confirmRemove() {
     const del = resource.delete;
     if (!del) return;
-    // Removing a record is always asked, whether or not it says why.
-    ask(
-      `${del.label}: ${titleOf(resource, record)}`,
-      [del.confirm ?? `Remove ${titleOf(resource, record)}?`],
-      () => void exec(del, buildArgs(del, record, null, {})),
-    );
+    await exec(del, buildArgs(del, record, null, {}));
+    // A failure is reported by the page's notice; the confirm closes either way.
+    removing = false;
   }
 
   const set = (id: string, v: FieldValue) => (draft = { ...draft, [id]: v });
@@ -485,6 +493,22 @@
     </footer>
   {/if}
 </div>
+
+{#if removing && resource.delete}
+  <DestructiveConfirm
+    title={`${resource.delete.label} "${titleOf(resource, record)}"?`}
+    lead={[resource.delete.confirm ?? `Remove ${titleOf(resource, record)}?`, removeLoss.line].filter(Boolean).join(' ')}
+    verb={resource.delete.label}
+    name={titleOf(resource, record)}
+    noun={resource.label.toLowerCase()}
+    loss={removeLoss.loss}
+    {busy}
+    testid="record-remove"
+    confirmTestid="record-confirm"
+    onconfirm={() => void confirmRemove()}
+    onclose={() => (removing = false)}
+  />
+{/if}
 
 {#if asking}
   <ConfirmDialog

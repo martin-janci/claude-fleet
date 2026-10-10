@@ -43,6 +43,7 @@
     dirty = false,
     oninvalid,
     secondary,
+    danger = false,
     children,
   }: {
     title: string;
@@ -71,6 +72,9 @@
     oninvalid?: () => void;
     /** A quiet action at the footer's start (e.g. "Start fresh instead"). */
     secondary?: Snippet;
+    /** A destructive verb (delete, remove): red instead of the accent
+     *  (G1.4; `forms/DestructiveConfirm.svelte` sets it). */
+    danger?: boolean;
     children: Snippet;
   } = $props();
 
@@ -116,6 +120,7 @@
         <button
           type="button"
           class="btn btn--primary"
+          class:btn--danger={danger}
           data-testid={confirmTestid}
           title={confirmTitle ?? ''}
           aria-describedby={why ? `${testid ?? 'sheet'}-why` : undefined}

@@ -445,3 +445,21 @@ export function nextRunWords(r: Pick<RoutineRow, 'enabled' | 'trigger' | 'next_r
 export function spentSince(runs: readonly RoutineRunRow[], since: number): number {
   return runs.filter((r) => r.started_at >= since).reduce((s, r) => s + r.cost_micros, 0);
 }
+
+/** How many runs `get` returns at most (fleet-core `routines::RUNS_SHOWN`):
+ *  a detail holding this many may have more. */
+export const ROUTINE_RUNS_SHOWN = 20;
+
+/** What deleting a routine loses, for the destructive confirm (G1.4): its
+ *  runs go with it (fleet-core `delete_routine`), the sessions they started
+ *  stay. `loss` is the runs counted, `lead` says it in one sentence. */
+export function routineDeleteLoss(detail: Pick<RoutineDetail, 'runs'>): { loss: number; lead: string } {
+  const n = detail.runs.length;
+  const runs =
+    n === 0
+      ? 'It has no runs yet.'
+      : n >= ROUTINE_RUNS_SHOWN
+        ? `Its ${n} or more runs go with it.`
+        : `Its ${n === 1 ? 'run goes' : `${n} runs go`} with it.`;
+  return { loss: n, lead: `${runs} Sessions it started keep running. This can't be undone.` };
+}

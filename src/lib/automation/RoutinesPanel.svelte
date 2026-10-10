@@ -27,6 +27,8 @@
   import StatusDot from '../kit/StatusDot.svelte';
   import type { OfState } from '../kit/status';
   import NewRoutineMenu from './NewRoutineMenu.svelte';
+  import DestructiveConfirm from '../forms/DestructiveConfirm.svelte';
+  import type { IpcError } from '../result';
   import { accountByUuid } from '../accounts';
   import { projects } from '../projects';
   import { errorText } from '../error_copy';
@@ -47,6 +49,7 @@
     morningPrSweep,
     nextRunWords,
     routineAccountLabel,
+    routineDeleteLoss,
     routineDot,
     routineLine,
     routineStateWords,
@@ -76,6 +79,8 @@
   let tab = $state<RoutineTab>('runs');
   let busy = $state(false);
   let confirmDelete = $state(false);
+  /** The delete confirm's failure, shown as its banner (input kept). */
+  let deleteError = $state<IpcError | null>(null);
   /** A built-in routine (a fleet loop) picked in the list, by name. */
   let loopSel = $state<string | null>(null);
   /** Each routine's newest run, for the list's dot and line. */
@@ -149,6 +154,34 @@
     await reload();
     await loadFailing();
     return r.ok;
+  }
+
+  // ---- delete (G1.4, the destructive confirm) --------------------------------
+
+  function askDelete() {
+    deleteError = null;
+    confirmDelete = true;
+  }
+
+  /** Delete the routine; a failure stays in the confirm as its banner. */
+  async function doDelete(id: number) {
+    busy = true;
+    const r = await deleteRoutine(id);
+    busy = false;
+    if (!r.ok) {
+      deleteError = r.error;
+      return;
+    }
+    confirmDelete = false;
+    selected = null;
+    await reload();
+    await loadFailing();
+  }
+
+  /** The safer way out: pause it, keep it and its runs. */
+  async function pauseInstead(id: number) {
+    confirmDelete = false;
+    await act('Pause', () => setRoutineEnabled(id, false));
   }
 
   // ---- the editor -----------------------------------------------------------
@@ -734,24 +767,25 @@
         </div>
         {#if detail.may_change}
           <footer class="inspector-foot">
+            <Button variant="quiet" testid="routine-duplicate" onclick={() => edit(r, true)}>Duplicate</Button>
+            <Button variant="danger" testid="routine-delete" onclick={askDelete}>Delete routine…</Button>
             {#if confirmDelete}
-              <span class="confirm">
-                Delete {r.name}? Its runs go with it.
-                <Button
-                  variant="danger-fill"
-                  size="sm"
-                  testid="routine-delete-confirm"
-                  onclick={async () => {
-                    confirmDelete = false;
-                    selected = null;
-                    await act('Delete', () => deleteRoutine(r.id));
-                  }}>Delete</Button
-                >
-                <Button variant="quiet" size="sm" onclick={() => (confirmDelete = false)}>Keep</Button>
-              </span>
-            {:else}
-              <Button variant="quiet" testid="routine-duplicate" onclick={() => edit(r, true)}>Duplicate</Button>
-              <Button variant="danger" testid="routine-delete" onclick={() => (confirmDelete = true)}>Delete routine…</Button>
+              {@const lost = routineDeleteLoss(detail)}
+              <DestructiveConfirm
+                title={`Delete routine "${r.name}"?`}
+                lead={lost.lead}
+                verb="Delete routine"
+                busyVerb="Deleting"
+                name={r.name}
+                noun="routine"
+                loss={lost.loss}
+                safer={r.enabled ? { label: 'Pause it instead', testid: 'routine-delete-pause', run: () => void pauseInstead(r.id) } : null}
+                {busy}
+                error={deleteError}
+                confirmTestid="routine-delete-confirm"
+                onconfirm={() => void doDelete(r.id)}
+                onclose={() => (confirmDelete = false)}
+              />
             {/if}
           </footer>
         {/if}
@@ -829,7 +863,6 @@
   .usage { display: flex; flex-direction: column; gap: 6px; }
   .of-sec.flat { padding: 0; }
   .inspector-foot { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; }
-  .confirm { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); font-size: var(--text-xs); }
   .editor { flex: 1; min-width: 0; overflow: auto; padding: var(--space-4) var(--space-6); max-width: 720px; display: flex; flex-direction: column; gap: var(--space-2); }
   .editor h3 { font-size: var(--text-lg); }
   .editor label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-sm); }
