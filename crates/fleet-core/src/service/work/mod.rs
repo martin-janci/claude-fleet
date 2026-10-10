@@ -215,13 +215,16 @@ pub struct WorkLinkArgs {
     /// name/create/propose: title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// create/propose/set_parent: parent, item:<id> (set_parent: "" = top).
+    /// create/propose/set_parent: item:<id> ("" = none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
-    /// edit: a top-level local item is an epic (true) or a task (false).
+    /// edit: epic or not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epic: Option<bool>,
-    /// create/propose/edit: notes (edit: "" clears).
+    /// comment_delete: which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_id: Option<i64>,
+    /// create/propose/edit/comment: text (edit: "" clears).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     /// Display names ([] clears).
@@ -524,6 +527,8 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "set_status",
     "edit",
     "set_parent",
+    "comment",
+    "comment_delete",
     "summarize",
     "set_primary",
     "reconsider",
@@ -599,6 +604,8 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("set_work_status", "work_link", "set_status"),
     ("edit_work_item", "work_link", "edit"),
     ("set_work_parent", "work_link", "set_parent"),
+    ("comment_on_work", "work_link", "comment"),
+    ("delete_work_comment", "work_link", "comment_delete"),
     ("accept_work_proposal", "work_link", "accept"),
     ("reject_work_proposal", "work_link", "reject"),
     ("summarize_past_work", "work_link", "summarize"),

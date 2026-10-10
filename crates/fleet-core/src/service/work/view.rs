@@ -112,11 +112,8 @@ pub struct WorkTreeFilters {
     /// any case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_name: Option<String>,
-    /// What a section under each org is: group (default; a person, rule,
-    /// tracker container, repo or key), org (one section per org), person,
-    /// mission, account, repo, sprint (its current sprint), release (its
-    /// release still planned, else its latest) or epic (the epic it is, or
-    /// is filed under).
+    /// Section per org: group (default), org, person, mission, account,
+    /// repo, sprint, release or epic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_by: Option<String>,
     /// Any of these orgs (ids, or "none" for unassigned): the Work panel's
@@ -634,6 +631,10 @@ pub struct TaskDetail {
     /// conversation, newest conversation first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<StepGroup>,
+    /// What people and agents said about the task in fleet, oldest first
+    /// (the newest `COMMENTS_SERVED_MAX`). Never a tracker's comments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<crate::store::CommentRow>,
 }
 
 /// The task one of a session's links points at, briefly.
@@ -3070,7 +3071,7 @@ pub fn task(
     // that journal; its native children, their jobs, live sessions and
     // the steps of every conversation of the task and its subtasks: a
     // second, short lock.
-    let (meta, journal, work) = {
+    let (meta, journal, work, comments) = {
         let s = lock(store)?;
         let meta = item
             .map(|i| s.work_item_meta(i.item.id))
@@ -3086,7 +3087,11 @@ pub fn task(
             None => Vec::new(),
         };
         let work = native_work(&s, &g, scope, item, task.key.as_deref())?;
-        (meta, journal, work)
+        let comments = match item {
+            Some(i) => s.item_comments(i.item.id)?,
+            None => Vec::new(),
+        };
+        (meta, journal, work, comments)
     };
     // The tracker that might serve the whole description, and the key to name
     // it by — flattened as every other `fence_ticket` call site flattens it
@@ -3227,6 +3232,22 @@ pub fn task(
             grp
         })
         .collect();
+    // Who wrote a comment is a device label, as `Placement.updated_by` is,
+    // and withheld for the same reason; the text is fenced for an agent.
+    let comments = comments
+        .into_iter()
+        .map(|mut c| {
+            // This is the org boundary, not a privacy fence: `CommentRow.author` is a device
+            // label on shared work, withheld from a scoped caller exactly as
+            // `Placement.updated_by` is (the same open owner decision).
+            if !scope.is_all() {
+                c.author = String::new();
+                c.author_person_id = None;
+            }
+            c.body = fence(c.body, "a comment");
+            c
+        })
+        .collect();
     Ok(TaskDetail {
         task,
         aliases,
@@ -3243,6 +3264,7 @@ pub fn task(
         rejected_proposals,
         jobs,
         steps,
+        comments,
     })
 }
 

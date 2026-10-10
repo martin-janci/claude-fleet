@@ -72,6 +72,7 @@ mod update;
 mod usage;
 mod work;
 mod work_buckets;
+mod work_comments;
 mod work_describe;
 mod work_detect;
 mod work_journal;
@@ -220,6 +221,7 @@ pub use work_buckets::{
     bucket_states, BucketMemberRow, BucketMembership, BucketPatch, BucketRefRow, BucketRow,
     ItemBucketRow, NewBucket, SprintClosed, BUCKET_KINDS,
 };
+pub use work_comments::{validate_comment, CommentRow, COMMENTS_SERVED_MAX, COMMENT_MAX_CHARS};
 pub use work_detect::{
     DetectionState, WITHDRAWN_CARRIED, WITHDRAWN_DECAY, WITHDRAWN_REASONS, WITHDRAWN_WITHDRAW,
     WORK_SUGGESTION_WITHDRAWN,

@@ -1779,6 +1779,11 @@ const MIGRATIONS: &[Migration] = &[
     },
     // M15 step G2.8: named Control API tokens — a new table, idempotent.
     Migration::plain(157, include_str!("../../migrations/157_control_tokens.sql")),
+    // Task comments: a new table, idempotent.
+    Migration::plain(
+        158,
+        include_str!("../../migrations/158_work_item_comments.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

@@ -1204,6 +1204,40 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Task comments.
+        (
+            "comment_on_work",
+            "work_link",
+            json!({ "session_id": null, "action": "comment", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "notes": "Looks good" }),
+            r#"{"id":3,"item_id":9,"author":"client:desk","body":"Looks good","created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::comment_on_work(
+                    b,
+                    commands::work_view::CommentOnWorkArgs {
+                        item_id: 9,
+                        body: "Looks good".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "delete_work_comment",
+            "work_link",
+            json!({ "session_id": null, "action": "comment_delete", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "comment_id": 3 }),
+            r#"{"id":3,"item_id":9,"author":"client:desk","body":"Looks good","created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::delete_work_comment(
+                    b,
+                    commands::work_view::DeleteWorkCommentArgs { comment_id: 3 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // Epics (sprints design 2026-09-28 §3).
         (
             "set_work_parent",

@@ -706,6 +706,49 @@ fn required_title(args: &WorkLinkArgs) -> Result<String, IpcError> {
     )
 }
 
+/// `work_link { action: comment, item_id, notes }`: a comment on a task the
+/// caller sees — fleet's own or a tracker's ticket (the comment stays in
+/// fleet). An item outside the scope answers as an unknown id.
+pub fn comment(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+    author: &str,
+    person: Option<i64>,
+) -> Result<crate::store::CommentRow, IpcError> {
+    let id = args
+        .item_id
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "comment needs item_id"))?;
+    let body = args
+        .notes
+        .as_deref()
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "comment needs notes: its text"))?;
+    let s = lock(store)?;
+    visible_parent(&s, scope, id)?;
+    let mut c = s.add_comment(id, author, person, body)?;
+    c.mine = true;
+    Ok(c)
+}
+
+/// `work_link { action: comment_delete, comment_id }`: its author's alone.
+/// A comment on an item outside the scope answers as an unknown one.
+pub fn comment_delete(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+    author: &str,
+    person: Option<i64>,
+) -> Result<crate::store::CommentRow, IpcError> {
+    let id = args
+        .comment_id
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "comment_delete needs comment_id"))?;
+    let unknown = || IpcError::new(codes::E_NOTFOUND, format!("comment {id} not found"));
+    let s = lock(store)?;
+    let c = s.get_comment(id)?.ok_or_else(unknown)?;
+    visible_parent(&s, scope, c.item_id).map_err(|_| unknown())?;
+    s.delete_comment(id, person, author)?.ok_or_else(unknown)
+}
+
 #[cfg(test)]
 mod tests;
 

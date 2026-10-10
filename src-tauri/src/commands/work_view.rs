@@ -24,7 +24,7 @@ use fleet_core::service::work::view::{
     WorkTreeFilters,
 };
 use fleet_core::service::work::{self, WorkArgs, WorkLinkArgs};
-use fleet_core::store::{BucketRow, Decider, SessionRow, Store, WorkRule, WorkView};
+use fleet_core::store::{BucketRow, CommentRow, Decider, SessionRow, Store, WorkRule, WorkView};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -196,6 +196,19 @@ pub struct WorkBucketArgs {
     pub bucket_id: i64,
 }
 
+/// `comment_on_work`: a comment on a task (a work item).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CommentOnWorkArgs {
+    pub item_id: i64,
+    pub body: String,
+}
+
+/// `delete_work_comment`: the author's own comment.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeleteWorkCommentArgs {
+    pub comment_id: i64,
+}
+
 /// `add_work_to_bucket` / `remove_work_from_bucket`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BucketMemberArgs {
@@ -220,6 +233,24 @@ fn decide(action: &str, session_id: i64, link_id: i64) -> WorkLinkArgs {
 }
 
 // --- the commands --------------------------------------------------------------
+
+#[tauri::command]
+pub async fn comment_on_work(
+    args: CommentOnWorkArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<CommentRow, IpcError> {
+    routed::comment_on_work(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn delete_work_comment(
+    args: DeleteWorkCommentArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<CommentRow, IpcError> {
+    routed::delete_work_comment(&backend, args, &store).await
+}
 
 #[tauri::command]
 pub async fn work_buckets(
@@ -507,7 +538,15 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_task", &wire).await,
-            None => view::task(store, &internal_view(), &args.task_id),
+            None => {
+                let mut detail = view::task(store, &internal_view(), &args.task_id)?;
+                // A standalone desktop writes as LOCAL_ACTOR: its own comments
+                // are the ones it may delete.
+                for c in &mut detail.comments {
+                    c.mark_mine(None, LOCAL_ACTOR);
+                }
+                Ok(detail)
+            }
         }
     }
 
@@ -867,6 +906,39 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("remove_work_from_bucket", &wire).await,
             None => buckets::bucket_remove(&wire, store, &OrgScope::All),
+        }
+    }
+
+    pub async fn comment_on_work(
+        backend: &FleetBackend,
+        args: CommentOnWorkArgs,
+        store: &Mutex<Store>,
+    ) -> Result<CommentRow, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "comment".into(),
+            item_id: Some(args.item_id),
+            notes: Some(args.body),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("comment_on_work", &wire).await,
+            None => work::local::comment(&wire, store, &OrgScope::All, LOCAL_ACTOR, None),
+        }
+    }
+
+    pub async fn delete_work_comment(
+        backend: &FleetBackend,
+        args: DeleteWorkCommentArgs,
+        store: &Mutex<Store>,
+    ) -> Result<CommentRow, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "comment_delete".into(),
+            comment_id: Some(args.comment_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("delete_work_comment", &wire).await,
+            None => work::local::comment_delete(&wire, store, &OrgScope::All, LOCAL_ACTOR, None),
         }
     }
 }

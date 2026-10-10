@@ -791,6 +791,17 @@ const SCOPE_GUARDS: &[Guard] = &[
     },
     Guard {
         file: "crates/fleet-core/src/service/work/view.rs",
+        func: "task",
+        nth: 1,
+        code: "if !scope.is_all() {",
+        verdict: Verdict::OrgBoundary,
+        why: "`CommentRow.author` is a DEVICE label exactly as \
+              `Placement.updated_by` is, on the same shared work, and is \
+              withheld from a scoped caller for the same org reason — the \
+              same open question as #0",
+    },
+    Guard {
+        file: "crates/fleet-core/src/service/work/view.rs",
         func: "task_visible",
         nth: 1,
         code: "OrgScope::All => true,",
@@ -946,6 +957,13 @@ const OPEN_QUESTIONS: &[(&str, &str, usize, &str)] = &[
         "task",
         0,
         "does a PERSON's own device get to learn another person's DEVICE          LABEL? `Placement.updated_by` is withheld from a scoped caller          only, and the eight rules do not cover device identity",
+    ),
+    (
+        "crates/fleet-core/src/service/work/view.rs",
+        "task",
+        1,
+        "the same device-identity question as #0, for a comment's author: \
+         withheld from a scoped caller only",
     ),
     (
         "crates/fleet-core/src/service/update/mod.rs",

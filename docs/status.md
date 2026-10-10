@@ -299,6 +299,19 @@ built on it — walks one level; a filed task cannot hold subtasks, and a task
 with subtasks is not filed. Going deeper is the owner's decision (it moves
 the org fence). Not yet: the phone. E9–E11 run on their defaults.
 
+Task comments (migration 158, `work_item_comments`; the Comments tab G3.4
+had cut is back on the owner's word, 2026-10-10): `work_link { comment,
+item_id, notes }` (`comment_on_work`) and `{ comment_delete, comment_id }`
+(`delete_work_comment`), both routed. A comment is about the ITEM — its
+org fence, `edit`'s person gate for writing — stays in fleet (never a
+tracker's), and is deleted by its author alone (the person when both sides
+prove one, else the caller's label). `work { task }` serves them oldest
+first with `mine`; who wrote one is withheld from a scoped caller as
+`Placement.updated_by` is (the same open device-identity question). The
+task page's Activity tab also lists each session that started, was
+suggested, turned down or stopped, and each comment. Not yet: comments on
+the phone.
+
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
 census languages` over `service::nl` (cargo feature `nl-detect`, lingua, ON

@@ -368,6 +368,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("edit_work_item", Verdict::Routed { tool: "work_link" }),
     // Epics (sprints design 2026-09-28 §3): a local item filed under an epic.
     ("set_work_parent", Verdict::Routed { tool: "work_link" }),
+    // Task comments: a note on a task, kept in fleet; deleting is the author's.
+    ("comment_on_work", Verdict::Routed { tool: "work_link" }),
+    ("delete_work_comment", Verdict::Routed { tool: "work_link" }),
     // Sprints and releases (design 2026-09-28 §6a/§6b): reads and
     // membership route; the buckets themselves are work_admin.
     ("work_buckets", Verdict::Routed { tool: "work" }),

@@ -351,6 +351,21 @@ export interface TaskDetail {
   jobs?: JobView[];
   /** The steps agents took, per conversation. */
   steps?: StepGroup[];
+  /** What people and agents said about the task in fleet, oldest first. */
+  comments?: TaskComment[];
+}
+
+/** One comment on a task (`store::CommentRow`). Kept in fleet, never a tracker's. */
+export interface TaskComment {
+  id: number;
+  item_id: number;
+  /** Who wrote it (`client:<name>`, `host:<alias>`, `desktop`); empty when withheld. */
+  author: string;
+  /** Plain text: rendered as text, never as markup. */
+  body: string;
+  created_at: number;
+  /** This reader wrote it, so may delete it. */
+  mine?: boolean;
 }
 
 /** A native subtask on a task page. */

@@ -2645,6 +2645,33 @@ fn a_tree_query_groups_by_epic_and_rolls_its_children_up() {
     assert_eq!(group_of(&p, "TK-1").id, "none");
 }
 
+/// Task comments: served with the task, oldest first; who wrote one is a
+/// device label, withheld from a scoped caller as a placement's author is.
+#[test]
+fn a_task_serves_its_comments_and_withholds_their_author_from_a_scoped_caller() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        s.add_comment(w.t1, "client:phone", Some(4), "first")
+            .unwrap();
+        s.add_comment(w.t1, "desktop", None, "second").unwrap();
+    }
+    let all = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", w.t1)).unwrap();
+    assert_eq!(
+        all.comments
+            .iter()
+            .map(|c| (c.author.as_str(), c.body.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("client:phone", "first"), ("desktop", "second")]
+    );
+    let scoped = task(&w.st, &vs(&strict(w.org_a)), &format!("item:{}", w.t1)).unwrap();
+    assert_eq!(scoped.comments.len(), 2);
+    assert!(scoped
+        .comments
+        .iter()
+        .all(|c| c.author.is_empty() && c.author_person_id.is_none()));
+}
+
 #[test]
 fn an_unknown_grouping_is_refused_not_ignored() {
     let w = world();

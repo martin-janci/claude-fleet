@@ -468,6 +468,8 @@ pub fn run() {
             commands::work_view::delete_work_rule,
             commands::work_view::save_work_view,
             commands::work_view::delete_work_view,
+            commands::work_view::comment_on_work,
+            commands::work_view::delete_work_comment,
             commands::work_view::work_buckets,
             commands::work_view::work_bucket,
             commands::work_view::add_work_to_bucket,

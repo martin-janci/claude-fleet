@@ -4170,10 +4170,13 @@ fn the_served_definition_budget_stays_bounded() {
     /// surface). Measured at 107,112 bytes for 133 tools (805 a tool) on
     /// 2026-10-09, when the redesign audit branch (send_prompt's key list,
     /// new_session's start token, ask's draft) met main's update_admin
-    /// rollout and policy actions. Raise it only from a measurement the
-    /// failure prints, and say in the commit message what was measured and
-    /// when.
-    const BYTES_PER_TOOL: usize = 815;
+    /// rollout and policy actions. Raised to 826 from 110,236 bytes for 135
+    /// tools (816 a tool) on 2026-10-10, when work_link gained epics
+    /// (`set_parent`, `epic`) and task comments (`comment`,
+    /// `comment_delete`, `comment_id`) after main's own trim to 814. Raise
+    /// it only from a measurement the failure prints, and say in the commit
+    /// message what was measured and when.
+    const BYTES_PER_TOOL: usize = 826;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -11574,6 +11577,8 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     ("work_link", "edit", &["Drive"]),
     // Epics: where a person's live work is filed, behind `edit`'s gate.
     ("work_link", "set_parent", &["Drive"]),
+    // A comment is written into the owner's task: `edit`'s gate.
+    ("work_link", "comment", &["Drive"]),
     // Sprint and release membership: `set_status`'s person gate, on the
     // item planned.
     ("work_link", "bucket_add", &["Drive"]),
@@ -11805,6 +11810,12 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
 /// a reviewer can check, not an exemption: each says what the arm acts on
 /// INSTEAD of a session.
 const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
+    (
+        "work_link",
+        "comment_delete",
+        "a comment, by id: its item's org fence first (outside it, unknown), \
+         then its author's alone; no session is named or answered",
+    ),
     (
         "work",
         "missions",
