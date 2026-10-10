@@ -95,7 +95,23 @@ pub const MAX_PAYLOAD_BYTES: usize = 200 * 1024 * 1024;
 /// existing field. **Do not bump it for:** a new optional field (an older
 /// peer already ignores a field it does not know), or a new frame `kind`
 /// whose absence the sender can tolerate the receiver not acting on.
-pub const PROTO_VERSION: u32 = 1;
+pub const PROTO_VERSION: u32 = 2;
+
+/// The first [`PROTO_VERSION`] that speaks [`HubFrame::UploadChunk`] and
+/// [`AgentFrame::ResultChunk`]. A sender splits a payload only when the
+/// peer's own number (the agent's `hello.proto`, the hub's `welcome.proto`)
+/// is at least this: a proto-1 peer would skip the chunks as unknown kinds
+/// (crate doc) and take the final frame's last piece for the whole payload.
+pub const CHUNKED_PROTO: u32 = 2;
+
+/// The most raw bytes one chunk carries, before base64 (~1.4 MB on the
+/// wire). A 200 MiB transcript used to cross as ONE frame of ~267 MiB:
+/// nothing else on the connection moved until it had — not a pong, not a
+/// probe's few-KB result — and on a slow uplink that outlasted the two
+/// missed heartbeats after which the hub drops the link. In 1 MiB pieces
+/// the writer's small lane interleaves between them (device-communication
+/// analysis, phase 4 item 13).
+pub const CHUNK_BYTES: usize = 1024 * 1024;
 
 /// The oldest `proto` a hub still accepts from an agent's `hello`.
 ///
@@ -128,6 +144,10 @@ pub const PROTO_VERSION: u32 = 1;
 /// agent waiting (at the maximum backoff) for an old hub — without either
 /// one being refused outright. Narrow the window again only once nothing in
 /// the field still needs the old floor.
+///
+/// **Proto 2** (chunked payloads) keeps this at 1, per the rule above: a
+/// proto-2 hub and a proto-1 agent (or the reverse) still talk, just without
+/// chunks — each side splits only toward a peer at [`CHUNKED_PROTO`].
 pub const MIN_SUPPORTED_PROTO: u32 = 1;
 
 // Enforced at compile time, not just in a test: `judge_proto` assumes this
@@ -347,8 +367,20 @@ pub enum HubFrame {
         /// mode argument — it pipes into `cat > path` and takes whatever the
         /// remote umask gives — so Task 3 has to choose what to send here.
         mode: u32,
+        /// The file's bytes — or, after `chunks` [`HubFrame::UploadChunk`]s
+        /// with this `id`, its LAST piece.
         bytes_b64: String,
+        /// How many [`HubFrame::UploadChunk`]s with this `id` came before
+        /// this frame (proto 2; absent = 0). The agent writes nothing unless
+        /// it holds exactly that many: a chunk lost with a replaced
+        /// connection must fail the upload, never write a short file.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        chunks: u32,
     },
+    /// One piece of an upload's bytes, sent before its [`HubFrame::Upload`]
+    /// (proto 2, only to an agent at [`CHUNKED_PROTO`]). Answered by nothing;
+    /// the final `upload` is answered as ever.
+    UploadChunk { id: String, bytes_b64: String },
     /// Kill the child of an in-flight request. `id` is that request's id.
     Cancel { id: String },
     /// Liveness. Answered with [`AgentFrame::Pong`] carrying the same `id`.
@@ -425,11 +457,28 @@ pub enum AgentFrame {
         /// The child's exit status; negative when it was killed by a signal
         /// or never started, matching what the SSH path already reports.
         exit_code: i32,
+        /// The streams — or, after `chunks` [`AgentFrame::ResultChunk`]s with
+        /// this `id`, what is left of them.
         stdout_b64: String,
         stderr_b64: String,
         /// Set when either stream hit the cap, so the caller knows the output
         /// is short rather than the command being quiet.
         truncated: bool,
+        /// How many [`AgentFrame::ResultChunk`]s with this `id` came before
+        /// this frame (proto 2; absent = 0). The hub refuses a result whose
+        /// count does not match what it holds.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        chunks: u32,
+    },
+    /// One piece of a result's streams, sent before its
+    /// [`AgentFrame::Result`] (proto 2, only to a hub at [`CHUNKED_PROTO`]).
+    /// Either piece may be empty.
+    ResultChunk {
+        id: String,
+        #[serde(default)]
+        stdout_b64: String,
+        #[serde(default)]
+        stderr_b64: String,
     },
     Pong {
         id: String,
@@ -444,6 +493,150 @@ pub enum AgentFrame {
         #[serde(default)]
         dropped: u32,
     },
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// Split an upload into the frames that carry it to a peer at `peer_proto`:
+/// one [`HubFrame::Upload`] when the peer predates [`CHUNKED_PROTO`] or the
+/// file fits one chunk, else [`CHUNK_BYTES`] pieces and a final `upload`
+/// carrying the last one.
+pub fn upload_frames(
+    id: &str,
+    path: &str,
+    mode: u32,
+    bytes: &[u8],
+    peer_proto: u32,
+) -> Vec<HubFrame> {
+    let pieces: Vec<&[u8]> = if peer_proto >= CHUNKED_PROTO && bytes.len() > CHUNK_BYTES {
+        bytes.chunks(CHUNK_BYTES).collect()
+    } else {
+        vec![bytes]
+    };
+    let (last, before) = pieces.split_last().expect("at least one piece");
+    let mut frames: Vec<HubFrame> = before
+        .iter()
+        .map(|piece| HubFrame::UploadChunk {
+            id: id.to_string(),
+            bytes_b64: encode_b64(piece),
+        })
+        .collect();
+    frames.push(HubFrame::Upload {
+        id: id.to_string(),
+        path: path.to_string(),
+        mode,
+        bytes_b64: encode_b64(last),
+        chunks: before.len() as u32,
+    });
+    frames
+}
+
+/// Split a result into the frames that carry it to a hub at `peer_proto`:
+/// [`CHUNK_BYTES`] pieces of stdout, then of stderr, and a final
+/// [`AgentFrame::Result`] carrying what is left — or one `result` when the
+/// hub predates [`CHUNKED_PROTO`] or everything fits one chunk.
+pub fn result_frames(
+    id: &str,
+    exit_code: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+    truncated: bool,
+    peer_proto: u32,
+) -> Vec<AgentFrame> {
+    let mut frames = Vec::new();
+    let (mut out, mut err) = (stdout, stderr);
+    if peer_proto >= CHUNKED_PROTO {
+        while out.len() + err.len() > CHUNK_BYTES {
+            let take_out = out.len().min(CHUNK_BYTES);
+            let take_err = (CHUNK_BYTES - take_out).min(err.len());
+            frames.push(AgentFrame::ResultChunk {
+                id: id.to_string(),
+                stdout_b64: encode_b64(&out[..take_out]),
+                stderr_b64: encode_b64(&err[..take_err]),
+            });
+            out = &out[take_out..];
+            err = &err[take_err..];
+        }
+    }
+    let chunks = frames.len() as u32;
+    frames.push(AgentFrame::Result {
+        id: id.to_string(),
+        exit_code,
+        stdout_b64: encode_b64(out),
+        stderr_b64: encode_b64(err),
+        truncated,
+        chunks,
+    });
+    frames
+}
+
+/// The pieces of chunked payloads still being received, by request id —
+/// one per connection, at either end. Bounded: each id by the caller's
+/// `limit`, all of them together by [`Assembly::MAX_IDS`] ids.
+#[derive(Debug, Default)]
+pub struct Assembly {
+    pending: std::collections::HashMap<String, Pieces>,
+}
+
+/// The pieces received so far for one id.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Pieces {
+    pub first: Vec<u8>,
+    pub second: Vec<u8>,
+    pub count: u32,
+}
+
+impl Assembly {
+    /// The most ids with pieces pending at once on one connection.
+    pub const MAX_IDS: usize = 64;
+
+    /// Add one chunk's decoded pieces to `id`, refusing past `limit` raw bytes
+    /// for the id (both pieces together) or past [`Self::MAX_IDS`] ids.
+    pub fn push(
+        &mut self,
+        id: &str,
+        first: &[u8],
+        second: &[u8],
+        limit: usize,
+    ) -> Result<(), ProtoError> {
+        if !self.pending.contains_key(id) && self.pending.len() >= Self::MAX_IDS {
+            return Err(ProtoError::malformed("too many chunked payloads in flight"));
+        }
+        let p = self.pending.entry(id.to_string()).or_default();
+        let total = p.first.len() + p.second.len() + first.len() + second.len();
+        if total > limit {
+            self.pending.remove(id);
+            return Err(ProtoError::TooLarge {
+                size: total,
+                cap: limit,
+            });
+        }
+        p.first.extend_from_slice(first);
+        p.second.extend_from_slice(second);
+        p.count += 1;
+        Ok(())
+    }
+
+    /// Take `id`'s pieces for its final frame, which said `chunks` came
+    /// before it. `None` when nothing is pending and `chunks` is 0 — the
+    /// unchunked case. An error when the counts disagree: a lost chunk.
+    pub fn finish(&mut self, id: &str, chunks: u32) -> Result<Option<Pieces>, ProtoError> {
+        let got = self.pending.remove(id);
+        let have = got.as_ref().map_or(0, |p| p.count);
+        if have != chunks {
+            return Err(ProtoError::malformed(format!(
+                "a chunked payload said {chunks} chunks came first, {have} did"
+            )));
+        }
+        Ok(got)
+    }
+
+    /// Forget `id`'s pieces (its caller gave up).
+    pub fn forget(&mut self, id: &str) {
+        self.pending.remove(id);
+    }
 }
 
 /// What can go wrong turning bytes into a frame, or back.

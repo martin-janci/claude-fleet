@@ -471,6 +471,9 @@ pub struct Served {
 /// What the writer task sends.
 enum Out {
     Frame(String),
+    /// A frame of a chunked answer: always the bulk lane, the final `result`
+    /// included, so no piece overtakes another.
+    Bulk(String),
     /// Close the socket with this code and reason, and stop.
     Close(CloseCode, String),
 }
@@ -525,6 +528,9 @@ where
     // `SessionEnd::VersionRefused`, which `run_with` backs off on at the
     // maximum interval instead of dialling this hub again right away.
     let mut welcomed = false;
+    // The hub's `welcome.proto`, and the pieces of chunked uploads (proto 2)
+    // until their final `upload`.
+    let mut link = Link::default();
     // Reports drained from the ring that did not fit the last frame. Consumed
     // before the ring on the next beat, so order is preserved: a `report`
     // frame is bounded by `REPORT_FRAME_BYTES`, not by `FRAME_BATCH_MAX`
@@ -557,6 +563,7 @@ where
                                 break SessionEnd::VersionRefused(reason);
                             }
                             welcomed = true;
+                            link.hub_proto = proto;
                             let hub_version = sanitized_hub_version(&hub_version);
                             tracing::info!(
                                 hub_version, proto, "[agent] hub protocol compatible"
@@ -570,7 +577,9 @@ where
                         Ok(_) if !welcomed => {
                             break SessionEnd::VersionRefused(no_welcome_reason());
                         }
-                        Ok(Decoded::Frame(frame)) => handle(frame, agent, &out, &inflight),
+                        Ok(Decoded::Frame(frame)) => {
+                            handle(frame, agent, &out, &inflight, &mut link)
+                        }
                         Ok(Decoded::Unknown { kind }) => {
                             match unknown_kinds.record(&kind) {
                                 fleet_proto::UnknownKindAction::LogOnce(kind) => {
@@ -790,7 +799,7 @@ impl Lanes {
     fn push(&mut self, out: Out) {
         match out {
             Out::Frame(text) if text.len() <= SMALL_FRAME_BYTES => self.small.push_back(text),
-            Out::Frame(text) => self.bulk.push_back(text),
+            Out::Frame(text) | Out::Bulk(text) => self.bulk.push_back(text),
             // Kept for last: the frames queued before it still go out.
             Out::Close(code, reason) => self.close = Some((code, reason)),
         }
@@ -843,6 +852,16 @@ async fn write_loop<S>(
     let _ = sink.close().await;
 }
 
+/// What one connection knows about its hub beyond the frames themselves.
+#[derive(Default)]
+struct Link {
+    /// The hub's `welcome.proto`: answers are chunked only toward a hub at
+    /// [`fleet_proto::CHUNKED_PROTO`].
+    hub_proto: u32,
+    /// Pieces of chunked uploads, until their final `upload`.
+    assembly: fleet_proto::Assembly,
+}
+
 /// Act on one hub frame. Nothing here waits: work is spawned, and answers go
 /// out through the writer.
 fn handle(
@@ -850,8 +869,22 @@ fn handle(
     agent: &Arc<Agent>,
     out: &mpsc::UnboundedSender<Out>,
     inflight: &InFlight,
+    link: &mut Link,
 ) {
+    let hub_proto = link.hub_proto;
     match frame {
+        HubFrame::UploadChunk { id, bytes_b64 } => {
+            // A chunk that cannot be kept fails its upload: the final frame
+            // counts the chunks, and a short count writes nothing.
+            let kept = decode_b64(&bytes_b64).and_then(|bytes| {
+                link.assembly
+                    .push(&id, &bytes, &[], fleet_proto::MAX_PAYLOAD_BYTES)
+            });
+            if let Err(e) = kept {
+                let id = fleet_proto::sanitize_for_log(&id, DUPLICATE_ID_LOG_MAX);
+                tracing::warn!(id, error = %e, "[agent] dropping an upload chunk");
+            }
+        }
         HubFrame::Ping { id } => {
             let pong = encode_agent_frame(&AgentFrame::Pong { id }).expect("a pong is small");
             let _ = out.send(Out::Frame(pong));
@@ -890,7 +923,7 @@ fn handle(
                     stderr: b"the agent is stopping".to_vec(),
                     truncated: false,
                 };
-                let _ = out.send(Out::Frame(result_frame(id, refused, cap_bytes)));
+                send_result(out, id, refused, cap_bytes, hub_proto);
                 return;
             }
             // Counted before the task is spawned, so a `stop` that races it
@@ -938,7 +971,7 @@ fn handle(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&id);
-                let _ = out.send(Out::Frame(result_frame(id, outcome, cap_bytes)));
+                send_result(&out, id, outcome, cap_bytes, hub_proto);
             });
         }
         HubFrame::Upload {
@@ -946,18 +979,37 @@ fn handle(
             path,
             mode,
             bytes_b64,
+            chunks,
         } => {
+            // Taken before the duplicate check, so a replayed id's chunks do
+            // not stay behind.
+            let before = link.assembly.finish(&id, chunks);
             if !agent.first_sight(&id) {
                 refuse_duplicate(&id);
                 return;
             }
+            let prefix = match before {
+                Ok(pieces) => pieces.map(|p| p.first).unwrap_or_default(),
+                Err(e) => {
+                    let failed = exec::ExecOutcome {
+                        exit_code: 1,
+                        stdout: Vec::new(),
+                        stderr: format!("{path}: {e}; nothing was written").into_bytes(),
+                        truncated: false,
+                    };
+                    send_result(out, id, failed, Some(0), hub_proto);
+                    return;
+                }
+            };
             let (agent, out) = (Arc::clone(agent), out.clone());
             tokio::spawn(async move {
                 let _permit = Arc::clone(&agent.slots).acquire_owned().await;
                 let home = agent.home.clone().unwrap_or_default();
                 let written = tokio::task::spawn_blocking(move || {
                     let target = exec::resolve_path(&home, &path);
-                    let bytes = decode_b64(&bytes_b64).map_err(|e| format!("{path}: {e}"))?;
+                    let last = decode_b64(&bytes_b64).map_err(|e| format!("{path}: {e}"))?;
+                    let mut bytes = prefix;
+                    bytes.extend_from_slice(&last);
                     exec::write_upload(&target, mode, &bytes)
                         .map_err(|e| format!("{}: {e}", target.display()))
                 })
@@ -979,7 +1031,7 @@ fn handle(
                 };
                 // An upload's answer is empty or one error line; the hub
                 // judges it against its floor, which a smallest cap fits.
-                let _ = out.send(Out::Frame(result_frame(id, outcome, Some(0))));
+                send_result(&out, id, outcome, Some(0), hub_proto);
             });
         }
     }
@@ -999,6 +1051,53 @@ fn refuse_duplicate(id: &str) {
     tracing::warn!(id, "[agent] refusing a request id already seen");
 }
 
+/// Queue a request's answer: in [`fleet_proto::CHUNK_BYTES`] pieces toward a
+/// hub that speaks them, so a pong or a probe's answer behind it is not held
+/// up by the whole of it (the writer's small lane overtakes the pieces).
+fn send_result(
+    out: &mpsc::UnboundedSender<Out>,
+    id: String,
+    outcome: exec::ExecOutcome,
+    cap_bytes: Option<u64>,
+    hub_proto: u32,
+) {
+    let texts = result_texts(id, outcome, cap_bytes, hub_proto);
+    let chunked = texts.len() > 1;
+    for text in texts {
+        let _ = out.send(if chunked {
+            Out::Bulk(text)
+        } else {
+            Out::Frame(text)
+        });
+    }
+}
+
+/// The encoded frames of one answer ([`send_result`]): one `result` within
+/// the hub's budget, or — toward a proto-2 hub, for an answer over one
+/// chunk — its chunks and a final `result`.
+fn result_texts(
+    id: String,
+    outcome: exec::ExecOutcome,
+    cap_bytes: Option<u64>,
+    hub_proto: u32,
+) -> Vec<String> {
+    let frames = fleet_proto::result_frames(
+        &id,
+        outcome.exit_code,
+        &outcome.stdout,
+        &outcome.stderr,
+        outcome.truncated,
+        hub_proto,
+    );
+    if frames.len() == 1 {
+        return vec![result_frame(id, outcome, cap_bytes)];
+    }
+    frames
+        .iter()
+        .map(|f| encode_agent_frame(f).expect("a chunk is a small frame"))
+        .collect()
+}
+
 /// Encode a `result` that fits the budget the hub will decode it against.
 /// `execute` already truncated to the matching limits, so the fallback only
 /// fires for an absurd id.
@@ -1009,9 +1108,11 @@ fn result_frame(id: String, outcome: exec::ExecOutcome, cap_bytes: Option<u64>) 
         stdout_b64: encode_b64(&outcome.stdout),
         stderr_b64: encode_b64(&outcome.stderr),
         truncated: outcome.truncated,
+        chunks: 0,
     };
     encode_agent_frame_within(&frame, result_budget(cap_bytes)).unwrap_or_else(|e| {
         let fallback = AgentFrame::Result {
+            chunks: 0,
             id,
             exit_code: -1,
             stdout_b64: String::new(),
@@ -1251,6 +1352,16 @@ mod tests {
         assert_eq!(lanes.pop(), Some(big('b')));
         assert_eq!(lanes.pop(), None);
         assert!(lanes.close.is_some(), "the close is kept for last");
+
+        // A chunked answer's final `result` is small, and still never
+        // overtakes its own chunks.
+        let mut lanes = Lanes::default();
+        lanes.push(Out::Bulk(big('c')));
+        lanes.push(Out::Bulk("final".into()));
+        lanes.push(Out::Frame("pong".into()));
+        assert_eq!(lanes.pop().as_deref(), Some("pong"));
+        assert_eq!(lanes.pop(), Some(big('c')));
+        assert_eq!(lanes.pop().as_deref(), Some("final"));
     }
 
     use super::*;
@@ -1395,6 +1506,7 @@ mod tests {
                         stdout_b64,
                         stderr_b64,
                         truncated,
+                        ..
                     },
                     len,
                 ) if got == id => {
@@ -1924,6 +2036,7 @@ mod tests {
         send(
             &mut p.hub,
             &HubFrame::Upload {
+                chunks: 0,
                 id: "u1".into(),
                 path: path.to_str().unwrap().into(),
                 mode: 0o600,
@@ -1952,6 +2065,7 @@ mod tests {
         send(
             &mut p.hub,
             &HubFrame::Upload {
+                chunks: 0,
                 id: "big".into(),
                 path: path.to_str().unwrap().into(),
                 mode: 0o600,
@@ -1970,6 +2084,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f");
         let upload = |body: &[u8]| HubFrame::Upload {
+            chunks: 0,
             id: "up".into(),
             path: path.to_str().unwrap().into(),
             mode: 0o600,
@@ -1994,6 +2109,7 @@ mod tests {
         send(
             &mut p.hub,
             &HubFrame::Upload {
+                chunks: 0,
                 id: "u2".into(),
                 path: "/proc/fleet-agent-cannot-write-here/x".into(),
                 mode: 0o644,

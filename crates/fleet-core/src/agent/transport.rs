@@ -20,7 +20,7 @@ use super::registry::AgentRegistry;
 use crate::ipc_error::{codes, IpcError};
 use crate::ssh::{home_from_output, SshClient, SshExec, UPLOAD_WALL_CLOCK};
 use dashmap::DashMap;
-use fleet_proto::{decode_b64, encode_b64, AgentFrame, HubFrame};
+use fleet_proto::{decode_b64, AgentFrame, HubFrame};
 use std::path::Path;
 use std::process::{ExitStatus, Output};
 use std::sync::Arc;
@@ -360,17 +360,20 @@ impl SshExec for AgentTransport {
                 format!("open {}: {e}", local_path.display()),
             )
         })?;
-        // Same note as `exec`'s `HubFrame::Exec`: nothing here needs gating
-        // on `self.registry.negotiated_proto(host)` yet either.
-        let frame = HubFrame::Upload {
-            id: uuid::Uuid::new_v4().to_string(),
-            path: remote_path.to_string(),
-            mode: upload_mode(&md),
-            bytes_b64: encode_b64(&bytes),
-        };
+        // In 1 MiB chunks to an agent that speaks them (proto 2), so nothing
+        // else on the link waits for the whole file; one frame to an older one.
+        let peer = self.registry.negotiated_proto(host).unwrap_or(1);
+        let mut frames = fleet_proto::upload_frames(
+            &uuid::Uuid::new_v4().to_string(),
+            remote_path,
+            upload_mode(&md),
+            &bytes,
+            peer,
+        );
+        let frame = frames.pop().expect("upload_frames ends with the upload");
         match self
             .registry
-            .request(host, frame, UPLOAD_WALL_CLOCK)
+            .request_after(host, frames, frame, UPLOAD_WALL_CLOCK)
             .await?
         {
             AgentFrame::Result { exit_code: 0, .. } => Ok(()),
@@ -432,6 +435,7 @@ mod tests {
     /// A `result` frame carrying `exit_code` and nothing else.
     fn result_frame(exit_code: i32) -> AgentFrame {
         AgentFrame::Result {
+            chunks: 0,
             id: "id".into(),
             exit_code,
             stdout_b64: encode_b64(b""),
@@ -565,6 +569,7 @@ mod tests {
     async fn an_undecodable_stream_is_a_protocol_error() {
         let (t, _agent) = setup(custom(|f: &HubFrame| match f {
             HubFrame::Exec { id, .. } => Some(AgentFrame::Result {
+                chunks: 0,
                 id: id.clone(),
                 exit_code: 0,
                 stdout_b64: "not base64 !!".into(),
@@ -691,6 +696,7 @@ mod tests {
                 path,
                 mode,
                 bytes_b64,
+                ..
             } => {
                 assert!(!id.is_empty());
                 assert_eq!(path, "/home/dev/.claude/hook.sh");
