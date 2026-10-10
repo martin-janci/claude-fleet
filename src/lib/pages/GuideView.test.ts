@@ -8,7 +8,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import PageView from './PageView.svelte';
 import { allDescriptors, bundle } from './testing';
-import { guideProposals, guidesWritable, liveGuides, loadGuides, type GuidesView } from './guides';
+import { guideApprovals, guideProposals, guideProvenance, guidesWritable, liveGuides, loadGuides, type GuidesView } from './guides';
+import { guideChanges, guideSnapshot, guideSummary } from './guide_changes';
 import type { Page } from './pages';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
@@ -60,6 +61,7 @@ beforeEach(() => {
   liveGuides.set([]);
   guideProposals.set([]);
   guidesWritable.set(true);
+  guideApprovals.set(new Map());
 });
 
 describe('a guide, step by step', () => {
@@ -90,6 +92,43 @@ describe('a guide, step by step', () => {
     expect(within(screen.getByTestId('guide-steps')).queryByText('When it acts')).toBeNull();
     await fireEvent.click(screen.getByTestId('guide-next'));
     expect(screen.getByTestId('guide-done')).toBeTruthy();
+  });
+});
+
+describe('where a guide came from and what it changed (G7.15)', () => {
+  it('says who proposed a live guide and who approved it, and when', () => {
+    const at = Date.UTC(2026, 9, 6, 12) / 1000;
+    expect(
+      guideProvenance({ page_id: 'guide.cleanup', source: 'agent', source_detail: 'host web-1', approved_by: 'person (pixel)', approved_at: at }, 'UTC'),
+    ).toBe('Guide · proposed by an agent (host web-1), approved by a person (pixel) on 6 Oct');
+    expect(guideProvenance(undefined)).toBe('Guide · comes with Fleet');
+  });
+
+  it('heads the guide with that line', () => {
+    guideApprovals.set(new Map([['guide.cleanup', { page_id: 'guide.cleanup', source: 'agent', approved_by: 'person' }]]));
+    showGuide({});
+    expect(screen.getByTestId('guide-provenance').textContent).toBe('Guide · proposed by an agent, approved by a person');
+  });
+
+  it('counts the steps and the settings a guide changes', () => {
+    expect(guideSummary(cleanup, descs)).toBe('3 steps · changes 2 settings');
+  });
+
+  it('lists each setting changed since the guide opened, and Undo writes the old value back', async () => {
+    const before = guideSnapshot(cleanup, descs, { ...defaults, 'gc.enabled': 'false' });
+    expect(guideChanges(cleanup, descs, before, { ...defaults, 'gc.enabled': 'false' })).toEqual([]);
+    const [c] = guideChanges(cleanup, descs, before, { ...defaults, 'gc.enabled': 'true' });
+    expect([c.key, c.before, c.words]).toEqual(['gc.enabled', 'false', 'Off → On']);
+
+    inv.mockResolvedValue({});
+    const { rerender } = render(PageView, {
+      props: { page: cleanup, pages: [...bundle.pages, cleanup], descs, values: { ...defaults, 'gc.enabled': 'false' }, sources: bundle.sources, onnavigate: vi.fn() },
+    });
+    expect(screen.queryByTestId('guide-changes')).toBeNull();
+    await rerender({ values: { ...defaults, 'gc.enabled': 'true' } });
+    expect(screen.getByTestId('guide-change-gc.enabled').textContent).toContain('Off → On');
+    await fireEvent.click(screen.getByTestId('guide-change-undo-gc.enabled'));
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'gc.enabled', value: 'false' }));
   });
 });
 

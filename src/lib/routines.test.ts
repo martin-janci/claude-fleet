@@ -20,6 +20,8 @@ import {
   cronWords,
   dryRunLine,
   nextRunLabel,
+  nextRoutineLine,
+  soonestRoutine,
   offsetWords,
   scheduleCron,
   schedulePick,
@@ -253,5 +255,41 @@ describe('automation guards in words (G3.8)', () => {
     expect(startedByWords({ trigger: 'cron', trigger_ref: 'retry:4' })).toBe('its schedule, retried once after run 4 failed');
     expect(startedByWords({ trigger: 'event', trigger_ref: 'pr:2:9' })).toBe('an event (pr:2:9)');
     expect(fixLabel(undefined)).toBe('Fix');
+  });
+});
+
+describe('the calm Inbox names the next routine (G7.15)', () => {
+  const at = (iso: string) => Date.parse(iso) / 1000;
+  const row = (name: string, next: string | undefined, over: Record<string, unknown> = {}) => ({
+    name,
+    enabled: true,
+    trigger: 'cron',
+    skip_next: false,
+    next_run_at: next ? at(next) : undefined,
+    ...over,
+  });
+
+  it('picks the enabled, scheduled routine that runs first', () => {
+    const now = at('2026-10-10T06:00:00Z');
+    const rows = [
+      row('Nightly', '2026-10-10T22:00:00Z'),
+      row('Morning PR sweep', '2026-10-10T07:30:00Z'),
+      row('Paused', '2026-10-10T06:30:00Z', { enabled: false }),
+      row('Skipped', '2026-10-10T06:31:00Z', { skip_next: true }),
+      row('On a PR', '2026-10-10T06:32:00Z', { trigger: 'event' }),
+      row('Past', '2026-10-10T05:00:00Z'),
+    ];
+    expect(soonestRoutine(rows, now)?.name).toBe('Morning PR sweep');
+    expect(soonestRoutine([row('Off', '2026-10-10T07:00:00Z', { enabled: false })], now)).toBeNull();
+  });
+
+  it('says the time for today, and the day for later', () => {
+    const now = at('2026-10-10T06:00:00Z');
+    expect(nextRoutineLine(row('Morning PR sweep', '2026-10-10T07:30:00Z'), now, 'UTC')).toBe(
+      'The next routine is Morning PR sweep at 07:30.',
+    );
+    expect(nextRoutineLine(row('Weekly', '2026-10-12T07:30:00Z'), now, 'UTC')).toBe(
+      'The next routine is Weekly on Mon 12 Oct, 07:30.',
+    );
   });
 });

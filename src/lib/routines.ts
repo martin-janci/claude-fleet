@@ -219,6 +219,41 @@ export async function loadFailing(): Promise<void> {
   failing.set(r.ok && Array.isArray(r.value) ? r.value : []);
 }
 
+/** The scheduled routine that runs next (G7.15, States board "Inbox
+ *  empty"): the calm Inbox names it. Null when none is scheduled or the
+ *  read failed; the line is then left out. */
+export const nextRoutine = writable<RoutineRow | null>(null);
+
+export async function loadNextRoutine(nowSec = Math.floor(Date.now() / 1000)): Promise<void> {
+  const r = await listRoutines();
+  nextRoutine.set(r.ok && Array.isArray(r.value) ? soonestRoutine(r.value, nowSec) : null);
+}
+
+/** The enabled, scheduled routine whose next run comes first, after `nowSec`. */
+export function soonestRoutine<T extends Pick<RoutineRow, 'enabled' | 'trigger' | 'next_run_at' | 'skip_next'>>(
+  rows: readonly T[],
+  nowSec: number,
+): T | null {
+  let best: T | null = null;
+  for (const r of rows) {
+    if (!r.enabled || r.trigger !== 'cron' || r.skip_next || !r.next_run_at || r.next_run_at <= nowSec) continue;
+    if (!best || r.next_run_at < best.next_run_at!) best = r;
+  }
+  return best;
+}
+
+/** "The next routine is Morning PR sweep at 07:30." — today's runs by the
+ *  time alone, a later day's with its date ("on Fri 23 Oct, 07:30"). */
+export function nextRoutineLine(r: Pick<RoutineRow, 'name' | 'next_run_at'>, nowSec: number, timeZone?: string): string | null {
+  if (!r.next_run_at) return null;
+  const day = (sec: number) => new Intl.DateTimeFormat('en-GB', { timeZone, dateStyle: 'short' }).format(new Date(sec * 1000));
+  const when =
+    day(r.next_run_at) === day(nowSec)
+      ? `at ${new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(r.next_run_at * 1000))}`
+      : `on ${nextRunLabel(r.next_run_at, timeZone)}`;
+  return `The next routine is ${r.name} ${when}.`;
+}
+
 /** How many failed runs the Inbox shows: added to its Needs you count. */
 export const failingCount = derived(failing, ($f) => $f.length);
 

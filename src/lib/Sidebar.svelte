@@ -45,7 +45,7 @@
   import RoutineFailures from './automation/RoutineFailures.svelte';
   import MissionWaits from './MissionWaits.svelte';
   import ProposedBy from './ProposedBy.svelte';
-  import { failingCount, loadFailing } from './routines';
+  import { failingCount, loadFailing, loadNextRoutine, nextRoutine, nextRoutineLine } from './routines';
   import { loadWaitingMissions, waitingMissionCount } from './mission_waits';
   import { sessionMatchesSearch } from './search';
   import { sessionFocus } from './session_focus';
@@ -56,7 +56,7 @@
   import { accessOf, backendMode, myGrantInfo } from './access';
   import { sharedRowLine, sharerName } from './shared_view';
   import AddProjectDialog from './AddProjectDialog.svelte';
-  import { hostFilter, effectiveHostFilter, hosts, hostByAlias } from './hosts';
+  import { hostFilter, effectiveHostFilter, hosts, hostByAlias, hideHost } from './hosts';
   import { bootstrapError } from './bootstrap_state';
   import { errorText } from './error_copy';
   import EmptyState from './states/EmptyState.svelte';
@@ -1040,6 +1040,7 @@
       untrack(() => {
         void loadFailing();
         void loadWaitingMissions();
+        void loadNextRoutine();
       });
   });
   // The footer's row count (UX audit L4): what this list holds right now.
@@ -1058,6 +1059,16 @@
   // A folded mass loss is its own Restore line below, not "12 paused" here.
   const inboxRestText = $derived(
     notWaitingText(notWaiting(inboxPool.filter((s) => !foldedIdSet.has(s.id)), attentionOpts)),
+  );
+  // G7.15 (States board, "Inbox empty · calm, not a void"): what is still
+  // to come, after what is not waiting.
+  const inboxCalmBody = $derived(
+    [
+      inboxRestText ? `Not waiting · ${inboxRestText}.` : '',
+      $nextRoutine ? (nextRoutineLine($nextRoutine, Math.floor(Date.now() / 1000)) ?? '') : '',
+    ]
+      .filter(Boolean)
+      .join(' ') || null,
   );
 
   // Interactive Claude sessions running entirely outside fleet (Claude
@@ -1105,7 +1116,21 @@
   // The empty list's actions (review r13): the Hosts view to add one, and
   // New session.
   const openAddHost = () => requestHostsView();
-  const openNewSession = () => openNewSessionPicker();
+  // G7.15 (States board, "Search with no results"): the way out carries the
+  // query, so the new session is named what was searched for.
+  const searchedFor = $derived(viewSearch.trim());
+  const openNewSessionFromSearch = () =>
+    openNewSessionPicker(undefined, undefined, undefined, searchedFor || undefined);
+  // G7.15 (States board, "First run"): this machine is a host too. Its
+  // `local` row is there but hidden (a desktop seeds one); a process with
+  // no local host (a Windows desktop, a hub client) has none to offer.
+  const hiddenLocal = $derived($hosts.find((h) => h.alias === 'local' && h.hidden) ?? null);
+  const visibleHostCount = $derived($hosts.filter((h) => !h.hidden).length);
+  const thisMachine = isMac ? 'this Mac' : 'this computer';
+  async function useThisMachine() {
+    const r = await hideHost('local', false);
+    if (!r.ok) pushError(r.error, `Could not use ${thisMachine}`);
+  }
 
   // A project row's own `+`: straight to New session for that project.
   // (The switcher's New session mode is the one place a project is picked.)
@@ -1481,7 +1506,7 @@
         kind="calm"
         testid="inbox-calm"
         title="Nothing needs you right now."
-        body={inboxRestText ? `Not waiting · ${inboxRestText}` : null}
+        body={inboxCalmBody}
         actions={[
           { label: 'See running', onclick: () => sidebarView.set('sessions'), testid: 'inbox-calm-running' },
           { label: 'Today', onclick: openToday, testid: 'inbox-calm-today' },
@@ -1982,19 +2007,27 @@
               ...(archivedHidden > 0
                 ? [{ label: `Include archived (${archivedHidden})`, onclick: () => setShowArchived(true), testid: 'sidebar-empty-archived' }]
                 : []),
-              { label: 'Start a new session', onclick: openNewSession, testid: 'sidebar-empty-new' },
+              {
+                label: searchedFor ? `Start new session “${searchedFor}”…` : 'Start a new session',
+                onclick: openNewSessionFromSearch,
+                testid: 'sidebar-empty-new',
+              },
             ]}
           />
         
-      {:else if !hubSkewEmptyMessage && $hosts.length === 0}
-        <!-- Review r13, States board "First run": one host to start with. -->
+      {:else if !hubSkewEmptyMessage && visibleHostCount === 0}
+        <!-- Review r13, States board "First run": one host to start with;
+             G7.15: this machine counts, when it can be one. -->
         <EmptyState
           kind="first"
           testid="sidebar-empty"
           title="Start with one host"
-          body="Sessions run in tmux on a host you can reach over SSH. Add one, or pair this app with a hub that already has them."
+          body={`Fleet runs Claude Code or Codex in tmux on machines you can reach over SSH.${hiddenLocal ? ` ${thisMachine[0].toUpperCase()}${thisMachine.slice(1)} counts.` : ''} Add one, or pair this app with a hub that already has them.`}
           actions={[
-            { label: 'Add a host…', onclick: openAddHost, primary: true, testid: 'sidebar-empty-add-host' },
+            ...(hiddenLocal
+              ? [{ label: `Use ${thisMachine}`, onclick: () => void useThisMachine(), primary: true, testid: 'sidebar-empty-use-local' }]
+              : []),
+            { label: hiddenLocal ? 'Add a remote host…' : 'Add a host…', onclick: openAddHost, primary: !hiddenLocal, testid: 'sidebar-empty-add-host' },
             { label: 'Pair with a hub', onclick: () => openSettingsAt('hub'), testid: 'sidebar-empty-pair' },
           ]}
         />

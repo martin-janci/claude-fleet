@@ -5,6 +5,7 @@
 // checks only read, and fleet-agent installs only after its row's Install. Pure but for the invoke wrappers; AddHostWizard.svelte
 // renders.
 import { invokeCmd, type Result } from "./result";
+import { STARTABLE_AGENTS } from "./agent_picker";
 
 /** Mirrors `fleet_core::store::SetupCheck`. */
 export interface SetupCheck {
@@ -216,6 +217,9 @@ export interface AgentLine {
   found: boolean;
   /** Claude Code is the one fleet cannot run sessions without. */
   required: boolean;
+  /** Fleet can start a session with it (`STARTABLE_AGENTS`); the others
+   *  are listed as they arrive. */
+  startable: boolean;
 }
 
 const AGENTS: readonly { bin: string; name: string }[] = [
@@ -233,7 +237,24 @@ export function agentLines(checks: readonly SetupCheck[]): AgentLine[] {
     ...a,
     found: label.includes(a.name),
     required: a.bin === "claude",
+    startable: (STARTABLE_AGENTS as readonly string[]).includes(a.bin),
   }));
+}
+
+/** The note at an agent row's end: `on PATH`, `on PATH · sessions coming`
+ *  for one fleet cannot start yet, else why it is missing. */
+export function agentDetail(a: AgentLine): string {
+  if (!a.found) return a.required ? "not found" : "not installed";
+  return a.startable ? "on PATH" : "on PATH · sessions coming";
+}
+
+/** The Agents step's lead (Wizard board, "Claude Code, Codex on PATH"):
+ *  which agents fleet starts sessions with, from the same list the New
+ *  session picker offers. */
+export function agentsLead(alias: string): string {
+  const names = STARTABLE_AGENTS.map((b) => AGENTS.find((a) => a.bin === b)?.name ?? b);
+  const runs = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : names[0];
+  return `The agents fleet can start on ${alias}. Fleet runs ${runs} sessions; the others are listed as they arrive.`;
 }
 
 export const CLAUDE_INSTALL_HINT =

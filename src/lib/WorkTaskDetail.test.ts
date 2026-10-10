@@ -847,6 +847,21 @@ describe('WorkTaskDetail', () => {
       expect(screen.queryByTestId('work-task-group-proposal')).toBeNull();
     });
 
+    it('says the change was Jev’s, and Undo clears the placement it made (G7.15)', async () => {
+      handlers.work_task = () => proposed;
+      handlers.place_work = () => ({ ...proposed.task, group: { id: 'label:Payments', label: 'Payments', source: 'manual' }, placement_version: 1 });
+      render(WorkTaskDetail, { props: { taskId: 'item:77' } });
+      await flush();
+      await fireEvent.click(screen.getByTestId('work-task-group-proposal-place'));
+      await flush();
+      expect(screen.getByTestId('work-task-group-ai-change').textContent).toContain('✓ Placed in Payments · Proposed by Jev · you confirmed');
+      handlers.place_work = () => ({ ...proposed.task, group: { id: 'none', label: '', source: 'none' }, placement_version: 2 });
+      await fireEvent.click(screen.getByTestId('work-task-group-ai-change-undo'));
+      await flush();
+      expect(calls('place_work')[1]).toEqual({ task_id: 'item:77', group: '', expected_version: 1 });
+      expect(screen.queryByTestId('work-task-group-ai-change')).toBeNull();
+    });
+
     it('shows nothing once a person placed the task', async () => {
       handlers.work_task = () => ({ ...proposed, task: { ...proposed.task, group: { id: 'label:Infra', label: 'Infra', source: 'manual' } } });
       render(WorkTaskDetail, { props: { taskId: 'item:77' } });

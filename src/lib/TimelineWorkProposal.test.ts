@@ -76,9 +76,26 @@ describe('J1 in the Details timeline (6.8)', () => {
       session: row({ work_suggested: null, work: { ...jev, state: 'confirmed', preselected: false } }),
     });
     expect(screen.getByTestId('timeline-work-proposal').dataset.state).toBe('confirmed');
-    expect(screen.getByTestId('timeline-work-proposal').textContent).toContain('you confirmed');
     expect(screen.queryByTestId('timeline-work-link')).toBeNull();
-    expect((await screen.findByTestId('timeline-proposed-by')).textContent).toContain('Proposed by Jev');
+    // G7.15: the AI patterns board's line for a change AI caused, with Undo.
+    expect(screen.getByTestId('timeline-ai-change').textContent).toContain('✓ Linked to TASK-219 · Proposed by Jev · you confirmed');
+  });
+
+  it('Undo puts a confirmed link back to a suggestion, at the version it has now (G7.15)', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) =>
+      cmd === 'session_work_links'
+        ? [{ ...link, state: 'confirmed' }]
+        : cmd === 'work_session_tasks'
+          ? { links: [{ link_id: 31, state: 'active', link_version: 4 }] }
+          : null,
+    );
+    render(TimelineWorkProposal, {
+      session: row({ work_suggested: null, work: { ...jev, state: 'confirmed', preselected: false } }),
+    });
+    await fireEvent.click(screen.getByTestId('timeline-ai-change-undo'));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('reconsider_work_link', { args: { session_id: 7, link_id: 31, expected_version: 4 } }),
+    );
   });
 
   it('a rule suggestion and a low-confidence answer show nothing of Jev', async () => {

@@ -32,6 +32,8 @@
   import TaskWorkSections from './TaskWorkSections.svelte';
   import TaskBlockedSpend from './TaskBlockedSpend.svelte';
   import ProposedBy from './ProposedBy.svelte';
+  import AiChangeLine from './AiChangeLine.svelte';
+  import type { ProposalSource } from './ai_proposal';
   import { proposalFor } from './proposals';
   import WorkButton from './WorkButton.svelte';
   import { tablistKeys } from './tablist_keys';
@@ -135,10 +137,30 @@
     if (!t || placingProposed) return;
     placingProposed = true;
     proposalError = null;
+    const source = groupProposal?.source ?? 'jev';
     const r = await placeWork(t.task_id, label, t.placement_version ?? 0);
     placingProposed = false;
-    if (r.ok) placed(r.value, null);
-    else proposalError = readErrorText(r.error);
+    if (r.ok) {
+      placed(r.value, null);
+      // G7.15: a change AI proposed reads as the AI patterns board's line,
+      // with Undo (the placement cleared, at the version this one left).
+      placedByProposal = { task: t.task_id, label, source, version: r.value.placement_version ?? 0 };
+    } else proposalError = readErrorText(r.error);
+  }
+
+  /** The placement the person took from Jev's proposal, while it stands. */
+  let placedByProposal = $state<{ task: string; label: string; source: ProposalSource; version: number } | null>(null);
+  async function undoProposedPlacement() {
+    const p = placedByProposal;
+    if (!p || placingProposed) return;
+    placingProposed = true;
+    proposalError = null;
+    const r = await placeWork(p.task, '', p.version);
+    placingProposed = false;
+    if (r.ok) {
+      placed(r.value, null);
+      placedByProposal = null;
+    } else proposalError = readErrorText(r.error);
   }
 
   // A placement saved: show the task and its placement line as the hub
@@ -436,6 +458,16 @@
         <dd data-testid="work-task-group">
           <strong>{task.group?.source === 'none' ? 'No group' : task.group?.label}</strong> — {groupSourceText(task.group, task, ruleName)}
           <div class="muted small" data-testid="work-task-group-note">{placementNote(task.group, task)}</div>
+          {#if placedByProposal && placedByProposal.task === task.task_id}
+            <AiChangeLine
+              what="Placed in {placedByProposal.label}"
+              source={placedByProposal.source}
+              onundo={() => void undoProposedPlacement()}
+              undoing={placingProposed}
+              undoBlocked={placeBlocked}
+              testid="work-task-group-ai-change"
+            />
+          {/if}
           {#if groupProposal}
             <div class="group-proposal" data-testid="work-task-group-proposal">
               <span>Jev proposes “{groupProposal.value}”</span>
