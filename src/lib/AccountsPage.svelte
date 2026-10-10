@@ -36,6 +36,7 @@
     loadAccountSpend,
     pausedSessions,
     routinesOn,
+    fallbackRoutinesOn,
     spendByAccount,
     type AccountSummary,
     type UsageSnapshotRow,
@@ -330,7 +331,12 @@
               </div>
             {/each}
             <div class="meta" data-testid="account-counts">
-              {countLine(a.sessions.length, routinesOn(a.uuid, routines, $hosts), spendText(a.uuid))}
+              {countLine(
+                a.sessions.length,
+                routinesOn(a.uuid, routines, $hosts),
+                spendText(a.uuid),
+                fallbackRoutinesOn(a.uuid, routines, $hosts),
+              )}
             </div>
             {#if paused.length > 0}
               {@const target = switchTo[a.uuid]}

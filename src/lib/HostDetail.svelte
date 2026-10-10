@@ -44,6 +44,7 @@
   import AccountNickname from './AccountNickname.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { isRestorable } from './lost_fold';
+  import type { HostTidyHint } from './hosts_table';
   import EmbedSlot from './pages/EmbedSlot.svelte';
   import { inventory } from './assets';
   import { provisionHost } from './mcp';
@@ -51,7 +52,19 @@
   import Loader from './Loader.svelte';
   import AgentInstallAction from './AgentInstallAction.svelte';
   import LostTargetForm from './LostTargetForm.svelte';
-  import { ignoredConversations, isOutsideFleet, needsRestoreInto, placeTranscript, setConversationIgnored } from './lost_found';
+  import {
+    ignoredConversations,
+    ignoredPanes,
+    isOutsideFleet,
+    needsRestoreInto,
+    otherConversations,
+    placeTranscript,
+    setConversationIgnored,
+    setPaneIgnored,
+  } from './lost_found';
+  import AddAccountDialog from './AddAccountDialog.svelte';
+  import { openNewSessionPicker } from './switcher_request';
+  import { requestAssetsView } from './app_views';
   import { savedWithUndo } from './forms/form_frame';
   import { linkSessionWork } from './work';
 
@@ -77,6 +90,8 @@
     onreprobe,
     onrefreshusage,
     onnewsession,
+    tidyHint = null,
+    onreviewtidy,
     hubVersion = null,
   }: {
     host: HostRow;
@@ -101,6 +116,10 @@
     onrefreshusage: () => void;
     /** Orbit Fleet 4.7: "New session here". Absent: the button is not shown. */
     onnewsession?: () => void;
+    /** G4.5: what a Tidy clean up would free on this host. */
+    tidyHint?: HostTidyHint | null;
+    /** "Review in Tidy": opens the Tidy-up sheet on these sessions. */
+    onreviewtidy?: (sessionIds: number[]) => void;
     /** The version a fleet-agent should match (the hub's when paired). */
     hubVersion?: string | null;
   } = $props();
@@ -226,8 +245,19 @@
   $effect(() => {
     ignored = ignoredConversations(host.alias);
   });
+  // "Find another…" (G4.5) on a lost row: the search, without that row's own
+  // conversation and with the ones from its folder first.
+  let findingFor = $state<SessionRow | null>(null);
+  const candidateList = $derived(
+    discoverList && findingFor
+      ? otherConversations(discoverList, {
+          claude_session_id: findingFor.claude_session_id,
+          project_id: findingFor.project_id,
+        })
+      : discoverList,
+  );
   const shownCandidates = $derived(
-    discoverList ? (showIgnored ? discoverList : discoverList.filter((c) => !ignored.has(c.claude_session_id))) : null,
+    candidateList ? (showIgnored ? candidateList : candidateList.filter((c) => !ignored.has(c.claude_session_id))) : null,
   );
   const ignoredCount = $derived(discoverList ? discoverList.filter((c) => ignored.has(c.claude_session_id)).length : 0);
   function setIgnored(c: LostCandidate, on: boolean) {
@@ -253,7 +283,17 @@
     }
   }
 
+  async function findAnother(s: SessionRow) {
+    findingFor = s;
+    await runDiscover();
+  }
+
   async function onDiscoverClick() {
+    findingFor = null;
+    await runDiscover();
+  }
+
+  async function runDiscover() {
     discoverError = null;
     discoverList = null;
     resumedIds = new Set();
@@ -362,7 +402,28 @@
   // by hand is adopted into a project; a found conversation that cannot
   // resume where it ran is restored into one. Both forms are prefilled
   // (LostTargetForm) and both confirm.
-  const outsidePanes = $derived(hostSessions.filter(isOutsideFleet));
+  const outsideAll = $derived(hostSessions.filter(isOutsideFleet));
+  // Ignore (G4.5): a pane somebody keeps outside fleet on purpose is left out
+  // of this list on this device; the pane itself is untouched.
+  let paneIgnored = $state<ReadonlySet<string>>(new Set());
+  let showIgnoredPanes = $state(false);
+  $effect(() => {
+    paneIgnored = ignoredPanes(host.alias);
+  });
+  const outsidePanes = $derived(showIgnoredPanes ? outsideAll : outsideAll.filter((p) => !paneIgnored.has(p.tmux_name)));
+  const ignoredPaneCount = $derived(outsideAll.filter((p) => paneIgnored.has(p.tmux_name)).length);
+  function setPaneIgnoredHere(p: SessionRow, on: boolean) {
+    setPaneIgnored(host.alias, p.tmux_name, on);
+    paneIgnored = ignoredPanes(host.alias);
+  }
+  function ignorePane(p: SessionRow) {
+    if (adoptingId === p.id) adoptingId = null;
+    setPaneIgnoredHere(p, true);
+    savedWithUndo(`Ignored ${p.tmux_name} on this device`, () => setPaneIgnoredHere(p, false));
+  }
+
+  // + Add account… (G2.9 from the host, G4.5): the wizard with this host picked.
+  let addingAccount = $state(false);
   let adoptingId = $state<number | null>(null);
   let restoringId = $state<string | null>(null);
   const adoptHubBlocked = $derived(hubActionBlocked('adopt_session', $hubStatus, $hubConnection));
@@ -560,7 +621,17 @@
         data-testid="detail-reprobe"
         >{#if probing}probing…{:else}<kbd>r</kbd> Re-probe{/if}</button
       >
+      <button
+        type="button"
+        class="small"
+        title="Sign in to another Claude account on this host"
+        data-testid="detail-add-account"
+        onclick={() => (addingAccount = true)}>+ Add account…</button
+      >
     </div>
+    {#if addingAccount}
+      <AddAccountDialog host={host.alias} onclose={() => (addingAccount = false)} />
+    {/if}
     {#if !host.reachable && !isLocal}
       <!-- The states kit: an offline host is said here, in its own pane.
            "Last answered" is `last_reachable_at` (or, from an older hub, the
@@ -622,6 +693,16 @@
             <span class="check-action">
               <AgentInstallAction alias={host.alias} version={hubVersion} testid="detail-agent-install" ondone={onreprobe} />
             </span>
+          {:else if row.key === 'skills' && row.state === 'warn'}
+            <span class="check-action">
+              <button
+                type="button"
+                class="small"
+                title="Open Assets and sync the drifted and missing skills"
+                data-testid="detail-skills-sync"
+                onclick={() => requestAssetsView({ command: 'sync' })}>Sync</button
+              >
+            </span>
           {/if}
         </li>
       {/each}
@@ -649,6 +730,14 @@
           disabled={!host.reachable && !isLocal}
           data-testid="detail-new-session-here"
           onclick={onnewsession}><kbd>n</kbd> New session here</button
+        >
+        <button
+          type="button"
+          class="action"
+          disabled={!host.reachable && !isLocal}
+          title="A plain login shell on {host.alias}, in a project you pick"
+          data-testid="detail-open-shell"
+          onclick={() => openNewSessionPicker(host.alias, undefined, 'shell')}>Open a shell…</button
         >
       {/if}
     </div>
@@ -733,6 +822,14 @@
         {/if}
       </div>
     </div>
+    {#if tidyHint && onreviewtidy}
+      <p class="muted" data-testid="detail-tidy-hint">
+        {tidyHint.text}
+        <button type="button" class="small" data-testid="detail-tidy-review" onclick={() => onreviewtidy(tidyHint.sessionIds)}
+          >Review in Tidy</button
+        >
+      </p>
+    {/if}
     {#if restoreError}
       <p class="error" data-testid="restore-error">{restoreError}</p>
     {/if}
@@ -747,6 +844,11 @@
     {/if}
     {#if discoverList}
       <div data-testid="discover-list">
+        {#if findingFor}
+          <p class="muted" data-testid="discover-finding-for">
+            Other conversations {sessionName(findingFor)} could resume, its own project first.
+          </p>
+        {/if}
         {#if discoverList.length === 0}
           <p class="muted">No Claude conversations found on {host.alias}.</p>
         {:else}
@@ -854,10 +956,34 @@
                 data-testid="outside-adopt"
                 onclick={() => (adoptingId = p.id)}>Adopt…</button
               >
+              {#if paneIgnored.has(p.tmux_name)}
+                <button type="button" class="small" data-testid="outside-unignore" onclick={() => setPaneIgnoredHere(p, false)}
+                  >Bring back</button
+                >
+              {:else}
+                <button
+                  type="button"
+                  class="small"
+                  title="Leave it out of this list on this device; the pane keeps running"
+                  data-testid="outside-ignore"
+                  onclick={() => ignorePane(p)}>Ignore</button
+                >
+              {/if}
             {/if}
           </li>
         {/each}
       </ul>
+    {/if}
+    {#if ignoredPaneCount > 0}
+      <p class="muted" data-testid="outside-ignored-count">
+        {ignoredPaneCount} ignored on this device ·
+        <button
+          type="button"
+          class="small"
+          data-testid="outside-show-ignored"
+          onclick={() => (showIgnoredPanes = !showIgnoredPanes)}>{showIgnoredPanes ? 'Hide them' : 'Show them'}</button
+        >
+      </p>
     {/if}
     {#if hostSessions.length === 0}
       <p class="muted">No sessions on this host. Press <kbd>n</kbd> to start one.</p>
@@ -875,6 +1001,16 @@
               <span class="s-name">{sessionName(s)}</span>
               <span class="muted">{sessionState(s)}</span>
             </button>
+            {#if host.reachable && isRestorable(s)}
+              <button
+                type="button"
+                class="small"
+                disabled={discoverBusy}
+                title="Its own conversation is gone or wrong? Pick another one found on this host"
+                data-testid="detail-find-another"
+                onclick={() => findAnother(s)}>Find another…</button
+              >
+            {/if}
           </li>
         {/each}
       </ul>
@@ -1083,6 +1219,7 @@
     color: var(--fg-muted);
   }
   .sessions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+  .sessions li { display: flex; align-items: center; gap: 4px; }
   .session {
     display: flex;
     gap: 0.6rem;

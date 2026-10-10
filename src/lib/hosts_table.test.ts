@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
+  hostTidyHint,
+  moveTargetFacts,
   accountsSignedIn,
   agentCell,
   connectionText,
@@ -108,5 +110,33 @@ describe('hosts table: order', () => {
       host('alpha'),
     ]).map((h) => h.alias);
     expect(order).toEqual(['local', 'alpha', 'zeta', 'beta']);
+  });
+});
+
+describe('Tidy hint and Move to host facts (G4.5)', () => {
+  it('sums the measured worktrees of one host', () => {
+    const cands = [
+      { session_id: 1, host_alias: 'mercury', worktree_kb: 2 * 1024 * 1024 },
+      { session_id: 2, host_alias: 'mercury', worktree_kb: 1024 * 1024 },
+      { session_id: 3, host_alias: 'mercury', worktree_kb: null },
+      { session_id: 4, host_alias: 'venus', worktree_kb: 1024 * 1024 },
+    ];
+    expect(hostTidyHint(cands, 'mercury')).toEqual({
+      sessionIds: [1, 2],
+      kb: 3 * 1024 * 1024,
+      text: '2 stopped sessions on mercury hold 3.0 GB of worktrees.',
+    });
+    expect(hostTidyHint(cands, 'venus')?.text).toBe('1 stopped session on venus holds 1.0 GB of worktrees.');
+    expect(hostTidyHint(cands, 'pluto')).toBeNull();
+  });
+
+  it('says free disk, load and an account at its limit', () => {
+    const h = host('mercury', { account_uuid: WORK.uuid, disk_home_free_kb: 50 * 1024 * 1024, load_1m: 0.42 });
+    expect(moveTargetFacts(h, {}, NOW)).toBe('50 GB free · load 0.4');
+    expect(moveTargetFacts(h, { [WORK.uuid]: { resets_at: NOW + 60 } }, NOW)).toBe(
+      '50 GB free · load 0.4 · account at limit',
+    );
+    expect(moveTargetFacts(h, { [WORK.uuid]: { resets_at: NOW - 60 } }, NOW)).toBe('50 GB free · load 0.4');
+    expect(moveTargetFacts(host('x', { disk_home_free_kb: null, load_1m: null }), undefined, NOW)).toBe('');
   });
 });

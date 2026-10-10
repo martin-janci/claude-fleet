@@ -60,6 +60,7 @@
     onCancel,
     initialName,
     initialHost,
+    initialKind,
     ticket,
     autostart = false,
     proposal = null,
@@ -75,6 +76,9 @@
     /** Preselect this host (e.g. where Add project just put the project);
      *  wins over the remembered choices while it is pickable. */
     initialHost?: string;
+    /** Preselect Work or Shell (the Hosts view's "Open a shell", G4.5);
+     *  wins over the project's remembered kind. */
+    initialKind?: 'work' | 'shell';
     /** Start work on this ticket (work graph M3): the dialog offers "Brief
      *  Claude with the ticket" with an editable preview, and creating goes
      *  through `start_work`, which links the session `started`. */
@@ -209,7 +213,7 @@
   }
 
   // "work" runs Claude Code in the pane; "shell" runs a plain login shell.
-  let chosenKind = $state<'work' | 'shell'>(untrack(() => memory?.kind ?? 'work'));
+  let chosenKind = $state<'work' | 'shell'>(untrack(() => initialKind ?? memory?.kind ?? 'work'));
   // Which agent a "work" session runs (redesign 12.4): Claude Code, or an
   // agent the chosen host has on its PATH. A ticket's start and a
   // background run are Claude Code's own paths, so they keep it.

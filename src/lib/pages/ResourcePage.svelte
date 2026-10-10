@@ -24,7 +24,8 @@
   import type { Values } from '../forms/forms';
   import { pairDevice, pairDeviceWizard } from '../forms/pair_device_wizard';
   import { WIZARDS } from '../forms/wizards';
-  import type { Page } from './pages';
+  import type { Page, PageAction } from './pages';
+  import PageActionButton from './PageActionButton.svelte';
   import {
     afterChange,
     badgesOf,
@@ -47,6 +48,7 @@
     resource,
     readonly = false,
     reason = null,
+    actions = [],
   }: {
     page: Page;
     resource: ResourceType;
@@ -54,6 +56,8 @@
     readonly?: boolean;
     /** Why it is read-only, and where to change it instead. */
     reason?: string | null;
+    /** The page actions an `action` list item names (`pages/actions.rs`). */
+    actions?: PageAction[];
   } = $props();
 
   let records = $state<ResourceRecord[]>([]);
@@ -233,6 +237,10 @@
         <p class={`notice ${item.tone}`}>{item.text}</p>
       {:else if item.type === 'custom' && item.component === 'org_suggestions'}
         <OrgSuggestions onchanged={() => void reload()} />
+      {:else if item.type === 'action'}
+        <!-- A page action over the whole list (G4.5: Scan all hosts). -->
+        {@const action = actions.find((a) => a.id === item.action)}
+        {#if action}<PageActionButton {action} onran={() => void reload()} />{/if}
       {/if}
     {/each}
   {/if}

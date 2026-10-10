@@ -722,11 +722,18 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
         }
         for (i, item) in page.list_items.iter().enumerate() {
             let at = format!("list item {}", i + 1);
-            if !matches!(item, Item::Notice { .. } | Item::Custom { .. }) {
-                cx.bad(&at, "a list item is a notice or a custom item");
+            if !matches!(
+                item,
+                Item::Notice { .. } | Item::Custom { .. } | Item::Action { .. }
+            ) {
+                cx.bad(&at, "a list item is a notice, a custom item or an action");
             }
-            if let Item::Notice { text, .. } = item {
-                cx.text(&at, "text", text, MAX_TEXT);
+            match item {
+                Item::Notice { text, .. } => cx.text(&at, "text", text, MAX_TEXT),
+                Item::Action { action } if super::actions::action(action).is_none() => {
+                    cx.bad(&at, format!("`{action}` is not a page action"));
+                }
+                _ => {}
             }
         }
         check_graph(&mut cx, page);

@@ -92,12 +92,14 @@ pub async fn list_debug_devices(
 
 #[tauri::command]
 pub async fn scan_debug_devices(
-    args: ScanDebugDevicesArgs,
+    // Absent: every host (the Debug devices page's "Scan all hosts", a page
+    // action, runs its command with no arguments).
+    args: Option<ScanDebugDevicesArgs>,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<ScanAnswer, IpcError> {
-    routed::scan_debug_devices(&backend, &store, &ssh, args).await
+    routed::scan_debug_devices(&backend, &store, &ssh, args.unwrap_or_default()).await
 }
 
 #[tauri::command]

@@ -1084,6 +1084,7 @@
     project={$newSessionRequest.project}
     initialName={$newSessionRequest.initialName}
     initialHost={$newSessionRequest.initialHost}
+    initialKind={$newSessionRequest.initialKind}
     ticket={$newSessionRequest.ticket}
     autostart={$newSessionRequest.autostart}
     proposal={$newSessionRequest.proposal}

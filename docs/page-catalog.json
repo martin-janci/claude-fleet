@@ -19,6 +19,12 @@
       "help": "Resume every host's lost sessions now, in batches with the pause between them set above.",
       "id": "restore.lost",
       "label": "Restore lost sessions"
+    },
+    {
+      "command": "scan_debug_devices",
+      "help": "Look for attached phones, emulators and simulators on every host now.",
+      "id": "debug_devices.scan_all",
+      "label": "Scan all hosts"
     }
   ],
   "layouts": [

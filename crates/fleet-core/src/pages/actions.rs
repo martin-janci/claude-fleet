@@ -46,6 +46,15 @@ pub const PAGE_ACTIONS: &[PageAction] = &[
         help: "Resume every host's lost sessions now, in batches with the pause between them set above.",
         confirm: Some("Resume every lost session on every host now? Each one starts its agent again on its host."),
     },
+    // Gap plan G4.5: Debug devices' list, every host at once (a record's
+    // own "Rescan host" scans one).
+    PageAction {
+        id: "debug_devices.scan_all",
+        label: "Scan all hosts",
+        command: "scan_debug_devices",
+        help: "Look for attached phones, emulators and simulators on every host now.",
+        confirm: None,
+    },
 ];
 
 pub fn action(id: &str) -> Option<&'static PageAction> {

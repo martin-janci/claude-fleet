@@ -19,6 +19,12 @@
       "help": "Resume every host's lost sessions now, in batches with the pause between them set above.",
       "id": "restore.lost",
       "label": "Restore lost sessions"
+    },
+    {
+      "command": "scan_debug_devices",
+      "help": "Look for attached phones, emulators and simulators on every host now.",
+      "id": "debug_devices.scan_all",
+      "label": "Scan all hosts"
     }
   ],
   "descriptors": [
@@ -5259,6 +5265,12 @@
       "id": "debug_devices",
       "intro": "Phones, emulators and simulators on your hosts. Set one up once where it is plugged in; sessions use it through fleet's control API (debug_devices), and a shared one from every host of its org.",
       "layout": "master_detail",
+      "list_items": [
+        {
+          "action": "debug_devices.scan_all",
+          "type": "action"
+        }
+      ],
       "resource": "debug_device",
       "sections": [
         {
