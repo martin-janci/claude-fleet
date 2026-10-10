@@ -1,16 +1,21 @@
 {
   "schema": 1,
   "track": "nightly",
-  "sequence": 2,
-  "generated_at": "2026-10-10T01:13:59Z",
-  "expires_at": "2026-10-24T01:13:59Z",
-  "current": "0.6.2-dev.30.desktop.g61c136f",
-  "recommended": "0.6.2-dev.30.desktop.g61c136f",
+  "sequence": 3,
+  "generated_at": "2026-10-10T03:46:33Z",
+  "expires_at": "2026-10-24T03:46:33Z",
+  "current": "0.6.2-dev.35.desktop.gea45122",
+  "recommended": "0.6.2-dev.35.desktop.gea45122",
   "minimum_supported": {},
   "mandatory": [],
   "rollback": null,
   "withdrawn": [],
   "releases": [
+    {
+      "version": "0.6.2-dev.35.desktop.gea45122",
+      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.2-dev.35.desktop.gea45122/release-manifest.json",
+      "manifest_sha256": "a492652a74b2909293e4f3661352d10f5b7f723b8649f268cd00aadb31f88414"
+    },
     {
       "version": "0.6.2-dev.30.desktop.g61c136f",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.2-dev.30.desktop.g61c136f/release-manifest.json",
