@@ -28,6 +28,7 @@
     defaultChoice,
     dismissReopened,
     formatIdle,
+    freedByResults,
     freedKb,
     groupByReason,
     newlyReopened,
@@ -45,6 +46,7 @@
     KEEP_DAYS,
     tidyEvidence,
     type TidyApplyItem,
+    type TidyApplyResult,
     type TidyCandidate,
     type TidyChoice,
   } from './tidy';
@@ -235,7 +237,15 @@
     push({
       kind: 'info',
       message: action === 'keep' ? `Kept ${rowName(c)} for ${KEEP_DAYS} days` : `Killed ${rowName(c)}`,
+      sub: freedLine(r.value.results),
     });
+  }
+
+  /** The toast's second line (Toasts board, "freed 2.1 GB"): what the safe
+   *  kills that went through free, as the sheet's footer counts it. */
+  function freedLine(results: readonly TidyApplyResult[]): string | undefined {
+    const kb = freedByResults(candidates, results);
+    return kb !== null && kb > 0 ? `frees about ${sizeText(kb)}` : undefined;
   }
 
   async function apply() {
@@ -260,9 +270,10 @@
         message: `Tidied ${done}; ${failed.length} failed: ${failed
           .map((f) => f.error ?? f.action)
           .join('; ')}`,
+        sub: freedLine(r.value.results),
       });
     } else {
-      push({ kind: 'info', message: `Tidied ${done} session${done === 1 ? '' : 's'}` });
+      push({ kind: 'info', message: `Tidied ${done} session${done === 1 ? '' : 's'}`, sub: freedLine(r.value.results) });
     }
     closeSheet();
   }

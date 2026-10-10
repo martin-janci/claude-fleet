@@ -221,6 +221,23 @@ export function freedKb(
   return total;
 }
 
+/** What an applied tidy frees, in kB: the measured worktree of every row
+ *  whose safe kill went through. `null` when none of them was measured, so
+ *  the toast says nothing rather than "0 MB". */
+export function freedByResults(
+  candidates: readonly TidyCandidate[],
+  results: readonly TidyApplyResult[],
+): number | null {
+  const byId = new Map(candidates.map((c) => [c.session_id, c] as const));
+  let total: number | null = null;
+  for (const r of results) {
+    const kb = byId.get(r.session_id)?.worktree_kb;
+    if (!r.ok || r.action !== 'safe_kill' || kb == null) continue;
+    total = (total ?? 0) + kb;
+  }
+  return total;
+}
+
 /** Whether a row starts ticked: every row whose default is an action,
  *  except a lost session (Resume is its own button) and a session with no
  *  work linked (M11.3: fleet cannot know what it was for, so a person ticks

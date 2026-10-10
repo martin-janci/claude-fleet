@@ -247,6 +247,43 @@ describe('TidyReview', () => {
     expect(screen.queryByTestId('tidy-frees')).toBeNull();
   });
 
+  it('the done toast says what the safe kills that went through free (G4.8)', async () => {
+    const GB = 1024 * 1024;
+    candidates = [cand(1, { worktree_kb: 1.5 * GB }), cand(2, { worktree_kb: 0.6 * GB }), cand(3, { worktree_kb: 9 * GB })];
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tidy') return { ...EMPTY_REPORT, candidates };
+      if (cmd === 'work_reopened') return reopened;
+      if (cmd === 'tidy_apply')
+        return {
+          results: [
+            { session_id: 1, action: 'safe_kill', ok: true, outcome: 'killed' },
+            { session_id: 2, action: 'safe_kill', ok: true, outcome: 'safe_kill_requested' },
+            // Refused: its tree stays, so its size is not counted.
+            { session_id: 3, action: 'safe_kill', ok: false, error: 'the tree is dirty' },
+          ],
+        };
+      return null;
+    });
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('tidy-apply'));
+    await waitFor(() => expect(get(toasts)).toHaveLength(1));
+    expect(get(toasts)[0].message).toBe('Tidied 2; 1 failed: the tree is dirty');
+    expect(get(toasts)[0].sub).toBe('frees about 2.1 GB');
+  });
+
+  it('the done toast has no second line when nothing measured went', async () => {
+    candidates = [cand(1)];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('tidy-apply'));
+    await waitFor(() => expect(get(toasts)).toHaveLength(1));
+    expect(get(toasts)[0].message).toBe('Tidied 1 session');
+    expect(get(toasts)[0].sub).toBeUndefined();
+  });
+
   it('a per-row choice changes the action sent', async () => {
     candidates = [cand(1)];
     await mount();

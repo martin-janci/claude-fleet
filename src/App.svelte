@@ -9,6 +9,7 @@
   import Resizer from './lib/Resizer.svelte';
   import { healthCheck, type Health } from './lib/ipc';
   import { appVersion, loadAppVersion, versionLine } from './lib/app_version';
+  import { startLimitToasts } from './lib/limit_toast';
   import { setContextRedPct } from './lib/attention';
   import { trackersHealth, trackersSummary } from './lib/tracker_health';
   import Sidebar from './lib/Sidebar.svelte';
@@ -206,8 +207,10 @@
     stopActivity?.();
     stopCatchUp?.();
     stopUpdateChecks?.();
+    stopLimitToasts?.();
   });
   let stopUpdateChecks: (() => void) | null = null;
+  let stopLimitToasts: (() => void) | null = null;
 
   // `work:*` frames: trackers and their first sync. When a tracker finishes
   // its FIRST sync, the sessions whose keys it owns just got titles and
@@ -272,6 +275,9 @@
     // the decision's interval. Paired, the hub decides; standalone, the
     // published channel.
     stopUpdateChecks = startUpdateChecks();
+    // The Toasts board's limit-hit toast: once, when a reading turns an
+    // account's usage into a limit.
+    stopLimitToasts = startLimitToasts();
     const hr0 = await healthCheck();
     // `health_check` routes to the hub's `fleet_health` in remote mode, so
     // it hits the same skewed-contract gate as every list load below — and

@@ -111,8 +111,10 @@ describe('startWorkMulti', () => {
     });
     const args = { reference: 'ABC-7', project_id: 1, host_alias: 'h', name: 'abc-7', project_ids: [2, 3] };
     const r = await startWorkMulti(args);
-    expect(invoked).toHaveBeenCalledTimes(1);
+    // One start; the second call is the start-rule offer read (G4.8).
+    expect(invoked.mock.calls.filter((c) => c[0] === 'start_work_multi')).toHaveLength(1);
     expect(invoked).toHaveBeenCalledWith('start_work_multi', { args });
+    expect(invoked).toHaveBeenCalledWith('start_rules', { args: { action: 'list' } });
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.value.started.map((s) => s.id)).toEqual([71, 72]);

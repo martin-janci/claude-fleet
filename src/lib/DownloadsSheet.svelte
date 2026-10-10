@@ -97,7 +97,7 @@
     >
   </div>
   {#if tab === 'notifications'}
-    <NotificationList />
+    <NotificationList onleave={onclose} />
   {:else if error}
     <LoadError title="Couldn't load downloads" {error} onretry={load} {retrying} testid="downloads-error" />
   {:else if $downloads.length === 0}

@@ -195,3 +195,47 @@ describe('long-job toast', () => {
     expect(screen.queryByRole('progressbar')).toBeNull();
   });
 });
+
+// Toasts board (G4.8): a title with a second line under it, and a second,
+// quieter button beside the first ("Add rule" · "Not now").
+describe('two-button toast with a second line', () => {
+  it('draws the second line and both buttons, and each runs its own action and closes the toast', async () => {
+    const add = vi.fn();
+    const later = vi.fn();
+    render(Toasts);
+    push({
+      message: 'You picked acme/pos for PD-* 5 times',
+      sub: 'Add rule PD-* → acme/pos?',
+      action: { label: 'Add rule', run: add },
+      secondary: { label: 'Not now', run: later },
+    });
+    await tick();
+    expect(screen.getByTestId('toast-sub')).toHaveTextContent('Add rule PD-* → acme/pos?');
+    expect(screen.getByTestId('toast-action')).toHaveTextContent('Add rule');
+    await fireEvent.click(screen.getByTestId('toast-secondary'));
+    expect(later).toHaveBeenCalledOnce();
+    expect(add).not.toHaveBeenCalled();
+    expect(get(toasts)).toHaveLength(0);
+
+    push({ message: 'again', action: { label: 'Add rule', run: add }, secondary: { label: 'Not now', run: later } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('toast-action'));
+    expect(add).toHaveBeenCalledOnce();
+    expect(later).toHaveBeenCalledOnce();
+  });
+
+  it('offers no lone secondary button without a primary one', async () => {
+    render(Toasts);
+    push({ message: 'nothing to say no to', secondary: { label: 'Not now', run: () => {} } });
+    await tick();
+    expect(screen.queryByTestId('toast-secondary')).toBeNull();
+    expect(get(toasts)[0].secondary).toBeUndefined();
+  });
+
+  it('a toast without a second line draws none', async () => {
+    render(Toasts);
+    push({ message: 'plain' });
+    await tick();
+    expect(screen.queryByTestId('toast-sub')).toBeNull();
+  });
+});

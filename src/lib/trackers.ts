@@ -9,6 +9,7 @@ import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { acceptCommandRow, type SessionRow } from './sessions';
 import { bumpWorkChanged } from './work';
+import { offerRuleAfterStart } from './rule_offer_toast';
 
 /** `trackers.state`. Anything else a newer hub sends is treated as not ok. */
 export type TrackerState =
@@ -210,6 +211,8 @@ export async function startWork(args: StartWorkArgs): Promise<Result<SessionRow>
   if (r.ok) {
     acceptCommandRow(r.value);
     bumpWorkChanged();
+    // A start can be the one that makes fleet offer a start rule (8.11).
+    void offerRuleAfterStart(r.value.work?.key);
   }
   return r;
 }
