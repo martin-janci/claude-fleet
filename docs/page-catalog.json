@@ -4202,6 +4202,24 @@
       ]
     },
     {
+      "default_widget": "select",
+      "key": "decide.jev.resume_or_new",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: resume or start fresh",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "switch",
       "key": "decide.jev.unassigned",
       "kind": {

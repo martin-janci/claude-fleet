@@ -98,6 +98,17 @@ describe('J1 in the Details timeline (6.8)', () => {
     );
   });
 
+  it('Unlink removes a confirmed link without rejecting it', async () => {
+    render(TimelineWorkProposal, {
+      session: row({ work_suggested: null, work: { ...jev, state: 'confirmed', preselected: false } }),
+    });
+    await fireEvent.click(screen.getByTestId('timeline-work-unlink'));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('unlink_session_work', { args: { session_id: 7, link_id: 31 } }),
+    );
+    expect(invoke).not.toHaveBeenCalledWith('reject_session_work', expect.anything());
+  });
+
   it('a rule suggestion and a low-confidence answer show nothing of Jev', async () => {
     const { unmount } = render(TimelineWorkProposal, { session: row({ work_suggested: { ...jev, source: 'prompt', rule: 'R5' } }) });
     expect(screen.queryByTestId('timeline-work-proposal')).toBeNull();

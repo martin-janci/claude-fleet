@@ -1098,6 +1098,17 @@ pub struct ControlRouteParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ResumeOrNewParams {
+    /// propose | follow
+    pub action: String,
+    /// The work key a new session plans (PD-2412).
+    pub key: String,
+    /// follow: the person's pick, new or l<link id>.
+    #[serde(default)]
+    pub chosen: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct AnswerMcpConfirmParams {
     /// The confirm_nonce the waiting call was handed.
     pub nonce: String,

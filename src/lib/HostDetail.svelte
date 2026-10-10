@@ -25,6 +25,7 @@
     type SessionRow,
   } from './sessions';
   import { selectSessionExplicitly } from './selection';
+  import Modal from './Modal.svelte';
   import { claudeStatusLabel, stuckStatus } from './attention';
   import { formatAge, hookHealthLabel, type HookHealth } from './hook_health';
   import { shortAge } from './session_status';
@@ -463,6 +464,16 @@
     savedWithUndo(`Ignored ${p.tmux_name} on this device`, () => setPaneIgnoredHere(p, false));
   }
 
+  // Attach… (G7.10, Session forms board): the tmux sessions running on this
+  // host outside fleet, with their age; "Switch to it" opens one as it is,
+  // "Add it to the list" adopts it (the same form as Adopt… below).
+  let attaching = $state(false);
+  let attachAdoptingId = $state<number | null>(null);
+  function switchTo(p: SessionRow) {
+    attaching = false;
+    selectSessionExplicitly(p);
+  }
+
   // + Add account… (G2.9 from the host, G4.5): the wizard with this host picked.
   let addingAccount = $state(false);
   let adoptingId = $state<number | null>(null);
@@ -862,6 +873,13 @@
           <button
             type="button"
             class="small"
+            data-testid="host-attach"
+            title="Attach to a tmux session running on {host.alias} outside fleet"
+            onclick={() => (attaching = true)}>Attach…</button
+          >
+          <button
+            type="button"
+            class="small"
             disabled={discoverBusy}
             data-testid="discover-lost"
             onclick={onDiscoverClick}
@@ -1232,6 +1250,59 @@
       <p class="note">Each session resumes its Claude conversation. Any first-run prompt waits for you.</p>
     {/if}
   </ConfirmDialog>
+{/if}
+
+{#if attaching}
+  <Modal
+    title="Attach to a running session"
+    onclose={() => {
+      attaching = false;
+      attachAdoptingId = null;
+    }} width="560px" testid="host-attach-sheet">
+    {#if outsideAll.length === 0}
+      <p class="muted" data-testid="host-attach-empty">Nothing is running on {host.alias} outside fleet.</p>
+    {:else}
+      <p class="muted">tmux sessions on {host.alias} that fleet did not start.</p>
+      <ul class="discover-items" data-testid="host-attach-list">
+        {#each outsideAll as p (p.id)}
+          <li class="discover-item" data-testid="host-attach-item">
+            <div class="d-main">
+              <span class="d-cwd">{p.tmux_name}</span>
+              <span class="muted">running {shortAge(p.created_at, now)}</span>
+            </div>
+            {#if attachAdoptingId === p.id}
+              <LostTargetForm
+                action="Adopt"
+                entry={p.tmux_name}
+                args={{ session_id: p.id }}
+                onsubmit={async (pid) => {
+                  const err = await adoptInto(p, pid);
+                  if (err === null) {
+                    attachAdoptingId = null;
+                    attaching = false;
+                  }
+                  return err;
+                }}
+                oncancel={() => (attachAdoptingId = null)}
+              />
+            {:else}
+              <button type="button" class="small" data-testid="host-attach-switch" onclick={() => switchTo(p)}
+                >Switch to it</button
+              >
+              <button
+                type="button"
+                class="small"
+                disabled={adoptBlocked(p) !== null}
+                title={adoptBlocked(p) ?? 'Fleet runs it from now on; the pane stays as it is'}
+                data-testid="host-attach-add"
+                onclick={() => (attachAdoptingId = p.id)}>Add it to the list</button
+              >
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </Modal>
 {/if}
 
 <style>

@@ -249,7 +249,7 @@
     | { kind: 'checkout-branch'; name: string }
     | { kind: 'checkout-commit'; hash: string }
     | { kind: 'delete-branch'; name: string }
-    | { kind: 'delete-merged'; names: string[] }
+    | { kind: 'delete-merged'; names: string[]; remotes: string[] }
     | { kind: 'new-branch'; startPoint: string | null };
   let dialog = $state<FilesDialog | null>(null);
 
@@ -280,14 +280,14 @@
   // in another worktree, is kept rather than lost.
   let branchNotice = $state<string | null>(null);
 
-  function confirmDeleteMerged(names: string[]): void {
-    dialog = { kind: 'delete-merged', names };
+  function confirmDeleteMerged(names: string[], remotes: string[] = []): void {
+    dialog = { kind: 'delete-merged', names, remotes };
   }
 
-  async function doDeleteMerged(names: string[]): Promise<void> {
+  async function doDeleteMerged(names: string[], remotes: string[]): Promise<void> {
     closeDialog();
     branchNotice = null;
-    const r = await repoDeleteMergedBranches(session.id, names);
+    const r = await repoDeleteMergedBranches(session.id, names, remotes);
     if (!r.ok) {
       applyFailure(r);
       return;
@@ -465,6 +465,7 @@
           onDelete={(n) => confirmDeleteBranch(n)}
           onNew={() => promptCreateBranch(null)}
           onDeleteMerged={(names) => confirmDeleteMerged(names)}
+          onDeleteMergedRemotes={(names) => confirmDeleteMerged([], names)}
           {writeBlocked}
         />
       </div>
@@ -569,17 +570,24 @@
   </ConfirmDialog>
 {:else if dialog?.kind === 'delete-merged'}
   {@const names = dialog.names}
+  {@const remotes = dialog.remotes}
   <ConfirmDialog
-    title="Delete merged branches?"
-    confirmLabel={`Delete ${names.length}`}
+    title={remotes.length ? 'Delete merged remote branches?' : 'Delete merged branches?'}
+    confirmLabel={`Delete ${names.length + remotes.length}`}
     danger
-    onconfirm={() => void doDeleteMerged(names)}
+    onconfirm={() => void doDeleteMerged(names, remotes)}
     oncancel={closeDialog}
     confirmTestId="confirm-delete-merged"
   >
-    The base branch already contains {names.length === 1 ? 'this local branch' : `these ${names.length} local branches`},
-    so no commit is lost: <code>{names.join(', ')}</code>. Each is checked again before it goes;
-    remote branches stay.
+    {#if remotes.length}
+      The base branch already contains {remotes.length === 1 ? 'this remote branch' : `these ${remotes.length} remote branches`},
+      so no commit is lost: <code>{remotes.join(', ')}</code>. Each is fetched and checked again,
+      then deleted on its remote for everyone; local branches stay.
+    {:else}
+      The base branch already contains {names.length === 1 ? 'this local branch' : `these ${names.length} local branches`},
+      so no commit is lost: <code>{names.join(', ')}</code>. Each is checked again before it goes;
+      remote branches stay.
+    {/if}
   </ConfirmDialog>
 {:else if dialog?.kind === 'new-branch'}
   <NewBranchSheet

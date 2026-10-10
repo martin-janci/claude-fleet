@@ -857,6 +857,34 @@ describe('HostDetail Lost and found with proposals (4.12)', () => {
     expect(mockedAdopt).toHaveBeenCalledWith(scratch.id, 3);
   });
 
+  it('Attach… lists the panes outside fleet with their age; Switch to it opens one, Add it to the list adopts (G7.10)', async () => {
+    const { scratch, hostSessions } = withScratch();
+    mockedTarget.mockResolvedValue({ ok: true, value: { project_id: 3, source: 'rule', reason: 'directory' } });
+    mockedAdopt.mockResolvedValueOnce({ ok: true, value: { ...scratch, started_at: NOW } });
+    mount('mefistos', { hostSessions });
+    await fireEvent.click(screen.getByTestId('host-attach'));
+    const items = within(screen.getByTestId('host-attach-sheet')).getAllByTestId('host-attach-item');
+    expect(items).toHaveLength(1);
+    expect(items[0].textContent).toContain('fleet-trn-scratch');
+    expect(items[0].textContent).toContain('running 2h');
+
+    await fireEvent.click(within(items[0]).getByTestId('host-attach-add'));
+    await settle();
+    const sheet = screen.getByTestId('host-attach-sheet');
+    await fireEvent.click(within(sheet).getByTestId('lost-target-submit'));
+    await tick();
+    await fireEvent.click(within(sheet).getByTestId('lost-target-confirm'));
+    await settle();
+    expect(mockedAdopt).toHaveBeenCalledWith(scratch.id, 3);
+    expect(screen.queryByTestId('host-attach-sheet')).toBeNull();
+
+    const { selectedSession } = await import('./selection');
+    await fireEvent.click(screen.getByTestId('host-attach'));
+    await fireEvent.click(screen.getByTestId('host-attach-switch'));
+    expect(get(selectedSession)?.id).toBe(scratch.id);
+    expect(screen.queryByTestId('host-attach-sheet')).toBeNull();
+  });
+
   it('Restore into copies the conversation, then resumes it in the chosen project', async () => {
     mockedDiscover.mockResolvedValueOnce({
       ok: true,

@@ -78,7 +78,14 @@
   import ForkSheet from './ForkSheet.svelte';
   import RewindSheet from './RewindSheet.svelte';
   import { suggestedForkName } from './reply_actions';
-  import { MODEL_OPTIONS, modelShortLabel } from './conversation';
+  import { MODEL_OPTIONS, modelShortLabel, sessionConversation } from './conversation';
+  import {
+    lastReplyText,
+    parseReviewVerdict,
+    reviewVerdictLine,
+    reviewVerdictTone,
+    type ReviewVerdict,
+  } from './review_verdict';
   import { switchTarget } from './account_limits';
   import { archiveBlocked } from './kill_check';
   import Meter from './kit/Meter.svelte';
@@ -559,6 +566,25 @@
   const reviewsOfThis = $derived(
     $sessions.filter((s) => s.kind === 'review' && s.reviews_session_id === session.id),
   );
+  // G7.10: each finished review run's verdict line, read from the
+  // reviewer's last reply (only what it wrote; no line when it wrote none).
+  // Read again when the run ends another turn.
+  let reviewVerdicts = $state<Record<number, ReviewVerdict | null>>({});
+  const verdictReadAt = new Map<number, number>();
+  $effect(() => {
+    for (const r of reviewsOfThis) {
+      if (r.claude_status === 'working') continue;
+      const at = r.last_turn_at ?? r.last_activity_at;
+      if (verdictReadAt.get(r.id) === at) continue;
+      verdictReadAt.set(r.id, at);
+      void sessionConversation(r.id, 1).then((c) => {
+        if (verdictReadAt.get(r.id) !== at) return;
+        const text = c.ok ? lastReplyText(c.value) : null;
+        reviewVerdicts = { ...reviewVerdicts, [r.id]: text ? parseReviewVerdict(text) : null };
+      });
+    }
+  });
+
   /** GitHub's review decision on this session's PR, in words. */
   // G7.9: "15/15 checks · no reviews" beside the PR in the inspector.
   const prLine = $derived(session.pr_url ? prEvidenceLine(session.pr_evidence) : '');
@@ -1182,8 +1208,9 @@
 
     <!-- Reviews (SessionDetails board): the PR's review decision GitHub
          reports, each review run of this session with who ran it, and Start
-         a review run. Only what is recorded: a run's verdict is its
-         session's state, never a findings count nobody measured. -->
+         a review run. Only what is recorded: a finished run's verdict line
+         is the reviewer's own closing `Verdict:` line (review_verdict.ts),
+         never a findings count Fleet made up. -->
     {#if reviewsShown}
       <section class="block related reviews" data-testid="reviews-panel">
         <h3>Reviews{#if reviewsOfThis.length > 0} <span class="count">{reviewsOfThis.length}</span>{/if}</h3>
@@ -1197,6 +1224,12 @@
             {#each reviewsOfThis as r (r.id)}
               <li>
                 {@render relatedRow(r, 'reviews-row', reviewerOf(r))}
+                {#if reviewVerdicts[r.id]}
+                  {@const v = reviewVerdicts[r.id]!}
+                  <p class="review-verdict tone-{reviewVerdictTone(v)}" data-testid="reviews-verdict">
+                    {reviewVerdictLine(v)}
+                  </p>
+                {/if}
               </li>
             {/each}
           </ul>
@@ -1913,6 +1946,13 @@
     font-size: var(--text-xs);
   }
   .reviews .btn-row { margin-top: 0.4rem; }
+  .review-verdict {
+    margin: 0.1rem 0 0.3rem 1rem;
+    font-size: var(--text-xs);
+  }
+  .review-verdict.tone-ok { color: var(--status-done); }
+  .review-verdict.tone-warn { color: var(--status-waiting); }
+  .review-verdict.tone-bad { color: var(--status-failed); }
   .related-decide { display: flex; gap: 0.4rem; margin-top: 0.3rem; }
   .related {
     border-top: 1px solid var(--border);

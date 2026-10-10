@@ -1337,6 +1337,23 @@ describe('SessionDetails reviews block (gap plan G4.3)', () => {
     expect(get(selectedSession)?.id).toBe(2);
   });
 
+  it("shows a finished run's verdict line from the reviewer's last reply (G7.10)", async () => {
+    const done = { ...sampleSession, id: 2, tmux_name: 'review-a', kind: 'review', reviews_session_id: 1, claude_status: 'idle' as const, last_turn_at: 50 };
+    const silent = { ...sampleSession, id: 3, tmux_name: 'review-b', kind: 'review', reviews_session_id: 1, claude_status: 'idle' as const, last_turn_at: 60 };
+    vi.mocked(mockedInvoke).mockImplementation(async (cmd: string, a?: unknown) => {
+      if (cmd !== 'session_conversation') return null;
+      const id = (a as { args: { session_id: number } }).args.session_id;
+      const text = id === 2 ? 'All good.\nVerdict: approve-with-fixes · 0 blocking · 2 nits' : 'Looks fine.';
+      return { turns: [{ prompt: 'p', at: null, ended_at: null, items: [{ kind: 'text', text }] }], context: null };
+    });
+    sessions.set([source, done, silent]);
+    render(SessionDetails, { props: { session: source } });
+    const line = await screen.findByTestId('reviews-verdict');
+    expect(line.textContent?.trim()).toBe('approve with fixes · no blocking findings · 2 nits');
+    expect(screen.getAllByTestId('reviews-verdict')).toHaveLength(1);
+    expect(mockedInvoke).toHaveBeenCalledWith('session_conversation', { args: { session_id: 3, turns: 1 } });
+  });
+
   it('shows the PR review decision GitHub reports', async () => {
     const withPr = {
       ...source,

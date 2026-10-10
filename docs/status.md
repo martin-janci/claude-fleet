@@ -348,8 +348,9 @@ default, guide `docs/decisions.md`): `sibling_repos`, `host_placement`,
 `quick_answer`, `adopt_target` / `restore_target`, `turn_outcome`,
 `duplicate`, `related_session`, `work_placement`, `routine_run_outcome`,
 `control_route`, `mission_triage`, `summary_check`, the PR shepherd's
-`pr_triage`, and Review's J6 `main_ticket` and J7 `tracker_duplicate`
-(6.8). Each closed-choice use case has a benchmark set, `fleet-hub decide
+`pr_triage`, Review's J6 `main_ticket` and J7 `tracker_duplicate`
+(6.8), and New session's N2 `resume_or_new` (gap plan G7.10, no
+benchmark set yet). Each other closed-choice use case has a benchmark set, `fleet-hub decide
 bench <use case>` (`bench/choice.rs`, docs/decisions.md *Benchmarking the
 closed-choice use cases*), and J2's `turn-outcome` set holds 51 `asked`
 tails; every built-in set is SYNTHETIC (no recorded data yet), so nothing

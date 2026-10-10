@@ -587,6 +587,12 @@ Restore sessions a host lost to a reboot or tmux restart: resume each one's conv
 
 Parameters: `confirm_nonce`, `dry_run`, `host_alias`, `session_ids`
 
+### `resume_or_new`
+
+Whether a new session on a work key should resume a past session or start fresh (propose {key}), or record the person's pick (follow {key, chosen}).
+
+Parameters: `action`, `chosen`, `key`
+
 ### `revoke_client`
 
 Revoke a paired client's token by name: its next request is refused and the name is free to pair again; the row is kept, revoked, for the audit trail. E_NOTFOUND when no live client has that name. Master token only.
@@ -949,6 +955,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::dismiss_reopened`
 - `commands::work::set_work_project_trust`
 - `commands::work::work_resume_plan`
+- `commands::work::resume_or_new_propose`
+- `commands::work::resume_or_new_follow`
 - `commands::work::resume_work`
 - `commands::work::work_purge_impact`
 - `commands::work::work_today`

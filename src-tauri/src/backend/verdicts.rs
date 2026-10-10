@@ -1458,6 +1458,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "control_route",
         },
     ),
+    (
+        "resume_or_new_propose",
+        Verdict::Routed {
+            tool: "resume_or_new",
+        },
+    ),
+    (
+        "resume_or_new_follow",
+        Verdict::Routed {
+            tool: "resume_or_new",
+        },
+    ),
     // ── the pairing itself — about THIS process, either way ─────────────────
     (
         "hub_status",

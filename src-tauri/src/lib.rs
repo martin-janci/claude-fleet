@@ -435,6 +435,8 @@ pub fn run() {
             commands::work::dismiss_reopened,
             commands::work::set_work_project_trust,
             commands::work::work_resume_plan,
+            commands::work::resume_or_new_propose,
+            commands::work::resume_or_new_follow,
             commands::work::resume_work,
             commands::work::work_purge_impact,
             commands::work::work_today,

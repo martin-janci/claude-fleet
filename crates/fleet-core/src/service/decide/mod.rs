@@ -64,6 +64,9 @@ mod quick_answer_tests;
 pub mod related_session;
 #[cfg(test)]
 mod related_session_tests;
+pub mod resume_or_new;
+#[cfg(test)]
+mod resume_or_new_tests;
 pub mod routine_run_outcome;
 #[cfg(test)]
 mod routine_run_outcome_tests;
@@ -166,6 +169,9 @@ pub enum Feature {
     /// A local task that may be the same work as a tracker ticket (J7,
     /// redesign step 6.8).
     TrackerDuplicate,
+    /// Resume a past session of the work key a new session plans, or start
+    /// fresh (N2, gap plan G7.10).
+    ResumeOrNew,
 }
 
 impl Feature {
@@ -189,6 +195,7 @@ impl Feature {
         Feature::PrTriage,
         Feature::MainTicket,
         Feature::TrackerDuplicate,
+        Feature::ResumeOrNew,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -212,6 +219,7 @@ impl Feature {
             Feature::PrTriage => "pr_triage",
             Feature::MainTicket => "main_ticket",
             Feature::TrackerDuplicate => "tracker_duplicate",
+            Feature::ResumeOrNew => "resume_or_new",
         }
     }
 
@@ -241,6 +249,7 @@ impl Feature {
             Feature::PrTriage => settings::DECIDE_JEV_PR_TRIAGE,
             Feature::MainTicket => settings::DECIDE_JEV_MAIN_TICKET,
             Feature::TrackerDuplicate => settings::DECIDE_JEV_TRACKER_DUPLICATE,
+            Feature::ResumeOrNew => settings::DECIDE_JEV_RESUME_OR_NEW,
         }
     }
 

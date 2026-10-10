@@ -935,6 +935,57 @@ impl FleetTools {
         }
     }
 
+    // ---- New session: resume or start fresh (gap plan G7.10, Jev N2) ----
+
+    #[tool(description = "Whether a new session on a work key should \
+        resume a past session or start fresh (propose {key}), or record \
+        the person's pick (follow {key, chosen}).")]
+    pub(super) async fn resume_or_new(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ResumeOrNewParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::service::decide::{resume_or_new, DecideCtx};
+        audit(
+            "resume_or_new",
+            &format!("action={}", p.action.escape_debug()),
+        );
+        refuse_operator_answer(&caller)?;
+        let scope = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            caller.view_scope(&s).map_err(to_mcp_err)?
+        };
+        match p.action.as_str() {
+            "propose" => {
+                let ctx = DecideCtx::jev(std::sync::Arc::clone(&self.store));
+                ok_json_compact(
+                    &resume_or_new::propose_for_key(&ctx, &scope, &p.key)
+                        .await
+                        .map_err(to_mcp_err)?,
+                )
+            }
+            "follow" => {
+                let Some(chosen) = p.chosen else {
+                    return Err(mcp_err("E_INVALID", "follow needs chosen", None));
+                };
+                let marked = resume_or_new::follow_for_key(
+                    &self.store,
+                    &scope,
+                    &p.key,
+                    &chosen,
+                    crate::store::now_unix(),
+                )
+                .map_err(to_mcp_err)?;
+                ok_json_compact(&marked)
+            }
+            other => Err(mcp_err(
+                "E_INVALID",
+                format!("resume_or_new's action is propose or follow, not {other:?}"),
+                None,
+            )),
+        }
+    }
+
     #[tool(description = "The settings page specs, data source shapes, \
         resources and page actions a device renders.")]
     pub(super) async fn list_pages(&self) -> Result<CallToolResult, McpError> {

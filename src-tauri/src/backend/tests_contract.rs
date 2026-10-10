@@ -1013,6 +1013,22 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             }),
         }),
     );
+    // Gap plan G7.10 (additive at revision 16: a hub without the tool
+    // answers E_HUB_PROTOCOL and the dialog keeps its plain notice).
+    put(
+        "ResumeOrNew",
+        wire_keys(&fleet_core::service::decide::resume_or_new::ResumeOrNew {
+            value: Some("l7".into()),
+            link_id: Some(7),
+            session_id: Some(3),
+            name: Some("receipt-totals".into()),
+            source: Some("jev".into()),
+            reason: Some("r".into()),
+            confidence_pct: Some(82),
+            run_id: Some(1),
+            unsure: false,
+        }),
+    );
     put(
         "PlacedTranscript",
         wire_keys(&fleet_core::service::sessions::PlacedTranscript {

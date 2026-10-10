@@ -2921,6 +2921,40 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "resume_or_new_propose",
+            "resume_or_new",
+            json!({ "action": "propose", "key": "PD-2412" }),
+            r#"{"value":"l7","link_id":7,"source":"jev","confidence_pct":82,"unsure":false}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::resume_or_new_propose(
+                    b,
+                    commands::work::ResumeOrNewArgs {
+                        key: "PD-2412".into(),
+                        chosen: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "resume_or_new_follow",
+            "resume_or_new",
+            json!({ "action": "follow", "key": "PD-2412", "chosen": "new" }),
+            "true",
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::resume_or_new_follow(
+                    b,
+                    commands::work::ResumeOrNewArgs {
+                        key: "PD-2412".into(),
+                        chosen: Some("new".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "mcp_confirm",
             "answer_mcp_confirm",
             json!({ "nonce": "n", "approved": true }),

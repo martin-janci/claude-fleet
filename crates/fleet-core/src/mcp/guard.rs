@@ -503,6 +503,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Gap plan G7.10 (Jev N2): the New session dialog's "Resume or start
+    // fresh" proposal and the person's pick. A person's own device, as
+    // `control_route`: the follow-up records a person's choice.
+    ToolPolicy {
+        name: "resume_or_new",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "answer_mcp_confirm",
         access: Access::PersonDevice,
