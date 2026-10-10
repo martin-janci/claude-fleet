@@ -122,6 +122,7 @@ describe('the proposed tree', () => {
     render(HandoffCards);
     const boxes = await screen.findAllByTestId('handoff-tree-item');
     expect(boxes).toHaveLength(3);
+    expect(screen.getByTestId('handoff-tree-skip').textContent).toBe('Unticked: skipped, not created');
     await fireEvent.click(boxes[2]);
     await fireEvent.click(screen.getByTestId('handoff-tree-create'));
     await waitFor(() => expect(calls('accept_work_proposals')).toEqual([{ args: { item_ids: [11, 12] } }]));
@@ -222,7 +223,8 @@ describe('tasks in chat (G3.11)', () => {
       { id: 6, at: now - 30, kind: 'task', tool: 'work_link', item: { id: 30, title: 'Fix login', status: 'todo', done_when: ['person'] } },
     ];
     render(HandoffCards);
-    expect((await screen.findByTestId('handoff-task-drafted')).textContent).toBe('Drafted from your message');
+    expect((await screen.findByTestId('handoff-task-drafted')).textContent).toContain('Drafted from your message');
+    expect(screen.getByTestId('handoff-task-proposed-by').textContent).toBe('Proposed by the LLM');
     expect(screen.getByTestId('handoff-task-live').textContent).toContain('fix-login on mac');
     expect(screen.getByTestId('handoff-task-when').textContent).toBe('finishes when a person checks it');
     expect(screen.queryByTestId('handoff-task-undo')).toBeNull();
@@ -234,6 +236,34 @@ describe('tasks in chat (G3.11)', () => {
     await waitFor(() => expect(calls('verify_work_item')).toEqual([{ args: { item_id: 30, line: 'person', ok: true } }]));
     await fireEvent.click(screen.getByTestId('handoff-task-done'));
     await waitFor(() => expect(calls('set_work_status')).toEqual([{ args: { item_id: 30, status: 'done' } }]));
+  });
+
+  it('a created task takes a group, and Start review run opens the review of its session (G7.8)', async () => {
+    const { workTreeMeta } = await import('./work_view');
+    workTreeMeta.set({
+      orgs: [],
+      trackers: [],
+      groups: [{ group: { source: 'manual', label: 'Payments' }, count: 3 } as never],
+    });
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'control_handoffs') return receipts;
+      if (cmd === 'place_work') return { task_id: 'item:30' };
+      return null;
+    });
+    sessions.set([{ ...session(4, 'working', 'fix-login'), host_alias: 'mac', work: { link_id: 1, item_id: 30, key: null, title: 'Fix login', source: 'agent' } } as SessionRow]);
+    receipts = [{ id: 6, at: now - 30, kind: 'task', tool: 'work_link', item: { id: 30, title: 'Fix login', status: 'todo' } }];
+    render(HandoffCards);
+    const field = (await screen.findByTestId('handoff-task-group')) as HTMLInputElement;
+    expect(Array.from(document.querySelectorAll('datalist option')).map((o) => (o as HTMLOptionElement).value)).toEqual(['Payments']);
+    await fireEvent.input(field, { target: { value: 'Payments' } });
+    await fireEvent.click(screen.getByTestId('handoff-task-save'));
+    await waitFor(() =>
+      expect(calls('place_work')).toEqual([{ args: { task_id: 'item:30', group: 'Payments', expected_version: 0 } }]),
+    );
+    expect(calls('edit_work_item')).toEqual([]);
+    await fireEvent.click(screen.getByTestId('handoff-task-review'));
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    workTreeMeta.set({ orgs: [], trackers: [], groups: [] });
   });
 
   it('Undo shows only while the backend can take an accept back', () => {

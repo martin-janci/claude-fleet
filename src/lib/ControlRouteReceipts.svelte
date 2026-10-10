@@ -4,7 +4,9 @@
   for a message too short or unclear to route, a question with the
   missions and sessions to pick from. Gap plan G3.9: a receipt about a
   session offers "↳ Send to <session>", which hands the message on (and
-  then reads "↳ Sent to session <name> ↗"); one about a mission opens it.
+  then reads "↳ Sent to session <name> ↗"); G7.8: one about a mission
+  offers "↳ Send to <mission>", which answers its open question with the
+  message ("↳ Sent to mission <name> ↗"), and its name opens it.
   Mounted beside Control's composer;
   it watches the outbox for this session's prompts once
   they are sent, and routes each one once.
@@ -83,7 +85,7 @@
       <div class="receipt" data-testid="control-route-receipt" data-outcome={r.route.outcome}>
         {#if r.handed}
           <button type="button" class="target link" data-testid="control-route-handed" onclick={() => open(r)}
-            >↳ Sent to session {r.handed.name} ↗</button
+            >↳ Sent to {r.handed.kind} {r.handed.name} ↗</button
           >
         {:else if text && changing !== r.key}
           {@const t = targetOf(r.route, shownOption(r))}
@@ -107,7 +109,7 @@
               >Change</button
             >
           {/if}
-          {#if t?.kind === 'session'}
+          {#if t}
             <button type="button" class="hand" data-testid="control-route-send" onclick={() => void send(r)}
               >↳ Send to {t.name}</button
             >

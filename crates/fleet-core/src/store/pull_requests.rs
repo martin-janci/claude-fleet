@@ -54,6 +54,14 @@ pub struct PullRequestRow {
     pub additions: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletions: Option<u32>,
+    /// The mission whose session opened it (gap plan G7.8, "from <mission>"
+    /// on a PR). Not stored: `prs { list }` reads it from the opening
+    /// session's origin, for a caller who may see that mission; absent once
+    /// the session is gone, or for a session no mission started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_name: Option<String>,
 }
 
 /// Timeline kinds a change of a PR row writes (M15 step G2.4), on the
@@ -129,6 +137,8 @@ fn row(r: &rusqlite::Row<'_>) -> Result<PullRequestRow> {
         updated_at: r.get(17)?,
         additions: None,
         deletions: None,
+        mission_id: None,
+        mission_name: None,
     })
 }
 

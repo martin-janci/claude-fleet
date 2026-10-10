@@ -818,6 +818,8 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         updated_at: 2,
         additions: None,
         deletions: None,
+        mission_id: None,
+        mission_name: None,
     };
     put("PullRequestRow", wire_keys(&pr));
     put(

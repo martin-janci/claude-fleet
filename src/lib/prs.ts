@@ -32,6 +32,10 @@ export interface PullRequestRow {
    *  probe; absent once that session is gone or from an older hub. */
   additions?: number | null;
   deletions?: number | null;
+  /** The mission whose session opened it (gap plan G7.8), when the caller
+   *  may see that mission; absent once the session is gone. */
+  mission_id?: number | null;
+  mission_name?: string | null;
 }
 
 export interface PrList {

@@ -24,7 +24,7 @@
   import { projectById } from './projects';
   import { selectSession, selectSessionExplicitly, clearSelection } from './selection';
   import { hostByAlias } from './hosts';
-  import { accountByUuid, accountEmailTier, type AccountRow } from './accounts';
+  import { accountByUuid, accountEmailTier, sessionAccountUuid, type AccountRow } from './accounts';
   import { timeAgo } from './session_status';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import PromptComposer from './PromptComposer.svelte';
@@ -234,14 +234,7 @@
   );
 
   const hostRow = $derived($hostByAlias.get(session.host_alias) ?? null);
-  // A session under a login profile bills that profile's account, not the
-  // host's (docs/accounts.md); it has none until the host reports the
-  // profile logged in. Any other session shows the account it runs on (the
-  // host's login when reconcile saw it; reconcile keeps it when the host's
-  // login changes later), and the host's only before it has one.
-  const accountUuid = $derived(
-    session.claude_profile ? session.account_uuid : (session.account_uuid ?? hostRow?.account_uuid ?? null),
-  );
+  const accountUuid = $derived(sessionAccountUuid(session, hostRow?.account_uuid));
   const accountRow = $derived(accountUuid ? ($accountByUuid.get(accountUuid) ?? null) : null);
 
   const worktree = $derived(parentProject?.worktrees.find((w) => w.id === session.worktree_id) ?? null);

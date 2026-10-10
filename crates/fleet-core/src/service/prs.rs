@@ -76,17 +76,24 @@ pub(crate) fn visible(s: &Store, scope: &ViewScope, pr: &PullRequestRow) -> Resu
     Ok(visible_with_diffstat(s, scope, pr)?.is_some())
 }
 
-/// A PR's diffstat: lines added, lines removed.
-type Diffstat = (Option<u32>, Option<u32>);
+/// What the list adds to a stored PR row from its opening session: the
+/// diffstat (lines added, removed) and the mission that started it.
+#[derive(Default)]
+struct Extras {
+    additions: Option<u32>,
+    deletions: Option<u32>,
+    mission: Option<(i64, String)>,
+}
 
-/// [`visible`], answering the PR's diffstat (lines added, removed) when it
-/// is: read from the opening session's probe while that session's PR is
-/// still this one (gap plan G3.10). `None` = not visible.
+/// [`visible`], answering what the opening session adds when it is: the
+/// diffstat, read from its probe while that session's PR is still this one
+/// (gap plan G3.10), and its mission when a mission started it and `scope`
+/// may see that mission (G7.8). `None` = not visible.
 fn visible_with_diffstat(
     s: &Store,
     scope: &ViewScope,
     pr: &PullRequestRow,
-) -> Result<Option<Diffstat>, IpcError> {
+) -> Result<Option<Extras>, IpcError> {
     let row = match pr.session_id {
         Some(id) => s.get_session_by_id(id)?,
         None => None,
@@ -97,10 +104,26 @@ fn visible_with_diffstat(
                 .pr_evidence
                 .as_ref()
                 .filter(|_| row.pr_url.as_deref() == Some(pr.url.as_str()));
-            Some((ev.and_then(|e| e.additions), ev.and_then(|e| e.deletions)))
+            let mission = match (row.origin.as_deref(), row.origin_ref.as_deref()) {
+                (Some("mission"), Some(r)) => match r.parse::<i64>().ok() {
+                    Some(id) => match s.get_mission(id)? {
+                        Some(m) if crate::service::work::missions::sees_mission(s, scope, &m)? => {
+                            Some((m.id, m.name))
+                        }
+                        _ => None,
+                    },
+                    None => None,
+                },
+                _ => None,
+            };
+            Some(Extras {
+                additions: ev.and_then(|e| e.additions),
+                deletions: ev.and_then(|e| e.deletions),
+                mission,
+            })
         }
         Some(_) => None,
-        None => (scope.is_unrestricted() || scope.is_sole_person()).then_some((None, None)),
+        None => (scope.is_unrestricted() || scope.is_sole_person()).then(Extras::default),
     })
 }
 
@@ -122,10 +145,13 @@ pub fn list(store: &Mutex<Store>, scope: &ViewScope, args: &PrsArgs) -> Result<P
         if args.project_id.is_some_and(|p| pr.project_id != Some(p)) {
             continue;
         }
-        if let Some((additions, deletions)) = visible_with_diffstat(&s, scope, &pr)? {
+        if let Some(x) = visible_with_diffstat(&s, scope, &pr)? {
+            let (mission_id, mission_name) = x.mission.unzip();
             items.push(PullRequestRow {
-                additions,
-                deletions,
+                additions: x.additions,
+                deletions: x.deletions,
+                mission_id,
+                mission_name,
                 ..pr
             });
         }
@@ -247,6 +273,53 @@ mod tests {
         assert_eq!(stat(2), (None, None));
         let json = serde_json::to_value(&l.items[0]).unwrap();
         assert!(json.get("additions").is_none(), "unknown is left out");
+    }
+
+    /// Gap plan G7.8: a PR a mission's session opened says which mission,
+    /// and one a person's session opened says nothing.
+    #[test]
+    fn a_pr_names_the_mission_whose_session_opened_it() {
+        let st = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = st.lock().unwrap();
+            s.insert_host("trn", None).unwrap();
+            let m = s
+                .create_mission(
+                    &crate::store::NewMission {
+                        org_id: None,
+                        owner_person_id: None,
+                        root_item_id: None,
+                        name: "Hub federation v2",
+                        goal: "pair two hubs",
+                        non_goals: None,
+                        done_when: &[],
+                        mode: None,
+                        level: None,
+                    },
+                    "test",
+                )
+                .unwrap();
+            let a = s
+                .upsert_session("a", "trn", None, None, 1, 1, "running", None)
+                .unwrap();
+            let b = s
+                .upsert_session("b", "trn", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.set_session_origin(a, &crate::store::SessionOrigin::mission(m.id))
+                .unwrap();
+            seed(&s, 1, "OPEN", a, None, 100);
+            seed(&s, 2, "OPEN", b, None, 200);
+        }
+        let l = list(&st, &ViewScope::internal(), &args(None)).unwrap();
+        let from = |n: i64| {
+            let p = l.items.iter().find(|p| p.number == Some(n)).unwrap();
+            p.mission_name.clone()
+        };
+        assert_eq!(from(1).as_deref(), Some("Hub federation v2"));
+        assert_eq!(from(2), None);
+        let json =
+            serde_json::to_value(l.items.iter().find(|p| p.number == Some(2)).unwrap()).unwrap();
+        assert!(json.get("mission_name").is_none(), "no mission is left out");
     }
 
     #[test]

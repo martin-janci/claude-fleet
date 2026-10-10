@@ -102,6 +102,47 @@ export function matchesFilter(e: LibraryEntry, f: LibraryFilter): boolean {
   return e.kind === 'output' || e.kind === 'download';
 }
 
+/** A folder of the Library (gap plan G7.8, board MCViews: "Session outputs
+ *  today 14", the repos with their host). Each entry sits in one folder by
+ *  its kind; the folders keep the list's order. */
+export type LibraryFolderId = 'outputs' | 'uploads' | 'repos';
+
+export interface LibraryFolder {
+  id: LibraryFolderId;
+  label: string;
+  entries: LibraryEntry[];
+  /** How many of its entries are from today (since `since`). */
+  today: number;
+}
+
+const FOLDERS: readonly { id: LibraryFolderId; label: string }[] = [
+  { id: 'outputs', label: 'Session outputs' },
+  { id: 'uploads', label: 'Uploads' },
+  { id: 'repos', label: 'Repos' },
+];
+
+export function folderOf(e: Pick<LibraryEntry, 'kind'>): LibraryFolderId {
+  if (e.kind === 'repo') return 'repos';
+  if (e.kind === 'upload' || e.kind === 'attachment') return 'uploads';
+  return 'outputs';
+}
+
+/** The non-empty folders of `entries`, in folder order, each keeping the
+ *  entries' order. `since` (unix seconds, local midnight) counts today's. */
+export function libraryFolders(entries: readonly LibraryEntry[], since: number): LibraryFolder[] {
+  return FOLDERS.map((f) => {
+    const list = entries.filter((e) => folderOf(e) === f.id);
+    return { ...f, entries: list, today: list.filter((e) => e.at != null && e.at >= since).length };
+  }).filter((f) => f.entries.length > 0);
+}
+
+/** "Session outputs · today 14 of 20", or just the count. */
+export function folderCountText(f: Pick<LibraryFolder, 'id' | 'entries' | 'today'>): string {
+  const n = f.entries.length;
+  if (f.id === 'repos' || f.today === 0) return String(n);
+  return f.today === n ? `today ${n}` : `today ${f.today} of ${n}`;
+}
+
 /** Repos per host: every (host, project) a session works in, newest first. */
 export function reposOf(
   rows: readonly SessionRow[],
