@@ -21,6 +21,7 @@
     showFriendlyNames,
     showRowDetails,
     sidebarGroupBy,
+    type SidebarGroupBy,
   } from './sessions';
   import { diskMeter } from './hosts_view';
   import { hosts, hostFilter, effectiveHostFilter } from './hosts';
@@ -37,7 +38,8 @@
   import TrackerAttention from './TrackerAttention.svelte';
   import ActiveFilters from './ActiveFilters.svelte';
   import FiltersSection from './FiltersSection.svelte';
-  import { SESSION_GROUPS } from './filter_schema';
+  import { INBOX_GROUPS, SESSION_GROUPS } from './filter_schema';
+  import { inboxGroupBy, type InboxGroupBy } from './inbox';
   import FilterChipGroup from './FilterChipGroup.svelte';
   import { sessionFocus, clearSessionFocus } from './session_focus';
   import { RECENCY_VALUES, type Recency } from './session_status';
@@ -534,10 +536,11 @@
       panelTestid="filter-panel"
       clearTestid="wf-clear"
       doneTestid="filters-done"
-      groupValue={$sidebarGroupBy}
-      groupOptions={SESSION_GROUPS}
-      ongroup={(id) => sidebarGroupBy.set(id)}
-      groupTestid="group-select"
+      groupValue={listView === 'inbox' ? $inboxGroupBy : $sidebarGroupBy}
+      groupOptions={listView === 'inbox' ? INBOX_GROUPS : SESSION_GROUPS}
+      ongroup={(id) =>
+        listView === 'inbox' ? inboxGroupBy.set(id as InboxGroupBy) : sidebarGroupBy.set(id as SidebarGroupBy)}
+      groupTestid={listView === 'inbox' ? 'inbox-group-select' : 'group-select'}
       onclearall={clearAll}
       bind:open={panelOpen}
       bind:filtersBtn

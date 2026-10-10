@@ -33,7 +33,9 @@
     SCOPE_TABS,
   } from './session_scope';
   import {
+    inboxGroupBy,
     inboxRows,
+    inboxSections,
     notWaiting,
     notWaitingSaid,
     notWaitingText,
@@ -43,8 +45,9 @@
   } from './inbox';
   import RoutineFailures from './automation/RoutineFailures.svelte';
   import MissionWaits from './MissionWaits.svelte';
-  import { failingCount } from './routines';
-  import { waitingMissionCount } from './mission_waits';
+  import ProposedBy from './ProposedBy.svelte';
+  import { failingCount, loadFailing } from './routines';
+  import { loadWaitingMissions, waitingMissionCount } from './mission_waits';
   import { sessionMatchesSearch } from './search';
   import { sessionFocus } from './session_focus';
   import { type ProjectRow } from './projects';
@@ -1018,6 +1021,26 @@
   const inboxNeeding = $derived(inboxList.length + $failingCount + $waitingMissionCount);
   // G1.6: Jev's "probably waiting" rows, listed apart and never counted.
   const inboxProposed = $derived(proposedRows(inboxPool, attentionOpts, $notWaitingSaid));
+  // G3.1: the model's sections ("Group: state"), each carrying the model's
+  // other rows: missions and Jev's proposals in Needs you, failed routines
+  // in Failed. Their counts add up to the badge.
+  const inboxSectionList = $derived(
+    inboxSections(inboxPool, attentionOpts, $inboxGroupBy, {
+      missions: $waitingMissionCount,
+      failingRoutines: $failingCount,
+      proposed: inboxProposed.length,
+    }),
+  );
+  // Opening the Inbox reads the failed routines and the waiting missions
+  // once more, so they are current as it shows (`trackFailingRoutines` and
+  // `trackWaitingMissions` keep them fresh after).
+  $effect(() => {
+    if ($sidebarView === 'inbox')
+      untrack(() => {
+        void loadFailing();
+        void loadWaitingMissions();
+      });
+  });
   // The footer's row count (UX audit L4): what this list holds right now.
   const listCountText = $derived.by(() => {
     if ($sidebarView === 'work') return '';
@@ -1031,7 +1054,10 @@
     void [flatGroups, workGroups, inboxList, orphanSessions];
     untrack(() => snapshotRows(sidebarEl));
   });
-  const inboxRestText = $derived(notWaitingText(notWaiting(inboxPool, attentionOpts)));
+  // A folded mass loss is its own Restore line below, not "12 paused" here.
+  const inboxRestText = $derived(
+    notWaitingText(notWaiting(inboxPool.filter((s) => !foldedIdSet.has(s.id)), attentionOpts)),
+  );
 
   // Interactive Claude sessions running entirely outside fleet (Claude
   // Desktop, a bare terminal). Read-only; the host filter applies but the
@@ -1553,39 +1579,54 @@
         : inboxNeeding === 0
           ? 'Nothing needs you'
           : `${inboxNeeding} need${inboxNeeding === 1 ? 's' : ''} you`}
-      {#if inboxProposed.length > 0}<span class="muted" data-testid="inbox-proposed-count">{proposedText(inboxProposed.length)}</span>{/if}
+      <!-- One queue has no section header: "+1 proposed" sits here. -->
+      {#if $inboxGroupBy === 'none' && inboxProposed.length > 0}<span class="muted" data-testid="inbox-proposed-count"
+          >{proposedText(inboxProposed.length)}</span
+        >{/if}
     </div>
     {#if inboxNeeding === 0}
       {@render listState('inbox')}
     {/if}
-    <div class="tree" role="tree" aria-label="Needs you">
-      {#each inboxList as sess (sess.id)}
-        {@render sessionRow(sess)}
-      {/each}
-    </div>
-    <!-- Redesign 8.6: routines whose newest run failed, with Fix, Retry, Pause. -->
-    <RoutineFailures />
-    <!-- G1.6: missions waiting on a person (a grant to sign, a question). -->
-    <MissionWaits />
-    {#if inboxProposed.length > 0}
-      <!-- G1.6: Jev's "probably waiting", apart from Needs you, never in
-           the badge; "Not waiting" sets the reading aside here. -->
-      <div class="section-header inbox-head" data-testid="inbox-proposed">Probably waiting · proposed by Jev</div>
-      <div class="tree" role="tree" aria-label="Probably waiting">
-        {#each inboxProposed as sess (sess.id)}
-          {@render sessionRow(sess)}
-          <div class="proposed-line">
-            <span class="muted">Last turn ended with a question</span>
-            <button
-              type="button"
-              class="btn btn--quiet"
-              data-testid="inbox-not-waiting"
-              onclick={() => sayNotWaiting(sess)}>Not waiting</button
-            >
+    {#each inboxSectionList as sec (sec.key)}
+      <div class="inbox-section" data-testid="inbox-section" data-key={sec.key}>
+        {#if sec.label}
+          <div class="section-header inbox-sec" class:failed={sec.key === 'failed'} data-testid="inbox-section-head">
+            {sec.label}<span class="count" data-testid="inbox-section-count">{sec.count}</span>
+            {#if sec.proposed && inboxProposed.length > 0}<span class="muted" data-testid="inbox-proposed-count"
+                >{proposedText(inboxProposed.length)}</span
+              >{/if}
           </div>
-        {/each}
+        {/if}
+        <div class="tree" role="tree" aria-label={sec.label ?? 'Needs you'}>
+          {#each sec.rows as sess (sess.id)}
+            {@render sessionRow(sess)}
+          {/each}
+        </div>
+        <!-- Redesign 8.6: routines whose newest run failed, with Fix, Retry, Pause. -->
+        {#if sec.routines}<RoutineFailures />{/if}
+        <!-- G1.6: missions waiting on a person (a grant to sign, a question). -->
+        {#if sec.missions}<MissionWaits />{/if}
+        {#if sec.proposed && inboxProposed.length > 0}
+          <!-- G1.6/G3.1: Jev's "probably waiting", at the foot of Needs you,
+               never in its count; "Not waiting" sets the reading aside. -->
+          <div class="tree" role="tree" aria-label="Probably waiting" data-testid="inbox-proposed">
+            {#each inboxProposed as sess (sess.id)}
+              {@render sessionRow(sess)}
+              <div class="proposed-line">
+                <ProposedBy
+                  proposal={{ value: 'waiting', source: 'jev', reason: 'last turn ended with a question' }}
+                  field="probably_waiting"
+                  stated
+                  changeLabel="Not waiting"
+                  onchange={() => sayNotWaiting(sess)}
+                  testid="inbox-proposed-by"
+                />
+              </div>
+            {/each}
+          </div>
+        {/if}
       </div>
-    {/if}
+    {/each}
     <div class="inbox-rest" data-testid="inbox-rest">
       {#if inboxRestText && !(inboxNeeding === 0 && !listUnavailable)}<span class="muted">Not waiting · {inboxRestText}</span>{/if}
       <button
@@ -1595,6 +1636,10 @@
         onclick={() => sidebarView.set('sessions')}>All sessions →</button
       >
     </div>
+    <!-- G3.1: a mass loss is the Sessions list's one Restore line here too. -->
+    {#each lostFoldList as fold (fold.host)}
+      <LostFoldRow {fold} open={openFolds.has(fold.host)} ontoggle={() => toggleFold(fold.host)} row={foldSessionRow} />
+    {/each}
   </div>
   {:else}
   {#if tabsShown}
@@ -2480,8 +2525,12 @@
   }
   .inbox-rest .muted { color: var(--fg-muted); }
   .inbox-head .muted { color: var(--fg-muted); font-weight: 400; margin-left: 6px; }
+  /* G3.1: a state section's header, "Needs you 4 +1 proposed" (Main board). */
+  .inbox-sec { display: flex; align-items: center; gap: 6px; color: var(--status-waiting); }
+  .inbox-sec.failed { color: var(--status-failed); }
+  .inbox-sec .count { font-weight: 500; padding: 0 5px; border-radius: var(--radius-sm); background: var(--bg-hover); color: var(--fg-2); text-transform: none; }
+  .inbox-sec .muted { color: var(--fg-muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
   .proposed-line { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 0 12px 6px 28px; font-size: var(--text-xs); }
-  .proposed-line .muted { color: var(--fg-muted); }
   .section-header {
     font-size: var(--text-2xs);
     text-transform: uppercase;
