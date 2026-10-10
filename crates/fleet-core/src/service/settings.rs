@@ -533,6 +533,10 @@ pub const WORK_MEMBERS_PLAN_SPRINTS: &str = "work.members_plan_sprints";
 pub const WORK_SUMMARY_MODEL: &str = "work.summary_model";
 /// The aliases [`WORK_SUMMARY_MODEL`] accepts.
 pub const SUMMARY_MODELS: &[&str] = &["haiku", "sonnet", "opus"];
+/// The model context help runs on (`service::context_help`): a person's
+/// question at a shell or composer prompt line, answered on the session's
+/// own host and account. One of [`SUMMARY_MODELS`]; Haiku by default.
+pub const WORK_HELP_MODEL: &str = "work.help_model";
 
 // ── writing help (gap plan G4.6): each LLM draft is off until turned on ──
 /// Files › Changed drafts a commit message from the staged diff
@@ -1313,6 +1317,14 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Ai])
     .per_org(),
+    Spec::new(
+        WORK_HELP_MODEL,
+        "haiku",
+        Kind::Choice(SUMMARY_MODELS),
+        "Context help model",
+        "The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account.",
+    )
+    .tags(&[Tag::Ai]),
     Spec::new(
         WORK_DRAFT_COMMIT_MESSAGES,
         "false",

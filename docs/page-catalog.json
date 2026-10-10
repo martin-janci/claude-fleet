@@ -3547,6 +3547,24 @@
       ]
     },
     {
+      "default_widget": "select",
+      "key": "work.help_model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Context help model",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "switch",
       "key": "work.draft_commit_messages",
       "kind": {

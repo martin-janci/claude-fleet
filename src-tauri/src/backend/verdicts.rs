@@ -1918,6 +1918,16 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "context_help",
+        Verdict::SameInBoth {
+            why: "the terminal's helper takes the terminal's path: one claude -p over this \
+                  machine's own ssh to the alias passed in, with the context the caller \
+                  sends and the shell's scrollback read over that same ssh; it reads no \
+                  state.db and the hub is not in the path. The pane offers it only where it \
+                  offers the attach (a session this client owns)",
+        },
+    ),
+    (
         "pty_resize",
         Verdict::SameInBoth {
             why: "the same as pty_write",

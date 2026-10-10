@@ -1284,6 +1284,7 @@ Frontend commands registered in `src/lib.rs`:
 - `pty::pty_drain`
 - `commands::editor::open_session_in_editor`
 - `commands::windows::open_terminal_window`
+- `commands::context_help::context_help`
 - `commands::voice::voice_claim`
 - `commands::voice::voice_release`
 - `cancel_command`

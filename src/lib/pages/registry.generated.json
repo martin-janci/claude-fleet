@@ -1456,6 +1456,32 @@
       "danger": {
         "level": "none"
       },
+      "default": "haiku",
+      "help": "The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account.",
+      "key": "work.help_model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Context help model",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "haiku"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "false",
       "help": "Files tab: Draft writes a commit message from the staged diff with claude -p on the session's host. A draft is text you edit and commit yourself.",
       "key": "work.draft_commit_messages",
@@ -3900,6 +3926,10 @@
               "items": [
                 {
                   "key": "work.summary_model",
+                  "type": "field"
+                },
+                {
+                  "key": "work.help_model",
                   "type": "field"
                 },
                 {

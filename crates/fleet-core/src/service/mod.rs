@@ -23,6 +23,7 @@ pub mod catalog;
 pub mod claude_print;
 pub mod clipboard;
 pub mod context;
+pub mod context_help;
 pub mod control_handoffs;
 pub mod control_tokens;
 pub mod debug_devices;

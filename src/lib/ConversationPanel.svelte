@@ -34,6 +34,9 @@
   import ReplyActions from './ReplyActions.svelte';
   import ForkSheet from './ForkSheet.svelte';
   import SendLaterSheet from './SendLaterSheet.svelte';
+  import ContextHelp from './ContextHelp.svelte';
+  import { askContextHelp, commandLine, helpModel } from './context_help';
+  import { fleetSettings } from './fleet_settings';
   import Icon from './kit/Icon.svelte';
   import { suggestedForkName } from './reply_actions';
   import {
@@ -1695,6 +1698,32 @@
   // (G1.8). Its own question: `queue_prompt`, `drive` like a send. Text
   // only, so a tray with files keeps them for a send now.
   let sendLaterOpen = $state(false);
+  // Context help (`context_help.ts`): ask Haiku about the draft, with the
+  // earlier prompts (the ↑ recall list) and the commands the box accepts as
+  // context. It runs over this machine's ssh, as the terminal does, so it is
+  // offered where the terminal is: on a session this client owns.
+  let helpOpen = $state(false);
+  let helpCommands = $state<string[]>([]);
+  const helpBlocked = $derived(
+    $accessOf(session) !== 'own'
+      ? 'Context help runs over this machine’s SSH, which reaches only sessions you own'
+      : null,
+  );
+  function openHelp() {
+    helpOpen = true;
+    const id = session.id;
+    void projectSkills(id).then((list) => {
+      if (session.id === id) helpCommands = matchSlashCommands('/', list).map(commandLine);
+    });
+  }
+  function askHelp(question: string) {
+    return askContextHelp(
+      { host_alias: session.host_alias, session_name: session.tmux_name, profile: session.claude_profile },
+      { surface: 'composer', line: draft, history, commands: helpCommands },
+      question,
+      helpModel($fleetSettings),
+    );
+  }
   const sendLaterBlocked = $derived(
     viewing !== null
       ? 'Viewing an earlier conversation — go back to current to send.'
@@ -2497,6 +2526,24 @@
           {/each}
         </ul>
       {/if}
+      {#if helpOpen}
+        <ContextHelp
+          model={helpModel($fleetSettings)}
+          line={draft}
+          what="your earlier prompts"
+          ask={askHelp}
+          insertLabel="Put in the box"
+          testid="conv-help"
+          oninsert={(c) => {
+            draft = c;
+            histIndex = null;
+          }}
+          onclose={() => {
+            helpOpen = false;
+            box?.focus();
+          }}
+        />
+      {/if}
       {#if sendError}
         <div class="composer-error" data-testid="conv-composer-error">{sendError}</div>
       {/if}
@@ -2645,6 +2692,15 @@
             {/each}
           </select>
           <span class="composer-hint" id={COMPOSER_HINT_ID} data-testid="conv-composer-hint">{composerHint}</span>
+          <button
+            type="button"
+            class="btn btn--icon btn--quiet"
+            data-testid="conv-help-button"
+            aria-label="Ask {helpModel($fleetSettings)} about this prompt"
+            aria-expanded={helpOpen}
+            title={helpBlocked ?? `Ask ${helpModel($fleetSettings)} about this prompt, with your earlier prompts as context`}
+            disabled={helpBlocked !== null}
+            onclick={() => (helpOpen ? (helpOpen = false) : openHelp())}>?</button>
           <button
             type="button"
             class="btn btn--icon btn--quiet"

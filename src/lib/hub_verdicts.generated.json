@@ -361,6 +361,7 @@
     "collect_diagnostics",
     "commit_local_workspace",
     "compare_local_conflict",
+    "context_help",
     "discard_local_workspace_changes",
     "disconnect_local_workspace",
     "dismiss_local_workspace_activity",
