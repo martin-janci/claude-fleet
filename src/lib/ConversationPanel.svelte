@@ -33,6 +33,8 @@
   import CopyButton from './CopyButton.svelte';
   import ReplyActions from './ReplyActions.svelte';
   import ForkSheet from './ForkSheet.svelte';
+  import SendLaterSheet from './SendLaterSheet.svelte';
+  import Icon from './kit/Icon.svelte';
   import { suggestedForkName } from './reply_actions';
   import {
     findMatches,
@@ -1660,6 +1662,20 @@
   // anything). A pasted file has neither, and `addFiles` says so.
 
   let attachments = $state<Attachment[]>([]);
+  // Send later (gap plan G2.7, the FormsSession board's "composer › Send
+  // later"): the draft goes into the session's prompt queue with a time
+  // (G1.8). Its own question: `queue_prompt`, `drive` like a send. Text
+  // only, so a tray with files keeps them for a send now.
+  let sendLaterOpen = $state(false);
+  const sendLaterBlocked = $derived(
+    viewing !== null
+      ? 'Viewing an earlier conversation — go back to current to send.'
+      : (hubActionBlocked('queue_prompt', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'queue_prompt')),
+  );
+  const sendLaterWhy = $derived(
+    sendLaterBlocked ??
+      (attachments.length > 0 ? 'Send later carries text only: send the files now, or remove them first' : null),
+  );
   let attachErrors = $state<string[]>([]);
   /** dragleave fires for every child, so DOM nesting is counted, not flagged. */
   let dragDepth = $state(0);
@@ -2596,6 +2612,14 @@
           </select>
           <span class="composer-hint" id={COMPOSER_HINT_ID}>↵ send · ⇧↵ newline · ↑ history</span>
           <button
+            type="button"
+            class="btn btn--icon btn--quiet"
+            data-testid="conv-send-later"
+            aria-label="Send later…"
+            title={sendLaterWhy ?? 'Send later…'}
+            disabled={sendLaterWhy !== null}
+            onclick={() => (sendLaterOpen = true)}><Icon name="clock" size={14} /></button>
+          <button
             type="submit"
             class="btn btn--icon btn--primary composer-send"
             data-testid="conv-composer-send"
@@ -2621,6 +2645,21 @@
     <p class="muted readonly" data-testid="conv-readonly">Read-only: this agent runs outside tmux, so there is no terminal to prompt.</p>
   {/if}
 </div>
+
+{#if sendLaterOpen}
+  <SendLaterSheet
+    sessionId={session.id}
+    initial={draft}
+    blocked={sendLaterBlocked}
+    onscheduled={(m) => {
+      if (draft.trim() === m) draft = '';
+    }}
+    onclose={() => {
+      sendLaterOpen = false;
+      box?.focus();
+    }}
+  />
+{/if}
 
 {#if forkOpen}
   <ForkSheet

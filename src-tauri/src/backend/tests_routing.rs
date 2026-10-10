@@ -2361,7 +2361,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
         LostTargetArgs, NewSessionArgs, PlaceTranscriptArgs, RecreateSessionArgs,
         RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs, SendPromptArgs,
-        SetFriendlyNameArgs, SpawnReviewArgs, TouchSessionViewedArgs,
+        SetFriendlyNameArgs, SetSessionTagsArgs, SpawnReviewArgs, TouchSessionViewedArgs,
     };
 
     vec![
@@ -2788,6 +2788,23 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         host_alias: "trn".into(),
                         tmux_name: "demo".into(),
                         friendly_name: "the demo".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_session_tags",
+            "set_session_tags",
+            json!({ "session_id": 7, "tags": ["release"] }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::set_session_tags(
+                    b,
+                    SetSessionTagsArgs {
+                        session_id: 7,
+                        tags: vec!["release".into()],
                     },
                     s,
                 ))

@@ -1850,6 +1850,64 @@ pub fn set_session_friendly_name(
         })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetSessionTagsArgs {
+    pub session_id: i64,
+    /// The full list (replaces; empty clears).
+    pub tags: Vec<String>,
+}
+
+/// Validate a session's tags: at most 16, each 1–32 chars of
+/// `[A-Za-z0-9_.:-]`, trimmed and de-duplicated in order. PURE; the MCP
+/// `set_session_tags` and the desktop's Label field share it.
+pub fn normalize_session_tags(tags: Vec<String>) -> Result<Vec<String>, IpcError> {
+    if tags.len() > 16 {
+        return Err(IpcError::new(
+            codes::E_VALIDATE,
+            "at most 16 tags per session",
+        ));
+    }
+    let mut out: Vec<String> = Vec::with_capacity(tags.len());
+    for t in tags {
+        let t = t.trim().to_string();
+        if t.is_empty() || t.chars().count() > 32 {
+            return Err(IpcError::new(
+                codes::E_VALIDATE,
+                format!("tag {t:?} must be 1–32 characters"),
+            ));
+        }
+        if !t
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
+        {
+            return Err(IpcError::new(
+                codes::E_VALIDATE,
+                format!("tag {t:?} may only contain letters, digits, _ . : -"),
+            ));
+        }
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    Ok(out)
+}
+
+/// Replace a session's tags (the desktop's Label, M15 G2.7). Answers the
+/// updated row.
+pub fn set_session_tags(
+    args: SetSessionTagsArgs,
+    store: &Mutex<Store>,
+) -> Result<SessionRow, IpcError> {
+    let tags = normalize_session_tags(args.tags)?;
+    let s = lock(store)?;
+    s.set_session_tags(args.session_id, &tags)?.ok_or_else(|| {
+        IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {} not found", args.session_id),
+        )
+    })
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct RestartSessionArgs {
     pub host_alias: String,

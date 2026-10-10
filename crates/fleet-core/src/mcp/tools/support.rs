@@ -1007,36 +1007,10 @@ pub(super) fn task_delivery_body(
 }
 
 /// Validate `set_session_tags` input: at most 16 tags, each 1–32 chars of
-/// `[A-Za-z0-9_.:-]`, de-duplicated in order. Pure so it is unit-testable.
+/// `[A-Za-z0-9_.:-]`, de-duplicated in order. The rule lives in the service
+/// (`sessions::normalize_session_tags`), which the desktop's Label shares.
 pub(super) fn normalize_tags(tags: Vec<String>) -> Result<Vec<String>, McpError> {
-    if tags.len() > 16 {
-        return Err(mcp_err("E_VALIDATE", "at most 16 tags per session", None));
-    }
-    let mut out: Vec<String> = Vec::with_capacity(tags.len());
-    for t in tags {
-        let t = t.trim().to_string();
-        if t.is_empty() || t.chars().count() > 32 {
-            return Err(mcp_err(
-                "E_VALIDATE",
-                format!("tag {t:?} must be 1–32 characters"),
-                None,
-            ));
-        }
-        if !t
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
-        {
-            return Err(mcp_err(
-                "E_VALIDATE",
-                format!("tag {t:?} may only contain letters, digits, _ . : -"),
-                None,
-            ));
-        }
-        if !out.contains(&t) {
-            out.push(t);
-        }
-    }
-    Ok(out)
+    crate::service::sessions::normalize_session_tags(tags).map_err(to_mcp_err)
 }
 
 /// Which session an audit row should attach to, resolved from the tool's

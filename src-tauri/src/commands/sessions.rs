@@ -45,7 +45,8 @@ use fleet_core::service::sessions::{
     self, AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
     LostCandidate, LostTargetArgs, NewSessionArgs, PlaceTranscriptArgs, PlacedTranscript,
     RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs,
-    RestoreReport, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs, TouchSessionViewedArgs,
+    RestoreReport, SendPromptArgs, SetFriendlyNameArgs, SetSessionTagsArgs, SpawnReviewArgs,
+    TouchSessionViewedArgs,
 };
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{DeferredPromptRow, SessionRow, Store};
@@ -143,6 +144,16 @@ pub async fn set_session_friendly_name(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<SessionRow, IpcError> {
     routed::set_session_friendly_name(&backend, args, &store).await
+}
+
+/// A session's tags, written as one list (the Label field, M15 G2.7).
+#[tauri::command]
+pub async fn set_session_tags(
+    args: SetSessionTagsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::set_session_tags(&backend, args, &store).await
 }
 
 /// The session on screen (redesign 2.3): its finished turns read as seen.
@@ -787,6 +798,17 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("set_session_friendly_name", &args).await,
             None => sessions::set_session_friendly_name(args, store),
+        }
+    }
+
+    pub async fn set_session_tags(
+        backend: &FleetBackend,
+        args: SetSessionTagsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("set_session_tags", &args).await,
+            None => sessions::set_session_tags(args, store),
         }
     }
 

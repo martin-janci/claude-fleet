@@ -51,7 +51,8 @@
   import Loader from './Loader.svelte';
   import AgentInstallAction from './AgentInstallAction.svelte';
   import LostTargetForm from './LostTargetForm.svelte';
-  import { isOutsideFleet, needsRestoreInto, placeTranscript } from './lost_found';
+  import { ignoredConversations, isOutsideFleet, needsRestoreInto, placeTranscript, setConversationIgnored } from './lost_found';
+  import { savedWithUndo } from './forms/form_frame';
   import { linkSessionWork } from './work';
 
   let {
@@ -217,6 +218,27 @@
   let resumingId = $state<string | null>(null);
   let resumedIds = $state<Set<string>>(new Set());
   let resumeErrors = $state<Record<string, string>>({});
+
+  // Ignore (gap plan G2.7): a found conversation a person does not want
+  // back is left out of later searches on this device (`lost_found.ts`).
+  let ignored = $state<ReadonlySet<string>>(new Set());
+  let showIgnored = $state(false);
+  $effect(() => {
+    ignored = ignoredConversations(host.alias);
+  });
+  const shownCandidates = $derived(
+    discoverList ? (showIgnored ? discoverList : discoverList.filter((c) => !ignored.has(c.claude_session_id))) : null,
+  );
+  const ignoredCount = $derived(discoverList ? discoverList.filter((c) => ignored.has(c.claude_session_id)).length : 0);
+  function setIgnored(c: LostCandidate, on: boolean) {
+    setConversationIgnored(host.alias, c.claude_session_id, on);
+    ignored = ignoredConversations(host.alias);
+  }
+  function ignoreCandidate(c: LostCandidate) {
+    restoringId = null;
+    setIgnored(c, true);
+    savedWithUndo(`Ignored ${c.git_branch ?? c.cwd} on this device`, () => setIgnored(c, false));
+  }
 
   function rankLabel(hint: LostCandidate['rank_hint']): string | null {
     switch (hint) {
@@ -732,7 +754,7 @@
             <p class="muted" data-testid="discover-hub-note">Resume is unavailable right now: {resumeHubBlocked}</p>
           {/if}
           <ul class="discover-items">
-            {#each discoverList as c (c.claude_session_id)}
+            {#each shownCandidates ?? [] as c (c.claude_session_id)}
               <li class="discover-item">
                 <div class="d-main">
                   <span class="d-cwd">{c.cwd}</span>
@@ -740,6 +762,12 @@
                   <span class="muted">{shortAge(c.transcript_mtime, now)}</span>
                   {#if rankLabel(c.rank_hint)}<span class="badge">{rankLabel(c.rank_hint)}</span>{/if}
                   {#if c.derived_tmux_name}<span class="muted">{c.derived_tmux_name}</span>{/if}
+                  {#if ignored.has(c.claude_session_id)}
+                    <span class="badge" data-testid="discover-ignored">ignored</span>
+                    <button type="button" class="small" data-testid="discover-unignore" onclick={() => setIgnored(c, false)}
+                      >Bring back</button
+                    >
+                  {/if}
                 </div>
                 {#if c.existing_session_id !== null}
                   <span class="muted">already in fleet</span>
@@ -773,6 +801,7 @@
                       }}
                       onsubmit={(pid, ticket) => restoreInto(c, pid, ticket)}
                       oncancel={() => (restoringId = null)}
+                      onignore={() => ignoreCandidate(c)}
                     />
                   {:else}
                     <button
@@ -788,6 +817,14 @@
               </li>
             {/each}
           </ul>
+          {#if ignoredCount > 0}
+            <p class="muted" data-testid="discover-ignored-count">
+              {ignoredCount} ignored on this device ·
+              <button type="button" class="small" data-testid="discover-show-ignored" onclick={() => (showIgnored = !showIgnored)}
+                >{showIgnored ? 'Hide them' : 'Show them'}</button
+              >
+            </p>
+          {/if}
         {/if}
       </div>
     {/if}

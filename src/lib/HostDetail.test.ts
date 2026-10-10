@@ -2,6 +2,7 @@ import { render, screen, fireEvent, within } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
+import { clearToasts, toasts } from './toasts';
 
 vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
@@ -875,4 +876,37 @@ describe('HostDetail Lost and found with proposals (4.12)', () => {
     expect(screen.getByTestId('discover-list').textContent).toContain('resumed');
   });
 
+
+  // Gap plan G2.7, the FormsSession board's "Adopt a lost session · Ignore":
+  // a found conversation is left out of later searches on this device, with
+  // Undo, and "Show them" brings the ignored ones back into view.
+  it('Ignore leaves a found conversation out from now on, with Undo', async () => {
+    localStorage.clear();
+    clearToasts();
+    const orphan = candidate({ cwd: '/work/c', claude_session_id: 'cs-c', project_id: null, derived_tmux_name: null, resumable: false });
+    mockedDiscover.mockResolvedValue({ ok: true, value: [orphan] });
+    mockedTarget.mockResolvedValue({ ok: true, value: { unsure: true } });
+    mount('mefistos');
+    await fireEvent.click(screen.getByTestId('discover-lost'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('discover-restore-into'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('lost-target-ignore'));
+    await settle();
+    expect(screen.queryByTestId('discover-restore-into')).toBeNull();
+    expect(screen.getByTestId('discover-ignored-count').textContent).toContain('1 ignored on this device');
+    // A second search still leaves it out.
+    await fireEvent.click(screen.getByTestId('discover-lost'));
+    await settle();
+    expect(screen.queryByTestId('discover-restore-into')).toBeNull();
+    // Show them, then Undo from the toast.
+    await fireEvent.click(screen.getByTestId('discover-show-ignored'));
+    expect(screen.getByTestId('discover-ignored')).toBeTruthy();
+    get(toasts).at(-1)!.action!.run();
+    await settle();
+    expect(screen.queryByTestId('discover-ignored')).toBeNull();
+    expect(screen.queryByTestId('discover-ignored-count')).toBeNull();
+    mockedDiscover.mockReset();
+    localStorage.clear();
+  });
 });

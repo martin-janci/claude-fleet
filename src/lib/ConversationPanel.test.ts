@@ -5102,3 +5102,98 @@ describe('ConversationPanel while the conversation loads (review r13)', () => {
     }
   });
 });
+
+// Gap plan G2.7 (on G1.8): Send later from the composer. The draft goes into
+// the session's prompt queue with a time, the box empties, and the toast's
+// Undo takes the queued prompt back.
+describe('ConversationPanel Send later', () => {
+  const mockedInvoke = invoke as unknown as ReturnType<typeof vi.fn>;
+  type InvokeImpl = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+  const baseInvoke = mockedInvoke.getMockImplementation() as unknown as InvokeImpl;
+  beforeEach(() => mockedInvoke.mockClear());
+  afterEach(() => {
+    mockedInvoke.mockImplementation(baseInvoke);
+    clearToasts();
+  });
+
+  function answerQueue() {
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'queue_prompt') return { session_id: 1, delivered: false, queued_id: 12 };
+      if (cmd === 'cancel_queued_prompt') return [];
+      return baseInvoke(cmd, args);
+    });
+  }
+  const queued = () =>
+    mockedInvoke.mock.calls.filter((c) => c[0] === 'queue_prompt').map((c) => (c[1] as { args: Record<string, unknown> }).args);
+
+  it('schedules the draft for tomorrow at nine, empties the box, and Undo takes it back', async () => {
+    answerQueue();
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'Rebase on main and re-run the e2e suite.' } });
+    await fireEvent.click(screen.getByTestId('conv-send-later'));
+    expect((screen.getByTestId('send-later-message') as HTMLTextAreaElement).value).toBe('Rebase on main and re-run the e2e suite.');
+    await fireEvent.click(screen.getByTestId('send-later-tomorrow'));
+    await fireEvent.click(screen.getByTestId('send-later-schedule'));
+    await settle();
+    const nine = new Date();
+    nine.setDate(nine.getDate() + 1);
+    nine.setHours(9, 0, 0, 0);
+    expect(queued()).toEqual([
+      {
+        session_id: 1,
+        prompt: 'Rebase on main and re-run the e2e suite.',
+        not_before: Math.floor(nine.getTime() / 1000),
+        skip_if_archived: true,
+      },
+    ]);
+    expect(screen.queryByTestId('send-later-sheet')).toBeNull();
+    expect(box.value).toBe('');
+    const toast = get(toasts).at(-1)!;
+    expect(toast.message).toMatch(/^Scheduled at \w+ 09:00$/);
+    toast.action!.run();
+    await settle();
+    expect(mockedInvoke).toHaveBeenCalledWith('cancel_queued_prompt', { args: { session_id: 1, id: 12 } });
+  });
+
+  it('When the usage limit resets waits for the account; At… refuses a time that has passed', async () => {
+    answerQueue();
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-send-later'));
+    const schedule = screen.getByTestId('send-later-schedule') as HTMLButtonElement;
+    expect(schedule.disabled).toBe(true);
+    await fireEvent.input(screen.getByTestId('send-later-message'), { target: { value: 'continue' } });
+    await fireEvent.click(screen.getByTestId('send-later-at'));
+    await fireEvent.input(screen.getByLabelText('Send at'), { target: { value: '2001-01-01T09:00' } });
+    expect(schedule.disabled).toBe(true);
+    expect(screen.getByTestId('sheet-why').textContent).toBe('That time has passed. Pick a later one.');
+    await fireEvent.click(screen.getByTestId('send-later-limit'));
+    await fireEvent.click(screen.getByTestId('send-later-skip'));
+    await fireEvent.click(schedule);
+    await settle();
+    expect(queued()).toEqual([{ session_id: 1, prompt: 'continue', until_limit_reset: true }]);
+  });
+
+  it('is off for a watcher, with the reason, and on for a driver', async () => {
+    for (const level of ['watch', 'drive'] as const) {
+      hubStatus.set(REMOTE);
+      hubConnection.set({ state: 'connected' });
+      myPersonId.set(3);
+      myGrants.set(new Map([[1, level]]));
+      mockedConv.mockReturnValue(ok(conv()));
+      const row = session({ owner_person_id: 7, visibility: 'private' });
+      sessions.set([row]);
+      const { unmount } = render(ConversationPanel, { session: row, visible: true });
+      await settle();
+      const later = screen.getByTestId('conv-send-later') as HTMLButtonElement;
+      expect(later.disabled, level).toBe(level === 'watch');
+      if (level === 'watch') expect(later.title).not.toBe('Send later…');
+      unmount();
+    }
+    hubConnection.set({ state: 'standalone' });
+  });
+});

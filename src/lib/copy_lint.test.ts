@@ -275,7 +275,7 @@ describe('the app', () => {
     const opens = (id: string) => details.find((b) => b.attrs.includes(`data-testid="${id}"`))?.opens;
     expect(opens('open-review')).toBe(true);
     expect(opens('kill-from-details')).toBe(true);
-    expect(opens('label-from-details')).toBe(false);
+    expect(opens('label-from-details')).toBe(true);
   });
 
   it('says every status in the six and ends every dialog label with "…"', () => {

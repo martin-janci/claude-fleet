@@ -375,6 +375,8 @@ export const ROUTED_ACTIONS = [
   'safe_kill_session',
   'rename_session',
   'set_friendly_name',
+  // The Label field (M15 G2.7): a session's tags.
+  'set_session_tags',
   'restart_session',
   'rewind_conversation',
   'spawn_review',

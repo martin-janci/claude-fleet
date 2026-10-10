@@ -23,6 +23,7 @@ import { resetAccessForTests } from './access';
 import { clearSelection } from './selection';
 import { clearToasts, toasts } from './toasts';
 import { outbox } from './outbox';
+import { accountUsage } from './account_usage_store';
 import { composerDrafts, transcriptMarkdown, type ConvTurn } from './conversation';
 import { rewindChoices } from './reply_actions';
 import {
@@ -170,10 +171,56 @@ describe('Details runs each action', () => {
     render(SessionDetails, { props: { session: sess } });
     await fireEvent.click(screen.getByTestId('switch-account-from-details'));
     await settle();
-    expect((screen.getByTestId('switch-account-pick') as HTMLSelectElement).value).toBe('work');
+    const picked = screen.getAllByTestId('switch-account-option').map((l) => l.querySelector('input') as HTMLInputElement);
+    expect(picked.find((i) => i.checked)?.value).toBe('work');
+    // The pick is the headroom rule's, and says so (a rule, not Jev).
+    const why = screen.getByTestId('switch-account-proposed');
+    expect(why.dataset.source).toBe('rule');
+    expect(why.textContent).toContain('most left on this host');
     await fireEvent.click(screen.getByTestId('confirm-account-switch'));
     await settle();
     expect(callsOf('restart_session')).toEqual([{ host_alias: 'mefistos', name: 'dev-foo', profile: 'work' }]);
+  });
+
+  it('Switch account… shows each login with its headroom or its limit (G2.7)', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    hosts.set([
+      host('mefistos', {
+        account_uuid: 'acc-1',
+        claude_profiles: [
+          { name: 'work', account_uuid: 'acc-2', email: 'w@example.com' },
+          { name: 'spare', account_uuid: 'acc-3', email: 's@example.com' },
+        ],
+      }),
+    ]);
+    const snap = (uuid: string, five: number, week: number) => ({
+      account_uuid: uuid,
+      usage: {
+        five_hour: { utilization: five, resets_at: now + 3600 },
+        seven_day: { utilization: week, resets_at: now + 3 * 86400 },
+        seven_day_opus: null,
+        seven_day_sonnet: null,
+      },
+      subscription: null,
+      fetched_at: now,
+      source_host: 'mefistos',
+      status: 'ok' as const,
+      detail: null,
+      next_try_at: 0,
+    });
+    accountUsage.set({ 'acc-1': snap('acc-1', 25, 15), 'acc-2': snap('acc-2', 5, 40), 'acc-3': snap('acc-3', 10, 100) });
+    answer({ check_account_headroom: null });
+    render(SessionDetails, { props: { session: { ...sess, account_uuid: 'acc-1' } } });
+    await fireEvent.click(screen.getByTestId('switch-account-from-details'));
+    await settle();
+    const rooms = screen.getAllByTestId('switch-account-headroom').map((e) => e.textContent);
+    expect(rooms[0]).toBe('5h 75% · week 85% left · current');
+    expect(rooms[1]).toBe('5h 95% · week 60% left');
+    expect(rooms[2]).toMatch(/^weekly limit until \w+ \d\d:\d\d$/);
+    // Nothing picked yet: the verb says why it is off.
+    expect((screen.getByTestId('confirm-account-switch') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('sheet-why').textContent).toBe('Pick another login.');
+    accountUsage.set({});
   });
 
   it('Change model… sends /model through the outbox', async () => {

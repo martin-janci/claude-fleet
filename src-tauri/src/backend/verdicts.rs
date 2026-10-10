@@ -269,6 +269,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "set_friendly_name",
         },
     ),
+    // The Label field (M15 G2.7): the hub's own `set_session_tags`, `own`.
+    (
+        "set_session_tags",
+        Verdict::Routed {
+            tool: "set_session_tags",
+        },
+    ),
     (
         "touch_session_viewed",
         Verdict::Routed {

@@ -150,7 +150,7 @@ describe('SessionDetails', () => {
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();
     const pick = (await screen.findByTestId('session-login-pick')) as HTMLSelectElement;
-    expect(Array.from(pick.options).map((o) => o.textContent)).toEqual(['Host login', 'work (work@x.com)']);
+    expect(Array.from(pick.options).map((o) => o.textContent)).toEqual(['Host login · current', 'work (work@x.com)']);
     expect(screen.queryByTestId('session-login-switch')).toBeNull();
     await fireEvent.change(pick, { target: { value: 'work' } });
     await tick();
@@ -542,23 +542,24 @@ describe('SessionDetails label editing and timeline', () => {
     });
   });
 
-  it('Rename edits the label, focused', async () => {
+  it('Rename and label… opens the sheet on the name the session has (G2.7)', async () => {
     render(SessionDetails, { props: { session: { ...sampleSession, friendly_name: 'Fix login' } } });
     await tick();
     await fireEvent.click(screen.getByTestId('label-from-details'));
-    const input = (await screen.findByTestId('details-label')) as HTMLInputElement;
+    const input = (await screen.findByTestId('rename-label-name')) as HTMLInputElement;
     expect(input.value).toBe('Fix login');
-    expect(document.activeElement).toBe(input);
-    expect(input.getAttribute('aria-label')).toContain('Label for dev-foo');
+    expect(screen.getByTestId('rename-label-sheet')).toBeTruthy();
   });
 
-  it('Enter saves the label through set_session_friendly_name', async () => {
+  it('Save writes the name through set_session_friendly_name', async () => {
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();
     await fireEvent.click(await screen.findByTestId('label-from-details'));
-    const input = await screen.findByTestId('details-label');
+    const input = await screen.findByTestId('rename-label-name');
     await fireEvent.input(input, { target: { value: 'New label' } });
-    await fireEvent.keyDown(input, { key: 'Enter' });
+    await fireEvent.click(screen.getByTestId('rename-label-save'));
+    await tick();
+    await Promise.resolve();
     await tick();
     const calls = inv().mock.calls;
     const call = calls.filter((c) => c[0] === 'set_session_friendly_name');
@@ -567,6 +568,13 @@ describe('SessionDetails label editing and timeline', () => {
       args: { host_alias: 'mefistos', tmux_name: 'dev-foo', friendly_name: 'New label' },
     });
     expect(calls.some((c) => c[0] === 'rename_session')).toBe(false);
+    expect(calls.some((c) => c[0] === 'set_session_tags')).toBe(false);
+  });
+
+  it('shows the label (the session tags) among the facts', async () => {
+    render(SessionDetails, { props: { session: { ...sampleSession, tags: ['release', 'wip'] } } });
+    await tick();
+    expect(screen.getByTestId('details-tags').textContent).toBe('releasewip');
   });
 
   it('Rename tmux session opens the tmux-name editor; Escape cancels', async () => {

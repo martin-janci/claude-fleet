@@ -32,6 +32,7 @@
   import ReviewDialog from './ReviewDialog.svelte';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import DialogSheet from './DialogSheet.svelte';
   import KillDialog from './KillDialog.svelte';
   import TasksPanel from './TasksPanel.svelte';
   import TicketCard from './TicketCard.svelte';
@@ -40,6 +41,7 @@
   import { assessRow, hasReading } from './evidence';
   import SessionTasks from './SessionTasks.svelte';
   import ProposedBy from './ProposedBy.svelte';
+  import RenameLabelSheet from './RenameLabelSheet.svelte';
   import { proposalFor } from './proposals';
   import Timeline from './Timeline.svelte';
   import TimelineWorkProposal from './TimelineWorkProposal.svelte';
@@ -79,7 +81,7 @@
   import { archiveBlocked } from './kill_check';
   import Meter from './kit/Meter.svelte';
   import { accountUsage } from './account_usage_store';
-  import { leftPct } from './account_usage';
+  import { leftPct, loginHeadroomText } from './account_usage';
   import { goTo } from './destination';
   import { shortcutLabel } from './shortcuts';
   import { detectMac } from './terminal_keys';
@@ -270,6 +272,30 @@
       : listed;
   });
   let loginPick = $state<string | null>(null);
+  /** Each login with its account's headroom (gap plan G2.7, the
+   *  FormsSession board's Switch login): "5h 75% · week 85% left",
+   *  "weekly limit until Fri 11:00". '' is the host's own login. */
+  const loginOptions = $derived.by(() => {
+    const current = session.claude_profile ?? '';
+    const hostUuid = hostRow?.account_uuid ?? null;
+    const rows = [
+      { value: '', name: 'Host login', email: hostUuid ? ($accountByUuid.get(hostUuid)?.email ?? null) : null, uuid: hostUuid, loggedIn: true },
+      ...loginChoices.map((p) => ({ value: p.name, name: p.name, email: p.email, uuid: p.account_uuid, loggedIn: p.account_uuid != null || p.email != null })),
+    ];
+    return rows.map((o) => ({
+      ...o,
+      current: o.value === current,
+      headroom: o.uuid ? loginHeadroomText($accountUsage[o.uuid] ?? null, nowSec) : null,
+    }));
+  });
+  function loginOptionText(o: (typeof loginOptions)[number]): string {
+    const who = o.email ? ` (${o.email})` : o.loggedIn ? '' : ' (not logged in)';
+    return `${o.name}${who}${o.headroom ? ` · ${o.headroom}` : ''}${o.current ? ' · current' : ''}`;
+  }
+  /** The login the headroom rule proposed (`switchTarget`), shown as a
+   *  proposal while the pick still holds it. A rule, never Jev: account
+   *  limits choose by numbers (`ai_proposal.ts` NEVER_DECIDES). */
+  let loginProposal = $state<string | null>(null);
   const loginTarget = $derived(loginPick ?? session.claude_profile ?? '');
   let confirmingSwitch = $state(false);
   /** Switch account…: the same switch as the Login row, from a dialog that
@@ -279,12 +305,16 @@
   async function openSwitchAccount() {
     if (switchAccountBlocked !== null) return;
     loginPick = null;
+    loginProposal = null;
     switchOpen = true;
     const id = session.id;
     const t = await switchTarget(session);
     // Only a proposal: a pick the person already made, or another session
     // selected meanwhile, keeps what it has.
-    if (t && switchOpen && loginPick === null && session.id === id) loginPick = t.profile ?? '';
+    if (t && switchOpen && loginPick === null && session.id === id) {
+      loginPick = t.profile ?? '';
+      loginProposal = loginPick;
+    }
   }
   // The pane is not keyed by session: a login picked (or a switch being
   // confirmed) on one session must not carry over to the next one selected,
@@ -405,7 +435,13 @@
   }
 
   const beginRename = () => beginEdit('tmux');
-  const beginLabelEdit = () => beginEdit('label');
+  // "Rename and label…" (gap plan G2.7): the name and the label (the
+  // session's tags) in one sheet. The title's inline editor stays for tmux.
+  let renameLabelOpen = $state(false);
+  function openRenameLabel() {
+    if (setFriendlyNameBlocked !== null) return;
+    renameLabelOpen = true;
+  }
 
   async function commitRename() {
     if (!renaming || committingRename) return;
@@ -714,7 +750,7 @@
   // (redesign step 3.10, `session_actions.ts`): run it as this pane's own
   // button would, with the same gate, confirm and dialog.
   const rowActions: Record<SessionActionId, { blocked: () => string | null; run: () => void }> = {
-    label: { blocked: () => setFriendlyNameBlocked, run: beginLabelEdit },
+    label: { blocked: () => setFriendlyNameBlocked, run: openRenameLabel },
     rename: { blocked: () => renameBlocked, run: beginRename },
     restart: { blocked: () => restartBlocked, run: askRestart },
     repair: { blocked: () => (repairing ? 'Repairing…' : repairBlocked), run: askRepair },
@@ -753,6 +789,10 @@
      and dialogs below, so nothing moves between them but the layout. -->
 {#snippet act(testid: string, label: string, run: () => void, blocked: string | null, title = '', cls = 'btn btn--quiet is-bounded')}
   <button class={cls} onclick={run} disabled={blocked !== null} title={blocked ?? title} data-testid={testid}>{label}</button>
+{/snippet}
+
+{#snippet tagChips()}
+  {#each session.tags as t (t)}<span class="tag-chip">{t}</span>{/each}
 {/snippet}
 
 {#snippet renameField()}
@@ -863,6 +903,10 @@
     <dl class="of of-kv facts-kv" data-testid="inspector-facts">
       <dt>Host</dt>
       <dd data-testid="session-host">{@render hostValue()}</dd>
+      {#if session.tags?.length}
+        <dt>Label</dt>
+        <dd data-testid="details-tags">{@render tagChips()}</dd>
+      {/if}
       <dt>Account</dt>
       <dd data-testid="session-account">{accountRow?.email ?? accountEmailTier(accountRow)}</dd>
       {#if fiveHour || week}
@@ -979,6 +1023,10 @@
     </section>
 
     <dl class="of of-kv meta">
+      {#if session.tags?.length}
+        <dt>Label</dt>
+        <dd data-testid="details-tags">{@render tagChips()}</dd>
+      {/if}
       {#if canSwitchLogin}
         <dt>Login</dt>
         <dd class="login" data-testid="session-login">
@@ -990,9 +1038,8 @@
             disabled={restartBlocked !== null}
             title="The Claude login this session bills: the host's own, or a login profile (~/.claude-profiles/<name>)"
           >
-            <option value="">Host login</option>
-            {#each loginChoices as p (p.name)}
-              <option value={p.name}>{p.name}{p.email ? ` (${p.email})` : p.account_uuid ? '' : ' (not logged in)'}</option>
+            {#each loginOptions as o (o.value)}
+              <option value={o.value}>{loginOptionText(o)}</option>
             {/each}
           </select>
           {#if loginTarget !== (session.claude_profile ?? '')}
@@ -1141,7 +1188,7 @@
             {#if !hasNoPane(session) && session.project_id !== null}
               {@render act('repair-from-details', 'Repair workspace…', askRepair, repairing ? 'Repairing…' : repairBlocked, 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it')}
             {/if}
-            {@render act('label-from-details', 'Rename', beginLabelEdit, setFriendlyNameBlocked)}
+            {@render act('label-from-details', 'Rename and label…', openRenameLabel, setFriendlyNameBlocked)}
             {@render act('rename-from-details', 'Rename tmux session', beginRename, renameBlocked)}
           </div>
         </div>
@@ -1162,7 +1209,7 @@
         </div>
       {:else}
         <div class="btn-row">
-          {@render act('label-from-details', 'Rename', beginLabelEdit, setFriendlyNameBlocked)}
+          {@render act('label-from-details', 'Rename and label…', openRenameLabel, setFriendlyNameBlocked)}
         </div>
       {/if}
       {#if session.kind !== 'external'}
@@ -1209,6 +1256,10 @@
   </ConfirmDialog>
 {/if}
 
+{#if renameLabelOpen}
+  <RenameLabelSheet {session} onclose={() => (renameLabelOpen = false)} />
+{/if}
+
 {#if forkOpen}
   <ForkSheet sessionId={session.id} anchor={null} suggestedName={suggestedForkName(session)} onclose={() => (forkOpen = false)} />
 {/if}
@@ -1218,35 +1269,47 @@
 {/if}
 
 {#if switchOpen}
-  <ConfirmDialog
-    title="Switch account?"
-    confirmLabel="Switch"
-    danger
-    confirmDisabled={loginTarget === (session.claude_profile ?? '') || switchAccountBlocked !== null}
+  <DialogSheet
+    title="Switch login for this session"
+    lead="The agent restarts with the other account and keeps the conversation. Anything it is doing right now is lost."
+    verb="Switch and restart"
+    busyVerb="Switching…"
+    canConfirm={loginTarget !== (session.claude_profile ?? '') && switchAccountBlocked === null}
+    confirmTitle={switchAccountBlocked ?? (loginTarget === (session.claude_profile ?? '') ? 'Pick another login.' : null)}
     onconfirm={onSwitchLogin}
-    oncancel={() => {
+    onclose={() => {
       switchOpen = false;
       loginPick = null;
+      loginProposal = null;
     }}
-    confirmTestId="confirm-account-switch"
+    testid="switch-account-sheet"
+    confirmTestid="confirm-account-switch"
   >
-    <label class="dialog-field">
-      <span>Resume under</span>
-      <select
-        aria-label="Claude login"
-        data-testid="switch-account-pick"
-        value={loginTarget}
-        onchange={(e) => (loginPick = (e.currentTarget as HTMLSelectElement).value)}
-      >
-        <option value="">Host login</option>
-        {#each loginChoices as p (p.name)}
-          <option value={p.name}>{p.name}{p.email ? ` (${p.email})` : p.account_uuid ? '' : ' (not logged in)'}</option>
-        {/each}
-      </select>
-    </label>
-    This restarts claude in <code>{session.tmux_name}</code> and resumes the same
-    conversation under that login. Anything it is working on right now is lost.
-  </ConfirmDialog>
+    <div class="login-options" role="radiogroup" aria-label="Claude login" data-testid="switch-account-pick">
+      {#each loginOptions as o (o.value)}
+        <label class="login-option" class:is-current={o.current} data-testid="switch-account-option">
+          <input
+            type="radio"
+            name="switch-login"
+            value={o.value}
+            checked={loginTarget === o.value}
+            onchange={() => (loginPick = o.value)}
+          />
+          <span class="login-name">{o.name}{#if o.email}<span class="muted"> · {o.email}</span>{:else if !o.loggedIn}<span class="muted"> · not logged in</span>{/if}</span>
+          <span class="login-room" data-testid="switch-account-headroom">{o.headroom ?? ''}{o.current ? (o.headroom ? ' · current' : 'current') : ''}</span>
+        </label>
+      {/each}
+    </div>
+    <ProposedBy
+      proposal={loginProposal !== null && loginTarget === loginProposal
+        ? { value: loginProposal || 'host', source: 'rule', reason: 'most left on this host' }
+        : null}
+      field="login"
+      stated
+      onchange={() => (loginPick = session.claude_profile ?? '')}
+      testid="switch-account-proposed"
+    />
+  </DialogSheet>
 {/if}
 
 {#if modelOpen}
@@ -1547,6 +1610,39 @@
   }
   .title-input:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
   .sub { display: flex; gap: 0.5rem; align-items: center; font-size: var(--text-2xs); flex-wrap: wrap; }
+  .login-options {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .login-option {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+  .login-option:hover {
+    background: var(--bg-hover, var(--bg-sunk));
+  }
+  .login-room {
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .tag-chip {
+    display: inline-block;
+    margin-right: 4px;
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-sunk);
+    border: 1px solid var(--border);
+    font-size: var(--text-2xs);
+    line-height: 16px;
+  }
   .friendly { margin: 0; font-size: var(--text-xs); color: var(--fg-muted); }
   .chip {
     padding: 0.1rem 0.4rem;

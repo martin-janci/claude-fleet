@@ -562,6 +562,17 @@ export async function setFriendlyName(
   return r;
 }
 
+/** Replace the session's tags (the Label field, M15 G2.7): the whole
+ *  list, empty clears. Validated again by the backend (1–32 characters of
+ *  letters, digits, `_ . : -`, at most 16). */
+export async function setSessionTags(sessionId: number, tags: readonly string[]): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('set_session_tags', {
+    args: { session_id: sessionId, tags: [...tags] },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
 /** Mark the session viewed now (redesign 2.3): its finished turns read as
  *  seen and it leaves the `done_unread` bucket. A watcher's call is refused
  *  by the hub (the stamp is one per row); that is not an error to show. */
