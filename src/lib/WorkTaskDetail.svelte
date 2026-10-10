@@ -34,6 +34,11 @@
   import ProposedBy from './ProposedBy.svelte';
   import { proposalFor } from './proposals';
   import WorkButton from './WorkButton.svelte';
+  import { tablistKeys } from './tablist_keys';
+  import { setWorkStatus, type WorkItemStatus } from './work';
+  import { listStartRules, ruleProject, type StartRuleView } from './start_rules';
+  import { projects } from './projects';
+  import { deliveryOf, hasDelivery, startRuleFor, TASK_TAB_LABELS, TASK_TABS, type TaskTab } from './task_detail';
   import {
     dependencyName,
     groupSessionLinks,
@@ -68,6 +73,7 @@
   }: { taskId: string; onclose?: () => void; closeLabel?: string; debounceMs?: number } = $props();
 
   const editBlocked = $derived(hubActionBlocked('edit_work_item', $hubStatus, $hubConnection));
+  const statusBlocked = $derived(hubActionBlocked('set_work_status', $hubStatus, $hubConnection));
   const placeBlocked = $derived(hubActionBlocked('place_work', $hubStatus, $hubConnection));
   const orgBlocked = $derived(hubActionBlocked('assign_work_org', $hubStatus, $hubConnection));
   const ruleBlocked = $derived(hubActionBlocked('save_work_rule', $hubStatus, $hubConnection));
@@ -237,6 +243,33 @@
     if (row) selectSessionExplicitly(row);
   }
 
+  // G3.4: the page is tabbed (Overview, Sessions, Activity); the tab stays
+  // as the selection moves from task to task.
+  let tab = $state<TaskTab>('overview');
+
+  // Inline status (a native task's own): set here, without the edit dialog.
+  let statusError = $state<string | null>(null);
+  let statusBusy = $state(false);
+  async function pickStatus(next: WorkItemStatus) {
+    const t = task;
+    if (!t || t.item_id == null || statusBusy || next === t.status_category) return;
+    statusBusy = true;
+    statusError = null;
+    const r = await setWorkStatus(t.item_id, next);
+    statusBusy = false;
+    if (!r.ok) statusError = readErrorText(r.error);
+    else void load(taskId);
+  }
+
+  // The Delivery block and the start rule that would place a start.
+  const rowsById = $derived(new Map($sessions.map((r) => [r.id, r])));
+  const delivery = $derived(task ? deliveryOf(task, detail?.last_outcome, rowsById, nowSec) : null);
+  let startRules = $state.raw<StartRuleView[]>([]);
+  void listStartRules().then((r) => {
+    if (r.ok && Array.isArray(r.value)) startRules = r.value;
+  });
+  const startRule = $derived(startRuleFor(task?.key, startRules));
+
   // Prefilled for the group it is in now (none: the editor asks).
   const makeRuleDraft = (t: WorkTask): WorkRuleDraft =>
     ruleDraftFor(t, t.group && t.group.source !== 'none' ? t.group.label : '');
@@ -249,6 +282,21 @@
       <span class="title" class:unavailable={task?.unavailable}>{task ? task.title || (task.key ? '' : task.task_id) : 'Task'}</span>
     </h2>
     <div class="head-actions">
+      {#if task?.kind === 'local' && task.item_id != null}
+        <select
+          class="status-pick"
+          aria-label="Status"
+          data-testid="work-task-status-pick"
+          value={task.status_category ?? 'todo'}
+          disabled={statusBlocked !== null || statusBusy}
+          title={statusBlocked ?? 'Set the status'}
+          onchange={(e) => void pickStatus((e.currentTarget as HTMLSelectElement).value as WorkItemStatus)}
+        >
+          <option value="todo">To do</option>
+          <option value="in_progress">In progress</option>
+          <option value="done">Done</option>
+        </select>
+      {/if}
       {#if task?.kind === 'local' && task.item_id != null}
         <button
           class="btn btn--quiet"
@@ -282,6 +330,21 @@
         <button class="btn btn--quiet" type="button" data-testid="work-task-refresh-retry" onclick={() => void load(taskId)}>Retry</button>
       </p>
     {/if}
+    {#if statusError}<p class="warn" role="alert" data-testid="work-task-status-error">{statusError}</p>{/if}
+    <div class="tabs" role="tablist" aria-label="Task" use:tablistKeys>
+      {#each TASK_TABS as t (t)}
+        <button
+          type="button"
+          role="tab"
+          class="tab"
+          aria-selected={tab === t}
+          data-testid="work-task-tab-{t}"
+          onclick={() => (tab = t)}
+          >{TASK_TAB_LABELS[t]}{#if t === 'sessions' && (task.sessions ?? []).length > 0}<span class="tab-count">{(task.sessions ?? []).length + (task.sessions_more ?? 0)}</span>{/if}</button
+        >
+      {/each}
+    </div>
+    {#if tab === 'overview'}
     <div class="meta">
       <span class="badge" title={task.provider ?? task.kind}
         >{task.kind === 'local' ? 'local work' : task.kind === 'ref' ? 'bare key' : `${providerInfo(task.provider)?.label ?? task.provider ?? 'tracker'}`}</span
@@ -327,6 +390,39 @@
 
     {#if (task.repos ?? []).length > 0}
       <p class="line">Repositories: <span data-testid="work-task-repos">{(task.repos ?? []).join(', ')}</span></p>
+    {/if}
+
+    {#if delivery && hasDelivery(delivery)}
+      <section class="delivery" data-testid="work-task-delivery" aria-label="Delivery">
+        <h3>Delivery</h3>
+        <dl>
+          {#if delivery.pr}
+            {@const pr = delivery.pr}
+            <dt>Pull request</dt>
+            <dd data-testid="work-task-delivery-pr">
+              <button class="link-btn" type="button" onclick={() => void openExternal(pr.url)}>{pr.label}</button>
+              {#if pr.checks === 'passing'}<span class="ok">✓ checks pass</span>{:else if pr.checks === 'failing'}<span class="bad">✕ {pr.failing} failing</span>{:else if pr.checks === 'running'}<span class="muted">checks running</span>{/if}
+            </dd>
+          {/if}
+          {#if delivery.column}<dt>Tracker column</dt><dd data-testid="work-task-delivery-column">{delivery.column}</dd>{/if}
+          {#if delivery.spend || delivery.duration}
+            <dt>Spent</dt>
+            <dd data-testid="work-task-delivery-spend">
+              {delivery.spend ?? '$0'}{#if delivery.duration}&nbsp;over {delivery.duration}{/if}
+            </dd>
+          {/if}
+          {#if delivery.owner}
+            <dt>Owner</dt>
+            <dd data-testid="work-task-delivery-owner" class:bad={delivery.owner.overdue}>{delivery.owner.text}</dd>
+          {/if}
+        </dl>
+      </section>
+    {/if}
+    {#if startRule}
+      <p class="line" data-testid="work-task-start-rule">
+        Starts in <strong>{ruleProject(startRule, $projects.map((t) => t.project))}</strong>{#if startRule.host_alias}&nbsp;on {startRule.host_alias}{:else}&nbsp;on its last host{/if}
+        <span class="muted small">· rule {startRule.pattern}</span>
+      </p>
     {/if}
 
     <details class="more" data-testid="work-task-more">
@@ -401,8 +497,9 @@
          its progress ("Checkout", "Setting up…") under it. -->
     <div class="actions"><WorkButton {task} variant="bar" /></div>
     {#if detail}<TaskWorkSections {detail} part="work" />{/if}
+    {/if}
 
-    <h3>Sessions</h3>
+    {#if tab === 'sessions'}
     {#snippet linkList(list: WorkTaskLink[], label: string)}
       {#if list.length > 0}
         <h4>{label}</h4>
@@ -458,6 +555,17 @@
     {#if (task.sessions_more ?? 0) > 0}
       <p class="muted">…and {task.sessions_more} more.</p>
     {/if}
+    {/if}
+
+    {#if tab === 'activity'}
+    {#if !detail?.last_outcome && !detail?.placement && (detail?.steps ?? []).length === 0}
+      <p class="muted" data-testid="work-task-no-activity">Nothing has happened on this task yet.</p>
+    {/if}
+    {#if detail?.placement}
+      <p class="muted small" data-testid="work-task-activity-placed">
+        Placed in {detail.placement.group}{#if detail.placement.updated_by}&nbsp;by {detail.placement.updated_by}{/if}{#if detail.placement.updated_at}&nbsp;{timeAgo(detail.placement.updated_at)}{/if}
+      </p>
+    {/if}
 
     {#if detail?.last_outcome}
       {@const o = detail.last_outcome}
@@ -474,6 +582,7 @@
     {/if}
 
     {#if detail}<TaskWorkSections {detail} part="steps" />{/if}
+    {/if}
   {/if}
 </section>
 
@@ -511,6 +620,49 @@
     flex-direction: column;
     gap: 0.4rem;
     font-size: var(--text-sm);
+  }
+  .tabs {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tab {
+    padding: 4px 10px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: none;
+    color: var(--fg-muted);
+    font: inherit;
+    cursor: pointer;
+  }
+  .tab[aria-selected='true'] {
+    color: var(--fg);
+    border-bottom-color: var(--accent);
+  }
+  .tab-count {
+    margin-left: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .delivery dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 2px 10px;
+    margin: 0;
+  }
+  .delivery dt {
+    color: var(--fg-muted);
+  }
+  .delivery dd {
+    margin: 0;
+  }
+  .ok {
+    color: var(--status-done);
+  }
+  .bad {
+    color: var(--status-failed);
+  }
+  .status-pick {
+    font: inherit;
   }
   header {
     display: flex;
