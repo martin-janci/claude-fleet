@@ -45,7 +45,7 @@
   import ProposedBy from './ProposedBy.svelte';
   import StartPulse from './StartPulse.svelte';
   import { creatingStart } from './session_starting';
-  import { preselect, type ProposalLike } from './ai_proposal';
+  import { correctionLine, preselect, type ProposalLike } from './ai_proposal';
   import { HOST_PLACEMENT_FLOOR, hostProposal, proposeHostPlacement, recordHostPlacement } from './host_placement';
   import DraftField from './DraftField.svelte';
   import { draftBrief, draftSource, previewStartWork, siblingProposal, type BriefDraft } from './start_preview';
@@ -180,13 +180,22 @@
       hostProposalShown = true;
     });
   });
+  // The corrected state (G4.9): the person moved off Jev's host. The start
+  // records it (`answerHostProposal`), so the line says so.
+  let hostCorrection = $state<{ from: string; to: string } | null>(null);
+  function correctHost(to: string) {
+    const from = hostProposed?.value ?? hostCorrection?.from ?? null;
+    hostCorrection = hostProposalShown && from && from !== to ? { from, to } : null;
+  }
   function pickHost(alias: string) {
+    correctHost(alias);
     hostPicked = true;
     hostProposed = null;
     chosenHost = alias;
   }
   function changeProposedHost() {
     if (hostBeforeProposal) chosenHost = hostBeforeProposal;
+    correctHost(chosenHost);
     hostPicked = true;
     hostProposed = null;
   }
@@ -1560,6 +1569,10 @@
         testid="new-session-host-proposed"
         onchange={changeProposedHost}
       />
+    {:else if hostCorrection}
+      <p class="correction" data-testid="new-session-host-corrected">
+        {correctionLine(hostCorrection.from, hostCorrection.to, 'when you start')}
+      </p>
     {/if}
 
     <!-- Not a <label>: the picker is a listbox, which a label cannot name
@@ -1845,5 +1858,10 @@
   .draft-error {
     margin: 0;
     color: var(--danger);
+  }
+  .correction {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
   }
 </style>

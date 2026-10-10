@@ -65,6 +65,17 @@ pub struct RoutineRow {
     pub paused_reason: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// A pull request event fires only for this repo (migration 156):
+    /// `owner/name`, or `name` of any owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_repo: Option<String>,
+    /// `anyone`: a pull request opened by any session of its org; absent
+    /// (or `me`) = its owner's sessions only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_author: Option<String>,
+    /// At most one run per PR (or session) in this many seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_rate_secs: Option<i64>,
 }
 
 /// What a person writes: every field of a routine but its identity and the
@@ -84,6 +95,9 @@ pub struct RoutineFields {
     pub budget_run_micros: Option<i64>,
     pub budget_day_micros: Option<i64>,
     pub overlap: String,
+    pub event_repo: Option<String>,
+    pub event_author: Option<String>,
+    pub event_rate_secs: Option<i64>,
 }
 
 /// One run of a routine.
@@ -141,7 +155,8 @@ pub struct NewRoutineRun<'a> {
 const COLS: &str = "id, org_id, owner_person_id, name, enabled, trigger, cron, utc_offset_min, \
                     event, event_cursor, host_alias, project_id, profile, prompt, \
                     budget_run_micros, budget_day_micros, overlap, next_run_at, skip_next, \
-                    paused_reason, created_at, updated_at";
+                    paused_reason, created_at, updated_at, event_repo, event_author, \
+                    event_rate_secs";
 
 fn routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
     Ok(RoutineRow {
@@ -167,6 +182,9 @@ fn routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
         paused_reason: r.get(19)?,
         created_at: r.get(20)?,
         updated_at: r.get(21)?,
+        event_repo: r.get(22)?,
+        event_author: r.get(23)?,
+        event_rate_secs: r.get(24)?,
     })
 }
 
@@ -207,8 +225,10 @@ impl Store {
         self.conn.execute(
             "INSERT INTO routines (org_id, owner_person_id, name, enabled, trigger, cron, \
                utc_offset_min, event, event_cursor, host_alias, project_id, profile, prompt, \
-               budget_run_micros, budget_day_micros, overlap, next_run_at, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18)",
+               budget_run_micros, budget_day_micros, overlap, next_run_at, created_at, updated_at, \
+               event_repo, event_author, event_rate_secs) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, \
+               ?19, ?20, ?21)",
             rusqlite::params![
                 org_id,
                 owner_person_id,
@@ -227,7 +247,10 @@ impl Store {
                 f.budget_day_micros,
                 f.overlap,
                 next_run_at,
-                now
+                now,
+                f.event_repo,
+                f.event_author,
+                f.event_rate_secs
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -248,7 +271,8 @@ impl Store {
                utc_offset_min = ?5, event = ?6, event_cursor = ?7, host_alias = ?8, \
                project_id = ?9, profile = ?10, prompt = ?11, budget_run_micros = ?12, \
                budget_day_micros = ?13, overlap = ?14, next_run_at = ?15, skip_next = 0, \
-               paused_reason = NULL, updated_at = ?16 \
+               paused_reason = NULL, updated_at = ?16, event_repo = ?18, event_author = ?19, \
+               event_rate_secs = ?20 \
              WHERE id = ?17",
             rusqlite::params![
                 f.name,
@@ -267,7 +291,10 @@ impl Store {
                 f.overlap,
                 next_run_at,
                 now_unix(),
-                id
+                id,
+                f.event_repo,
+                f.event_author,
+                f.event_rate_secs
             ],
         )?;
         self.get_routine(id)
@@ -410,21 +437,43 @@ impl Store {
     }
 
     /// Session events of `kind` after `cursor`, oldest first, at most
-    /// `limit`: `(event id, session id)`.
+    /// `limit`: `(event id, session id, detail)`.
     pub fn events_of_kind_after(
         &self,
         cursor: i64,
         kind: &str,
         limit: i64,
-    ) -> Result<Vec<(i64, i64)>, IpcError> {
+    ) -> Result<Vec<(i64, i64, Option<String>)>, IpcError> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, session_id FROM session_events \
+            "SELECT id, session_id, detail FROM session_events \
              WHERE id > ?1 AND kind = ?2 ORDER BY id LIMIT ?3",
         )?;
         let rows = stmt.query_map(rusqlite::params![cursor, kind, limit], |r| {
-            Ok((r.get(0)?, r.get(1)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Whether a run of routine `id` that was not skipped fired on
+    /// `subject` (a `trigger_ref` prefix such as `pr:<id>:`) at or after
+    /// `since`: the event rate (migration 156).
+    pub fn routine_fired_on_since(
+        &self,
+        id: i64,
+        subject: &str,
+        since: i64,
+    ) -> Result<bool, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM routine_runs WHERE routine_id = ?1 AND started_at >= ?3 \
+                   AND state <> 'skipped' \
+                   AND substr(trigger_ref, 1, length(?2)) = ?2 LIMIT 1",
+                rusqlite::params![id, subject, since],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     /// Whether `session_id` has an event of `kind` after event `after`.

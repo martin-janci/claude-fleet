@@ -200,33 +200,47 @@ pub fn login_account(
     profile: Option<&str>,
     now: i64,
 ) -> Result<Option<LoginAccount>, IpcError> {
+    let profile = profile.map(str::trim).filter(|p| !p.is_empty());
+    Ok(login_accounts(s, host_alias, now)?
+        .into_iter()
+        .find(|l| l.login.profile.as_deref() == profile))
+}
+
+/// Every login on `host_alias` that is on a known account, the host's own
+/// first, as [`LoginAccount`]s: the routine editor's Account picker (gap
+/// plan G2.3). Empty for an unknown host.
+pub fn login_accounts(
+    s: &Store,
+    host_alias: &str,
+    now: i64,
+) -> Result<Vec<LoginAccount>, IpcError> {
     let Some(host) = s.get_host_row(host_alias)? else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let snaps = s.latest_usage_snapshots()?;
     let pause_at = pause_at_pct(s);
-    let profile = profile.map(str::trim).filter(|p| !p.is_empty());
-    let Some(login) = logins_with(&host, |uuid| {
+    let logins = logins_with(&host, |uuid| {
         snaps
             .iter()
             .find(|r| r.account_uuid == uuid)
             .and_then(|r| used_pct_of(&r.usage, Some(r.fetched_at), now))
-    })
-    .into_iter()
-    .find(|l| l.profile.as_deref() == profile) else {
-        return Ok(None);
-    };
-    let email = s
-        .list_accounts()?
+    });
+    if logins.is_empty() {
+        return Ok(Vec::new());
+    }
+    let accounts = s.list_accounts()?;
+    Ok(logins
         .into_iter()
-        .find(|a| a.uuid == login.account_uuid)
-        .and_then(|a| a.email);
-    Ok(Some(LoginAccount {
-        host_alias: host_alias.to_string(),
-        over: login.used_pct.is_some_and(|u| u >= pause_at),
-        login,
-        email,
-    }))
+        .map(|login| LoginAccount {
+            host_alias: host_alias.to_string(),
+            over: login.used_pct.is_some_and(|u| u >= pause_at),
+            email: accounts
+                .iter()
+                .find(|a| a.uuid == login.account_uuid)
+                .and_then(|a| a.email.clone()),
+            login,
+        })
+        .collect())
 }
 
 /// Whether automation (a routine, the mission loop) should leave the login
@@ -315,6 +329,20 @@ pub fn refuse_over_limit(
             "suggested_profile": suggestion.as_ref().map(|l| l.profile.clone().unwrap_or_default()),
             "suggested_account_uuid": suggestion.as_ref().map(|l| l.account_uuid.clone()),
     })))
+}
+
+/// Whether the account `account_uuid` is at or past `accounts.pause_at` at
+/// `now`, from the store's newest usage snapshot (as [`login_account`]).
+/// `false` without a reading or once its windows have reset: Send later's
+/// "when the limit resets" (M15 step G1.8) holds a prompt only while the
+/// limit is known to be hit.
+pub fn account_over_line(s: &Store, account_uuid: &str, now: i64) -> Result<bool, IpcError> {
+    let used = s
+        .latest_usage_snapshots()?
+        .into_iter()
+        .find(|r| r.account_uuid == account_uuid)
+        .and_then(|r| used_pct_of(&r.usage, Some(r.fetched_at), now));
+    Ok(used.is_some_and(|u| u >= pause_at_pct(s)))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]

@@ -334,10 +334,21 @@ pub struct RulePreview {
     pub total: u32,
     /// Tasks it matches that a person placed: they stay where they are.
     pub kept_manual: u32,
+    /// Open tasks (not done, not archived) the draft's conditions match now,
+    /// whether or not it moves them and whether or not it is enabled: the
+    /// editor's live "Matches 6 open tasks now" (gap plan G2.2). `0` from an
+    /// older hub.
+    #[serde(default)]
+    pub matched: u32,
+    /// The first [`MATCHED_SAMPLE`] of them, each its key, else its title.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_sample: Vec<String>,
 }
 
 /// Most affected tasks one preview lists.
 pub const PREVIEW_MAX: usize = 200;
+/// Most matched tasks one preview names.
+pub const MATCHED_SAMPLE: usize = 3;
 
 /// `work { action: rule_preview, rule }`: which of the caller's tasks the
 /// rule — as drafted, in its place among the others — would move, before
@@ -372,11 +383,22 @@ pub fn rule_preview(
     let after = view::all_tasks(&g, scope, 0);
     let mut affected = Vec::new();
     let mut kept_manual = 0;
+    let mut matched = 0u32;
+    let mut matched_sample = Vec::new();
     for t in &after {
         let Some(b) = before.iter().find(|x| x.task_id == t.task_id) else {
             continue;
         };
         let item = t.item_id.and_then(|i| g.items.get(&i));
+        if !t.archived
+            && t.stage != "done"
+            && rule_matches(&draft, item, t.key.as_deref(), &t.title, &t.repos)
+        {
+            matched += 1;
+            if matched_sample.len() < MATCHED_SAMPLE {
+                matched_sample.push(t.key.clone().unwrap_or_else(|| t.title.clone()));
+            }
+        }
         if draft.enabled
             && t.group.source == "manual"
             && rule_matches(&draft, item, t.key.as_deref(), &t.title, &t.repos)
@@ -399,6 +421,8 @@ pub fn rule_preview(
         affected,
         total,
         kept_manual,
+        matched,
+        matched_sample,
     })
 }
 
@@ -572,6 +596,15 @@ pub struct OrgImpact {
     /// Paired clients bound to an org that would stop / start seeing it.
     pub bound_clients_losing: u32,
     pub bound_clients_gaining: u32,
+    /// The people whose org-bound devices are among those: who loses /
+    /// gains access to the task by the move (gap plan G2.2's "Ondrej loses
+    /// access"), by display name, sorted. A device that belongs to someone
+    /// who keeps access on another of theirs still counts them: the line
+    /// names what the device sees. Empty from an older hub.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people_losing: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people_gaining: Vec<String>,
     /// Journal rows (conversations, notes, handovers) and summaries of
     /// this work whose readers change with it.
     pub journal_entries: u32,
@@ -702,6 +735,14 @@ fn impact_of(
     // only while its org's `bound_sees_unassigned` is on (D31). One scope
     // per org, read once.
     let mut client_scopes: HashMap<i64, OrgScope> = HashMap::new();
+    let mut people_losing: BTreeSet<String> = BTreeSet::new();
+    let mut people_gaining: BTreeSet<String> = BTreeSet::new();
+    let person_name = |id: Option<i64>| -> Result<Option<String>, IpcError> {
+        Ok(match id {
+            Some(p) => s.get_person(p)?.map(|p| p.display_name.unwrap_or(p.name)),
+            None => None,
+        })
+    };
     for c in s.active_client_tokens()? {
         let Some(o) = c.org_id else {
             continue;
@@ -711,8 +752,14 @@ fn impact_of(
             Entry::Vacant(e) => e.insert(OrgScope::for_client(s, o)?),
         };
         match (cs.sees_org(from), cs.sees_org(to)) {
-            (true, false) => bound_clients_losing += 1,
-            (false, true) => bound_clients_gaining += 1,
+            (true, false) => {
+                bound_clients_losing += 1;
+                people_losing.extend(person_name(c.person_id)?);
+            }
+            (false, true) => {
+                bound_clients_gaining += 1;
+                people_gaining.extend(person_name(c.person_id)?);
+            }
             _ => {}
         }
     }
@@ -737,6 +784,8 @@ fn impact_of(
         hosts_gaining,
         bound_clients_losing,
         bound_clients_gaining,
+        people_losing: people_losing.into_iter().collect(),
+        people_gaining: people_gaining.into_iter().collect(),
         journal_entries,
         summaries,
         impact_token: token,

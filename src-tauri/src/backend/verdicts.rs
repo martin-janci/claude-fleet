@@ -269,6 +269,21 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "set_friendly_name",
         },
     ),
+    // The Label field (M15 G2.7): the hub's own `set_session_tags`, `own`.
+    (
+        "set_session_tags",
+        Verdict::Routed {
+            tool: "set_session_tags",
+        },
+    ),
+    // Link / Not related on a related-session proposal (M15 G4.3): the
+    // hub's own `decide_related_session`, `own`.
+    (
+        "decide_related_session",
+        Verdict::Routed {
+            tool: "decide_related_session",
+        },
+    ),
     (
         "touch_session_viewed",
         Verdict::Routed {
@@ -878,6 +893,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     ("list_pull_requests", Verdict::Routed { tool: "prs" }),
+    // Named Control API tokens (M15 step G2.8): a token for the fleet this
+    // window is onto, so the hub's. Its tool serves the owner's trusted full
+    // device read and act tokens; an admin one stays the hub master's.
+    ("api_tokens", Verdict::Routed { tool: "api_tokens" }),
     // Start rules (Orbit Fleet 8.11): the hub decides and tallies its own
     // starts, so its rules are the ones that count.
     (

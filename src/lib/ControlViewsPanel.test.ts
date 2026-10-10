@@ -10,7 +10,8 @@ import { sessions } from './sessions';
 import { selectedSession, onSessionOpened } from './selection';
 import { destination } from './destination';
 import { sidebarView } from './work_view';
-import { session } from './hosts_fixture';
+import { session, snapshot } from './hosts_fixture';
+import { accountUsage } from './account_usage_store';
 import { expectAccessible } from './a11y_check';
 
 // Redesign step 9.4: the Views panel beside Control's chat.
@@ -108,5 +109,55 @@ describe('ControlViewsPanel (step 9.4)', () => {
     const { container, getByTestId } = render(ControlViewsPanel);
     await fireEvent.click(getByTestId('control-views-add'));
     await expectAccessible(container);
+  });
+});
+
+// Gap plan G3.10 (board MissionControl): the fleet line, search and folds.
+describe('Needs you folds and search (G3.10)', () => {
+  const now = Math.floor(Date.now() / 1000);
+  afterEach(() => accountUsage.set({}));
+
+  it('says the fleet in a line and folds Running, Idle and Done today', async () => {
+    sessions.set([
+      asking,
+      busy,
+      session('trn', 'quiet', { claude_status: 'idle', last_stop_at: now - 3 * 86_400, last_activity_at: now - 3 * 86_400 }),
+    ]);
+    const { getByTestId, getAllByTestId } = render(ControlViewsPanel);
+    expect(getByTestId('control-fleet-line').textContent).toBe('Welcome back. 1 needs you · 1 running · 1 idle');
+    const running = getByTestId('control-fold-running');
+    expect(running.textContent).toContain('Working');
+    expect(running.hasAttribute('open')).toBe(false);
+    await fireEvent.click(getAllByTestId('control-fold-row')[0]);
+    expect(get(selectedSession)?.id).toBe(busy.id);
+    expect(get(controlViews).active).toBe('session');
+  });
+
+  it('the search narrows the rows and the folds, not the fleet line', async () => {
+    const { getByTestId, queryAllByTestId, queryByTestId } = render(ControlViewsPanel);
+    await fireEvent.input(getByTestId('control-views-search'), { target: { value: 'busy' } });
+    expect(queryAllByTestId('control-needs-you-row')).toHaveLength(0);
+    expect(getByTestId('control-fold-running')).toBeTruthy();
+    expect(getByTestId('control-fleet-line').textContent).toContain('1 needs you');
+    await fireEvent.input(getByTestId('control-views-search'), { target: { value: 'nothing-like-it' } });
+    expect(queryByTestId('control-fold-running')).toBeNull();
+  });
+
+  it('a paused-limit row answers Switch account and Wait right there', () => {
+    const limited = session('mac', 'limited', { claude_status: 'idle', account_uuid: 'acc-1' });
+    accountUsage.set({
+      'acc-1': snapshot('acc-1', {
+        status: 'ok',
+        usage: {
+          five_hour: { utilization: 100, resets_at: now + 3600 },
+          seven_day: { utilization: 10, resets_at: now + 86_400 },
+          seven_day_opus: null,
+          seven_day_sonnet: null,
+        },
+      }),
+    });
+    sessions.set([limited]);
+    const { getByTestId } = render(ControlViewsPanel);
+    expect(getByTestId('control-needs-you-limit').textContent).toMatch(/Switch account|Wait/);
   });
 });

@@ -18,7 +18,7 @@ use tauri::State;
 /// The `routines` tool's arguments, as the tool reads them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoutinesArgs {
-    /// list | get | runs | failing | save | delete | set_enabled | skip_next | run_now
+    /// list | get | runs | failing | save | preview | delete | set_enabled | skip_next | run_now
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine_id: Option<i64>,
@@ -86,6 +86,19 @@ pub(crate) mod routed {
                     .ok_or_else(|| IpcError::new(codes::E_INVALID, "save needs routine"))?;
                 json(svc::save(store, &scope, args.routine_id, input)?)
             }
+            "preview" => {
+                let input = args
+                    .routine
+                    .as_ref()
+                    .ok_or_else(|| IpcError::new(codes::E_INVALID, "preview needs routine"))?;
+                json(svc::preview(
+                    store,
+                    &scope,
+                    args.routine_id,
+                    input,
+                    fleet_core::store::now_unix(),
+                )?)
+            }
             "delete" => json(serde_json::json!({ "removed": svc::delete(store, &scope, id()?)? })),
             "set_enabled" => {
                 let on = args
@@ -106,8 +119,8 @@ pub(crate) mod routed {
             other => Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
-                    "action must be list | get | runs | failing | save | delete | set_enabled | \
-                     skip_next | run_now, got {other:?}"
+                    "action must be list | get | runs | failing | save | preview | delete | \
+                     set_enabled | skip_next | run_now, got {other:?}"
                 ),
             )),
         }

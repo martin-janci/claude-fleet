@@ -84,7 +84,9 @@
     selectedPath: string | null;
     onSelect: (path: string, status: string | undefined) => void;
     onStageToggle?: (path: string, staged: boolean) => void;
-    onCommit?: (message: string) => void;
+    /** Commit the staged changes (G2.7): `amend` rewrites the last commit,
+     *  `push` pushes the branch once the commit is made. */
+    onCommit?: (message: string, opts: { amend: boolean; push: boolean }) => void;
     enableStaging?: boolean;
     /** Set when staging/committing has no hub tool (`hubBlock('repo_write', …)`
      *  from `FilesPanel`) — the reason, shown as the checkbox's/button's title. */
@@ -128,6 +130,59 @@
   let expanded = $state<Record<string, boolean>>({});
 
   const stagedCount = $derived(changes.filter((c) => c.staged).length);
+
+  // The commit form's two choices (gap plan G2.7, the FormsSession board):
+  // push once committed, and amend the last commit instead of a new one.
+  let pushAfter = $state(false);
+  let amend = $state(false);
+  /** The last commit is already on the remote: amending it would need a
+   *  force push, which this form never does, so Push after commit is off. */
+  const lastPushed = $derived(
+    branch !== null && branch.upstream !== null && branch.unpushed.length === 0,
+  );
+  const pushWhy = $derived(
+    branch === null
+      ? null
+      : branch.branch === null
+        ? 'Detached HEAD: check out a branch to push'
+        : amend && lastPushed
+          ? `The last commit is already on ${branch.upstream}; amending it needs a force push, so it is not pushed from here`
+          : null,
+  );
+  const ahead = $derived(branch ? branch.unpushed.length : 0);
+  const commitHead = $derived(
+    branch?.branch
+      ? `On ${branch.branch} · ${branch.upstream ? `${ahead}${branch.truncated ? '+' : ''} ahead of ${branch.upstream.split('/')[0]}` : 'not on the remote yet'}`
+      : branch
+        ? 'Detached HEAD'
+        : null,
+  );
+  // Amend may reword the last commit with nothing staged; a new commit
+  // needs something staged.
+  const commitBlocked = $derived(
+    writeBlocked ??
+      (commitMsg.trim() === ''
+        ? amend
+          ? 'Write the message for the amended commit'
+          : 'Write a commit message'
+        : !amend && stagedCount === 0
+          ? 'Stage files first'
+          : null),
+  );
+  const commitVerb = $derived(
+    amend
+      ? stagedCount > 0
+        ? `Amend last with ${stagedCount} file${stagedCount === 1 ? '' : 's'}`
+        : 'Amend last commit'
+      : `Commit ${stagedCount} file${stagedCount === 1 ? '' : 's'}`,
+  );
+  function commitNow(): void {
+    if (commitBlocked !== null) return;
+    onCommit?.(commitMsg.trim(), { amend, push: pushAfter && pushWhy === null });
+    commitMsg = '';
+    draft = null;
+    amend = false;
+  }
 
   const statusByPath = $derived(new Map(changes.map((c) => [c.path, c.status])));
   /** The folders a changed file sits in (the FilesTree board's tree marks
@@ -301,7 +356,10 @@
     {/if}
   </div>
   {#if enableStaging && mode === 'changes'}
-    <div class="commit-footer">
+    <div class="commit-footer" data-testid="commit-form">
+      {#if commitHead}
+        <p class="commit-head" data-testid="commit-head">{commitHead}</p>
+      {/if}
       {#if draftCommit && writeBlocked === null}
         <DraftField
           bind:value={commitMsg}
@@ -338,11 +396,30 @@
           title={writeBlocked ?? ''}
         ></textarea>
       {/if}
+      <div class="commit-opts">
+        <label title={pushWhy ?? 'Push the branch once the commit is made'}>
+          <input
+            type="checkbox"
+            data-testid="commit-push-after"
+            bind:checked={pushAfter}
+            disabled={writeBlocked !== null || pushWhy !== null}
+          />
+          Push after commit
+        </label>
+        <label title="Rewrite the last commit with the staged changes and this message">
+          <input type="checkbox" data-testid="commit-amend" bind:checked={amend} disabled={writeBlocked !== null} />
+          Amend last
+        </label>
+      </div>
+      {#if pushWhy && (amend || branch?.branch === null)}
+        <p class="commit-note" data-testid="commit-push-why">{pushWhy}.</p>
+      {/if}
       <button
-        disabled={writeBlocked !== null || stagedCount === 0 || commitMsg.trim() === ''}
-        title={writeBlocked ?? ''}
-        onclick={() => { onCommit?.(commitMsg.trim()); commitMsg = ''; draft = null; }}
-      >Commit {stagedCount} file{stagedCount === 1 ? '' : 's'}</button>
+        data-testid="commit-submit"
+        disabled={commitBlocked !== null}
+        title={commitBlocked ?? ''}
+        onclick={commitNow}
+      >{commitVerb}</button>
     </div>
   {/if}
 </div>
@@ -558,6 +635,24 @@
     flex-direction: column;
     gap: 0.35rem;
     flex: 0 0 auto;
+  }
+  .commit-head,
+  .commit-note {
+    margin: 0;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
+  .commit-opts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem 0.8rem;
+    font-size: var(--text-2xs);
+  }
+  .commit-opts label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    cursor: pointer;
   }
   .commit-footer .draft {
     align-self: flex-start;

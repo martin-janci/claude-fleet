@@ -23,6 +23,7 @@
   // overlay. An agent's own form is FormCard; this is the app's.
   import { untrack } from 'svelte';
   import FormWizard from './FormWizard.svelte';
+  import SavedLaterLine from './SavedLaterLine.svelte';
   import Loader from '../Loader.svelte';
   import { finishedSpec, partialSpec } from './partial_spec';
   import { answerSummary, endedMark } from './receipt';
@@ -38,6 +39,7 @@
     initial = {},
     building = false,
     outcome = null,
+    saveKey = null,
     onsubmit,
     ondecline,
     onended,
@@ -58,6 +60,10 @@
     building?: boolean;
     /** How it ended, when the card is drawn again after it did. */
     outcome?: ChatFormEnded | null;
+    /** Where "Save and finish later" keeps the answers on this device (the
+     *  card's own key). With the spec's `save_later`, the card offers it,
+     *  folds to one line with Resume, and opens again from what was kept. */
+    saveKey?: string | null;
     onsubmit: (values: Values) => Promise<ChatFormOutcome>;
     ondecline?: (note: string) => void | Promise<void>;
     onended?: (ended: ChatFormEnded) => void;
@@ -72,11 +78,17 @@
   let declining = $state(false);
   let note = $state('');
   let ended = $state<ChatFormEnded | null>(untrack(() => outcome));
-  let wizard: { clearSecrets: () => void } | undefined = $state();
+  let wizard: { clearSecrets: () => void; forgetSaved: () => void } | undefined = $state();
+  // Saved to finish later: the card is one line until Resume.
+  let later = $state(false);
 
   /** The receipt line's summary, read as a decided form's would be. */
   function summaryOf(s: FormSpec, values: Values): string {
-    const view = { spec: s, answers: values, secrets: {}, host_alias: '', state: 'answered' } as unknown as FormView;
+    // A secret counts ("1 secret"), never with its value.
+    const secrets: Record<string, string> = {};
+    for (const st of s.steps)
+      for (const f of st.fields ?? []) if (f.type === 'secret' && typeof values[f.name] === 'string' && values[f.name] !== '') secrets[f.name] = '';
+    const view = { spec: s, answers: values, secrets, host_alias: '', state: 'answered' } as unknown as FormView;
     return answerSummary(view);
   }
 
@@ -89,6 +101,7 @@
     busy = false;
     wizard?.clearSecrets();
     if (r.ok) {
+      wizard?.forgetSaved();
       ended = { state: 'answered', summary: r.summary ?? summaryOf(whole, values), starting: r.starting ?? null };
       onended?.(ended);
       return;
@@ -101,6 +114,7 @@
     busy = true;
     await ondecline?.(note.trim());
     busy = false;
+    wizard?.forgetSaved();
     ended = { state: 'declined', note: note.trim() };
     onended?.(ended);
   }
@@ -122,6 +136,8 @@
       <span>{ended.starting}</span>
     </div>
   {/if}
+{:else if whole && later}
+  <SavedLaterLine title={whole.title} onresume={() => (later = false)} />
 {:else}
   <section class="card" data-testid="chat-form" aria-label={`Form from ${from}`} aria-busy={!whole}>
     {#if whole}
@@ -139,6 +155,8 @@
         {sending}
         {initial}
         serverProblems={problems}
+        {saveKey}
+        onsavelater={() => (later = true)}
         onunplaced={(ps) => (error = ps.map((p) => `${p.field}: ${p.problem}`).join('; '))}
         onsubmit={(v) => void submit(v)} />
       {#if ondecline}

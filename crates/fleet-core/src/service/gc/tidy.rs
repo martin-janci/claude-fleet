@@ -344,6 +344,10 @@ pub struct TidyCandidate {
     /// candidate, whose tree is its own; `None` = not measured yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_kb: Option<i64>,
+    /// The worktree a `safe_kill` would remove, as the store records it
+    /// (G3.12: the sheet's row detail names it). `None` = no tree of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
     /// The linked item's org, for scoping the link's details (never sent).
     #[serde(skip)]
     pub link_org_id: Option<i64>,
@@ -679,6 +683,7 @@ pub fn plan_tidy(
                 .flatten(),
             // Filled by the service from the probe's sizes.
             worktree_kb: None,
+            worktree_path: None,
             link_org_id: s.link.as_ref().and_then(|l| l.org_id),
         });
     }

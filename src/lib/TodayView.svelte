@@ -6,7 +6,19 @@
   // tracker cache — no network), cut to the scope the sidebar shows. Copy
   // standup puts the same four sections on the clipboard as plain text.
   // Tracker titles are rendered as text, never as markup.
+  //
+  // Gap plan G3.2 (board Today): four KPI tiles, the date and fleet line,
+  // a paused-limit row's Switch account and Wait right on it with an Open
+  // per row, "from <routine>" on what shipped, and In progress cut to four
+  // groups with "N more ›". Cut: "Release 0.5.3 · apps installed" (fleet
+  // records no install per device).
   import { onDestroy } from 'svelte';
+  import LimitActions from './LimitActions.svelte';
+  import { classify } from './attention';
+  import { attentionFacts } from './attention_facts';
+  import { accountByUuid, accountLabel } from './accounts';
+  import { hosts } from './hosts';
+  import { attentionIdleMinutes } from './notify';
   import { sessions, type SessionRow } from './sessions';
   import { selectSessionExplicitly } from './selection';
   import { effectiveScope, scopeOf } from './orgs';
@@ -30,6 +42,9 @@
     groupLabel,
     groupStatusLabel,
     sessionPhrase,
+    todayKpis,
+    todayLine,
+    IN_PROGRESS_SHOWN,
     type Today,
     type TodayBucket,
     type TodayGroup,
@@ -130,6 +145,27 @@
     copyTimer = setTimeout(() => (copied = false), 1_500);
   }
 
+  const kpis = $derived(view ? todayKpis(view) : null);
+  const dateLine = $derived(
+    todayLine(
+      now(),
+      $hosts.filter((h) => !h.hidden).map((h) => h.alias),
+      $sessions,
+      localMidnight(now()),
+    ),
+  );
+  let allInProgress = $state(false);
+  const inProgressShown = $derived(view ? (allInProgress ? view.inProgress : view.inProgress.slice(0, IN_PROGRESS_SHOWN)) : []);
+
+  /** The live row behind a digest session, when it is paused on a limit:
+   *  its Switch account and Wait go right on the row. */
+  function limited(s: TodaySession): SessionRow | null {
+    const row = $sessions.find((r) => r.id === s.id);
+    if (!row) return null;
+    const opts = { idleSecs: $attentionIdleMinutes * 60, now: Math.floor(now() / 1000), facts: $attentionFacts };
+    return classify(row, opts) === 'account_limit' ? row : null;
+  }
+
   function jump(s: TodaySession) {
     const row: SessionRow | undefined = $sessions.find((r) => r.id === s.id);
     if (!row) return;
@@ -172,6 +208,21 @@
                 onclick={() => jump(s)}>{sessionPhrase(s, bucket)}</button
               >
               <span class="meta">{s.host_alias}{#if s.ci_status} · CI {s.ci_status}{/if}</span>
+              <button class="btn btn--quiet open" type="button" data-testid="today-session-open" aria-label="Open {s.name}" onclick={() => jump(s)}
+                >Open</button
+              >
+              {#if bucket === 'waiting'}
+                {@const row = limited(s)}
+                {#if row}
+                  <div class="limit" data-testid="today-limit">
+                    <LimitActions
+                      sess={row}
+                      resetsAt={$attentionFacts?.limited_accounts?.[row.account_uuid ?? '']?.resets_at ?? null}
+                      accountName={(u) => accountLabel($accountByUuid.get(u))}
+                    />
+                  </div>
+                {/if}
+              {/if}
             </li>
           {/each}
         </ul>
@@ -182,7 +233,10 @@
 
 <section class="today" data-testid="today-view" aria-label="Today">
   <header>
-    <h2>Today</h2>
+    <div>
+      <h2>Today</h2>
+      <p class="dateline" data-testid="today-dateline">{dateLine}</p>
+    </div>
     <div class="actions">
       <button class="btn" type="button" data-testid="today-copy" disabled={!view} onclick={() => void copyStandup()}
         >{copied ? 'Copied' : 'Copy standup'}</button
@@ -207,6 +261,15 @@
   <!-- Redesign 9.10: stuck missions, with the next step Jev proposes. -->
   <MissionNudge />
 
+  {#if view && kpis}
+    <ul class="kpis" aria-label="Today in numbers" data-testid="today-kpis">
+      <li class="kpi" class:hot={kpis.needsYou > 0}><span class="n">{kpis.needsYou}</span>{' '}<span class="k">Needs you</span></li>
+      <li class="kpi"><span class="n">{kpis.inProgress}</span>{' '}<span class="k">In progress</span></li>
+      <li class="kpi"><span class="n">{kpis.shipped}</span>{' '}<span class="k">Shipped today</span></li>
+      <li class="kpi"><span class="n">{kpis.stale}</span>{' '}<span class="k">Stale</span></li>
+    </ul>
+  {/if}
+
   {#if view}
     {#if isEmptyView(view)}
       <p class="empty" data-testid="details-empty">Nothing running today. Pick a session, or start work from ⌘K.</p>
@@ -230,7 +293,12 @@
     {/if}
     {#if view.inProgress.length > 0}
       <h3 data-testid="today-in-progress">In progress</h3>
-      {@render groups(view.inProgress, 'in_progress')}
+      {@render groups(inProgressShown, 'in_progress')}
+      {#if view.inProgress.length > inProgressShown.length}
+        <button class="btn btn--quiet more" type="button" data-testid="today-more" onclick={() => (allInProgress = true)}
+          >{view.inProgress.length - inProgressShown.length} more ›</button
+        >
+      {/if}
     {/if}
     {#if view.shipped.length > 0}
       <h3 data-testid="today-shipped">Shipped today</h3>
@@ -239,6 +307,7 @@
           <li class="group shipped">
             <span class="label">{x.key ? groupLabel({ key: x.key, title: x.title ?? '' }) : x.title || 'Untitled work'}</span>
             <span class="status">{x.how === 'done' ? 'done' : 'PR'}</span>
+            {#if x.from}<span class="status" data-testid="today-shipped-from">from {x.from}</span>{/if}
             {#if x.pr_url}
               <button class="btn btn--quiet link" type="button" onclick={() => void openExternal(x.pr_url ?? '')}>PR</button>
             {:else if x.url}
@@ -289,6 +358,44 @@
   h2 {
     margin: 0;
     font-size: var(--text-md);
+  }
+  .dateline {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+  }
+  .kpis {
+    list-style: none;
+    margin: 0.2rem 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+    gap: 0.4rem;
+  }
+  .kpi {
+    display: flex;
+    flex-direction: column;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+  }
+  .kpi .n {
+    font-size: var(--text-md);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .kpi.hot .n {
+    color: var(--status-waiting);
+  }
+  .kpi .k {
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+  }
+  .limit {
+    padding: 0.2rem 0 0.2rem 0.6rem;
+  }
+  .more {
+    align-self: flex-start;
   }
   h3 {
     margin: 0.6rem 0 0.2rem;

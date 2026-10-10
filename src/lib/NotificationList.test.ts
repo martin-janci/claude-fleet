@@ -74,3 +74,37 @@ describe('NotificationList', () => {
     expect(screen.getByTestId('notices-empty')).toBeInTheDocument();
   });
 });
+
+// Toasts board (G4.8): the centre keeps a toast's second line, offers both
+// of its buttons while it is up, and ⚙ goes to Settings › Notifications.
+describe('NotificationList, G4.8', () => {
+  it('keeps the second line and offers both buttons while the toast is up', async () => {
+    const add = vi.fn();
+    const later = vi.fn();
+    push({
+      message: 'You picked acme/pos for PD-* 5 times',
+      sub: 'Add rule PD-* → acme/pos?',
+      action: { label: 'Add rule', run: add },
+      secondary: { label: 'Not now', run: later },
+    });
+    render(NotificationList);
+    expect(screen.getByTestId('notice-sub')).toHaveTextContent('Add rule PD-* → acme/pos?');
+    await fireEvent.click(screen.getByTestId('notice-secondary'));
+    expect(later).toHaveBeenCalledOnce();
+    await tick();
+    // The toast is gone, so its buttons are too; the line stays to read.
+    expect(screen.queryByTestId('notice-action')).toBeNull();
+    expect(screen.getByTestId('notice-sub')).toBeInTheDocument();
+  });
+
+  it('⚙ leaves the sheet and opens Settings at Notifications', async () => {
+    const { settingsOpen, settingsSection } = await import('./app_views');
+    settingsOpen.set(false);
+    const onleave = vi.fn();
+    render(NotificationList, { props: { onleave } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Notification settings' }));
+    expect(onleave).toHaveBeenCalledOnce();
+    expect(get(settingsOpen)).toBe(true);
+    expect(get(settingsSection)).toBe('notifications');
+  });
+});

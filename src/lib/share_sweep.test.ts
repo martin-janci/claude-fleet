@@ -756,9 +756,6 @@ const NO_FRONTEND_WRITER: Partial<Record<SessionAction, string>> = {
   dispatch_task:
     'Likewise MCP-only — the desktop watches tasks (TasksPanel) and cancels them, but dispatching ' +
     'one is the control API’s.',
-  set_session_tags:
-    'No desktop command exists yet: tags arrive on the row and are shown, and `set_session_tags` ' +
-    'is reachable only through the control API.',
   delete_worktree:
     'MCP-only since the desktop command went (no component called it): fleet-mobile and agents ' +
     'still delete a worktree through the control API.',

@@ -3,14 +3,12 @@
   // board's "Hub federation v2 · sign the autonomy grant" row): each one
   // the hub says waits (`waiting_on`), with why and how long, opening the
   // mission. Their count is part of the Needs you badge.
-  import { onMount } from 'svelte';
   import { shortAge } from './session_status';
   import { openMission } from './missions';
-  import { loadWaitingMissions, waitWords, waitingMissions } from './mission_waits';
+  import { waitWords, waitingMissions } from './mission_waits';
 
   // `trackWaitingMissions` (main.ts) keeps the list fresh; opening the
-  // Inbox reads it once more so it is current as it shows.
-  onMount(() => void loadWaitingMissions());
+  // Inbox reads it once more (Sidebar.svelte), so it is current as it shows.
 </script>
 
 {#if $waitingMissions.length > 0}

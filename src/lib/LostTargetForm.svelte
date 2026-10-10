@@ -33,6 +33,7 @@
     requireProject = false,
     onsubmit,
     oncancel,
+    onignore,
   }: {
     /** The button: Adopt (a pane) or Restore (a conversation). */
     action: 'Adopt' | 'Restore';
@@ -46,6 +47,9 @@
      *  resolves to an error message, or null when done. */
     onsubmit: (projectId: number | null, ticket: string | null) => Promise<string | null>;
     oncancel: () => void;
+    /** "Ignore" (gap plan G2.7): leave this entry out from now on. Absent,
+     *  the form offers no Ignore. */
+    onignore?: () => void;
   } = $props();
 
   const list = $derived(pickableProjects($projects.map((p) => p.project)));
@@ -125,6 +129,16 @@
   {/if}
   {#if error}<p class="error" data-testid="lost-target-error">{error}</p>{/if}
   <div class="actions">
+    {#if onignore}
+      <button
+        type="button"
+        class="small ignore"
+        disabled={busy}
+        title="Leave it out of this list from now on, on this device. Nothing on the host changes."
+        data-testid="lost-target-ignore"
+        onclick={onignore}>Ignore</button
+      >
+    {/if}
     <button
       type="button"
       class="small primary"
@@ -181,5 +195,8 @@
   .actions {
     display: flex;
     gap: 6px;
+  }
+  .ignore {
+    margin-right: auto;
   }
 </style>

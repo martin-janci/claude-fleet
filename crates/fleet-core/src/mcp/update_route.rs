@@ -159,6 +159,7 @@ mod tests {
 
     fn peer() -> Caller {
         Caller {
+            api: None,
             host_alias: None,
             client: Some(ClientRef {
                 id: 1,

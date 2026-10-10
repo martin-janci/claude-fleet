@@ -120,6 +120,39 @@ export function proposedByLabel(source: ProposalSource): string {
   }
 }
 
+/**
+ * A confidence in words, never a percentage (AI patterns board: "A
+ * confidence word, never a percentage"). Takes whole percent. Null when
+ * there is no number.
+ */
+export function confidenceWord(pct: number | null | undefined): string | null {
+  if (typeof pct !== 'number' || !Number.isFinite(pct)) return null;
+  if (pct >= 90) return 'almost sure';
+  if (pct >= 70) return 'likely';
+  if (pct >= 50) return 'maybe';
+  return 'unsure';
+}
+
+/** A why line from the backend with its Jev confidence note ("Jev
+ *  proposed ABC-12 (82%) · R12") worded: "(likely)". */
+export function wordConfidenceIn(text: string): string {
+  return text.replace(/\((\d{1,3})%\)/g, (_, n: string) => `(${confidenceWord(Number(n))})`);
+}
+
+/** The corrected state (AI patterns board): the person picked something
+ *  else, and the pick is kept as the label Jev is measured against.
+ *  `recorded` says when: "now" or a moment still ahead ("on start"). */
+export function correctionLine(from: string, to: string, recorded = ''): string {
+  return `You changed ${from} → ${to} · recorded as a correction${recorded ? ` ${recorded}` : ''}`;
+}
+
+/** The parts of the "When AI changed something" line, in board order:
+ *  "Linked to PD-2592 · Proposed by Jev · you confirmed". The Undo is the
+ *  consumer's button or toast action. */
+export function aiChangeLine(what: string, source: ProposalSource, confirmed = false): string {
+  return [what, proposedByLabel(source), confirmed ? 'you confirmed' : ''].filter(Boolean).join(' · ');
+}
+
 /** Where a draft came from: "by haiku on mercury · from 3 changed files". */
 export function draftedBy(model?: string | null, host?: string | null, from?: string | null): string {
   const who = [model ? `by ${model}` : '', host ? `on ${host}` : ''].filter(Boolean).join(' ');

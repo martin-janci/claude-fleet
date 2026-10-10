@@ -9,7 +9,14 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   routineDeleteLoss,
   ROUTINE_RUNS_SHOWN,
+  clockChange,
   cronWords,
+  dryRunLine,
+  nextRunLabel,
+  offsetWords,
+  scheduleCron,
+  schedulePick,
+  zoneOffsetMin,
   failing,
   fixRoutine,
   microsOf,
@@ -167,5 +174,58 @@ describe('routineDeleteLoss (G1.4)', () => {
   it('a full page of runs may be more: says "or more"', () => {
     const page = Array.from({ length: ROUTINE_RUNS_SHOWN }, () => run);
     expect(routineDeleteLoss({ runs: page }).lead).toMatch(/^Its 20 or more runs go with it\./);
+  });
+});
+
+describe('the schedule picker and its next run (G2.3)', () => {
+  it('reads a cron line into days and time, and writes the line back', () => {
+    expect(schedulePick('30 7 * * 1-5')).toEqual({ days: 'weekdays', time: '07:30' });
+    expect(schedulePick('0 9 * * *')).toEqual({ days: 'daily', time: '09:00' });
+    expect(schedulePick('0 16 * * 5')).toEqual({ days: '5', time: '16:00' });
+    expect(schedulePick('0 10 * * 6,0')).toEqual({ days: 'weekends', time: '10:00' });
+    expect(schedulePick('15 * * * *')).toEqual({ days: 'hourly', time: '15' });
+    expect(schedulePick('0 */2 * * *').days).toBe('custom');
+    expect(schedulePick('0 9 1 * *').days).toBe('custom');
+    for (const line of ['30 7 * * 1-5', '0 9 * * *', '0 16 * * 5', '0 10 * * 0,6', '15 * * * *']) {
+      const p = schedulePick(line);
+      expect(scheduleCron(p.days, p.time)).toBe(line);
+    }
+    expect(scheduleCron('daily', '25:00')).toBeNull();
+    expect(scheduleCron('custom', '09:00')).toBeNull();
+  });
+
+  // Europe/Bratislava leaves CEST (+02:00) for CET (+01:00) at 01:00 UTC
+  // on Sunday 25 October 2026. The backend reads a line at the offset it
+  // was saved at (fleet-core `routines::cron`), so a weekday 08:30 saved in
+  // October fires at 06:30 UTC: 08:30 before the change, 07:30 after.
+  const zone = 'Europe/Bratislava';
+  const utc = (d: number, h: number, m: number) => Date.UTC(2026, 9, d, h, m) / 1000;
+  const fires = [utc(23, 6, 30), utc(26, 6, 30), utc(27, 6, 30)];
+
+  it('Next-run test across DST: names the first fire the clock change moves, and by how much', () => {
+    expect(zoneOffsetMin(utc(23, 12, 0), zone)).toBe(120);
+    expect(zoneOffsetMin(utc(26, 12, 0), zone)).toBe(60);
+    expect(nextRunLabel(fires[0], zone)).toBe('Fri 23 Oct, 08:30');
+    expect(nextRunLabel(fires[1], zone)).toBe('Mon 26 Oct, 07:30');
+    expect(clockChange(fires, 120, zone)).toEqual({ at: fires[1], shiftMin: -60 });
+    // Saved again after the change (+60): the same wall time, nothing moves.
+    const winter = [utc(26, 7, 30), utc(27, 7, 30)];
+    expect(winter.map((f) => nextRunLabel(f, zone))).toEqual(['Mon 26 Oct, 08:30', 'Tue 27 Oct, 08:30']);
+    expect(clockChange(winter, 60, zone)).toBeNull();
+    // And into summer time (29 March 2027): a line saved at +60 fires an hour later on the wall.
+    const spring = [Date.UTC(2027, 2, 26, 7, 30) / 1000, Date.UTC(2027, 2, 29, 7, 30) / 1000];
+    expect(clockChange(spring, 60, zone)).toEqual({ at: spring[1], shiftMin: 60 });
+    expect(nextRunLabel(spring[1], zone)).toBe('Mon 29 Mar, 09:30');
+  });
+
+  it('says the offset a line is saved at, and the dry run in one line', () => {
+    expect(offsetWords(120)).toBe('UTC+02:00');
+    expect(offsetWords(-330)).toBe('UTC−05:30');
+    expect(dryRunLine({ host_alias: 'mercury', budget_run_micros: 2_000_000 }, 'acme/web', 'me@x.com')).toBe(
+      'Dry run: on mercury, in acme/web, as me@x.com, at most $2.00 a run.',
+    );
+    expect(dryRunLine({ host_alias: 'mac', profile: 'work' }, 'acme/web', null)).toBe(
+      'Dry run: on mac, in acme/web, as profile work, no limit a run.',
+    );
   });
 });

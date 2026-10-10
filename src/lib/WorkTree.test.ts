@@ -9,6 +9,8 @@ import { get } from 'svelte/store';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkTree from './WorkTree.svelte';
+import { newTaskOwnsChord } from './new_task';
+import { detectMac } from './terminal_keys';
 import { expectAccessible } from './a11y_check';
 import { workBoardOpen } from './app_views';
 import { sessions } from './sessions';
@@ -286,6 +288,22 @@ describe('WorkTree', () => {
       const s = readFileSync(`src/lib/${f}.svelte`, 'utf8');
       expect(s, f).not.toMatch(/>\s*Loading[^<]*…\s*</);
     }
+  });
+
+  it('with no tracker connected, the empty state offers Create a task and Connect a tracker (G3.13)', async () => {
+    const { settingsOpen, settingsSection } = await import('./app_views');
+    treeImpl = () => ({ ...firstPage, tasks: [], groups: [], trackers: [], total: 0 });
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('work-tree-no-tracker').textContent).toContain('No tracker connected');
+    await fireEvent.click(screen.getByTestId('work-empty-connect'));
+    expect(get(settingsSection)).toBe('trackers');
+    expect(get(settingsOpen)).toBe(true);
+    settingsOpen.set(false);
+    settingsSection.set(null);
+    await fireEvent.click(screen.getByTestId('work-empty-create'));
+    await flush();
+    expect(screen.getByRole('dialog')).toBeTruthy();
   });
 
   it('empty, error with Retry, and an older hub', async () => {
@@ -735,5 +753,104 @@ describe('WorkTree', () => {
     workLayout.set('list');
     await flush();
     await expectAccessible(container);
+  });
+});
+
+// G2.1 (FormsWork): ⌘N in Work makes a task; New session keeps it elsewhere.
+describe('WorkTree: New task on ⌘N', () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    workLayout.set('grouped');
+    treeImpl = () => firstPage;
+    mockHub();
+  });
+
+  it('opens New task from the chord and from +, and owns the chord only while mounted', async () => {
+    const isMac = detectMac(navigator);
+    const { unmount } = render(WorkTree);
+    await flush();
+    expect(newTaskOwnsChord()).toBe(true);
+    expect(screen.queryByTestId('new-task-dialog')).toBeNull();
+    window.dispatchEvent(
+      new KeyboardEvent('keydown', isMac ? { key: 'n', metaKey: true } : { key: 'N', ctrlKey: true, shiftKey: true }),
+    );
+    await flush();
+    expect(screen.getByTestId('new-task-dialog')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('sheet-cancel'));
+    await flush();
+    expect(screen.queryByTestId('new-task-dialog')).toBeNull();
+    await fireEvent.click(screen.getByTestId('work-new-task'));
+    await flush();
+    expect(screen.getByTestId('new-task-dialog')).toBeTruthy();
+    unmount();
+    expect(newTaskOwnsChord()).toBe(false);
+  });
+});
+
+describe('WorkTree tab counts and hidden rows (G3.3)', () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    activeWorkViewId.set(null);
+    workViewFilters.set({});
+    workExpanded.set({});
+    sessions.set([]);
+  });
+
+  function hub(page: WorkTreePage) {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tree') return page;
+      if (cmd === 'work_review') return { items: [], total: 0, next_cursor: null };
+      if (cmd === 'work_missions')
+        return [
+          { id: 1, name: 'a', state: 'active' },
+          { id: 2, name: 'b', state: 'draft' },
+          { id: 3, name: 'c', state: 'completed' },
+        ];
+      if (cmd === 'list_pull_requests') return { items: [], total: 3 };
+      if (cmd === 'work_views') return [];
+      return null;
+    });
+  }
+
+  it('counts the tree’s tasks, the missions still moving and the open pull requests', async () => {
+    workLayout.set('grouped');
+    hub(firstPage);
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('work-tab-tasks-count').textContent).toBe('6');
+    expect(screen.getByTestId('work-tab-missions-count').textContent).toBe('2');
+    expect(screen.getByTestId('work-tab-prs-count').textContent).toBe('3');
+    expect(screen.getByTestId('work-tab-tasks').textContent).toBe('Tasks6');
+  });
+
+  it('a hub that refuses a list shows no number, not 0', async () => {
+    workLayout.set('grouped');
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tree') return firstPage;
+      if (cmd === 'work_missions' || cmd === 'list_pull_requests') throw { code: 'E_INVALID', message: 'unknown command' };
+      return null;
+    });
+    render(WorkTree);
+    await flush();
+    expect(screen.queryByTestId('work-tab-missions-count')).toBeNull();
+    expect(screen.queryByTestId('work-tab-prs-count')).toBeNull();
+  });
+
+  it('List: counts the rows not done, and Hidden by filters clears the filters but archived', async () => {
+    workLayout.set('list');
+    workViewFilters.set({ status: 'open', query: 'pay' });
+    hub({
+      ...firstPage,
+      tasks: [task({ task_id: 'item:1', stage: 'in_progress' }), task({ task_id: 'item:2', stage: 'done', status_category: 'done' })],
+      hidden_by_filters: 31,
+    });
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('work-tab-tasks-count').textContent).toBe('1');
+    const row = screen.getByTestId('work-hidden-by-filters');
+    expect(row.textContent).toContain('Hidden by filters 31');
+    await fireEvent.click(row);
+    expect(get(workViewFilters).status).toBeUndefined();
+    expect(get(workViewFilters).query).toBeUndefined();
   });
 });

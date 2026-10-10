@@ -457,6 +457,7 @@ fn caller_view_scope_follows_the_table() {
     );
 
     let device = |person: Option<i64>| Caller {
+        api: None,
         host_alias: None,
         client: Some(ClientRef {
             id: 1,
@@ -483,6 +484,7 @@ fn caller_view_scope_follows_the_table() {
     );
 
     let host = Caller {
+        api: None,
         host_alias: Some("h-a".into()),
         client: None,
         mode: TokenMode::Full,
@@ -519,6 +521,7 @@ fn the_pane_header_resolves_to_one_row_or_to_none() {
         .unwrap();
     let with_pane = |pane: Option<&str>| {
         Caller {
+            api: None,
             host_alias: Some("h-a".into()),
             client: None,
             mode: TokenMode::Full,
@@ -536,6 +539,7 @@ fn the_pane_header_resolves_to_one_row_or_to_none() {
     // fenced on the token's own host.
     s.upsert_host("h-b").unwrap();
     let other = Caller {
+        api: None,
         host_alias: Some("h-b".into()),
         client: None,
         mode: TokenMode::Full,

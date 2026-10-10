@@ -360,3 +360,32 @@ describe('authoring wrappers', () => {
     expect(EVENTS).toContain('session_start');
   });
 });
+
+// G2.6 helpers.
+describe('Toolkit form helpers', () => {
+  it('harness boxes read and write targets.<harness>.enabled, dropping a bare override', async () => {
+    const { harnessOn, withHarness } = await import('./assets');
+    expect(harnessOn({}, 'codex')).toBe(true);
+    const off = withHarness(undefined, 'codex', false);
+    expect(off).toEqual({ codex: { enabled: false } });
+    expect(harnessOn({ targets: off }, 'codex')).toBe(false);
+    expect(withHarness(off, 'codex', true)).toBeUndefined();
+    // Another field on the override stays.
+    expect(withHarness({ codex: { enabled: false, model: 'o3' } }, 'codex', true)).toEqual({ codex: { model: 'o3' } });
+  });
+
+  it('the What boxes and the commit message', async () => {
+    const { importOnlyFor, commitMessageFor, KIND_ORDER } = await import('./assets');
+    expect(importOnlyFor(KIND_ORDER)).toEqual([]);
+    expect(importOnlyFor(['skill', 'command'])).toEqual(['skill:*', 'command:*']);
+    expect(commitMessageFor([])).toBe('catalog: commit pending changes');
+    expect(
+      commitMessageFor([
+        { path: 'a/1', status: 'A' },
+        { path: 'a/2', status: 'M' },
+        { path: 'a/3', status: 'M' },
+        { path: 'a/4', status: 'D' },
+      ]),
+    ).toBe('catalog: update a/1, a/2, a/3 (+1)');
+  });
+});

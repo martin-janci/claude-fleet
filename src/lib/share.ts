@@ -46,7 +46,8 @@ import {
   type SessionAccess,
 } from './access';
 import { hubStatus, unavailableReason, type HubStatus } from './hub';
-import { sessions, type SessionRow } from './sessions';
+import { sessions, type SessionGrant, type SessionRow } from './sessions';
+import { SHARE_LEVEL_WORDS } from './session_scope';
 
 /**
  * The session whose Share sheet is open, or null — one sheet for the whole
@@ -116,6 +117,7 @@ const SESSION_TIER = {
   abandon_start: 'own',
   rename_session: 'own',
   set_session_tags: 'own',
+  decide_related_session: 'own',
   // `work_link { summarize }`: a durable précis of the transcript that
   // outlives the grant.
   summarize_past_work: 'own',
@@ -384,3 +386,55 @@ export const sessionIdBlocked = derived(
     (id: number | null | undefined, action: SessionAction): string | null =>
       sessionIdActionBlocked(id, action, $sessions, $status, $person, $grants),
 );
+
+/** The header's visibility badge (SessionDetails board: "Needs you ·
+ *  Private"): who can see this session, as its owner reads it. */
+export interface VisibilityBadge {
+  kind: 'private' | 'shared' | 'unclaimed';
+  text: string;
+  title: string;
+}
+
+/** A grant's recipient, in words: the person's name, an org's, or its id. */
+export function grantRecipient(g: Pick<SessionGrant, 'person_id' | 'person_name' | 'person_display_name' | 'org_id' | 'org_name'>): string {
+  if (g.org_id != null) return `${g.org_name || `org ${g.org_id}`} (org)`;
+  return g.person_display_name || g.person_name || `person ${g.person_id ?? '?'}`;
+}
+
+/**
+ * The badge for `row`, or null when there is nothing true to say:
+ *
+ * * `unclaimed` — fleet found the session and nobody has claimed it;
+ * * the owner's own `private` row: "Private" when it is shared with nobody,
+ *   "Shared · N" when it has grants. `grants` is the owner's live list
+ *   (`session_access`); `null` while it is unread, and then nothing shows
+ *   rather than a "Private" that may be wrong;
+ * * anyone else's row: null — a recipient's header says how it was shared
+ *   with them, not this.
+ */
+export function visibilityBadge(
+  row: Pick<SessionRow, 'visibility'>,
+  access: SessionAccess,
+  grants: readonly SessionGrant[] | null,
+): VisibilityBadge | null {
+  if (row.visibility === 'unclaimed') {
+    return {
+      kind: 'unclaimed',
+      text: 'Unclaimed',
+      title:
+        'Fleet did not start this session and nobody has claimed it. Until someone does, all anyone sees of it is a per-host count.',
+    };
+  }
+  if (row.visibility !== 'private' || access !== 'own' || grants === null) return null;
+  if (grants.length === 0) {
+    return {
+      kind: 'private',
+      text: 'Private',
+      title: 'Private: only you can see it until you share it.',
+    };
+  }
+  const who = grants
+    .map((g) => `${grantRecipient(g)} (${SHARE_LEVEL_WORDS[g.level as GrantLevel] ?? g.level})`)
+    .join(', ');
+  return { kind: 'shared', text: `Shared · ${grants.length}`, title: `Shared with ${who}` };
+}

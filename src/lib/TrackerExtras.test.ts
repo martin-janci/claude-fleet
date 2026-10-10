@@ -175,7 +175,7 @@ describe('TrackerExtras: Jev section proposals (status_map assist)', () => {
     ]);
     // Third-party text is never markup.
     expect(rows[1].querySelector('b')).toBeNull();
-    expect(rows[0].querySelector('[data-testid="jev-proposal-confidence"]')!.textContent).toBe('0.82');
+    expect(rows[0].querySelector('[data-testid="jev-proposal-confidence"]')!.textContent).toBe('likely');
     expect(rows[0].querySelector('[data-testid="jev-proposal-why"]')!.textContent).toBe(
       'why: to do 0.82 · unsure 0.11',
     );

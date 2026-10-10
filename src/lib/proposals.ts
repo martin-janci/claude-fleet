@@ -23,6 +23,9 @@ export interface DecisionProposal {
   run_id?: number | null;
   /** When it was decided, unix seconds. */
   at?: number | null;
+  /** A `related_session` a person confirmed with Link (M15 G4.3): no
+   *  longer a proposal but the row's linked partner. */
+  linked?: boolean | null;
 }
 
 /** The proposal a row carries for `feature`, if any. */

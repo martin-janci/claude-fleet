@@ -100,6 +100,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async () => () => {}),
   emit: vi.fn(async () => {}),
+  emitTo: vi.fn(async () => {}),
 }));
 
 // `getVersion()` is an IPC call into the Tauri runtime, which jsdom has none

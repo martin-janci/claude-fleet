@@ -16,7 +16,16 @@ import { sessions, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectSession, clearSelection } from './selection';
 import { clearToasts } from './toasts';
 import { get } from 'svelte/store';
-import { nextTerminalTab, requestTerminalTab, shellTerminalName, terminalOpensOn, terminalPane, terminalPtyId } from './terminals';
+import {
+  nextTerminalTab,
+  requestTerminalTab,
+  shellActivity,
+  shellTerminalName,
+  SHELL_ACTIVITY_POLL_MS,
+  terminalOpensOn,
+  terminalPane,
+  terminalPtyId,
+} from './terminals';
 
 const row = {
   id: 1, tmux_name: 'api', host_alias: 'alpha', project_id: null, worktree_id: null, created_at: 1,
@@ -50,15 +59,18 @@ class FakeResizeObserver {
 
 /** The terminals tmux has, as the backend would answer. */
 let open: number[] = [];
+/** What runs in each, as tmux's `pane_current_command` (M15 G4.4). */
+let cmds: Record<number, string> = {};
 const answer = (opened: number | null = null) => ({
   session_id: 1,
   host_alias: 'alpha',
-  terminals: open.map((n) => ({ n, tmux_name: `api--sh${n}` })),
+  terminals: open.map((n) => (cmds[n] ? { n, tmux_name: `api--sh${n}`, command: cmds[n] } : { n, tmux_name: `api--sh${n}` })),
   opened,
 });
 
 beforeEach(() => {
   open = [];
+  cmds = {};
   inv().mockReset();
   inv().mockImplementation(async (cmd: string, payload?: { args?: { action?: string; n?: number | null } }) => {
     if (cmd === 'pty_drain') return { data: '', bytes: 0 };
@@ -83,6 +95,7 @@ beforeEach(() => {
 
 afterEach(() => {
   clearSelection();
+  vi.useRealTimers();
 });
 
 describe('shell terminals strip (step 5.3)', () => {
@@ -254,6 +267,73 @@ describe('the session bar\'s Terminals tab (step 5.3)', () => {
     expect(opens.map((c) => args(c).n)).toEqual(opens.map(() => 3));
   });
 
+});
+
+describe('what runs in each shell (Terminals board, M15 G4.4)', () => {
+  it('a shell running something says what; one at its prompt does not; the list is asked again while shown', async () => {
+    // Only the interval is faked: the pane's own timeouts keep running.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    open = [1, 2];
+    cmds = { 1: 'zsh', 2: 'node' };
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    expect(screen.getByTestId('terminal-running-2').textContent).toContain('node');
+    expect(screen.getByTestId('terminal-tab-2').getAttribute('title')).toContain('node running');
+    expect(screen.queryByTestId('terminal-running-1')).toBeNull();
+    expect(screen.getByTestId('terminal-tab-1').getAttribute('title')).toContain('zsh, at its prompt');
+
+    // `pnpm dev` stops in Shell 2 and starts in Shell 1: no event says so,
+    // the next poll does.
+    cmds = { 1: 'pnpm', 2: '-zsh' };
+    const lists = calls('shell_terminals').length;
+    vi.advanceTimersByTime(SHELL_ACTIVITY_POLL_MS);
+    await settle();
+    expect(calls('shell_terminals').length).toBe(lists + 1);
+    expect(args(calls('shell_terminals').at(-1)!)).toMatchObject({ session_id: 1, action: 'list' });
+    expect(screen.getByTestId('terminal-running-1').textContent).toContain('pnpm');
+    expect(screen.queryByTestId('terminal-running-2')).toBeNull();
+    // Asking never typed into a terminal.
+    expect(calls('pty_write')).toHaveLength(0);
+  });
+
+  it('an older hub that does not say leaves the tabs as they were', async () => {
+    open = [1];
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    expect(screen.getByTestId('terminal-tab-1').textContent?.trim()).toBe('Shell 1');
+    expect(screen.queryByTestId('terminal-running-1')).toBeNull();
+  });
+
+  it('reads a command as running or idle', () => {
+    expect(shellActivity('node')).toEqual({ state: 'running', command: 'node' });
+    expect(shellActivity('-zsh')).toEqual({ state: 'idle', command: 'zsh' });
+    expect(shellActivity('bash')).toEqual({ state: 'idle', command: 'bash' });
+    expect(shellActivity('/usr/bin/vim')).toEqual({ state: 'running', command: 'vim' });
+    expect(shellActivity('')).toBeNull();
+    expect(shellActivity(undefined)).toBeNull();
+  });
+});
+
+describe('popping back in to a named terminal (M15 G4.4)', () => {
+  it('shows the shell the pop-out had, whether or not the list is in yet', async () => {
+    open = [1, 3];
+    render(TerminalView);
+    selectSession(row);
+    // Before the list has come back.
+    requestTerminalTab('shells', 3);
+    await settle();
+    expect(screen.getByTestId('terminal-tab-3').getAttribute('aria-selected')).toBe('true');
+
+    await fireEvent.click(screen.getByTestId('terminal-tab-agent'));
+    await settle();
+    requestTerminalTab('shells', 1);
+    await settle();
+    expect(screen.getByTestId('terminal-tab-1').getAttribute('aria-selected')).toBe('true');
+    // Neither opened a new terminal.
+    expect(calls('shell_terminals').filter((c) => args(c).action === 'open' && args(c).n == null)).toHaveLength(0);
+  });
 });
 
 describe('terminals helpers', () => {

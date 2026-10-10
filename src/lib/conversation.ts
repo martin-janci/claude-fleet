@@ -879,6 +879,9 @@ export interface SlashCommand {
   /** Where it comes from when it is not a built-in (redesign 5.9): a skill
    *  or command in the project's `.claude/` folder. */
   source?: 'skill' | 'command';
+  /** What the argument looks like ("#KEY @session"), shown after the name
+   *  (gap plan G3.9, Control's commands). */
+  usage?: string;
 }
 
 /**

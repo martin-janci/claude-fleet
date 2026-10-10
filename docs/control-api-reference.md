@@ -45,6 +45,12 @@ Approve or deny one waiting call by its nonce; false when it was already answere
 
 Parameters: `approved`, `nonce`
 
+### `api_tokens`
+
+Named Control API tokens. list; create {name, scope: read | act | admin, expires_in_days?, hosts?} answers the token ONCE, with env_line; revoke {name}. A device creates read or act only, and needs trust.
+
+Parameters: `action`, `expires_in_days`, `hosts`, `name`, `scope`
+
 ### `apply_sync`
 
 Apply a plan_sync plan: writes files with compare-and-swap, backs up overwritten files, merges config (files end up mode 0600), installs plugins, writes the managed manifest, then re-scans. Master token only; requires confirmation. restart_required marks hosts whose Claude must be restarted.
@@ -110,6 +116,12 @@ Parameters: `action`, `chosen`, `run_id`, `text`
 Phones, emulators and simulators on any fleet host, used from any session that may see them; commands run on the device's host. run: one adb / simctl / devicectl command. install copies the app from your host. screenshot answers an image. A claim keeps others off (E_CONFLICT); use extends it.
 
 Parameters: `action`, `args`, `claim_s`, `contains`, `device`, `downgrade`, `filter`, `host`, `label`, `lines`, `name`, `note`, `path`, `refresh`, `shared`, `since_s`, `timeout_s`
+
+### `decide_related_session`
+
+Answer a session's related_session proposal {session_id, run_id, linked}: linked=true (Link) keeps the other session listed as linked, false (Not related) withdraws it. Nothing is stopped or merged. Returns the session's row.
+
+Parameters: `linked`, `run_id`, `session_id`
 
 ### `decide_setting_proposals`
 
@@ -411,9 +423,9 @@ Parameters: `action`, `limit`, `project_id`, `state`
 
 ### `queue_prompt`
 
-Send a prompt as a new turn when the session is idle: typed now if it is, else kept and typed once its turn ends (never into a dialog). Marked untrusted unless raw=true (master only). Returns { session_id, delivered, queued_id }.
+Send a prompt as a new turn when the session is idle: typed now if it is, else kept and typed once its turn ends (never into a dialog). Send later: not_before (unix secs) holds it until then, until_limit_reset while the account is at its limit, skip_if_archived drops it if the session is archived first. Marked untrusted unless raw=true (master only). Returns { session_id, delivered, queued_id }.
 
-Parameters: `confirm_nonce`, `prompt`, `raw`, `session_id`
+Parameters: `confirm_nonce`, `not_before`, `prompt`, `raw`, `session_id`, `skip_if_archived`, `until_limit_reset`
 
 ### `queued_prompts`
 
@@ -481,7 +493,7 @@ Parameters: `path`, `session_id`
 
 ### `repo_branch_diff`
 
-What a session's branch carries: the commits no remote has and the files they change, and the files it changes against the base branch: {branch, upstream, unpushed, unpushedFiles, truncated, base, aheadOfBase, baseFiles}.
+What a session's branch carries: the commits no remote has and the files they change, and the files it changes against the base branch: {branch, upstream, unpushed, unpushedFiles, truncated, base, aheadOfBase, baseFiles, behindBase}.
 
 Parameters: `session_id`
 
@@ -493,13 +505,13 @@ Parameters: `session_id`
 
 ### `repo_changes`
 
-A session's changed files (git status) in its worktree.
+A session's changed files (git status) in its worktree, each with added/removed line counts against HEAD when git diffs it.
 
 Parameters: `session_id`
 
 ### `repo_commit`
 
-One commit's metadata + changed files: {hash, subject, body, author, date, files}.
+One commit's metadata + changed files with added/removed line counts: {hash, subject, body, author, date, files, pushed}.
 
 Parameters: `hash`, `session_id`
 
@@ -577,7 +589,7 @@ Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 
 ### `routines`
 
-Routines: a saved prompt that starts a session on a cron schedule, a session event or Run now. list; get {routine_id}: with its last runs; runs {routine_id, limit?}; failing: each routine whose newest run failed, for the Inbox; save {routine, routine_id?}: the whole routine; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
+Routines: a saved prompt that starts a session on a cron schedule, a session or pull request event or Run now. list; get {routine_id}: with its last runs; runs {routine_id, limit?}; failing: each routine whose newest run failed, for the Inbox; save {routine, routine_id?}: the whole routine; preview: save's dry run, writes nothing; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
 
 Parameters: `action`, `enabled`, `limit`, `routine`, `routine_id`, `skip`
 
@@ -767,7 +779,7 @@ Settings proposals waiting for review, each with the key's value now, and can_wr
 
 ### `shell_terminals`
 
-A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory (at=home: home) and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals.
+A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory (at=home: home) and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals, each with the command running in it.
 
 Parameters: `action`, `at`, `n`, `session_id`
 
@@ -857,7 +869,7 @@ Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. edit {item_id, title?, notes?, assignees?, due_at?}: a person edits work with no ticket. create {title, parent?, notes?, assignees?, due_at?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status}; mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check. mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours?, budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; missions_pause_all. mission_release_note {mission_id}: a drafted release note of a completed mission; today_brief {refresh?, org_id?, since?}: Today's morning brief, drafted only on refresh; mission_triage {mission_id, refresh?}: a stuck mission's card, Jev's proposed outcome and next step (never applied), and with refresh its drafted words. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. edit {item_id, title?, notes?, assignees?, due_at?}: a person edits work with no ticket. create {title, parent?, notes?, assignees?, due_at?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status} (paused reopens a finished one); mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check. mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours?, budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; missions_pause_all. mission_release_note {mission_id}: a drafted release note of a completed mission; today_brief {refresh?, org_id?, since?}: Today's morning brief, drafted only on refresh; mission_triage {mission_id, refresh?}: a stuck mission's card, Jev's proposed outcome and next step (never applied), and with refresh its drafted words. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
 
 Parameters: `ack_live`, `action`, `assignees`, `brief`, `bucket_id`, `budget_cents`, `card_id`, `confirm_nonce`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `item_id`, `item_ids`, `items`, `key`, `level`, `line`, `link_id`, `max_parallel`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `primary`, `profile`, `project_id`, `project_ids`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `step`, `task_id`, `title`, `tree`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
 
@@ -904,6 +916,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::repair_session`
 - `commands::sessions::rename_session`
 - `commands::sessions::set_session_friendly_name`
+- `commands::sessions::set_session_tags`
+- `commands::sessions::decide_related_session`
 - `commands::sessions::touch_session_viewed`
 - `commands::work::session_work_links`
 - `commands::work::link_session_work`
@@ -1090,6 +1104,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::debug_device_screenshot`
 - `commands::prs::list_pull_requests`
 - `commands::start_rules::start_rules`
+- `commands::api_tokens::api_tokens`
 - `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`

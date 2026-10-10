@@ -8,7 +8,7 @@
     type SessionRow,
     type SafeKillInspection,
   } from './sessions';
-  import { formatCostMicros, formatTokens, sessionUsageTokens } from './sessions';
+  import { formatCostMicros, formatTokens, sessionUsageTokens, decideRelatedSession } from './sessions';
   import {
     killSession,
     restartSession,
@@ -30,8 +30,11 @@
   import PromptComposer from './PromptComposer.svelte';
   import WatchSummary from './WatchSummary.svelte';
   import ReviewDialog from './ReviewDialog.svelte';
+  import { reviewerOf } from './review_scope';
+  import { reviewDecisionWords } from './prs';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import DialogSheet from './DialogSheet.svelte';
   import KillDialog from './KillDialog.svelte';
   import TasksPanel from './TasksPanel.svelte';
   import TicketCard from './TicketCard.svelte';
@@ -40,6 +43,7 @@
   import { assessRow, hasReading } from './evidence';
   import SessionTasks from './SessionTasks.svelte';
   import ProposedBy from './ProposedBy.svelte';
+  import RenameLabelSheet from './RenameLabelSheet.svelte';
   import { proposalFor } from './proposals';
   import Timeline from './Timeline.svelte';
   import TimelineWorkProposal from './TimelineWorkProposal.svelte';
@@ -79,7 +83,7 @@
   import { archiveBlocked } from './kill_check';
   import Meter from './kit/Meter.svelte';
   import { accountUsage } from './account_usage_store';
-  import { leftPct } from './account_usage';
+  import { leftPct, loginHeadroomText } from './account_usage';
   import { goTo } from './destination';
   import { shortcutLabel } from './shortcuts';
   import { detectMac } from './terminal_keys';
@@ -270,6 +274,30 @@
       : listed;
   });
   let loginPick = $state<string | null>(null);
+  /** Each login with its account's headroom (gap plan G2.7, the
+   *  FormsSession board's Switch login): "5h 75% · week 85% left",
+   *  "weekly limit until Fri 11:00". '' is the host's own login. */
+  const loginOptions = $derived.by(() => {
+    const current = session.claude_profile ?? '';
+    const hostUuid = hostRow?.account_uuid ?? null;
+    const rows = [
+      { value: '', name: 'Host login', email: hostUuid ? ($accountByUuid.get(hostUuid)?.email ?? null) : null, uuid: hostUuid, loggedIn: true },
+      ...loginChoices.map((p) => ({ value: p.name, name: p.name, email: p.email, uuid: p.account_uuid, loggedIn: p.account_uuid != null || p.email != null })),
+    ];
+    return rows.map((o) => ({
+      ...o,
+      current: o.value === current,
+      headroom: o.uuid ? loginHeadroomText($accountUsage[o.uuid] ?? null, nowSec) : null,
+    }));
+  });
+  function loginOptionText(o: (typeof loginOptions)[number]): string {
+    const who = o.email ? ` (${o.email})` : o.loggedIn ? '' : ' (not logged in)';
+    return `${o.name}${who}${o.headroom ? ` · ${o.headroom}` : ''}${o.current ? ' · current' : ''}`;
+  }
+  /** The login the headroom rule proposed (`switchTarget`), shown as a
+   *  proposal while the pick still holds it. A rule, never Jev: account
+   *  limits choose by numbers (`ai_proposal.ts` NEVER_DECIDES). */
+  let loginProposal = $state<string | null>(null);
   const loginTarget = $derived(loginPick ?? session.claude_profile ?? '');
   let confirmingSwitch = $state(false);
   /** Switch account…: the same switch as the Login row, from a dialog that
@@ -279,12 +307,16 @@
   async function openSwitchAccount() {
     if (switchAccountBlocked !== null) return;
     loginPick = null;
+    loginProposal = null;
     switchOpen = true;
     const id = session.id;
     const t = await switchTarget(session);
     // Only a proposal: a pick the person already made, or another session
     // selected meanwhile, keeps what it has.
-    if (t && switchOpen && loginPick === null && session.id === id) loginPick = t.profile ?? '';
+    if (t && switchOpen && loginPick === null && session.id === id) {
+      loginPick = t.profile ?? '';
+      loginProposal = loginPick;
+    }
   }
   // The pane is not keyed by session: a login picked (or a switch being
   // confirmed) on one session must not carry over to the next one selected,
@@ -335,13 +367,31 @@
   // the same thing, when it is not listed above already. Nothing is
   // stopped or merged.
   const relatedProposal = $derived(proposalFor(session, 'related_session'));
-  const proposedRelated = $derived.by(() => {
+  const relatedPartner = $derived.by(() => {
     const m = /^s(\d+)$/.exec(relatedProposal?.value ?? '');
     if (!m) return null;
     const id = Number(m[1]);
     if (related.some((r) => r.id === id)) return null;
     return $sessions.find((s) => s.id === id && s.id !== session.id) ?? null;
   });
+  // Link / Not related (M15 G4.3): a linked partner is listed like a
+  // sibling; a proposed one carries the two answers until someone decides.
+  const relatedLinked = $derived(relatedProposal?.linked === true);
+  const proposedRelated = $derived(relatedLinked ? null : relatedPartner);
+  const linkedRelated = $derived(relatedLinked ? relatedPartner : null);
+  const relatedDecideBlocked = $derived(
+    hubActionBlocked('decide_related_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'decide_related_session'),
+  );
+  let relatedDeciding = $state(false);
+  async function decideRelated(linked: boolean): Promise<void> {
+    const runId = relatedProposal?.run_id;
+    if (runId == null || relatedDeciding || $sessionBlocked(session, 'decide_related_session') !== null) return;
+    relatedDeciding = true;
+    const r = await decideRelatedSession(session.id, runId, linked);
+    relatedDeciding = false;
+    if (!r.ok) pushError(r.error, linked ? 'Linking the session failed' : 'Saving “Not related” failed');
+  }
 
   // Local-only for v0.2 (Phase 4 will branch on host_alias for remote attach).
   const attachCommand = $derived(`tmux attach -t ${session.tmux_name}`);
@@ -405,7 +455,13 @@
   }
 
   const beginRename = () => beginEdit('tmux');
-  const beginLabelEdit = () => beginEdit('label');
+  // "Rename and label…" (gap plan G2.7): the name and the label (the
+  // session's tags) in one sheet. The title's inline editor stays for tmux.
+  let renameLabelOpen = $state(false);
+  function openRenameLabel() {
+    if (setFriendlyNameBlocked !== null) return;
+    renameLabelOpen = true;
+  }
 
   async function commitRename() {
     if (!renaming || committingRename) return;
@@ -510,6 +566,9 @@
   const reviewsOfThis = $derived(
     $sessions.filter((s) => s.kind === 'review' && s.reviews_session_id === session.id),
   );
+  /** GitHub's review decision on this session's PR, in words. */
+  const prReview = $derived(session.pr_url ? reviewDecisionWords(session.pr_evidence?.review_decision) : null);
+  const reviewsShown = $derived(session.kind !== 'external' || reviewsOfThis.length > 0 || prReview !== null);
 
   let confirmingKill = $state(false);
   let confirmingSafeKill = $state(false);
@@ -714,7 +773,7 @@
   // (redesign step 3.10, `session_actions.ts`): run it as this pane's own
   // button would, with the same gate, confirm and dialog.
   const rowActions: Record<SessionActionId, { blocked: () => string | null; run: () => void }> = {
-    label: { blocked: () => setFriendlyNameBlocked, run: beginLabelEdit },
+    label: { blocked: () => setFriendlyNameBlocked, run: openRenameLabel },
     rename: { blocked: () => renameBlocked, run: beginRename },
     restart: { blocked: () => restartBlocked, run: askRestart },
     repair: { blocked: () => (repairing ? 'Repairing…' : repairBlocked), run: askRepair },
@@ -753,6 +812,10 @@
      and dialogs below, so nothing moves between them but the layout. -->
 {#snippet act(testid: string, label: string, run: () => void, blocked: string | null, title = '', cls = 'btn btn--quiet is-bounded')}
   <button class={cls} onclick={run} disabled={blocked !== null} title={blocked ?? title} data-testid={testid}>{label}</button>
+{/snippet}
+
+{#snippet tagChips()}
+  {#each session.tags as t (t)}<span class="tag-chip">{t}</span>{/each}
 {/snippet}
 
 {#snippet renameField()}
@@ -863,6 +926,10 @@
     <dl class="of of-kv facts-kv" data-testid="inspector-facts">
       <dt>Host</dt>
       <dd data-testid="session-host">{@render hostValue()}</dd>
+      {#if session.tags?.length}
+        <dt>Label</dt>
+        <dd data-testid="details-tags">{@render tagChips()}</dd>
+      {/if}
       <dt>Account</dt>
       <dd data-testid="session-account">{accountRow?.email ?? accountEmailTier(accountRow)}</dd>
       {#if fiveHour || week}
@@ -906,7 +973,7 @@
           {#if canMove}
             {@render act('move-from-details', 'Move to host…', openMove, moveBlocked, 'Continue this conversation on another host: same branch, same Claude session')}
           {/if}
-          {@render act('open-review', 'Review…', () => (reviewOpen = true), reviewBlocked)}
+          {@render act('open-review', 'Start a review run…', () => (reviewOpen = true), reviewBlocked)}
           {#if hasPaneConversation}
             {@render act('fork-from-details', 'Fork…', openFork, rewindBlocked, 'A new session from this conversation; this one keeps running')}
           {/if}
@@ -979,6 +1046,10 @@
     </section>
 
     <dl class="of of-kv meta">
+      {#if session.tags?.length}
+        <dt>Label</dt>
+        <dd data-testid="details-tags">{@render tagChips()}</dd>
+      {/if}
       {#if canSwitchLogin}
         <dt>Login</dt>
         <dd class="login" data-testid="session-login">
@@ -990,9 +1061,8 @@
             disabled={restartBlocked !== null}
             title="The Claude login this session bills: the host's own, or a login profile (~/.claude-profiles/<name>)"
           >
-            <option value="">Host login</option>
-            {#each loginChoices as p (p.name)}
-              <option value={p.name}>{p.name}{p.email ? ` (${p.email})` : p.account_uuid ? '' : ' (not logged in)'}</option>
+            {#each loginOptions as o (o.value)}
+              <option value={o.value}>{loginOptionText(o)}</option>
             {/each}
           </select>
           {#if loginTarget !== (session.claude_profile ?? '')}
@@ -1071,32 +1141,75 @@
       {#snippet head()}<TimelineWorkProposal {session} />{/snippet}
     </Timeline>
 
-    {#if related.length > 0 || proposedRelated}
+    {#if related.length > 0 || relatedPartner}
       <section class="block related" data-testid="related-sessions">
-        <h3>Related sessions <span class="count">{related.length + (proposedRelated ? 1 : 0)}</span></h3>
+        <h3>Related sessions <span class="count">{related.length + (relatedPartner ? 1 : 0)}</span></h3>
         <ul class="related-list">
           {#each related as r (r.id)}
             <li>{@render relatedRow(r, 'related-row', accountEmailTier(accountForRow(r)))}</li>
           {/each}
+          {#if linkedRelated}
+            <li data-testid="related-linked">{@render relatedRow(linkedRelated, 'related-linked-row', 'linked · same work')}</li>
+          {/if}
           {#if proposedRelated}
             {@const r = proposedRelated}
             <li class="proposed" data-testid="related-proposed">
               {@render relatedRow(r, 'related-proposed-row', 'same work?')}
               <ProposedBy proposal={relatedProposal} field="related_session" testid="related-proposed-by" />
+              {#if relatedProposal?.run_id != null}
+                <div class="btn-row related-decide">
+                  <button
+                    type="button"
+                    class="btn is-bounded"
+                    data-testid="related-link"
+                    disabled={relatedDeciding || relatedDecideBlocked !== null}
+                    title={relatedDecideBlocked ?? 'Same work: keep it listed here'}
+                    onclick={() => void decideRelated(true)}>Link</button
+                  >
+                  <button
+                    type="button"
+                    class="btn btn--quiet is-bounded"
+                    data-testid="related-not-related"
+                    disabled={relatedDeciding || relatedDecideBlocked !== null}
+                    title={relatedDecideBlocked ?? 'Not the same work: stop suggesting it'}
+                    onclick={() => void decideRelated(false)}>Not related</button
+                  >
+                </div>
+              {/if}
             </li>
           {/if}
         </ul>
       </section>
     {/if}
 
-    {#if reviewsOfThis.length > 0}
-      <section class="block related" data-testid="reviews-panel">
-        <h3>Reviews <span class="count">{reviewsOfThis.length}</span></h3>
-        <ul class="related-list">
-          {#each reviewsOfThis as r (r.id)}
-            <li>{@render relatedRow(r, 'reviews-row', accountEmailTier(accountForRow(r)))}</li>
-          {/each}
-        </ul>
+    <!-- Reviews (SessionDetails board): the PR's review decision GitHub
+         reports, each review run of this session with who ran it, and Start
+         a review run. Only what is recorded: a run's verdict is its
+         session's state, never a findings count nobody measured. -->
+    {#if reviewsShown}
+      <section class="block related reviews" data-testid="reviews-panel">
+        <h3>Reviews{#if reviewsOfThis.length > 0} <span class="count">{reviewsOfThis.length}</span>{/if}</h3>
+        {#if prReview}
+          <p class="pr-review" data-testid="reviews-pr-decision" data-decision={session.pr_evidence?.review_decision}>
+            {prNumber ? `PR #${prNumber}` : 'Pull request'} · {prReview}
+          </p>
+        {/if}
+        {#if reviewsOfThis.length > 0}
+          <ul class="related-list">
+            {#each reviewsOfThis as r (r.id)}
+              <li>
+                {@render relatedRow(r, 'reviews-row', reviewerOf(r))}
+              </li>
+            {/each}
+          </ul>
+        {:else if !prReview}
+          <p class="muted" data-testid="reviews-empty">No review run yet.</p>
+        {/if}
+        {#if session.kind !== 'external'}
+          <div class="btn-row">
+            {@render act('open-review', 'Start a review run…', () => (reviewOpen = true), reviewBlocked, 'A read-only Claude Code session reviews this one: pick a skill and what it reads')}
+          </div>
+        {/if}
       </section>
     {/if}
 
@@ -1118,7 +1231,6 @@
             {#if session.kind !== 'shell'}
               {@render act('send-prompt-from-details', 'Send prompt…', openComposer, sendPromptBlocked, '', 'btn btn--primary')}
             {/if}
-            {@render act('open-review', 'Review…', () => (reviewOpen = true), reviewBlocked)}
             {#if hasPaneConversation}
               {@render act('fork-from-details', 'Fork…', openFork, rewindBlocked, 'A new session from this conversation; this one keeps running')}
               {@render act('rewind-from-details', 'Rewind…', openRewind, rewindBlocked, 'Take the conversation back to before a turn; files stay as they are')}
@@ -1127,7 +1239,6 @@
               {@render act('switch-account-from-details', 'Switch account…', openSwitchAccount, switchAccountBlocked, 'Resume this conversation under another login on this host')}
               {@render act('change-model-from-details', 'Change model…', openModel, sendPromptBlocked, 'Send /model to this session')}
             {/if}
-            {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked)}
           </div>
         </div>
         <div class="group" data-testid="actions-place">
@@ -1137,11 +1248,12 @@
               {@render act('move-from-details', 'Move to host…', openMove, moveBlocked, 'Continue this conversation on another host: same branch, same Claude session')}
             {/if}
             {@render moveSteps()}
+            {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked)}
             {@render act('recreate-from-details', 'Recreate…', askRecreate, recreateBlocked)}
             {#if !hasNoPane(session) && session.project_id !== null}
               {@render act('repair-from-details', 'Repair workspace…', askRepair, repairing ? 'Repairing…' : repairBlocked, 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it')}
             {/if}
-            {@render act('label-from-details', 'Rename', beginLabelEdit, setFriendlyNameBlocked)}
+            {@render act('label-from-details', 'Rename and label…', openRenameLabel, setFriendlyNameBlocked)}
             {@render act('rename-from-details', 'Rename tmux session', beginRename, renameBlocked)}
           </div>
         </div>
@@ -1162,7 +1274,7 @@
         </div>
       {:else}
         <div class="btn-row">
-          {@render act('label-from-details', 'Rename', beginLabelEdit, setFriendlyNameBlocked)}
+          {@render act('label-from-details', 'Rename and label…', openRenameLabel, setFriendlyNameBlocked)}
         </div>
       {/if}
       {#if session.kind !== 'external'}
@@ -1209,6 +1321,10 @@
   </ConfirmDialog>
 {/if}
 
+{#if renameLabelOpen}
+  <RenameLabelSheet {session} onclose={() => (renameLabelOpen = false)} />
+{/if}
+
 {#if forkOpen}
   <ForkSheet sessionId={session.id} anchor={null} suggestedName={suggestedForkName(session)} onclose={() => (forkOpen = false)} />
 {/if}
@@ -1218,35 +1334,47 @@
 {/if}
 
 {#if switchOpen}
-  <ConfirmDialog
-    title="Switch account?"
-    confirmLabel="Switch"
-    danger
-    confirmDisabled={loginTarget === (session.claude_profile ?? '') || switchAccountBlocked !== null}
+  <DialogSheet
+    title="Switch login for this session"
+    lead="The agent restarts with the other account and keeps the conversation. Anything it is doing right now is lost."
+    verb="Switch and restart"
+    busyVerb="Switching…"
+    canConfirm={loginTarget !== (session.claude_profile ?? '') && switchAccountBlocked === null}
+    confirmTitle={switchAccountBlocked ?? (loginTarget === (session.claude_profile ?? '') ? 'Pick another login.' : null)}
     onconfirm={onSwitchLogin}
-    oncancel={() => {
+    onclose={() => {
       switchOpen = false;
       loginPick = null;
+      loginProposal = null;
     }}
-    confirmTestId="confirm-account-switch"
+    testid="switch-account-sheet"
+    confirmTestid="confirm-account-switch"
   >
-    <label class="dialog-field">
-      <span>Resume under</span>
-      <select
-        aria-label="Claude login"
-        data-testid="switch-account-pick"
-        value={loginTarget}
-        onchange={(e) => (loginPick = (e.currentTarget as HTMLSelectElement).value)}
-      >
-        <option value="">Host login</option>
-        {#each loginChoices as p (p.name)}
-          <option value={p.name}>{p.name}{p.email ? ` (${p.email})` : p.account_uuid ? '' : ' (not logged in)'}</option>
-        {/each}
-      </select>
-    </label>
-    This restarts claude in <code>{session.tmux_name}</code> and resumes the same
-    conversation under that login. Anything it is working on right now is lost.
-  </ConfirmDialog>
+    <div class="login-options" role="radiogroup" aria-label="Claude login" data-testid="switch-account-pick">
+      {#each loginOptions as o (o.value)}
+        <label class="login-option" class:is-current={o.current} data-testid="switch-account-option">
+          <input
+            type="radio"
+            name="switch-login"
+            value={o.value}
+            checked={loginTarget === o.value}
+            onchange={() => (loginPick = o.value)}
+          />
+          <span class="login-name">{o.name}{#if o.email}<span class="muted"> · {o.email}</span>{:else if !o.loggedIn}<span class="muted"> · not logged in</span>{/if}</span>
+          <span class="login-room" data-testid="switch-account-headroom">{o.headroom ?? ''}{o.current ? (o.headroom ? ' · current' : 'current') : ''}</span>
+        </label>
+      {/each}
+    </div>
+    <ProposedBy
+      proposal={loginProposal !== null && loginTarget === loginProposal
+        ? { value: loginProposal || 'host', source: 'rule', reason: 'most left on this host' }
+        : null}
+      field="login"
+      stated
+      onchange={() => (loginPick = session.claude_profile ?? '')}
+      testid="switch-account-proposed"
+    />
+  </DialogSheet>
 {/if}
 
 {#if modelOpen}
@@ -1547,6 +1675,39 @@
   }
   .title-input:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
   .sub { display: flex; gap: 0.5rem; align-items: center; font-size: var(--text-2xs); flex-wrap: wrap; }
+  .login-options {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .login-option {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+  .login-option:hover {
+    background: var(--bg-hover, var(--bg-sunk));
+  }
+  .login-room {
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .tag-chip {
+    display: inline-block;
+    margin-right: 4px;
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-sunk);
+    border: 1px solid var(--border);
+    font-size: var(--text-2xs);
+    line-height: 16px;
+  }
   .friendly { margin: 0; font-size: var(--text-xs); color: var(--fg-muted); }
   .chip {
     padding: 0.1rem 0.4rem;
@@ -1747,6 +1908,13 @@
   }
   .confirm-actions button.danger:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
 
+  .reviews .pr-review,
+  .reviews .muted {
+    margin: 0 0 0.4rem 0;
+    font-size: var(--text-xs);
+  }
+  .reviews .btn-row { margin-top: 0.4rem; }
+  .related-decide { display: flex; gap: 0.4rem; margin-top: 0.3rem; }
   .related {
     border-top: 1px solid var(--border);
     padding-top: 0.6rem;

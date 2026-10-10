@@ -85,8 +85,20 @@ export function accountPill(
 /** The account the Accounts page should show next; it takes it and clears it. */
 export const accountsPageRequest = writable<string | null>(null);
 
+/** With `accountsPageRequest`: show only the sessions its limit paused
+ *  ("Show paused sessions" on the limit-hit toast). The page clears it. */
+export const accountsPausedRequest = writable(false);
+
 /** Open `uuid` on the Accounts page. */
 export function openAccount(uuid: string): void {
+  accountsPausedRequest.set(false);
+  accountsPageRequest.set(uuid);
+  goTo('accounts');
+}
+
+/** Open `uuid` on the Accounts page, its Sessions narrowed to the paused ones. */
+export function openPausedSessions(uuid: string): void {
+  accountsPausedRequest.set(true);
   accountsPageRequest.set(uuid);
   goTo('accounts');
 }

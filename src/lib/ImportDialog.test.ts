@@ -50,3 +50,35 @@ describe('ImportDialog', () => {
     expect(screen.queryByTestId('import-warnings')).toBeNull();
   });
 });
+
+// G2.6: the What boxes pick the kinds to import.
+describe('ImportDialog: What', () => {
+  const empty = { created: [], problems: [], warnings: [], flagged_secrets: [], dry_run: true };
+
+  it('imports everything with every box ticked, and only the ticked kinds otherwise', async () => {
+    invoke.mockResolvedValue(empty);
+    render(ImportDialog, { props: { onclose: () => {}, ondone: () => {} } });
+    expect(screen.getByTestId('import-what').textContent).toContain('Commands');
+    await fireEvent.click(screen.getByTestId('import-dry-run'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    expect(invoke.mock.calls[0][1].args.only).toEqual([]);
+
+    for (const k of ['skill', 'agent', 'hook', 'mcp_server', 'plugin_ref']) {
+      await fireEvent.click(screen.getByTestId(`import-what-${k}`));
+    }
+    await fireEvent.click(screen.getByTestId('import-dry-run'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+    expect(invoke.mock.calls[1][1].args.only).toEqual(['command:*']);
+
+    await fireEvent.click(screen.getByTestId('import-what-command'));
+    expect((screen.getByTestId('import-dry-run') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("one asset's Import keeps its own `only` and shows no boxes", async () => {
+    invoke.mockResolvedValue(empty);
+    render(ImportDialog, { props: { only: ['skill:worktree'], onclose: () => {}, ondone: () => {} } });
+    expect(screen.queryByTestId('import-what')).toBeNull();
+    await fireEvent.click(screen.getByTestId('import-dry-run'));
+    await waitFor(() => expect(invoke.mock.calls[0][1].args.only).toEqual(['skill:worktree']));
+  });
+});

@@ -19,7 +19,7 @@
 //!    NEITHER the master NOR a host, so the fleet-admin tools stay out of
 //!    its reach.
 
-use crate::store::{ClientTokenRow, HostTokenRow};
+use crate::store::{ApiScope, ClientTokenRow, ControlTokenRow, HostTokenRow};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 
 /// What a token is allowed to do. Unknown mode strings in the DB fall back
@@ -99,6 +99,26 @@ pub struct ClientRef {
     pub person_id: Option<i64>,
 }
 
+/// The named Control API token behind a request (migration 157, M15 step
+/// G2.8): the `control_tokens` row that matched. The id and name travel for
+/// the "last used" stamp and audit labels; never the token or its hash.
+///
+/// A named token speaks for the hub's owner, as the master token does, so
+/// its caller has the master's shape (no host alias, no client). What sets it
+/// apart is [`Caller::is_master`]: true only for an `admin` token, so a `read`
+/// or `act` token is refused every fleet-admin and settings tool, and a
+/// `read` one every mutating tool through its `Readonly` mode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiTokenRef {
+    pub id: i64,
+    pub name: String,
+    pub scope: ApiScope,
+    /// The hosts it may reach; `None` every host. Enforced by
+    /// `ViewScope::sees_session_facts` (sessions) and `require_host`
+    /// (host-addressed calls). Never set on an admin token.
+    pub hosts: Option<Vec<String>>,
+}
+
 /// The authenticated identity behind a request, derived from the bearer
 /// token that matched. Inserted into the request extensions by the auth
 /// middleware so tools and the `/hook` handler can read it.
@@ -158,6 +178,9 @@ pub struct Caller {
     /// here, so the fleet's settings are refused rather than served to
     /// whoever asked.
     pub is_personal_owner: bool,
+    /// `Some(_)` for a named Control API token (see [`ApiTokenRef`]). The
+    /// caller then has the master's shape; its scope decides the rest.
+    pub api: Option<ApiTokenRef>,
 }
 
 impl Caller {
@@ -173,14 +196,33 @@ impl Caller {
             mode: TokenMode::Full,
             pane: None,
             is_personal_owner: true,
+            api: None,
         }
     }
 
     /// True only for the master token. A paired client carries no host alias
     /// either, so the client field must be checked as well — this is the one
     /// gate that keeps the fleet-admin tools master-only.
+    ///
+    /// A named token with the `admin` scope counts: it is what the master
+    /// token is (G2.8). A `read` or `act` one does not.
     pub fn is_master(&self) -> bool {
+        self.host_alias.is_none()
+            && self.client.is_none()
+            && self.api.as_ref().is_none_or(|a| a.scope == ApiScope::Admin)
+    }
+
+    /// True for the master token and for every named token: a caller that
+    /// speaks for the hub's owner without being a paired device. The person
+    /// behind it is `Store::personal_owner_id()`.
+    pub fn speaks_for_owner(&self) -> bool {
         self.host_alias.is_none() && self.client.is_none()
+    }
+
+    /// The host a named token is limited to reaching, `None` for every host
+    /// (and for every other kind of caller).
+    pub fn api_hosts(&self) -> Option<&[String]> {
+        self.api.as_ref().and_then(|a| a.hosts.as_deref())
     }
 
     /// True for a paired client (a phone), whatever its mode.
@@ -359,7 +401,8 @@ impl Caller {
             proven_session,
             sole_person,
             unclaimed,
-        ))
+        )
+        .with_hosts(self.api_hosts().map(<[String]>::to_vec)))
     }
 
     /// True when this caller reads through an ORG boundary: a per-host
@@ -382,7 +425,10 @@ impl Caller {
         match (&self.host_alias, &self.client) {
             (Some(h), _) => format!("host:{h}"),
             (None, Some(c)) => format!("client:{}", c.name),
-            (None, None) => "master".to_string(),
+            (None, None) => match &self.api {
+                Some(a) => format!("token:{}", a.name),
+                None => "master".to_string(),
+            },
         }
     }
 }
@@ -443,6 +489,30 @@ pub fn resolve_token(
     client_tokens: &[ClientTokenRow],
     personal_owner: Option<i64>,
 ) -> Option<Caller> {
+    resolve_token_at(
+        presented,
+        master,
+        host_tokens,
+        client_tokens,
+        &[],
+        personal_owner,
+        crate::store::now_unix(),
+    )
+}
+
+/// [`resolve_token`] with the named Control API tokens (migration 157) and
+/// the time to judge their expiry by. A named token matches by its SHA-256,
+/// in the same no-short-circuit scan; one past its `expires_at` at `now`
+/// resolves to nobody, so an expiry needs no write and no cache rebuild.
+pub fn resolve_token_at(
+    presented: &str,
+    master: &str,
+    host_tokens: &[HostTokenRow],
+    client_tokens: &[ClientTokenRow],
+    control_tokens: &[ControlTokenRow],
+    personal_owner: Option<i64>,
+    now: i64,
+) -> Option<Caller> {
     let mut found: Option<Caller> = None;
     if !master.is_empty() && constant_time_eq(presented.as_bytes(), master.as_bytes()) {
         found = Some(Caller {
@@ -460,6 +530,7 @@ pub fn resolve_token(
                 // A machine's token is never a person, so it is never the
                 // person who owns this hub.
                 is_personal_owner: false,
+                api: None,
             });
         }
     }
@@ -482,7 +553,44 @@ pub fn resolve_token(
                 mode: TokenMode::parse_client(&row.mode),
                 pane: None,
                 is_personal_owner: is_the_personal_owner(row.person_id, personal_owner),
+                api: None,
             });
+        }
+    }
+    for row in control_tokens {
+        if !row.token_sha256.is_empty()
+            && constant_time_eq(presented_sha.as_bytes(), row.token_sha256.as_bytes())
+        {
+            found = if row.revoked_at.is_some() || row.expired_at(now) {
+                // A match that may no longer be used is nobody, not a
+                // fall-through to another row.
+                None
+            } else {
+                Some(Caller {
+                    host_alias: None,
+                    client: None,
+                    mode: match row.scope {
+                        ApiScope::Read => TokenMode::Readonly,
+                        ApiScope::Act | ApiScope::Admin => TokenMode::Full,
+                    },
+                    pane: None,
+                    // The owner's token, as the master is: true exactly when
+                    // the hub can say who its owner is (T1).
+                    is_personal_owner: personal_owner.is_some(),
+                    api: Some(ApiTokenRef {
+                        id: row.id,
+                        name: row.name.clone(),
+                        scope: row.scope,
+                        // An admin row never has a limit (the table's CHECK);
+                        // dropped here too so `is_master` and a limit can
+                        // never meet.
+                        hosts: match row.scope {
+                            ApiScope::Admin => None,
+                            _ => row.hosts.clone(),
+                        },
+                    }),
+                })
+            };
         }
     }
     found
@@ -594,7 +702,8 @@ pub fn check_origin(headers: &HeaderMap, allowed: &[String]) -> Result<(), Statu
 
 /// Authorize an incoming request and identify its caller. `Err` carries the
 /// status to return: `403` for a cross-origin / DNS-rebinding attempt, `401`
-/// for a missing or unknown bearer token. `allowed` must already be normalized
+/// for a missing or unknown bearer token. `control_tokens` are the named
+/// Control API tokens (migration 157). `allowed` must already be normalized
 /// ([`normalize_allowed_hosts`]) — see [`check_origin`]. `personal_owner` is
 /// the hub's `people` row id, read beside the token rows — see
 /// [`resolve_token`] for why it is an argument and not a lookup.
@@ -603,18 +712,21 @@ pub fn check_request(
     master_token: &str,
     host_tokens: &[HostTokenRow],
     client_tokens: &[ClientTokenRow],
+    control_tokens: &[ControlTokenRow],
     allowed: &[String],
     personal_owner: Option<i64>,
 ) -> Result<Caller, StatusCode> {
     check_origin(headers, allowed)?;
     let presented =
         bearer_token(headers.get(header::AUTHORIZATION)).ok_or(StatusCode::UNAUTHORIZED)?;
-    resolve_token(
+    resolve_token_at(
         presented,
         master_token,
         host_tokens,
         client_tokens,
+        control_tokens,
         personal_owner,
+        crate::store::now_unix(),
     )
     .ok_or(StatusCode::UNAUTHORIZED)
 }
@@ -656,6 +768,7 @@ pub(crate) fn device_view(
     person: i64,
 ) -> crate::service::view_scope::ViewScope {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(ClientRef {
             id: 11,
@@ -814,7 +927,7 @@ mod tests {
             ("host", "127.0.0.1:4180"),
             ("authorization", "Bearer tok-phone"),
         ]);
-        let c = check_request(&h, "s3cret", &[], &clients, &[], OWNER).unwrap();
+        let c = check_request(&h, "s3cret", &[], &clients, &[], &[], OWNER).unwrap();
         assert!(!c.is_master());
         assert!(c.is_client());
         assert_eq!(c.label(), "client:phone");
@@ -857,6 +970,7 @@ mod tests {
         assert_eq!(
             resolve_token("tok-mef", "master-tok", &hosts, &[], OWNER),
             Some(Caller {
+                api: None,
                 host_alias: Some("mefistos".into()),
                 client: None,
                 mode: TokenMode::Full,
@@ -867,6 +981,7 @@ mod tests {
         assert_eq!(
             resolve_token("tok-tur", "master-tok", &hosts, &[], OWNER),
             Some(Caller {
+                api: None,
                 host_alias: Some("turanga".into()),
                 client: None,
                 mode: TokenMode::Readonly,
@@ -955,6 +1070,7 @@ mod tests {
         assert_eq!(Caller::master().label(), "master");
         assert!(!Caller::master().is_client());
         let c = Caller {
+            api: None,
             host_alias: Some("mefistos".into()),
             client: None,
             mode: TokenMode::Full,
@@ -1041,7 +1157,7 @@ mod tests {
             ("authorization", "Bearer s3cret"),
         ]);
         assert_eq!(
-            check_request(&h, "s3cret", &[], &[], &[], OWNER),
+            check_request(&h, "s3cret", &[], &[], &[], &[], OWNER),
             Ok(Caller::master())
         );
     }
@@ -1055,6 +1171,7 @@ mod tests {
             &[host_row("mefistos", "tok-mef", "readonly")],
             &[],
             &[],
+            &[],
             OWNER,
         )
         .unwrap();
@@ -1066,19 +1183,19 @@ mod tests {
     fn check_request_allows_non_browser_client_without_origin() {
         // A CLI MCP client sends no Origin — only the token gates it.
         let h = headers(&[("authorization", "Bearer s3cret")]);
-        assert!(check_request(&h, "s3cret", &[], &[], &[], OWNER).is_ok());
+        assert!(check_request(&h, "s3cret", &[], &[], &[], &[], OWNER).is_ok());
     }
 
     #[test]
     fn check_request_rejects_wrong_token_with_401() {
         let h = headers(&[("host", "127.0.0.1:4180"), ("authorization", "Bearer nope")]);
         assert_eq!(
-            check_request(&h, "s3cret", &[], &[], &[], OWNER),
+            check_request(&h, "s3cret", &[], &[], &[], &[], OWNER),
             Err(StatusCode::UNAUTHORIZED)
         );
         let none = headers(&[("host", "127.0.0.1:4180")]);
         assert_eq!(
-            check_request(&none, "s3cret", &[], &[], &[], OWNER),
+            check_request(&none, "s3cret", &[], &[], &[], &[], OWNER),
             Err(StatusCode::UNAUTHORIZED)
         );
     }
@@ -1092,7 +1209,7 @@ mod tests {
             ("authorization", "Bearer s3cret"),
         ]);
         assert_eq!(
-            check_request(&h, "s3cret", &[], &[], &[], OWNER),
+            check_request(&h, "s3cret", &[], &[], &[], &[], OWNER),
             Err(StatusCode::FORBIDDEN)
         );
         assert_eq!(check_origin(&h, &[]), Err(StatusCode::FORBIDDEN));
@@ -1103,7 +1220,7 @@ mod tests {
         // Host header carrying the attacker's domain (rebound to 127.0.0.1).
         let h = headers(&[("host", "evil.com"), ("authorization", "Bearer s3cret")]);
         assert_eq!(
-            check_request(&h, "s3cret", &[], &[], &[], OWNER),
+            check_request(&h, "s3cret", &[], &[], &[], &[], OWNER),
             Err(StatusCode::FORBIDDEN)
         );
     }
@@ -1127,6 +1244,7 @@ mod tests {
             "s3cret",
             &[],
             &[],
+            &[],
             &allowed,
             OWNER,
         )
@@ -1134,6 +1252,7 @@ mod tests {
         assert!(check_request(
             &allow_headers("FLEET.example.com:443", None),
             "s3cret",
+            &[],
             &[],
             &[],
             &allowed,
@@ -1145,6 +1264,7 @@ mod tests {
             "s3cret",
             &[],
             &[],
+            &[],
             &allowed,
             OWNER,
         )
@@ -1153,6 +1273,7 @@ mod tests {
         assert!(check_request(
             &allow_headers("127.0.0.1:4180", None),
             "s3cret",
+            &[],
             &[],
             &[],
             &allowed,
@@ -1166,6 +1287,7 @@ mod tests {
                 "s3cret",
                 &[],
                 &[],
+                &[],
                 &allowed,
                 OWNER,
             ),
@@ -1175,6 +1297,7 @@ mod tests {
             check_request(
                 &allow_headers("fleet.example.com", Some("https://evil.example.com")),
                 "s3cret",
+                &[],
                 &[],
                 &[],
                 &allowed,
@@ -1187,6 +1310,7 @@ mod tests {
             check_request(
                 &allow_headers("fleet.example.com", None),
                 "s3cret",
+                &[],
                 &[],
                 &[],
                 &[],

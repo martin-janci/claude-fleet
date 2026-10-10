@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   UNSURE_NOTE,
   confirmTitle,
+  ignoredConversations,
+  setConversationIgnored,
   isOutsideFleet,
   needsRestoreInto,
   pickableProjects,
@@ -103,5 +105,20 @@ describe('lost and found (4.12)', () => {
       'Adopt fleet-trn-scratch into acme/papaya-pos?',
     );
     expect(confirmTitle('Adopt', 'scratch', null)).toBe('Adopt scratch without a project?');
+  });
+});
+
+describe('Ignore a found conversation (G2.7)', () => {
+  it('is kept per host on this device, and Bring back undoes it', () => {
+    localStorage.clear();
+    expect(ignoredConversations('mercury').size).toBe(0);
+    setConversationIgnored('mercury', 'c-1', true);
+    setConversationIgnored('mercury', 'c-2', true);
+    setConversationIgnored('venus', 'c-1', true);
+    expect([...ignoredConversations('mercury')].sort()).toEqual(['c-1', 'c-2']);
+    setConversationIgnored('mercury', 'c-1', false);
+    expect([...ignoredConversations('mercury')]).toEqual(['c-2']);
+    expect([...ignoredConversations('venus')]).toEqual(['c-1']);
+    localStorage.clear();
   });
 });

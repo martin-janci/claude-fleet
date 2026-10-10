@@ -66,7 +66,7 @@ describe('the start popover', () => {
     await flush();
     const chip = screen.getByTestId('start-popover-suggested');
     expect(chip.querySelector('.pill')?.textContent).toBe('Proposed by Jev');
-    expect(chip.textContent).toContain('88%');
+    expect(chip.textContent).toContain('likely');
     expect(screen.getByTestId('start-popover-project')).toHaveClass('ai-pre');
     await fireEvent.click(screen.getByTestId('start-popover-suggested-change'));
     await flush();

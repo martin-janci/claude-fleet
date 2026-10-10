@@ -165,6 +165,7 @@ const EVERYONE: &[Who] = &[
 impl Who {
     fn caller(self, fx: &Fx) -> Caller {
         let device = |person: Option<i64>| Caller {
+            api: None,
             host_alias: None,
             client: Some(crate::mcp::auth::ClientRef {
                 id: 21,
@@ -181,6 +182,7 @@ impl Who {
             is_personal_owner: person == Some(fx.admin),
         };
         let host = |alias: &str, pane: Option<&str>| Caller {
+            api: None,
             host_alias: Some(alias.into()),
             client: None,
             mode: TokenMode::Full,
@@ -764,6 +766,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "list_tasks" => fx.t.list_tasks(ext, p!()).await,
         "cancel_task" => fx.t.cancel_task(ext, p!()).await,
         "set_session_tags" => fx.t.set_session_tags(ext, p!()).await,
+        "decide_related_session" => fx.t.decide_related_session(ext, p!()).await,
         "work" => fx.t.work(ext, p!()).await,
         "work_link" => fx.t.work_link(ext, p!()).await,
         // ---- repo.rs ------------------------------------------------------
@@ -1068,6 +1071,12 @@ async fn run_matrix() {
         "set_session_tags",
         Reach::Own,
         |fx, _| json!({ "session_id": fx.row, "tags": ["t"] }),
+    )
+    .await;
+    m.gated(
+        "decide_related_session",
+        Reach::Own,
+        |fx, _| json!({ "session_id": fx.row, "run_id": 1, "linked": true }),
     )
     .await;
     // `delete_worktree` is `Own` on every OCCUPANT of the tree, and it is
@@ -2111,6 +2120,7 @@ fn own_tier_args(fx: &Fx, tool: &str) -> Value {
         "rename_session" => json!({ "session_id": fx.row, "new_name": "renamed" }),
         "adopt_session" | "lost_target" => json!({ "session_id": fx.row }),
         "set_session_tags" => json!({ "session_id": fx.row, "tags": ["t"] }),
+        "decide_related_session" => json!({ "session_id": fx.row, "run_id": 1, "linked": true }),
         "delete_worktree" => json!({ "worktree_id": fx.worktree, "force": true }),
         "session_share" | "session_unshare" | "session_narrow" => {
             json!({ "session_id": fx.row, "person": PERSON_SPARE, "level": "watch" })
@@ -2140,6 +2150,7 @@ fn own_tier_args(fx: &Fx, tool: &str) -> Value {
 async fn claiming_needs_the_pane_of_the_row_not_merely_its_host() {
     let fx = fixture();
     let in_pane = Caller {
+        api: None,
         host_alias: Some(HOST.into()),
         client: None,
         mode: TokenMode::Full,

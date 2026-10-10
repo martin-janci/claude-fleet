@@ -30,6 +30,12 @@ export interface Toast {
   /** How many times the same code+message was pushed while visible. */
   count: number;
   action: ToastAction | null;
+  /** A second, quieter button beside `action` ("Not now" beside "Add rule"),
+   *  the Toasts board's two-button toast. Running it dismisses the toast too. */
+  secondary?: ToastAction;
+  /** A second line under the message, in the muted colour ("2 sessions
+   *  paused until Fri 11:00", "freed about 2.1 GB"). */
+  sub?: string;
   /** A long job's progress, 0–1 (step 10.10): drawn as a 28 px Progress
    *  ring. Absent on every other toast. */
   progress?: number;
@@ -47,6 +53,10 @@ export interface PushOptions {
   timeoutMs?: number;
   /** An inline button; a toast with one stays up for `ACTION_TIMEOUT_MS` by default. */
   action?: ToastAction;
+  /** A second, quieter button; only with `action`. */
+  secondary?: ToastAction;
+  /** A second line under the message. Not part of the dedup key. */
+  sub?: string;
   /** 0–1 for a long job of known size; move it with `setToastProgress`. */
   progress?: number;
   /** Shown under Details instead of in the line itself. */
@@ -154,23 +164,37 @@ export function push(opts: PushOptions): number {
   const sticky = opts.sticky ?? kind === 'error';
   const key = keyOf(code, opts.message);
   const action = opts.action ?? null;
+  // A lone "Not now" with nothing to say no to is not a choice.
+  const secondary = action ? opts.secondary : undefined;
   const timeout = opts.timeoutMs ?? (action ? ACTION_TIMEOUT_MS : INFO_TIMEOUT_MS);
   const existing = get(toasts).find((t) => keyOf(t.code, t.message) === key);
   if (existing) {
     toasts.update((arr) =>
-      arr.map((t) => (t.id === existing.id ? { ...t, count: t.count + 1, action: action ?? t.action } : t)),
+      arr.map((t) =>
+        t.id === existing.id
+          ? {
+              ...t,
+              count: t.count + 1,
+              action: action ?? t.action,
+              ...(action ? { secondary } : {}),
+              ...(opts.sub !== undefined ? { sub: opts.sub } : {}),
+            }
+          : t,
+      ),
     );
     if (!existing.sticky) arm(existing.id, timeout);
-    recordNotice(existing.id, false, { kind, code, message: opts.message });
+    recordNotice(existing.id, false, { kind, code, message: opts.message, sub: opts.sub });
     return existing.id;
   }
   const id = nextId++;
   const toast: Toast = { id, kind, code, message: opts.message, sticky, count: 1, action };
   if (opts.progress !== undefined) toast.progress = clamp01(opts.progress);
   if (opts.detail) toast.detail = opts.detail;
+  if (secondary) toast.secondary = secondary;
+  if (opts.sub) toast.sub = opts.sub;
   toasts.update((arr) => capped([...arr, toast]));
   if (!sticky) arm(id, timeout);
-  recordNotice(id, true, { kind, code, message: opts.message });
+  recordNotice(id, true, { kind, code, message: opts.message, sub: opts.sub });
   return id;
 }
 
@@ -238,11 +262,12 @@ export function dismiss(id: number): void {
   if (get(toasts).length === 0) droppedToasts.set(0);
 }
 
-/** Run a toast's action (if it still has one) and dismiss the toast. */
-export function runToastAction(id: number): void {
+/** Run a toast's action (or its `secondary` one) if it still has it, and
+ *  dismiss the toast. */
+export function runToastAction(id: number, which: 'primary' | 'secondary' = 'primary'): void {
   const t = get(toasts).find((x) => x.id === id);
   dismiss(id);
-  t?.action?.run();
+  (which === 'secondary' ? t?.secondary : t?.action)?.run();
 }
 
 export function clearToasts(): void {

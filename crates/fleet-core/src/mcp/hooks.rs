@@ -297,6 +297,7 @@ mod tests {
             ssh: Arc::new(SshClient::new()),
         };
         let client = Caller {
+            api: None,
             host_alias: None,
             client: Some(ClientRef {
                 id: 1,
@@ -659,6 +660,7 @@ mod tests {
             ssh: Arc::new(SshClient::new()),
         };
         let client = Caller {
+            api: None,
             host_alias: None,
             client: Some(ClientRef {
                 id: 1,

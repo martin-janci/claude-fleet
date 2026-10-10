@@ -1,6 +1,8 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import type { ProposalLike } from './ai_proposal';
+import { outbox } from './outbox';
+import { sessions } from './sessions';
 
 /**
  * Jev K2, redesign step 9.9: where a message just sent in Control goes.
@@ -12,9 +14,13 @@ import type { ProposalLike } from './ai_proposal';
  * - `none`: show nothing (feature off, shadow, a slash command, or the
  *   message is for Control itself).
  *
- * The message has already reached Control's agent: a receipt never moves,
- * holds or re-sends it. "Change" records the person's pick, which is what
- * the use case learns from.
+ * The message has already reached Control's agent: a receipt never moves
+ * or holds it. "Change" records the person's pick, which is what the use
+ * case learns from. Gap plan G3.9: a receipt about a session can hand the
+ * message on — "Send to <session>" puts the same text in that session's
+ * outbox, on the person's press, never on the proposal alone; the receipt
+ * then reads "Sent to session …". A mission has no inbox to hand text to,
+ * so its receipt only opens it.
  */
 
 export type TargetKind = 'mission' | 'session';
@@ -62,6 +68,10 @@ export interface Receipt {
   chosen: string | null;
   /** Whether a follow-up was recorded (once per receipt). */
   followed: boolean;
+  /** What the person typed (no context prefix): what Send hands on. */
+  text: string;
+  /** The session it was handed on to, once it was. */
+  handed: RouteTarget | null;
 }
 
 /** Receipts shown in Control, newest last; only the latest few are kept. */
@@ -75,7 +85,7 @@ export async function routeSent(key: string, text: string): Promise<void> {
   // mock) keeps no receipt rather than throwing out of the send.
   if (!r.ok || !r.value || r.value.outcome === 'none') return;
   const route = r.value;
-  receipts.update((rs) => [...rs.filter((x) => x.key !== key), { key, route, chosen: null, followed: false }].slice(-MAX_RECEIPTS));
+  receipts.update((rs) => [...rs.filter((x) => x.key !== key), { key, route, chosen: null, followed: false, text, handed: null }].slice(-MAX_RECEIPTS));
 }
 
 /**
@@ -92,6 +102,25 @@ export async function choose(key: string, option: string): Promise<void> {
     }),
   );
   if (runId != null) await followRoute(runId, option);
+}
+
+/**
+ * Hand receipt `key`'s message on to the session it is about (the person's
+ * pick, else the proposal). Recorded as the person's choice when they had
+ * not made one. `null` when it went into the session's outbox, else why not.
+ */
+export async function handOn(key: string): Promise<string | null> {
+  const r = get(receipts).find((x) => x.key === key);
+  if (!r) return 'That receipt is gone.';
+  if (r.handed) return null;
+  const t = targetOf(r.route, shownOption(r));
+  if (!t || t.kind !== 'session') return 'Only a session can take the message.';
+  const row = get(sessions).find((s) => s.id === t.id);
+  if (!row || row.lost_at != null) return `${t.name} is no longer running.`;
+  outbox.enqueue({ id: row.id, host_alias: row.host_alias, tmux_name: row.tmux_name }, { kind: 'prompt', text: r.text });
+  receipts.update((rs) => rs.map((x) => (x.key === key ? { ...x, handed: t } : x)));
+  if (r.chosen === null) await choose(key, optionOf(t));
+  return null;
 }
 
 /** The option a receipt shows now: the person's pick, else the proposal. */

@@ -16,6 +16,7 @@ mod catalog;
 mod changesets;
 mod clients;
 mod control_handoffs;
+mod control_tokens;
 mod conversations;
 mod debug_devices;
 mod decisions;
@@ -99,6 +100,7 @@ pub use clients::{
 pub use control_handoffs::{
     handoff_preview, ControlHandoffRow, HandoffItem, NewHandoff, HANDOFFS_KEEP, HANDOFF_PREVIEW_MAX,
 };
+pub use control_tokens::{ApiScope, ControlTokenRow, NewControlToken};
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, SeenDevice};
 pub use decisions::{
@@ -107,7 +109,7 @@ pub use decisions::{
     DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_NO_BASELINE,
     DECISION_PERSON_FOLLOWUPS, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
 };
-pub use deferred_prompts::{DeferredPromptRow, DEFERRED_MAX_ATTEMPTS};
+pub use deferred_prompts::{DeferredPromptRow, DeferredTiming, DEFERRED_MAX_ATTEMPTS};
 pub use downloads::{DownloadRow, NewDownload};
 pub use forms::{FormFinish, FormRow, NewForm, FORM_STATES};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
@@ -160,7 +162,10 @@ pub use pr_shepherd::{
     SHEPHERD_RECIPES_MAX_CHARS,
 };
 pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
-pub use pull_requests::{repo_and_number, PrSeenBy, PullRequestRow};
+pub use pull_requests::{
+    pr_events, repo_and_number, PrSeenBy, PullRequestRow, PR_EVENT_CI_FAILED, PR_EVENT_CI_PASSED,
+    PR_EVENT_MERGED, PR_EVENT_REVIEW,
+};
 pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};

@@ -113,6 +113,7 @@ pub(crate) fn sample_session() -> SessionRow {
             confidence_pct: Some(82),
             run_id: Some(41),
             at: Some(1_700_000_200),
+            linked: None,
         }],
         pending_form: Some(fleet_core::store::PendingForm {
             form_id: "f_x".into(),
@@ -654,6 +655,9 @@ fn sample_changed_file() -> ChangedFile {
         status: "renamed".into(),
         staged: true,
         orig_path: Some("src/old.rs".into()),
+        // Set, so the golden pins the Files tab's +/- names (M15 G1.10).
+        added: Some(1),
+        removed: Some(1),
     }
 }
 
@@ -805,6 +809,8 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         project_id: Some(1),
         first_seen_at: 1,
         updated_at: 2,
+        additions: None,
+        deletions: None,
     };
     put("PullRequestRow", wire_keys(&pr));
     put(
@@ -878,6 +884,11 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             failed_at: Some(1),
             error: Some("e".into()),
             cancelled_at: Some(1),
+            // Set, so the golden pins Send later's names (M15 G1.8).
+            not_before: Some(1),
+            until_limit_reset: true,
+            skip_if_archived: true,
+            skipped_at: Some(1),
         }),
     );
     put(
@@ -891,6 +902,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             base: Some("origin/main".into()),
             ahead_of_base: 1,
             base_files: vec![],
+            behind_base: Some(1),
         }),
     );
     let terms = fleet_core::service::sessions::ShellTerminalsResult {
@@ -899,6 +911,8 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         terminals: vec![fleet_core::service::sessions::ShellTerminal {
             n: 1,
             tmux_name: "fleet-dev-t1".into(),
+            // Some, so the golden pins the name the strip reads (M15 G4.4).
+            command: Some("node".into()),
         }],
         opened: Some(1),
     };
@@ -940,6 +954,8 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         status: "todo".into(),
         proposal_state: Some("accepted".into()),
         accepted_at: Some(1),
+        done_when: Vec::new(),
+        depends_on: Vec::new(),
     };
     put("HandoffItem", wire_keys(&item));
     put(
@@ -1237,6 +1253,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             author: "A Person".into(),
             date: "2026-09-18".into(),
             files: vec![sample_changed_file()],
+            pushed: Some(true),
         }),
     );
     c

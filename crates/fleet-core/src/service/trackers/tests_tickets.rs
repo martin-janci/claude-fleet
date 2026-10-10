@@ -29,6 +29,7 @@ fn vs(store: &Mutex<Store>, scope: &OrgScope) -> ViewScope {
         // (`view_scope_tests::only_caller_view_scope_constructs_a_view_scope`
         // holds that true by reading this file too).
         Some(h) => crate::mcp::auth::Caller {
+            api: None,
             host_alias: Some(h.to_string()),
             client: None,
             mode: crate::mcp::auth::TokenMode::Full,

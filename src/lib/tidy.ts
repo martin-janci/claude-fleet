@@ -10,6 +10,7 @@ import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { acceptCommandRow, type SessionRow } from './sessions';
 import { ALL_SCOPES } from './orgs';
+import { sizeText } from './hosts_table';
 
 /** `service::gc::tidy::TidyReason` — tolerant of values a newer hub adds. */
 export type TidyReason =
@@ -60,14 +61,50 @@ export const TIDY_REASON_LABELS: Record<string, string> = {
   idle_unlinked: 'Idle, no work linked',
 };
 
+/** The choice names the Tidy board uses (G3.12). Snooze (per link) and
+ *  Keep (per session) read the same to a person: never both on one row. */
 export const TIDY_CHOICE_LABELS: Record<TidyChoice, string> = {
-  safe_kill: 'Safe kill',
+  safe_kill: 'Clean up',
   kill: 'Kill',
-  archive: 'Archive only',
-  snooze: 'Snooze 7 d',
-  never: 'Never for this work',
-  keep: `Keep ${KEEP_DAYS} d`,
+  archive: 'Archive',
+  snooze: `Keep for ${KEEP_DAYS} days`,
+  never: 'Never',
+  keep: `Keep for ${KEEP_DAYS} days`,
 };
+
+/** What each choice does, in the words of the sheet's legend. They say what
+ *  the backend's `tidy_apply` does, not more: Archive only folds the session
+ *  into its work's Done section, a plain Kill removes no tree of its own. */
+export const TIDY_CHOICE_HELP: Record<TidyChoice, string> = {
+  safe_kill: 'Claude commits and pushes first; the worktree goes only if that succeeds',
+  kill: 'Ends the pane now; offered only where it has no worktree of its own to remove (a shared tree, a shell, a review)',
+  archive: "Folds it into its work's Done section; the pane, worktree and transcript stay",
+  snooze: 'Out of Tidy for a week',
+  never: 'Never suggest it again for this work',
+  keep: 'Out of Tidy for a week',
+};
+
+/** The legend's Restore line, shown when the sheet has stopped sessions. */
+export const TIDY_RESTORE_HELP =
+  'Brings the stopped sessions back, each resuming its Claude conversation; left alone, one expires at the time shown';
+
+/** The legend: one line per choice the shown rows offer, in the sheet's
+ *  order, a label once (Keep and Snooze read the same), and Restore when a
+ *  stopped session is among them. */
+export function tidyLegend(cands: readonly TidyCandidate[]): { label: string; help: string }[] {
+  const offered = new Set<TidyChoice>();
+  for (const c of cands) for (const ch of choicesFor(c)) offered.add(ch);
+  const order: TidyChoice[] = ['safe_kill', 'kill', 'archive', 'snooze', 'keep', 'never'];
+  const out: { label: string; help: string }[] = [];
+  const seen = new Set<string>();
+  for (const ch of order) {
+    if (!offered.has(ch) || seen.has(TIDY_CHOICE_LABELS[ch])) continue;
+    seen.add(TIDY_CHOICE_LABELS[ch]);
+    out.push({ label: TIDY_CHOICE_LABELS[ch], help: TIDY_CHOICE_HELP[ch] });
+  }
+  if (cands.some((c) => c.reason === 'ghost_expiring')) out.push({ label: 'Restore all', help: TIDY_RESTORE_HELP });
+  return out;
+}
 
 export function tidyReasonLabel(r: string): string {
   return TIDY_REASON_LABELS[r] ?? r.replace(/_/g, ' ');
@@ -99,6 +136,9 @@ export interface TidyCandidate {
   /** A `safe_kill` row's own worktree size in kB, as the host probe last
    *  measured it; absent when not measured (or from an older hub). */
   worktree_kb?: number | null;
+  /** A `safe_kill` row's own worktree, the tree a clean up removes (G3.12);
+   *  absent without one (or from an older hub). */
+  worktree_path?: string | null;
 }
 
 /** `work { action: tidy }`. */
@@ -219,6 +259,90 @@ export function freedKb(
     total = (total ?? 0) + c.worktree_kb;
   }
   return total;
+}
+
+/** What an applied tidy frees, in kB: the measured worktree of every row
+ *  whose safe kill went through. `null` when none of them was measured, so
+ *  the toast says nothing rather than "0 MB". */
+export function freedByResults(
+  candidates: readonly TidyCandidate[],
+  results: readonly TidyApplyResult[],
+): number | null {
+  const byId = new Map(candidates.map((c) => [c.session_id, c] as const));
+  let total: number | null = null;
+  for (const r of results) {
+    const kb = byId.get(r.session_id)?.worktree_kb;
+    if (!r.ok || r.action !== 'safe_kill' || kb == null) continue;
+    total = (total ?? 0) + kb;
+  }
+  return total;
+}
+
+/**
+ * The selected row's explanation (G3.12): why fleet suggests it, from what
+ * the candidate carries, then what the chosen action does to it — the tree
+ * a clean up removes, with its measured size. Whether that tree is clean or
+ * pushed is not known until the clean up inspects it, so it is not claimed.
+ */
+export function tidyDetail(
+  c: TidyCandidate,
+  choice: TidyChoice | null,
+  nowSecs: number = Math.floor(Date.now() / 1000),
+): string {
+  const facts: string[] = [];
+  if (c.reason === 'pr_merged_idle') facts.push('PR merged');
+  if (c.key && c.item_status) facts.push(`${c.key} is ${c.item_status}`);
+  if (c.branch) facts.push(`branch ${c.branch}`);
+  if (c.expires_at) facts.push(`stopped, expires in ${formatIdle(c.expires_at - nowSecs)}`);
+  else facts.push(tidyEvidence(c, nowSecs));
+  const why = `${tidyReasonLabel(c.reason)}: ${facts.join(', ')}.`;
+  let what: string;
+  switch (choice) {
+    case 'safe_kill': {
+      const tree = c.worktree_path
+        ? `${c.worktree_path}${c.worktree_kb != null ? ` (${sizeText(c.worktree_kb)})` : ''}`
+        : 'its worktree';
+      what =
+        c.reason === 'idle_unlinked'
+          ? `Clean up removes ${tree} only if it is clean and pushed; otherwise it is refused.`
+          : `Clean up has Claude commit and push first, then removes ${tree}.`;
+      break;
+    }
+    case 'kill':
+      what = 'Kill ends the pane now; no worktree of its own is removed.';
+      break;
+    case 'archive':
+      what = "Archive folds it into its work's Done section; nothing on the host changes.";
+      break;
+    case 'snooze':
+    case 'keep':
+      what = `Kept out of Tidy for ${KEEP_DAYS} days.`;
+      break;
+    case 'never':
+      what = 'Never suggested again for this work.';
+      break;
+    default:
+      what = c.action === 'resume_or_expire' ? 'Resume or Restore all brings it back.' : '';
+  }
+  return what ? `${why} ${what}` : why;
+}
+
+/** "Restore all" on the stopped group: the group's session ids by host (the
+ *  batch `restore_host_sessions` takes is per host), only those `allowed`. */
+export function restoreBatches(
+  cands: readonly TidyCandidate[],
+  allowed: (sessionId: number) => boolean = () => true,
+): { host: string; ids: number[] }[] {
+  const byHost = new Map<string, number[]>();
+  for (const c of cands) {
+    if (c.reason !== 'ghost_expiring' || !allowed(c.session_id)) continue;
+    const list = byHost.get(c.host_alias);
+    if (list) list.push(c.session_id);
+    else byHost.set(c.host_alias, [c.session_id]);
+  }
+  return [...byHost.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([host, ids]) => ({ host, ids }));
 }
 
 /** Whether a row starts ticked: every row whose default is an action,

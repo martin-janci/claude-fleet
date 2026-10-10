@@ -269,6 +269,7 @@
     detail={view.detail ?? undefined}
     {answers}
     {compact}
+    enter={!compact}
     keys={false}
     mac={isMac}
     label={view.kind === 'permission' ? 'Permission request' : 'Question from Claude'}

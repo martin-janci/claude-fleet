@@ -11,6 +11,7 @@ import {
   formatResetShort,
   freshness,
   leftPct,
+  loginHeadroomText,
   limitWording,
   missingToolText,
   modelBuckets,
@@ -492,5 +493,30 @@ describe('statusMessage', () => {
       'curl 7.55+ needed on htz — usage is read via mefistos.',
     ]);
     expect(m.lines.every((l) => l.tone === 'muted')).toBe(true);
+  });
+});
+
+describe('loginHeadroomText (G2.7 Switch login)', () => {
+  it('says what is left in both windows, or in the one there is', () => {
+    expect(loginHeadroomText(snap(), NOW, L, TZ)).toBe('5h 91% · week 58% left');
+    expect(loginHeadroomText(snap({ usage: usage({ five_hour: null }) }), NOW, L, TZ)).toBe('58% left');
+  });
+
+  it('names the limit and when it lifts once a window is used up', () => {
+    expect(loginHeadroomText(snap({ usage: usage({ seven_day: { utilization: 100, resets_at: RESET_WEEK } }) }), NOW, L, TZ)).toBe(
+      'weekly limit until Thu 09:00',
+    );
+    expect(loginHeadroomText(snap({ usage: usage({ five_hour: { utilization: 100, resets_at: RESET_5H } }) }), NOW, L, TZ)).toBe(
+      '5-hour limit until 15:10',
+    );
+  });
+
+  it('drops a window whose reset has passed, and says nothing without a reading', () => {
+    expect(loginHeadroomText(snap({ usage: usage({ five_hour: { utilization: 100, resets_at: NOW - 1 } }) }), NOW, L, TZ)).toBe(
+      '58% left',
+    );
+    expect(loginHeadroomText(null, NOW)).toBeNull();
+    expect(loginHeadroomText(snap({ usage: null }), NOW)).toBeNull();
+    expect(loginHeadroomText(snap({ fetched_at: null }), NOW)).toBeNull();
   });
 });

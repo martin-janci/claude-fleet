@@ -58,7 +58,8 @@ export type Scope =
   | 'session-list'
   | 'question-card'
   | 'form-card'
-  | 'form';
+  | 'form'
+  | 'work';
 
 /** Each scope's heading, in the order the lists show them: Settings →
  *  Shortcuts and the `?` sheet both read it, so they name a scope alike. */
@@ -69,6 +70,7 @@ export const SCOPE_TITLES: Record<Scope, string> = {
   'question-card': 'Question card',
   'form-card': 'Chat form',
   form: 'Dialogs and forms',
+  work: 'Work',
   conversation: 'Conversation',
   terminal: 'Terminal',
   switcher: 'Quick switcher',
@@ -270,6 +272,8 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('work-board', 'work-board.left', 'Move the card a column left', keys('ArrowLeft')),
   row('work-board', 'work-board.right', 'Move the card a column right', keys('ArrowRight')),
   row('work-board', 'work-board.cancel-drag', 'Cancel the drag', keys('Escape*')),
+  row('work-board', 'work-board.select', 'Select the card (or unselect it)', keys('x')),
+  row('work-board', 'work-board.start', 'Start a new session for the card', keys('s')),
   // SessionRowItem
   row('session-row', 'session-row.yes', 'Confirm the suggested link', view('y')),
   row('session-row', 'session-row.no', 'Reject the suggested link', view('n')),
@@ -292,6 +296,10 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // through the native <dialog> (Modal), as it always has.
   row('form', 'form.submit', 'Submit the form', split(['Meta+Enter'], ['Ctrl+Enter'])),
   row('form', 'form.submit-one', 'Submit a one-field form', keys('Enter')),
+
+  // ── Work (G2.1, FormsWork): while the Work view is open, New session's
+  // chord makes a task instead (WorkTree; QuickSwitcher stands aside).
+  row('work', 'work.new-task', 'New task', split(['Meta+N'], ['Ctrl+Shift+N']), { shadows: ['new-session'] }),
 ];
 
 /** The view handlers each per-view scope lives in, for the freeze test. */
@@ -322,6 +330,7 @@ export const MATCHED_SCOPES: Partial<Record<Scope, string>> = {
   'tidy-review': 'src/lib/TidyReview.svelte',
   'work-board': 'src/lib/WorkBoard.svelte',
   'session-row': 'src/lib/SessionRowItem.svelte',
+  work: 'src/lib/new_task.ts',
 };
 
 export interface KeyEventLike {

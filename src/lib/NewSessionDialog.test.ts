@@ -1921,7 +1921,7 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
       await vi.waitFor(() => expect(also.checked).toBe(true));
       const chip = screen.getByTestId('ticket-also-in-proposed');
       expect(chip.textContent).toContain('Proposed by Jev');
-      expect(chip.textContent).toContain('81%');
+      expect(chip.textContent).toContain('likely');
       expect(also.closest('label')).toHaveClass('ai-pre');
       await fireEvent.click(screen.getByTestId('ticket-also-in-proposed-change'));
       await tick();
@@ -2353,7 +2353,7 @@ describe('NewSessionDialog host placement', () => {
     expect(active()).toBe('mefistos');
     expect(document.querySelector('[data-alias="mefistos"]')).toHaveClass('ai-pre');
     expect(screen.getByTestId('new-session-host-proposed').textContent).toContain('Proposed by Jev');
-    expect(screen.getByTestId('new-session-host-proposed').textContent).toContain('80%');
+    expect(screen.getByTestId('new-session-host-proposed').textContent).toContain('likely');
     await vi.waitFor(() => expect(worktreeLabels()).toContain('main'));
     await fireEvent.click(screen.getByText('Create'));
     await vi.waitFor(() => expect(calls('record_host_placement')).toHaveLength(1));
@@ -2368,6 +2368,10 @@ describe('NewSessionDialog host placement', () => {
     await fireEvent.click(screen.getByText('Change'));
     expect(active()).toBe('local');
     expect(screen.queryByTestId('new-session-host-proposed')).toBeNull();
+    // The corrected state says what changed and that it is kept (G4.9).
+    expect(screen.getByTestId('new-session-host-corrected').textContent).toContain(
+      'You changed mefistos → local · recorded as a correction when you start',
+    );
     await fireEvent.click(screen.getByText('Create'));
     await vi.waitFor(() => expect(calls('record_host_placement')).toHaveLength(1));
     expect((calls('record_host_placement')[0][1] as any).args.host_alias).toBe('local');

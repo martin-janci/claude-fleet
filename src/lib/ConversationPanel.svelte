@@ -33,6 +33,8 @@
   import CopyButton from './CopyButton.svelte';
   import ReplyActions from './ReplyActions.svelte';
   import ForkSheet from './ForkSheet.svelte';
+  import SendLaterSheet from './SendLaterSheet.svelte';
+  import Icon from './kit/Icon.svelte';
   import { suggestedForkName } from './reply_actions';
   import {
     findMatches,
@@ -178,6 +180,15 @@
     // 9.13): Control's chat reads the running turn itself and answers the
     // loader and the line to show instead of the Atom's "Thinking · …".
     thinkingAs,
+    // Gap plan G3.9: a host that runs some slash commands itself (Control's
+    // /task, /done, /assign, /start — `control_slash.ts`). Asked before a
+    // command goes into the outbox; `true` means it took the line, which
+    // then leaves the box and never reaches the REPL.
+    runCommand,
+    // The line under the box and the box's placeholder, in a host's words
+    // (Control: "# task · @ host · / command").
+    composerHint = '↵ send · ⇧↵ newline · ↑ history',
+    placeholder = 'Send a prompt…',
   }: {
     session: SessionRow;
     visible: boolean;
@@ -188,6 +199,9 @@
     blockWhileBusy?: boolean;
     composerAbove?: Snippet;
     thinkingAs?: (conv: Conversation | null) => { loader: LoaderName; label: string } | null;
+    runCommand?: (text: string) => boolean;
+    composerHint?: string;
+    placeholder?: string;
   } = $props();
 
   // Raw: replaced whole on each read and never mutated, so a deep proxy only
@@ -1422,6 +1436,12 @@
       await sendKey();
       return;
     }
+    if (kind === 'command' && runCommand?.(text)) {
+      if (opts.fromDraft) draft = '';
+      histIndex = null;
+      box?.focus();
+      return;
+    }
     if (busyBlocked) return;
     chipHeld = false;
     // A pasted tile has an empty `path` (see attachments.ts): nothing ever
@@ -1660,6 +1680,20 @@
   // anything). A pasted file has neither, and `addFiles` says so.
 
   let attachments = $state<Attachment[]>([]);
+  // Send later (gap plan G2.7, the FormsSession board's "composer › Send
+  // later"): the draft goes into the session's prompt queue with a time
+  // (G1.8). Its own question: `queue_prompt`, `drive` like a send. Text
+  // only, so a tray with files keeps them for a send now.
+  let sendLaterOpen = $state(false);
+  const sendLaterBlocked = $derived(
+    viewing !== null
+      ? 'Viewing an earlier conversation — go back to current to send.'
+      : (hubActionBlocked('queue_prompt', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'queue_prompt')),
+  );
+  const sendLaterWhy = $derived(
+    sendLaterBlocked ??
+      (attachments.length > 0 ? 'Send later carries text only: send the files now, or remove them first' : null),
+  );
   let attachErrors = $state<string[]>([]);
   /** dragleave fires for every child, so DOM nesting is counted, not flagged. */
   let dragDepth = $state(0);
@@ -2440,6 +2474,7 @@
                 onmousedown={(e) => e.preventDefault()}
                 onclick={() => acceptSlash(c)}>
                 <span class="slash-name">/{c.name}</span>
+                {#if c.usage}<span class="slash-usage" data-testid="conv-slash-usage">{c.usage}</span>{/if}
                 <span class="slash-desc">{c.description}</span>
                 {#if c.source}<span class="slash-source" data-testid="conv-slash-source">{c.source === 'skill' ? 'Skill' : 'Command'}</span>{/if}
               </button>
@@ -2553,7 +2588,7 @@
           rows="2"
           use:autoGrow={draft}
           onpaste={onComposerPaste}
-          placeholder="Send a prompt…"
+          {placeholder}
           title={shareBlocked ?? undefined}
           disabled={viewing !== null || shareBlocked !== null}
         ></textarea>
@@ -2594,7 +2629,15 @@
               <option value={o.value}>{o.label}</option>
             {/each}
           </select>
-          <span class="composer-hint" id={COMPOSER_HINT_ID}>↵ send · ⇧↵ newline · ↑ history</span>
+          <span class="composer-hint" id={COMPOSER_HINT_ID} data-testid="conv-composer-hint">{composerHint}</span>
+          <button
+            type="button"
+            class="btn btn--icon btn--quiet"
+            data-testid="conv-send-later"
+            aria-label="Send later…"
+            title={sendLaterWhy ?? 'Send later…'}
+            disabled={sendLaterWhy !== null}
+            onclick={() => (sendLaterOpen = true)}><Icon name="clock" size={14} /></button>
           <button
             type="submit"
             class="btn btn--icon btn--primary composer-send"
@@ -2621,6 +2664,21 @@
     <p class="muted readonly" data-testid="conv-readonly">Read-only: this agent runs outside tmux, so there is no terminal to prompt.</p>
   {/if}
 </div>
+
+{#if sendLaterOpen}
+  <SendLaterSheet
+    sessionId={session.id}
+    initial={draft}
+    blocked={sendLaterBlocked}
+    onscheduled={(m) => {
+      if (draft.trim() === m) draft = '';
+    }}
+    onclose={() => {
+      sendLaterOpen = false;
+      box?.focus();
+    }}
+  />
+{/if}
 
 {#if forkOpen}
   <ForkSheet
@@ -2937,6 +2995,12 @@
     flex: 1 1 auto;
     height: 1px;
     background: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .slash-usage {
+    color: var(--fg-muted);
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: var(--text-2xs);
+    white-space: nowrap;
   }
   .slash-desc {
     flex: 1 1 auto;

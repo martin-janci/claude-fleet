@@ -53,9 +53,10 @@
   import { showFriendlyNames } from './sessions';
   import { selectSessionExplicitly } from './selection';
   import { pushError } from './toasts';
-  import { accountsPageRequest } from './account_pill';
+  import { accountsPageRequest, accountsPausedRequest } from './account_pill';
   import { requestHostsView } from './app_views';
   import { untrack } from 'svelte';
+  import { get } from 'svelte/store';
 
   let {
     clock = () => Math.floor(Date.now() / 1000),
@@ -166,6 +167,9 @@
     const req = $accountsPageRequest;
     if (req === null) return;
     picked = req;
+    // The limit-hit toast's "Show paused sessions" asks for the paused ones.
+    pausedOnly = get(accountsPausedRequest) ? req : null;
+    accountsPausedRequest.set(false);
     accountsPageRequest.set(null);
   });
   // Nothing picked yet: the first account. A pick that names an account the

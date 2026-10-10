@@ -71,6 +71,38 @@ pub fn shell_terminals_in(session: &str, names: &str) -> Vec<u32> {
     out
 }
 
+/// Every tmux session on the server with what runs in the front of its
+/// active pane (`pane_current_command`: the shell when it is idle, `node`
+/// while `pnpm dev` runs), one `<command>|<name>` per line; nothing when no
+/// server runs. [`shell_terminal_commands_in`] picks a session's terminals
+/// out. The command goes first because a session name is the part that
+/// must survive whole.
+pub const LIST_SESSION_COMMANDS_SCRIPT: &str =
+    "tmux list-sessions -F '#{pane_current_command}|#{session_name}' 2>/dev/null; true";
+
+/// The terminals of `session` in [`LIST_SESSION_COMMANDS_SCRIPT`]'s output,
+/// ascending, each with what runs in it (`None` when tmux printed nothing).
+/// A `|` in the command or the name is resolved by trying each split until
+/// the rest names one of `session`'s terminals. PURE.
+pub fn shell_terminal_commands_in(session: &str, lines: &str) -> Vec<(u32, Option<String>)> {
+    let mut out: Vec<(u32, Option<String>)> = lines
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_end_matches('\r');
+            line.match_indices('|').find_map(|(at, _)| {
+                let (s, n) = parse_shell_terminal_name(&line[at + 1..])?;
+                (s == session).then(|| {
+                    let cmd = line[..at].trim();
+                    (n, (!cmd.is_empty()).then(|| cmd.to_string()))
+                })
+            })
+        })
+        .collect();
+    out.sort_by_key(|(n, _)| *n);
+    out.dedup_by_key(|(n, _)| *n);
+    out
+}
+
 /// Exit code [`open_shell_terminal_script`] ends with when the agent's own
 /// tmux session is gone: a terminal is only ever opened beside a live one.
 pub const SHELL_TERMINAL_NO_SESSION: i32 = 3;

@@ -35,7 +35,8 @@
     replaceOperator,
     type OperatorBlocked,
   } from './operator';
-  import { openSettingsAt, requestHostsView } from './app_views';
+  import { openSettingsAt, requestHostsView, requestNewSessionOnHost } from './app_views';
+  import { hosts } from './hosts';
   import { agentContext, type AgentContextInput } from './agent_context';
   import { OPERATOR_COMMANDS } from './operator';
   import { insertIntoComposer } from './conversation';
@@ -44,6 +45,14 @@
   import HandoffCards from './HandoffCards.svelte';
   import { controlThinking } from './control_loaders';
   import ControlRouteReceipts from './ControlRouteReceipts.svelte';
+  import ControlCommandReceipts from './ControlCommandReceipts.svelte';
+  import ControlSuggestions from './ControlSuggestions.svelte';
+  import { takeControlCommand } from './control_slash';
+
+  // Gap plan G3.9: the box's words in Control. `#KEY` names a task and
+  // `@name` a host or session in Control's commands; `/` opens them.
+  const CONTROL_HINT = '# task · @ host · / command · ↵ send';
+  const CONTROL_PLACEHOLDER = 'Ask the fleet, or start a task…';
 
   let { contextInput = null }: { contextInput?: AgentContextInput | null } = $props();
 
@@ -125,9 +134,34 @@
     if ($operatorState !== 'token_revoked') confirmingReplace = false;
   });
 
+  // Gap plan G3.13 (board Finish, "Control · first run"): an agent nobody
+  // has written to yet opens on a card with three first steps. The first
+  // two fill the box (nothing is sent until Enter); the third opens New
+  // session on the first host.
+  let firstRunClosed = $state(false);
+  const firstRun = $derived(!!session && !session.last_prompt && !firstRunClosed);
+  const firstHost = $derived($hosts.find((h) => !h.hidden)?.alias ?? $operatorHost);
 </script>
 
 {#snippet chip()}
+  {#if firstRun && session}
+    <div class="first-run" data-testid="control-first-run">
+      <p class="first-title">Ask Control about your fleet</p>
+      <p class="first-sub">It reads every session, task and routine, and can start, send or plan work for you.</p>
+      <div class="first-actions">
+        <button class="chip command" data-testid="control-first-needs" onclick={() => insertIntoComposer(session.id, 'What needs me?')}
+          >What needs me?</button
+        >
+        <button class="chip command" data-testid="control-first-plan" onclick={() => insertIntoComposer(session.id, '/plan ')}>Plan a task</button>
+        <button class="chip command" data-testid="control-first-start" onclick={() => requestNewSessionOnHost(firstHost)}
+          >Start a session on {firstHost}</button
+        >
+        <button class="chip" data-testid="control-first-close" title="Hide these first steps" onclick={() => (firstRunClosed = true)}
+          >Not now</button
+        >
+      </div>
+    </div>
+  {/if}
   <!-- Step 9.2: the agent's starts and kills wait here as cards, above the
        composer (not in the transcript; parity P30 accepts the placement).
        Mounted only while this row renders, so a request is never parked on
@@ -139,6 +173,10 @@
   <!-- Step 9.9 (Jev K2): where each message just sent here goes. Keyed, so
        another Control session primes afresh instead of routing its history. -->
   {#if session}{#key session.id}<ControlRouteReceipts sessionId={session.id} />{/key}{/if}
+  <!-- G3.9: what /task, /done, /assign and /start did (control_slash.ts). -->
+  <ControlCommandReceipts />
+  <!-- G3.9: suggestions read from the fleet's rows; a press runs them. -->
+  {#if session}<ControlSuggestions sessionId={session.id} />{/if}
   {#if ctx}
     <button
       class="chip"
@@ -206,6 +244,9 @@
       blockWhileBusy={true}
       composerAbove={chip}
       thinkingAs={controlThinking}
+      runCommand={takeControlCommand}
+      composerHint={CONTROL_HINT}
+      placeholder={CONTROL_PLACEHOLDER}
     />
   {/if}
 </div>
@@ -253,6 +294,27 @@
     margin: 0;
     color: var(--usage-crit);
     font-size: var(--text-2xs);
+  }
+  .first-run {
+    flex-basis: 100%;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-raise);
+  }
+  .first-title {
+    margin: 0;
+    font-weight: 500;
+  }
+  .first-sub {
+    margin: 2px 0 var(--space-2);
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+  }
+  .first-actions {
+    display: flex;
+    gap: var(--space-1);
+    flex-wrap: wrap;
   }
   .chip {
     align-self: flex-start;

@@ -96,3 +96,28 @@ describe('NewAssetDialog', () => {
     expect(onsaved).not.toHaveBeenCalled();
   });
 });
+
+// G2.6: the Command kind, the name help and "Write it with Claude…".
+describe('NewAssetDialog: Toolkit forms', () => {
+  it('offers Command as a kind and says what the name becomes', () => {
+    render(NewAssetDialog, { onclose: () => {}, onsaved: () => {} });
+    const kinds = Array.from((screen.getByTestId('new-asset-kind') as HTMLSelectElement).options).map((o) => o.textContent);
+    expect(kinds).toEqual(['Skill', 'Agent', 'Command', 'Hook', 'MCP server', 'Plugin']);
+    expect(screen.getByTestId('new-asset-dialog').textContent).toContain('Lower case and dashes; it becomes the folder name.');
+  });
+
+  it('Write it with Claude hands the kind and name to a session', async () => {
+    const onwrite = vi.fn();
+    render(NewAssetDialog, { onclose: () => {}, onsaved: () => {}, onwrite });
+    await fireEvent.change(screen.getByTestId('new-asset-kind'), { target: { value: 'command' } });
+    await fireEvent.input(screen.getByTestId('new-asset-name'), { target: { value: 'ship-it' } });
+    await fireEvent.click(screen.getByTestId('new-asset-write'));
+    expect(onwrite).toHaveBeenCalledWith('Create a new command named "ship-it" that …');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('has no Write it with Claude where no session can start', () => {
+    render(NewAssetDialog, { onclose: () => {}, onsaved: () => {} });
+    expect(screen.queryByTestId('new-asset-write')).toBeNull();
+  });
+});

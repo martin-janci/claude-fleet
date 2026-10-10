@@ -130,7 +130,11 @@ Any field but a secret may carry:
 
 With `save_later`, **Save and finish later** folds the card to one line
 with Resume; what was typed (never a secret, never a disabled field) is
-kept on that device until the form is answered or declined. The hub's
+kept on that device until the form is answered or declined. The app's
+own wizards take the same key (Get started does): in the chat the card folds
+the same way, and in a dialog the dialog closes without asking to discard,
+opening next time from what was kept. A kept choice the form no longer
+offers (a host since removed) is dropped when it opens. The hub's
 `form_drafts` table (migration 153) is the agent's spec while it is being
 written, purged after 10 minutes, so it does not hold answers.
 

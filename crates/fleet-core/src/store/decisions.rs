@@ -66,7 +66,9 @@ pub const DECISION_NO_BASELINE: &str = "none";
 
 /// The proposals about one subject (step 2.8), as one JSON array: per
 /// feature, the LATEST run about `$subject` of kind `$kind`, kept only when
-/// it is a live `assist` answer with no fallback and no follow-up, not
+/// it is a live `assist` answer with no fallback and no follow-up (save a
+/// `related_session` a person confirmed with Link, which stays as the
+/// row's `linked` partner, M15 G4.3), not
 /// `unsure`, and at or above `PROPOSAL_MIN_CONFIDENCE` (0.5, spelled out
 /// in [`proposal_keep_sql!`] because `concat!` takes literals;
 /// `tests::the_proposal_floor_is_the_constant` keeps them equal). A later shadow run or fallback about the same subject
@@ -83,7 +85,8 @@ macro_rules! proposals_sql {
                  'source', CASE d.provider WHEN 'rules' THEN 'rule' \
                                            WHEN 'llm' THEN 'llm' ELSE 'jev' END, \
                  'confidence_pct', CAST(ROUND(d.confidence * 100) AS INTEGER), \
-                 'run_id', d.id, 'at', d.at)) \
+                 'run_id', d.id, 'at', d.at, \
+                 'linked', json(CASE WHEN d.followup = 'confirmed' THEN 'true' END))) \
                FROM decision_runs d \
               WHERE d.subject_kind = '",
             $kind,
@@ -106,7 +109,9 @@ macro_rules! proposals_sql {
 macro_rules! proposal_keep_sql {
     () => {
         "d.mode = 'assist' AND d.fallback IS NULL \
-         AND d.followup IS NULL AND d.answer IS NOT NULL \
+         AND (d.followup IS NULL \
+              OR (d.feature = 'related_session' AND d.followup = 'confirmed')) \
+         AND d.answer IS NOT NULL \
          AND d.answer <> 'unsure' \
          AND (d.confidence IS NULL OR d.confidence >= 0.5)"
     };
@@ -437,7 +442,8 @@ impl Store {
         subject_kind: &str,
     ) -> Result<HashMap<String, Vec<super::DecisionProposal>>, IpcError> {
         let mut stmt = self.conn.prepare(concat!(
-            "SELECT d.subject_id, d.feature, d.answer, d.provider, d.confidence, d.id, d.at \
+            "SELECT d.subject_id, d.feature, d.answer, d.provider, d.confidence, d.id, d.at, \
+                    d.followup \
                FROM decision_runs d \
               WHERE d.subject_kind = ?1 \
                 AND d.id IN (SELECT MAX(id) FROM decision_runs \
@@ -459,6 +465,8 @@ impl Store {
                     confidence_pct: confidence.map(|c| (c.clamp(0.0, 1.0) * 100.0).round() as u8),
                     run_id: Some(r.get(5)?),
                     at: Some(r.get(6)?),
+                    linked: (r.get::<_, Option<String>>(7)?.as_deref() == Some("confirmed"))
+                        .then_some(true),
                 },
             ))
         })?;
@@ -956,6 +964,7 @@ mod tests {
                 confidence_pct: Some(82),
                 run_id: Some(run_id),
                 at: Some(1_000),
+                linked: None,
             }]
         );
         assert!(row(other).proposals.is_empty(), "only the subject's row");

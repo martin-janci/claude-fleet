@@ -118,7 +118,7 @@ describe('TaskWorkSections', () => {
       render(TaskWorkSections, { detail: dupDetail });
       const dup = screen.getByTestId('task-proposal-duplicate');
       expect(dup.textContent).toContain('May duplicate TASK-36');
-      expect(screen.getByTestId('task-proposal-duplicate-by').textContent).toContain('82%');
+      expect(screen.getByTestId('task-proposal-duplicate-by').textContent).toContain('likely');
       expect(screen.queryByTestId('task-proposal-accept')).toBeNull();
       await fireEvent.click(screen.getByTestId('task-proposal-merge'));
       await flush();

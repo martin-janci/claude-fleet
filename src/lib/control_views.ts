@@ -4,13 +4,29 @@
 // briefing); "+" toggles and reorders them. What lives in another place
 // (Tasks and Missions in Work, Routines in Automation, Hosts and usage in
 // Accounts) is a link there, not a copy. The layout is a local pref.
-import { writable } from 'svelte/store';
-import { inboxQueue } from './inbox';
+//
+// Gap plan G3.10 (boards MissionControl, MCViews, MCTasks): Needs you
+// gains a fleet line, a search and Running / Idle / Done today folds; the
+// strip gains Tasks (☑, the Work tree's tasks by status, with bulk Start
+// new, Assign and Done) and Routines (◷); Open elsewhere gains Routines in
+// Automation.
+import { derived, writable } from 'svelte/store';
+import { inboxQueue, inboxRows } from './inbox';
+import { attentionState, displayName, type AttentionOptions } from './attention';
+import { attentionFacts } from './attention_facts';
+import { effectiveHostFilter } from './hosts';
+import { attentionIdleMinutes } from './notify';
+import { effectiveScope, scopeOf } from './orgs';
+import { sessions, showBgAgents, type SessionRow } from './sessions';
+import { sessionVisible } from './sidebar_index';
+import { localMidnight } from './today';
+import { openRoutines } from './routines';
+import type { WorkTask } from './work_view';
 import { readPref, writePref } from './prefs';
 import { goTo, leave } from './destination';
 import { sidebarView } from './work_view';
 
-export type ControlViewId = 'needs-you' | 'session' | 'prs' | 'library' | 'today';
+export type ControlViewId = 'needs-you' | 'session' | 'tasks' | 'routines' | 'prs' | 'library' | 'today';
 
 export interface ControlViewDef {
   id: ControlViewId;
@@ -25,23 +41,25 @@ export interface ControlViewDef {
 export const CONTROL_VIEWS: readonly ControlViewDef[] = [
   { id: 'needs-you', label: 'Needs you', glyph: '▤', step: '9.4', landed: true },
   { id: 'session', label: 'Session in focus', glyph: '▢', step: '9.4', landed: true },
+  { id: 'tasks', label: 'Tasks', glyph: '☑', step: 'G3.10', landed: true },
+  { id: 'routines', label: 'Routines', glyph: '◷', step: 'G3.10', landed: true },
   { id: 'prs', label: 'Pull requests', glyph: '⑂', step: '9.4', landed: true },
   { id: 'library', label: 'Library', glyph: '◧', step: '9.7', landed: true },
   { id: 'today', label: 'Today briefing', glyph: '☀', step: '9.4', landed: true },
 ];
 
-export type ElsewhereId = 'tasks' | 'missions' | 'hosts';
+export type ElsewhereId = 'tasks' | 'missions' | 'routines' | 'hosts';
 
 export interface ElsewhereLink {
   id: ElsewhereId;
   label: string;
 }
 
-/** "Not views here, open them where they live." Routines in Automation
- *  joins them with the Automation rail item (8.4). */
+/** "Not views here, open them where they live." */
 export const ELSEWHERE: readonly ElsewhereLink[] = [
   { id: 'tasks', label: 'Tasks in Work' },
   { id: 'missions', label: 'Missions in Work' },
+  { id: 'routines', label: 'Routines in Automation' },
   { id: 'hosts', label: 'Hosts and usage in Accounts' },
 ];
 
@@ -49,6 +67,10 @@ export const ELSEWHERE: readonly ElsewhereLink[] = [
 export function openElsewhere(id: ElsewhereId): void {
   if (id === 'hosts') {
     goTo('accounts');
+    return;
+  }
+  if (id === 'routines') {
+    openRoutines();
     return;
   }
   sidebarView.set('work');
@@ -132,3 +154,124 @@ export function setViewsOpen(open: boolean): void {
 /** Needs you: the Inbox's own rows (`inboxQueue`), so the panel, the Inbox
  *  and the rail's badge ask one attention query. */
 export const needsYouList = inboxQueue;
+
+// ── Needs you folds and search (G3.10, board MissionControl) ──
+
+/** The fleet as the Inbox sees it: the rail count's filters, with the
+ *  attention options the model reads. */
+export const visibleFleet = derived(
+  [sessions, effectiveHostFilter, showBgAgents, effectiveScope, scopeOf, attentionIdleMinutes, attentionFacts],
+  ([$sessions, $host, $bg, $scope, $of, $idle, $facts]) => {
+    const scope = $scope === 'all' ? null : { id: $scope, of: $of };
+    const rows = $sessions.filter((s) => sessionVisible(s, $host, $bg, null, scope));
+    const opts: AttentionOptions = { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000), facts: $facts };
+    return { rows, opts };
+  },
+);
+
+/** Does a row match the panel's search: its name, host, project path or
+ *  last prompt, case-insensitive. An empty query matches everything. */
+export function matchesQuery(s: SessionRow, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return [displayName(s, true), s.tmux_name, s.host_alias, s.last_prompt ?? ''].some((f) => f.toLowerCase().includes(q));
+}
+
+export interface FleetFolds {
+  needs: SessionRow[];
+  running: SessionRow[];
+  idle: SessionRow[];
+  doneToday: SessionRow[];
+}
+
+/** Needs you and its folds: the Inbox's rows (worst first), then what is
+ *  working, idle, and what finished a turn since local midnight, the same
+ *  split as the Inbox's quiet line (`notWaiting`). */
+export function fleetFolds(
+  rows: readonly SessionRow[],
+  opts: AttentionOptions,
+  query = '',
+  since: number = localMidnight(opts.now * 1000),
+): FleetFolds {
+  const hit = rows.filter((s) => matchesQuery(s, query));
+  const out: FleetFolds = { needs: inboxRows(hit, opts), running: [], idle: [], doneToday: [] };
+  const recent = (a: SessionRow, b: SessionRow) => (b.last_activity_at ?? 0) - (a.last_activity_at ?? 0);
+  for (const s of hit) {
+    const st = attentionState(s, opts);
+    const today = s.kind !== 'shell' && s.kind !== 'external' && s.last_stop_at != null && s.last_stop_at >= since;
+    if (st === 'working') out.running.push(s);
+    else if ((st === 'idle' || st === 'done') && today) out.doneToday.push(s);
+    else if (st === 'idle') out.idle.push(s);
+  }
+  out.running.sort(recent);
+  out.idle.sort(recent);
+  out.doneToday.sort((a, b) => (b.last_stop_at ?? 0) - (a.last_stop_at ?? 0));
+  return out;
+}
+
+/** "4 need you · 6 running · 9 idle": the folds counted, zeros left out;
+ *  "Nothing running" for an empty fleet. */
+export function fleetLine(f: FleetFolds): string {
+  const parts: string[] = [];
+  if (f.needs.length) parts.push(`${f.needs.length} need${f.needs.length === 1 ? 's' : ''} you`);
+  if (f.running.length) parts.push(`${f.running.length} running`);
+  if (f.idle.length) parts.push(`${f.idle.length} idle`);
+  if (f.doneToday.length) parts.push(`${f.doneToday.length} done today`);
+  return parts.length ? parts.join(' · ') : 'Nothing running';
+}
+
+// ── Tasks view (G3.10, board MCTasks) ──
+
+export type TaskSection = 'needs_you' | 'in_progress' | 'up_next' | 'done_week';
+
+export const TASK_SECTION_LABELS: Record<TaskSection, string> = {
+  needs_you: 'Needs you',
+  in_progress: 'In progress',
+  up_next: 'Up next',
+  done_week: 'Done this week',
+};
+
+export const TASK_SECTIONS: readonly TaskSection[] = ['needs_you', 'in_progress', 'up_next', 'done_week'];
+
+const WEEK_SECS = 7 * 86_400;
+
+/** Where a task sits in the Tasks view: a session waiting on a person
+ *  first, then done (shown only for a week), working, and the rest up next.
+ *  `null` drops it (done longer ago than a week). */
+export function taskSection(t: WorkTask, nowSec: number): TaskSection | null {
+  const done = t.stage === 'done' || t.status_category === 'done';
+  if (done) return (t.last_activity_at ?? 0) >= nowSec - WEEK_SECS ? 'done_week' : null;
+  if (t.needs_you) return 'needs_you';
+  if (t.stage === 'in_progress' || t.stage === 'in_review' || t.stage === 'blocked' || t.status_category === 'in_progress' || (t.counts?.active ?? 0) > 0)
+    return 'in_progress';
+  return 'up_next';
+}
+
+/** The Tasks view's filter chips: Mine (assigned to me in its tracker, the
+ *  hub's own filter) and Claude (an agent session is on it now). */
+export interface TaskChips {
+  mine: boolean;
+  claude: boolean;
+}
+
+export function tasksBySection(tasks: readonly WorkTask[], chips: TaskChips, nowSec: number): Record<TaskSection, WorkTask[]> {
+  const out: Record<TaskSection, WorkTask[]> = { needs_you: [], in_progress: [], up_next: [], done_week: [] };
+  for (const t of tasks) {
+    if (t.parent_task_id) continue;
+    if (chips.claude && (t.counts?.active ?? 0) === 0) continue;
+    const s = taskSection(t, nowSec);
+    if (s) out[s].push(t);
+  }
+  return out;
+}
+
+/** A native item a person may change from here (status, assignees); a
+ *  tracker's ticket changes in its tracker. */
+export function isNativeTask<T extends Pick<WorkTask, 'kind' | 'item_id'>>(t: T): t is T & { item_id: number } {
+  return t.kind === 'local' && t.item_id != null;
+}
+
+/** Start new: the tasks of a selection with no live session on them. */
+export function startable(tasks: readonly WorkTask[]): WorkTask[] {
+  return tasks.filter((t) => (t.counts?.active ?? 0) === 0 && (t.item_id != null || !!t.key) && t.stage !== 'done');
+}

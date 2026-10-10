@@ -75,6 +75,39 @@
     await reload();
   }
 
+  // ── Add a secret (G2.6): one value, written to several hosts at once ──
+  // The value lives only in this input until Add writes it; it is cleared
+  // after, and never kept anywhere else in the app.
+  let secretName = $state('');
+  let addValue = $state('');
+  let addGlobal = $state(true);
+  let addHosts = $state<Record<string, 'write' | 'skip'>>({});
+  let adding = $state(false);
+  const NAME_OK = /^[A-Z0-9_]+$/;
+  const addNameNorm = $derived(secretName.trim().toUpperCase());
+  const writeHosts = $derived(visibleHosts.filter((h) => addHosts[h.alias] === 'write').map((h) => h.alias));
+  const canAdd = $derived(NAME_OK.test(addNameNorm) && addValue !== '' && (addGlobal || writeHosts.length > 0) && !adding);
+
+  async function addSecret() {
+    if (!canAdd) return;
+    adding = true;
+    error = null;
+    const name = addNameNorm;
+    const value = addValue;
+    const targets: (string | undefined)[] = [...(addGlobal ? [undefined] : []), ...writeHosts];
+    const failed: string[] = [];
+    for (const t of targets) {
+      const r = await setSecret(name, value, t);
+      if (!r.ok) failed.push(`${t ?? 'every host'}: ${r.error.message}`);
+    }
+    adding = false;
+    addValue = '';
+    if (failed.length > 0) error = `${name} was not written to ${failed.join('; ')}`;
+    else secretName = '';
+    if (!visibleNames.includes(name)) extraNames = [...extraNames, name];
+    await reload();
+  }
+
   async function del(name: string) {
     const hostAlias = draftHost(name);
     busy = name;
@@ -92,6 +125,31 @@
 <Modal title="Secrets" onclose={onclose} width="580px" testid="secrets-panel">
   <p class="muted">Values are write-only: fleet never reads or displays a secret once it is set.</p>
   {#if error}<p class="error" data-testid="secrets-error">{error}</p>{/if}
+  <form class="add-secret" data-testid="secrets-add" onsubmit={(e) => { e.preventDefault(); void addSecret(); }}>
+    <p class="muted">Assets read it as ${'{'}NAME{'}'}. Its value goes to hosts and is never shown again.</p>
+    <div class="add-row">
+      <input placeholder="NAME" bind:value={secretName} aria-label="Name" autocomplete="off" data-testid="secrets-add-secret-name" />
+      <input type="password" placeholder="value" bind:value={addValue} aria-label="Value" autocomplete="off" data-testid="secrets-add-secret-value" />
+    </div>
+    <p class="muted small">Write-only. To change it, paste a new value.</p>
+    <div class="add-hosts" role="group" aria-label="Hosts">
+      <label class="host"><input type="checkbox" bind:checked={addGlobal} data-testid="secrets-add-global" /> Every host</label>
+      {#each visibleHosts as h (h.alias)}
+        <label class="host">
+          <span>{h.alias}</span>
+          <select
+            value={addHosts[h.alias] ?? 'skip'}
+            onchange={(e) => (addHosts = { ...addHosts, [h.alias]: (e.currentTarget as HTMLSelectElement).value as 'write' | 'skip' })}
+            data-testid={`secrets-add-host-${h.alias}`}
+          >
+            <option value="write">Write</option>
+            <option value="skip">Skip</option>
+          </select>
+        </label>
+      {/each}
+    </div>
+    <button type="submit" disabled={!canAdd} data-testid="secrets-add-secret">{adding ? 'Adding…' : 'Add secret'}</button>
+  </form>
   <div class="add-name">
     <input placeholder="NAME" bind:value={newName} data-testid="secrets-add-name" />
     <button onclick={addName} data-testid="secrets-add-name-submit">Add</button>
@@ -134,6 +192,14 @@
   .muted { color: var(--fg-muted); font-size: var(--text-xs); margin: 0 0 6px; }
   .error { color: var(--usage-crit); }
   .add-name { display: flex; gap: 6px; margin-bottom: 8px; }
+  .add-secret { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 8px; margin-bottom: 10px; }
+  .add-row { display: flex; gap: 6px; }
+  .add-row input { flex: 1; min-width: 0; }
+  .small { font-size: var(--text-2xs); margin: 0; }
+  .add-hosts { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: var(--text-xs); }
+  .add-hosts .host { display: inline-flex; align-items: center; gap: 6px; }
+  .add-secret button { align-self: flex-end; font-size: var(--text-xs); padding: 0.3rem 0.8rem; border: 1px solid var(--accent); background: transparent; color: var(--fg); border-radius: var(--radius-sm); cursor: pointer; }
+  .add-secret button:disabled { opacity: 0.5; cursor: not-allowed; }
   .add-name input { flex: 1; }
   .rows { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow: auto; }
   .secret-row { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 6px 8px; }

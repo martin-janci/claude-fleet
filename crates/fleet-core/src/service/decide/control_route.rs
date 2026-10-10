@@ -382,6 +382,7 @@ pub async fn propose(ctx: &DecideCtx, scope: &ViewScope, text: &str) -> ControlR
         confidence_pct: super::start_project::pct(answer.confidence),
         run_id: out.run_id,
         at: Some(now),
+        linked: None,
     };
     ControlRoute {
         outcome: "proposed".into(),

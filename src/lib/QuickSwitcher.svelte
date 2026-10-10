@@ -17,6 +17,7 @@
   // action, never because data arrived.
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
+  import { newTaskOwnsChord } from './new_task';
   import ProjectActionsMenu from './ProjectActionsMenu.svelte';
   import Icon from './kit/Icon.svelte';
   import { switcherRequest } from './switcher_request';
@@ -456,6 +457,8 @@
   function onWindowKeydown(e: KeyboardEvent) {
     if (isNewSessionChord(e, isMac)) {
       if (!open && (e.target as Element | null)?.closest?.('dialog')) return;
+      // In the Work view the chord is New task (G2.1): WorkTree takes it.
+      if (!open && newTaskOwnsChord()) return;
       e.preventDefault();
       e.stopPropagation();
       if (open && mode === 'new') hide();

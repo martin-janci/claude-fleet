@@ -61,3 +61,24 @@ export function validateBranchName(name: string): string | null {
   if (name === '@') return '"@" is not a valid branch name.';
   return null;
 }
+
+/**
+ * The corrected name the New branch form offers ("Use fix/hub-e2e-windows-2?",
+ * the FormsSession board): a name git would refuse is slugged, and a name a
+ * branch already has gets the first free `-2`, `-3`… Null when the name is
+ * fine as typed, or when nothing usable can be made of it.
+ */
+export function suggestBranchName(name: string, existing: readonly string[]): string | null {
+  const taken = new Set(existing);
+  let base = name;
+  if (validateBranchName(name) !== null) {
+    base = finalizeBranchSlug(name);
+    if (base === '' || validateBranchName(base) !== null) return null;
+  }
+  if (!taken.has(base)) return base === name ? null : base;
+  for (let i = 2; i < 100; i++) {
+    const next = `${base}-${i}`;
+    if (!taken.has(next)) return next;
+  }
+  return null;
+}

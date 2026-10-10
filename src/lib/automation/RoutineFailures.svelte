@@ -5,13 +5,11 @@
   // (run it now) and Pause. Either Retry or Pause takes it out; its count is
   // part of the Needs you badge (`failingCount`). A routine's name opens it
   // in Automation's Routines tab (8.4).
-  import { onMount } from 'svelte';
   import { shortAge } from '../session_status';
   import { push, pushError } from '../toasts';
   import {
     failing,
     fixRoutine,
-    loadFailing,
     openRoutines,
     pauseRoutine,
     retryRoutine,
@@ -22,8 +20,7 @@
   let busy = $state<number | null>(null);
 
   // `trackFailingRoutines` (main.ts) keeps the list fresh; opening the Inbox
-  // reads it once more so it is current as it shows.
-  onMount(() => void loadFailing());
+  // reads it once more (Sidebar.svelte), so it is current as it shows.
 
   async function retry(f: FailingRoutine) {
     busy = f.routine.id;

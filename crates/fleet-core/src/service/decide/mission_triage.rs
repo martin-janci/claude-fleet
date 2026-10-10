@@ -246,6 +246,7 @@ fn proposal_of(r: &DecisionRunRow, why: &str) -> Option<DecisionProposal> {
             .map(|c| (c * 100.0).round().clamp(0.0, 100.0) as u8),
         run_id: Some(r.id),
         at: Some(r.at),
+        linked: None,
     })
 }
 
@@ -262,6 +263,7 @@ fn proposal_from(out: &DecisionOutcome, why: &str, now: i64) -> Option<DecisionP
             .map(|c| (c * 100.0).round().clamp(0.0, 100.0) as u8),
         run_id: out.run_id,
         at: Some(now),
+        linked: None,
     })
 }
 

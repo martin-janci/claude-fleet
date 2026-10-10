@@ -295,3 +295,59 @@ pub fn spawn_ask(store: &Arc<Mutex<Store>>, session_id: i64) {
         ask(&ctx, session_id).await;
     });
 }
+
+/// A person's answer to a session's `related_session` proposal (M15 G4.3,
+/// the SessionDetails board's "Link / Not related").
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DecideRelatedSessionArgs {
+    /// The session whose Details carry the proposal.
+    pub session_id: i64,
+    /// The proposal's run (`DecisionProposal::run_id`).
+    pub run_id: i64,
+    /// `true`: Link (same work); `false`: Not related.
+    pub linked: bool,
+}
+
+/// Mark the proposal's run `confirmed` (Link: the other session stays
+/// listed under Related sessions as linked) or `rejected` (Not related: it
+/// leaves, and the same answer is not proposed again on the same input).
+/// Only an undecided assist run of this feature about `session_id` that
+/// names a session is marked; answers whether one was. Nothing is stopped,
+/// merged or moved.
+pub fn decide_proposal(
+    s: &Store,
+    args: &DecideRelatedSessionArgs,
+    now: i64,
+) -> Result<bool, IpcError> {
+    let Some(r) = s.get_decision_run(args.run_id)? else {
+        return Ok(false);
+    };
+    if r.feature != Feature::RelatedSession.as_str()
+        || r.subject_kind != SUBJECT_KIND
+        || r.subject_id != args.session_id.to_string()
+        || r.mode != Mode::Assist.as_str()
+        || r.followup.is_some()
+        || r.answer.as_deref().and_then(session_of).is_none()
+    {
+        return Ok(false);
+    }
+    let mark = if args.linked { "confirmed" } else { "rejected" };
+    s.set_decision_followup(r.id, mark, None, now)
+}
+
+/// [`decide_proposal`] behind the store lock, answering the session's row
+/// as it reads now (its proposals re-read). `E_NOTFOUND` for a session that
+/// is not there; a proposal already decided or withdrawn changes nothing.
+pub fn decide_related_session(
+    args: DecideRelatedSessionArgs,
+    store: &Mutex<Store>,
+) -> Result<SessionRow, IpcError> {
+    let s = lock(store)?;
+    decide_proposal(&s, &args, crate::service::catalog::now_secs())?;
+    s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+        IpcError::new(
+            crate::ipc_error::codes::E_NOTFOUND,
+            format!("session {} not found", args.session_id),
+        )
+    })
+}

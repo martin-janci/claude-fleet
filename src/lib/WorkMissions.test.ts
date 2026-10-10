@@ -2,7 +2,7 @@
 // its detail with the lifecycle moves the state allows, a new task under its
 // root, and a refusal shown as text.
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -11,6 +11,7 @@ import WorkMissions from './WorkMissions.svelte';
 import { expectAccessible } from './a11y_check';
 import { expectLastButton, expectOnePrimary } from './action_hierarchy_check';
 import { hosts } from './hosts';
+import { projects } from './projects';
 import {
   doneWhenRows,
   finalMoveQuestion,
@@ -131,6 +132,133 @@ describe('WorkMissions', () => {
     await flush();
     expect(calls('save_mission')[0]).toEqual({ mission: { name: 'Payments v2', goal: 'Cards and refunds' } });
     expect(screen.getByTestId('mission-detail').textContent).toContain('Cards and refunds');
+  });
+
+  describe('G2.5: mission forms', () => {
+    const tree = (id: number, owner: string, repo: string) => ({
+      project: { id, owner, repo, base_path: `/p/${owner}/${repo}`, last_session_at: null, adopted: false, system: false },
+      worktrees: [],
+    });
+    afterEach(() => projects.set([]));
+
+    it('the planner drafts the first tasks only when asked', async () => {
+      handlers.work_missions = () => [];
+      handlers.plan_mission = () => ({ mission_id: 4, cards: [] });
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-new'));
+      expect((screen.getByTestId('mission-new-planner') as HTMLInputElement).checked).toBe(false);
+      await fireEvent.input(screen.getByTestId('mission-new-name'), { target: { value: 'Payments v2' } });
+      await fireEvent.input(screen.getByTestId('mission-new-goal'), { target: { value: 'Cards' } });
+      await fireEvent.click(screen.getByTestId('mission-new-planner'));
+      handlers.work_missions = () => [current];
+      await fireEvent.click(screen.getByTestId('mission-create'));
+      await flush();
+      expect(calls('save_mission')).toHaveLength(1);
+      expect(calls('plan_mission')[0]).toEqual({ mission_id: 4 });
+    });
+
+    it('a new mission without the box asks no planner', async () => {
+      handlers.work_missions = () => [];
+      handlers.plan_mission = () => ({ mission_id: 4, cards: [] });
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-new'));
+      await fireEvent.input(screen.getByTestId('mission-new-name'), { target: { value: 'P' } });
+      await fireEvent.input(screen.getByTestId('mission-new-goal'), { target: { value: 'G' } });
+      await fireEvent.click(screen.getByTestId('mission-create'));
+      await flush();
+      expect(calls('plan_mission')).toHaveLength(0);
+    });
+
+    it('imports a plan with a repo per row from the create form; a row with no repo must be picked first', async () => {
+      projects.set([tree(3, 'acme', 'api'), tree(5, 'acme', 'web')]);
+      handlers.work_missions = () => [];
+      handlers.import_mission_plan = () => ({ created: 2, updated: 0, unchanged: 0, deps_added: 1, deps_removed: 0 });
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-new'));
+      await fireEvent.input(screen.getByTestId('mission-new-name'), { target: { value: 'P' } });
+      await fireEvent.input(screen.getByTestId('mission-new-goal'), { target: { value: 'G' } });
+      await fireEvent.click(screen.getByTestId('mission-new-import-open'));
+      await fireEvent.input(screen.getByTestId('mission-new-import-text'), {
+        target: { value: '| # | Step | Needs | Repo |\n|---|---|---|---|\n| 1.1 | Schema | | acme/api |\n| 1.2 | UI | 1.1 | mobile |' },
+      });
+      await flush();
+      expect(screen.getByTestId('mission-new-import-repo-missing').textContent).toBe('Row 2 has no repo: pick one');
+      // Not ready: the mission is not made while a row has no repo.
+      await fireEvent.click(screen.getByTestId('mission-create'));
+      await flush();
+      expect(calls('save_mission')).toHaveLength(0);
+      const pick = screen.getAllByTestId('mission-new-import-repo-pick')[1] as HTMLSelectElement;
+      pick.value = '5';
+      await fireEvent.change(pick);
+      await flush();
+      expect(screen.queryByTestId('mission-new-import-repo-missing')).toBeNull();
+      handlers.work_missions = () => [current];
+      await fireEvent.click(screen.getByTestId('mission-create'));
+      await flush();
+      await flush();
+      expect(calls('save_mission')).toHaveLength(1);
+      expect(calls('import_mission_plan')[0]).toEqual({
+        mission_id: 4,
+        plan: [
+          { step: '1.1', title: 'Schema', project_id: 3 },
+          { step: '1.2', title: 'UI', needs: ['1.1'], project_id: 5 },
+        ],
+      });
+      expect(screen.getByTestId('mission-import-result').textContent).toBe('Imported: 2 added, 1 link added.');
+    });
+
+    it('answers a mission question on its page: an option, your own words, or Skip', async () => {
+      const ask = (id: number) => ({
+        id,
+        mission_id: 4,
+        decision_id: `d${id}`,
+        source: 'planner',
+        kind: 'ask',
+        state: 'open',
+        created_at: 1,
+        payload: { question: 'Which gateway?', options: ['Stripe', 'Adyen'] },
+      });
+      handlers.work_mission = () => ({
+        mission: current,
+        events: [],
+        may_change: true,
+        graph: { nodes: [], waves: 0 },
+        plan: {
+          steps: [],
+          cards: [ask(7)],
+          autonomy: { asked: 1, ceiling: 1, effective: 1, why: 'L1', enabled: true },
+          cost_micros: 0,
+          counts: { total: 0, open: 0 },
+        },
+      });
+      handlers.decide_mission_card = (a) => ({ ...ask(Number(a.card_id)), state: a.ok ? 'applied' : 'dismissed' });
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      const card = screen.getByTestId('mission-card-question');
+      expect(card.textContent).toContain('Which gateway?');
+      const opts = screen.getAllByTestId('mission-card-option').map((b) => b.textContent ?? '');
+      expect(opts).toHaveLength(2);
+      expect(opts[0]).toContain('Stripe');
+      expect(opts[1]).toContain('Adyen');
+      await fireEvent.click(screen.getAllByTestId('mission-card-option')[1]);
+      await flush();
+      expect(calls('decide_mission_card')[0]).toEqual({ card_id: 7, ok: true, note: 'Adyen' });
+      // Own words open a field under the answers.
+      expect(screen.queryByTestId('mission-card-answer')).toBeNull();
+      await fireEvent.click(screen.getByTestId('question-own-words'));
+      await fireEvent.input(screen.getByTestId('mission-card-answer'), { target: { value: 'Both' } });
+      await fireEvent.click(screen.getByTestId('mission-card-apply'));
+      await flush();
+      expect(calls('decide_mission_card')[1]).toEqual({ card_id: 7, ok: true, note: 'Both' });
+      await fireEvent.click(screen.getByTestId('mission-card-skip'));
+      await flush();
+      expect(calls('decide_mission_card')[2]).toEqual({ card_id: 7, ok: false });
+    });
   });
 
   it('offers the moves the state allows and sends the version it saw', async () => {

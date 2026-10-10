@@ -1238,6 +1238,15 @@ fn a_safe_kill_candidate_carries_its_worktrees_measured_size() {
     assert_eq!(of(measured).action, TidyAction::SafeKill);
     assert_eq!(of(measured).worktree_kb, Some(2_200_000));
     assert_eq!(of(unmeasured).worktree_kb, None);
+    // G3.12: the row detail names the tree a clean up removes, measured or not.
+    assert_eq!(
+        of(measured).worktree_path.as_deref(),
+        Some("/p/o/r/.worktrees/measured")
+    );
+    assert_eq!(
+        of(unmeasured).worktree_path.as_deref(),
+        Some("/p/o/r/.worktrees/unmeasured")
+    );
     // On the wire only when known.
     let wire = serde_json::to_value(of(unmeasured)).unwrap();
     assert!(wire.get("worktree_kb").is_none(), "{wire}");

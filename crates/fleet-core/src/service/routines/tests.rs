@@ -115,6 +115,7 @@ fn fx() -> Fx {
 /// A person's device, bound to `org` or to none, scoped the way a request is.
 fn person(store: &Mutex<Store>, org: Option<i64>, id: i64) -> ViewScope {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(ClientRef {
             id: 7,
@@ -891,6 +892,7 @@ fn the_org_boundary_comes_before_the_owner() {
 fn a_caller_without_a_person_owns_no_routine() {
     let f = fx();
     let host = Caller {
+        api: None,
         host_alias: Some("mac".into()),
         client: None,
         mode: TokenMode::Full,
@@ -1178,4 +1180,439 @@ async fn a_routine_the_scheduler_paused_over_budget_stays_in_the_inbox() {
     let inbox = failing(&f.store, &ana).unwrap();
     assert_eq!(inbox.len(), 1);
     assert!(inbox[0].routine.paused_reason.is_some());
+}
+
+// ---- Pull request triggers (M15 step G2.4) --------------------------------
+
+const PR: &str = "https://github.com/acme/web/pull/42";
+
+/// A session of `owner` on mac, as reconcile would have recorded it.
+fn pr_session(f: &Fx, name: &str, owner: i64) -> i64 {
+    let s = lock(&f.store).unwrap();
+    let id = s
+        .upsert_session(name, "mac", Some(f.project), None, 1, 1, "running", None)
+        .unwrap();
+    s.claim_if_unclaimed(id, Some(owner)).unwrap();
+    id
+}
+
+/// One reconcile pass seeing `url` on session `sid`: the `pull_requests`
+/// upsert reconcile runs, with gh's state, review decision and checks.
+fn see_pr(f: &Fx, sid: i64, url: &str, state: &str, review: Option<&str>, ci: Option<&str>) {
+    let s = lock(&f.store).unwrap();
+    let ev = crate::service::outcome::PrEvidence {
+        state: Some(state.into()),
+        review_decision: review.map(str::to_string),
+        title: Some("Fix login".into()),
+        ..Default::default()
+    };
+    crate::store::Store::upsert_pull_request_in_tx(
+        s.conn_ref(),
+        url,
+        ci,
+        Some(&ev),
+        crate::store::PrSeenBy {
+            session_id: sid,
+            session_name: "api",
+            host_alias: "mac",
+            project_id: Some(f.project),
+        },
+        OCT8,
+    )
+    .unwrap();
+}
+
+fn pr_routine(f: &Fx, event: &str, change: impl FnOnce(&mut RoutineInput)) -> RoutineRow {
+    let mut i = input(f);
+    i.trigger = "event".into();
+    i.cron = None;
+    i.event = Some(event.into());
+    i.overlap = Some("parallel".into());
+    change(&mut i);
+    new_routine(f, i)
+}
+
+fn queued_prompt(f: &Fx, sid: i64) -> String {
+    let s = lock(&f.store).unwrap();
+    let rows = s.undelivered_handovers(sid).unwrap();
+    rows[0].body.clone().unwrap_or_default()
+}
+
+#[test]
+fn a_pull_request_change_writes_review_ci_and_merge_events() {
+    let f = fx();
+    let sid = pr_session(&f, "api", f.ana);
+    let kinds = |f: &Fx| -> Vec<String> {
+        let s = lock(&f.store).unwrap();
+        s.session_events_after(sid, 0, 50)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind.starts_with("pr_"))
+            .map(|e| {
+                assert_eq!(e.detail.as_deref(), Some(PR), "the detail is the PR's URL");
+                e.kind
+            })
+            .collect()
+    };
+    see_pr(
+        &f,
+        sid,
+        PR,
+        "OPEN",
+        Some("REVIEW_REQUIRED"),
+        Some("pending"),
+    );
+    assert!(
+        kinds(&f).is_empty(),
+        "an open PR with nothing new is no event"
+    );
+    see_pr(
+        &f,
+        sid,
+        PR,
+        "OPEN",
+        Some("REVIEW_REQUIRED"),
+        Some("failing"),
+    );
+    see_pr(
+        &f,
+        sid,
+        PR,
+        "OPEN",
+        Some("REVIEW_REQUIRED"),
+        Some("failing"),
+    );
+    see_pr(
+        &f,
+        sid,
+        PR,
+        "OPEN",
+        Some("CHANGES_REQUESTED"),
+        Some("passing"),
+    );
+    see_pr(
+        &f,
+        sid,
+        PR,
+        "MERGED",
+        Some("CHANGES_REQUESTED"),
+        Some("passing"),
+    );
+    assert_eq!(
+        kinds(&f),
+        ["pr_ci_failed", "pr_review", "pr_ci_passed", "pr_merged"],
+        "one event per change, none for the same reading twice"
+    );
+    // A PR first seen merged is history.
+    see_pr(
+        &f,
+        sid,
+        "https://github.com/acme/web/pull/7",
+        "MERGED",
+        None,
+        Some("failing"),
+    );
+    assert_eq!(kinds(&f).len(), 4);
+}
+
+#[tokio::test]
+async fn a_routine_fires_when_its_owners_pr_gets_a_review() {
+    let f = fx();
+    let r = pr_routine(&f, "pr_review", |_| {});
+    let mine = pr_session(&f, "mine", f.ana);
+    let theirs = pr_session(&f, "theirs", f.bo);
+    see_pr(&f, mine, PR, "OPEN", None, None);
+    see_pr(
+        &f,
+        theirs,
+        "https://github.com/acme/web/pull/43",
+        "OPEN",
+        None,
+        None,
+    );
+    tick_once(&f.deps, OCT8).await;
+    assert!(runs_of(&f, r.id).is_empty());
+    see_pr(
+        &f,
+        theirs,
+        "https://github.com/acme/web/pull/43",
+        "OPEN",
+        Some("APPROVED"),
+        None,
+    );
+    see_pr(&f, mine, PR, "OPEN", Some("CHANGES_REQUESTED"), None);
+    tick_once(&f.deps, OCT8 + 20).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 1, "only the owner's PR: {runs:?}");
+    assert!(runs[0].trigger_ref.as_deref().unwrap().starts_with("pr:"));
+    let prompt = queued_prompt(&f, runs[0].session_id.unwrap());
+    assert!(prompt.starts_with("Review my open PRs"), "{prompt}");
+    assert!(
+        prompt.ends_with(&format!(
+            "Started because pull request {PR} got a review asking for changes."
+        )),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn a_repo_filter_and_anyone_pick_the_prs_that_fire() {
+    let f = fx();
+    let org = {
+        let s = lock(&f.store).unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        s.set_host_org("mac", Some(org)).unwrap();
+        s.set_org_member(org, f.ana, "member", None).unwrap();
+        s.set_org_member(org, f.bo, "member", None).unwrap();
+        org
+    };
+    let r = pr_routine(&f, "pr_ci_failed", |i| {
+        i.event_repo = Some(" WEB ".into());
+        i.event_author = Some("anyone".into());
+    });
+    assert_eq!(r.org_id, Some(org));
+    assert_eq!(r.event_repo.as_deref(), Some("WEB"));
+    let theirs = pr_session(&f, "theirs", f.bo);
+    // Another repo of the same owner does not pass the filter.
+    see_pr(
+        &f,
+        theirs,
+        "https://github.com/acme/api/pull/1",
+        "OPEN",
+        None,
+        Some("failing"),
+    );
+    // Bo's PR in acme/web does, with anyone.
+    see_pr(&f, theirs, PR, "OPEN", None, Some("failing"));
+    tick_once(&f.deps, OCT8).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let pr_id = lock(&f.store)
+        .unwrap()
+        .pull_request_by_url(PR)
+        .unwrap()
+        .unwrap()
+        .id;
+    assert!(runs[0]
+        .trigger_ref
+        .as_deref()
+        .unwrap()
+        .starts_with(&format!("pr:{pr_id}:")));
+    // A PR a routine's own session opened fires nothing, anyone or not.
+    let run_session = runs[0].session_id.unwrap();
+    see_pr(
+        &f,
+        run_session,
+        "https://github.com/acme/web/pull/44",
+        "OPEN",
+        None,
+        Some("failing"),
+    );
+    tick_once(&f.deps, OCT8 + 20).await;
+    assert_eq!(runs_of(&f, r.id).len(), 1);
+}
+
+#[tokio::test]
+async fn the_rate_holds_one_run_per_pr_in_its_window() {
+    let f = fx();
+    let r = pr_routine(&f, "pr_ci_failed", |i| i.event_rate_secs = Some(H));
+    let mine = pr_session(&f, "mine", f.ana);
+    let flap = |f: &Fx, url: &str| {
+        see_pr(f, mine, url, "OPEN", None, Some("pending"));
+        see_pr(f, mine, url, "OPEN", None, Some("failing"));
+    };
+    // Two failures of one PR in one pass: one run.
+    flap(&f, PR);
+    flap(&f, PR);
+    tick_once(&f.deps, OCT8).await;
+    assert_eq!(runs_of(&f, r.id).len(), 1);
+    // Inside the hour: dropped, not recorded. Another PR still fires.
+    flap(&f, PR);
+    flap(&f, "https://github.com/acme/web/pull/43");
+    tick_once(&f.deps, OCT8 + 30 * 60).await;
+    assert_eq!(runs_of(&f, r.id).len(), 2);
+    // Past the hour, the first PR fires again.
+    flap(&f, PR);
+    tick_once(&f.deps, OCT8 + H + 1).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 3);
+    assert!(runs.iter().all(|r| r.state != "skipped"), "{runs:?}");
+}
+
+#[test]
+fn pull_request_filters_are_checked() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    type Change = Box<dyn Fn(&mut RoutineInput)>;
+    let event = |i: &mut RoutineInput, e: &str| {
+        i.trigger = "event".into();
+        i.event = Some(e.into());
+    };
+    let cases: Vec<(Change, &str)> = vec![
+        (
+            Box::new(move |i| {
+                event(i, "stuck");
+                i.event_repo = Some("acme/web".into());
+            }),
+            "repo filter is for a pull request event",
+        ),
+        (
+            Box::new(move |i| {
+                event(i, "stuck");
+                i.event_author = Some("anyone".into());
+            }),
+            "its owner's",
+        ),
+        (
+            Box::new(move |i| {
+                event(i, "pr_merged");
+                i.event_repo = Some("a/b/c".into());
+            }),
+            "owner/name or name",
+        ),
+        (
+            Box::new(move |i| {
+                event(i, "pr_merged");
+                i.event_author = Some("bo".into());
+            }),
+            "event_author must be",
+        ),
+        (
+            Box::new(move |i| {
+                event(i, "pr_merged");
+                i.event_rate_secs = Some(0);
+            }),
+            "event_rate_secs",
+        ),
+    ];
+    for (change, says) in cases {
+        let mut i = input(&f);
+        change(&mut i);
+        let e = save(&f.store, &ana, None, &i).unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert!(e.message.contains(says), "{says}: {}", e.message);
+    }
+    // A cron routine drops the event filters it was sent.
+    let mut i = input(&f);
+    i.event_repo = Some("acme/web".into());
+    i.event_rate_secs = Some(60);
+    let r = save(&f.store, &ana, None, &i).unwrap();
+    assert_eq!((r.event_repo, r.event_rate_secs), (None, None));
+    // `me` is stored as absent.
+    let mut i = input(&f);
+    event(&mut i, "pr_merged");
+    i.event_author = Some("me".into());
+    assert_eq!(save(&f.store, &ana, None, &i).unwrap().event_author, None);
+}
+
+#[test]
+fn a_repo_filter_matches_owner_and_name_or_name() {
+    assert!(repo_matches("acme/web", Some("Acme/Web")));
+    assert!(repo_matches("web", Some("acme/web")));
+    assert!(!repo_matches("acme/web", Some("other/web")));
+    assert!(!repo_matches("web", Some("acme/webapp")));
+    assert!(!repo_matches("web", None));
+}
+
+/// Gap plan G2.3: the editor's next runs across a daylight-saving change.
+/// Europe/Bratislava leaves CEST (+02:00) for CET (+01:00) on Sunday 25
+/// October 2026. A weekday 08:30 line saved at +120 keeps that offset, so
+/// past the change it fires at 06:30 UTC, 07:30 on the wall: the preview
+/// lists the instants the scheduler will use, and the editor shows them in
+/// the device's zone, the moved hour included.
+#[test]
+fn preview_lists_the_next_runs_the_scheduler_uses_across_a_dst_change() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let fri_oct23_noon = OCT8 + 15 * 86_400 + 12 * H;
+    let line = RoutineInput {
+        cron: Some("30 8 * * 1-5".into()),
+        utc_offset_min: Some(120),
+        ..input(&f)
+    };
+    let p = preview(&f.store, &ana, None, &line, fri_oct23_noon).unwrap();
+    let mon_oct26 = OCT8 + 18 * 86_400;
+    assert_eq!(
+        p.next_runs,
+        (0..5)
+            .map(|d| mon_oct26 + d * 86_400 + 6 * H + 30 * 60)
+            .collect::<Vec<_>>(),
+        "Mon–Fri at 08:30 +02:00, which is 07:30 once CET begins"
+    );
+    assert_eq!(p.utc_offset_min, 120);
+    // Saved again after the change, at +60, it is back on 08:30 local.
+    let after = RoutineInput {
+        utc_offset_min: Some(60),
+        ..line.clone()
+    };
+    let p = preview(&f.store, &ana, None, &after, fri_oct23_noon).unwrap();
+    assert_eq!(p.next_runs[0], mon_oct26 + 7 * H + 30 * 60);
+    // And it is the very fire save schedules.
+    let saved = save(&f.store, &ana, None, &line).unwrap();
+    let now = crate::store::now_unix();
+    assert_eq!(
+        saved.next_run_at,
+        preview(&f.store, &ana, None, &line, now)
+            .unwrap()
+            .next_runs
+            .first()
+            .copied()
+    );
+}
+
+/// Gap plan G2.3: a dry run writes nothing, says what save would refuse,
+/// and names the account the chosen login bills among the host's logins.
+#[test]
+fn preview_writes_nothing_and_says_what_save_would_refuse() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    {
+        let s = lock(&f.store).unwrap();
+        crate::service::account_limits::seed_usage(&s, "mac", None, "own", 10.0, OCT8);
+        crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 95.0, OCT8);
+    }
+    let blank = RoutineInput {
+        prompt: "  ".into(),
+        ..input(&f)
+    };
+    let p = preview(&f.store, &ana, None, &blank, OCT8).unwrap();
+    assert!(
+        p.problem.as_deref().is_some_and(|m| m.contains("prompt")),
+        "{p:?}"
+    );
+    assert!(list(&f.store, &ana).unwrap().is_empty(), "nothing saved");
+    assert_eq!(
+        p.logins
+            .iter()
+            .map(|l| l.login.profile.as_deref())
+            .collect::<Vec<_>>(),
+        vec![None, Some("work")],
+        "the host's own login first"
+    );
+    let a = p.account.expect("profile work is on a known account");
+    assert_eq!(a.login.account_uuid, "work");
+    let p = preview(&f.store, &ana, None, &input(&f), OCT8).unwrap();
+    assert_eq!(p.problem, None);
+    assert_eq!(p.next_runs.len(), PREVIEW_RUNS);
+    // An event routine has no next runs; an unknown host has no logins.
+    let ev = RoutineInput {
+        trigger: "event".into(),
+        event: Some("stuck".into()),
+        host_alias: "nowhere".into(),
+        ..input(&f)
+    };
+    let p = preview(&f.store, &ana, None, &ev, OCT8).unwrap();
+    assert!(p.next_runs.is_empty() && p.logins.is_empty());
+    assert!(p.problem.unwrap().contains("nowhere"));
+}
+
+/// A preview of a change is fenced like the change: another person's
+/// routine is unknown to them.
+#[test]
+fn preview_of_another_persons_routine_is_not_found() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let bo = person(&f.store, None, f.bo);
+    let e = preview(&f.store, &bo, Some(r.id), &input(&f), OCT8).unwrap_err();
+    assert_eq!(e.code, codes::E_NOTFOUND);
 }

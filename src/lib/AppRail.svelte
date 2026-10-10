@@ -3,7 +3,9 @@
   Rail (design manual: Rail). The order and which items show live in
   `rail.ts`; this file names the current one, the titles with their
   shortcuts, and the Inbox's Needs you count. The shortcuts themselves stay
-  where they were (`shortcuts.ts`).
+  where they were (`shortcuts.ts`). The Work item can carry one saved view's
+  task count, quietly, when the person chose "Show its count on the rail"
+  (gap plan G2.2, `work_rail_view.ts`).
 -->
 <script lang="ts">
   import { destination } from './destination';
@@ -14,6 +16,8 @@
   import { inboxCount } from './inbox';
   import Rail from './kit/Rail.svelte';
   import { hintAnchor } from './hints';
+  import { onMount } from 'svelte';
+  import { railWorkView, startRailWorkView } from './work_rail_view';
 
   interface Props {
     isMac: boolean;
@@ -33,15 +37,23 @@
   }
 
   // The rail ids are the manual's icon names (kit/icons.ts).
+  onMount(() => startRailWorkView());
+
+  const workView = $derived($railWorkView);
   const entries = $derived(
-    items.map((item) => ({
-      id: item.id,
-      label: item.label,
-      icon: item.id,
-      title: title(item),
-      badge: item.id === 'inbox' && $inboxCount > 0 ? $inboxCount : undefined,
-      bottom: item.id === 'settings',
-    })),
+    items.map((item) => {
+      const viewCount = item.id === 'work' && workView && workView.count > 0 ? workView : null;
+      return {
+        id: item.id,
+        label: item.label,
+        icon: item.id,
+        title: viewCount ? `${title(item)}  ·  ${viewCount.name}: ${viewCount.count}` : title(item),
+        badge: item.id === 'inbox' && $inboxCount > 0 ? $inboxCount : viewCount ? viewCount.count : undefined,
+        badgeLabel: viewCount ? `in ${viewCount.name}` : undefined,
+        badgeQuiet: viewCount !== null,
+        bottom: item.id === 'settings',
+      };
+    }),
   );
 
   // The agent hint anchors on Control, where the floating button used to be

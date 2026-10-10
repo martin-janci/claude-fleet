@@ -287,6 +287,7 @@ fn an_org_member_reads_a_rule_only_an_admin_changes_it_and_others_see_nothing() 
 /// A person's device, bound to no org, scoped the way a request is.
 fn person(store: &Mutex<Store>, id: i64) -> ViewScope {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(ClientRef {
             id: 7,

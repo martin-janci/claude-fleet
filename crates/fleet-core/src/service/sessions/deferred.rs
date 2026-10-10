@@ -13,20 +13,50 @@
 //!
 //! One prompt goes out per idle moment: the session is working again once it
 //! has one, and its next Stop carries the next.
+//!
+//! Send later's time choices (M15 step G1.8, migration 155) narrow "idle" per
+//! prompt: `not_before` holds it until a time ("In 1 hour", "Tomorrow
+//! 09:00", "At…"), `until_limit_reset` while the session's account is at or
+//! past `accounts.pause_at`, and `skip_if_archived` drops it instead once the
+//! session is archived. A prompt that is not due yet does not hold back one
+//! queued after it that is. The reconcile tick is the clock: a timed prompt
+//! goes in on the first tick at which its time has come and the session is
+//! idle.
 
 use super::*;
 use crate::ipc_error::{codes, lock};
 use crate::service::messages::{wake_action, WakeAction};
-use crate::store::DeferredPromptRow;
+use crate::store::{DeferredPromptRow, DeferredTiming};
 
 /// How long after a Stop hook the prompt is typed: the hook fires as the
 /// turn ends, a moment before the REPL is back at its input.
 const AFTER_STOP: std::time::Duration = std::time::Duration::from_millis(1500);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueuePromptArgs {
     pub session_id: i64,
     pub prompt: String,
+    /// Send later: not typed before this unix second. Absent: the next idle
+    /// moment, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before: Option<i64>,
+    /// Send later "When the limit resets": held while the session's account
+    /// is at or past `accounts.pause_at`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub until_limit_reset: bool,
+    /// "Skip it if the session is archived first".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skip_if_archived: bool,
+}
+
+impl QueuePromptArgs {
+    fn timing(&self) -> DeferredTiming {
+        DeferredTiming {
+            not_before: self.not_before,
+            until_limit_reset: self.until_limit_reset,
+            skip_if_archived: self.skip_if_archived,
+        }
+    }
 }
 
 /// What [`queue_prompt`] did with one prompt.
@@ -62,6 +92,43 @@ pub fn idle_for_prompt(row: &SessionRow) -> bool {
         ) == WakeAction::Paste
 }
 
+/// Whether the row's work link is archived (collapsed into Done).
+fn archived(row: &SessionRow) -> bool {
+    row.work.as_ref().is_some_and(|w| w.archived_at.is_some())
+}
+
+/// Whether the session's account is known to be at or past the line now.
+fn account_over(s: &Store, row: &SessionRow, now: i64) -> Result<bool, IpcError> {
+    match row.account_uuid.as_deref() {
+        Some(uuid) => crate::service::account_limits::account_over_line(s, uuid, now),
+        None => Ok(false),
+    }
+}
+
+/// The prompt among `due` (oldest first, their time come) to type now: the
+/// first that does not wait for a limit still hit.
+fn first_ready(
+    s: &Store,
+    row: &SessionRow,
+    due: Vec<DeferredPromptRow>,
+    now: i64,
+) -> Result<Option<DeferredPromptRow>, IpcError> {
+    let mut over: Option<bool> = None;
+    for p in due {
+        if p.until_limit_reset {
+            let hit = match over {
+                Some(h) => h,
+                None => *over.insert(account_over(s, row, now)?),
+            };
+            if hit {
+                continue;
+            }
+        }
+        return Ok(Some(p));
+    }
+    Ok(None)
+}
+
 fn session_row(store: &Mutex<Store>, session_id: i64) -> Result<SessionRow, IpcError> {
     lock(store)?
         .get_session_by_id(session_id)?
@@ -76,7 +143,7 @@ pub async fn queue_prompt(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<QueuePromptResult, IpcError> {
-    queue_prompt_with(args, store, |row, body| {
+    queue_prompt_with(args, store, now_unix(), |row, body| {
         let ssh = Arc::clone(ssh);
         async move {
             prompt::send_prompt_inner(
@@ -99,6 +166,7 @@ pub async fn queue_prompt(
 pub async fn queue_prompt_with<F, Fut>(
     args: QueuePromptArgs,
     store: &Mutex<Store>,
+    now: i64,
     type_it: F,
 ) -> Result<QueuePromptResult, IpcError>
 where
@@ -124,8 +192,23 @@ where
             format!("session {} is not running", row.id),
         ));
     }
-    let ahead = lock(store)?.next_deferred_prompt(row.id)?.is_some();
-    if idle_for_prompt(&row) && !ahead {
+    let timing = args.timing();
+    if timing.skip_if_archived && archived(&row) {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!("session {} is already archived", row.id),
+        ));
+    }
+    let send_now = {
+        let s = lock(store)?;
+        // Only a prompt that could go out now holds this one back.
+        let due = s.due_deferred_prompts(row.id, now)?;
+        let ahead = first_ready(&s, &row, due, now)?.is_some();
+        let held = timing.not_before.is_some_and(|t| t > now)
+            || (timing.until_limit_reset && account_over(&s, &row, now)?);
+        idle_for_prompt(&row) && !ahead && !held
+    };
+    if send_now {
         type_it(row.clone(), body).await?;
         return Ok(QueuePromptResult {
             session_id: row.id,
@@ -133,7 +216,7 @@ where
             queued_id: None,
         });
     }
-    let id = lock(store)?.insert_deferred_prompt(row.id, &body, now_unix())?;
+    let id = lock(store)?.insert_deferred_prompt_timed(row.id, &body, timing, now)?;
     Ok(QueuePromptResult {
         session_id: row.id,
         delivered: false,
@@ -149,7 +232,7 @@ pub async fn deliver_due(
     ssh: &Arc<SshClient>,
     session_id: i64,
 ) -> Result<Option<DeferredPromptRow>, IpcError> {
-    deliver_due_with(store, session_id, |row, body| {
+    deliver_due_with(store, session_id, now_unix(), |row, body| {
         let ssh = Arc::clone(ssh);
         async move {
             prompt::send_prompt_inner(
@@ -171,6 +254,7 @@ pub async fn deliver_due(
 pub async fn deliver_due_with<F, Fut>(
     store: &Mutex<Store>,
     session_id: i64,
+    now: i64,
     type_it: F,
 ) -> Result<Option<DeferredPromptRow>, IpcError>
 where
@@ -183,15 +267,21 @@ where
         let Some(row) = s.get_session_by_id(session_id)? else {
             return Ok(None);
         };
+        // Archived first: what was to be skipped then never goes out, idle
+        // or not.
+        if archived(&row) {
+            s.skip_archived_deferred_prompts(session_id, now)?;
+        }
         if !idle_for_prompt(&row) {
             return Ok(None);
         }
-        let Some(next) = s.next_deferred_prompt(session_id)? else {
+        let due = s.due_deferred_prompts(session_id, now)?;
+        let Some(next) = first_ready(&s, &row, due, now)? else {
             return Ok(None);
         };
         // One prompt per idle moment, whichever path (Stop hook or the
         // reconcile backstop) gets there first.
-        if !s.claim_deferred_prompt_in(next.id, now_unix(), row.idle_since)? {
+        if !s.claim_deferred_prompt_in(next.id, now, row.idle_since)? {
             return Ok(None);
         }
         (row, next)
@@ -199,7 +289,7 @@ where
     match type_it(row, next.body.clone()).await {
         Ok(()) => Ok(Some(next)),
         Err(e) => {
-            let gave_up = lock(store)?.release_deferred_prompt(next.id, &e.message, now_unix())?;
+            let gave_up = lock(store)?.release_deferred_prompt(next.id, &e.message, now)?;
             tracing::warn!(
                 session_id,
                 prompt = next.id,
@@ -324,6 +414,7 @@ mod tests {
         QueuePromptArgs {
             session_id: id,
             prompt: p.into(),
+            ..Default::default()
         }
     }
 
@@ -331,7 +422,7 @@ mod tests {
     async fn an_idle_session_gets_the_prompt_at_once() {
         let (store, id) = store_with("idle");
         let typed = Mutex::new(Vec::<String>::new());
-        let r = queue_prompt_with(args(id, "status?"), &store, |_, b| {
+        let r = queue_prompt_with(args(id, "status?"), &store, now_unix(), |_, b| {
             typed.lock().unwrap().push(b);
             async { Ok(()) }
         })
@@ -344,24 +435,29 @@ mod tests {
     #[tokio::test]
     async fn a_queued_prompt_is_delivered_when_the_session_goes_idle() {
         let (store, id) = store_with("working");
-        let r = queue_prompt_with(args(id, "rebase on main"), &store, |_, _| async {
-            panic!("a working session is never typed into")
-        })
+        let r = queue_prompt_with(
+            args(id, "rebase on main"),
+            &store,
+            now_unix(),
+            |_, _| async { panic!("a working session is never typed into") },
+        )
         .await
         .unwrap();
         assert!(!r.delivered);
         let qid = r.queued_id.unwrap();
 
         // Still working: nothing goes out.
-        let out = deliver_due_with(&store, id, |_, _| async { panic!("not idle yet") })
-            .await
-            .unwrap();
+        let out = deliver_due_with(&store, id, now_unix(), |_, _| async {
+            panic!("not idle yet")
+        })
+        .await
+        .unwrap();
         assert!(out.is_none());
 
         // The turn ends: the prompt is typed, once.
         set_status(&store, id, "idle");
         let typed = Mutex::new(Vec::<(String, String)>::new());
-        let out = deliver_due_with(&store, id, |row, b| {
+        let out = deliver_due_with(&store, id, now_unix(), |row, b| {
             typed.lock().unwrap().push((row.tmux_name, b));
             async { Ok(()) }
         })
@@ -372,9 +468,11 @@ mod tests {
             *typed.lock().unwrap(),
             vec![("s".to_string(), "rebase on main".to_string())]
         );
-        let again = deliver_due_with(&store, id, |_, _| async { panic!("typed twice") })
-            .await
-            .unwrap();
+        let again = deliver_due_with(&store, id, now_unix(), |_, _| async {
+            panic!("typed twice")
+        })
+        .await
+        .unwrap();
         assert!(again.is_none());
         assert!(store
             .lock()
@@ -387,15 +485,17 @@ mod tests {
     #[tokio::test]
     async fn a_blocked_session_keeps_the_prompt_until_it_is_idle() {
         let (store, id) = store_with("blocked");
-        let r = queue_prompt_with(args(id, "continue"), &store, |_, _| async {
+        let r = queue_prompt_with(args(id, "continue"), &store, now_unix(), |_, _| async {
             panic!("Enter would answer the dialog")
         })
         .await
         .unwrap();
         assert!(r.queued_id.is_some());
-        let out = deliver_due_with(&store, id, |_, _| async { panic!("still blocked") })
-            .await
-            .unwrap();
+        let out = deliver_due_with(&store, id, now_unix(), |_, _| async {
+            panic!("still blocked")
+        })
+        .await
+        .unwrap();
         assert!(out.is_none());
     }
 
@@ -403,13 +503,15 @@ mod tests {
     async fn prompts_go_out_in_order_one_per_idle_moment() {
         let (store, id) = store_with("working");
         for p in ["one", "two"] {
-            queue_prompt_with(args(id, p), &store, |_, _| async { panic!("working") })
-                .await
-                .unwrap();
+            queue_prompt_with(args(id, p), &store, now_unix(), |_, _| async {
+                panic!("working")
+            })
+            .await
+            .unwrap();
         }
         // Idle now, but "one" is still waiting: a new prompt queues behind it.
         set_status(&store, id, "idle");
-        let r = queue_prompt_with(args(id, "three"), &store, |_, _| async {
+        let r = queue_prompt_with(args(id, "three"), &store, now_unix(), |_, _| async {
             panic!("would jump the queue")
         })
         .await
@@ -418,13 +520,13 @@ mod tests {
         let mut sent = Vec::new();
         for _ in 0..3 {
             set_status(&store, id, "idle");
-            let row = deliver_due_with(&store, id, |_, _| async { Ok(()) })
+            let row = deliver_due_with(&store, id, now_unix(), |_, _| async { Ok(()) })
                 .await
                 .unwrap()
                 .unwrap();
             sent.push(row.body);
             set_status(&store, id, "working");
-            let none = deliver_due_with(&store, id, |_, _| async { panic!("working") })
+            let none = deliver_due_with(&store, id, now_unix(), |_, _| async { panic!("working") })
                 .await
                 .unwrap();
             assert!(none.is_none());
@@ -438,9 +540,11 @@ mod tests {
     async fn one_idle_moment_takes_one_prompt_whichever_path_comes_first() {
         let (store, id) = store_with("working");
         for p in ["one", "two"] {
-            queue_prompt_with(args(id, p), &store, |_, _| async { panic!("working") })
-                .await
-                .unwrap();
+            queue_prompt_with(args(id, p), &store, now_unix(), |_, _| async {
+                panic!("working")
+            })
+            .await
+            .unwrap();
         }
         let idle_at = |at: i64| {
             set_status(&store, id, "idle");
@@ -455,18 +559,20 @@ mod tests {
                 .unwrap();
         };
         idle_at(now_unix() - 5);
-        let first = deliver_due_with(&store, id, |_, _| async { Ok(()) })
+        let first = deliver_due_with(&store, id, now_unix(), |_, _| async { Ok(()) })
             .await
             .unwrap();
         assert_eq!(first.map(|r| r.body).as_deref(), Some("one"));
         // The other path, same moment (the status still reads idle).
-        let second = deliver_due_with(&store, id, |_, _| async { panic!("typed twice") })
-            .await
-            .unwrap();
+        let second = deliver_due_with(&store, id, now_unix(), |_, _| async {
+            panic!("typed twice")
+        })
+        .await
+        .unwrap();
         assert!(second.is_none());
         // The next idle moment carries the next prompt.
         idle_at(now_unix() + 5);
-        let next = deliver_due_with(&store, id, |_, _| async { Ok(()) })
+        let next = deliver_due_with(&store, id, now_unix(), |_, _| async { Ok(()) })
             .await
             .unwrap();
         assert_eq!(next.map(|r| r.body).as_deref(), Some("two"));
@@ -475,14 +581,14 @@ mod tests {
     #[tokio::test]
     async fn a_failed_typing_hands_the_prompt_back() {
         let (store, id) = store_with("working");
-        let qid = queue_prompt_with(args(id, "p"), &store, |_, _| async { panic!() })
+        let qid = queue_prompt_with(args(id, "p"), &store, now_unix(), |_, _| async { panic!() })
             .await
             .unwrap()
             .queued_id
             .unwrap();
         set_status(&store, id, "idle");
         let calls = AtomicUsize::new(0);
-        let err = deliver_due_with(&store, id, |_, _| {
+        let err = deliver_due_with(&store, id, now_unix(), |_, _| {
             calls.fetch_add(1, Ordering::SeqCst);
             async { Err(IpcError::new(codes::E_TMUX, "no pane")) }
         })
@@ -510,7 +616,7 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_prompt_never_goes_out() {
         let (store, id) = store_with("working");
-        let qid = queue_prompt_with(args(id, "p"), &store, |_, _| async { panic!() })
+        let qid = queue_prompt_with(args(id, "p"), &store, now_unix(), |_, _| async { panic!() })
             .await
             .unwrap()
             .queued_id
@@ -536,7 +642,7 @@ mod tests {
             codes::E_NOTFOUND
         );
         set_status(&store, id, "idle");
-        let out = deliver_due_with(&store, id, |_, _| async { panic!("cancelled") })
+        let out = deliver_due_with(&store, id, now_unix(), |_, _| async { panic!("cancelled") })
             .await
             .unwrap();
         assert!(out.is_none());
@@ -551,9 +657,11 @@ mod tests {
             .conn_ref()
             .execute("UPDATE sessions SET status = 'ghost' WHERE id = ?1", [id])
             .unwrap();
-        let e = queue_prompt_with(args(id, "later"), &store, |_, _| async { Ok(()) })
-            .await
-            .unwrap_err();
+        let e = queue_prompt_with(args(id, "later"), &store, now_unix(), |_, _| async {
+            Ok(())
+        })
+        .await
+        .unwrap_err();
         assert_eq!(e.code, codes::E_INVALID_STATE);
         assert!(store
             .lock()
@@ -566,19 +674,241 @@ mod tests {
     #[tokio::test]
     async fn an_empty_prompt_or_a_shell_is_refused() {
         let (store, id) = store_with("idle");
-        let e = queue_prompt_with(args(id, "  \n"), &store, |_, _| async { Ok(()) })
-            .await
-            .unwrap_err();
+        let e = queue_prompt_with(args(id, "  \n"), &store, now_unix(), |_, _| async {
+            Ok(())
+        })
+        .await
+        .unwrap_err();
         assert_eq!(e.code, codes::E_VALIDATE);
         store
             .lock()
             .unwrap()
             .set_session_kind(id, "shell", None)
             .unwrap();
-        let e = queue_prompt_with(args(id, "ls"), &store, |_, _| async { Ok(()) })
+        let e = queue_prompt_with(args(id, "ls"), &store, now_unix(), |_, _| async { Ok(()) })
             .await
             .unwrap_err();
         assert_eq!(e.code, codes::E_VALIDATE);
+    }
+
+    // --- Send later's time choices (M15 step G1.8), on a clock the test
+    // holds: `T` is "now" when the prompt is sent.
+    const T: i64 = 1_800_000_000;
+
+    fn timed(id: i64, p: &str, f: impl FnOnce(&mut QueuePromptArgs)) -> QueuePromptArgs {
+        let mut a = args(id, p);
+        f(&mut a);
+        a
+    }
+
+    async fn deliver_at(store: &Mutex<Store>, id: i64, now: i64) -> Option<String> {
+        deliver_due_with(store, id, now, |_, _| async { Ok(()) })
+            .await
+            .unwrap()
+            .map(|r| r.body)
+    }
+
+    #[tokio::test]
+    async fn a_prompt_for_later_waits_for_its_time_even_when_idle() {
+        let (store, id) = store_with("idle");
+        let r = queue_prompt_with(
+            timed(id, "in an hour", |a| a.not_before = Some(T + 3_600)),
+            &store,
+            T,
+            |_, _| async { panic!("not before its time") },
+        )
+        .await
+        .unwrap();
+        assert!(!r.delivered);
+        let row = store
+            .lock()
+            .unwrap()
+            .get_deferred_prompt(r.queued_id.unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.not_before, Some(T + 3_600));
+        assert_eq!(deliver_at(&store, id, T + 3_599).await, None);
+        // Its time has come but the session is busy: still waits.
+        set_status(&store, id, "working");
+        assert_eq!(deliver_at(&store, id, T + 3_600).await, None);
+        set_status(&store, id, "idle");
+        assert_eq!(
+            deliver_at(&store, id, T + 3_700).await.as_deref(),
+            Some("in an hour")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prompt_not_due_yet_holds_back_nothing_behind_it() {
+        let (store, id) = store_with("idle");
+        queue_prompt_with(
+            timed(id, "tomorrow", |a| a.not_before = Some(T + 86_400)),
+            &store,
+            T,
+            |_, _| async { panic!("not yet") },
+        )
+        .await
+        .unwrap();
+        let typed = Mutex::new(Vec::<String>::new());
+        let r = queue_prompt_with(args(id, "now"), &store, T, |_, b| {
+            typed.lock().unwrap().push(b);
+            async { Ok(()) }
+        })
+        .await
+        .unwrap();
+        assert!(r.delivered, "the timed one is not ahead of it");
+        assert_eq!(*typed.lock().unwrap(), vec!["now".to_string()]);
+        // A time in the past is the next idle moment.
+        let r = queue_prompt_with(
+            timed(id, "late", |a| a.not_before = Some(T - 60)),
+            &store,
+            T,
+            |_, _| async { Ok(()) },
+        )
+        .await
+        .unwrap();
+        assert!(r.delivered);
+    }
+
+    fn set_account_use(store: &Mutex<Store>, id: i64, pct: f64, resets_at: i64) {
+        use crate::service::account_usage::{AccountUsage, Window};
+        let s = store.lock().unwrap();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "acct".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET account_uuid = 'acct' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        s.insert_usage_snapshot(&crate::store::UsageSnapshotRow {
+            account_uuid: "acct".into(),
+            fetched_at: T,
+            usage: AccountUsage {
+                five_hour: Some(Window {
+                    utilization: pct,
+                    resets_at: Some(resets_at),
+                }),
+                ..Default::default()
+            },
+            subscription: None,
+            source_host: None,
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_prompt_for_after_the_limit_waits_until_the_window_resets() {
+        let (store, id) = store_with("idle");
+        set_account_use(&store, id, 100.0, T + 1_000);
+        let r = queue_prompt_with(
+            timed(id, "after the reset", |a| a.until_limit_reset = true),
+            &store,
+            T,
+            |_, _| async { panic!("the account is at its limit") },
+        )
+        .await
+        .unwrap();
+        assert!(!r.delivered);
+        // A plain prompt is not held by the limit wait of the one before it.
+        let r = queue_prompt_with(args(id, "plain"), &store, T, |_, _| async { Ok(()) })
+            .await
+            .unwrap();
+        assert!(r.delivered);
+        assert_eq!(deliver_at(&store, id, T + 999).await, None);
+        assert_eq!(
+            deliver_at(&store, id, T + 1_000).await.as_deref(),
+            Some("after the reset"),
+            "the window reset: the reading no longer counts"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_limit_wait_sends_at_once_when_the_account_has_headroom() {
+        let (store, id) = store_with("idle");
+        set_account_use(&store, id, 20.0, T + 1_000);
+        let r = queue_prompt_with(
+            timed(id, "go", |a| a.until_limit_reset = true),
+            &store,
+            T,
+            |_, _| async { Ok(()) },
+        )
+        .await
+        .unwrap();
+        assert!(r.delivered);
+    }
+
+    fn archive(store: &Mutex<Store>, id: i64) {
+        let s = store.lock().unwrap();
+        s.link_session_work(id, crate::store::WorkTarget::Key("PD-1"), "manual")
+            .unwrap();
+        s.archive_session_work(id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_prompt_marked_skip_is_dropped_when_the_session_is_archived_first() {
+        let (store, id) = store_with("working");
+        let skip = queue_prompt_with(
+            timed(id, "skip me", |a| a.skip_if_archived = true),
+            &store,
+            T,
+            |_, _| async { panic!("working") },
+        )
+        .await
+        .unwrap()
+        .queued_id
+        .unwrap();
+        queue_prompt_with(args(id, "keep me"), &store, T, |_, _| async {
+            panic!("working")
+        })
+        .await
+        .unwrap();
+        archive(&store, id);
+        // Still working: the archived skip goes anyway, the other waits.
+        assert_eq!(deliver_at(&store, id, T + 1).await, None);
+        let row = store
+            .lock()
+            .unwrap()
+            .get_deferred_prompt(skip)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.skipped_at, Some(T + 1));
+        set_status(&store, id, "idle");
+        assert_eq!(
+            deliver_at(&store, id, T + 2).await.as_deref(),
+            Some("keep me")
+        );
+        // Sent to an already archived session with skip on: refused.
+        let e = queue_prompt_with(
+            timed(id, "too late", |a| a.skip_if_archived = true),
+            &store,
+            T,
+            |_, _| async { Ok(()) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID_STATE);
+    }
+
+    /// The desktop routes `queue_prompt` to a hub as the args it was given:
+    /// the new fields are left out when unset, so an older hub reads the same
+    /// call it always did.
+    #[test]
+    fn unset_time_choices_stay_off_the_wire() {
+        let v = serde_json::to_value(args(3, "p")).unwrap();
+        assert_eq!(v, serde_json::json!({ "session_id": 3, "prompt": "p" }));
+        let v = serde_json::to_value(timed(3, "p", |a| {
+            a.not_before = Some(9);
+            a.until_limit_reset = true;
+            a.skip_if_archived = true;
+        }))
+        .unwrap();
+        assert_eq!(v["not_before"], 9);
+        assert_eq!(v["until_limit_reset"], true);
+        assert_eq!(v["skip_if_archived"], true);
     }
 
     /// The Stop hook is the moment a turn ends; it must hand the session's

@@ -242,3 +242,70 @@ async fn a_young_conversation_or_none_alike_is_not_asked() {
     assert_eq!(ask(&w.ctx(&fake), w.me).await, None);
     assert_eq!(w.proposal(), None);
 }
+
+/// M15 G4.3: Link keeps the other session on the row as `linked`; Not
+/// related withdraws it; a decided or foreign run changes nothing.
+#[tokio::test]
+async fn link_keeps_the_partner_and_not_related_withdraws_it() {
+    let proposed = |w: &World| {
+        let s = w.store.lock().unwrap();
+        s.get_session_by_id(w.me)
+            .unwrap()
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|p| p.feature == "related_session")
+    };
+    for linked in [true, false] {
+        let w = world();
+        w.on("assist");
+        let fake = Fake::answering(vec![says(&option_of(w.twin), 0.8)]);
+        assert_eq!(ask(&w.ctx(&fake), w.me).await, Some(w.twin));
+        let p = proposed(&w).expect("proposal");
+        assert_eq!(p.linked, None);
+        let run_id = p.run_id.expect("run");
+        // Another session's id does not reach this run.
+        let wrong = DecideRelatedSessionArgs {
+            session_id: w.twin,
+            run_id,
+            linked,
+        };
+        assert!(!decide_proposal(&w.store.lock().unwrap(), &wrong, 1).unwrap());
+        let args = DecideRelatedSessionArgs {
+            session_id: w.me,
+            run_id,
+            linked,
+        };
+        let row = decide_related_session(args.clone(), &w.store).unwrap();
+        let after = row
+            .proposals
+            .iter()
+            .find(|p| p.feature == "related_session")
+            .cloned();
+        if linked {
+            let p = after.expect("a linked partner stays");
+            assert_eq!(p.value, option_of(w.twin));
+            assert_eq!(p.linked, Some(true));
+        } else {
+            assert!(after.is_none(), "Not related withdraws it");
+        }
+        let run = w.runs().into_iter().find(|r| r.id == run_id).unwrap();
+        assert_eq!(
+            run.followup.as_deref(),
+            Some(if linked { "confirmed" } else { "rejected" })
+        );
+        // Decided once: a second answer changes nothing.
+        assert!(!decide_proposal(&w.store.lock().unwrap(), &args, 2).unwrap());
+    }
+    let w = world();
+    let err = decide_related_session(
+        DecideRelatedSessionArgs {
+            session_id: 9_999,
+            run_id: 1,
+            linked: true,
+        },
+        &w.store,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "E_NOTFOUND");
+}

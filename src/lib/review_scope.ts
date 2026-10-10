@@ -2,6 +2,8 @@
 // visible lines at the head of the review prompt: the dialog shows them
 // above the editable text, so nothing the reviewer reads is hidden.
 import type { AssetInventoryRow } from './assets';
+import { AGENT_LABELS } from './row_groups';
+import { sessionAgent, type SessionRow } from './sessions';
 
 export type ReviewScope = 'branch' | 'uncommitted' | 'last_commit';
 
@@ -54,4 +56,16 @@ export function reviewerSkills(rows: AssetInventoryRow[], host: string): string[
   );
   const review = (n: string) => (/review/i.test(n) ? 0 : 1);
   return [...names].sort((a, b) => review(a) - review(b) || a.localeCompare(b));
+}
+
+const SKILL_LINE = /^Use the (\S+) skill for this review\./;
+
+/** Who ran a review session, in the Reviews block's words: "pr-review
+ *  skill · Claude Code", or just the agent when the skill is not known. The
+ *  skill is read from the seeded prompt's first line (`reviewPreamble`)
+ *  while it is still the row's last prompt; nothing else records it. */
+export function reviewerOf(row: Pick<SessionRow, 'agent' | 'kind' | 'last_prompt'>): string {
+  const agent = AGENT_LABELS[sessionAgent(row)] ?? 'Claude Code';
+  const skill = SKILL_LINE.exec(row.last_prompt ?? '')?.[1];
+  return skill ? `${skill} skill · ${agent}` : agent;
 }
