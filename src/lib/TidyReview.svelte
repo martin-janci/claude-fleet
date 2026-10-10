@@ -4,9 +4,12 @@
   //
   // - "n to tidy", a segment of the sidebar's attention line (redesign 1.2),
   //   appears only when fleet has something to suggest. It is neutral: it never counts toward Needs you. It opens a sheet grouped by
-  //   reason, rows preselected, a per-row choice (Safe kill by default for
-  //   the kill reasons, Archive only, Snooze 7 d, Never for this work), and
-  //   the footer "Tidy n · Cancel". Keyboard: j/k move, space toggles, ↵
+  //   reason, rows preselected, a per-row choice (Clean up by default for
+  //   the kill reasons, Archive, Keep for 7 days, Never), and the footer
+  //   "Tidy n · Cancel". Under the rows: the cursor row's detail (why, and
+  //   what its choice does — the tree a clean up removes and its size), and
+  //   the legend "What each choice does". The stopped group has Restore all
+  //   (`restore_host_sessions`, per host). G3.12. Keyboard: j/k move, space toggles, ↵
   //   applies, esc closes. Clicking a row narrows the sidebar to that
   //   session and opens it, to look before tidying; closing lifts that.
   // - "Idle, no work linked" (M11.3) rows start unticked and carry their own
@@ -31,6 +34,9 @@
     freedByResults,
     freedKb,
     groupByReason,
+    restoreBatches,
+    tidyDetail,
+    tidyLegend,
     newlyReopened,
     preselected,
     refreshTidy,
@@ -60,6 +66,7 @@
   import { clearSessionFocus, focusSession } from './session_focus';
   import { windowHidden } from './window_hidden';
   import { sizeText } from './hosts_table';
+  import { restoreHostSessions } from './sessions';
 
   /** How often the candidates are re-read (they change on the scale of hours). */
   const REFRESH_MS = 60_000;
@@ -132,6 +139,56 @@
   const tickedCount = $derived(allowed.filter((c) => ticked.has(c.session_id)).length);
   /** "frees about 2.1 GB": the measured worktrees the ticked safe kills remove. */
   const freed = $derived(freedKb(allowed, ticked, choice));
+  /** "What each choice does": the choices the shown rows offer (G3.12). */
+  const legend = $derived(tidyLegend(shown));
+  /** The cursor row and what its choice would do (G3.12's row detail). */
+  const selected = $derived(ordered[cursor] ?? null);
+  const selectedDetail = $derived(
+    selected ? tidyDetail(selected, choice.get(selected.session_id) ?? defaultChoice(selected)) : '',
+  );
+  /** Restore all on the stopped group: the hub's half, then the access half
+   *  per session (`restore_host_sessions` is `own`). */
+  const restoreBlocked = $derived(hubActionBlocked('restore_host_sessions', $hubStatus, $hubConnection));
+  function restoreTargets(items: TidyCandidate[]) {
+    return restoreBatches(items, (id) => $sessionIdBlocked(id, 'restore_host_sessions') === null);
+  }
+  let restoring = $state(false);
+
+  /** Restore every stopped session of the group this client may restore,
+   *  one `restore_host_sessions` batch per host. Not destructive: each
+   *  resumes its Claude conversation; one that cannot be is reported. */
+  async function restoreAll(items: TidyCandidate[]) {
+    const batches = restoreTargets(items);
+    if (restoring || restoreBlocked !== null || batches.length === 0) return;
+    restoring = true;
+    let ok = 0;
+    let total = 0;
+    const failed: string[] = [];
+    for (const b of batches) {
+      const r = await restoreHostSessions(b.host, { sessionIds: b.ids });
+      if (!r.ok) {
+        total += b.ids.length;
+        failed.push(`${b.host}: ${r.error.message ?? 'restore failed'}`);
+        continue;
+      }
+      for (const x of r.value.results) {
+        total += 1;
+        if (x.ok) ok += 1;
+        else failed.push(`${x.tmux_name}: ${x.error ?? 'unknown error'}`);
+      }
+    }
+    restoring = false;
+    void refreshTidy();
+    if (failed.length === 0) {
+      push({ kind: 'success', message: `Restored ${ok} of ${total} stopped session${total === 1 ? '' : 's'}` });
+    } else {
+      push({
+        kind: 'warning',
+        sticky: true,
+        message: `Restored ${ok} of ${total} stopped sessions. Failed: ${failed.join('; ')}`,
+      });
+    }
+  }
 
   function rowName(c: TidyCandidate): string {
     return c.label || c.tmux_name;
@@ -236,7 +293,7 @@
     }
     push({
       kind: 'info',
-      message: action === 'keep' ? `Kept ${rowName(c)} for ${KEEP_DAYS} days` : `Killed ${rowName(c)}`,
+      message: action === 'keep' ? `Kept ${rowName(c)} for ${KEEP_DAYS} days` : `Cleaned up ${rowName(c)}`,
       sub: freedLine(r.value.results),
     });
   }
@@ -478,7 +535,25 @@
     <div role="tree" aria-label="Sessions to tidy" aria-multiselectable="true">
     {#each groups as g (g.reason)}
       <div role="group" aria-label={tidyReasonLabel(g.reason)}>
-      <div class="group-head" data-testid="tidy-group">{tidyReasonLabel(g.reason)} · {g.items.length}</div>
+      <div class="group-line">
+        <div class="group-head" data-testid="tidy-group">{tidyReasonLabel(g.reason)} · {g.items.length}</div>
+        {#if g.reason === 'ghost_expiring'}
+          {@const targets = restoreTargets(g.items)}
+          <!-- G3.12: the stopped group's Restore all, the same
+               `restore_host_sessions` the sidebar's lost fold runs. -->
+          <button
+            class="btn btn--quiet is-bounded group-action"
+            data-testid="tidy-restore-all"
+            disabled={restoring || restoreBlocked !== null || targets.length === 0}
+            title={restoreBlocked ??
+              (targets.length === 0
+                ? 'None of these sessions are yours to restore'
+                : 'Restore each stopped session; it resumes its Claude conversation')}
+            onkeydown={(e) => e.stopPropagation()}
+            onclick={() => void restoreAll(g.items)}>{restoring ? 'Restoring…' : 'Restore all'}</button
+          >
+        {/if}
+      </div>
       {#each g.items as c (c.session_id)}
         {@const i = ordered.indexOf(c)}
         {@const choices = choicesFor(c)}
@@ -534,7 +609,7 @@
               disabled={busy || rowBlocked(c) !== null}
               title={rowBlocked(c) ?? `Leave it out of Tidy up for ${KEEP_DAYS} days`}
               onkeydown={(e) => e.stopPropagation()}
-              onclick={() => void applyRow(c, 'keep')}>Keep {KEEP_DAYS} d</button
+              onclick={() => void applyRow(c, 'keep')}>{TIDY_CHOICE_LABELS.keep}</button
             >
             <button
               class="btn btn--quiet is-bounded"
@@ -544,7 +619,7 @@
               title={rowBlocked(c) ?? ''}
               onkeydown={(e) => e.stopPropagation()}
               onclick={() => void applyRow(c, 'safe_kill')}
-              >{armed === c.session_id ? 'Confirm safe kill' : 'Safe kill'}</button
+              >{armed === c.session_id ? 'Confirm clean up' : TIDY_CHOICE_LABELS.safe_kill}</button
             >
           {:else if c.action === 'safe_kill'}
             <span class="warn" title="Claude is asked to commit and push first; the worktree is removed only if that succeeds"
@@ -567,6 +642,23 @@
       </div>
     {/each}
     </div>
+    {#if selected}
+      <p class="tidy-detail" data-testid="tidy-detail" aria-live="polite">
+        <span class="detail-name">Selected: {rowName(selected)}</span>
+        {selectedDetail}
+      </p>
+    {/if}
+    {#if legend.length > 0}
+      <details class="tidy-legend" data-testid="tidy-legend">
+        <summary>What each choice does</summary>
+        <dl>
+          {#each legend as l (l.label)}
+            <dt>{l.label}</dt>
+            <dd>{l.help}</dd>
+          {/each}
+        </dl>
+      </details>
+    {/if}
     <div class="sheet-foot">
       {#if tickedCount > 0 && freed !== null && freed > 0}
         <span class="foot-meta" data-testid="tidy-frees">{tickedCount} selected · frees about {sizeText(freed)}</span>
@@ -644,6 +736,43 @@
     margin-right: auto;
     color: var(--fg-muted);
     font-size: var(--text-2xs);
+  }
+  .group-line {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .group-action {
+    margin-left: auto;
+    color: var(--accent);
+  }
+  .tidy-detail {
+    margin: 0.2rem 0 0;
+    padding: 0.3rem;
+    border-top: 1px solid var(--border);
+    color: var(--fg-muted);
+  }
+  .detail-name {
+    color: var(--fg);
+    font-weight: 500;
+    margin-right: 0.3rem;
+  }
+  .tidy-legend summary {
+    cursor: pointer;
+    color: var(--fg-muted);
+  }
+  .tidy-legend dl {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 0.15rem 0.6rem;
+    margin: 0.3rem 0 0;
+  }
+  .tidy-legend dt {
+    color: var(--fg);
+  }
+  .tidy-legend dd {
+    margin: 0;
+    color: var(--fg-muted);
   }
   .group-head {
     color: var(--fg-muted);

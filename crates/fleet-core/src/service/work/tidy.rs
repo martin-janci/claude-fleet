@@ -233,9 +233,10 @@ pub fn work_tidy(
     })
 }
 
-/// Each `safe_kill` candidate's worktree size, from the host probe's last
-/// measurement (G1.9): what the sheet totals as "frees about …". A tree
-/// the probe has not measured stays `None`, never 0.
+/// Each `safe_kill` candidate's worktree path and size, from the host
+/// probe's last measurement (G1.9): what the sheet totals as "frees about
+/// …" and its row detail names (G3.12). A tree the probe has not measured
+/// keeps its path and a `None` size, never 0.
 fn fill_worktree_sizes(
     store: &Mutex<Store>,
     snap: &Snapshot,
@@ -260,6 +261,7 @@ fn fill_worktree_sizes(
         if let Some(path) = s.worktree_path(wt)? {
             c.worktree_kb = crate::service::sessions::worktree_sizes::size_kb(&c.host_alias, &path)
                 .map(|(kb, _)| kb);
+            c.worktree_path = Some(path);
         }
     }
     Ok(())

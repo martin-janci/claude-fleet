@@ -659,8 +659,9 @@ Index by area (names only; see the reference for details):
   `same_as`, the session kept), `secondary` reasons, the preselected `action`
   (`safe_kill` | `kill` | `archive` | `resume_or_expire`), a preview (host,
   branch, key, item status, PR, idle time), `auto` (auto-tidy would act
-  on it) and, on a `safe_kill` row, `worktree_kb` (its own worktree's size
-  as the host probe last measured it; absent until measured) — plus the policy (`auto_tidy`, `auto_reasons`, `done_days`,
+  on it) and, on a `safe_kill` row, `worktree_path` (the tree a clean up
+  removes) and `worktree_kb` (its size as the host probe last measured it;
+  absent until measured) — plus the policy (`auto_tidy`, `auto_reasons`, `done_days`,
   `idle_hours`). `work { action: "reopened" }` lists work moved out of done
   that has past sessions. `work_link { action: "tidy_apply", items: [{
   session_id, action, link_id?, days? }] }` applies a batch (`safe_kill`,

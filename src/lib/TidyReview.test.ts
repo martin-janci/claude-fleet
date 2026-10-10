@@ -291,10 +291,10 @@ describe('TidyReview', () => {
     await tick();
     const select = screen.getByTestId('tidy-choice') as HTMLSelectElement;
     expect(Array.from(select.options, (o) => o.textContent)).toEqual([
-      'Safe kill',
-      'Archive only',
-      'Snooze 7 d',
-      'Never for this work',
+      'Clean up',
+      'Archive',
+      'Keep for 7 days',
+      'Never',
     ]);
     await fireEvent.change(select, { target: { value: 'archive' } });
     await fireEvent.click(screen.getByTestId('tidy-apply'));
@@ -303,6 +303,83 @@ describe('TidyReview', () => {
         args: { items: [{ session_id: 1, action: 'archive', link_id: 101 }] },
       }),
     );
+  });
+
+  // G3.12: the selected row says why and what its choice does.
+  it('the cursor row shows its detail: why, and the tree a clean up removes with its size', async () => {
+    candidates = [
+      cand(1, { reason: 'pr_merged_idle', worktree_path: '/w/.worktrees/abc-1', worktree_kb: 380 * 1024 }),
+      cand(2, { reason: 'pr_merged_idle' }),
+    ];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    const detail = screen.getByTestId('tidy-detail');
+    expect(detail).toHaveTextContent('Selected: s1');
+    expect(detail).toHaveTextContent('PR merged, idle: PR merged, ABC-1 is Done, branch abc-1, idle 5 h.');
+    expect(detail).toHaveTextContent('Clean up has Claude commit and push first, then removes /w/.worktrees/abc-1 (380 MB).');
+    // The choice changes what it says; j moves it to the next row.
+    await fireEvent.change(screen.getAllByTestId('tidy-choice')[0], { target: { value: 'archive' } });
+    await tick();
+    expect(screen.getByTestId('tidy-detail')).toHaveTextContent("Archive folds it into its work's Done section");
+    await fireEvent.keyDown(screen.getByTestId('tidy-sheet'), { key: 'j' });
+    await tick();
+    expect(screen.getByTestId('tidy-detail')).toHaveTextContent('Selected: s2');
+    expect(screen.getByTestId('tidy-detail')).toHaveTextContent('then removes its worktree.');
+  });
+
+  it('the legend says what each offered choice does, and Restore when a stopped session is shown', async () => {
+    candidates = [cand(1)];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    const legend = screen.getByTestId('tidy-legend');
+    expect(legend).toHaveTextContent('What each choice does');
+    expect(Array.from(legend.querySelectorAll('dt'), (d) => d.textContent)).toEqual([
+      'Clean up',
+      'Archive',
+      'Keep for 7 days',
+      'Never',
+    ]);
+    expect(legend).toHaveTextContent('Claude commits and pushes first; the worktree goes only if that succeeds');
+    expect(screen.queryByTestId('tidy-restore-all')).toBeNull();
+  });
+
+  it('Restore all restores the stopped group, one batch per host, and says how it went', async () => {
+    const ghost = (id: number, host: string) =>
+      cand(id, { host_alias: host, reason: 'ghost_expiring', action: 'resume_or_expire', expires_at: 2e9 });
+    candidates = [cand(1), ghost(2, 'trn'), ghost(3, 'trn'), ghost(4, 'mac')];
+    const base = vi.mocked(invoke).getMockImplementation()!;
+    vi.mocked(invoke).mockImplementation(async (cmd: string, a?: unknown) => {
+      if (cmd === 'restore_host_sessions') {
+        const args = (a as { args: { host_alias: string; session_ids: number[] } }).args;
+        return {
+          host_alias: args.host_alias,
+          dry_run: false,
+          plan: [],
+          results: args.session_ids.map((id) => ({ session_id: id, tmux_name: `s${id}`, ok: true, error: null })),
+        };
+      }
+      return base(cmd, a as never);
+    });
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    expect(Array.from(screen.getByTestId('tidy-legend').querySelectorAll('dt'), (d) => d.textContent)).toContain(
+      'Restore all',
+    );
+    await fireEvent.click(screen.getByTestId('tidy-restore-all'));
+    await waitFor(() =>
+      expect(get(toasts).some((t) => t.message === 'Restored 3 of 3 stopped sessions')).toBe(true),
+    );
+    expect(invoke).toHaveBeenCalledWith('restore_host_sessions', {
+      args: { host_alias: 'mac', dry_run: false, session_ids: [4] },
+    });
+    expect(invoke).toHaveBeenCalledWith('restore_host_sessions', {
+      args: { host_alias: 'trn', dry_run: false, session_ids: [2, 3] },
+    });
+    // Nothing else was tidied by it.
+    expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
   });
 
   it('Enter on a focused control (Cancel, checkbox, PR link) is not a sheet chord', async () => {
@@ -669,9 +746,9 @@ describe('TidyReview', () => {
       const checks = screen.getAllByTestId('tidy-check') as HTMLInputElement[];
       expect(checks.map((c) => c.checked)).toEqual([true, false]);
       const select = row.querySelector('[data-testid="tidy-choice"]') as HTMLSelectElement;
-      expect(Array.from(select.options, (o) => o.textContent)).toEqual(['Safe kill', 'Keep 7 d']);
-      expect(row.querySelector('[data-testid="tidy-keep"]')).toHaveTextContent('Keep 7 d');
-      expect(row.querySelector('[data-testid="tidy-safe-kill"]')).toHaveTextContent('Safe kill');
+      expect(Array.from(select.options, (o) => o.textContent)).toEqual(['Clean up', 'Keep for 7 days']);
+      expect(row.querySelector('[data-testid="tidy-keep"]')).toHaveTextContent('Keep for 7 days');
+      expect(row.querySelector('[data-testid="tidy-safe-kill"]')).toHaveTextContent('Clean up');
     });
 
     it('Keep sends a per-session keep for 7 days', async () => {
@@ -695,7 +772,7 @@ describe('TidyReview', () => {
       const kill = screen.getByTestId('tidy-safe-kill');
       await fireEvent.click(kill);
       await tick();
-      expect(kill).toHaveTextContent('Confirm safe kill');
+      expect(kill).toHaveTextContent('Confirm clean up');
       expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
       await fireEvent.click(kill);
       await waitFor(() =>
