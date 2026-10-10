@@ -3,7 +3,7 @@
 // behind "Show answers". A pending form says when it expires. Pure, so the
 // card and its tests read the same words.
 import { visibleSteps } from './form_model';
-import type { FormField, FormView } from './forms';
+import { optionsOfField, type FormField, type FormSpec, type FormView, type Values } from './forms';
 
 /** A pending form nobody answered within this long expires. Mirrors
  *  `EXPIRE_SECS` in crates/fleet-core/src/service/forms.rs (receipt.test.ts
@@ -26,7 +26,7 @@ export interface Answer {
 }
 
 function optionLabel(f: FormField, v: unknown): string {
-  return f.options?.find(([k]) => k === v)?.[1] ?? String(v);
+  return optionsOfField(f).find((o) => o.value === v)?.label ?? String(v);
 }
 
 function lower(label: string): string {
@@ -49,18 +49,52 @@ export function answerList(form: FormView): Answer[] {
         if (f.name in secrets) out.push({ name: f.name, label: f.label, text: `written to ${form.host_alias}, never shown` });
         continue;
       }
-      const v = answers[f.name];
-      if (v === undefined || v === null || v === '') continue;
-      let text: string;
-      if (f.type === 'bool') text = v === true ? 'yes' : 'no';
-      else if (f.type === 'select') text = optionLabel(f, v);
-      else if (f.type === 'multiselect') {
-        if (!Array.isArray(v) || v.length === 0) continue;
-        text = v.map((x) => optionLabel(f, x)).join(', ');
-      } else text = String(v);
-      out.push({ name: f.name, label: f.label, text });
+      const text = answerText(f, answers[f.name]);
+      if (text !== null) out.push({ name: f.name, label: f.label, text });
     }
   }
+  return out;
+}
+
+/** One non-secret answer in words, or null when there is none. */
+function answerText(f: FormField, v: unknown): string | null {
+  if (v === undefined || v === null || v === '') return null;
+  if (f.type === 'bool') return v === true ? 'yes' : 'no';
+  if (f.type === 'select') return optionLabel(f, v);
+  if (f.type === 'multiselect') return Array.isArray(v) && v.length > 0 ? v.map((x) => optionLabel(f, x)).join(', ') : null;
+  return String(v);
+}
+
+/** One earlier step on a review step: its chip name, where Edit goes
+ *  (the visible step's index), and what it holds so far. */
+export interface ReviewSection {
+  step: number;
+  title: string;
+  rows: Answer[];
+}
+
+/** What a review step (`kind: "review"`) summarises: every visible step
+ *  before it, each field's answer in words. A secret says only whether it
+ *  is set; a disabled field is left out (it is not answered); an empty
+ *  field reads "—". */
+export function reviewSections(spec: FormSpec, values: Values): ReviewSection[] {
+  const out: ReviewSection[] = [];
+  visibleSteps(spec, values).forEach((s, i) => {
+    if (s.kind === 'review') return;
+    const rows: Answer[] = [];
+    for (const f of s.fields) {
+      if (f.disabled_reason !== undefined) continue;
+      const v = values[f.name];
+      const text =
+        f.type === 'secret'
+          ? typeof v === 'string' && v !== ''
+            ? 'set, never shown to the agent'
+            : null
+          : answerText(f, v);
+      rows.push({ name: f.name, label: f.label, text: text ?? '—' });
+    }
+    out.push({ step: i, title: s.name ?? s.title, rows });
+  });
   return out;
 }
 

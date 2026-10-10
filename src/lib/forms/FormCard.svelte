@@ -30,7 +30,10 @@
   let problems = $state<FieldProblem[]>([]);
   let declining = $state(false);
   let note = $state('');
-  let wizard: { clearSecrets: () => void } | undefined = $state();
+  let wizard: { clearSecrets: () => void; forgetSaved: () => void } | undefined = $state();
+  // "Save and finish later" (a spec's `save_later`): the card folds to one
+  // line until the person resumes; the answers stay on this device.
+  let later = $state(false);
 
   $effect(() => {
     const id = formId;
@@ -40,6 +43,7 @@
     declining = false;
     note = '';
     busy = false;
+    later = false;
     void getForm(id).then((r) => {
       if (id !== formId) return;
       if (r.ok) form = r.value;
@@ -67,6 +71,7 @@
     busy = false;
     wizard?.clearSecrets();
     if (r.ok) {
+      wizard?.forgetSaved();
       form = r.value;
       return;
     }
@@ -81,8 +86,10 @@
     error = null;
     const r = await declineForm(formId, note);
     busy = false;
-    if (r.ok) form = r.value;
-    else error = r.error.message;
+    if (r.ok) {
+      wizard?.forgetSaved();
+      form = r.value;
+    } else error = r.error.message;
   }
 </script>
 
@@ -115,6 +122,15 @@
 {:else if form && form.state !== 'pending'}
   {@render receipt(form)}
   {#if error}<p class="err" data-testid="form-error">{error}</p>{/if}
+{:else if form && later}
+  <div class="receipt" data-testid="form-saved-later" role="status">
+    <div class="line">
+      <span class="mark" aria-hidden="true">◷</span>
+      <strong>{form.title}</strong>
+      <span class="meta">saved to finish later · {expiresIn(form.created_at, now)}</span>
+      <button type="button" class="link" data-testid="form-resume" onclick={() => (later = false)}>Resume</button>
+    </div>
+  </div>
 {:else}
   <section class="card" data-testid="form-card" aria-label={`Form from ${sessionName}`}>
     {#if form}
@@ -132,6 +148,8 @@
         disabled={blocked !== null}
         serverProblems={problems}
         proposal={form.proposal ?? null}
+        saveKey={form.form_id}
+        onsavelater={() => (later = true)}
         onunplaced={(ps) => (error = ps.map((p) => `${p.field}: ${p.problem}`).join('; '))}
         onsubmit={submit} />
       <div class="foot">

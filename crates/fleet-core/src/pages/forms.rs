@@ -21,6 +21,8 @@ pub const MAX_LABEL: usize = 200;
 /// `intro`, `help`, and the tool's `why` / `note`.
 pub const MAX_TEXT: usize = 500;
 pub const MAX_NAME: usize = 40;
+/// A step's `name`, the word on its step chip.
+pub const MAX_STEP_NAME: usize = 24;
 const MAX_SUBMIT: usize = 40;
 const TEXT_LEN: (u32, u32) = (500, 2000);
 const TEXTAREA_LEN: (u32, u32) = (5000, 20000);
@@ -41,7 +43,29 @@ pub struct FormSpec {
     /// The last step's button. Default "Submit".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submit: Option<String>,
+    /// Offer "Save and finish later": the person may leave the form with
+    /// what they typed kept, and come back to it while it is pending.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub save_later: bool,
     pub steps: Vec<FormStep>,
+}
+
+/// What a step is: fields to fill (the default), or a review of the steps
+/// before it, each with an Edit link back to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum StepKind {
+    #[default]
+    Fields,
+    /// Summarises the answers so far; has no fields and is the last step.
+    Review,
+}
+
+impl StepKind {
+    fn is_fields(&self) -> bool {
+        *self == StepKind::Fields
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -49,10 +73,18 @@ pub struct FormSpec {
 #[serde(deny_unknown_fields)]
 pub struct FormStep {
     pub title: String,
+    /// The step's short name on its step chip (≤ 24 chars). Default: the title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `review`: a summary of the earlier steps, with no fields of its own.
+    #[serde(default, skip_serializing_if = "StepKind::is_fields")]
+    pub kind: StepKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intro: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<FieldCondition>,
+    /// At least one, except on a `review` step, which has none.
+    #[serde(default)]
     pub fields: Vec<FormField>,
 }
 
@@ -118,9 +150,113 @@ pub struct FormField {
     /// number: whole numbers only.
     #[serde(default, skip_serializing_if = "is_false")]
     pub integer: bool,
-    /// select, multiselect: `[value, label]` pairs.
+    /// select, multiselect: `[value, label]` pairs, or
+    /// `{value, label, detail?, proposed?}` objects; the two mix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub options: Option<Vec<(String, String)>>,
+    pub options: Option<Vec<FormOption>>,
+    /// select: offer "Another…", a free entry beside the options. The
+    /// answer may then be any text (≤ 500 chars), not only an option value.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub other: bool,
+    /// Shown but not answerable, with this reason under it ("Needs 2 GB
+    /// free; mercury has 1.4 GB"). Never required; never in the answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
+    /// The default `value` was drafted by an AI: who and from what. The
+    /// field shows the Drafted label until the person changes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drafted: Option<Drafted>,
+    /// secret: where the value goes, shown under the field ("Written to a
+    /// 0600 file on mercury, never shown to the agent").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_note: Option<String>,
+}
+
+/// One option of a select or multiselect: the original `[value, label]`
+/// pair, or an object that may add a detail line and a proposal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(untagged)]
+pub enum FormOption {
+    /// `[value, label]`.
+    Pair(String, String),
+    Full(OptionSpec),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+pub struct OptionSpec {
+    pub value: String,
+    pub label: String,
+    /// One line under the label ("2 idle", "next free on main").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// This is the likely choice: shown first with "Proposed by …", the
+    /// reason and Change. select only; at most one option per field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed: Option<OptionProposal>,
+}
+
+impl FormOption {
+    pub fn value(&self) -> &str {
+        match self {
+            FormOption::Pair(v, _) => v,
+            FormOption::Full(o) => &o.value,
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            FormOption::Pair(_, l) => l,
+            FormOption::Full(o) => &o.label,
+        }
+    }
+
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            FormOption::Pair(..) => None,
+            FormOption::Full(o) => o.detail.as_deref(),
+        }
+    }
+
+    pub fn proposed(&self) -> Option<&OptionProposal> {
+        match self {
+            FormOption::Pair(..) => None,
+            FormOption::Full(o) => o.proposed.as_ref(),
+        }
+    }
+}
+
+/// Who proposes an option, and why.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+pub struct OptionProposal {
+    pub by: ProposedBy,
+    /// Why, in words a person reads (≤ 500 chars).
+    pub reason: String,
+}
+
+/// The three proposers of the design manual's AI patterns: a fleet rule,
+/// the decision model (Jev), or an LLM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum ProposedBy {
+    Rule,
+    Jev,
+    Llm,
+}
+
+/// Where a drafted default came from: `by` who wrote it ("haiku on
+/// mercury"), `from` what it read ("the Jira epic PD-3012").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+pub struct Drafted {
+    pub by: String,
+    pub from: String,
 }
 
 /// When a step or a field is asked. Exactly one form: `{field, eq}`,
@@ -242,14 +378,30 @@ pub fn validate(form: &FormSpec) -> Vec<String> {
         if !titles.insert(step.title.as_str()) {
             v.bad(&at, "another step has this title");
         }
+        if let Some(t) = &step.name {
+            v.text(&at, "name", t, MAX_STEP_NAME);
+        }
         if let Some(t) = &step.intro {
             v.text(&at, "intro", t, MAX_TEXT);
         }
         if let Some(c) = &step.when {
             check_condition(&mut v, &format!("{at} › when"), c, &seen);
         }
-        if step.fields.is_empty() {
-            v.bad(&at, "a step has at least one field");
+        match step.kind {
+            StepKind::Fields if step.fields.is_empty() => {
+                v.bad(&at, "a step has at least one field")
+            }
+            StepKind::Fields => {}
+            StepKind::Review => {
+                if !step.fields.is_empty() {
+                    v.bad(&at, "a review step has no fields");
+                }
+                if i == 0 {
+                    v.bad(&at, "a review step needs a step before it");
+                } else if i + 1 != form.steps.len() {
+                    v.bad(&at, "a review step is the last step");
+                }
+            }
         }
         for (j, f) in step.fields.iter().enumerate() {
             let fat = format!("{at} › field {} ({})", j + 1, f.name);
@@ -284,6 +436,29 @@ fn check_field(v: &mut Problems, at: &str, f: &FormField, seen: &BTreeMap<&str, 
     let word = f.kind.word();
     let not_for =
         |v: &mut Problems, key: &str| v.bad(at, format!("`{key}` is not for a {word} field"));
+    if let Some(t) = &f.disabled_reason {
+        v.text(at, "disabled_reason", t, MAX_TEXT);
+        if f.required {
+            v.bad(at, "a disabled field cannot be required");
+        }
+    }
+    if let Some(d) = &f.drafted {
+        v.text(at, "drafted.by", &d.by, MAX_LABEL);
+        v.text(at, "drafted.from", &d.from, MAX_LABEL);
+        if f.kind == Secret {
+            not_for(v, "drafted");
+        } else if f.value.is_none() {
+            v.bad(at, "a drafted field needs the drafted `value`");
+        }
+    }
+    match (&f.secret_note, f.kind) {
+        (Some(t), Secret) => v.text(at, "secret_note", t, MAX_TEXT),
+        (Some(_), _) => not_for(v, "secret_note"),
+        (None, _) => {}
+    }
+    if f.other && f.kind != Select {
+        not_for(v, "other");
+    }
     if f.placeholder.is_some() && !matches!(f.kind, Text | Textarea) {
         not_for(v, "placeholder");
     }
@@ -324,14 +499,28 @@ fn check_field(v: &mut Problems, at: &str, f: &FormField, seen: &BTreeMap<&str, 
                 );
             }
             let mut values = BTreeSet::new();
-            for (value, label) in opts {
-                if !values.insert(value.as_str()) {
+            let mut proposed = 0;
+            for o in opts {
+                let value = o.value();
+                if !values.insert(value) {
                     v.bad(at, format!("option value {value:?} appears twice"));
                 }
                 if value.is_empty() {
                     v.bad(at, "an option value must not be empty");
                 }
-                v.text(at, "an option label", label, MAX_LABEL);
+                v.text(at, "an option label", o.label(), MAX_LABEL);
+                if let Some(d) = o.detail() {
+                    v.text(at, "an option detail", d, MAX_LABEL);
+                }
+                if let Some(p) = o.proposed() {
+                    proposed += 1;
+                    v.text(at, "a proposal's reason", &p.reason, MAX_TEXT);
+                }
+            }
+            if proposed > 0 && f.kind != Select {
+                v.bad(at, "only a select's option can be proposed");
+            } else if proposed > 1 {
+                v.bad(at, "at most one option is proposed");
             }
         }
         (None, Select | Multiselect) => v.bad(
@@ -429,7 +618,7 @@ fn check_condition(
 }
 
 fn option_values(f: &FormField) -> impl Iterator<Item = &str> {
-    f.options.iter().flatten().map(|(v, _)| v.as_str())
+    f.options.iter().flatten().map(FormOption::value)
 }
 
 /// `v` as an answer to `f`, normalised (a multiselect in option order), or
@@ -469,6 +658,14 @@ fn check_value(f: &FormField, v: &Value) -> Result<Value, String> {
             .ok_or_else(|| "must be on or off".into()),
         Select => match v.as_str() {
             Some(s) if option_values(f).any(|o| o == s) => Ok(v.clone()),
+            // "Another…": any text the person typed.
+            Some(s) if f.other => {
+                if s.chars().count() > TEXT_LEN.0 as usize {
+                    return Err(format!("is longer than {} characters", TEXT_LEN.0));
+                }
+                Ok(v.clone())
+            }
+            _ if f.other => Err("must be one of the options or your own text".into()),
             _ => Err("must be one of the options".into()),
         },
         Multiselect => {
@@ -540,7 +737,8 @@ pub fn holds(c: Option<&FieldCondition>, shown: &Map<String, Value>) -> bool {
 
 /// Check a person's `values` against `form`: the accepted answers, or each
 /// field's problem in form order (then names the form does not have).
-/// Values of hidden steps and fields are dropped, not checked.
+/// Values of hidden steps and fields are dropped, not checked; so is the
+/// value of a disabled field (`disabled_reason`), which nobody can answer.
 pub fn check_answers(
     form: &FormSpec,
     values: &Map<String, Value>,
@@ -560,7 +758,7 @@ pub fn check_answers(
             continue;
         }
         for f in &step.fields {
-            if !holds(f.when.as_ref(), &out.values) {
+            if !holds(f.when.as_ref(), &out.values) || f.disabled_reason.is_some() {
                 continue;
             }
             let Some(given) = values.get(&f.name).filter(|v| !is_blank(v)) else {

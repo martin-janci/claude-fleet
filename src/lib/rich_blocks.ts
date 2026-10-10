@@ -554,7 +554,9 @@ function checkForm(v: unknown, p: Problems): FormSpec | null {
   each(steps, p, 'form › step', (s, at) => {
     str(s, 'title', p, at, { required: true, max: 120 });
     str(s, 'intro', p, at, { max: 500 });
-    const fs = arr(s, 'fields', p, at, 1, 40);
+    // A review step (forms.rs `StepKind::Review`) has no fields.
+    const review = s.kind === 'review';
+    const fs = review && s.fields === undefined ? [] : arr(s, 'fields', p, at, review ? 0 : 1, 40);
     each(fs, p, `${at} › field`, (f, fat) => {
       fields++;
       const name = str(f, 'name', p, fat, { required: true, max: 40 });
@@ -572,7 +574,10 @@ function checkForm(v: unknown, p: Problems): FormSpec | null {
       if (type === 'select' || type === 'multiselect') {
         const opts = arr(f, 'options', p, fat, 1, 50);
         opts.forEach((o, k) => {
-          if (!Array.isArray(o) || o.length !== 2 || typeof o[0] !== 'string' || typeof o[1] !== 'string')
+          // [value, label], or {value, label, …} (forms.rs `FormOption`).
+          const pair = Array.isArray(o) && o.length === 2 && typeof o[0] === 'string' && typeof o[1] === 'string';
+          const obj = isObject(o) && typeof o.value === 'string' && typeof o.label === 'string';
+          if (!pair && !obj)
             p.add(`${fat} › option ${k + 1}`, 'must be [value, label]');
         });
       }

@@ -9,6 +9,10 @@
         "null"
       ]
     },
+    "save_later": {
+      "description": "Offer \"Save and finish later\": the person may leave the form with\nwhat they typed kept, and come back to it while it is pending.",
+      "type": "boolean"
+    },
     "spec": {
       "description": "Always \"fleet.form/1\".",
       "type": "string"
@@ -37,6 +41,23 @@
     "steps"
   ],
   "$defs": {
+    "Drafted": {
+      "description": "Where a drafted default came from: `by` who wrote it (\"haiku on\nmercury\"), `from` what it read (\"the Jira epic PD-3012\").",
+      "type": "object",
+      "properties": {
+        "by": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "by",
+        "from"
+      ]
+    },
     "FieldCondition": {
       "description": "When a step or a field is asked. Exactly one form: `{field, eq}`,\n`{field, in}`, `{field, truthy}`, `{all}`, `{any}` or `{not}`. `field`\nnames an EARLIER field, never a secret.",
       "type": "object",
@@ -116,6 +137,24 @@
       "description": "One field. Flat, like a page `Condition`: which keys a type may carry is\nthe validator's to say, not serde's.",
       "type": "object",
       "properties": {
+        "disabled_reason": {
+          "description": "Shown but not answerable, with this reason under it (\"Needs 2 GB\nfree; mercury has 1.4 GB\"). Never required; never in the answers.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "drafted": {
+          "description": "The default `value` was drafted by an AI: who and from what. The\nfield shows the Drafted label until the person changes it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Drafted"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "help": {
           "type": [
             "string",
@@ -158,24 +197,18 @@
           "type": "string"
         },
         "options": {
-          "description": "select, multiselect: `[value, label]` pairs.",
+          "description": "select, multiselect: `[value, label]` pairs, or\n`{value, label, detail?, proposed?}` objects; the two mix.",
           "type": [
             "array",
             "null"
           ],
           "items": {
-            "type": "array",
-            "maxItems": 2,
-            "minItems": 2,
-            "prefixItems": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "string"
-              }
-            ]
+            "$ref": "#/$defs/FormOption"
           }
+        },
+        "other": {
+          "description": "select: offer \"Another…\", a free entry beside the options. The\nanswer may then be any text (≤ 500 chars), not only an option value.",
+          "type": "boolean"
         },
         "placeholder": {
           "description": "text, textarea.",
@@ -186,6 +219,13 @@
         },
         "required": {
           "type": "boolean"
+        },
+        "secret_note": {
+          "description": "secret: where the value goes, shown under the field (\"Written to a\n0600 file on mercury, never shown to the agent\").",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "type": {
           "$ref": "#/$defs/FieldType"
@@ -211,16 +251,51 @@
         "label"
       ]
     },
+    "FormOption": {
+      "description": "One option of a select or multiselect: the original `[value, label]`\npair, or an object that may add a detail line and a proposal.",
+      "anyOf": [
+        {
+          "description": "`[value, label]`.",
+          "type": "array",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        {
+          "$ref": "#/$defs/OptionSpec"
+        }
+      ]
+    },
     "FormStep": {
       "type": "object",
       "properties": {
         "fields": {
+          "description": "At least one, except on a `review` step, which has none.",
           "type": "array",
+          "default": [],
           "items": {
             "$ref": "#/$defs/FormField"
           }
         },
         "intro": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "`review`: a summary of the earlier steps, with no fields of its own.",
+          "$ref": "#/$defs/StepKind"
+        },
+        "name": {
+          "description": "The step's short name on its step chip (≤ 24 chars). Default: the title.",
           "type": [
             "string",
             "null"
@@ -242,8 +317,84 @@
       },
       "additionalProperties": false,
       "required": [
-        "title",
-        "fields"
+        "title"
+      ]
+    },
+    "OptionProposal": {
+      "description": "Who proposes an option, and why.",
+      "type": "object",
+      "properties": {
+        "by": {
+          "$ref": "#/$defs/ProposedBy"
+        },
+        "reason": {
+          "description": "Why, in words a person reads (≤ 500 chars).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "by",
+        "reason"
+      ]
+    },
+    "OptionSpec": {
+      "type": "object",
+      "properties": {
+        "detail": {
+          "description": "One line under the label (\"2 idle\", \"next free on main\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "proposed": {
+          "description": "This is the likely choice: shown first with \"Proposed by …\", the\nreason and Change. select only; at most one option per field.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OptionProposal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "label"
+      ]
+    },
+    "ProposedBy": {
+      "description": "The three proposers of the design manual's AI patterns: a fleet rule,\nthe decision model (Jev), or an LLM.",
+      "type": "string",
+      "enum": [
+        "rule",
+        "jev",
+        "llm"
+      ]
+    },
+    "StepKind": {
+      "description": "What a step is: fields to fill (the default), or a review of the steps\nbefore it, each with an Edit link back to it.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "fields"
+          ]
+        },
+        {
+          "description": "Summarises the answers so far; has no fields and is the last step.",
+          "type": "string",
+          "const": "review"
+        }
       ]
     }
   }

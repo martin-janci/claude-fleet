@@ -206,4 +206,16 @@
 //!   listed mission its `cost_micros` / `budget_micros`, and a mission's
 //!   plan a `run_estimate`. The golden file pins `HostLogin`, `Headroom`,
 //!   `ShepherdRuleView`, `MissionRow` and `RunEstimate`.
-pub const CONTRACT_REVISION: u32 = 14;
+//! - **15** — *a wider form spec* (gap plan G1.1). `fleet.form/1` takes
+//!   optional keys an older reader refuses: an option may be an object
+//!   (`{value, label, detail?, proposed?}`) beside the `[value, label]`
+//!   pair, a step a `name` and `kind: "review"` (with no fields), a field
+//!   `other`, `disabled_reason`, `drafted` and `secret_note`, the form
+//!   `save_later`. A `FormView`'s `spec` rides as JSON, but a
+//!   revision-14 client reads each option as a `[value, label]` pair (the
+//!   desktop destructures it, the phone decodes a typed spec) and knows
+//!   no review step, so a form using them breaks its card there. Specs in
+//!   the older shape are unchanged. The desktop routes no new
+//!   tool, so it still accepts a revision-14 hub (`MIN_HUB_CONTRACT`
+//!   stays 14).
+pub const CONTRACT_REVISION: u32 = 15;

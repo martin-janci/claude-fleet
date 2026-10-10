@@ -21,7 +21,12 @@
         { "name": "both_note", "type": "text", "label": "Both note", "when": { "all": [ { "field": "kind", "eq": "web" }, { "field": "db", "truthy": true } ] } },
         { "name": "either_note", "type": "text", "label": "Either note", "when": { "any": [ { "field": "kind", "eq": "cli" }, { "field": "port", "eq": 8080 } ] } },
         { "name": "not_note", "type": "text", "label": "Not-web note", "when": { "not": { "field": "kind", "eq": "web" } } },
-        { "name": "tag_note", "type": "text", "label": "Tag note", "when": { "field": "tags", "in": ["a", "c"] } } ] }
+        { "name": "tag_note", "type": "text", "label": "Tag note", "when": { "field": "tags", "in": ["a", "c"] } },
+        { "name": "region", "type": "select", "label": "Region", "other": true, "options": [
+          ["eu", "Europe"],
+          { "value": "us", "label": "US", "detail": "2 idle", "proposed": { "by": "jev", "reason": "the last three ran there" } } ] },
+        { "name": "plan", "type": "text", "label": "Plan", "value": "free", "disabled_reason": "Plans change in Settings" } ] },
+      { "title": "Review", "kind": "review" }
     ]
   },
   "cases": [
@@ -91,6 +96,23 @@
       "name": "a required multiselect left empty",
       "values": { "name": "x", "tags": ["b"], "agree": true, "features": [] },
       "problems": [ { "field": "features", "problem": "is required" } ]
+    },
+    {
+      "name": "Another… keeps the text typed, an object option is an option, and a disabled field's value is dropped",
+      "values": { "name": "x", "agree": true, "region": "eu-north-9", "plan": "pro" },
+      "answers": { "name": "x", "agree": true, "region": "eu-north-9" },
+      "secrets": []
+    },
+    {
+      "name": "an object option's value",
+      "values": { "name": "x", "agree": true, "region": "us" },
+      "answers": { "name": "x", "agree": true, "region": "us" },
+      "secrets": []
+    },
+    {
+      "name": "Another… still wants text",
+      "values": { "name": "x", "agree": true, "region": 5 },
+      "problems": [ { "field": "region", "problem": "must be one of the options or your own text" } ]
     }
   ]
 }

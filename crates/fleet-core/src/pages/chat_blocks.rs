@@ -565,7 +565,13 @@ fn form(p: &mut Problems, v: Option<&Value>) {
     p.each(&steps, "form › step", |p, s, at| {
         p.str(s, "title", at, true, 120);
         p.str(s, "intro", at, false, 500);
-        let fs = p.arr(s, "fields", at, 1, 40);
+        // A review step (forms.rs `StepKind::Review`) has no fields.
+        let review = s.get("kind").and_then(Value::as_str) == Some("review");
+        let fs = if review && !s.contains_key("fields") {
+            vec![]
+        } else {
+            p.arr(s, "fields", at, usize::from(!review), 40)
+        };
         p.each(&fs, &format!("{at} › field"), |p, f, fat| {
             fields += 1;
             if let Some(name) = p.str(f, "name", fat, true, 40) {
@@ -597,9 +603,14 @@ fn form(p: &mut Problems, v: Option<&Value>) {
             ) {
                 let opts = p.arr(f, "options", fat, 1, 50);
                 for (k, opt) in opts.iter().enumerate() {
+                    // `[value, label]`, or `{value, label, …}` (forms.rs `FormOption`).
                     let ok = opt
                         .as_array()
-                        .is_some_and(|a| a.len() == 2 && a[0].is_string() && a[1].is_string());
+                        .is_some_and(|a| a.len() == 2 && a[0].is_string() && a[1].is_string())
+                        || opt.as_object().is_some_and(|o| {
+                            o.get("value").is_some_and(Value::is_string)
+                                && o.get("label").is_some_and(Value::is_string)
+                        });
                     if !ok {
                         p.add(
                             &format!("{fat} › option {}", k + 1),

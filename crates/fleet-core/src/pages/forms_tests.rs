@@ -178,3 +178,71 @@ fn every_chat_wizard_has_a_spec_and_the_app_lists_the_same() {
     );
     assert!(ts.contains(&line), "chat_wizard_ids.ts should hold: {line}");
 }
+
+/// Every older spec still parses, and serialises back to exactly what it
+/// was: an option pair stays a pair, and no new key appears.
+#[test]
+fn an_older_spec_round_trips_unchanged() {
+    let doc = cases("docs/form-examples/specs.json");
+    let old = &doc["cases"][0]["spec"];
+    let form = parse(old).expect("the spec's own example is valid");
+    assert_eq!(&serde_json::to_value(&form).unwrap(), old);
+    let kind = &form.steps[0].fields[1];
+    assert_eq!(
+        kind.options.as_ref().unwrap()[0],
+        FormOption::Pair("web".into(), "Web app".into())
+    );
+    assert_eq!(form.steps[0].kind, StepKind::Fields);
+    assert!(!form.save_later);
+}
+
+#[test]
+fn an_option_is_a_pair_or_an_object_and_both_read_alike() {
+    let form = parse(&json!({ "spec": "fleet.form/1", "title": "T", "steps": [
+        { "title": "A", "fields": [ { "name": "host", "type": "select", "label": "Host", "options": [
+            ["mercury", "Mercury"],
+            { "value": "venus", "label": "Venus", "detail": "2 idle",
+              "proposed": { "by": "jev", "reason": "the last three ran there" } } ] } ] },
+        { "title": "Check", "name": "Review", "kind": "review" } ] }))
+    .unwrap();
+    let opts = form.steps[0].fields[0].options.clone().unwrap();
+    let read: Vec<(&str, &str, Option<&str>)> = opts
+        .iter()
+        .map(|o| (o.value(), o.label(), o.detail()))
+        .collect();
+    assert_eq!(
+        read,
+        [
+            ("mercury", "Mercury", None),
+            ("venus", "Venus", Some("2 idle"))
+        ]
+    );
+    assert_eq!(opts[1].proposed().unwrap().by, ProposedBy::Jev);
+    assert_eq!(form.steps[1].kind, StepKind::Review);
+    assert!(form.steps[1].fields.is_empty());
+    // Both shapes keep their own spelling on the way out.
+    let back = serde_json::to_value(&form).unwrap();
+    assert_eq!(
+        back["steps"][0]["fields"][0]["options"][0],
+        json!(["mercury", "Mercury"])
+    );
+    assert_eq!(
+        back["steps"][0]["fields"][0]["options"][1]["detail"],
+        "2 idle"
+    );
+    assert_eq!(back["steps"][1]["kind"], "review");
+}
+
+#[test]
+fn a_disabled_field_is_never_answered_and_another_takes_free_text() {
+    let form = parse(&json!({ "spec": "fleet.form/1", "title": "T", "steps": [
+        { "title": "A", "fields": [
+            { "name": "tier", "type": "select", "label": "Tier", "value": "s",
+              "disabled_reason": "Needs an admin", "options": [["s", "Small"], ["l", "Large"]] },
+            { "name": "host", "type": "select", "label": "Host", "other": true, "options": [["m", "M"]] } ] } ] }))
+    .unwrap();
+    let values: Map<String, Value> =
+        serde_json::from_value(json!({ "tier": "l", "host": "pluto" })).unwrap();
+    let a = check_answers(&form, &values).unwrap();
+    assert_eq!(Value::Object(a.values), json!({ "host": "pluto" }));
+}

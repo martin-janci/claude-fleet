@@ -373,7 +373,7 @@ upgrade before the hub is touched (point `FLEET_HUB_DATA` at the right
 directory) — it never migrates without a backup. An upgrade never prunes an older
 version's `pre-<version>-*.db` (see *Backups*).
 
-**Order across the three binaries.** Today (contract 14 on both sides,
+**Order across the three binaries.** Today (the hub serves contract 15, the desktop accepts 14–15,
 proto 1 on both sides; `fleet-hub compat` prints a build's windows) the order is a habit: hub, then desktop, then the
 agents. When a release bumps `CONTRACT_REVISION`, upgrade the **hub first,
 then the desktop in the same window** — there is no mixed window, the desktop

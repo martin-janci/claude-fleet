@@ -105,6 +105,67 @@
       "name": "empty in, empty all, and a problem inside not",
       "spec": {"spec": "fleet.form/1", "title": "T", "steps": [{"title": "A", "fields": [{"name": "b", "type": "bool", "label": "B"}, {"name": "c", "type": "text", "label": "C", "when": {"field": "b", "in": []}}, {"name": "d", "type": "text", "label": "D", "when": {"all": []}}, {"name": "e", "type": "text", "label": "E", "when": {"not": {"field": "zz", "truthy": true}}}]}]},
       "problems": ["step 1 › field 2 (c) › when: `b`: `in` needs at least one value", "step 1 › field 3 (d) › when: all / any need at least one condition", "step 1 › field 4 (e) › when › not: `zz` is not an earlier field"]
+    },
+    {
+      "name": "the newer keys: step names, a review step, both option shapes, Another…, disabled, drafted, a secret's note, save later",
+      "spec": {
+        "spec": "fleet.form/1", "title": "Deploy", "save_later": true,
+        "steps": [
+          { "title": "Where it runs", "name": "Where", "fields": [
+            { "name": "host", "type": "select", "label": "Host", "other": true, "options": [
+              ["mercury", "mercury"],
+              { "value": "venus", "label": "venus", "detail": "2 idle", "proposed": { "by": "jev", "reason": "you used it for the last three deploys" } },
+              { "value": "mars", "label": "mars", "detail": "next free on main" } ] },
+            { "name": "tier", "type": "select", "label": "Tier", "value": "small", "disabled_reason": "Larger tiers need an org admin", "options": [["small", "Small"], ["large", "Large"]] },
+            { "name": "summary", "type": "textarea", "label": "Summary", "value": "Ship the hub fix.", "drafted": { "by": "haiku on mercury", "from": "the Jira epic PD-3012" } },
+            { "name": "token", "type": "secret", "label": "Token", "secret_note": "Written to a 0600 file on mercury, never shown to the agent" }
+          ] },
+          { "title": "Check it", "name": "Review", "kind": "review" }
+        ]
+      },
+      "problems": []
+    },
+    {
+      "name": "the newer keys misused",
+      "spec": {
+        "spec": "fleet.form/1", "title": "T",
+        "steps": [
+          { "title": "Check", "kind": "review" },
+          { "title": "A", "name": "A name far longer than a chip holds", "fields": [
+            { "name": "a", "type": "text", "label": "A", "other": true, "secret_note": "x", "required": true, "disabled_reason": "Locked" },
+            { "name": "b", "type": "text", "label": "B", "drafted": { "by": "haiku", "from": "the epic" } },
+            { "name": "c", "type": "select", "label": "C", "options": [
+              { "value": "x", "label": "X", "proposed": { "by": "jev", "reason": "r" } },
+              { "value": "y", "label": "Y", "proposed": { "by": "rule", "reason": "r" } } ] },
+            { "name": "d", "type": "multiselect", "label": "D", "options": [{ "value": "x", "label": "X", "detail": "", "proposed": { "by": "llm", "reason": "r" } }] },
+            { "name": "pw", "type": "secret", "label": "P", "drafted": { "by": "haiku", "from": "the epic" } }
+          ] },
+          { "title": "Review", "kind": "review", "fields": [{ "name": "z", "type": "text", "label": "Z" }] },
+          { "title": "After", "fields": [{ "name": "y", "type": "text", "label": "Y" }] }
+        ]
+      },
+      "problems": [
+        "step 1: a review step needs a step before it",
+        "step 2: name is longer than 24 characters",
+        "step 2 › field 1 (a): a disabled field cannot be required",
+        "step 2 › field 1 (a): `secret_note` is not for a text field",
+        "step 2 › field 1 (a): `other` is not for a text field",
+        "step 2 › field 2 (b): a drafted field needs the drafted `value`",
+        "step 2 › field 3 (c): at most one option is proposed",
+        "step 2 › field 4 (d): an option detail must not be empty",
+        "step 2 › field 4 (d): only a select's option can be proposed",
+        "step 2 › field 5 (pw): `drafted` is not for a secret field",
+        "step 3: a review step has no fields",
+        "step 3: a review step is the last step"
+      ]
+    },
+    {
+      "name": "an unknown key inside an option object",
+      "spec": {
+        "spec": "fleet.form/1", "title": "T",
+        "steps": [{ "title": "A", "fields": [{ "name": "s", "type": "select", "label": "S", "options": [{ "value": "x", "label": "X", "colour": "red" }] }] }]
+      },
+      "problems": ["not a fleet.form/1 spec: data did not match any variant of untagged enum FormOption"]
     }
   ]
 }

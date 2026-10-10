@@ -5,12 +5,13 @@
   proposal appears when ready or not at all.
 -->
 <script lang="ts">
-  import { preselect, proposedByLabel, type ProposalLike } from './ai_proposal';
+  import { neverDecides, preselect, proposedByLabel, type ProposalLike } from './ai_proposal';
 
   let {
     proposal,
     field,
     floor,
+    stated = false,
     changeLabel = 'Change',
     onchange,
     testid = 'proposed-by',
@@ -21,6 +22,10 @@
     field: string;
     /** The use case confidence floor, in whole percent. */
     floor?: number;
+    /** The proposal is written into what is asked (a form option's
+     *  `proposed`), not scored: no confidence, so no floor. AI's
+     *  never-decides targets still never show. */
+    stated?: boolean;
     /** The undo link: "Change", "Not waiting". */
     changeLabel?: string;
     /** The person wants another value: the consumer clears the field. */
@@ -28,7 +33,9 @@
     testid?: string;
   } = $props();
 
-  const shown = $derived(proposal && preselect(field, proposal, floor) != null ? proposal : null);
+  const shown = $derived(
+    proposal && (stated ? !neverDecides(field) && !!proposal.value : preselect(field, proposal, floor) != null) ? proposal : null,
+  );
 </script>
 
 {#if shown}

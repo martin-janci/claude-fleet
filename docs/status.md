@@ -25,10 +25,11 @@ account usage history (122), the Hosts page's probe facts (123), token use
 (126), the cost of fleet's own `claude -p` runs (127), every PR a session's
 branch has had (`pull_requests`, 128), cost per account (130), prompts
 queued for a busy session (133), the agent CLIs a host has (134) and the
-add-host wizard's state (135). The hub contract is revision 14
+add-host wizard's state (135). The hub contract is revision 15
 (`CONTRACT_REVISION`, `crates/fleet-core/src/wire_contract.rs`):
 revisions 11 to 14 add tools a revision-10 hub does not serve, so the
-desktop and its hub are upgraded together.
+desktop and its hub are upgraded together; 15 widens the form spec and
+adds no tool, so a desktop still accepts a revision-14 hub.
 
 A session start reports its three real steps (worktree, tmux, agent) as
 `start:progress` frames (redesign 5.13, `service/sessions/start_progress.rs`):
