@@ -7,7 +7,7 @@
 import { derived, type Readable } from 'svelte/store';
 import { invokeCmd } from './result';
 import { sessions } from './sessions';
-import { inboxCount } from './inbox';
+import { inboxBadge, inboxCount } from './inbox';
 import { hubConnection, isLost, lostSince, SIGNAL_LOST_AFTER_MS } from './hub_connection';
 
 /** The names `TrayState` in tray.rs deserialises. */
@@ -61,7 +61,7 @@ export function startTraySync(
     invokeCmd('set_tray_state', { state, needsYou }),
 ): () => void {
   let last: string | null = null;
-  return derived([trayState, inboxCount], ([s, n]) => [s, n] as const).subscribe(([s, n]) => {
+  return derived([trayState, inboxBadge], ([s, n]) => [s, n] as const).subscribe(([s, n]) => {
     const key = `${s}:${n}`;
     if (key === last) return;
     last = key;

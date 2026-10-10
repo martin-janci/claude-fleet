@@ -34,7 +34,7 @@ import { failingCount } from './routines';
 import { waitingMissionCount } from './mission_waits';
 import { groupRows } from './row_groups';
 import { localMidnight } from './today';
-import { readPref, writePref } from './prefs';
+import { badgeCounts, badgeNumber, readPref, writePref } from './prefs';
 
 /** The rows that need you, worst first (`byTriage`). */
 export function inboxRows(rows: readonly SessionRow[], opts: AttentionOptions): SessionRow[] {
@@ -217,6 +217,10 @@ export const inboxCount = derived(
     return countNeedsYou(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000) }) + $failing + $missions;
   },
 );
+
+/** The number the rail and the dock show: the Inbox count, or none when
+ *  Settings › Appearance › Badge counts is Off (G4.6). */
+export const inboxBadge = derived([inboxCount, badgeCounts], ([$n, $pref]) => badgeNumber($n, $pref));
 
 /** The Inbox's rows as a store, under the rail count's filters and with the
  *  attention facts (step 2.4), for code that walks the queue rather than

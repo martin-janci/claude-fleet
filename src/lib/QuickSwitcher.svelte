@@ -123,6 +123,8 @@
   let preferredHost = $state<string | null>(null);
   /** The ticket a project pick starts (the dialog's Change, redesign 3.12). */
   let pendingTicket = $state<TicketRow | null>(null);
+  /** "Open a shell" (G4.5): the dialog opens on Shell. */
+  let preferredKind = $state<'work' | 'shell' | null>(null);
   let toggled = $state<ReadonlySet<string>>(new Set());
   // Re-rank triggers besides the query: open, the person's own actions, folds.
   let seq = $state(0);
@@ -469,8 +471,14 @@
     }
   });
 
-  function show(next: 'switch' | 'new' = 'switch', host: string | null = null, ticket: TicketRow | null = null) {
+  function show(
+    next: 'switch' | 'new' = 'switch',
+    host: string | null = null,
+    ticket: TicketRow | null = null,
+    kind: 'work' | 'shell' | null = null,
+  ) {
     query = '';
+    preferredKind = kind;
     activeKey = null;
     mode = next;
     preferredHost = host;
@@ -498,7 +506,7 @@
     if (!r) return;
     switcherRequest.set(null);
     if (r.mode === 'switch') show('switch');
-    else show('new', r.host ?? null, r.ticket ?? null);
+    else show('new', r.host ?? null, r.ticket ?? null, r.kind ?? null);
   });
   const unsubHost = newSessionHostRequest.subscribe((h) => {
     if (h === null) return;
@@ -640,7 +648,12 @@
       // The person chose the repository for a ticket start: the ticket stays.
       requestNewSession({ project: e.project, initialHost: preferredHost ?? undefined, ...ticketName(t), ticket: t });
     } else {
-      requestNewSession({ project: e.project, initialHost: preferredHost ?? undefined, autostart });
+      requestNewSession({
+        project: e.project,
+        initialHost: preferredHost ?? undefined,
+        autostart,
+        ...(preferredKind ? { initialKind: preferredKind } : {}),
+      });
     }
     hide();
   }

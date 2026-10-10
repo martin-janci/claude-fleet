@@ -12,6 +12,7 @@ import { copyText } from './clipboard';
 import MorningBrief from './MorningBrief.svelte';
 import ReleaseNote from './ReleaseNote.svelte';
 import { draftedAt, type Draft } from './drafts';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 
 const draft: Draft = {
   text: 'PAY-7 waits on you.',
@@ -107,6 +108,7 @@ describe('MorningBrief', () => {
 
 describe('ReleaseNote', () => {
   beforeEach(() => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.draft_release_notes': 'true' });
     vi.mocked(invoke).mockReset();
     vi.mocked(copyText).mockClear();
   });

@@ -304,10 +304,11 @@ pub async fn handle_source(
         )
             .into_response();
     }
-    if caller.mode == TokenMode::Readonly {
+    // An answer-only device answers dialogs; dictation types a prompt.
+    if matches!(caller.mode, TokenMode::Readonly | TokenMode::Answer) {
         return (
             StatusCode::FORBIDDEN,
-            "a readonly token cannot supply a microphone\n",
+            "a readonly or answer-only token cannot supply a microphone\n",
         )
             .into_response();
     }

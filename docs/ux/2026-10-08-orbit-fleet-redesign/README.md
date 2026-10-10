@@ -22,7 +22,7 @@ Nothing in the build reads this folder itself.
 
 ## Other references
 
-- [Orbit Fleet gap plan](https://claude.ai/code/artifact/c4caae1a-3fea-404d-8241-56d6e97771bb): milestone M15, 57 steps (G0.1 to G6.2) in 7 iterations and 8 lanes that close what the canvas shows and the apps lack. Its evidence is the board-by-board audit in [`docs/redesign/canvas-gaps-2026-10-09.md`](../../redesign/canvas-gaps-2026-10-09.md).
+- [Orbit Fleet gap plan](https://claude.ai/code/artifact/c4caae1a-3fea-404d-8241-56d6e97771bb): milestone M15, 57 steps (G0.1 to G6.2) in 7 iterations and 8 lanes that close what the canvas shows and the apps lack. Its evidence is the board-by-board audit in [`docs/redesign/canvas-gaps-2026-10-09.md`](../../redesign/canvas-gaps-2026-10-09.md). The audit re-run after the plan landed is [`docs/redesign/canvas-gaps-2026-10-10.md`](../../redesign/canvas-gaps-2026-10-10.md).
 - [Screen inventory and UX plan](https://claude.ai/code/artifact/2c086832-200f-4f52-a69b-fedd67921530): about 60 screens, the "nothing removed, only moved" parity table, motion rules, and the 47-step UX plan that the transition plan builds on.
 - [AI map](https://claude.ai/artifact/JZsDwLPdMJdh97jPb6g92Y): every AI idea for each screen. All of them are in the transition plan's AI section, and the top 10 are steps.
 - [Earlier UX review](https://claude.ai/code/artifact/11727098-ce9d-41d5-a4d8-83512feaaf1f) and the [Fleet design system for 0.5.3](https://claude.ai/artifact/KvZWoiomzJDRFetDxcb81x), which shows what shipped before the redesign.

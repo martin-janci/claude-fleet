@@ -36,6 +36,7 @@
     loadAccountSpend,
     pausedSessions,
     routinesOn,
+    fallbackRoutinesOn,
     spendByAccount,
     type AccountSummary,
     type UsageSnapshotRow,
@@ -55,6 +56,7 @@
   import { pushError } from './toasts';
   import { accountsPageRequest, accountsPausedRequest } from './account_pill';
   import { requestHostsView } from './app_views';
+  import AddAccountDialog from './AddAccountDialog.svelte';
   import { untrack } from 'svelte';
   import { get } from 'svelte/store';
 
@@ -119,6 +121,8 @@
 
   // "Show": the detail's Sessions list narrows to the paused ones.
   let pausedOnly = $state<string | null>(null);
+  /** + Add account's dialog is open (M15 G2.9). */
+  let adding = $state(false);
   function showPaused(uuid: string) {
     picked = uuid;
     pausedOnly = uuid;
@@ -278,11 +282,18 @@
     <button type="button" class="btn-quiet hosts-link" data-testid="accounts-all-hosts" onclick={() => requestHostsView()}
       >All hosts ›</button
     >
+    <!-- M15 step G2.9: a subscription login or an API key, as a new login
+         profile on a host. -->
+    <button type="button" class="btn" data-testid="accounts-add" onclick={() => (adding = true)}>+ Add account…</button>
   </header>
+
+  {#if adding}
+    <AddAccountDialog onclose={() => (adding = false)} />
+  {/if}
 
   {#if list.length === 0}
     <p class="empty" data-testid="accounts-empty">
-      No Claude account yet. An account appears here once a host is logged in to it.
+      No Claude account yet. Add one, or log a host in to it.
     </p>
   {:else}
     <div class="split">
@@ -320,7 +331,12 @@
               </div>
             {/each}
             <div class="meta" data-testid="account-counts">
-              {countLine(a.sessions.length, routinesOn(a.uuid, routines, $hosts), spendText(a.uuid))}
+              {countLine(
+                a.sessions.length,
+                routinesOn(a.uuid, routines, $hosts),
+                spendText(a.uuid),
+                fallbackRoutinesOn(a.uuid, routines, $hosts),
+              )}
             </div>
             {#if paused.length > 0}
               {@const target = switchTo[a.uuid]}

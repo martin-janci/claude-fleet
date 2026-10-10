@@ -306,7 +306,7 @@ describe('the org overview boards (OrgOverview, OrgSpend)', () => {
     render(ResourcePage, { props: { page, resource } });
     await openTab('Overview');
     const tabs = Array.from(document.querySelectorAll('[data-testid="record-tabs"] [role="tab"]')).map((t) => t.getAttribute('data-tab'));
-    expect(tabs).toEqual(['Overview', 'Members', 'Devices', 'Spend', 'Settings']);
+    expect(tabs).toEqual(['Overview', 'Members', 'Sharing', 'Devices', 'Spend', 'Settings']);
     expect(document.querySelector('[data-tab="Members"]')!.textContent).toContain('1');
     // The overview holds the tiles and the needs, not the members.
     expect(screen.getByTestId('tile-spent_today_micros')).toBeTruthy();

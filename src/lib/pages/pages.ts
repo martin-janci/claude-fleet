@@ -114,6 +114,15 @@ export interface GraphView {
   facts: string[];
 }
 
+/** A master_detail page's records shown as one table (`model.rs`
+ *  `TableView`, M15 G4.7). */
+export interface TableView {
+  title: string;
+  columns: string[];
+  filters?: string[];
+  group_by?: string;
+}
+
 export interface Page {
   spec: string;
   id: string;
@@ -127,6 +136,8 @@ export interface Page {
   list_items?: Item[];
   /** A `master_detail` page's records also drawn as a graph. */
   graph?: GraphView;
+  /** A `master_detail` page's records also shown as a table. */
+  table?: TableView;
   /** A `review_apply` page's proposals: settings (`pages/review.ts`) or
    *  guides (`pages/guides.ts`). */
   review?: 'settings' | 'guides';

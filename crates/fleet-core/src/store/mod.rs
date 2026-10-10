@@ -8,6 +8,7 @@ use crate::events::{EventBus, RowChange};
 use rusqlite::{Connection, OptionalExtension, Result, TransactionBehavior};
 use std::sync::Arc;
 
+mod access_requests;
 mod account_usage_snapshots;
 mod aux_usage;
 pub mod backup;
@@ -36,6 +37,7 @@ mod nl_census;
 mod orchestration;
 mod org_activity;
 mod org_members;
+mod org_projects;
 mod orgs;
 mod participants;
 mod peer_links;
@@ -83,6 +85,7 @@ mod work_tidy;
 mod work_usage;
 mod work_view;
 
+pub use access_requests::{AccessRequestRow, ACCESS_REQUEST_COOLDOWN_SECS};
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
 pub use aux_usage::{
     AuxUsageRow, NewAuxUsage, AUX_ORIGINS, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE,
@@ -144,6 +147,7 @@ pub use org_members::{
     effective_device, role_receives_shares, validate_org_role, DeviceOrg, OrgMemberRow, NO_ORG,
     ORG_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_VIEWER,
 };
+pub use org_projects::{NewOrgProject, OrgProjectRow, ORG_PROJECT_NAME_MAX_CHARS};
 pub use orgs::{
     normalize_rule, org_of_session, validate_org_color, validate_org_name, OrgRow, OrgRuleRow,
     SessionOrgFacts, ORG_JEV_REPLY_KEY, ORG_NAME_MAX_CHARS,
@@ -183,8 +187,8 @@ pub use schema::known_schema_version;
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use schema::{is_newer_schema_error, open_failure_advice};
 pub use session_grants::{
-    grant_generation, validate_grant_level, GrantRecipient, SessionGrantRow, GRANT_ANSWER,
-    GRANT_DRIVE, GRANT_LEVELS, GRANT_WATCH,
+    grant_generation, validate_grant_level, GrantDetail, GrantRecipient, SessionGrantRow,
+    GRANT_ANSWER, GRANT_DRIVE, GRANT_LEVELS, GRANT_WATCH,
 };
 pub use sessions::PromptAckState;
 pub use setting_review::{

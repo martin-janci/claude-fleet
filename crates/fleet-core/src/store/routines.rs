@@ -76,6 +76,22 @@ pub struct RoutineRow {
     /// At most one run per PR (or session) in this many seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_rate_secs: Option<i64>,
+    /// The IANA zone it was saved in (migration 159, M15 G3.8), shown
+    /// beside the schedule; `utc_offset_min` still drives it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
+    /// A run still going after this many seconds is stopped and failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_max_secs: Option<i64>,
+    /// Where a run starts when `host_alias` cannot take it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_host: Option<String>,
+    /// A failed run is started again once.
+    #[serde(default)]
+    pub retry_once: bool,
+    /// 0 report only | 1 ask before push | 2 push and open PRs; absent = 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomy: Option<i64>,
 }
 
 /// What a person writes: every field of a routine but its identity and the
@@ -98,6 +114,11 @@ pub struct RoutineFields {
     pub event_repo: Option<String>,
     pub event_author: Option<String>,
     pub event_rate_secs: Option<i64>,
+    pub time_zone: Option<String>,
+    pub run_max_secs: Option<i64>,
+    pub fallback_host: Option<String>,
+    pub retry_once: bool,
+    pub autonomy: Option<i64>,
 }
 
 /// One run of a routine.
@@ -129,6 +150,13 @@ pub struct RoutineRunRow {
     /// Who answered it: `exit` | `rule` | `jev`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome_source: Option<String>,
+    /// Why it failed, as a code (migration 159): the start's `E_*`, or the
+    /// scheduler's own (`service::routines::fix`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// The host its session started on: the routine's, or its fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_alias: Option<String>,
 }
 
 /// `routine_runs.outcome` (migration 133): every value its `CHECK` admits.
@@ -150,13 +178,18 @@ pub struct NewRoutineRun<'a> {
     pub scheduled_for: Option<i64>,
     /// When it fired (the scheduler's clock).
     pub at: i64,
+    /// Why it failed, as a code; `None` for a run that did not.
+    pub error_code: Option<&'a str>,
+    /// The host its session started on.
+    pub host_alias: Option<&'a str>,
 }
 
 const COLS: &str = "id, org_id, owner_person_id, name, enabled, trigger, cron, utc_offset_min, \
                     event, event_cursor, host_alias, project_id, profile, prompt, \
                     budget_run_micros, budget_day_micros, overlap, next_run_at, skip_next, \
                     paused_reason, created_at, updated_at, event_repo, event_author, \
-                    event_rate_secs";
+                    event_rate_secs, time_zone, run_max_secs, fallback_host, retry_once, \
+                    autonomy";
 
 fn routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
     Ok(RoutineRow {
@@ -185,12 +218,17 @@ fn routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
         event_repo: r.get(22)?,
         event_author: r.get(23)?,
         event_rate_secs: r.get(24)?,
+        time_zone: r.get(25)?,
+        run_max_secs: r.get(26)?,
+        fallback_host: r.get(27)?,
+        retry_once: r.get::<_, i64>(28)? != 0,
+        autonomy: r.get(29)?,
     })
 }
 
 const RUN_COLS: &str = "id, routine_id, trigger, trigger_ref, state, reason, session_id, \
                         cost_micros, scheduled_for, started_at, finished_at, outcome, \
-                        outcome_source";
+                        outcome_source, error_code, host_alias";
 
 fn run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRunRow> {
     Ok(RoutineRunRow {
@@ -207,6 +245,8 @@ fn run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRunRow> {
         finished_at: r.get(10)?,
         outcome: r.get(11)?,
         outcome_source: r.get(12)?,
+        error_code: r.get(13)?,
+        host_alias: r.get(14)?,
     })
 }
 
@@ -226,9 +266,10 @@ impl Store {
             "INSERT INTO routines (org_id, owner_person_id, name, enabled, trigger, cron, \
                utc_offset_min, event, event_cursor, host_alias, project_id, profile, prompt, \
                budget_run_micros, budget_day_micros, overlap, next_run_at, created_at, updated_at, \
-               event_repo, event_author, event_rate_secs) \
+               event_repo, event_author, event_rate_secs, time_zone, run_max_secs, fallback_host, \
+               retry_once, autonomy) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, \
-               ?19, ?20, ?21)",
+               ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
             rusqlite::params![
                 org_id,
                 owner_person_id,
@@ -250,7 +291,12 @@ impl Store {
                 now,
                 f.event_repo,
                 f.event_author,
-                f.event_rate_secs
+                f.event_rate_secs,
+                f.time_zone,
+                f.run_max_secs,
+                f.fallback_host,
+                f.retry_once as i64,
+                f.autonomy
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -272,7 +318,8 @@ impl Store {
                project_id = ?9, profile = ?10, prompt = ?11, budget_run_micros = ?12, \
                budget_day_micros = ?13, overlap = ?14, next_run_at = ?15, skip_next = 0, \
                paused_reason = NULL, updated_at = ?16, event_repo = ?18, event_author = ?19, \
-               event_rate_secs = ?20 \
+               event_rate_secs = ?20, time_zone = ?21, run_max_secs = ?22, fallback_host = ?23, \
+               retry_once = ?24, autonomy = ?25 \
              WHERE id = ?17",
             rusqlite::params![
                 f.name,
@@ -294,7 +341,12 @@ impl Store {
                 id,
                 f.event_repo,
                 f.event_author,
-                f.event_rate_secs
+                f.event_rate_secs,
+                f.time_zone,
+                f.run_max_secs,
+                f.fallback_host,
+                f.retry_once as i64,
+                f.autonomy
             ],
         )?;
         self.get_routine(id)
@@ -502,9 +554,11 @@ impl Store {
             // A run that failed before it started is `failed` from its exit
             // (step 8.10); nothing later may say otherwise.
             "INSERT INTO routine_runs (routine_id, trigger, trigger_ref, state, reason, \
-               session_id, scheduled_for, started_at, finished_at, outcome, outcome_source) \
+               session_id, scheduled_for, started_at, finished_at, outcome, outcome_source, \
+               error_code, host_alias) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
-               CASE ?4 WHEN 'failed' THEN 'failed' END, CASE ?4 WHEN 'failed' THEN 'exit' END)",
+               CASE ?4 WHEN 'failed' THEN 'failed' END, CASE ?4 WHEN 'failed' THEN 'exit' END, \
+               ?10, ?11)",
             rusqlite::params![
                 r.routine_id,
                 r.trigger,
@@ -514,7 +568,9 @@ impl Store {
                 r.session_id,
                 r.scheduled_for,
                 now,
-                finished
+                finished,
+                r.error_code,
+                r.host_alias
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -576,6 +632,49 @@ impl Store {
             rusqlite::params![routine_id, since],
             |r| r.get(0),
         )?)
+    }
+
+    /// What every routine's runs started at or after `since` spent: the
+    /// fleet's routine spend (`automation.daily_budget`, M15 G3.8).
+    pub fn routines_cost_since(&self, since: i64) -> Result<i64, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(SUM(cost_micros), 0) FROM routine_runs WHERE started_at >= ?1",
+            [since],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The failed runs to start again (`retry_once`, M15 G3.8): each is
+    /// its routine's newest run, failed at or after `since`, not itself a
+    /// retry (`trigger_ref` `retry:<id>`), of a routine that is on and
+    /// asks for it. A retry that is skipped or fails is newer than the run
+    /// it retried, so a run is retried at most once. Oldest first.
+    pub fn routine_runs_to_retry(&self, since: i64) -> Result<Vec<RoutineRunRow>, IpcError> {
+        let cols = RUN_COLS
+            .split(", ")
+            .map(|c| format!("rr.{}", c.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {cols} FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id \
+             WHERE rr.state = 'failed' AND rr.started_at >= ?1 \
+               AND r.enabled = 1 AND r.retry_once = 1 \
+               AND (rr.trigger_ref IS NULL OR rr.trigger_ref NOT LIKE 'retry:%') \
+               AND NOT EXISTS (SELECT 1 FROM routine_runs n \
+                               WHERE n.routine_id = rr.routine_id AND n.id > rr.id) \
+             ORDER BY rr.id"
+        ))?;
+        let rows = stmt.query_map([since], run)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Record why a run failed, as a code.
+    pub fn set_routine_run_error_code(&self, id: i64, code: &str) -> Result<(), IpcError> {
+        self.conn.execute(
+            "UPDATE routine_runs SET error_code = ?1 WHERE id = ?2",
+            rusqlite::params![code, id],
+        )?;
+        Ok(())
     }
 
     /// A running run's cost so far.

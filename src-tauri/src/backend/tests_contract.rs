@@ -760,17 +760,24 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         "MyGrants",
         wire_keys(&fleet_core::service::sessions::MyGrants {
             person_id: Some(1),
-            grants: vec![fleet_core::service::sessions::MyGrant {
-                session_id: 7,
-                level: "drive".into(),
-            }],
+            grants: vec![sample_my_grant()],
+            requests: vec![sample_my_request()],
         }),
     );
+    put("MyGrants.grants", wire_keys(&sample_my_grant()));
+    put("MyGrants.requests", wire_keys(&sample_my_request()));
     put(
-        "MyGrants.grants",
-        wire_keys(&fleet_core::service::sessions::MyGrant {
+        "AccessRequestView",
+        wire_keys(&fleet_core::service::sessions::AccessRequestView {
+            id: 3,
             session_id: 7,
-            level: "drive".into(),
+            session_name: Some("work".into()),
+            person_id: 2,
+            person_name: Some("bob".into()),
+            person_display_name: Some("Bob".into()),
+            level: "answer".into(),
+            requested_at: 1_700_000_000,
+            resolution: Some("granted".into()),
         }),
     );
     put(
@@ -1910,4 +1917,24 @@ fn an_older_hubs_tool_item_still_parses_with_defaults() {
             done: true,
         }
     );
+}
+
+fn sample_my_grant() -> fleet_core::service::sessions::MyGrant {
+    fleet_core::service::sessions::MyGrant {
+        session_id: 7,
+        level: "drive".into(),
+        shared_by: Some(1),
+        shared_by_name: Some("Martin".into()),
+        granted_at: Some(1_700_000_000),
+        via_org: Some("acme".into()),
+    }
+}
+
+fn sample_my_request() -> fleet_core::service::sessions::MyAccessRequest {
+    fleet_core::service::sessions::MyAccessRequest {
+        id: 3,
+        session_id: 7,
+        level: "answer".into(),
+        requested_at: 1_700_000_000,
+    }
 }

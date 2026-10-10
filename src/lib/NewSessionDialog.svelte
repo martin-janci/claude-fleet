@@ -32,6 +32,8 @@
   import {
     fleetSettings,
     loadFleetSettings,
+    settingBool,
+    SETTING_KEYS,
     settingPathMap,
     settingLayout,
     projectDir,
@@ -58,6 +60,7 @@
     onCancel,
     initialName,
     initialHost,
+    initialKind,
     ticket,
     autostart = false,
     proposal = null,
@@ -73,6 +76,9 @@
     /** Preselect this host (e.g. where Add project just put the project);
      *  wins over the remembered choices while it is pickable. */
     initialHost?: string;
+    /** Preselect Work or Shell (the Hosts view's "Open a shell", G4.5);
+     *  wins over the project's remembered kind. */
+    initialKind?: 'work' | 'shell';
     /** Start work on this ticket (work graph M3): the dialog offers "Brief
      *  Claude with the ticket" with an editable preview, and creating goes
      *  through `start_work`, which links the session `started`. */
@@ -207,7 +213,7 @@
   }
 
   // "work" runs Claude Code in the pane; "shell" runs a plain login shell.
-  let chosenKind = $state<'work' | 'shell'>(untrack(() => memory?.kind ?? 'work'));
+  let chosenKind = $state<'work' | 'shell'>(untrack(() => initialKind ?? memory?.kind ?? 'work'));
   // Which agent a "work" session runs (redesign 12.4): Claude Code, or an
   // agent the chosen host has on its PATH. A ticket's start and a
   // background run are Claude Code's own paths, so they keep it.
@@ -1266,6 +1272,8 @@
       }
     }
   }
+  /** Writing help's "Draft agent briefs" (G4.6), off by default. */
+  const draftsBriefs = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftBriefs));
 </script>
 
 <Modal label="New session" onclose={onCancel} width="520px">
@@ -1360,14 +1368,14 @@
                 value={briefText}
                 oninput={(e) => onBriefInput((e.target as HTMLTextAreaElement).value)}
               ></textarea>
-              <button
+              {#if draftsBriefs}<button
                 type="button"
                 class="btn btn--quiet draft-ask"
                 data-testid="ticket-brief-draft-ask"
                 disabled={startBlocked != null || !chosenHost}
                 title="Write the brief from the ticket and earlier sessions on it, with a model call on {chosenHost || 'the host'}"
                 onclick={() => void draftTicketBrief(ticket)}>Draft with Claude</button
-              >
+              >{/if}
             {/if}
             {#if draftError}
               <p class="draft-error small" role="alert" data-testid="ticket-brief-draft-error">{draftError}</p>

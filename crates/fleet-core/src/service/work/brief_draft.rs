@@ -323,6 +323,10 @@ pub async fn draft_into(
     preview: &mut StartPreview,
     view: &crate::service::view_scope::ViewScope,
 ) -> Result<(), IpcError> {
+    crate::service::settings::require_writing_help(
+        &*lock(store)?,
+        crate::service::settings::WORK_DRAFT_BRIEFS,
+    )?;
     let Some(plan) = preview.plan.clone() else {
         return Err(IpcError::new(
             codes::E_INVALID,

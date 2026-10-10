@@ -15,6 +15,7 @@
   import DraftField from './DraftField.svelte';
   import { startWork, type StartWorkArgs } from './trackers';
   import { acceptStartRule, dismissStartRule, ruleLine } from './start_rules';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
   import {
     argsWithChoice,
     choiceFromPreview,
@@ -154,6 +155,8 @@
   // the task's earlier work. It is the person's to edit and goes only with
   // Start; Clear goes back to the task's brief.
   let draftMeta = $state<BriefDraft | null>(null);
+  /** Writing help's "Draft agent briefs" (G4.6), off by default. */
+  const draftsBriefs = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftBriefs));
   let draftText = $state('');
   let drafting = $state(false);
   let draftSeq = 0;
@@ -337,7 +340,7 @@
         >{showBrief ? 'Hide' : 'Preview'}</button
       >
     {/if}
-    {#if choice.with_brief && planned && !draftMeta && !drafting}
+    {#if choice.with_brief && planned && !draftMeta && !drafting && draftsBriefs}
       <button
         class="btn btn--quiet link"
         type="button"

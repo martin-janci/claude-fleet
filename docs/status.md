@@ -25,13 +25,29 @@ account usage history (122), the Hosts page's probe facts (123), token use
 (126), the cost of fleet's own `claude -p` runs (127), every PR a session's
 branch has had (`pull_requests`, 128), cost per account (130), prompts
 queued for a busy session (133), the agent CLIs a host has (134) and the
-add-host wizard's state (135). The hub contract is revision 15
+add-host wizard's state (135). The hub contract is revision 16
 (`CONTRACT_REVISION`, `crates/fleet-core/src/wire_contract.rs`):
 revisions 11 to 14 add tools a revision-10 hub does not serve, so the
 desktop and its hub are upgraded together; 15 widens the form spec and
 adds the attention model's two classes (a mission waiting on a person, and
-Jev's "probably waiting" kept apart from Needs you) and no tool, so a
-desktop still accepts a revision-14 hub.
+Jev's "probably waiting" kept apart from Needs you) and no tool; 16 adds
+named tokens (`api_tokens`) and + Add account (`add_account`), so a
+desktop accepts only a revision-16 hub.
+
+The canvas gap plan (M15, steps G0.1 to G6.2; transition plan section M15)
+landed in #779, #812 and #814 and fleet-mobile #192 to #198: the form spec's
+contract-15 fields and the form kit, settings with one Save bar, mission asks
+and Jev proposals in the attention model, task due dates, timed Send later,
+routine event triggers and guards, named Control API tokens, + Add account,
+org switches and the project catalog, access requests for shared sessions,
+and the phone's bottom sheets, chat forms and Inbox rows (migrations 153 to
+160). The re-run audit (`docs/redesign/canvas-gaps-2026-10-10.md`) closes
+233 of 396 rows and leaves 36 missing and 127 partial. Waiting on the owner:
+tracker write-back from Fleet (D3, D29), start rules that name a host,
+account, model or agent, and the six items the plan left out on purpose
+(Wake host, liquid orbit for rebase, the database upgrade ring, waiting for
+the other hub to sign, Bedrock and Vertex accounts, hub settings that follow
+an org).
 
 A session start reports its three real steps (worktree, tmux, agent) as
 `start:progress` frames (redesign 5.13, `service/sessions/start_progress.rs`):
@@ -486,7 +502,11 @@ and merge, read from the `pull_requests` changes reconcile records, with a
 repo filter, "me or anyone in its org" and a rate per PR. The scheduler stops on
 `automation.paused`, a fire past the routine's day budget is skipped, a run
 past its run budget fails and pauses the routine, and a run whose account
-is at or past `accounts.pause_at` is skipped (8.7). Each finished run
+is at or past `accounts.pause_at` is skipped (8.7). M15 G3.8 (migration
+159) adds the guards: a fleet daily budget for every routine's runs
+(`automation.daily_budget`), a per-run time cap, a fallback host, retry
+once, an autonomy line under the prompt, and a named fix on a failed run
+from its error code. Each finished run
 records what it came to (8.10; Jev N6 is off), and a failed run shows in
 the Inbox. `runs` (8.3, migration 141) lists tasks, missions, Jev,
 `claude -p` and routine runs in one list. Start rules (8.11,

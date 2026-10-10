@@ -789,3 +789,499 @@ fn list_members_counts_live_and_private_sessions_and_names_none() {
     let bob = rows.iter().find(|m| m.person_id == c.bob).unwrap();
     assert_eq!((bob.live_sessions, bob.private_sessions), (3, 0));
 }
+
+// ---- M15 step G2.10: org forms ----
+
+/// Bob's three live sessions on Acme's host, one owned by a non-member,
+/// one on a host of no org under acme/api, for the rule preview and the
+/// team switch.
+fn company_with_sessions() -> (Company, i64) {
+    let c = company();
+    let outsider;
+    {
+        let s = c.st.lock().unwrap();
+        outsider = s.create_person("eve", None).unwrap().id;
+        let conn = s.conn_for_test();
+        conn.execute_batch(
+            "INSERT INTO hosts (alias) VALUES ('ha'), ('hz'); \
+             INSERT INTO projects (id, owner, repo, base_path) VALUES (50, 'acme', 'api', '/w/acme/api');",
+        )
+        .unwrap();
+        s.set_host_org("ha", Some(c.acme)).unwrap();
+        let add = |name: &str, host: &str, owner: i64, project: Option<i64>| {
+            conn.execute(
+                "INSERT INTO sessions (tmux_name, host_alias, project_id, created_at, last_activity_at, \
+                                       status, started_at, owner_person_id, visibility) \
+                 VALUES (?1, ?2, ?3, 1, 1, 'running', 1, ?4, 'private')",
+                rusqlite::params![name, host, project, owner],
+            )
+            .unwrap();
+        };
+        add("bob-1", "ha", c.bob, None);
+        add("bob-2", "ha", c.bob, None);
+        add("eve-1", "ha", outsider, None);
+        add("bob-api", "hz", c.bob, Some(50));
+        add("jane-api", "hz", c.jane, Some(50));
+    }
+    (c, outsider)
+}
+
+#[test]
+fn a_rule_preview_counts_what_it_matches_and_moves_and_writes_nothing() {
+    let (c, _) = company_with_sessions();
+    let mut p = c.with_org("rule_preview", c.beta);
+    p.owner = Some("acme".into());
+    p.repo = Some("api".into());
+    let v = run(&p, &c.st, Me::LOCAL).unwrap();
+    assert_eq!(v["matches"], 2, "{v}");
+    assert_eq!(v["moving"], 2, "{v}");
+    assert_eq!(v["from"][0]["name"], "Personal");
+    assert_eq!(
+        v["sentence"],
+        "Matches 2 sessions now; 2 of them are in Personal and would move."
+    );
+    // A host rule for Beta on Acme's host: the host's route stays Acme's
+    // only where a rule says so; here the host rule wins over the route.
+    let mut h = c.with_org("rule_preview", c.beta);
+    h.host_alias = Some("ha".into());
+    let v = run(&h, &c.st, Me::LOCAL).unwrap();
+    assert_eq!(
+        (v["matches"].as_i64(), v["moving"].as_i64()),
+        (Some(3), Some(3)),
+        "{v}"
+    );
+    assert_eq!(v["from"][0]["name"], "Acme");
+    // Nothing was written: no rule, the host still routed to Acme.
+    let s = c.st.lock().unwrap();
+    assert!(s.list_org_rules().unwrap().is_empty());
+    assert_eq!(
+        s.list_hosts()
+            .unwrap()
+            .iter()
+            .find(|x| x.alias == "ha")
+            .unwrap()
+            .org_id,
+        Some(c.acme)
+    );
+    drop(s);
+    // A rule that matches nothing says so; a bad one is refused as add_rule
+    // refuses it; an org admin does not preview the hub owner's rules.
+    let mut none = c.with_org("rule_preview", c.beta);
+    none.path_prefix = Some("/nowhere".into());
+    assert_eq!(
+        run(&none, &c.st, Me::LOCAL).unwrap()["sentence"],
+        "Matches no session now; it applies to sessions started later."
+    );
+    let mut bad = c.with_org("rule_preview", c.beta);
+    bad.repo = Some("api".into());
+    assert_eq!(err_code(run(&bad, &c.st, Me::LOCAL)), "E_INVALID");
+    assert_eq!(err_code(run(&p, &c.st, c.jane())), "E_FORBIDDEN");
+    assert!(Action::parse("rule_preview").unwrap().is_read());
+}
+
+#[test]
+fn a_more_specific_rule_keeps_what_it_holds() {
+    let (c, _) = company_with_sessions();
+    let mut keep = c.with_org("add_rule", c.acme);
+    keep.owner = Some("acme".into());
+    keep.repo = Some("api".into());
+    run(&keep, &c.st, Me::LOCAL).unwrap();
+    let mut p = c.with_org("rule_preview", c.beta);
+    p.owner = Some("acme".into());
+    let v = run(&p, &c.st, Me::LOCAL).unwrap();
+    assert_eq!(
+        (
+            v["matches"].as_i64(),
+            v["moving"].as_i64(),
+            v["kept"].as_i64()
+        ),
+        (Some(2), Some(0), Some(2)),
+        "{v}"
+    );
+    assert_eq!(
+        v["sentence"],
+        "Matches 2 sessions now; none would move; a more specific rule keeps 2 sessions where they are."
+    );
+}
+
+#[test]
+fn match_by_turns_one_value_into_the_rule() {
+    use crate::service::orgs::rule_from_match;
+    let r = rule_from_match(1, "repository", "https://github.com/acme/api.git").unwrap();
+    assert_eq!(
+        (r.owner.as_deref(), r.repo.as_deref()),
+        (Some("acme"), Some("api"))
+    );
+    let r = rule_from_match(1, "repository", "git@github.com:acme/api").unwrap();
+    assert_eq!(
+        (r.owner.as_deref(), r.repo.as_deref()),
+        (Some("acme"), Some("api"))
+    );
+    assert_eq!(
+        rule_from_match(1, "owner", " acme ")
+            .unwrap()
+            .owner
+            .as_deref(),
+        Some("acme")
+    );
+    assert_eq!(
+        rule_from_match(1, "path", "/w/a")
+            .unwrap()
+            .path_prefix
+            .as_deref(),
+        Some("/w/a")
+    );
+    assert_eq!(
+        rule_from_match(1, "host", "ha")
+            .unwrap()
+            .host_alias
+            .as_deref(),
+        Some("ha")
+    );
+    assert!(rule_from_match(1, "repository", "acme").is_err());
+    assert!(rule_from_match(1, "repository", "a/b/c").is_err());
+    assert!(rule_from_match(1, "owner", "  ").is_err());
+    assert!(rule_from_match(1, "branch", "main").is_err());
+}
+
+/// The switch off: Acme's members watch each other's sessions in Acme —
+/// never a non-member's, never another org's — and the member list counts
+/// them as open. On again, they are private again.
+#[test]
+fn members_see_only_their_own_sessions_until_the_org_says_otherwise() {
+    let (c, _) = company_with_sessions();
+    let rows = |me: Me<'_>| -> Vec<MemberSummary> {
+        serde_json::from_value(run(&c.with_org("list_members", c.acme), &c.st, me).unwrap())
+            .unwrap()
+    };
+    let bob = |rows: &[MemberSummary]| {
+        let b = rows.iter().find(|m| m.person_id == c.bob).unwrap();
+        (b.live_sessions, b.private_sessions)
+    };
+    assert_eq!(bob(&rows(c.jane())), (2, 2));
+    assert!(team_reach(&c.st.lock().unwrap(), c.jane)
+        .unwrap()
+        .is_empty());
+
+    let mut off = c.with_org("update_org", c.acme);
+    off.members_own_sessions_only = Some(false);
+    // Off widens what every member reads, the org's admin included: the hub
+    // owner's call, never an org admin's.
+    assert_eq!(err_code(run(&off, &c.st, c.jane())), "E_FORBIDDEN");
+    let v = run(&off, &c.st, Me::LOCAL).expect("the hub owner turns it off");
+    assert_eq!(v["members_own_sessions_only"], false);
+    assert_eq!(bob(&rows(c.jane())), (2, 0));
+    let team = team_reach(&c.st.lock().unwrap(), c.jane).unwrap();
+    assert!(team.covers(Some(c.acme), Some(c.bob)));
+    assert!(!team.covers(Some(c.beta), Some(c.bob)), "another org");
+    let eve =
+        c.st.lock()
+            .unwrap()
+            .get_person_by_name("eve")
+            .unwrap()
+            .unwrap()
+            .id;
+    assert!(!team.covers(Some(c.acme), Some(eve)), "not a member");
+
+    let mut on = c.with_org("update_org", c.acme);
+    on.members_own_sessions_only = Some(true);
+    run(&on, &c.st, c.jane()).expect("an org admin may turn it back on: it only narrows");
+    assert_eq!(bob(&rows(c.jane())), (2, 2));
+    // An org admin may not set it for another org.
+    let mut beta = c.with_org("update_org", c.beta);
+    beta.members_own_sessions_only = Some(false);
+    assert_eq!(err_code(run(&beta, &c.st, c.jane())), "E_FORBIDDEN");
+
+    // A disabled teammate is out of reach, the switch off or not.
+    run(&off, &c.st, Me::LOCAL).unwrap();
+    let st = c.st.lock().unwrap();
+    assert!(team_reach(&st, c.jane)
+        .unwrap()
+        .covers(Some(c.acme), Some(c.bob)));
+    st.disable_person(c.bob).unwrap();
+    assert!(!team_reach(&st, c.jane)
+        .unwrap()
+        .covers(Some(c.acme), Some(c.bob)));
+}
+
+#[test]
+fn a_new_org_takes_its_switches_at_create() {
+    let st = store();
+    let mut add = args("add_org");
+    add.name = Some("Acme".into());
+    add.isolate_sessions = Some(true);
+    add.members_own_sessions_only = Some(false);
+    let v = run(&add, &st, Me::LOCAL).unwrap();
+    assert_eq!(v["isolate_sessions"], true);
+    assert_eq!(v["members_own_sessions_only"], false);
+    let mut plain = args("add_org");
+    plain.name = Some("Beta".into());
+    let v = run(&plain, &st, Me::LOCAL).unwrap();
+    assert_eq!(v["members_own_sessions_only"], true, "on by default");
+}
+
+#[test]
+fn an_org_keeps_a_project_catalog_its_admins_edit() {
+    let c = company();
+    c.st.lock().unwrap().upsert_host("ha").unwrap();
+    let mut add = c.with_org("add_project", c.acme);
+    add.name = Some("api".into());
+    add.remote = Some("git@github.com:acme/api.git".into());
+    add.path = Some("~/src/api".into());
+    add.hosts = Some("ha".into());
+    let p = run(&add, &c.st, c.jane()).expect("an admin's own org");
+    assert_eq!(p["hosts"][0], "ha");
+    let orgs = run(&args("list_orgs"), &c.st, Me::LOCAL).unwrap();
+    let acme = orgs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == c.acme)
+        .unwrap();
+    assert_eq!(acme["projects"][0]["name"], "api");
+    // Not another org's; and removing goes through the entry's own org.
+    let mut beta = c.with_org("add_project", c.beta);
+    beta.name = Some("web".into());
+    assert_eq!(err_code(run(&beta, &c.st, c.jane())), "E_FORBIDDEN");
+    let id = run(&beta, &c.st, Me::LOCAL).unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let rm = |id: i64| OrgAdminArgs {
+        project_id: Some(id),
+        ..args("remove_project")
+    };
+    assert_eq!(err_code(run(&rm(id), &c.st, c.jane())), "E_FORBIDDEN");
+    let mine = p["id"].as_i64().unwrap();
+    assert_eq!(run(&rm(mine), &c.st, c.jane()).unwrap()["removed"], true);
+    assert_eq!(err_code(run(&rm(mine), &c.st, Me::LOCAL)), "E_NOTFOUND");
+}
+
+#[test]
+fn an_answer_only_device_is_a_device_mode_and_a_viewer_still_watches_only() {
+    let c = company();
+    {
+        let s = c.st.lock().unwrap();
+        s.set_client_mode("bob-phone", "answer").unwrap();
+        let rows = s.auth_client_tokens().unwrap();
+        assert_eq!(
+            rows.iter().find(|r| r.name == "bob-phone").unwrap().mode,
+            "answer"
+        );
+        s.set_org_member(c.acme, c.bob, "viewer", None).unwrap();
+        let rows = s.auth_client_tokens().unwrap();
+        assert_eq!(
+            rows.iter().find(|r| r.name == "bob-phone").unwrap().mode,
+            "readonly",
+            "a viewer's device watches only"
+        );
+    }
+    let mut set = args("set_device_mode");
+    set.device = Some("jane-phone".into());
+    set.mode = Some("answer".into());
+    assert_eq!(
+        err_code(run(&set, &c.st, c.jane())),
+        "E_INVALID_STATE",
+        "the device in hand is not narrowed through itself"
+    );
+}
+
+// ---- M15 step G4.7: the org pages ----
+
+/// `person`'s scope, built by `Caller::view_scope` for their device fenced
+/// to Acme.
+fn person_view(c: &Company, person: i64) -> crate::service::view_scope::ViewScope {
+    use crate::mcp::auth::{Caller, ClientRef, TokenMode};
+    let caller = Caller {
+        host_alias: None,
+        client: Some(ClientRef {
+            id: 0,
+            name: format!("device-of-{person}"),
+            trusted: true,
+            org_id: Some(c.acme),
+            person_id: Some(person),
+        }),
+        mode: TokenMode::Full,
+        pane: None,
+        is_personal_owner: false,
+        api: None,
+    };
+    caller.view_scope(&c.st.lock().unwrap()).unwrap()
+}
+
+/// Acme as `person` sees it on the org page, with `role`.
+fn acme_for(c: &Company, person: i64, role: &str) -> crate::service::orgs::OrgDetail {
+    let view = person_view(c, person);
+    let roles = [(c.acme, role.to_string())].into_iter().collect();
+    crate::service::orgs::org_details(
+        &c.st,
+        &view,
+        crate::service::orgs::AdminView::Person { roles },
+    )
+    .unwrap()
+    .into_iter()
+    .find(|d| d.org.id == c.acme)
+    .unwrap()
+}
+
+fn session_id(c: &Company, name: &str) -> i64 {
+    c.st.lock()
+        .unwrap()
+        .conn_for_test()
+        .query_row(
+            "SELECT id FROM sessions WHERE tmux_name = ?1",
+            [name],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn the_sharing_tab_lists_every_share_and_names_only_what_the_admin_sees() {
+    use crate::store::GrantRecipient;
+    let (c, eve) = company_with_sessions();
+    let (bob1, bob2, jane_api) = (
+        session_id(&c, "bob-1"),
+        session_id(&c, "bob-2"),
+        session_id(&c, "jane-api"),
+    );
+    let (to_jane, to_eve, outside) = {
+        let s = c.st.lock().unwrap();
+        (
+            s.grant_session(bob1, GrantRecipient::Person(c.jane), "drive", c.bob)
+                .unwrap()
+                .id,
+            s.grant_session(bob2, GrantRecipient::Person(eve), "answer", c.bob)
+                .unwrap()
+                .id,
+            s.grant_session(jane_api, GrantRecipient::Person(c.bob), "watch", c.jane)
+                .unwrap()
+                .id,
+        )
+    };
+    let d = acme_for(&c, c.jane, "admin");
+    let shares = d.shares.expect("an admin is shown the org's shares");
+    assert_eq!(shares.len(), 2, "{shares:?}");
+    let mine = shares.iter().find(|x| x.id == to_jane).unwrap();
+    assert_eq!(
+        (
+            mine.session.as_deref(),
+            mine.owner.as_deref(),
+            mine.shared_with.as_str(),
+            mine.level.as_str()
+        ),
+        (Some("bob-1"), Some("bob"), "jane", "drive")
+    );
+    let private = shares.iter().find(|x| x.id == to_eve).unwrap();
+    assert_eq!(
+        private.session, None,
+        "a session the admin cannot see is not named"
+    );
+    assert_eq!(private.session_id, None);
+    assert_eq!(private.shared_with, "eve");
+
+    // A member is shown no Sharing tab.
+    assert!(acme_for(&c, c.bob, "member").shares.is_none());
+
+    // Narrow, then revoke, as the org's admin; never another org's share.
+    let mut narrow = c.with_org("narrow_share", c.acme);
+    narrow.grant_id = Some(to_jane);
+    assert_eq!(run(&narrow, &c.st, c.jane()).unwrap()["level"], "watch");
+    let mut revoke = c.with_org("revoke_share", c.acme);
+    revoke.grant_id = Some(to_eve);
+    assert!(run(&revoke, &c.st, c.jane()).unwrap()["revoked_at"].is_i64());
+    let mut far = c.with_org("revoke_share", c.acme);
+    far.grant_id = Some(outside);
+    assert_eq!(err_code(run(&far, &c.st, c.jane())), "E_NOTFOUND");
+    let mut beta = c.with_org("revoke_share", c.beta);
+    beta.grant_id = Some(to_jane);
+    assert_eq!(err_code(run(&beta, &c.st, c.jane())), "E_FORBIDDEN");
+    let left = acme_for(&c, c.jane, "admin").shares.unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].level, "watch");
+}
+
+#[test]
+fn the_team_panel_names_what_the_caller_sees_and_counts_the_rest() {
+    use crate::store::GrantRecipient;
+    let (c, _) = company_with_sessions();
+    let team = acme_for(&c, c.jane, "admin").team.unwrap();
+    let bob = team.iter().find(|m| m.person_id == c.bob).unwrap();
+    assert!(bob.sessions.is_empty());
+    assert_eq!(
+        bob.private, 2,
+        "bob-1 and bob-2 are private; bob-api is in no org"
+    );
+    let bob1 = session_id(&c, "bob-1");
+    c.st.lock()
+        .unwrap()
+        .grant_session(bob1, GrantRecipient::Person(c.jane), "watch", c.bob)
+        .unwrap();
+    let team = acme_for(&c, c.jane, "admin").team.unwrap();
+    let bob = team.iter().find(|m| m.person_id == c.bob).unwrap();
+    assert_eq!(
+        bob.sessions
+            .iter()
+            .map(|x| x.name.as_str())
+            .collect::<Vec<_>>(),
+        ["bob-1"]
+    );
+    assert_eq!(bob.private, 1);
+    // A member is shown the team too.
+    assert!(acme_for(&c, c.bob, "member").team.is_some());
+}
+
+#[test]
+fn a_removed_member_keeps_a_row_until_their_shares_are_taken_back() {
+    use crate::store::GrantRecipient;
+    let (c, _) = company_with_sessions();
+    let bob1 = session_id(&c, "bob-1");
+    let carl = {
+        let s = c.st.lock().unwrap();
+        let carl = s.create_person("carl", None).unwrap().id;
+        s.set_org_member(c.acme, carl, "member", None).unwrap();
+        s.grant_session(bob1, GrantRecipient::Person(carl), "drive", c.bob)
+            .unwrap();
+        carl
+    };
+    let mut rm = c.with_org("remove_member", c.acme);
+    rm.person_id = Some(carl);
+    rm.keep_grants = Some(true);
+    run(&rm, &c.st, c.jane()).unwrap();
+    let gone = acme_for(&c, c.jane, "admin").removed_members.unwrap();
+    assert_eq!(gone.len(), 1);
+    assert_eq!((gone[0].name.as_str(), gone[0].grants), ("carl", 1));
+    let mut take = c.with_org("revoke_member_grants", c.acme);
+    take.person_id = Some(carl);
+    assert_eq!(run(&take, &c.st, c.jane()).unwrap()["revoked"], 1);
+    assert_eq!(
+        acme_for(&c, c.jane, "admin").removed_members.unwrap()[0].grants,
+        0
+    );
+    // Only its admins are shown former members.
+    assert!(acme_for(&c, c.bob, "member").removed_members.is_none());
+}
+
+#[test]
+fn what_belongs_lists_the_accounts_its_hosts_use() {
+    let (c, _) = company_with_sessions();
+    {
+        let s = c.st.lock().unwrap();
+        s.conn_for_test()
+            .execute_batch(
+                "INSERT INTO accounts (uuid, email, seat_tier) VALUES ('u-1', 'ops@acme.dev', 'max'), ('u-2', 'z@else.dev', NULL); \
+                 UPDATE hosts SET account_uuid = 'u-1' WHERE alias = 'ha'; \
+                 UPDATE hosts SET account_uuid = 'u-2' WHERE alias = 'hz';",
+            )
+            .unwrap();
+    }
+    let a = acme_for(&c, c.bob, "member").accounts.unwrap();
+    assert_eq!(a.len(), 1, "{a:?}");
+    assert_eq!(
+        (
+            a[0].name.as_str(),
+            a[0].seat_tier.as_deref(),
+            a[0].hosts.clone()
+        ),
+        ("ops@acme.dev", Some("max"), vec!["ha".to_string()])
+    );
+}

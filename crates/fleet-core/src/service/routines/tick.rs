@@ -5,6 +5,10 @@
 //! missed while the process was down runs once at the next pass, and the
 //! next one is counted from then.
 
+use super::fix::{
+    turn_code, E_NO_SESSION, E_PROMPT_NOT_QUEUED, E_RUN_BUDGET, E_RUN_STALE, E_RUN_TIME_CAP,
+    E_SESSION_LOST, E_SESSION_REMOVED,
+};
 use super::{record_skip, repo_matches, usd, EVENTS, PR_EVENTS};
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{lock, IpcError};
@@ -21,6 +25,9 @@ pub const TICK_EVERY: Duration = Duration::from_secs(20);
 pub const RUN_STALE_SECS: i64 = 6 * 3600;
 /// Session events one event routine reads per pass.
 pub const EVENTS_PER_PASS: i64 = 50;
+/// A failed run older than this is not retried (`retry_once`): a pass
+/// missed for longer, a restart, does not start yesterday's work.
+pub const RETRY_WITHIN_SECS: i64 = 3600;
 
 /// Starts a run's session: the real start path in production, a fake in
 /// tests.
@@ -31,6 +38,11 @@ pub trait Spawn: Send + Sync {
     /// pane can be read (tests).
     fn panes(&self) -> Option<Arc<dyn PaneReader>> {
         None
+    }
+    /// Stops the turn of a run past its time cap (G3.8): Escape in its
+    /// pane, so the session stays for a person to read. Nothing in tests.
+    async fn stop_turn(&self, _host_alias: &str, _tmux_name: &str) -> Result<(), IpcError> {
+        Ok(())
     }
 }
 
@@ -50,6 +62,16 @@ impl Spawn for LiveSpawn {
         Some(Arc::new(TmuxPanes {
             ssh: Arc::clone(&self.ssh),
         }))
+    }
+    async fn stop_turn(&self, host_alias: &str, tmux_name: &str) -> Result<(), IpcError> {
+        crate::service::sessions::send_keys(
+            host_alias,
+            tmux_name,
+            crate::tmux::NamedKey::Escape,
+            &self.store,
+            &self.ssh,
+        )
+        .await
     }
 }
 
@@ -76,10 +98,10 @@ impl Deps {
     }
 }
 
-/// The session a run of `r` starts.
-fn session_args(r: &RoutineRow, owner: Option<i64>) -> NewSessionArgs {
+/// The session a run of `r` starts on `host`.
+fn session_args(r: &RoutineRow, host: &str, owner: Option<i64>) -> NewSessionArgs {
     NewSessionArgs {
-        host_alias: r.host_alias.clone(),
+        host_alias: host.to_string(),
         project_id: r.project_id,
         worktree_id: None,
         name: String::new(),
@@ -129,11 +151,14 @@ pub async fn fire_with(
     context: Option<&str>,
     now: i64,
 ) -> Result<RoutineRunRow, IpcError> {
-    let (owner, _starting) = {
+    let (owner, _starting, plan) = {
         let s = lock(&deps.store)?;
-        if let Some(why) = refusal(&s, r, now)? {
-            return record_skip(&s, r, trigger, trigger_ref, scheduled_for, &why, now);
-        }
+        let (host, note) = match plan(&s, r, now)? {
+            Plan::Skip(why) => {
+                return record_skip(&s, r, trigger, trigger_ref, scheduled_for, &why, now)
+            }
+            Plan::Start { host, note } => (host, note),
+        };
         // Its run row is written only once the session exists, so a second
         // fire while this one spawns (Run now during a scheduled fire, a
         // double click) would pass `routine_run_open` too: the claim is
@@ -149,27 +174,38 @@ pub async fn fire_with(
             Some(p) => Some(p),
             None => s.personal_owner_id()?,
         };
-        (owner, starting)
+        (owner, starting, (host, note))
     };
-    let spawned = deps.spawn.spawn(session_args(r, owner)).await;
+    let (mut host, mut note) = plan;
+    let mut spawned = deps.spawn.spawn(session_args(r, &host, owner)).await;
+    // The start failed on the routine's own host: its fallback takes the
+    // run, once (G3.8).
+    if let (Err(e), Some(fb)) = (&spawned, r.fallback_host.as_deref()) {
+        if host == r.host_alias {
+            note = Some(format!(
+                "on {fb}: the start on {} failed ({})",
+                r.host_alias, e.message
+            ));
+            host = fb.to_string();
+            spawned = deps.spawn.spawn(session_args(r, &host, owner)).await;
+        }
+    }
     let s = lock(&deps.store)?;
-    let (state, reason, session_id) = match spawned {
+    let (state, reason, code, session_id) = match spawned {
         Ok(row) => {
             let meta = serde_json::json!({ "routine_id": r.id, "source": "routine" }).to_string();
-            let prompt = match context {
-                Some(c) => format!("{}\n\n{c}", r.prompt),
-                None => r.prompt.clone(),
-            };
+            let prompt = run_prompt(r, context);
             match s.enqueue_handover(row.id, &prompt, Some(&meta)) {
-                Ok(_) => ("running", None, Some(row.id)),
+                Ok(_) => ("running", note, None, Some(row.id)),
                 Err(e) => (
                     "failed",
                     Some(format!("its prompt was not queued: {}", e.message)),
+                    Some(E_PROMPT_NOT_QUEUED.to_string()),
                     Some(row.id),
                 ),
             }
         }
-        Err(e) => ("failed", Some(e.message), None),
+        Err(e) => ("failed", Some(e.message), Some(e.code), None),
     };
     s.insert_routine_run(&NewRoutineRun {
         routine_id: r.id,
@@ -180,7 +216,23 @@ pub async fn fire_with(
         session_id,
         scheduled_for,
         at: now,
+        error_code: code.as_deref(),
+        host_alias: Some(&host),
     })
+}
+
+/// The prompt a run of `r` queues: its own, the autonomy line (G3.8) and
+/// the line on what fired it.
+pub(super) fn run_prompt(r: &RoutineRow, context: Option<&str>) -> String {
+    let mut prompt = r.prompt.clone();
+    for line in [super::autonomy_line(r.autonomy), context]
+        .into_iter()
+        .flatten()
+    {
+        prompt.push_str("\n\n");
+        prompt.push_str(line);
+    }
+    prompt
 }
 
 /// The `overlap: skip` routines whose run is between its check and its row.
@@ -196,35 +248,96 @@ fn claim_start(store: &Arc<Mutex<Store>>, r: &RoutineRow) -> Option<Option<crate
     crate::rt::claim(&STARTING, Arc::as_ptr(store) as usize, r.id.to_string()).map(Some)
 }
 
+/// Whether `r` starts a run now, and where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Plan {
+    /// It does not, in words.
+    Skip(String),
+    /// On `host`: its own, or its fallback with `note` saying why.
+    Start { host: String, note: Option<String> },
+}
+
 /// Why `r` may not start a run now, in words: its last run is still open
-/// (overlap `skip`), or its runs spent its day budget.
+/// (overlap `skip`), its runs spent its day budget, the fleet's routines
+/// spent `automation.daily_budget`, or its login is past the line and no
+/// fallback host can take it.
 fn refusal(s: &Store, r: &RoutineRow, now: i64) -> Result<Option<String>, IpcError> {
+    Ok(match plan(s, r, now)? {
+        Plan::Skip(why) => Some(why),
+        Plan::Start { .. } => None,
+    })
+}
+
+/// Where a run of `r` starts now, if it does (see [`refusal`]). Its own
+/// host, unless that host is unreachable or its login is past
+/// `accounts.pause_at` and its fallback host is neither (G3.8); the
+/// fallback bills the same profile there. A host the last probe could not
+/// reach, with no fallback that can, is tried anyway: the probe may be
+/// stale, and a failed start says why.
+pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError> {
     if r.overlap == "skip" && s.routine_run_open(r.id)? {
-        return Ok(Some("its last run is still going".into()));
+        return Ok(Plan::Skip("its last run is still going".into()));
     }
     if let Some(budget) = r.budget_day_micros {
         let since = super::cron::local_day_start(now, r.utc_offset_min);
         let spent = s.routine_cost_since(r.id, since)?;
         if spent >= budget {
-            return Ok(Some(format!(
+            return Ok(Plan::Skip(format!(
                 "its runs spent {} of today's {}",
                 usd(spent),
                 usd(budget)
             )));
         }
     }
+    let fleet = super::fleet_budget(s, now)?;
+    if let Some(budget) = fleet.budget_micros {
+        if fleet.spent_micros >= budget {
+            return Ok(Plan::Skip(format!(
+                "the fleet's routines spent {} of today's {} (automation.daily_budget)",
+                usd(fleet.spent_micros),
+                usd(budget)
+            )));
+        }
+    }
     // Account-aware automation (redesign 8.7): a run on an account past
     // `accounts.pause_at` would stall at the limit, so the routine skips it
-    // and fires again at its next time.
-    if let Some(over) =
-        crate::service::account_limits::over_limit(s, &r.host_alias, r.profile.as_deref(), now)?
-    {
-        return Ok(Some(over.reason()));
+    // and fires again at its next time, unless its fallback can take it.
+    let profile = r.profile.as_deref();
+    let over = crate::service::account_limits::over_limit(s, &r.host_alias, profile, now)?;
+    let reachable = |h: &str| -> Result<bool, IpcError> {
+        Ok(s.get_host_row(h)?.is_some_and(|row| row.reachable))
+    };
+    let down = !reachable(&r.host_alias)?;
+    if over.is_none() && !down {
+        return Ok(Plan::Start {
+            host: r.host_alias.clone(),
+            note: None,
+        });
     }
-    Ok(None)
+    if let Some(fb) = r.fallback_host.as_deref() {
+        let fb_over = crate::service::account_limits::over_limit(s, fb, profile, now)?;
+        if fb_over.is_none() && reachable(fb)? {
+            let why = match &over {
+                Some(o) => o.reason(),
+                None => format!("{} was unreachable", r.host_alias),
+            };
+            return Ok(Plan::Start {
+                host: fb.to_string(),
+                note: Some(format!("on {fb}: {why}")),
+            });
+        }
+    }
+    Ok(match over {
+        Some(o) => Plan::Skip(o.reason()),
+        None => Plan::Start {
+            host: r.host_alias.clone(),
+            note: None,
+        },
+    })
 }
 
 /// Close a run and record what its own facts say it came to (step 8.10).
+/// A failed close records `code`, why it failed (G3.8).
 fn close(
     s: &Store,
     id: i64,
@@ -237,42 +350,71 @@ fn close(
     super::outcome::on_close(s, id, now)
 }
 
+/// [`close`] a run failed, with its error code.
+fn fail(
+    s: &Store,
+    id: i64,
+    code: &str,
+    reason: &str,
+    cost_micros: i64,
+    now: i64,
+) -> Result<(), IpcError> {
+    s.set_routine_run_error_code(id, code)?;
+    close(s, id, "failed", Some(reason), cost_micros, now)
+}
+
+/// A turn to stop: a run past its time cap (G3.8), `(host, tmux name)`.
+pub type StopTurn = (String, String);
+
+/// How a time cap reads: "20 min", "2 h", "1 h 30 min".
+pub(super) fn cap_words(secs: i64) -> String {
+    let m = secs / 60;
+    match (m / 60, m % 60) {
+        (0, m) => format!("{m} min"),
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
+    }
+}
+
 /// Close the open runs whose session finished a turn, failed, went away or
-/// went quiet for [`RUN_STALE_SECS`]; refresh the others' cost, and fail
-/// one past its run budget and pause its routine.
-pub fn settle(s: &Store, now: i64) -> Result<(), IpcError> {
+/// went quiet for [`RUN_STALE_SECS`]; refresh the others' cost, fail one
+/// past its run budget and pause its routine, and fail one past its time
+/// cap. Answers the turns to stop: the time-capped runs' (G3.8).
+pub fn settle(s: &Store, now: i64) -> Result<Vec<StopTurn>, IpcError> {
+    let mut stop = Vec::new();
     for run in s.running_routine_runs()? {
         let Some(sid) = run.session_id else {
-            close(s, run.id, "failed", Some("it started no session"), 0, now)?;
+            fail(s, run.id, E_NO_SESSION, "it started no session", 0, now)?;
             continue;
         };
         let Some(row) = s.get_session_by_id(sid)? else {
-            close(
+            fail(
                 s,
                 run.id,
-                "failed",
-                Some("its session was removed before its turn finished"),
+                E_SESSION_REMOVED,
+                "its session was removed before its turn finished",
                 run.cost_micros,
                 now,
             )?;
             continue;
         };
         let cost = row.usage.usage_cost_micros;
+        let routine = s.get_routine(run.routine_id)?;
         if s.session_event_since(sid, "turn_done", 0)? {
             close(s, run.id, "done", None, cost, now)?;
         } else if s.session_event_since(sid, "stop_failure", 0)? {
-            close(
-                s,
-                run.id,
-                "failed",
-                Some("its turn ended in an error"),
-                cost,
-                now,
-            )?;
+            let detail = s
+                .newest_session_event_of(sid, &["stop_failure"])?
+                .and_then(|e| e.detail);
+            let why = match detail.as_deref() {
+                Some(d) => format!("its turn ended in an error: {d}"),
+                None => "its turn ended in an error".to_string(),
+            };
+            fail(s, run.id, turn_code(detail.as_deref()), &why, cost, now)?;
         } else if row.lost_at.is_some() {
-            close(s, run.id, "failed", Some("its session was lost"), cost, now)?;
-        } else if let Some(budget) = s
-            .get_routine(run.routine_id)?
+            fail(s, run.id, E_SESSION_LOST, "its session was lost", cost, now)?;
+        } else if let Some(budget) = routine
+            .as_ref()
             .and_then(|r| r.budget_run_micros)
             .filter(|b| cost >= *b)
         {
@@ -281,25 +423,59 @@ pub fn settle(s: &Store, now: i64) -> Result<(), IpcError> {
                 usd(cost),
                 usd(budget)
             );
-            close(s, run.id, "failed", Some(&why), cost, now)?;
+            fail(s, run.id, E_RUN_BUDGET, &why, cost, now)?;
             s.set_routine_enabled(
                 run.routine_id,
                 false,
                 Some(&format!("paused: a run went over its budget ({why})")),
                 None,
             )?;
+        } else if let Some(cap) = routine
+            .as_ref()
+            .and_then(|r| r.run_max_secs)
+            .filter(|c| now - run.started_at > *c)
+        {
+            let why = format!(
+                "it ran past its {} time cap; its turn was stopped",
+                cap_words(cap)
+            );
+            fail(s, run.id, E_RUN_TIME_CAP, &why, cost, now)?;
+            stop.push((row.host_alias.clone(), row.tmux_name.clone()));
         } else if now - run.started_at > RUN_STALE_SECS {
-            close(
+            fail(
                 s,
                 run.id,
-                "failed",
-                Some("no turn finished in 6 hours"),
+                E_RUN_STALE,
+                "no turn finished in 6 hours",
                 cost,
                 now,
             )?;
         } else if cost != run.cost_micros {
             s.set_routine_run_cost(run.id, cost)?;
         }
+    }
+    Ok(stop)
+}
+
+/// Start each failed run of a `retry_once` routine again, once (G3.8): the
+/// run's own trigger, `trigger_ref` `retry:<run id>`. Only while automation
+/// runs (the caller is past Pause all's gate).
+async fn retry_failed(deps: &Deps, now: i64) -> Result<(), IpcError> {
+    let runs = lock(&deps.store)?.routine_runs_to_retry(now - RETRY_WITHIN_SECS)?;
+    for run in runs {
+        let Some(r) = lock(&deps.store)?.get_routine(run.routine_id)? else {
+            continue;
+        };
+        let reference = format!("retry:{}", run.id);
+        fire(
+            deps,
+            &r,
+            &run.trigger,
+            Some(&reference),
+            run.scheduled_for,
+            now,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -519,30 +695,40 @@ pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<
 /// One pass of the scheduler.
 pub async fn tick_once(deps: &Deps, now: i64) {
     let next = Some(TICK_EVERY);
-    let (due, events) = match deps.store.lock() {
-        Ok(s) => {
-            // Settling only reads what happened, so it runs while paused too.
-            if let Err(e) = settle(&s, now) {
-                crate::service::loops::report("routines", Err(e.message), next);
-                return;
+    // Settling only reads what happened (and stops a run past its time
+    // cap), so it runs while paused too. Nothing below Pause all's gate
+    // starts: no fire, no retry.
+    let (stop, work) = match deps.store.lock() {
+        Ok(s) => match settle(&s, now) {
+            Err(e) => (Vec::new(), Err(e.message)),
+            Ok(stop) => {
+                let work = if !crate::service::loops::gate_in("routines", &s, next) {
+                    Ok(None)
+                } else {
+                    match (s.routines_due(now), s.event_routines()) {
+                        (Ok(d), Ok(e)) => Ok(Some((d, e))),
+                        (Err(e), _) | (_, Err(e)) => Err(e.message),
+                    }
+                };
+                (stop, work)
             }
-            if !crate::service::loops::gate_in("routines", &s, next) {
-                return;
-            }
-            match (s.routines_due(now), s.event_routines()) {
-                (Ok(d), Ok(e)) => (d, e),
-                (Err(e), _) | (_, Err(e)) => {
-                    crate::service::loops::report("routines", Err(e.message), next);
-                    return;
-                }
-            }
-        }
+        },
+        Err(e) => (Vec::new(), Err(e.to_string())),
+    };
+    stop_turns(deps, stop).await;
+    let (due, events) = match work {
+        Ok(Some(w)) => w,
+        Ok(None) => return,
         Err(e) => {
-            crate::service::loops::report("routines", Err(e.to_string()), next);
+            crate::service::loops::report("routines", Err(e), next);
             return;
         }
     };
     let mut failed: Option<String> = None;
+    if let Err(e) = retry_failed(deps, now).await {
+        tracing::warn!(error = %e.message, "[routines] retry failed");
+        failed = Some(format!("retry: {}", e.message));
+    }
     for id in due {
         if let Err(e) = tick_cron(deps, id, now).await {
             tracing::warn!(routine = id, error = %e.message, "[routines] fire failed");
@@ -560,6 +746,16 @@ pub async fn tick_once(deps: &Deps, now: i64) {
         routine_run_outcome::spawn_pass(&deps.store, panes, now);
     }
     crate::service::loops::report("routines", failed.map_or(Ok(()), Err), next);
+}
+
+/// Stop the turns of the runs past their time cap; a failure is logged,
+/// the run is failed either way.
+async fn stop_turns(deps: &Deps, stop: Vec<StopTurn>) {
+    for (host, name) in stop {
+        if let Err(e) = deps.spawn.stop_turn(&host, &name).await {
+            tracing::warn!(host = %host, session = %name, error = %e.message, "[routines] stop turn failed");
+        }
+    }
 }
 
 /// The scheduler's periodic task, on the hub and on a standalone desktop.

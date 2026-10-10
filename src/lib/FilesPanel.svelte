@@ -30,6 +30,7 @@
   import NewBranchSheet from './NewBranchSheet.svelte';
   import { hubStatus, hubBlock } from './hub';
   import { pushError } from './toasts';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -394,6 +395,8 @@
   function onResize(delta: number): void {
     listPx = Math.max(160, Math.min(560, listPx + delta));
   }
+  /** Writing help's "Draft commit messages" (G4.6), off by default. */
+  const draftsCommits = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftCommitMessages));
 </script>
 
 <svelte:window onkeydown={onWindowKeydown} />
@@ -496,7 +499,7 @@
             enableStaging={true}
             onStageToggle={stageToggle}
             onCommit={(m, o) => void commitStaged(m, o)}
-            draftCommit={() => draftCommitMessage(session.id)}
+            draftCommit={draftsCommits ? () => draftCommitMessage(session.id) : undefined}
             {writeBlocked}
             branch={mode === 'changes' ? branch : null}
             {selectedRange}
