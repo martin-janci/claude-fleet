@@ -7,6 +7,8 @@ question card, My work, More), and New becomes the default. The old
 navigation goes one release later. This audit, taken on 2026-10-08, lists what
 stands between the checklists and that bar.
 
+Refreshed on 2026-10-10 against fleet-mobile main 1ffaba2 and claude-fleet main 6c0853eb (gap plan step G6.2).
+
 Sources:
 
 - The checklists are the three mobile analysis notes that the plan's M14
@@ -40,8 +42,8 @@ Why most rows are already covered: each 14.x PR (#114–#141) carried its own
 parity table against these notes, and the Classic screens' view models are
 reused under New. Examples are `SessionsViewModel` and `BulkViewModel` (14.3),
 `RepoViewModel` (14.4), `NewSessionUiState` (14.6) and `MyWorkViewModel`
-(14.9). The Classic bar is still the default (`ui/PhoneLayoutPref.kt`,
-`loadPhoneLayout` returns Classic unless the stored value is `new`).
+(14.9). Since gap plan G5.4 New is the default (`ui/PhoneLayoutPref.kt:13-14`,
+`loadPhoneLayout` returns Classic only when the stored value is `classic`).
 
 ## 1. Bottom navigation (analysis-work-hosts-settings.md §G; step 14.2)
 
@@ -55,7 +57,7 @@ reused under New. Examples are `SessionsViewModel` and `BulkViewModel` (14.3),
 | Today → Inbox header | done | `ui/InboxScreen.kt:76` |
 | Missions → Control › Missions and More › Automation | done | `App.kt:1438`, `App.kt:1456` |
 | Back from a pushed screen returns to More | done | `NewLayoutTest`, `BackGestureTest` (#115) |
-| New becomes the default; Classic is removed one release later | gap | `ui/PhoneLayoutPref.kt`: Classic is the default. This is 14.13's own last step |
+| New becomes the default; Classic is removed one release later | done | `ui/PhoneLayoutPref.kt:9-14`: New is the default, and Classic only for a phone that chose it (gap plan G5.4). Classic goes one release later, as planned |
 
 ## 2. Pairing (analysis-sessions.md §A, "Pairing parity list"; step 14.11)
 
@@ -91,7 +93,7 @@ reused under New. Examples are `SessionsViewModel` and `BulkViewModel` (14.3),
 | Host heading: fold, name, "N need you", count, unreachable | done | `ui/PhoneSessions.kt:516`, `:531` |
 | Project subheadings, and ticket subheadings under Work | done | #120 (kept under the host in the Project and Work views) |
 | Row: status dot, title, line two (activity or what it waits on), age | done | `ui/kit/PhoneRow.kt:43`, `ui/PhoneSessions.kt:88-94` |
-| Row: unlabelled two-segment bar under the title | gap | not on the New row. The context % is still in the session's strip (`components/StatusStrip.kt:130`). Drop it on purpose or bring it back |
+| Row: unlabelled two-segment bar under the title | gap | still not on the New row (`ui/kit/PhoneRow.kt`, `ui/PhoneSessions.kt`). The context % is still in the session's strip (`components/StatusStrip.kt:130`). Drop it on purpose or bring it back |
 | Row: ticket chip | done | work chip, #120 |
 | Row: CI badge | done | `ui/PhoneSessions.kt:123` "PR #476 ✓" |
 | Row: external and shell rows | done | `model/Triage.kt:66-70` |
@@ -122,10 +124,10 @@ reused under New. Examples are `SessionsViewModel` and `BulkViewModel` (14.3),
 | Tickets: search or paste a key or URL, Filters, Sort, sections with counts | done | `ui/TicketsSheet.kt:119`, `:208` |
 | Ticket detail inline with criteria and Resume | done | `App.kt:1065` (`confirmResume`) |
 | Ticket filters: lists, status, tracker column, Sessions | done | `model/TicketFilters.kt:12` |
-| One ticket with its tasks as one sheet (14.15) | gap | #135 left it for a follow-up |
+| One ticket with its tasks as one sheet (14.15) | done | `ui/PhoneTicketSheet.kt:36-48`; the ticket chip and the Tasks chip both open it (`ui/SessionScreen.kt:705`) |
 | Missions list with progress, state and Refresh | done | `ui/MissionsSheet.kt:85`, reached from Control (#115) |
-| Missions list in Orbit style (Running, Paused, Drafts, Done this week) | open PR | #142 (`ui/OrbitMissionsScreen.kt` on its branch) |
-| Pause all | done | `ui/MissionsSheet.kt:98`, `net/HubClient.kt:1131`. #142 adds the list of what stops |
+| Missions list in Orbit style (Running, Paused, Drafts, Done this week) | done | `ui/OrbitMissionsScreen.kt:177`, `:216-218`; #142 merged |
+| Pause all | done | `ui/MissionsSheet.kt:98`, `net/HubClient.kt:1131`. It says what stops before it stops anything (`ui/OrbitMissionsScreen.kt:157`, `:224-235`; #142) |
 | Mission detail: goal, meta, autonomy, spent, Waiting for you, Next steps with Go | done | `ui/MissionsSheet.kt:168`, `:177`, `:201`, `:204`, `:238` |
 
 ## 5. One session (analysis-session.md Part A and its parity checklist; steps 14.4, 14.5, 14.14)
@@ -143,12 +145,12 @@ reused under New. Examples are `SessionsViewModel` and `BulkViewModel` (14.3),
 | Question card: Enter/Esc, Show terminal | done | the keys are on the agent tab, labelled; `ui/QuestionCard.kt:157` "Show in <agent>" |
 | Question card: composer hint | done | `ui/QuestionCard.kt:154` "Answer in your own words…" |
 | Trust card: Enter/Esc, Show terminal | done | `ui/QuestionCard.kt:64` |
-| Composer: schedule (send later) | blocked | the hub cannot hold a prompt until later, and no plan step builds it (#127). The clock on main is "Draft history" (`ui/SessionScreen.kt:2752`) |
+| Composer: schedule (send later) | gap | send later works and the hub holds it (`deferred_prompts`): `ui/SessionLater.kt:233-243`, time choices at `:152-155`, `model/QueuedPrompts.kt:9`. It is reached from ⋮ "Send later…" (`ui/SessionMenu.kt:81`), not a clock in the composer. The clock on main is still "Draft history" (`ui/SessionScreen.kt:2752`) |
 | Composer: field, Send (Queue while working), Stop | done | `ui/Recovery.kt:77`, `ui/SessionScreen.kt:2812` |
 | Composer: sending caption, Not sent (Retry, Edit), read-only caption, quick replies | done | `ui/Recovery.kt:80`; #122 |
 | States: working, waiting, stuck on trust, idle, failed | done | `ui/kit/StatusWord.kt`; failed card in `ui/Recovery.kt:116-145` |
 | States: hub unreachable, read-only, sending, send failed, empty | done | `ui/SessionScreen.kt:653` |
-| State: loading (skeleton after 400 ms, 14.12) | gap | `ui/kit/PhoneStates.kt:194` `ConversationLoading` is defined and used nowhere |
+| State: loading (skeleton after 400 ms, 14.12) | done | `ui/SessionScreen.kt:751-752`, `:2620`; `ui/kit/PhoneStates.kt:245-246` waits before it shows |
 | Repair report: steps, warning | done | in the conversation, `ui/Recovery.kt:83-86` (#122) |
 | Ticket sheet: id, state, title, why, criteria, Copy, Open in browser, Clear, Ask for a handover, Rename | done | `components/TicketCardBody.kt:53`, `ui/WorkSheet.kt:96`, `:182` |
 | Suggestion sheet: reason, Confirm, Not this | done | `model/SessionRow.kt:78`, `net/HubClient.kt:1362` |
@@ -161,8 +163,8 @@ reused under New. Examples are `SessionsViewModel` and `BulkViewModel` (14.3),
 | Files tab: Diff (hunks, File link, line numbers) | done | #119 `a_diff_numbers_its_lines_from_each_hunk` |
 | Files tab: Commit (body, files, Copy hash) | done | `ui/RepoScreen.kt:646` |
 | Files tab: File (Send to Downloads) | done | `ui/RepoScreen.kt:669` |
-| Files tab: +/− counts and ahead/behind on Changes (board) | blocked | `repo_changes` does not send them (#119) |
-| Agent tab named after the session's agent (14.4) | gap | `ui/SessionTabs.kt:50`: `agentName` always returns "Claude Code". Contract 11 is accepted (#129), and hub 2.1 and 5.1 have merged (claude-fleet #514, #596) |
+| Files tab: +/− counts and ahead/behind on Changes (board) | done | per-file counts `model/Repo.kt:19-27`, `ui/RepoScreen.kt:298-305`; "N ahead of main · N behind main" `model/Repo.kt:103-117`, `ui/RepoScreen.kt:165` |
+| Agent tab named after the session's agent (14.4) | done | `ui/SessionTabs.kt:49-61` reads the row's `agent` (contract 11). The Files tab's "Ask Claude Code to commit" still uses `DEFAULT_AGENT_NAME` (`ui/RepoScreen.kt:249`) |
 | Terminal view behind "Show terminal" | done | agent pane (#119); full screen (#136) |
 | ⋮ menu: Rename, Ticket and tasks, Move, Repair, Recreate, Copy tmux attach, Details, Archive, Kill last (14.14) | done | `ui/SessionMenu.kt:68-87` |
 
@@ -177,12 +179,12 @@ reused under New. Examples are `SessionsViewModel` and `BulkViewModel` (14.3),
 | Worktree switch; Branch with validation; Base branch; Name with help | done | `ui/NewSessionWizard.kt:456`, `:465` |
 | Start stays off on an invalid branch (14.6 verify) | done | `an_invalid_branch_holds_project_and_keeps_start_off` (#118) |
 | Create, Creating…, Pulse after 400 ms | done | `ui/kit/Pulse.kt:38` |
-| Pulse ticks off the real steps | blocked | `new_session` has no step events. claude-fleet 5.13 has not merged |
+| Pulse ticks off the real steps | done | `ui/NewSessionWizard.kt:327-336` ticks the hub's `start:progress` steps (`model/StartProgress.kt`). Ticket mode and older hubs fall back to the fixed names |
 | Background agent on <host>… | done | `ui/NewSessionScreen.kt:389`; the wizard's Where and Review steps |
 | Start <ticket>; Also start in (up to 7, org rule) | done | `ui/NewSessionWizard.kt:531` |
 | Multi-start confirm: org, list, Start N, Cancel | done | `ui/MultiStartSheets.kt:89` |
 | Multi-start result: status per project, Open, Done | done | `ui/NewSessionViewModel.kt:639` |
-| Board extras: Jev host proposal, drafted branch, Start from a branch, first message, account row | blocked | no hub support for the phone yet (#118). The account row needs the headroom read, which the hub keeps desktop-only |
+| Board extras: Jev host proposal, drafted branch, Start from a branch, first message, account row | blocked | Start from a branch, first message and the account row have landed (`ui/NewSessionWizard.kt:418`, `:723-729`, `:689-701`; G5.6). The drafted branch shows "Drafted from KEY" and Clear but has no Regenerate (`:379-381`). The Jev host proposal waits on the hub: `propose_host_placement` is desktop-only (claude-fleet `src-tauri/src/backend/verdicts.rs:1331`) |
 
 ## 7. Work (analysis-work-hosts-settings.md §A; step 14.9)
 
@@ -236,9 +238,9 @@ reused under New. Examples are `SessionsViewModel` and `BulkViewModel` (14.3),
 |---|---|---|
 | Subtitle, 24 h / 7 days / 30 days, by host, by day, by session | done | `ui/MorePlacesScreen.kt:238`, `:300`, `:307`; `ui/UsageViewModel.kt:20` |
 | Claude accounts | done | #128 |
-| Quota meters with their numbers (14.10 verify) | open PR | #145, stacked on #144 (`MorePlacesScreen.kt:280-320` on its branch) |
-| Paused row names the window and when it resets | open PR | #144 (`PhoneSessions.kt:123-134` on its branch) |
-| Switch account and Wait on a paused row | blocked | `check_account_headroom` is desktop-only (#139, #144) |
+| Quota meters with their numbers (14.10 verify) | done | `ui/MorePlacesScreen.kt:257-323`, `:360`; #145 merged |
+| Paused row names the window and when it resets | done | `ui/PhoneSessions.kt:136-148`; #144 merged |
+| Switch account and Wait on a paused row | done | Inbox row `ui/InboxScreen.kt:405-415`; in the session `ui/SessionLater.kt:87-136`. `check_account_headroom` now reaches phones (`net/HubCapabilities.kt:383`, `net/HubClient.kt:549`) |
 
 ## 11. Settings and organisations (analysis-work-hosts-settings.md §D; steps 14.11, 14.17)
 
@@ -256,59 +258,59 @@ reused under New. Examples are `SessionsViewModel` and `BulkViewModel` (14.3),
 | This phone: notification kinds, Dark / Light / System theme | done | `ui/PhoneSettings.kt:14-16` |
 | New navigation switch at the foot of Settings | done | #117 |
 | Quiet hours | done | fleet-mobile #153 after claude-fleet 11.9 (#633). The phone follows the hub's Phone column and quiet hours. The Phone column's default includes Blocked, as before the matrix, so a stuck session, a host down or an account at its limit still reaches the phone unless someone unticks it |
-| Done notifications; fingerprint lock | gap | not built (#117) |
-| Organisation automation playbooks (MobileOrgsSettings) | blocked | claude-fleet 8.4 has not merged (#133) |
-| Member actions on Company | open PR | #146 (list, change role, remove with the three share choices); hub 11.2 merged in #606 |
-| Share and watch | blocked | claude-fleet 11.7, contract 15 (#143) |
+| Done notifications; fingerprint lock | done | Done kind `notify/NotifyKinds.kt:15`, off by default; lock `ui/PhoneSettings.kt:71`, `ui/PhoneLock.kt:40-51` (Android and iOS actuals), switch at `App.kt:2058` |
+| Organisation automation playbooks (MobileOrgsSettings) | blocked | claude-fleet 8.4 has merged. The phone shows playbooks as plain hub settings fields; the board's toggles with "Ran N times this week" need a per-playbook run count the hub does not send |
+| Member actions on Company | done | `ui/MembersSheet.kt:41-56` (change role, remove with the share choices); #146 merged |
+| Share and watch | done | `ui/ShareSheet.kt:63`, Narrow to watch at `:184`, `model/Sharing.kt`; opened at `App.kt:2917` (contract 15) |
 
 ## 12. Step requirements the notes do not cover (14.5, 14.7, 14.8, 14.12, 14.14, 14.16, 14.18–14.22)
 
 | Item | Status | Evidence |
 |---|---|---|
 | 14.5 failed card, Not sent with Retry, repair result, Move with no host chosen | done | `ui/Recovery.kt`; `ui/MoveSheet.kt:167`; `MobileRecoveryTest` (#122) |
-| 14.7 coordinator chat in the Control tab | gap | there is no 14.7 PR. Control is a list of entries that opens the agent session (`ui/MoreScreen.kt:62-68`, `App.kt:1423-1432`) |
+| 14.7 coordinator chat in the Control tab | done | the Control tab is the coordinator's conversation with its header, handoff chips, other sessions' forms and confirm cards (`App.kt:1774-1797`, `ui/ControlChat.kt:340-499`) |
 | 14.7 ChatForm answered, declined and expired states; one-step form as an inline card | done | `model/ChatForms.kt:36-60`; `ui/ChatFormCard.kt` (#121, 10.8) |
-| 14.7 multi-step form full screen | gap | `ui/ChatFormCard.kt:112` draws every step inline in one card |
-| 14.7 building state with a skeleton and Atom | gap | `ui/kit/` has no Atom loader |
-| 14.7 handoff chips | blocked | claude-fleet 9.8 (contract 14) |
+| 14.7 multi-step form full screen | done | a long or secret form opens paged, one step at a time, at full height with "‹ Chat" back (`ui/OrbitChatForm.kt:74-85`, `:124-126`, `:237-250`, `:378`). It is a full-height sheet, not a pushed screen |
+| 14.7 building state with a skeleton and Atom | done | `ui/kit/Loaders.kt:496` (`Atom`); `ui/ChatFormDraft.kt:60-68`, `:135` streams the draft with "Writing the form · reading …" |
+| 14.7 handoff chips | done | `ui/ControlChat.kt:528`, `:562`; drawn above the composer at `App.kt:1793` |
 | 14.8 no Approve action; lock screen hides the command; the tap lands on the card | done | `notify/NeedsYouContent.kt:42-47`; `NotificationsNeverAnswerTest` (#124) |
-| 14.12 Signal lost and Gravity well banners on every screen | gap | `HubBanner` is used only in Work (`ui/PhoneWork.kt:330`, `:593`). Sessions, the session, Hosts, Files and New session still draw `ConnectionBanner` (`ui/PhoneSessions.kt:307`, `ui/SessionScreen.kt:653`, `ui/MorePlacesScreen.kt:163`, `:392`, `ui/NewSessionWizard.kt:155`) |
+| 14.12 Signal lost and Gravity well banners on every screen | done | `HubBanner` on Sessions (`ui/PhoneSessions.kt:351`), the session (`ui/SessionScreen.kt:693-694`), Hosts and Files (`ui/MorePlacesScreen.kt:180`, `:508`), New session (`ui/NewSessionWizard.kt:170`) and Work. `ConnectionBanner` is left on Classic screens only. `ReconnectingPanel` is still Classic only (`ui/SessionsScreen.kt:849`) |
 | 14.12 Hex field for the fleet check | done | `ui/FleetCheck.kt:56` |
-| 14.12 Hex field after a repair | blocked | the hub answers a repair in one call with no steps (#116) |
-| 14.12 Radar while adding a host | blocked | the phone has no add-host; `add_host` is Master-only |
-| 14.12 Galaxy for the first import | gap | `FullscreenLoader` is used only by `ui/FleetCheck.kt`. #116 assigned it to 14.19, and #141 did not wire it |
+| 14.12 Hex field after a repair | blocked | the Hex field and step list are now shown (`ui/RepairWait.kt:22-41`, `App.kt:2747-2749`), but nothing ticks: the hub answers a repair in one call with no steps |
+| 14.12 Radar while adding a host | done | `ui/AddHostScreen.kt:34-48`, `ui/kit/Loaders.kt:301`; opened at `App.kt:1626`. Contract 13 lets the owner's trusted phone call `add_host` (claude-fleet `crates/fleet-core/src/mcp/guard.rs:2839`) |
+| 14.12 Galaxy for the first import | done | `ui/FleetCheck.kt:107-119` with real counts (`:82-89`); shown at `App.kt:2279` |
 | 14.14 shells 0..N with a key bar (Esc, Tab, ⌃C) | done | `ui/Terminals.kt:98`, `:414` (#127) |
-| 14.14 / 14.21 Ctrl, arrow, ⇧Tab and Alt keys | blocked | `send_prompt { keys }` takes only Enter, Escape, Tab, C-c and digits (#127, #136) |
+| 14.14 / 14.21 Ctrl, arrow, ⇧Tab and Alt keys | blocked | arrows, ⇧Tab and the Ctrl row are built where the hub lists them (`ui/Terminals.kt:108-117`, `ui/Landscape.kt:147-160`, `net/HubCapabilities.kt:409`). Alt is left: the hub refuses every Meta chord |
 | 14.14 find with scopes | done | `ui/TurnNav.kt:72` (#127) |
-| 14.16 spend ask with Approve and Deny, neither pre-selected | blocked | claude-fleet 9.8 (contract 14) and 8.6 have not merged (#142) |
-| 14.16 background agent screen (project, agent, read-only, stop-after) | blocked | `new_bg_session` takes only a host, name and prompt (#142) |
+| 14.16 spend ask with Approve and Deny, neither pre-selected | done | `ui/OrbitMissionDetail.kt:220`, `:461-494` (two outlined buttons, nothing pre-selected); `ui/MissionsViewModel.kt:176`, `:200` |
+| 14.16 background agent screen (project, agent, read-only, stop-after) | blocked | project, read-only, stop after and a spend limit are built, as a sheet (`ui/NewSessionScreen.kt:466-530`). The agent is always Claude: the hub refuses a Codex background agent (`model/Recovery.kt:72-77`) |
 | 14.18 update card, Progress ring, signature check, wordmark, hub-older banner | done | `ui/UpdateScreens.kt`, `update/Updates.kt`; `UpdatesTest` (#123) |
 | 14.19 welcome and "I don't have a hub yet" | done | `ui/FirstInstall.kt:160` (#141) |
-| 14.19 install fleet-agent on a found host, Pulse and Sonar to the first heartbeat | blocked | built (`ui/FirstInstall.kt:339`), but the hub lists `install_agent` only to Master tokens, so a phone never sees it. This needs Martin's decision on an additive hub change (#141, claude-fleet #577) |
-| 14.19 installing tmux | blocked | the hub's install job does not install tmux (#141) |
+| 14.19 install fleet-agent on a found host, Pulse and Sonar to the first heartbeat | done | `ui/FirstInstall.kt:339`, opened from Hosts and Add a host (`App.kt:1592`, `:1634`, `ui/AddHostScreen.kt:52-61`). Contract 13 lets the owner's trusted phone call `install_agent` (claude-fleet `crates/fleet-core/src/mcp/guard.rs:2839`) |
+| 14.19 installing tmux | done | the install job's `tmux` step installs it when missing (`ui/FirstInstall.kt:243-247`) |
 | 14.20 Add a project in three steps with Data rain | done | `ui/AddProjectWizard.kt`, `ui/kit/Loaders.kt:393` (#137) |
-| 14.20 "A folder already on the host" source | gap | claude-fleet 6.11 has merged (#629); the follow-up is named in #137 |
-| 14.20 Connect a tracker with a secret field | blocked | client tokens never get `work_admin`; needs a contract decision (#137) |
+| 14.20 "A folder already on the host" source | done | `ui/AddProjectWizard.kt:446-455`. A folder is added on the hub's own machine only (`:122-125`) |
+| 14.20 Connect a tracker with a secret field | done | `ui/OrbitTrackersScreen.kt:80`, `:321-322`; `net/HubClient.kt:640-652` (`work_admin` for the owner's trusted phone, contract 13) |
 | 14.21 two panes, split diff, split terminals, agent full screen | done | `ui/Landscape.kt:52`, `:80`; `MobileLandscapeTest` (#136) |
-| 14.21 hide the status bar on iOS | gap | needs the Swift view controller (#136) |
+| 14.21 hide the status bar on iOS | done | `shared/src/iosMain/.../ui/SystemBars.ios.kt`, `MainViewController.kt:90`, `iosApp/iosApp/ContentView.swift:29` (6be202a) |
 | 14.22 help picker, tour, tips, practice fleet, Learn, guides with Undo | done | `ui/help/Help.kt:11-12`; `HelpNeverActsTest` (#125) |
-| 14.22 a lesson inside Control puts its prompts in the composer | gap | the steps only say what to ask (#125) |
+| 14.22 a lesson inside Control puts its prompts in the composer | done | `ui/help/Help.kt:166-171`, `ui/help/HelpScreens.kt:428-441`; a tap fills the composer and sends nothing (`App.kt:2119`) |
 
 ## 13. Light check and Martin's week (14.13 verify)
 
 | Item | Status | Evidence |
 |---|---|---|
-| Inbox, question card, My work and More checked in light against MobileLight | gap | the theme switch exists (`ui/PhoneSettings.kt:15`), and the `kit-previews` CI artifact renders both themes (#114, #117, #120). No screen-by-screen check against MobileLight is recorded |
+| Inbox, question card, My work and More checked in light against MobileLight | gap | the theme switch exists (`ui/PhoneSettings.kt:15`), and `LightCheckTest` (commonTest `ui/theme/LightCheckTest.kt`, G5.9) holds every text colour at 4.5:1 on every ground. No screen-by-screen check against MobileLight is recorded |
 | Martin uses New on the phone for a week | gap | not started on record |
 
 ## Counts
 
 | Status | Rows |
 |---|---|
-| done | 156 |
-| open PR | 4 |
-| gap | 16 |
-| blocked | 17 |
+| done | 184 |
+| open PR | 0 |
+| gap | 4 |
+| blocked | 5 |
 
 ## Gaps
 
@@ -316,43 +318,25 @@ What is left before Martin's phone sign-off, grouped by who has to act.
 
 ### Lane M (fleet-mobile), no hub work needed
 
-1. Agent tab named after the agent (14.4). `agentName` is still hard-coded, although contract 11 and hub 5.1 have landed.
-2. Adopt the 14.12 states on the remaining screens: `HubBanner` (Signal lost, Gravity well) on Sessions, the session, Hosts, Files and New session, and `ConversationLoading` in the session.
-3. Control as the coordinator chat (14.7): the chat in the tab, a multi-step form full screen, and the building state with Atom. There is no 14.7 PR yet.
-4. Galaxy for the first import (14.12 / 14.19).
-5. One ticket with its tasks as one sheet (14.15 follow-up).
-6. "A folder already on the host" in Add a project (14.20). Hub 6.11 is merged.
-7. Done notifications and a fingerprint lock in This phone (14.11 board items).
-8. Hiding the status bar on iOS in full screen (14.21).
-9. A lesson in Control that fills the composer (14.22).
-10. Decide on the row's unlabelled two-segment bar (§3): drop it on purpose or bring it back.
+1. Decide on the row's unlabelled two-segment bar (§3): drop it on purpose or bring it back.
+2. A clock in the composer for send later (§5). Send later itself works and the hub holds it; it is reached from ⋮ only.
+3. Regenerate on the drafted branch in New session (§6).
 
 ### Open fleet-mobile PRs to land
 
-1. #144 (4.10 when a paused row's limit resets), then #145 (14.10 quota meters).
-2. #142 (14.16 Orbit missions list and Pause all asked first).
-3. #146 (11.10 member actions on Company).
+None. #142, #144, #145 and #146 have merged.
 
 ### Blocked on claude-fleet
 
-1. 9.8 (contract 14): Control handoff chips (14.7). 9.8 with 8.6: the spend ask with Approve and Deny (14.16).
-2. 8.4: organisation automation playbooks (14.17).
-3. 11.9 (open, #633): quiet hours (14.11).
-4. 11.7 (contract 15): share and watch on the phone (11.10).
-5. 5.13: Pulse ticking off the real start steps (14.6).
-6. A tool or contract change with no plan step yet:
-   - a headroom read for phones (Switch account, Wait, and the New session account row);
-   - send later held on the hub (composer schedule, 14.14);
-   - more `send_prompt` keys (Ctrl, arrows, ⇧Tab, Alt; 14.14 and 14.21);
-   - repair step progress (Hex field after a repair);
-   - richer `new_bg_session` (background agent screen, 14.16);
-   - `repo_changes` counts and ahead/behind;
-   - `work_admin` for client tokens (Connect a tracker, 14.20);
-   - the hub's install job installing tmux.
+1. A tool or contract change with no plan step yet:
+   - Jev's host proposal for phones (`propose_host_placement` is desktop-only; New session, 14.6);
+   - a per-playbook run count (organisation automation playbooks, 14.17);
+   - repair step progress (the Hex field after a repair ticks nothing, 14.12);
+   - Meta chords in `send_prompt { keys }` (the Alt key, 14.14 and 14.21);
+   - a Codex background agent (the Agent choice on the background agent sheet, 14.16).
 
 ### Waiting on Martin
 
-1. Whether to offer `install_agent` and `add_host` to phone tokens. This unblocks 14.19's install path and the Radar.
-2. Whether the blocked rows above may stay open at sign-off (they are hub work, not phone parity), or must close first.
-3. The light check against MobileLight: Inbox, question card, My work, More.
-4. A week on New. After that, New becomes the default, and Classic goes one release later.
+1. Whether the blocked rows above may stay open at sign-off (they are hub work, not phone parity), or must close first.
+2. The light check against MobileLight: Inbox, question card, My work, More. `LightCheckTest` covers contrast only.
+3. A week on New. New is already the default; Classic goes one release later.
