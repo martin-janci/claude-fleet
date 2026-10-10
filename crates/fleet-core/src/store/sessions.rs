@@ -729,6 +729,21 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Forget that a session was viewed, so its last finished turn reads as
+    /// unread again and lands in the Inbox (G7.9: a person sends a routine
+    /// run Jev read as "nothing to do" to the Inbox). Answers whether the row
+    /// changed; a change emits `session_updated`.
+    pub fn clear_session_viewed(&self, id: i64) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET last_viewed_at = NULL WHERE id = ?1 AND last_viewed_at IS NOT NULL",
+            [id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(n > 0)
+    }
+
     /// Set (or, with `None`, clear) what a finished turn came to (migration
     /// 129; J2, step 5.11, writes it). Refuses a value outside
     /// [`TURN_OUTCOMES`](super::TURN_OUTCOMES). Answers whether the row

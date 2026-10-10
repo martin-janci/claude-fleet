@@ -107,6 +107,24 @@ describe('Routines (8.6)', () => {
     expect(tags[0].getAttribute('title')).toMatch(/last screen/);
   });
 
+  it('a run Jev read as nothing to do is kept out of Inbox, with Change and Send to Inbox (G7.9)', async () => {
+    const quiet: RoutineRunRow = { ...ok, id: 4, outcome: 'nothing', outcome_source: 'jev' };
+    route([sweep], [quiet]);
+    render(RoutinesPanel);
+    const line = await screen.findByTestId('routine-run-nothing');
+    expect(line.textContent).toContain('kept out of Inbox');
+    expect(line.textContent).toContain('Proposed by Jev');
+    await fireEvent.click(screen.getByTestId('routine-run-to-inbox'));
+    await waitFor(() =>
+      expect(argsOf('set_run_outcome')).toEqual({ action: 'set_run_outcome', routine_id: 3, run_id: 4, outcome: 'needs_person' }),
+    );
+    await fireEvent.click(screen.getByTestId('routine-run-change'));
+    const pick = screen.getByTestId('routine-run-outcome') as HTMLSelectElement;
+    expect(Array.from(pick.options).map((o) => o.textContent)).toEqual(['Did work', 'Nothing to do', 'Needs you']);
+    await fireEvent.change(pick, { target: { value: 'did_work' } });
+    await waitFor(() => expect(argsOf('set_run_outcome').outcome).toBe('did_work'));
+  });
+
   it('starts a new routine from the Morning PR sweep template and saves it whole', async () => {
     route([]);
     render(RoutinesPanel);

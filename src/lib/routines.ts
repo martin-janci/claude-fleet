@@ -215,7 +215,16 @@ export function routineInputOf(r: RoutineRow): RoutineInput {
   };
 }
 
-type Args = { action: string; routine_id?: number; routine?: RoutineInput; enabled?: boolean; skip?: boolean; limit?: number };
+type Args = {
+  action: string;
+  routine_id?: number;
+  routine?: RoutineInput;
+  enabled?: boolean;
+  skip?: boolean;
+  limit?: number;
+  run_id?: number;
+  outcome?: string;
+};
 
 function call<T>(args: Args): Promise<Result<T>> {
   return invokeCmd<T>('routines', { args });
@@ -234,6 +243,19 @@ export const setRoutineEnabled = (id: number, enabled: boolean) =>
   call<RoutineRow>({ action: 'set_enabled', routine_id: id, enabled });
 export const skipNextRun = (id: number, skip = true) => call<RoutineRow>({ action: 'skip_next', routine_id: id, skip });
 export const runRoutineNow = (id: number) => call<RoutineRunRow>({ action: 'run_now', routine_id: id });
+/** A person's answer to what a finished run came to (G7.9): Send to Inbox
+ *  is `needs_person`, Change picks any of the three. A failed run stays
+ *  failed (E_INVALID_STATE). */
+export type PersonOutcome = 'did_work' | 'nothing' | 'needs_person';
+export const setRunOutcome = (id: number, runId: number, outcome: PersonOutcome) =>
+  call<RoutineRunRow>({ action: 'set_run_outcome', routine_id: id, run_id: runId, outcome });
+
+/** The Change menu's choices, in the run list's words. */
+export const PERSON_OUTCOMES: readonly { value: PersonOutcome; label: string }[] = [
+  { value: 'did_work', label: 'Did work' },
+  { value: 'nothing', label: 'Nothing to do' },
+  { value: 'needs_person', label: 'Needs you' },
+];
 
 // ---- the Inbox ------------------------------------------------------------
 

@@ -1,5 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import { capRows, groupRows, isFlatGroupBy, moreRunningText, RUNNING_CAP, STATE_LABELS } from './row_groups';
+import {
+  capRows,
+  groupCountText,
+  groupMoreText,
+  groupRows,
+  isFlatGroupBy,
+  moreRunningText,
+  RUNNING_CAP,
+  STATE_LABELS,
+  type RowGroup,
+} from './row_groups';
 import { ATTENTION_STATES } from './attention';
 import { session } from './hosts_fixture';
 import type { SessionRow } from './sessions';
@@ -123,5 +133,34 @@ describe('the running cap (Sessions board: "4 more running ›")', () => {
     expect(capRows(three, new Set()).hidden).toBe(0);
     const byHost = groupRows(runs, 'host', opts)[0];
     expect(capRows(byHost, new Set()).hidden).toBe(0);
+  });
+});
+
+describe('the Done group holds today (G7.9, Sessions board: "Done 6 today")', () => {
+  const MIDNIGHT = NOW - 3600;
+  const today = session('mac', 't1', { last_stop_at: NOW - 600, last_activity_at: NOW - 600 });
+  const today2 = session('mac', 't2', { last_stop_at: NOW - 60, last_activity_at: NOW - 60 });
+  const old = session('mac', 'o1', { last_stop_at: MIDNIGHT - 600, last_activity_at: MIDNIGHT - 600 });
+  const done: RowGroup = { key: 'state:done', label: 'Done', rows: [today, old, today2] };
+
+  it('shows the turns that ended since midnight and counts the older ones', () => {
+    const c = capRows(done, new Set(), new Set(), RUNNING_CAP, MIDNIGHT);
+    expect(c.shown.map((s) => s.tmux_name)).toEqual(['t1', 't2']);
+    expect(c.hidden).toBe(1);
+    expect(groupCountText(done, MIDNIGHT)).toBe('2 today');
+    expect(groupMoreText(done, c.hidden)).toBe('1 earlier');
+  });
+
+  it('opened, or the older row selected, shows it; without a day it stays whole', () => {
+    expect(capRows(done, new Set(['state:done']), new Set(), RUNNING_CAP, MIDNIGHT).hidden).toBe(0);
+    expect(capRows(done, new Set(), new Set([old.id]), RUNNING_CAP, MIDNIGHT).hidden).toBe(0);
+    expect(capRows(done, new Set()).hidden).toBe(0);
+    expect(groupCountText(done)).toBe('3');
+  });
+
+  it('every other group keeps its plain count and the running words', () => {
+    const working: RowGroup = { key: 'state:working', label: 'Working', rows: [today] };
+    expect(groupCountText(working, MIDNIGHT)).toBe('1');
+    expect(groupMoreText(working, 4)).toBe('4 more running');
   });
 });

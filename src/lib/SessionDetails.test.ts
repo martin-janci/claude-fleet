@@ -1350,6 +1350,18 @@ describe('SessionDetails reviews block (gap plan G4.3)', () => {
     expect(screen.queryByTestId('reviews-empty')).toBeNull();
   });
 
+  it('the PR line reads checks passed and the review decision (G7.9)', async () => {
+    const withPr = {
+      ...source,
+      pr_url: 'https://github.com/o/r/pull/476',
+      pr_evidence: { draft: false, checks: { total: 16, pending: 0, skipped: 1, failing_total: 0 } },
+    } as unknown as SessionRow;
+    sessions.set([withPr]);
+    render(SessionDetails, { props: { session: withPr } });
+    await tick();
+    expect(screen.getAllByTestId('details-pr-line')[0].textContent).toBe('15/15 checks · no reviews');
+  });
+
   it('with no run yet says so, and Start a review run opens the review dialog', async () => {
     sessions.set([source]);
     render(SessionDetails, { props: { session: source } });

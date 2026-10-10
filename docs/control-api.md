@@ -941,7 +941,12 @@ Index by area (names only; see the reference for details):
   `utc_offset_min`, which a daylight-saving change does not move), the
   `account` its login bills and the host's `logins` for the Account
   picker; `delete`; `set_enabled
-  { enabled }`; `skip_next { skip? }`; `run_now`. Each run's session has
+  { enabled }`; `skip_next { skip? }`; `run_now`; `set_run_outcome {
+  run_id, outcome }` (gap plan G7.9), a person's answer to what a finished
+  run came to (`did_work`, `nothing` or `needs_person`; a failed run stays
+  failed): it outranks Jev's reading and is stored as `rule`, and
+  `needs_person` clears the session's `last_viewed_at` so its turn lands in
+  the Inbox. Each run's session has
   origin `routine` and is the routine's owner's; the prompt is its
   handover. A run is `done` when its session's first turn finishes,
   `failed` on an error, a lost or removed session, six quiet hours, or a

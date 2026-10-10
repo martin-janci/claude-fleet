@@ -83,6 +83,9 @@
     routineStateWords,
     routinesRequest,
     runRoutineNow,
+    setRunOutcome,
+    PERSON_OUTCOMES,
+    type PersonOutcome,
     runSourceHint,
     runDot,
     runWords,
@@ -98,12 +101,15 @@
     type RoutineTab,
     type RoutineTrigger,
   } from '../routines';
+  import { proposedByLabel } from '../ai_proposal';
 
   let list = $state<RoutineRow[]>([]);
   let loaded = $state(false);
   let error = $state<string | null>(null);
   let selected = $state<number | null>(null);
   let detail = $state<RoutineDetail | null>(null);
+  /** The run whose Change menu is open (G7.9). */
+  let changing = $state<number | null>(null);
   let tab = $state<RoutineTab>('runs');
   let busy = $state(false);
   let confirmDelete = $state(false);
@@ -882,7 +888,40 @@
                   {#if s}
                     <Button variant="quiet" size="sm" testid="routine-run-session" onclick={() => openSession(run)}>Session</Button>
                   {:else}<span></span>{/if}
-                  {#if runSourceHint(run)}
+                  {#if run.outcome === 'nothing' && !failed(run)}
+                    <!-- G7.9 (Automation board): "Nothing to do · kept out of
+                         Inbox · Proposed by Jev · Change · Send to Inbox". -->
+                    <span class="sub-line" data-testid="routine-run-nothing">
+                      <span class="meta">kept out of Inbox</span>
+                      {#if runSourceHint(run)}<span class="ai" data-testid="routine-run-jev" title={runSourceHint(run)}>{proposedByLabel('jev')}</span>{/if}
+                      {#if detail.may_change}
+                        {#if changing === run.id}
+                          <select
+                            aria-label="What this run came to"
+                            data-testid="routine-run-outcome"
+                            disabled={busy}
+                            value={run.outcome}
+                            onchange={(e) => {
+                              const v = (e.currentTarget as HTMLSelectElement).value as PersonOutcome;
+                              changing = null;
+                              if (v !== run.outcome) void act('Change', () => setRunOutcome(r.id, run.id, v));
+                            }}
+                          >
+                            {#each PERSON_OUTCOMES as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
+                          </select>
+                        {:else}
+                          <Button variant="quiet" size="sm" testid="routine-run-change" disabled={busy} onclick={() => (changing = run.id)}>Change</Button>
+                        {/if}
+                        <Button
+                          variant="quiet"
+                          size="sm"
+                          testid="routine-run-to-inbox"
+                          disabled={busy}
+                          onclick={() => void act('Send to Inbox', () => setRunOutcome(r.id, run.id, 'needs_person'))}>Send to Inbox</Button
+                        >
+                      {/if}
+                    </span>
+                  {:else if runSourceHint(run)}
                     <span class="sub-line">
                       <span class="ai" data-testid="routine-run-jev" title={runSourceHint(run)}>Read by Jev</span>
                       <span class="meta">from the run's last screen; open its session to check</span>

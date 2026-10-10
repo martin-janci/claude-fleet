@@ -31,7 +31,7 @@
   import WatchSummary from './WatchSummary.svelte';
   import ReviewDialog from './ReviewDialog.svelte';
   import { reviewerOf } from './review_scope';
-  import { reviewDecisionWords } from './prs';
+  import { prEvidenceLine, reviewDecisionWords } from './prs';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import DialogSheet from './DialogSheet.svelte';
@@ -567,6 +567,8 @@
     $sessions.filter((s) => s.kind === 'review' && s.reviews_session_id === session.id),
   );
   /** GitHub's review decision on this session's PR, in words. */
+  // G7.9: "15/15 checks · no reviews" beside the PR in the inspector.
+  const prLine = $derived(session.pr_url ? prEvidenceLine(session.pr_evidence) : '');
   const prReview = $derived(session.pr_url ? reviewDecisionWords(session.pr_evidence?.review_decision) : null);
   const reviewsShown = $derived(session.kind !== 'external' || reviewsOfThis.length > 0 || prReview !== null);
 
@@ -869,6 +871,9 @@
         style="color: {ciStatusColor(session.ci_status)}; border-color: color-mix(in srgb, {ciStatusColor(session.ci_status)} 33%, transparent);"
         title="CI checks: {session.ci_status}"
       >{ciStatusLabel(session.ci_status)}</span>
+    {/if}
+    {#if prLine}
+      <span class="pr-line" data-testid="details-pr-line">{prLine}</span>
     {/if}
   {/if}
 {/snippet}
@@ -1725,6 +1730,7 @@
     overflow: auto;
   }
   .pr-link { color: var(--accent); font-size: var(--text-xs); overflow-wrap: anywhere; }
+  .pr-line { color: var(--fg-muted); font-size: var(--text-xs); margin-left: 6px; }
   .host {
     color: var(--fg-muted);
     border: 1px solid var(--border);

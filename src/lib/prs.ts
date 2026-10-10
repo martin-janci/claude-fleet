@@ -2,6 +2,7 @@
 // session's branch has had, as reconcile recorded it (`pull_requests`), read
 // through `list_pull_requests` (the hub's `prs` tool when paired).
 import { invokeCmd, type Result } from './result';
+import type { PrEvidence } from './sessions';
 
 export type PrState = 'OPEN' | 'CLOSED' | 'MERGED';
 export type PrFilter = 'open' | 'merged' | 'closed' | 'all';
@@ -76,6 +77,17 @@ export function reviewDecisionWords(decision: string | null | undefined): string
     default:
       return null;
   }
+}
+
+/** The inspector's PR line (Main board, "15/15 checks · no reviews"; G7.9):
+ *  passing checks of those that ran, then the review decision, or '' when
+ *  the probe has not read the PR. Skipped checks count on neither side. */
+export function prEvidenceLine(ev: Pick<PrEvidence, 'checks' | 'review_decision'> | null | undefined): string {
+  if (!ev) return '';
+  const c = ev.checks;
+  const ran = c.total - c.skipped;
+  const checks = ran > 0 ? `${ran - c.pending - c.failing_total}/${ran} checks` : '';
+  return [checks, reviewDecisionWords(ev.review_decision) ?? 'no reviews'].filter(Boolean).join(' · ');
 }
 
 /** `owner/name#42`, or the URL when the repo could not be read from it. */

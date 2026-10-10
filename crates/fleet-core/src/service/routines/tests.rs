@@ -2015,3 +2015,98 @@ async fn a_failed_run_names_its_fix() {
     assert_eq!(tick::cap_words(90 * 60), "1 h 30 min");
     assert_eq!(tick::cap_words(2 * H), "2 h");
 }
+
+// G7.9: a person answers a run Jev read as "nothing to do" (Change, Send to
+// Inbox on the Automation board).
+#[tokio::test]
+async fn a_person_sends_a_nothing_run_to_the_inbox_and_jev_is_corrected() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let bo = person(&f.store, None, f.bo);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    let sid = run.session_id.unwrap();
+    event(&f, sid, "turn_done");
+    tick_once(&f.deps, OCT8 + 60).await;
+    let done = run_row(&f, run.id);
+    {
+        let s = lock(&f.store).unwrap();
+        assert!(outcome::record(
+            &s,
+            &done,
+            outcome::RunOutcome::Nothing,
+            outcome::OutcomeSource::Jev,
+            OCT8 + 90
+        )
+        .unwrap());
+        assert_eq!(
+            s.get_session_by_id(sid).unwrap().unwrap().last_viewed_at,
+            Some(OCT8 + 90)
+        );
+    }
+
+    // Another person may not answer it, and a bad value is refused.
+    assert_eq!(
+        set_run_outcome(&f.store, &bo, r.id, run.id, "needs_person", OCT8 + 120)
+            .unwrap_err()
+            .code,
+        codes::E_NOTFOUND
+    );
+    assert_eq!(
+        set_run_outcome(&f.store, &ana, r.id, run.id, "failed", OCT8 + 120)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID
+    );
+    assert_eq!(
+        set_run_outcome(&f.store, &ana, r.id, run.id + 99, "nothing", OCT8 + 120)
+            .unwrap_err()
+            .code,
+        codes::E_NOTFOUND
+    );
+
+    // Send to Inbox: the person's answer outranks Jev's, and the session's
+    // finished turn reads as unread again.
+    let sent = set_run_outcome(&f.store, &ana, r.id, run.id, "needs_person", OCT8 + 120).unwrap();
+    assert_eq!(sent.outcome.as_deref(), Some("needs_person"));
+    assert_eq!(sent.outcome_source.as_deref(), Some("rule"));
+    assert_eq!(
+        lock(&f.store)
+            .unwrap()
+            .get_session_by_id(sid)
+            .unwrap()
+            .unwrap()
+            .last_viewed_at,
+        None
+    );
+
+    // Change back: nothing to do marks it seen again.
+    let back = set_run_outcome(&f.store, &ana, r.id, run.id, "nothing", OCT8 + 150).unwrap();
+    assert_eq!(back.outcome.as_deref(), Some("nothing"));
+    assert_eq!(
+        lock(&f.store)
+            .unwrap()
+            .get_session_by_id(sid)
+            .unwrap()
+            .unwrap()
+            .last_viewed_at,
+        Some(OCT8 + 150)
+    );
+}
+
+#[tokio::test]
+async fn a_failed_run_stays_failed_whatever_a_person_says() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    f.fake.fail.store(true, Ordering::SeqCst);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    tick_once(&f.deps, OCT8 + 60).await;
+    assert_eq!(
+        set_run_outcome(&f.store, &ana, r.id, run.id, "did_work", OCT8 + 90)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID_STATE
+    );
+    assert_eq!(run_row(&f, run.id).outcome.as_deref(), Some("failed"));
+}

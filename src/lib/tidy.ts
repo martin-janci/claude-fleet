@@ -6,11 +6,12 @@
 // Nothing here acts on its own: every destructive action is a person's
 // confirm in the sheet (or the backend's opt-in auto-tidy).
 
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
-import { acceptCommandRow, type SessionRow } from './sessions';
+import { acceptCommandRow, dismissGhostSession, type SessionRow } from './sessions';
 import { ALL_SCOPES } from './orgs';
 import { sizeText } from './hosts_table';
+import { sessionIdBlocked } from './share';
 
 /** `service::gc::tidy::TidyReason` — tolerant of values a newer hub adds. */
 export type TidyReason =
@@ -27,7 +28,7 @@ export type TidyReason =
 export type TidyAction = 'archive' | 'safe_kill' | 'kill' | 'resume_or_expire' | (string & {});
 
 /** The sheet's per-row choice: an action, or leaving the row alone. */
-export type TidyChoice = 'safe_kill' | 'kill' | 'archive' | 'snooze' | 'never' | 'keep';
+export type TidyChoice = 'safe_kill' | 'kill' | 'archive' | 'snooze' | 'never' | 'keep' | 'expire';
 
 /** Reason order: the backend's ranking, the sheet's group order. */
 export const TIDY_REASONS = [
@@ -70,6 +71,7 @@ export const TIDY_CHOICE_LABELS: Record<TidyChoice, string> = {
   snooze: `Keep for ${KEEP_DAYS} days`,
   never: 'Never',
   keep: `Keep for ${KEEP_DAYS} days`,
+  expire: 'Expire',
 };
 
 /** What each choice does, in the words of the sheet's legend. They say what
@@ -82,6 +84,7 @@ export const TIDY_CHOICE_HELP: Record<TidyChoice, string> = {
   snooze: 'Out of Tidy for a week',
   never: 'Never suggest it again for this work',
   keep: 'Out of Tidy for a week',
+  expire: 'Forgets a stopped session now instead of at the time shown; it can no longer be restored',
 };
 
 /** The legend's Restore line, shown when the sheet has stopped sessions. */
@@ -94,7 +97,7 @@ export const TIDY_RESTORE_HELP =
 export function tidyLegend(cands: readonly TidyCandidate[]): { label: string; help: string }[] {
   const offered = new Set<TidyChoice>();
   for (const c of cands) for (const ch of choicesFor(c)) offered.add(ch);
-  const order: TidyChoice[] = ['safe_kill', 'kill', 'archive', 'snooze', 'keep', 'never'];
+  const order: TidyChoice[] = ['safe_kill', 'kill', 'archive', 'snooze', 'keep', 'never', 'expire'];
   const out: { label: string; help: string }[] = [];
   const seen = new Set<string>();
   for (const ch of order) {
@@ -232,6 +235,9 @@ export function choicesFor(c: TidyCandidate): TidyChoice[] {
   } else if (c.action === 'safe_kill' || c.action === 'kill') {
     out.push('keep');
   }
+  // G7.9: a stopped session can be let go now (`dismiss_ghost_session`),
+  // last, so it is never the preselected choice of a linked row.
+  if (c.action === 'resume_or_expire') out.push('expire');
   return out;
 }
 
@@ -320,6 +326,9 @@ export function tidyDetail(
       break;
     case 'never':
       what = 'Never suggested again for this work.';
+      break;
+    case 'expire':
+      what = 'Expire forgets the stopped session now; it can no longer be restored.';
       break;
     default:
       what = c.action === 'resume_or_expire' ? 'Resume or Restore all brings it back.' : '';
@@ -414,6 +423,45 @@ export async function applyTidy(items: TidyApplyItem[]): Promise<Result<{ result
   const r = await invokeCmd<{ results: TidyApplyResult[] }>('tidy_apply', { args: { items } });
   void refreshTidy();
   return r;
+}
+
+/** Apply the sheet's items: the Expire ones through `dismiss_ghost_session`
+ *  (G7.9), one call each, the rest in one `tidy_apply`. Every item is
+ *  reported in the order given; an `expire` that fails is a failed result,
+ *  never a dropped one. Fails whole only when `tidy_apply` itself does. */
+export async function applyTidyChoices(items: TidyApplyItem[]): Promise<Result<{ results: TidyApplyResult[] }>> {
+  const expire = items.filter((i) => i.action === 'expire');
+  const rest = items.filter((i) => i.action !== 'expire');
+  const byId = new Map<number, TidyApplyResult>();
+  if (rest.length > 0) {
+    const r = await invokeCmd<{ results: TidyApplyResult[] }>('tidy_apply', { args: { items: rest } });
+    if (!r.ok) {
+      void refreshTidy();
+      return r;
+    }
+    for (const x of r.value.results) byId.set(x.session_id, x);
+  }
+  // The write's own gate (`dismiss_ghost_session` is `drive`): a session
+  // this client may not drive is refused here, whatever the sheet showed.
+  const $sessionIdBlocked = get(sessionIdBlocked);
+  for (const i of expire) {
+    const blocked = $sessionIdBlocked(i.session_id, 'dismiss_ghost_session');
+    if (blocked !== null) {
+      byId.set(i.session_id, { session_id: i.session_id, action: 'expire', ok: false, outcome: null, error: blocked });
+      continue;
+    }
+    const r = await dismissGhostSession(i.session_id);
+    byId.set(i.session_id, {
+      session_id: i.session_id,
+      action: 'expire',
+      ok: r.ok,
+      outcome: r.ok ? 'expired' : null,
+      error: r.ok ? null : (r.error.message ?? 'expire failed'),
+    });
+  }
+  void refreshTidy();
+  const results = items.map((i) => byId.get(i.session_id)).filter((x): x is TidyApplyResult => x !== undefined);
+  return { ok: true, value: { results } };
 }
 
 async function rowCmd(cmd: string, args: Record<string, unknown>): Promise<Result<SessionRow>> {

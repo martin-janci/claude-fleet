@@ -18,7 +18,8 @@
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
-  import { capRows, groupRows, isFlatGroupBy, moreRunningText } from './row_groups';
+  import { localMidnight } from './today';
+  import { capRows, groupCountText, groupMoreText, groupRows, isFlatGroupBy } from './row_groups';
   import { startingSessions } from './session_starting';
   import { tablistKeys } from './tablist_keys';
   import {
@@ -1009,6 +1010,9 @@
   // rows; the line opens the rest. The selected row always shows.
   let expandedFlat: Set<string> = $state(new Set());
   const keepIds = $derived(new Set($selectedSession ? [$selectedSession.id] : []));
+  // G7.9: the Done group holds today's finished turns ("Done 6 today");
+  // older ones sit behind "N earlier ›".
+  const doneSince = $derived(localMidnight(nowSec * 1000));
 
   // ── Inbox (redesign step 3.3) ──
   // The rows the list would show under the same filters, narrowed to what
@@ -1878,7 +1882,7 @@
             >
               <span class="caret" class:collapsed={isCollapsed}>▾</span>
               <span class="label">{g.label}</span>
-              <span class="count">{g.rows.length}</span>
+              <span class="count">{groupCountText(g, doneSince)}</span>
             </div>
             {#if !isCollapsed}
               {@const offlineHost = flatBy === 'host' ? $hostByAlias.get(g.key) : undefined}
@@ -1892,7 +1896,7 @@
                   ontry={() => void onRefresh()}
                   trying={loading} />
               {/if}
-              {@const capped = capRows(g, expandedFlat, keepIds)}
+              {@const capped = capRows(g, expandedFlat, keepIds, undefined, doneSince)}
               <div role="group">
                 {#each capped.shown as sess (sess.id)}
                   {@render sessionRow(sess)}
@@ -1903,7 +1907,7 @@
                     class="btn btn--quiet group-more"
                     data-testid="group-more"
                     onclick={() => (expandedFlat = toggleIn(expandedFlat, g.key))}
-                    >{moreRunningText(capped.hidden)} ›</button
+                    >{groupMoreText(g, capped.hidden)} ›</button
                   >
                 {/if}
               </div>
