@@ -43,7 +43,7 @@
     const r = await listStartRules();
     loaded = true;
     if (r.ok) {
-      rules = r.value;
+      rules = Array.isArray(r.value) ? r.value : [];
       error = null;
     } else error = readErrorText(r.error);
   }

@@ -805,7 +805,7 @@ Parameters: `action`, `at`, `n`, `session_id`
 
 Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns its row.
 
-Parameters: `confirm_nonce`, `prompt`, `source_session_id`
+Parameters: `agent`, `confirm_nonce`, `prompt`, `source_session_id`
 
 ### `start_rules`
 

@@ -126,7 +126,17 @@
         >{disk.text}</span
       >
       <span role="gridcell" class="mono" data-testid="hosts-table-agent">
-        {agent.text}{#if agent.update}<span class="update" title="Older than the newest Claude Code in the fleet"> · update</span>{/if}
+        {agent.text}{#if agent.update} · <button
+            type="button"
+            class="update"
+            tabindex="-1"
+            title="Older than the newest Claude Code in the fleet: open {h.alias}'s health checklist"
+            data-testid="hosts-table-update"
+            onclick={(e) => {
+              e.stopPropagation();
+              onopen(h.alias);
+            }}>update</button
+          >{/if}
       </span>
       <span role="gridcell" class="accounts" data-testid="hosts-table-accounts">{signedIn.length ? signedIn.join(', ') : 'none'}</span>
       <span role="gridcell" class="open-cell">
@@ -185,6 +195,7 @@
   .machine { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .mono { font-variant-numeric: tabular-nums; white-space: nowrap; }
   .warn, .needs, .update { color: var(--usage-warn); }
+  button.update { padding: 0; border: none; background: none; font: inherit; text-decoration: underline; cursor: pointer; }
   .crit, .failed { color: var(--usage-crit); }
   .accounts { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .attention { font-size: var(--text-2xs); cursor: help; }

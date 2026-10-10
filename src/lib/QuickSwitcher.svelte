@@ -650,6 +650,13 @@
       ),
     ].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })),
   );
+  /** M15 G7.12: how many projects each of those groups holds ("3 projects"). */
+  const menuGroupCounts = $derived(
+    (newView?.entries ?? []).reduce<Record<string, number>>((m, x) => {
+      if (!x.group.key.startsWith('o:') && x.group.key !== 'f') m[x.group.name] = (m[x.group.name] ?? 0) + 1;
+      return m;
+    }, {}),
+  );
 
   function pickNew(key: string) {
     if (key === 'add') {
@@ -982,6 +989,7 @@
             pinned={e.pinned}
             hidden={!!e.hidden}
             groups={menuGroups}
+            counts={menuGroupCounts}
             currentGroup={e.group.name}
             manualGroup={e.manualGroup}
             startIn={menu.startIn}

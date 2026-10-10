@@ -1167,10 +1167,13 @@ export async function spawnReview(
   sourceSessionId: number,
   prompt: string,
   signal?: AbortSignal,
+  agent: 'claude' | 'codex' = 'claude',
 ): Promise<Result<SessionRow>> {
   const r = await invokeCmdAbortable<SessionRow>(
     'spawn_review',
-    { args: { source_session_id: sourceSessionId, prompt } },
+    // M15 G7.12: Codex as the reviewer; Claude Code stays the default and
+    // is not named, so an older hub reads the same call.
+    { args: agent === 'claude' ? { source_session_id: sourceSessionId, prompt } : { source_session_id: sourceSessionId, prompt, agent } },
     signal,
   );
   if (r.ok) mergeSession(r.value);

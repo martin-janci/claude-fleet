@@ -179,16 +179,18 @@ export function hostTidyHint(
   };
 }
 
-/** "Move to host" facts (gap plan G4.5): free disk, load and whether the
+/** "Move to host" facts (gap plan G4.5, latency M15 G7.12): latency, free disk, load and whether the
  *  host's account is at its limit, for picking where a session goes.
  *  `limited` is `attentionFacts.limited_accounts`. Empty when nothing is
  *  known. */
 export function moveTargetFacts(
-  h: Pick<HostRow, 'disk_home_free_kb' | 'load_1m' | 'account_uuid'>,
+  h: Pick<HostRow, 'disk_home_free_kb' | 'load_1m' | 'account_uuid'> & { latency_ms?: number | null },
   limited: Readonly<Record<string, { resets_at: number | null }>> | undefined,
   now: number,
 ): string {
   const parts: string[] = [];
+  // M15 G7.12: the last probe's round trip, as the hosts table shows it.
+  if (h.latency_ms != null) parts.push(`${h.latency_ms} ms`);
   if (h.disk_home_free_kb != null) parts.push(`${sizeText(h.disk_home_free_kb)} free`);
   if (h.load_1m != null) parts.push(`load ${h.load_1m.toFixed(1)}`);
   const limit = h.account_uuid ? limited?.[h.account_uuid] : undefined;

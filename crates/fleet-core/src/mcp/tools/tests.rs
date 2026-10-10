@@ -1999,6 +1999,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 args: sessions::SpawnReviewArgs {
                     source_session_id: on_b,
                     prompt: "review".into(),
+                    agent: None,
                     call_id: None,
                     origin: None,
                 },

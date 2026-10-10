@@ -19,6 +19,8 @@
   import { loadProposals, settingProposals, settingsWritable } from './pages/review';
   import { allPages, guideProposals, loadGuides } from './pages/guides';
   import { hosts } from './hosts';
+  import { basePathLine, checkHost } from './host_check';
+  import StartRules from './StartRules.svelte';
   import { mcpStatus } from './mcp';
   import { healthCheck } from './ipc';
   import { appVersion, loadAppVersion } from './app_version';
@@ -343,10 +345,53 @@
     baseDrafts = { ...baseDrafts, [alias]: (e.currentTarget as HTMLInputElement).value };
   }
 
+  // M15 G7.12: each base path is checked on its host (`check_host` with a
+  // base path) before it is saved: a path the login user cannot write stops
+  // the save, a host that does not answer does not.
+  let baseChecks = $state<Record<string, { path: string; text: string; problem: boolean }>>({});
+
+  async function checkBasePaths(): Promise<boolean> {
+    const asked = $hosts.map((h) => ({ alias: h.alias, path: previewRoot(h.alias) }));
+    const answers = await Promise.all(asked.map((a) => checkHost(a.alias, a.path)));
+    const next: typeof baseChecks = {};
+    let blocked = false;
+    answers.forEach((r, i) => {
+      const { alias, path } = asked[i];
+      const line = r.ok ? (r.value ? basePathLine(alias, r.value) : null) : { text: `${alias}: ${r.error.message}`, problem: false };
+      if (!line) return;
+      // Only a host that answered can say a path is wrong.
+      const problem = line.problem && r.ok && !r.value?.error;
+      next[alias] = { path, text: line.text, problem };
+      blocked ||= problem;
+    });
+    baseChecks = next;
+    return !blocked;
+  }
+
+  async function checkProjects() {
+    projectsBusy = true;
+    projectsError = null;
+    projectsMsg = null;
+    await checkBasePaths();
+    projectsBusy = false;
+  }
+
+  function discardProjects() {
+    resetProjectDrafts();
+    baseChecks = {};
+    projectsError = null;
+    projectsMsg = null;
+  }
+
   async function saveProjects() {
     projectsBusy = true;
     projectsError = null;
     projectsMsg = null;
+    if (!(await checkBasePaths())) {
+      projectsError = 'Not saved: a base path below cannot be used on its host.';
+      projectsBusy = false;
+      return;
+    }
     const map: Record<string, string> = {};
     for (const [alias, p] of Object.entries(baseDrafts)) {
       const t = p.trim();
@@ -693,18 +738,42 @@
             data-testid="projects-preview-{h.alias}">
             {pathErr ?? projectPathPreview(previewRoot(h.alias), layoutDraft)}
           </span>
+          {#if baseChecks[h.alias] && baseChecks[h.alias].path === previewRoot(h.alias) && pathErr === null}
+            <span
+              class="hook-desc project-preview"
+              class:err={baseChecks[h.alias].problem}
+              data-testid="projects-check-{h.alias}">{baseChecks[h.alias].text}</span
+            >
+          {/if}
         </div>
       {/each}
       <div class="mcp-field">
+        <button
+          onclick={checkProjects}
+          disabled={projectsBusy || projectsInvalid || !projectsLoaded}
+          data-testid="projects-check">Check on hosts</button>
+        <button
+          onclick={discardProjects}
+          disabled={projectsBusy || !projectsLoaded}
+          data-testid="projects-discard">Discard</button>
         <button
           onclick={saveProjects}
           disabled={projectsBusy || projectsInvalid || !projectsLoaded}
           data-testid="projects-save">Save &amp; rescan</button>
         {#if projectsMsg}<span class="hook-desc" data-testid="projects-msg">{projectsMsg}</span>{/if}
       </div>
-      {#if projectsError}<p class="err">{projectsError}</p>{/if}
+      {#if projectsError}<p class="err" data-testid="projects-error">{projectsError}</p>{/if}
     </section>
     {/if}
+    <!-- M15 G7.12: the start rules inline under Projects (Accounts forms
+         board); the same list Automation › Rules shows. -->
+    <section class="block" data-testid="projects-start-rules">
+      <div class="section-header">
+        <h4>Start rules</h4>
+      </div>
+      <p class="mcp-blurb">A ticket key decides the project and host a session starts in.</p>
+      {#if panel === 'projects'}<StartRules />{/if}
+    </section>
     </div>
 
     <div class="panel" hidden={panel !== 'appearance'} data-testid="settings-panel-onboarding">

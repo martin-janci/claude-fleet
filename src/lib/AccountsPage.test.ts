@@ -1,3 +1,4 @@
+import { waitingOut } from './account_limits';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -255,7 +256,9 @@ describe('AccountsPage: spend, routines and paused sessions (4.1 / 4.2)', () => 
 
     await fireEvent.click(screen.getByTestId('account-paused-show'));
     expect(screen.getByTestId('account-detail').textContent).toContain('Paused by its limit');
-    expect(within(screen.getByTestId('account-sessions')).getAllByRole('button')).toHaveLength(2);
+    expect(within(screen.getByTestId('account-sessions')).getAllByRole('listitem')).toHaveLength(2);
+    // M15 G7.12: each paused row answers on the spot, Switch account or Wait.
+    expect(within(screen.getByTestId('account-sessions')).getAllByText(/Paused · limit/)).toHaveLength(2);
 
     await fireEvent.click(sw);
     await waitFor(() => expect(inv.mock.calls.filter((c) => c[0] === 'restart_session')).toHaveLength(2));
@@ -269,10 +272,28 @@ describe('AccountsPage: spend, routines and paused sessions (4.1 / 4.2)', () => 
     openPausedSessions(ADMIN.uuid);
     render(AccountsPage, props);
     await waitFor(() => expect(screen.getByTestId('account-detail').textContent).toContain('Paused by its limit'));
-    expect(within(screen.getByTestId('account-sessions')).getAllByRole('button')).toHaveLength(2);
+    expect(within(screen.getByTestId('account-sessions')).getAllByRole('listitem')).toHaveLength(2);
     expect(get(accountsPausedRequest)).toBe(false);
     await fireEvent.click(screen.getByTestId('account-paused-all'));
     expect(screen.getByTestId('account-detail').textContent).toContain('Sessions on it');
+  });
+
+  it('Wait until puts every paused session of the account on wait (M15 G7.12)', async () => {
+    accountUsage.set(atLimit());
+    render(AccountsPage, props);
+    const wait = await screen.findByTestId('account-paused-wait');
+    expect(wait.textContent).toContain('Wait until');
+    await fireEvent.click(wait);
+    expect(get(waitingOut).size).toBe(2);
+    expect(inv.mock.calls.some((c) => c[0] === 'restart_session')).toBe(false);
+  });
+
+  it('the header reads when usage was refreshed, and Refresh reads every account again (M15 G7.12)', async () => {
+    render(AccountsPage, props);
+    const btn = screen.getByTestId('accounts-refresh-all');
+    expect(screen.getByTestId('accounts-count').textContent).toMatch(/usage refreshed/);
+    await fireEvent.click(btn);
+    await waitFor(() => expect(inv.mock.calls.filter((c) => c[0] === 'refresh_account_usage').length).toBeGreaterThan(1));
   });
 
   it('an account under its limit shows no paused line', () => {

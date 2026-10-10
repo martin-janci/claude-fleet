@@ -1,6 +1,7 @@
 <script lang="ts">
   // Start a review run (step 5.10's one dialog pattern): who reviews (a skill
-  // on the session's host, run by Claude Code) and what it reads (the scope).
+  // on the session's host, run by Claude Code or Codex, M15 G7.12) and what
+  // it reads (the scope).
   // Both become lines shown above the prompt; the prompt stays editable, and
   // what is sent is exactly what the dialog shows.
   import { onMount } from 'svelte';
@@ -13,17 +14,22 @@
   import DialogSheet from './DialogSheet.svelte';
   import {
     REVIEW_SCOPES,
+    REVIEWER_AGENTS,
     reviewPreamble,
     reviewPrompt,
     reviewerSkills,
+    type ReviewerAgent,
     type ReviewScope,
   } from './review_scope';
+  import type { AssetInventoryRow } from './assets';
 
   let { source, onClose }: { source: SessionRow; onClose: () => void } = $props();
 
   let prompt = $state(DEFAULT_REVIEW_PROMPT);
   let skill = $state<string | null>(null);
-  let skills = $state<string[]>([]);
+  let agent = $state<ReviewerAgent>('claude');
+  let inventory = $state<AssetInventoryRow[]>([]);
+  const skills = $derived(reviewerSkills(inventory, source.host_alias, agent));
   let scope = $state<ReviewScope>('branch');
   let spawning = $state(false);
   let error = $state<string | null>(null);
@@ -46,10 +52,16 @@
     // Best effort: without an inventory the reviewer is plain Claude Code.
     const r = await loadInventory();
     if (r.ok && Array.isArray(r.value)) {
-      skills = reviewerSkills(r.value, source.host_alias);
+      inventory = r.value;
       skill = skills.find((n) => /review/i.test(n)) ?? null;
     }
   });
+
+  function pickAgent(a: ReviewerAgent) {
+    agent = a;
+    // The skill list is the agent's harness's; keep the pick only if it is there.
+    if (skill && !skills.includes(skill)) skill = skills.find((n) => /review/i.test(n)) ?? null;
+  }
 
   async function start() {
     if (!canStart) return;
@@ -57,7 +69,7 @@
     error = null;
     controller = new AbortController();
     try {
-      const r = await spawnReview(source.id, reviewPrompt(skill, scope, prompt), controller.signal);
+      const r = await spawnReview(source.id, reviewPrompt(skill, scope, prompt), controller.signal, agent);
       if (r.ok) {
         selectSessionExplicitly(r.value);
         onClose();
@@ -99,7 +111,15 @@
         <option value="">No skill</option>
         {#each skills as s (s)}<option value={s}>{s} skill</option>{/each}
       </select>
-      <span class="field-note">run by Claude Code</span>
+      <span class="field-note">run by</span>
+      <select
+        data-testid="review-agent"
+        aria-label="Reviewer agent"
+        value={agent}
+        onchange={(e) => pickAgent((e.currentTarget as HTMLSelectElement).value as ReviewerAgent)}
+      >
+        {#each REVIEWER_AGENTS as a (a.value)}<option value={a.value}>{a.label}</option>{/each}
+      </select>
     </span>
   </label>
 

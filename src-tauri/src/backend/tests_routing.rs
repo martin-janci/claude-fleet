@@ -3441,6 +3441,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     SpawnReviewArgs {
                         source_session_id: 7,
                         prompt: "review it".into(),
+                        agent: None,
                         call_id: None,
                         origin: None,
                     },
@@ -3465,6 +3466,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     SpawnReviewArgs {
                         source_session_id: 7,
                         prompt: "review it".into(),
+                        agent: None,
                         call_id: Some(123),
                         origin: None,
                     },

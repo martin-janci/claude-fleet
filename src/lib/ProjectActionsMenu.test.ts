@@ -72,8 +72,21 @@ describe('ProjectActionsMenu', () => {
     expect(document.activeElement?.textContent).toBe('claude');
     await fireEvent.keyDown(document.activeElement as Element, { key: 'ArrowUp' });
     expect(document.activeElement).toBe(input);
+    // Up from the input wraps to the last item, Cancel (M15 G7.12).
     await fireEvent.keyDown(input, { key: 'ArrowUp' });
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('project-group-cancel');
+    await fireEvent.keyDown(document.activeElement as Element, { key: 'ArrowUp' });
     expect(document.activeElement?.textContent).toBe('sales-twins');
+  });
+
+  it('each group says how many projects it holds, and Cancel closes (M15 G7.12)', async () => {
+    const p = groupsProps({ counts: { claude: 3, openmarket: 1 } });
+    render(ProjectActionsMenu, { props: p });
+    await tick();
+    expect(screen.getAllByTestId('project-group-count').map((e) => e.textContent)).toEqual(['3 projects', '1 project']);
+    await fireEvent.click(screen.getByTestId('project-group-cancel'));
+    expect(p.onclose).toHaveBeenCalled();
+    expect(p.ongroup).not.toHaveBeenCalled();
   });
 
   it('the group input is capped at 40 characters', () => {

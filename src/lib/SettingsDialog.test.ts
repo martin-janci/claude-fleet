@@ -224,6 +224,40 @@ describe('SettingsDialog projects (W5 G3)', () => {
     expect(inv).toHaveBeenCalledWith('refresh_projects', undefined);
   });
 
+  it('checks each base path on its host and keeps a path the user cannot write unsaved (M15 G7.12)', async () => {
+    const inv = routeProjects();
+    const base = inv.getMockImplementation() as (cmd: string, args?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, args?: { args?: { alias: string; base_path?: string } }) => {
+      if (cmd === 'check_host') {
+        const a = args!.args!;
+        const state = a.base_path === '/srv/work' ? 'unwritable' : 'ok';
+        return { alias: a.alias, checked_at: 1, error: null, tmux_version: null, agents_on_path: null, fleet_hooks: null, guard_hook: null, base_path: { path: a.base_path, state, user: 'dev' } };
+      }
+      return base(cmd, args);
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await ready();
+    await fireEvent.input(screen.getByTestId('projects-base-mefistos'), { target: { value: '/srv/work' } });
+    await fireEvent.click(screen.getByTestId('projects-save'));
+    await waitFor(() => expect(screen.getByTestId('projects-check-mefistos')).toHaveTextContent('/srv/work is not writable by user dev on mefistos.'));
+    expect(screen.getByTestId('projects-check-mefistos')).toHaveClass('err');
+    expect(screen.getByTestId('projects-error')).toBeInTheDocument();
+    expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.objectContaining({ key: 'projects.base_path' }));
+    expect(inv).toHaveBeenCalledWith('check_host', { args: { alias: 'mefistos', base_path: '/srv/work' } });
+    // Discard puts the saved value back and drops the stale line.
+    await fireEvent.click(screen.getByTestId('projects-discard'));
+    await tick();
+    expect((screen.getByTestId('projects-base-mefistos') as HTMLInputElement).value).toBe('');
+    expect(screen.queryByTestId('projects-check-mefistos')).toBeNull();
+  });
+
+  it('shows the start rules inline under Projects (M15 G7.12)', async () => {
+    routeProjects();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await ready();
+    expect(screen.getByTestId('projects-start-rules')).toBeInTheDocument();
+  });
+
   it('flags an invalid path and disables Save', async () => {
     const inv = routeProjects();
     render(SettingsDialog, { props: { onClose: () => {} } });
