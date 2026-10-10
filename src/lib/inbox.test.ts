@@ -3,6 +3,7 @@ import { get } from 'svelte/store';
 import {
   inboxCount,
   inboxRows,
+  inboxSections,
   nextInInbox,
   notWaiting,
   notWaitingSaid,
@@ -39,9 +40,9 @@ describe('inbox', () => {
   it('a ghost leaves the Inbox and is counted below it as paused', () => {
     expect(attentionState(rows[4], opts)).toBe('paused');
     const n = notWaiting(rows, opts);
-    expect(n).toEqual({ working: 1, idle: 2, done: 0, paused: 1 });
+    expect(n).toEqual({ working: 1, idle: 2, completedToday: 0, done: 0, paused: 1 });
     expect(notWaitingText(n)).toBe('1 running · 2 idle · 1 paused');
-    expect(notWaitingText({ working: 0, idle: 0, done: 0, paused: 0 })).toBe('');
+    expect(notWaitingText({ working: 0, idle: 0, completedToday: 0, done: 0, paused: 0 })).toBe('');
   });
 });
 
@@ -88,5 +89,61 @@ describe('G1.6: Jev proposals and waiting missions', () => {
     );
     expect(get(inboxCount)).toBe(1);
     waitingMissions.set([]);
+  });
+});
+
+describe('G3.1: the Inbox by state, from the attention model', () => {
+  const none = { missions: 0, failingRoutines: 0, proposed: 0 };
+  const limited = session('mac', 'limited', { claude_status: 'idle', account_uuid: 'acc' });
+  const facts = { limited_accounts: { acc: { window: 'weekly' as const, resets_at: opts.now + 3600 } } };
+  const withFacts = { ...opts, facts };
+
+  it('splits the queue into Needs you (Action required and Blocked) and Failed', () => {
+    const all = [...rows, limited];
+    const secs = inboxSections(all, withFacts, 'state', none);
+    expect(secs.map((s) => [s.key, s.label, s.count])).toEqual([
+      ['needs_you', 'Needs you', 2],
+      ['failed', 'Failed', 1],
+    ]);
+    expect(secs[0].rows.map((s) => s.tmux_name)).toEqual(['asking', 'limited']);
+    expect(secs[1].rows.map((s) => s.tmux_name)).toEqual(['crashed']);
+    // The sections add up to the badge.
+    expect(secs.reduce((n, s) => n + s.count, 0)).toBe(countNeedsYou(all, withFacts));
+  });
+
+  it('puts missions and Jev proposals in Needs you and failed routines in Failed', () => {
+    const secs = inboxSections([], opts, 'state', { missions: 1, failingRoutines: 2, proposed: 1 });
+    expect(secs.map((s) => [s.key, s.count, s.missions, s.proposed, s.routines])).toEqual([
+      ['needs_you', 1, true, true, false],
+      ['failed', 2, false, false, true],
+    ]);
+    // A proposal alone opens Needs you, and is never in its count.
+    expect(inboxSections([], opts, 'state', { ...none, proposed: 1 }).map((s) => [s.key, s.count])).toEqual([
+      ['needs_you', 0],
+    ]);
+    expect(inboxSections([rows[2]], opts, 'state', none)).toEqual([]);
+  });
+
+  it('as one queue: every row worst first, under no header', () => {
+    const secs = inboxSections(rows, opts, 'none', { ...none, missions: 1 });
+    expect(secs).toHaveLength(1);
+    expect(secs[0].label).toBeNull();
+    expect(secs[0].rows.map((s) => s.tmux_name)).toEqual(['asking', 'crashed']);
+    expect(secs[0].count).toBe(3);
+    expect(inboxSections([rows[2]], opts, 'none', none)).toEqual([]);
+  });
+
+  it('counts the turns that finished since midnight as completed today', () => {
+    const midnight = opts.now - 3600;
+    const today = [
+      session('mac', 'shipped', { claude_status: 'completed', last_stop_at: opts.now - 60 }),
+      session('mac', 'unread', { claude_status: 'idle', last_stop_at: opts.now - 30, started_at: opts.now - 900 }),
+      session('mac', 'yesterday', { claude_status: 'idle', last_stop_at: midnight - 60 }),
+      session('mac', 'busy', { claude_status: 'working', last_stop_at: opts.now - 60 }),
+    ];
+    expect(attentionState(today[1], opts)).toBe('done');
+    const n = notWaiting(today, opts, midnight);
+    expect(n).toEqual({ working: 1, idle: 1, completedToday: 2, done: 0, paused: 0 });
+    expect(notWaitingText(n)).toBe('1 running · 1 idle · 2 completed today');
   });
 });

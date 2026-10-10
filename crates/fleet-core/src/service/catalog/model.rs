@@ -37,15 +37,19 @@ pub enum Kind {
     Hook,
     McpServer,
     PluginRef,
+    /// A slash command (gap plan G2.6): a prompt a person runs as
+    /// `/name`, with an argument hint and an allowed-tools list.
+    Command,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 5] = [
+    pub const ALL: [Kind; 6] = [
         Kind::Skill,
         Kind::Agent,
         Kind::Hook,
         Kind::McpServer,
         Kind::PluginRef,
+        Kind::Command,
     ];
 
     /// Directory inside the catalog repo that holds this kind.
@@ -56,6 +60,7 @@ impl Kind {
             Kind::Hook => "hooks",
             Kind::McpServer => "mcp",
             Kind::PluginRef => "plugins",
+            Kind::Command => "commands",
         }
     }
 
@@ -71,12 +76,14 @@ impl Kind {
             Kind::Hook => "hook",
             Kind::McpServer => "mcp_server",
             Kind::PluginRef => "plugin_ref",
+            Kind::Command => "command",
         }
     }
 
-    /// Skills and agents are folders (asset.yaml + body); the rest are single files.
+    /// Skills, agents and commands are folders (asset.yaml + body); the
+    /// rest are single files.
     pub fn is_folder(&self) -> bool {
-        matches!(self, Kind::Skill | Kind::Agent)
+        matches!(self, Kind::Skill | Kind::Agent | Kind::Command)
     }
 }
 
@@ -243,6 +250,18 @@ pub enum AssetSpec {
         plugin: String,
         version: String,
     },
+    /// A slash command; its prompt is the body (`prompt.md`).
+    Command {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        allowed_tools: Vec<String>,
+        /// What follows the command, e.g. `[ticket] [branch]`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        argument_hint: Option<String>,
+        /// A neutral tier (`fast`, `default`, `strong`); absent runs on the
+        /// session's own model.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
 }
 
 /// A file that ships alongside a skill (`resources/…`).
@@ -289,7 +308,7 @@ pub struct Problem {
 pub struct Asset {
     pub header: Header,
     pub spec: AssetSpec,
-    /// `body.md` (skill) or `prompt.md` (agent). Empty for other kinds.
+    /// `body.md` (skill) or `prompt.md` (agent, command). Empty for other kinds.
     pub body: String,
     pub resources: Vec<Resource>,
 }
@@ -425,6 +444,7 @@ impl Asset {
             AssetSpec::Hook { .. } => Kind::Hook,
             AssetSpec::McpServer { .. } => Kind::McpServer,
             AssetSpec::PluginRef { .. } => Kind::PluginRef,
+            AssetSpec::Command { .. } => Kind::Command,
         };
         if spec_kind != file.header.kind {
             return Err("kind field does not match the kind-specific fields".into());
@@ -549,6 +569,25 @@ impl Asset {
                 }
                 if version.trim().is_empty() {
                     out.push("version must be an exact version or 'latest'".into());
+                }
+            }
+            AssetSpec::Command {
+                allowed_tools,
+                argument_hint,
+                model,
+            } => {
+                for t in allowed_tools {
+                    if !is_valid_tool(t) {
+                        out.push(format!("allowed_tools: unknown tool '{t}'"));
+                    }
+                }
+                if argument_hint.as_deref().is_some_and(|h| h.contains('\n')) {
+                    out.push("argument_hint must be one line".into());
+                }
+                if let Some(m) = model {
+                    if !TIERS.contains(&m.as_str()) {
+                        out.push(format!("model '{m}' must be one of {TIERS:?}"));
+                    }
                 }
             }
         }

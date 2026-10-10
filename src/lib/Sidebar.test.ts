@@ -1,4 +1,6 @@
 import { sidebarView } from './work_view';
+import { inboxGroupBy, notWaitingSaid } from './inbox';
+import { waitingMissions, waitingOf } from './mission_waits';
 import { fireEvent, render, screen, within, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
@@ -3318,6 +3320,86 @@ describe('Inbox (redesign step 3.3)', () => {
     await tick();
     expect(get(sidebarView)).toBe('sessions');
     expect(screen.getAllByTestId('sess-row')).toHaveLength(3);
+  });
+
+  // G3.1: the Main board's Inbox, from the one attention model.
+  it('groups by state: Needs you with its missions and "+1 proposed", then Failed', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const jev = { ...sessionFor(2, 'dev-maybe'), claude_status: 'idle' as const, turn_outcome: 'asked' as const, last_stop_at: now - 30, last_activity_at: now };
+    mockBackend(fakeProjects, [...fleet(), jev]);
+    inboxGroupBy.set('state');
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await tick(); await tick();
+    waitingMissions.set(
+      waitingOf([
+        { id: 7, name: 'Hub federation v2', goal: 'g', mode: 'finite', state: 'active', level: 2, plan_version: 1, created_at: 1, updated_at: 1, version: 1, waiting_on: { reason: 'sign_grant', since: now - 60, open_cards: 0 } },
+      ]),
+    );
+    await tick();
+    const secs = screen.getAllByTestId('inbox-section');
+    expect(secs.map((x) => x.dataset.key)).toEqual(['needs_you', 'failed']);
+    const [needs, failed] = secs;
+    expect(within(needs).getByTestId('inbox-section-head').textContent).toMatch(/Needs you\s*2\s*\+1 proposed/);
+    expect(within(needs).getAllByTestId('sess-row').map((r) => r.textContent ?? '').some((t) => t.includes('dev-asking'))).toBe(true);
+    expect(within(needs).getByTestId('mission-wait').textContent).toContain('sign the autonomy grant');
+    // Jev's row sits at the foot of Needs you with its pill, out of the count.
+    const proposed = within(needs).getByTestId('inbox-proposed');
+    expect(within(proposed).getByTestId('sess-row').textContent).toContain('dev-maybe');
+    expect(within(proposed).getByTestId('inbox-proposed-by').textContent).toContain('Proposed by Jev');
+    expect(within(failed).getByTestId('inbox-section-head').textContent).toMatch(/Failed\s*1/);
+    expect(within(failed).getByTestId('sess-row').textContent).toContain('dev-crashed');
+    expect(screen.getByTestId('inbox-head').textContent).toContain('3 need you');
+    // "Not waiting" sets the reading aside: the row and "+1 proposed" go.
+    await fireEvent.click(within(proposed).getByTestId('inbox-proposed-by-change'));
+    await tick();
+    expect(screen.queryByTestId('inbox-proposed')).toBeNull();
+    expect(screen.queryByTestId('inbox-proposed-count')).toBeNull();
+    waitingMissions.set([]);
+    notWaitingSaid.set(new Set());
+  });
+
+  it('"Group: None" lists one queue under no section header', async () => {
+    mockBackend(fakeProjects, fleet());
+    sidebarView.set('inbox');
+    inboxGroupBy.set('state');
+    render(Sidebar);
+    await tick(); await tick();
+    const select = screen.getByTestId('inbox-group-select') as HTMLSelectElement;
+    expect(select.value).toBe('state');
+    await fireEvent.change(select, { target: { value: 'none' } });
+    await tick();
+    expect(get(inboxGroupBy)).toBe('none');
+    expect(screen.getAllByTestId('inbox-section')).toHaveLength(1);
+    expect(screen.queryByTestId('inbox-section-head')).toBeNull();
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
+    // The Sessions list keeps its own grouping.
+    expect(get(sidebarGroupBy)).not.toBe('none');
+    inboxGroupBy.set('state');
+  });
+
+  it('says what finished today and folds a mass loss into one Restore line', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const lost = Array.from({ length: 4 }, (_, i) => ({
+      ...sessionFor(1, `trn-lost-${i}`),
+      host_alias: 'trn',
+      lost_at: now - 100,
+      claude_session_id: `c-trn-${i}`,
+      claude_status: 'idle' as const,
+    }));
+    const finished = { ...sessionFor(2, 'dev-finished'), claude_status: 'completed' as const, last_stop_at: now - 5, last_activity_at: now - 5 };
+    mockBackend(fakeProjects, [...fleet(), finished, ...lost]);
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await tick(); await tick();
+    const rest = screen.getByTestId('inbox-rest').textContent ?? '';
+    expect(rest).toContain('1 running');
+    expect(rest).toContain('1 completed today');
+    // The stopped rows are the Restore line, not "4 paused".
+    expect(rest).not.toContain('paused');
+    const fold = within(screen.getByTestId('inbox')).getByTestId('lost-fold');
+    expect(within(fold).getByTestId('lost-fold-toggle')).toHaveTextContent('4 stopped on trn');
+    expect(within(fold).getByTestId('lost-fold-restore')).toHaveTextContent('Restore');
   });
 
   it('has no Today tab: Today lives in Control since step 9.1', async () => {

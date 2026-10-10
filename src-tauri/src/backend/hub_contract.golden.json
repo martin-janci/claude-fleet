@@ -45,6 +45,7 @@
       "aheadOfBase",
       "base",
       "baseFiles",
+      "behindBase",
       "branch",
       "truncated",
       "unpushed",
@@ -52,8 +53,10 @@
       "upstream"
     ],
     "ChangedFile": [
+      "added",
       "orig_path",
       "path",
+      "removed",
       "staged",
       "status"
     ],
@@ -72,6 +75,7 @@
       "date",
       "files",
       "hash",
+      "pushed",
       "subject"
     ],
     "ConfirmRequest": [
@@ -290,7 +294,11 @@
       "error",
       "failed_at",
       "id",
-      "session_id"
+      "not_before",
+      "session_id",
+      "skip_if_archived",
+      "skipped_at",
+      "until_limit_reset"
     ],
     "FileBlame": [
       "hunks",
@@ -780,6 +788,7 @@
       "terminals"
     ],
     "ShellTerminalsResult.terminals": [
+      "command",
       "n",
       "tmux_name"
     ],

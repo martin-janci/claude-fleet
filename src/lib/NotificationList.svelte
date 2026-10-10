@@ -4,6 +4,18 @@
   // the toast is still up; after that the entry is something to read.
   import { markAllNoticesRead, clearNotices, notices, removeNotice, unreadNotices, type Notice } from './notifications';
   import { runToastAction, toasts } from './toasts';
+  import { openSettingsAt } from './app_views';
+  import Icon from './kit/Icon.svelte';
+
+  // `onleave`: the sheet holding the list closes before ⚙ opens Settings,
+  // so the two dialogs do not stack.
+  let { onleave }: { onleave?: () => void } = $props();
+
+  /** ⚙: Settings › Notifications, where what reaches you (and where) is set. */
+  function openNotificationSettings() {
+    onleave?.();
+    openSettingsAt('notifications');
+  }
 
   const KIND_MARK = { info: 'ℹ', success: '✓', warning: '!', error: '✕' } as const;
 
@@ -21,6 +33,14 @@
 <div class="bar">
   <button type="button" data-testid="notices-mark-read" disabled={$unreadNotices === 0} onclick={markAllNoticesRead}>Mark all read</button>
   <button type="button" data-testid="notices-clear" disabled={$notices.length === 0} onclick={clearNotices}>Clear all</button>
+  <button
+    type="button"
+    class="gear"
+    data-testid="notices-settings"
+    aria-label="Notification settings"
+    title="Notification settings"
+    onclick={openNotificationSettings}><Icon name="settings" size={14} /></button
+  >
 </div>
 {#if $notices.length === 0}
   <p class="hint" data-testid="notices-empty">Nothing yet. What fleet tells you in the corner stays here for this window.</p>
@@ -32,11 +52,15 @@
         <span class="mark" aria-hidden="true">{KIND_MARK[n.kind]}</span>
         <div class="main">
           <span class="message">{n.message}{#if n.count > 1}<span class="count"> ×{n.count}</span>{/if}</span>
+          {#if n.sub}<span class="sub" data-testid="notice-sub">{n.sub}</span>{/if}
           <span class="meta">{#if n.code}<code>{n.code}</code> · {/if}{age(n.at)}</span>
         </div>
         <div class="actions">
           {#if t?.action}
             <button type="button" data-testid="notice-action" onclick={() => runToastAction(t.id)}>{t.action.label}</button>
+            {#if t.secondary}
+              <button type="button" data-testid="notice-secondary" onclick={() => runToastAction(t.id, 'secondary')}>{t.secondary.label}</button>
+            {/if}
           {/if}
           <button type="button" aria-label="Remove" title="Remove" onclick={() => removeNotice(n.id)}>✕</button>
         </div>
@@ -82,6 +106,8 @@
     flex: 1;
   }
   .message { word-break: break-word; }
+  .sub { font-size: var(--text-2xs); color: var(--fg-muted); }
+  .gear { display: inline-flex; align-items: center; padding: 0.2rem 0.4rem; }
   .unread .message { font-weight: 600; }
   .count,
   .meta,

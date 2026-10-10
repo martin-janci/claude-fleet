@@ -133,6 +133,36 @@ fn the_lifecycle_moves_only_forward_or_between_active_and_paused() {
         kinds(&s, m.id),
         ["created", "state", "state", "state", "state"]
     );
+    // Reopen (G3.7): back to paused, never straight to active, and no
+    // longer finished.
+    let reopened = s.set_mission_state(m.id, None, "paused", "fleet").unwrap();
+    assert_eq!(reopened.state, "paused");
+    assert_eq!(reopened.finished_at, None);
+    assert_eq!(
+        reopened.started_at,
+        Some(started),
+        "a reopen keeps the start"
+    );
+    s.update_mission(m.id, None, &MissionPatch::default(), "fleet")
+        .expect("a reopened mission changes again");
+}
+
+#[test]
+fn every_finished_state_reopens_to_paused() {
+    let s = store();
+    for end in ["completed", "failed", "cancelled"] {
+        let m = mission(&s, &format!("m-{end}"), None);
+        s.set_mission_state(m.id, None, "active", "fleet").unwrap();
+        s.set_mission_state(m.id, None, end, "fleet").unwrap();
+        for refused in ["draft", "active"] {
+            let e = s
+                .set_mission_state(m.id, None, refused, "fleet")
+                .unwrap_err();
+            assert_eq!(e.code, codes::E_INVALID, "{end} → {refused}");
+        }
+        let r = s.set_mission_state(m.id, None, "paused", "fleet").unwrap();
+        assert_eq!(r.state, "paused", "{end} reopens");
+    }
 }
 
 #[test]

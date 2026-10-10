@@ -11,7 +11,7 @@
   import { startingValues, stepProblems, visibleSteps } from './form_model';
   import { optionsOfField, type FieldProblem, type FormField, type FormProposal, type FormSpec, type OptionSpec, type Values } from './forms';
   import { reviewSections } from './receipt';
-  import { clearSaved, loadSaved, saveForLater } from './saved_answers';
+  import { clearSaved, loadSaved, restorable, saveForLater } from './saved_answers';
   import ProposedBy from '../ProposedBy.svelte';
   import DraftedLabel from '../DraftedLabel.svelte';
   import { neverDecidesField, preselect } from '../ai_proposal';
@@ -71,7 +71,9 @@
   // wizard while it loads another form), so the starting values are read once on purpose.
   // svelte-ignore state_referenced_locally
   // svelte-ignore state_referenced_locally
-  const kept = spec.save_later && saveKey ? loadSaved(saveKey) : null;
+  const saved = spec.save_later && saveKey ? loadSaved(saveKey) : null;
+  // svelte-ignore state_referenced_locally
+  const kept = saved ? restorable(spec, saved) : null;
   // svelte-ignore state_referenced_locally
   const started: Values = { ...startingValues(spec, !ownDefaults), ...initial, ...(kept ?? {}) };
   let values = $state<Values>({ ...started });

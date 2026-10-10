@@ -189,6 +189,19 @@ describe('shortcut registry', () => {
     expect(findConflicts()).toEqual([]);
   });
 
+  it('⌘N is free for New task in Work: it shadows New session there and clashes with nothing (G2.1)', () => {
+    const row = SHORTCUTS.find((s) => s.id === 'work.new-task');
+    expect(row?.shadows).toEqual(['new-session']);
+    const cmdN: KeyEventLike = { key: 'n', metaKey: true, ctrlKey: false, altKey: false, shiftKey: false };
+    const ctrlShiftN: KeyEventLike = { key: 'N', metaKey: false, ctrlKey: true, altKey: false, shiftKey: true };
+    expect(matchShortcut('work', cmdN, true)).toBe('work.new-task');
+    expect(matchShortcut('work', ctrlShiftN, false)).toBe('work.new-task');
+    expect(matchShortcut('global', cmdN, true)).toBe('new-session');
+    // Without the shadow the two would clash; with it, nothing does.
+    expect(findConflicts(SHORTCUTS.map((s) => (s.id === 'work.new-task' ? { ...s, shadows: [] } : s)))).toHaveLength(2);
+    expect(findConflicts()).toEqual([]);
+  });
+
   it('a duplicate chord fails the check', () => {
     const dup: Shortcut = {
       id: 'test.dup', scope: 'global', action: 'Clash with Today', status: 'planned',
@@ -376,6 +389,9 @@ const FROZEN_054: Record<string, Frozen> = {
     if (e.key === 'e' || e.key === 'E') return 'work-board.edit';
     if (e.key === 'ArrowLeft') return 'work-board.left';
     if (e.key === 'ArrowRight') return 'work-board.right';
+    // G3.5 (gap plan): x selects, s starts new.
+    if (e.key === 'x' || e.key === 'X') return 'work-board.select';
+    if (e.key === 's' || e.key === 'S') return 'work-board.start';
     return null;
   },
   'session-row': (e) => {
@@ -400,11 +416,12 @@ function* realEvents(): Generator<KeyboardEvent> {
 describe('shortcut freeze: views matched through the registry answer every key as 0.5.4 did', () => {
   it('covers every matched scope that had a 0.5.4 handler', () => {
     // 'form' (G1.2) is new since 0.5.4 too: DialogSheet/WizardDialog/FormWizard.
-    const since38 = ['session-list', 'question-card', 'form-card', 'form'];
+    // 'work' (G2.1) too: ⌘N makes a task in the Work view.
+    const since38 = ['session-list', 'question-card', 'form-card', 'form', 'work'];
     expect(Object.keys(FROZEN_054).sort()).toEqual(Object.keys(MATCHED_SCOPES).filter((k) => !since38.includes(k)).sort());
-    // 14 of the 17 scopes ask the registry; the other 3 are SCOPE_SOURCES.
-    expect(Object.keys(MATCHED_SCOPES)).toHaveLength(14);
-    expect(new Set([...Object.keys(MATCHED_SCOPES), ...Object.keys(SCOPE_SOURCES), 'global']).size).toBe(18);
+    // 15 of the 18 scopes ask the registry; the other 3 are SCOPE_SOURCES.
+    expect(Object.keys(MATCHED_SCOPES)).toHaveLength(15);
+    expect(new Set([...Object.keys(MATCHED_SCOPES), ...Object.keys(SCOPE_SOURCES), 'global']).size).toBe(19);
   });
 
   for (const [scope, frozen] of Object.entries(FROZEN_054)) {

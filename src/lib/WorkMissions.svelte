@@ -19,12 +19,15 @@
   import { projects } from './projects';
   import { readPref, writePref } from './prefs';
   import ReleaseNote from './ReleaseNote.svelte';
+  import MissionFinish from './MissionFinish.svelte';
   import MissionTriage from './MissionTriage.svelte';
   import type { NextStep } from './mission_triage';
   import MissionGraph from './MissionGraph.svelte';
   import Loader from './Loader.svelte';
   import { defaultLaneBy, toneOf, type LaneBy } from './mission_graph';
-  import { PLAN_IMPORT_MAX_ROWS, importLine, importMissionPlan, parsePlan } from './plan_import';
+  import { importLine, importMissionPlan, type PlanRow } from './plan_import';
+  import PlanImportForm from './PlanImportForm.svelte';
+  import QuestionCard from './kit/QuestionCard.svelte';
   import { hosts } from './hosts';
   import { shortAge, timeAgo } from './session_status';
   import { createWorkTask, onWorkChangedDebounced } from './work';
@@ -146,18 +149,19 @@
   type DetailTab = 'plan' | 'runs' | 'log' | 'repos';
   let detailTab = $state<DetailTab>('plan');
   const runs = $derived(detail ? runsOf(detail) : []);
+  function personName(id: number): string | null {
+    for (const o of $orgs) {
+      const p = (o.members ?? []).find((x) => x.person_id === id);
+      if (p) return p.display_name || p.name;
+    }
+    return null;
+  }
   const owner = $derived(
     detail
       ? ownerLine(
           detail.mission,
           $myPersonId,
-          (id) => {
-            for (const o of $orgs) {
-              const p = (o.members ?? []).find((x) => x.person_id === id);
-              if (p) return p.display_name || p.name;
-            }
-            return null;
-          },
+          personName,
           (id) => $orgs.find((o) => o.id === id)?.name ?? null,
         )
       : null,
@@ -166,6 +170,13 @@
   let creating = $state(false);
   let newName = $state('');
   let newGoal = $state('');
+  // G2.5: the New mission form can ask the planner for the first tasks
+  // (off by default: the planner proposes, a person confirms its cards) and
+  // import a plan into the new mission.
+  let newPlanner = $state(false);
+  let newImportOpen = $state(false);
+  let newImportText = $state('');
+  let newImportRows = $state<PlanRow[] | null>(null);
 
   let editing = $state(false);
   let editGoal = $state('');
@@ -215,14 +226,12 @@
   let importText = $state('');
   let importResult = $state<string | null>(null);
   let importUnknown = $state<string[]>([]);
-  const parsed = $derived(importText.trim() ? parsePlan(importText) : null);
-  const parsedLanes = $derived(parsed ? new Set(parsed.rows.map((r) => r.lane).filter(Boolean)).size : 0);
-  const parsedLinks = $derived(parsed ? parsed.rows.reduce((n, r) => n + (r.needs?.length ?? 0), 0) : 0);
+  let importRows = $state<PlanRow[] | null>(null);
   const importBlocked = $derived(!!hubActionBlocked('import_mission_plan', $hubStatus, $hubConnection));
 
   async function runImport() {
-    if (!mission || !parsed || parsed.rows.length === 0) return;
-    const out = await act(importMissionPlan(mission.id, parsed.rows));
+    if (!mission || !importRows || importRows.length === 0) return;
+    const out = await act(importMissionPlan(mission.id, importRows));
     if (out) {
       importResult = importLine(out);
       importUnknown = out.unknown_needs ?? [];
@@ -366,6 +375,18 @@
     } finally {
       busy = false;
     }
+  }
+
+  // G2.5: a mission's question answered on its page, as the session's
+  // question card is: its options, your own words, or Skip.
+  let ownWords = $state<Record<number, boolean>>({});
+  function askOptions(c: MissionCard): string[] {
+    const o = (c.payload as { options?: unknown } | null | undefined)?.options;
+    return Array.isArray(o) ? o.filter((x): x is string => typeof x === 'string' && x.trim() !== '').slice(0, 6) : [];
+  }
+  async function answerWith(c: MissionCard, option: string) {
+    answers = { ...answers, [c.id]: option };
+    await decide(c, true);
   }
 
   async function decide(c: MissionCard, ok: boolean) {
@@ -534,12 +555,31 @@
       notice = 'A mission needs a name and a goal.';
       return;
     }
+    if (newImportOpen && newImportText.trim() && !newImportRows) {
+      notice = 'The plan is not ready to import: see the rows above.';
+      return;
+    }
     const m = await act(createMission({ name, goal }));
     if (m) {
+      const rows = newImportOpen ? newImportRows : null;
+      const planner = newPlanner;
       creating = false;
       newName = '';
       newGoal = '';
+      newPlanner = false;
+      newImportOpen = false;
+      newImportText = '';
       await open(m.id);
+      if (rows && rows.length > 0) {
+        const out = await act(importMissionPlan(m.id, rows));
+        if (out) {
+          importResult = importLine(out);
+          importUnknown = out.unknown_needs ?? [];
+          tasksView = 'graph';
+        }
+      }
+      // The planner drafts the first tasks as cards to confirm.
+      if (planner) await askPlanner();
     }
   }
 
@@ -785,6 +825,19 @@
         {/if}
       {/if}
 
+      {#if isFinal(mission.state)}
+        <!-- Gap G3.7: the Finish board. Reopen moves it back to paused. -->
+        <MissionFinish
+          {detail}
+          completed={missions.filter((m) => isFinal(m.state)).length}
+          mayChange={!!detail.may_change}
+          reopenBlocked={changeBlocked}
+          nameOf={personName}
+          onreopen={() => move('paused')}
+          onarchived={load}
+        />
+      {/if}
+
       <dl class="kv" data-testid="mission-facts">
         {#if owner}<dt>Owner</dt><dd data-testid="mission-owner">{owner}</dd>{/if}
         {#if mission.mode !== 'plan'}
@@ -905,18 +958,45 @@
             <ul class="cards" data-testid="mission-cards">
               {#each openCards as c (c.id)}
                 <li data-testid="mission-card" data-kind={c.kind}>
+                  {#if c.kind === 'ask' && detail.may_change}
+                    {@const options = askOptions(c)}
+                    <QuestionCard
+                      question={cardLine(c)}
+                      age={`${c.source === 'planner' ? 'Planner' : 'Fleet'} · asked ${shortAge(c.created_at)}`}
+                      label="Question from the mission"
+                      testid="mission-card-question"
+                      answers={[
+                        ...options.map((o, i) => ({
+                          label: o,
+                          testid: 'mission-card-option',
+                          disabled: busy || changeBlocked,
+                          onselect: () => void answerWith(c, o),
+                          kbd: String(i + 1),
+                        })),
+                        { label: 'Skip', testid: 'mission-card-skip', disabled: busy || changeBlocked, onselect: () => void decide(c, false) },
+                      ]}
+                      onownwords={() => (ownWords = { ...ownWords, [c.id]: true })}
+                    >
+                      {#if ownWords[c.id] || options.length === 0}
+                        <span class="row">
+                          <input placeholder="Your answer" aria-label="Your answer" bind:value={answers[c.id]} data-testid="mission-card-answer" />
+                          <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-card-apply" onclick={() => void decide(c, true)}
+                            >Answer</button
+                          >
+                        </span>
+                      {/if}
+                    </QuestionCard>
+                  {:else}
                   <span class="muted small">{c.source === 'planner' ? 'Planner' : 'Fleet'}</span>
                   <span>{cardLine(c)}</span>
                   {#if detail.may_change}
-                    {#if c.kind === 'ask'}
-                      <input placeholder="Your answer" bind:value={answers[c.id]} data-testid="mission-card-answer" />
-                    {/if}
                     <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-card-apply" onclick={() => void decide(c, true)}
-                      >{c.kind === 'ask' ? 'Answer' : 'Apply'}</button
+                      >Apply</button
                     >
                     <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-card-dismiss" onclick={() => void decide(c, false)}
                       >Dismiss</button
                     >
+                  {/if}
                   {/if}
                 </li>
               {/each}
@@ -933,26 +1013,14 @@
               >Import plan…</button
             >
           {:else}
-            <p class="muted small">
-              Paste a markdown plan. Fleet reads its step tables (#, Step, Needs, and Lane or Status when there) and a Lanes table
-              (Lane, Steps in order). Each step becomes a task here; importing again updates them.
-            </p>
-            <textarea rows="6" bind:value={importText} placeholder={'| # | Step | Needs |\n|---|---|---|\n| 1.1 | Schema | — |\n| 1.2 | API | 1.1 |'} data-testid="mission-import-text"
-            ></textarea>
-            {#if parsed}
-              <p class="muted small" data-testid="mission-import-preview">
-                {parsed.rows.length} steps · {parsedLanes} lanes · {parsedLinks} links
-                {#if parsed.rows.length > PLAN_IMPORT_MAX_ROWS} · at most {PLAN_IMPORT_MAX_ROWS} at once{/if}
-              </p>
-              {#each parsed.notes as n (n)}<p class="muted small">{n}</p>{/each}
-            {/if}
+            <PlanImportForm bind:text={importText} bind:ready={importRows} />
             <span class="row">
               <button
                 class="btn"
                 type="button"
-                disabled={busy || importBlocked || !parsed || parsed.rows.length === 0 || parsed.rows.length > PLAN_IMPORT_MAX_ROWS}
+                disabled={busy || importBlocked || !importRows}
                 data-testid="mission-import-run"
-                onclick={() => void runImport()}>Import {parsed?.rows.length ?? 0} steps</button
+                onclick={() => void runImport()}>Import {importRows?.length ?? 0} steps</button
               >
               <button class="btn btn--quiet" type="button" onclick={() => ((importOpen = false), (importText = ''))}>Cancel</button>
             </span>
@@ -1252,6 +1320,17 @@
           <input placeholder="Name" bind:value={newName} data-testid="mission-new-name" />
           <textarea rows="3" placeholder="Goal: what is true when it is done" bind:value={newGoal} data-testid="mission-new-goal"
           ></textarea>
+          <label class="check"
+            ><input type="checkbox" bind:checked={newPlanner} data-testid="mission-new-planner" /> Let the planner draft the first tasks
+            <span class="muted small">(you confirm each one)</span></label
+          >
+          {#if newImportOpen}
+            <PlanImportForm bind:text={newImportText} bind:ready={newImportRows} testid="mission-new-import" />
+          {:else}
+            <button class="btn btn--quiet" type="button" data-testid="mission-new-import-open" onclick={() => (newImportOpen = true)}
+              >Import a plan…</button
+            >
+          {/if}
           <div class="row">
             <button class="btn btn--primary" type="submit" disabled={busy || saveBlocked} data-testid="mission-create">Create</button>
             <button class="btn btn--quiet" type="button" onclick={() => (creating = false)}>Cancel</button>
@@ -1354,6 +1433,7 @@
   .confirm-move { margin-top: 0.3rem; font-size: var(--text-xs); }
   .bar, .row { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
   .create { display: flex; flex-direction: column; gap: 0.4rem; width: 100%; }
+  .check { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
   input, textarea, select {
     font: inherit;
     padding: 0.25rem 0.4rem;
@@ -1398,7 +1478,6 @@
   .dep { font-size: var(--text-2xs); }
   .dep-pick { max-width: 7rem; font-size: var(--text-2xs); }
   .import { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.4rem; }
-  .import textarea { font-family: var(--font-mono); font-size: var(--text-xs); }
   /* The design system's Tabs (of-tabs). */
   .view-switch { display: flex; gap: 20px; border-bottom: 1px solid var(--border); margin-bottom: 0.4rem; }
   .view-switch button {

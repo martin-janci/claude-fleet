@@ -16,6 +16,7 @@ struct Fx {
 
 fn person(store: &Mutex<Store>, id: i64) -> ViewScope {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(ClientRef {
             id: 7,
@@ -34,6 +35,7 @@ fn person(store: &Mutex<Store>, id: i64) -> ViewScope {
 
 fn host(store: &Mutex<Store>) -> ViewScope {
     Caller {
+        api: None,
         host_alias: Some("h".into()),
         client: None,
         mode: TokenMode::Full,
@@ -717,4 +719,16 @@ fn two_planner_runs_in_one_second_keep_both_answers_and_run_one_at_a_time() {
         PlannerSlot::take(&fx.deps, &fx.m).is_ok(),
         "the slot is given back"
     );
+}
+
+/// Two decisions on one card at once: the second hears it is being decided
+/// instead of applying the card a second time, and the claim is released
+/// with the first.
+#[test]
+fn a_card_is_claimed_while_it_is_decided() {
+    let first = CardClaim::take(987_654).expect("free");
+    let second = CardClaim::take(987_654).expect_err("held");
+    assert_eq!(second.code, codes::E_INVALID_STATE);
+    drop(first);
+    assert!(CardClaim::take(987_654).is_ok(), "released with the first");
 }

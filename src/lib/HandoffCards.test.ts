@@ -19,7 +19,7 @@ vi.mock('@tauri-apps/api/event', () => {
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import HandoffCards from './HandoffCards.svelte';
-import { resetHandoffsForTests, sessionState, undoable, type ControlHandoff } from './handoffs';
+import { doneWhenWords, finishesWhen, resetHandoffsForTests, sessionState, taskUndoable, treeWaves, undoable, type ControlHandoff } from './handoffs';
 import { sessions, type SessionRow } from './sessions';
 import { sessionFocus } from './session_focus';
 import { missionOpenRequest } from './missions';
@@ -151,6 +151,96 @@ describe('the proposed tree', () => {
     expect(undo.textContent).toContain('9 min');
     await fireEvent.click(undo);
     await waitFor(() => expect(calls('undo_work_accept')).toEqual([{ args: { item_ids: [11, 12, 13] } }]));
+  });
+});
+
+// Gap plan G3.11 (board MCTasks): tasks in chat.
+describe('tasks in chat (G3.11)', () => {
+  const plan: ControlHandoff = {
+    id: 5,
+    at: now,
+    kind: 'tree',
+    tool: 'work_link',
+    item: { id: 20, title: 'Ship G3.11', status: 'todo' },
+    items: [
+      { id: 21, title: 'Schema', status: 'todo', proposal_state: 'proposed', done_when: ['ci:test'] },
+      { id: 22, title: 'Card', status: 'todo', proposal_state: 'proposed', depends_on: [21], done_when: ['ci:test', 'review'] },
+      { id: 23, title: 'Docs', status: 'todo', proposal_state: 'proposed', depends_on: [22, 999] },
+    ],
+  };
+
+  it('waves come from the edges inside the tree; an edge outside does not hold an item back', () => {
+    expect(treeWaves(plan.items!).map((w) => w.map((i) => i.id))).toEqual([[21], [22], [23]]);
+    expect(treeWaves([{ id: 1, title: 'a', status: 'todo', depends_on: [999] }]).map((w) => w.length)).toEqual([1]);
+    expect(doneWhenWords('test:pnpm test')).toBe('`pnpm test` passes');
+    expect(finishesWhen(['ci:test', 'review', 'person'])).toBe('finishes when CI test passes, a review approves and a person checks it');
+    expect(finishesWhen([])).toBe('');
+  });
+
+  it('the plan card lists its tasks by wave with what each finishes when, and Edit in Work opens the parent', async () => {
+    receipts = [plan];
+    render(HandoffCards);
+    const waves = await screen.findAllByTestId('handoff-tree-wave');
+    expect(waves.map((w) => w.textContent)).toEqual(['Wave 1', 'Wave 2', 'Wave 3']);
+    expect(screen.getAllByTestId('handoff-tree-when').map((w) => w.textContent)).toEqual([
+      'finishes when CI test passes',
+      'finishes when CI test passes and a review approves',
+    ]);
+    expect(screen.getByTestId('handoff-tree-edit')).toBeTruthy();
+  });
+
+  it('a proposal that may duplicate a task offers Merge or Keep both', async () => {
+    inv.mockImplementation(async (cmd: string, raw?: { args?: { task_id?: string } }) => {
+      if (cmd === 'control_handoffs') return receipts;
+      if (cmd === 'work_task' && raw?.args?.task_id === 'item:20')
+        return {
+          task: { task_id: 'item:20' },
+          proposals: [{ item_id: 22, title: 'Card', at: 1, duplicate: { item_id: 7, task_id: 'item:7', key: 'TASK-236', title: 'Card', source: 'jev' } }],
+        };
+      if (cmd === 'reject_work_proposal') return {};
+      return null;
+    });
+    receipts = [plan];
+    render(HandoffCards);
+    const dup = await screen.findByTestId('handoff-tree-dup');
+    expect(dup.textContent).toContain('May duplicate TASK-236');
+    await fireEvent.click(screen.getByTestId('handoff-tree-merge'));
+    await waitFor(() => expect(calls('reject_work_proposal')).toEqual([{ args: { item_id: 22, merge_into: 7 } }]));
+    await fireEvent.click(screen.getByTestId('handoff-tree-keep'));
+    await waitFor(() => expect(screen.queryByTestId('handoff-tree-dup')).toBeNull());
+  });
+
+  it('a created task asks owner and due while new, shows its session, and moves to Done', async () => {
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'control_handoffs') return receipts;
+      if (cmd === 'edit_work_item' || cmd === 'set_work_status') return { id: 30, title: 'Fix login', status_category: 'todo' };
+      if (cmd === 'verify_work_item') return { item_id: 30, changed: true };
+      return null;
+    });
+    sessions.set([{ ...session(4, 'working', 'fix-login'), host_alias: 'mac', work: { link_id: 1, item_id: 30, key: null, title: 'Fix login', source: 'agent' } } as SessionRow]);
+    receipts = [
+      { id: 6, at: now - 30, kind: 'task', tool: 'work_link', item: { id: 30, title: 'Fix login', status: 'todo', done_when: ['person'] } },
+    ];
+    render(HandoffCards);
+    expect((await screen.findByTestId('handoff-task-drafted')).textContent).toBe('Drafted from your message');
+    expect(screen.getByTestId('handoff-task-live').textContent).toContain('fix-login on mac');
+    expect(screen.getByTestId('handoff-task-when').textContent).toBe('finishes when a person checks it');
+    expect(screen.queryByTestId('handoff-task-undo')).toBeNull();
+    await fireEvent.input(screen.getByTestId('handoff-task-owner'), { target: { value: 'Ana' } });
+    await fireEvent.input(screen.getByTestId('handoff-task-due'), { target: { value: '2026-10-16' } });
+    await fireEvent.click(screen.getByTestId('handoff-task-save'));
+    await waitFor(() => expect(calls('edit_work_item')).toEqual([{ args: { item_id: 30, assignees: ['Ana'], due_at: '2026-10-16' } }]));
+    await fireEvent.click(screen.getByTestId('handoff-task-verify'));
+    await waitFor(() => expect(calls('verify_work_item')).toEqual([{ args: { item_id: 30, line: 'person', ok: true } }]));
+    await fireEvent.click(screen.getByTestId('handoff-task-done'));
+    await waitFor(() => expect(calls('set_work_status')).toEqual([{ args: { item_id: 30, status: 'done' } }]));
+  });
+
+  it('Undo shows only while the backend can take an accept back', () => {
+    const item = { id: 1, title: 't', status: 'todo', proposal_state: 'accepted', accepted_at: now - 60 };
+    expect(taskUndoable(item, now)).toBe(true);
+    expect(taskUndoable({ ...item, accepted_at: now - 700 }, now)).toBe(false);
+    expect(taskUndoable({ ...item, proposal_state: null }, now)).toBe(false);
   });
 });
 

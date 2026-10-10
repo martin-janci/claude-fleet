@@ -28,6 +28,9 @@ import {
   splitArchived,
   tidyEvidence,
   tidyReasonLabel,
+  restoreBatches,
+  tidyDetail,
+  tidyLegend,
   type ReopenedWork,
   type TidyCandidate,
 } from './tidy';
@@ -43,6 +46,60 @@ const cand = (id: number, over: Partial<TidyCandidate> = {}): TidyCandidate => (
   since: 0,
   idle_secs: 5 * 3600,
   ...over,
+});
+
+describe('the legend, the row detail and Restore all (G3.12)', () => {
+  it('lists each offered choice once, in the sheet order, and Restore only with a stopped session', () => {
+    const unlinked = cand(2, { link_id: null, reason: 'idle_unlinked' });
+    expect(tidyLegend([unlinked]).map((l) => l.label)).toEqual(['Clean up', 'Keep for 7 days']);
+    // Snooze and Keep read the same: one line.
+    expect(tidyLegend([cand(1), unlinked]).map((l) => l.label)).toEqual([
+      'Clean up',
+      'Archive',
+      'Keep for 7 days',
+      'Never',
+    ]);
+    const ghost = cand(3, { reason: 'ghost_expiring', action: 'resume_or_expire' });
+    expect(tidyLegend([ghost]).map((l) => l.label)).toEqual(['Keep for 7 days', 'Never', 'Restore all']);
+    expect(tidyLegend([])).toEqual([]);
+  });
+
+  it('explains why and what the choice does, never claiming what is not known', () => {
+    const c = cand(1, {
+      reason: 'pr_merged_idle',
+      key: 'TASK-219',
+      item_status: 'Done',
+      branch: 'task-219-spec',
+      worktree_path: '~/.worktrees/task-219-spec',
+      worktree_kb: 380 * 1024,
+    });
+    expect(tidyDetail(c, 'safe_kill')).toBe(
+      'PR merged, idle: PR merged, TASK-219 is Done, branch task-219-spec, idle 5 h. ' +
+        'Clean up has Claude commit and push first, then removes ~/.worktrees/task-219-spec (380 MB).',
+    );
+    expect(tidyDetail({ ...c, worktree_kb: null }, 'safe_kill')).toContain('removes ~/.worktrees/task-219-spec.');
+    expect(tidyDetail(c, 'snooze')).toContain('Kept out of Tidy for 7 days.');
+    expect(tidyDetail(c, 'never')).toContain('Never suggested again for this work.');
+    const unlinked = cand(2, { link_id: null, reason: 'idle_unlinked', since: 0 });
+    expect(tidyDetail(unlinked, 'safe_kill', 9 * 86_400)).toBe(
+      'Idle, no work linked: idle 9 d · no work linked. ' +
+        'Clean up removes its worktree only if it is clean and pushed; otherwise it is refused.',
+    );
+    const ghost = cand(3, { reason: 'ghost_expiring', action: 'resume_or_expire', expires_at: 1000 + 6 * 86_400 });
+    expect(tidyDetail(ghost, null, 1000)).toBe(
+      'Lost session about to expire: stopped, expires in 6 d. Resume or Restore all brings it back.',
+    );
+  });
+
+  it('batches the stopped group per host, only the sessions this client may restore', () => {
+    const ghost = (id: number, host: string) => cand(id, { host_alias: host, reason: 'ghost_expiring' });
+    const list = [cand(1), ghost(2, 'trn'), ghost(3, 'mac'), ghost(4, 'trn'), ghost(5, 'trn')];
+    expect(restoreBatches(list)).toEqual([
+      { host: 'mac', ids: [3] },
+      { host: 'trn', ids: [2, 4, 5] },
+    ]);
+    expect(restoreBatches(list, (id) => id !== 3 && id !== 4)).toEqual([{ host: 'trn', ids: [2, 5] }]);
+  });
 });
 
 describe('tidy choices', () => {

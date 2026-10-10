@@ -11,6 +11,11 @@
 // person (`mission_waits.ts`), listed and counted beside the sessions, and
 // Jev's "probably waiting" (state Proposed), listed apart as "+N proposed"
 // and never counted by the badge.
+//
+// Gap plan G3.1 (the Main board's Inbox): "Group: state" splits the queue
+// into the model's own sections (`row_groups.ts::groupRows`, the Sessions
+// list's state grouping), the footer says what finished today, and a mass
+// loss shows as the Sessions list's "12 stopped on trn · Restore" line.
 import { derived, writable } from 'svelte/store';
 import {
   attentionState,
@@ -27,6 +32,9 @@ import { sessionVisible } from './sidebar_index';
 import { attentionFacts } from './attention_facts';
 import { failingCount } from './routines';
 import { waitingMissionCount } from './mission_waits';
+import { groupRows } from './row_groups';
+import { localMidnight } from './today';
+import { readPref, writePref } from './prefs';
 
 /** The rows that need you, worst first (`byTriage`). */
 export function inboxRows(rows: readonly SessionRow[], opts: AttentionOptions): SessionRow[] {
@@ -68,19 +76,28 @@ export function proposedText(n: number): string {
   return n > 0 ? `+${n} proposed` : '';
 }
 
-/** Everything the Inbox leaves out, by state. */
+/** Everything the Inbox leaves out, by state. `completedToday` is a
+ *  finished turn (Done, or Idle after it) that ended since local midnight
+ *  (`since`); `idle` and `done` hold the older ones. */
 export interface NotWaiting {
   working: number;
   idle: number;
+  completedToday: number;
   done: number;
   paused: number;
 }
 
-export function notWaiting(rows: readonly SessionRow[], opts: AttentionOptions): NotWaiting {
-  const n: NotWaiting = { working: 0, idle: 0, done: 0, paused: 0 };
+export function notWaiting(
+  rows: readonly SessionRow[],
+  opts: AttentionOptions,
+  since: number = localMidnight(opts.now * 1000),
+): NotWaiting {
+  const n: NotWaiting = { working: 0, idle: 0, completedToday: 0, done: 0, paused: 0 };
   for (const s of rows) {
     const st = attentionState(s, opts);
+    const today = s.kind !== 'shell' && s.kind !== 'external' && s.last_stop_at != null && s.last_stop_at >= since;
     if (st === 'working') n.working++;
+    else if ((st === 'idle' || st === 'done') && today) n.completedToday++;
     else if (st === 'idle') n.idle++;
     else if (st === 'done') n.done++;
     else if (st === 'paused') n.paused++;
@@ -88,14 +105,95 @@ export function notWaiting(rows: readonly SessionRow[], opts: AttentionOptions):
   return n;
 }
 
-/** "6 running · 9 idle · 2 done": the parts that are not zero. */
+/** "6 running · 9 idle · 6 completed today": the parts that are not zero. */
 export function notWaitingText(n: NotWaiting): string {
   const parts: string[] = [];
   if (n.working) parts.push(`${n.working} running`);
   if (n.idle) parts.push(`${n.idle} idle`);
+  if (n.completedToday) parts.push(`${n.completedToday} completed today`);
   if (n.done) parts.push(`${n.done} done`);
   if (n.paused) parts.push(`${n.paused} paused`);
   return parts.join(' · ');
+}
+
+// ── state sections (G3.1) ──
+
+/** How the Inbox lists its rows: by state (the board's "Group: state") or
+ *  as one queue, worst first. */
+export type InboxGroupBy = 'state' | 'none';
+const isInboxGroupBy = (v: unknown): v is InboxGroupBy => v === 'state' || v === 'none';
+export const inboxGroupBy = writable<InboxGroupBy>(readPref('inbox.group', 'state', isInboxGroupBy));
+inboxGroupBy.subscribe((v) => writePref('inbox.group', v));
+
+/** One Inbox section. The sessions come from the attention model; the
+ *  section also says which of the model's other rows it carries: missions
+ *  waiting on a person and Jev's proposals sit in Needs you, routines whose
+ *  newest run failed in Failed. */
+export interface InboxSection {
+  key: 'needs_you' | 'failed' | 'all';
+  /** The header ("Needs you"); null for the one-queue list, which has none. */
+  label: string | null;
+  rows: SessionRow[];
+  /** The header's count: its sessions plus the missions or routines it holds.
+   *  Jev's proposals are never counted ("+1 proposed" beside it instead). */
+  count: number;
+  missions: boolean;
+  routines: boolean;
+  proposed: boolean;
+}
+
+export interface InboxExtras {
+  missions: number;
+  failingRoutines: number;
+  proposed: number;
+}
+
+/**
+ * The Inbox's sections. By state: Needs you (Action required and Blocked,
+ * the Sessions list's one status word for both), then Failed, each left
+ * out when it holds nothing. As one queue: every row worst first. Either
+ * way the rows are `inboxRows`, so the sections add up to the badge.
+ */
+export function inboxSections(
+  rows: readonly SessionRow[],
+  opts: AttentionOptions,
+  by: InboxGroupBy,
+  extra: InboxExtras,
+): InboxSection[] {
+  const queue = inboxRows(rows, opts);
+  if (by === 'none') {
+    const count = queue.length + extra.missions + extra.failingRoutines;
+    if (count === 0 && extra.proposed === 0) return [];
+    return [{ key: 'all', label: null, rows: queue, count, missions: true, routines: true, proposed: true }];
+  }
+  const groups = groupRows(queue, 'state', opts, new Set());
+  const of = (state: string) => groups.find((g) => g.key === `state:${state}`)?.rows ?? [];
+  const out: InboxSection[] = [];
+  const needs = of('action_required');
+  if (needs.length + extra.missions + extra.proposed > 0) {
+    out.push({
+      key: 'needs_you',
+      label: 'Needs you',
+      rows: needs,
+      count: needs.length + extra.missions,
+      missions: true,
+      routines: false,
+      proposed: true,
+    });
+  }
+  const failed = of('failed');
+  if (failed.length + extra.failingRoutines > 0) {
+    out.push({
+      key: 'failed',
+      label: 'Failed',
+      rows: failed,
+      count: failed.length + extra.failingRoutines,
+      missions: false,
+      routines: true,
+      proposed: false,
+    });
+  }
+  return out;
 }
 
 /** The rail's Inbox count: the Needs you pill's number, under the same host,

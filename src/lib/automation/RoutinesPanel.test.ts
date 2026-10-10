@@ -11,7 +11,7 @@ import { projects } from '../projects';
 import { get } from 'svelte/store';
 import { destination } from '../destination';
 import { automationTab } from '../automation';
-import { failing, type RoutineRow, type RoutineRunRow } from '../routines';
+import { deviceOffsetMin, failing, nextRunLabel, type RoutineRow, type RoutineRunRow } from '../routines';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -37,6 +37,9 @@ const bad: RoutineRunRow = { id: 1, routine_id: 3, trigger: 'cron', state: 'fail
 const argsOf = (action: string) =>
   inv.mock.calls.map((c) => c[1]?.args).filter((a) => a?.action === action).at(-1);
 
+/** What `preview` answers in these tests (G2.3's dry run). */
+let previewAnswer: Record<string, unknown> = { next_runs: [], utc_offset_min: 0, logins: [] };
+
 function route(list: RoutineRow[] = [sweep], runs: RoutineRunRow[] = [ok, bad], failingNow: unknown[] = [], account?: unknown) {
   inv.mockReset();
   inv.mockImplementation(async (cmd: string, a: { args: { action: string; routine?: { name: string } } }) => {
@@ -50,6 +53,8 @@ function route(list: RoutineRow[] = [sweep], runs: RoutineRunRow[] = [ok, bad], 
         return failingNow;
       case 'save':
         return { ...sweep, id: 8, name: a.args.routine!.name };
+      case 'preview':
+        return previewAnswer;
       default:
         return list[0];
     }
@@ -60,6 +65,7 @@ beforeEach(() => {
   hosts.set([{ alias: 'mac', hidden: false } as never]);
   projects.set([{ project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', system: false }, worktrees: [] } as never]);
   failing.set([]);
+  previewAnswer = { next_runs: [], utc_offset_min: 0, logins: [] };
   route();
 });
 
@@ -107,7 +113,9 @@ describe('Routines (8.6)', () => {
     await fireEvent.click(screen.getByTestId('routine-new'));
     await fireEvent.click(screen.getByTestId('routine-template-morning-pr-sweep'));
     expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Morning PR sweep');
-    expect((screen.getByTestId('routine-cron') as HTMLInputElement).value).toBe('30 7 * * 1-5');
+    // The schedule is a picker now (G2.3): Weekdays at 07:30.
+    expect((screen.getByTestId('routine-days') as HTMLSelectElement).value).toBe('weekdays');
+    expect((screen.getByTestId('routine-time') as HTMLInputElement).value).toBe('07:30');
     expect((screen.getByTestId('routine-prompt') as HTMLTextAreaElement).value).toContain('martin-janci/claude-fleet');
     await fireEvent.click(screen.getByTestId('routine-save'));
     await waitFor(() => expect(argsOf('save')).toBeDefined());
@@ -289,5 +297,110 @@ describe('deleting a routine (G1.4, the destructive confirm)', () => {
     await fireEvent.click(await screen.findByTestId('routine-delete-confirm'));
     expect((await screen.findByTestId('destructive-confirm-error')).textContent).toContain('The hub refused this');
     expect(screen.getByTestId('destructive-confirm')).toBeTruthy();
+  });
+});
+
+describe('no routines yet (G3.13)', () => {
+  it('the empty state starts a blank routine or the template, right there', async () => {
+    route([]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routines-empty');
+    await fireEvent.click(screen.getByTestId('routines-empty-template'));
+    expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Morning PR sweep');
+  });
+
+  it('+ New routine opens a blank one', async () => {
+    route([]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routines-empty');
+    await fireEvent.click(screen.getByTestId('routines-empty-new'));
+    expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('');
+    expect(screen.getByTestId('routine-editor')).toBeTruthy();
+  });
+});
+
+describe('the routine editor (G2.3: schedule picker, next run, account, dry run, Run once now)', () => {
+  // Monday 12 October 2026, 06:30 UTC.
+  const mon = Date.UTC(2026, 9, 12, 6, 30) / 1000;
+
+  it('picks a schedule in words, shows the next run from the dry run, and saves the cron line it means', async () => {
+    previewAnswer = { next_runs: [mon, mon + 86_400], utc_offset_min: deviceOffsetMin(), logins: [] };
+    route([]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routines-empty');
+    await fireEvent.click(screen.getByTestId('routine-new'));
+    await fireEvent.click(screen.getByTestId('routine-template-blank'));
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Tidy up.' } });
+    await fireEvent.change(screen.getByTestId('routine-days'), { target: { value: '5' } });
+    await fireEvent.input(screen.getByTestId('routine-time'), { target: { value: '16:15' } });
+    await waitFor(() => expect(argsOf('preview')?.routine.cron).toBe('15 16 * * 5'));
+    await waitFor(() => expect(screen.getByTestId('routine-next-run').textContent).toContain(`next run ${nextRunLabel(mon)}`));
+    expect(screen.getByTestId('routine-next-run').textContent).toContain('Fridays 16:15');
+    expect(screen.getByTestId('routine-zone').textContent).toContain('Time zone');
+    // Custom shows the line itself.
+    await fireEvent.change(screen.getByTestId('routine-days'), { target: { value: 'custom' } });
+    await fireEvent.input(screen.getByTestId('routine-cron'), { target: { value: '0 */2 * * *' } });
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    await waitFor(() => expect(argsOf('save')?.routine.cron).toBe('0 */2 * * *'));
+  });
+
+  it('picks the Account from the host logins, apart from the Profile, and the dry run names it', async () => {
+    previewAnswer = {
+      next_runs: [mon],
+      utc_offset_min: deviceOffsetMin(),
+      account: { host_alias: 'mac', profile: 'work', account_uuid: 'w-1', email: 'work@x.com', over: false },
+      logins: [
+        { host_alias: 'mac', profile: null, account_uuid: 'o-1', email: 'me@x.com', over: false },
+        { host_alias: 'mac', profile: 'work', account_uuid: 'w-1', email: 'work@x.com', over: false },
+      ],
+    };
+    route([sweep]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-edit'));
+    const acct = screen.getByTestId('routine-account') as HTMLSelectElement;
+    await waitFor(() => expect(Array.from(acct.options).map((o) => o.textContent)).toEqual(["me@x.com · the host's own login", 'work@x.com · profile work']));
+    await fireEvent.change(acct, { target: { value: 'work' } });
+    expect((screen.getByTestId('routine-profile') as HTMLInputElement).value).toBe('work');
+    await waitFor(() => expect(argsOf('preview')?.routine.profile).toBe('work'));
+    await waitFor(() =>
+      expect(screen.getByTestId('routine-dry-run').textContent).toContain('Dry run: on mac, in martin-janci/claude-fleet, as work@x.com, at most $2.00 a run.'),
+    );
+    expect(argsOf('preview').routine_id).toBe(3);
+  });
+
+  it('the dry run says what save would refuse, and Run once now waits for a routine that would save', async () => {
+    previewAnswer = { next_runs: [], utc_offset_min: 0, problem: 'host gone not found', logins: [] };
+    route([sweep]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-edit'));
+    await waitFor(() => expect(screen.getByTestId('routine-dry-run').textContent).toContain('it would not save: host gone not found'));
+    expect((screen.getByTestId('routine-run-once') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('Run once now runs the saved routine unchanged; a changed one is saved first', async () => {
+    previewAnswer = { next_runs: [mon], utc_offset_min: deviceOffsetMin(), logins: [] };
+    route([sweep]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-edit'));
+    const once = screen.getByTestId('routine-run-once') as HTMLButtonElement;
+    await waitFor(() => expect(once.disabled).toBe(false));
+    expect(once.textContent).toBe('Run once now');
+    await fireEvent.click(once);
+    await waitFor(() => expect(argsOf('run_now')).toEqual({ action: 'run_now', routine_id: 3 }));
+    expect(argsOf('save')).toBeUndefined();
+
+    await fireEvent.click(screen.getByTestId('routine-edit'));
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Only CI.' } });
+    const again = screen.getByTestId('routine-run-once') as HTMLButtonElement;
+    expect(again.textContent).toBe('Save and run once');
+    await waitFor(() => expect(again.disabled).toBe(false));
+    inv.mockClear();
+    await fireEvent.click(again);
+    await waitFor(() => expect(argsOf('run_now')).toEqual({ action: 'run_now', routine_id: 8 }));
+    expect(argsOf('save')).toMatchObject({ routine_id: 3, routine: { prompt: 'Only CI.' } });
   });
 });

@@ -7,6 +7,11 @@
   // and the move is sent only with that preview's token. When the impact
   // changed in the meantime the hub refuses (`E_CONFLICT`) and the new
   // impact is shown to be confirmed again.
+  //
+  // Gap plan G2.2: picking the target reads its impact at once, so the
+  // impact list IS the confirm ("Move to Papaya"), and it names who loses or
+  // gains access (the people whose org-bound devices do) and where the
+  // task's spend stays.
   import Modal from './Modal.svelte';
   import { orgs as orgStore } from './orgs';
   import { hubStatus, hubActionBlocked } from './hub';
@@ -16,6 +21,7 @@
     conflictOf,
     readErrorText,
     taskLabel,
+    taskSpend,
     workOrgImpact,
     workTreeMeta,
     type OrgImpact,
@@ -81,13 +87,17 @@
   }
 
   function onTarget() {
-    // A review in flight answers for the old target: drop it.
+    // A review in flight answers for the old target: drop it, and read the
+    // new target's.
     reviewSeq++;
     busy = false;
     fetched = null;
     changed = false;
     failure = null;
+    void review();
   }
+
+  const spend = $derived(taskSpend(task));
 
   async function confirm() {
     const imp = impact;
@@ -187,18 +197,32 @@
             <li data-testid="work-org-journal">
               {plural(impact.journal_entries, 'journal entry', 'journal entries')} and {plural(impact.summaries, 'summary', 'summaries')} move with it
             </li>
+            {#each impact.people_losing ?? [] as p (p)}
+              <li class="warn" data-testid="work-org-person-losing">
+                {p} loses access (their device is bound to {orgName(impact.from_org)}, not {orgName(impact.to_org)})
+              </li>
+            {/each}
+            {#each impact.people_gaining ?? [] as p (p)}
+              <li data-testid="work-org-person-gaining">{p} gains access (their device is bound to {orgName(impact.to_org)})</li>
+            {/each}
+            {#if spend}
+              <li data-testid="work-org-spend">
+                {spend} spent so far stays on its sessions' organisation budget: spend follows a session, not its task
+              </li>
+            {/if}
           </ul>
         {/if}
       </div>
     {/if}
 
+    {#if busy && !impact}<p class="note" data-testid="work-org-reading">Reading what this move changes…</p>{/if}
     {#if failure}<p class="err" role="alert" data-testid="work-org-error">{failure}</p>{/if}
     {#if blocked}<p class="note">{blocked}</p>{/if}
     <div class="actions">
       <button type="button" class="btn btn--quiet" onclick={onclose}>Cancel</button>
-      <button type="button" class="btn" data-testid="work-org-review" disabled={targetId === null || busy} onclick={() => void review()}
-        >{impact ? 'Review again' : 'Review impact'}</button
-      >
+      {#if failure && !impact && targetId !== null}
+        <button type="button" class="btn" data-testid="work-org-review" disabled={busy} onclick={() => void review()}>Try again</button>
+      {/if}
       <button
         type="button"
         class="btn btn--primary"

@@ -5,11 +5,10 @@ use crate::ipc_error::lock;
 
 #[tool_router(router = messaging_router, vis = "pub(super)")]
 impl FleetTools {
-    #[tool(description = "Send and SUBMIT a prompt to a running Claude \
+    #[tool(description = "Send and SUBMIT a prompt to a Claude \
         session's REPL (pasted, then one Enter); the first prompt to an \
         unnamed session also names it. Marked untrusted unless raw=true \
-        (master only) or a trusted client. keys presses a key instead. \
-        Returns { delivered, session_id, turn_seq_before, queued, acked }: \
+        (master only) or a trusted client. Returns { delivered, session_id, turn_seq_before, queued, acked }: \
         pass turn_seq_before to wait_for_session { until: \"turn_gt\" } or \
         session_transcript { since_turn } for the reply (run_prompt does all \
         three). Refuses a blocked or stuck session (E_INVALID_STATE) unless \
@@ -86,9 +85,26 @@ impl FleetTools {
                 answer_key_allowed(key, probe.pending_input.as_ref())
                     .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))?;
             }
+            // The client's check and its press, made one step here: the pane
+            // is re-read now and the key goes out right after, with no round
+            // trip to the client in between.
+            if let Some(expect) = &p.expect {
+                sessions::check_expected_dialog(&self.store, &self.ssh, row.id, expect, key)
+                    .await
+                    .map_err(to_mcp_err)?;
+            }
             sessions::send_keys(&row.host_alias, &row.tmux_name, key, &self.store, &self.ssh)
                 .await
                 .map_err(to_mcp_err)?;
+            // Re-read just this pane so the answered dialog leaves the row
+            // (and a following one comes up) now, not on the next tick: an
+            // answer mid-turn fires no hook.
+            sessions::spawn_dialog_followup(
+                Arc::clone(&self.store),
+                Arc::clone(&self.ssh),
+                row.id,
+                sessions::DialogFollowup::Answered,
+            );
             return ok_json(&serde_json::json!({
                 "delivered": true,
                 "session_id": row.id,
@@ -151,8 +167,11 @@ impl FleetTools {
 
     #[tool(description = "Send a prompt as a new turn when the session is \
         idle: typed now if it is, else kept and typed once its turn ends \
-        (never into a dialog). Marked untrusted unless raw=true (master \
-        only). Returns { session_id, delivered, queued_id }.")]
+        (never into a dialog). Send later: not_before (unix secs) holds it \
+        until then, until_limit_reset while the account is at its limit, \
+        skip_if_archived drops it if the session is archived first. Marked \
+        untrusted unless raw=true (master only). Returns { session_id, \
+        delivered, queued_id }.")]
     pub(super) async fn queue_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -181,6 +200,9 @@ impl FleetTools {
             sessions::QueuePromptArgs {
                 session_id: row.id,
                 prompt,
+                not_before: p.not_before,
+                until_limit_reset: p.until_limit_reset,
+                skip_if_archived: p.skip_if_archived,
             },
             &self.store,
             &self.ssh,

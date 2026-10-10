@@ -51,12 +51,21 @@
         </span>
       {/if}
       <span class="msg"
-        >{t.message}{#if t.code}<details class="details"
+        >{t.message}{#if t.sub}<span class="sub" data-testid="toast-sub">{t.sub}</span>{/if}{#if t.code}<details class="details"
             ><summary>Details</summary><code class="code" data-testid="toast-code">{t.detail ?? t.code}</code></details
           >{/if}</span
       >
       {#if t.action}
-        <button class="action" onclick={() => runToastAction(t.id)} data-testid="toast-action">{t.action.label}</button>
+        <!-- The Toasts board's two-button toast: the answer first, then the
+             quiet way out ("Add rule" · "Not now"). -->
+        <span class="actions">
+          <button class="action" onclick={() => runToastAction(t.id)} data-testid="toast-action">{t.action.label}</button>
+          {#if t.secondary}
+            <button class="action action--quiet" onclick={() => runToastAction(t.id, 'secondary')} data-testid="toast-secondary"
+              >{t.secondary.label}</button
+            >
+          {/if}
+        </span>
       {/if}
       {#if t.count > 1}
         <span class="count" title="repeated">×{t.count}</span>
@@ -171,6 +180,16 @@
     color: var(--fg-muted);
   }
   .msg { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  .sub {
+    display: block;
+    margin-top: 0.1rem;
+    color: var(--fg-muted);
+  }
+  .actions {
+    flex: 0 0 auto;
+    display: inline-flex;
+    gap: 0.3rem;
+  }
   .count { color: var(--fg-muted); font-size: var(--text-2xs); }
   .job {
     display: inline-flex;
@@ -187,6 +206,8 @@
     padding: 0 0.4rem;
   }
   .action:hover { border-color: var(--accent); }
+  .action--quiet { color: var(--fg-muted); }
+  .action--quiet:hover { color: var(--fg); border-color: var(--border); }
   .close {
     flex: 0 0 auto;
     background: transparent;

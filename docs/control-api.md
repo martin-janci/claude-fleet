@@ -92,6 +92,42 @@ Devices does; the device you are using has none). A rotation keeps the host's
 created time, records the rotation and starts "used" over; stamping use never
 invalidates the hub's token cache (`auth_epoch`), a rotation does.
 
+### Named tokens
+
+Settings → Control API → **+ Token** (or the `api_tokens` tool) creates a
+token for a script or another agent, under a name, with a scope, an expiry
+and an optional host limit:
+
+- **Read** — the tools that observe the fleet, as a `readonly` token.
+- **Act** — start, send to and stop sessions: every tool but the fleet-admin
+  and settings ones, and it cannot create tokens.
+- **Admin** — what the master token can do. The master token is the fleet's
+  first Admin token; only the master (or another admin token) creates one.
+
+**Expires** is a number of days (1–3650) or never; an expired token is
+refused from that second on, with no write. **Hosts** limits a Read or Act
+token to some hosts: sessions elsewhere are invisible to it and host-addressed
+calls on another host answer `E_FORBIDDEN`. A limited token reaches only the
+tools whose every host goes through that check (`guard::HOST_LIMITED_TOOLS`:
+listing, reading, starting, prompting and stopping sessions); routines,
+clipboard, probes and the fleet-wide reads are refused to it. An Admin token
+is never limited.
+
+A named token is for the tool surface: it authenticates `/mcp` and
+`/mcp/json` and is refused (`403`) on every other route, `/hook` and the
+`/events` stream included, so no open connection outlives its revoke or
+expiry.
+
+A named token speaks for the hub's owner, like the master token: the sessions
+it starts are the owner's, and what it sends is delivered with the
+untrusted-content marker naming the token. The token (`flt_live_…`) is shown
+once, with **Copy token** and **Copy as env line** (`FLEET_MCP_TOKEN=…`); the
+store keeps only its SHA-256, and nothing logs it. The table lists each with
+its scope, hosts, expiry and when it was last used (to the minute);
+**Revoke** ends it on its next request. On a desktop paired with a hub the
+same panel creates the hub's tokens, from the owner's trusted full device,
+Read or Act only.
+
 ## Connecting a client
 
 The Settings panel has a collapsible **MCP client config** disclosure — expand
@@ -493,7 +529,9 @@ Index by area (names only; see the reference for details):
 - **Orchestration** — `wait_for_session`, `session_transcript`,
   `session_conversation`, `session_tool_detail`, `session_summary_since`, `run_prompt`,
   `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
-  `set_session_tags`.
+  `set_session_tags`, `decide_related_session` (Link or Not related on a
+  session's `related_session` proposal; a linked partner stays on the row
+  with `linked: true`).
 - **Work** — `work` (read: `{session_id}` → that session's live work links,
   primary first; `{key}` → ended links to the key, each with the snapshot of
   the session that did it), `work_link` (`{session_id, action}`: `link` a key
@@ -659,8 +697,9 @@ Index by area (names only; see the reference for details):
   `same_as`, the session kept), `secondary` reasons, the preselected `action`
   (`safe_kill` | `kill` | `archive` | `resume_or_expire`), a preview (host,
   branch, key, item status, PR, idle time), `auto` (auto-tidy would act
-  on it) and, on a `safe_kill` row, `worktree_kb` (its own worktree's size
-  as the host probe last measured it; absent until measured) — plus the policy (`auto_tidy`, `auto_reasons`, `done_days`,
+  on it) and, on a `safe_kill` row, `worktree_path` (the tree a clean up
+  removes) and `worktree_kb` (its size as the host probe last measured it;
+  absent until measured) — plus the policy (`auto_tidy`, `auto_reasons`, `done_days`,
   `idle_hours`). `work { action: "reopened" }` lists work moved out of done
   that has past sessions. `work_link { action: "tidy_apply", items: [{
   session_id, action, link_id?, days? }] }` applies a batch (`safe_kill`,
@@ -864,12 +903,28 @@ Index by area (names only; see the reference for details):
   saved), on a session timeline event (`trigger: event`, one of `turn_done`,
   `stop_failure`, `stuck`, `lost`, `task_done`, `task_failed`,
   `session_restore_failed`, `workspace_repair_failed`, written for a
-  session its owner owns and not started by a routine), or only when a
-  person presses `run_now` (`trigger: manual`). `list`; `get {
+  session its owner owns and not started by a routine), on a pull
+  request's review, checks or merge (`pr_review` when it gains an approval
+  or a request for changes, `pr_ci_failed`, `pr_ci_passed`, `pr_merged`:
+  written when reconcile's `pull_requests` row changes, on the timeline of
+  the session that opened it; M15 G2.4), or only when a person presses
+  `run_now` (`trigger: manual`). A pull request routine may narrow to
+  `event_repo` (`owner/name`, or `name` of any owner) and widen with
+  `event_author: anyone` from its owner's PRs to those of any session on a
+  host of its org, never one a routine's session opened; its run's prompt
+  ends with a line naming the PR. Any event routine may set
+  `event_rate_secs` (up to a week): at most one run per PR, or per
+  session, in that window; a fire inside it is dropped. `list`; `get {
   routine_id }` with its last runs; `runs { routine_id, limit? }`; `save {
   routine, routine_id? }` writes the whole routine (host, project,
   `profile` = the account it bills, prompt, `budget_run_micros`,
-  `budget_day_micros`, `overlap: skip | parallel`); `delete`; `set_enabled
+  `budget_day_micros`, `overlap: skip | parallel`); `preview { routine,
+  routine_id? }` is the editor's dry run (gap plan G2.3): it writes
+  nothing and answers `problem` (what `save` would refuse, absent when it
+  would save), `next_runs` (the schedule's next five fires at
+  `utc_offset_min`, which a daylight-saving change does not move), the
+  `account` its login bills and the host's `logins` for the Account
+  picker; `delete`; `set_enabled
   { enabled }`; `skip_next { skip? }`; `run_now`. Each run's session has
   origin `routine` and is the routine's owner's; the prompt is its
   handover. A run is `done` when its session's first turn finishes,
@@ -1110,6 +1165,13 @@ derive from them.
   waits on a person: `question` (an open `ask` card), `sign_grant` (it asks
   for autonomy and no live grant covers its plan) or `confirm` (open cards
   in its confirm queue), with `since` and `open_cards`.
+- **`finish`** (on `work { mission }` of a finished mission, G3.7; optional,
+  absent while it runs): `sessions`, the live sessions on its member items
+  that the caller may see (`session_id`, `item_id`, `host_alias`,
+  `tmux_name`, `kind`, `worktree_kb?` from the host probe), and `prs`, the
+  pull requests its work opened, as `prs { list }` rows behind the same
+  fence. A finished mission reopens with `work_link { mission_state,
+  status: paused }`; it does not go straight back to active.
 
 ### Errors and limits
 

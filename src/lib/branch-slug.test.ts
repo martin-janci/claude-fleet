@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { slugifyBranch, finalizeBranchSlug, validateBranchName } from './branch-slug';
+import { slugifyBranch, finalizeBranchSlug, validateBranchName, suggestBranchName } from './branch-slug';
 
 describe('slugifyBranch', () => {
   it('converts a natural sentence into a kebab slug', () => {
@@ -86,5 +86,18 @@ describe('validateBranchName', () => {
   it('rejects an empty name', () => {
     expect(validateBranchName('')).toMatch(/required/);
     expect(validateBranchName('   ')).toMatch(/required/);
+  });
+});
+
+describe('suggestBranchName (G2.7 New branch: "Use fix/hub-e2e-windows-2?")', () => {
+  it('slugs a name git would refuse and skips names already taken', () => {
+    expect(suggestBranchName('fix/hub e2e windows', ['main', 'fix/hub-e2e-windows'])).toBe('fix/hub-e2e-windows-2');
+    expect(suggestBranchName('fix/hub e2e windows', ['main'])).toBe('fix/hub-e2e-windows');
+    expect(suggestBranchName('feat/a', ['feat/a', 'feat/a-2'])).toBe('feat/a-3');
+  });
+
+  it('offers nothing for a good name, or when nothing usable is left', () => {
+    expect(suggestBranchName('feat/a', ['main'])).toBeNull();
+    expect(suggestBranchName('???', [])).toBeNull();
   });
 });

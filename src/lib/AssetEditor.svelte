@@ -5,7 +5,7 @@
   import type { PickedFile } from './attachments';
   import {
     updateAsset, addResource, removeResource, lintAsset, getAsset, resourceSize,
-    TOOLS, TIERS, EVENTS, KIND_FIELDS,
+    TOOLS, TIERS, EVENTS, KIND_FIELDS, HARNESSES, harnessOn, withHarness,
     type EditableAsset, type LintReport, type WriteResult,
   } from './assets';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -78,7 +78,7 @@
   // agent, mcp_server) — mirrors `Header::validate`'s allow-list. `hook` and
   // `plugin_ref` derive their host key from other fields and reject
   // `install_as` outright, so the editor never renders the field for them.
-  const INSTALL_AS_KINDS = new Set(['skill', 'agent', 'mcp_server']);
+  const INSTALL_AS_KINDS = new Set(['skill', 'agent', 'command', 'mcp_server']);
   // Mirrors `is_valid_install_name` in `service/catalog/model.rs`: non-empty
   // after trim, every character in `[A-Za-z0-9._-]`, not `.`/`..`.
   const INSTALL_AS_RE = /^[A-Za-z0-9._-]+$/;
@@ -198,6 +198,14 @@
       env[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
     }
     draft.env = env;
+  }
+
+  // ── Harness boxes (G2.6) ─────────────────────────────────────────────
+  // Which harnesses receive the asset: `targets.<harness>.enabled`. Only
+  // the harnesses that can render this kind are offered.
+  const harnesses = $derived(HARNESSES.filter((h) => h.kinds.includes(draft.kind)));
+  function setHarness(id: string, on: boolean) {
+    draft.targets = withHarness(draft.targets, id, on);
   }
 
   // ── Resources ────────────────────────────────────────────────────────
@@ -423,8 +431,56 @@
       {/if}
       {#if fields.includes('env')}
         <label class="field" data-testid="editor-field-env">
-          Env (KEY=VALUE per line)
+          Environment (KEY=VALUE per line)
           <textarea value={envText()} oninput={onEnvInput} rows="3"></textarea>
+          <span class="help">Use ${'{'}NAME{'}'} for values from Secrets; they are filled on the host.</span>
+        </label>
+      {/if}
+    {:else if draft.kind === 'command'}
+      {#if fields.includes('allowed_tools')}
+        <div class="field" data-testid="editor-field-allowed_tools">
+          <span class="field-label">Allowed tools</span>
+          <div class="tool-list">
+            {#each TOOLS as t (t)}
+              <label class="tool">
+                <input
+                  type="checkbox"
+                  checked={strArr('allowed_tools').includes(t)}
+                  onchange={() => toggleTool('allowed_tools', t)}
+                  data-testid={`editor-tool-allowed_tools-${t}`}
+                />{t}
+              </label>
+            {/each}
+          </div>
+        </div>
+      {/if}
+      {#if fields.includes('argument_hint')}
+        <label class="field" data-testid="editor-field-argument_hint">
+          Arguments
+          <input
+            value={strField('argument_hint')}
+            placeholder="[ticket] [branch]"
+            oninput={(e) => {
+              const v = (e.currentTarget as HTMLInputElement).value;
+              draft.argument_hint = v.trim() === '' ? undefined : v;
+            }}
+          />
+          <span class="help">What follows /{draft.name}; the prompt reads it as $ARGUMENTS.</span>
+        </label>
+      {/if}
+      {#if fields.includes('model')}
+        <label class="field" data-testid="editor-field-model">
+          Model
+          <select
+            value={strField('model')}
+            onchange={(e) => {
+              const v = (e.currentTarget as HTMLSelectElement).value;
+              draft.model = v === '' ? undefined : v;
+            }}
+          >
+            <option value="">Inherit</option>
+            {#each TIERS as t (t)}<option value={t}>{t}</option>{/each}
+          </select>
         </label>
       {/if}
     {:else if draft.kind === 'plugin_ref'}
@@ -449,9 +505,26 @@
         </label>
       {/if}
     {/if}
+    {#if harnesses.length > 1}
+      <div class="field" role="group" aria-label="Harness" data-testid="editor-field-harnesses">
+        <span class="field-label">Harness</span>
+        <div class="tool-list">
+          {#each harnesses as h (h.id)}
+            <label class="tool">
+              <input
+                type="checkbox"
+                checked={harnessOn(draft, h.id)}
+                onchange={(e) => setHarness(h.id, (e.currentTarget as HTMLInputElement).checked)}
+                data-testid={`editor-harness-${h.id}`}
+              />{h.label}
+            </label>
+          {/each}
+        </div>
+      </div>
+    {/if}
   </div>
 
-  <label>Body
+  <label>{draft.kind === 'command' ? 'Prompt' : 'Body'}
     <textarea bind:value={draft.body} rows="10" class="body" data-testid="editor-body"></textarea>
   </label>
 
@@ -508,6 +581,7 @@
 {/if}
 
 <style>
+  .help { color: var(--fg-muted); font-size: var(--text-2xs); }
   .editor { display: flex; flex-direction: column; gap: 10px; font-size: var(--text-sm); }
   .row { display: flex; gap: 10px; }
   .row label { flex: 1; }

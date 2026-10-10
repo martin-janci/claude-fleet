@@ -27,6 +27,10 @@ export interface PullRequestRow {
   project_id?: number | null;
   first_seen_at: number;
   updated_at: number;
+  /** The diffstat (gap plan G3.10), from the opening session's latest
+   *  probe; absent once that session is gone or from an older hub. */
+  additions?: number | null;
+  deletions?: number | null;
 }
 
 export interface PrList {
@@ -57,18 +61,30 @@ export function prStateLabel(pr: Pick<PullRequestRow, 'state' | 'draft'>): strin
 export function prChecksLabel(pr: Pick<PullRequestRow, 'ci_status' | 'review_decision'>): string {
   const ci =
     pr.ci_status === 'passing' ? 'CI passing' : pr.ci_status === 'failing' ? 'CI failing' : pr.ci_status === 'pending' ? 'CI running' : '';
-  const review =
-    pr.review_decision === 'APPROVED'
-      ? 'approved'
-      : pr.review_decision === 'CHANGES_REQUESTED'
-        ? 'changes requested'
-        : pr.review_decision === 'REVIEW_REQUIRED'
-          ? 'review required'
-          : '';
-  return [ci, review].filter(Boolean).join(' · ');
+  return [ci, reviewDecisionWords(pr.review_decision) ?? ''].filter(Boolean).join(' · ');
+}
+
+/** GitHub's `reviewDecision` in words, or null when it is unknown. */
+export function reviewDecisionWords(decision: string | null | undefined): string | null {
+  switch (decision) {
+    case 'APPROVED':
+      return 'approved';
+    case 'CHANGES_REQUESTED':
+      return 'changes requested';
+    case 'REVIEW_REQUIRED':
+      return 'review required';
+    default:
+      return null;
+  }
 }
 
 /** `owner/name#42`, or the URL when the repo could not be read from it. */
 export function prRef(pr: Pick<PullRequestRow, 'repo' | 'number' | 'url'>): string {
   return pr.repo && pr.number != null ? `${pr.repo}#${pr.number}` : pr.url;
+}
+
+/** "+18 −6": the diffstat, or '' when it is not known. */
+export function prDiffstat(pr: Pick<PullRequestRow, 'additions' | 'deletions'>): string {
+  if (pr.additions == null && pr.deletions == null) return '';
+  return `+${pr.additions ?? 0} \u2212${pr.deletions ?? 0}`;
 }

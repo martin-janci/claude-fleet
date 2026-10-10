@@ -394,6 +394,7 @@ async fn a_run_the_caller_cannot_see_is_not_followed() {
     // A paired device of a person who is not on the run, built the one way
     // a caller's scope is built (view_scope_tests pins that).
     let eve = crate::mcp::auth::Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 77,

@@ -624,6 +624,46 @@ pub(super) fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
 }
 
 impl Store {
+    /// Where shipped work came from (gap plan G3.2, Today's "from Morning
+    /// PR sweep"): the routine whose newest run started the participant's
+    /// session, else `mission <name>` when the item is a mission's task.
+    /// `None` for work a person started.
+    pub fn shipped_from(
+        &self,
+        participant_id: Option<i64>,
+        item_id: Option<i64>,
+    ) -> rusqlite::Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        if let Some(p) = participant_id {
+            let routine: Option<String> = self
+                .conn
+                .prepare_cached(
+                    "SELECT r.name FROM participants p \
+                     JOIN routine_runs rr ON rr.session_id = p.session_id \
+                     JOIN routines r ON r.id = rr.routine_id \
+                     WHERE p.id = ?1 ORDER BY rr.id DESC LIMIT 1",
+                )?
+                .query_row([p], |r| r.get(0))
+                .optional()?;
+            if routine.is_some() {
+                return Ok(routine);
+            }
+        }
+        let Some(item) = item_id else {
+            return Ok(None);
+        };
+        let mission: Option<String> = self
+            .conn
+            .prepare_cached(
+                "SELECT m.name FROM work_items i \
+                 JOIN orchestration_projects m ON m.id = i.orchestration_project_id \
+                 WHERE i.id = ?1",
+            )?
+            .query_row([item], |r| r.get(0))
+            .optional()?;
+        Ok(mission.map(|m| format!("mission {m}")))
+    }
+
     /// Keyed local work items changed since `since` (unix seconds), newest
     /// first — the classification nudge's (work graph M4.6) local
     /// candidates. A keyless item cannot be named back by key, so it is not
@@ -2647,5 +2687,66 @@ mod tests {
             "ITEM_COLUMN_COUNT must equal the columns ITEM_COLUMNS names, or every \
              query that appends its own columns decodes the wrong index"
         );
+    }
+}
+
+#[cfg(test)]
+mod shipped_from_tests {
+    use super::*;
+
+    /// Gap plan G3.2: Today's shipped line says which routine or mission
+    /// the work came from; a person's own work says nothing.
+    #[test]
+    fn shipped_work_names_its_routine_or_mission() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", None).unwrap();
+        let sid = s
+            .upsert_session("sweep", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let c = s.conn_ref();
+        c.execute(
+            "INSERT INTO routines (name, trigger, host_alias, project_id, prompt, created_at, updated_at) \
+             VALUES ('Morning PR sweep', 'cron', 'h', 1, 'p', 1, 1)",
+            [],
+        )
+        .unwrap();
+        let rid = c.last_insert_rowid();
+        c.execute(
+            "INSERT INTO routine_runs (routine_id, trigger, state, session_id, started_at) \
+             VALUES (?1, 'cron', 'done', ?2, 1)",
+            rusqlite::params![rid, sid],
+        )
+        .unwrap();
+        let pid: i64 = c
+            .query_row(
+                "SELECT id FROM participants WHERE session_id = ?1",
+                [sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            s.shipped_from(Some(pid), None).unwrap().as_deref(),
+            Some("Morning PR sweep")
+        );
+
+        let item = s.create_local_work_item(None, "Federation").unwrap();
+        c.execute(
+            "INSERT INTO orchestration_projects (name, goal, mode, state, created_at, updated_at) \
+             VALUES ('Hub federation v2', 'g', 'manual', 'active', 1, 1)",
+            [],
+        )
+        .unwrap();
+        let mid = c.last_insert_rowid();
+        c.execute(
+            "UPDATE work_items SET orchestration_project_id = ?1 WHERE id = ?2",
+            rusqlite::params![mid, item.id],
+        )
+        .unwrap();
+        assert_eq!(
+            s.shipped_from(None, Some(item.id)).unwrap().as_deref(),
+            Some("mission Hub federation v2")
+        );
+        let plain = s.create_local_work_item(None, "Mine").unwrap();
+        assert_eq!(s.shipped_from(None, Some(plain.id)).unwrap(), None);
     }
 }

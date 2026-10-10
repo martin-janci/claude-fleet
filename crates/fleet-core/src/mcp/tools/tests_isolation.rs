@@ -75,6 +75,7 @@ const PANE_N: &str = "%13";
 impl Who {
     fn caller(self) -> Caller {
         let host = |h: &str, pane: &str| Caller {
+            api: None,
             host_alias: Some(h.into()),
             client: None,
             mode: TokenMode::Full,
@@ -87,6 +88,7 @@ impl Who {
         // `None` would be testing the fail-closed path in every row rather
         // than the org boundary this matrix is about.
         let client = |mode, org_id| Caller {
+            api: None,
             host_alias: None,
             client: Some(crate::mcp::auth::ClientRef {
                 id: 7,
@@ -2235,6 +2237,7 @@ async fn run_matrix(isolate: bool) {
                 ..Default::default()
             };
             let c = Caller {
+                api: None,
                 host_alias: Some(host.into()),
                 client: None,
                 mode: TokenMode::Full,
@@ -5157,6 +5160,7 @@ async fn a_per_host_token_still_cannot_read_another_hosts_tickets_in_its_org() {
         s.set_host_org("h-a2", s.host_org("h-a").unwrap()).unwrap();
     }
     let a2 = Caller {
+        api: None,
         host_alias: Some("h-a2".into()),
         client: None,
         mode: TokenMode::Full,

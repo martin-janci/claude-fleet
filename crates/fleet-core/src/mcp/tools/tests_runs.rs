@@ -60,6 +60,7 @@ fn fixture() -> Fx {
 
 fn client(mode: TokenMode, org_id: Option<i64>) -> Caller {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 7,
@@ -76,6 +77,7 @@ fn client(mode: TokenMode, org_id: Option<i64>) -> Caller {
 
 fn host(alias: &str) -> Caller {
     Caller {
+        api: None,
         host_alias: Some(alias.into()),
         client: None,
         mode: TokenMode::Full,

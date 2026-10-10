@@ -25,6 +25,7 @@ pub(super) fn tools_notifying(s: Store, notify: guard::ConfirmNotify) -> FleetTo
 
 pub(super) fn client(id: i64, mode: TokenMode, org_id: Option<i64>) -> Caller {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id,
@@ -41,6 +42,7 @@ pub(super) fn client(id: i64, mode: TokenMode, org_id: Option<i64>) -> Caller {
 
 pub(super) fn host(alias: &str) -> Caller {
     Caller {
+        api: None,
         host_alias: Some(alias.into()),
         client: None,
         mode: TokenMode::Full,

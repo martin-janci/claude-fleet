@@ -1,8 +1,9 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import ChatForm, { type ChatFormOutcome } from './ChatForm.svelte';
 import { expectAccessible } from '../a11y_check';
 import type { FormSpec } from './forms';
+import { loadSaved } from './saved_answers';
 
 const SPEC: FormSpec = {
   spec: 'fleet.form/1',
@@ -107,5 +108,123 @@ describe('ChatForm: a wizard in the chat (redesign step 10.12)', () => {
     await expectAccessible(container);
     await fill();
     await expectAccessible(container);
+  });
+});
+
+// G1.3: the newer fleet.form/1 keys drawn in the chat, through the same
+// FormWizard a dialog and an agent's FormCard use.
+const WIDE: FormSpec = {
+  spec: 'fleet.form/1',
+  title: 'Deploy',
+  submit: 'Deploy',
+  save_later: true,
+  steps: [
+    {
+      title: 'Where it runs',
+      name: 'Where',
+      fields: [
+        {
+          name: 'host',
+          type: 'select',
+          label: 'Host',
+          required: true,
+          other: true,
+          options: [
+            { value: 'mercury', label: 'mercury', detail: 'next free on main' },
+            { value: 'venus', label: 'venus', detail: '2 idle', proposed: { by: 'rule', reason: 'it has the most room' } },
+          ],
+        },
+      ],
+    },
+    {
+      title: 'What ships',
+      name: 'What',
+      fields: [
+        { name: 'summary', type: 'text', label: 'Summary', value: 'Ship the hub fix', drafted: { by: 'haiku on mercury', from: 'the Jira epic' } },
+        { name: 'tier', type: 'select', label: 'Tier', value: 'small', disabled_reason: 'Larger tiers need an org admin', options: [['small', 'Small'], ['large', 'Large']] },
+        { name: 'token', type: 'secret', label: 'Token', secret_note: 'Stays on mercury' },
+      ],
+    },
+    { title: 'Check it', name: 'Review', kind: 'review' },
+  ] as FormSpec['steps'],
+};
+
+describe('ChatForm: the wider spec (G1.3)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('draws step chips by name, a proposal with its reason, each option’s detail', () => {
+    render(ChatForm, { props: { spec: WIDE, from: 'Control', onsubmit: vi.fn() } });
+    const chips = screen.getByTestId('form-step-chips');
+    expect(chips).toHaveTextContent('Where');
+    expect(chips).toHaveTextContent('What');
+    expect(chips).toHaveTextContent('Review');
+    expect(screen.getAllByRole('radio')[0]).toHaveAttribute('data-testid', 'form-field-host-venus');
+    expect(screen.getByTestId('form-field-host-venus')).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByTestId('form-proposed-host')).toHaveTextContent('it has the most room');
+    expect(screen.getByTestId('form-option-detail-mercury')).toHaveTextContent('next free on main');
+    expect(screen.getByTestId('form-option-detail-venus')).toHaveTextContent('2 idle');
+  });
+
+  it('takes Another…, shows the drafted, disabled and secret lines, reviews with Edit, and sends only what is answered', async () => {
+    const onsubmit = vi.fn(async () => ({ ok: true as const }));
+    render(ChatForm, { props: { spec: WIDE, from: 'Control', onsubmit } });
+    await fireEvent.click(screen.getByTestId('form-field-host-other'));
+    await fireEvent.input(screen.getByTestId('form-field-host-other-text'), { target: { value: 'pluto' } });
+    await fireEvent.click(screen.getByTestId('form-next'));
+
+    expect(screen.getByTestId('form-drafted-from-summary')).toHaveTextContent('by haiku on mercury · from the Jira epic');
+    expect(screen.getByTestId('form-disabled-tier')).toHaveTextContent('Larger tiers need an org admin');
+    expect(screen.getByTestId('form-secret-note-token')).toHaveTextContent('Stays on mercury');
+    await fireEvent.input(screen.getByTestId('form-field-token'), { target: { value: 's3cret' } });
+    await fireEvent.click(screen.getByTestId('form-next'));
+
+    const review = screen.getByTestId('form-review');
+    expect(screen.getByTestId('form-review-step-0')).toHaveTextContent('pluto');
+    expect(review).toHaveTextContent('set, never shown to the agent');
+    expect(review).not.toHaveTextContent('s3cret');
+    await fireEvent.click(screen.getByTestId('form-review-edit-0'));
+    expect(screen.getByTestId('form-step-title')).toHaveTextContent('Where it runs');
+    expect(screen.getByTestId('form-field-host-other-text')).toHaveValue('pluto');
+    await fireEvent.click(screen.getByTestId('form-step-chip-0'));
+    await fireEvent.click(screen.getByTestId('form-next'));
+    await fireEvent.click(screen.getByTestId('form-next'));
+    await fireEvent.click(screen.getByTestId('form-submit'));
+
+    // The disabled tier is shown, never sent.
+    expect(onsubmit).toHaveBeenCalledWith({ host: 'pluto', summary: 'Ship the hub fix', token: 's3cret' });
+    expect((await screen.findByTestId('chat-form-summary')).textContent).toBe('pluto · Ship the hub fix · 1 secret');
+  });
+
+  it('saves to finish later: one line with Resume, the answers kept on the device without the secret, gone once answered', async () => {
+    const onsubmit = vi.fn(async () => ({ ok: true as const }));
+    const first = render(ChatForm, { props: { spec: WIDE, from: 'Control', saveKey: 'wizard:app:1:k', onsubmit } });
+    await fireEvent.click(screen.getByTestId('form-field-host-mercury'));
+    await fireEvent.click(screen.getByTestId('form-next'));
+    await fireEvent.input(screen.getByTestId('form-field-token'), { target: { value: 's3cret' } });
+    await fireEvent.click(screen.getByTestId('form-save-later'));
+
+    expect(screen.queryByTestId('chat-form')).toBeNull();
+    expect(screen.getByTestId('form-saved-later')).toHaveTextContent('Deploy');
+    expect(loadSaved('wizard:app:1:k')).toEqual({ host: 'mercury', summary: 'Ship the hub fix' });
+    await fireEvent.click(screen.getByTestId('form-resume'));
+    expect(screen.getByTestId('chat-form')).toBeInTheDocument();
+    first.unmount();
+
+    // Drawn again (the panel re-mounted): it opens from what was kept.
+    render(ChatForm, { props: { spec: WIDE, from: 'Control', saveKey: 'wizard:app:1:k', onsubmit } });
+    expect(screen.getByTestId('form-field-host-mercury')).toHaveAttribute('aria-checked', 'true');
+    await fireEvent.click(screen.getByTestId('form-next'));
+    await fireEvent.input(screen.getByTestId('form-field-token'), { target: { value: 's3cret' } });
+    await fireEvent.click(screen.getByTestId('form-next'));
+    await fireEvent.click(screen.getByTestId('form-submit'));
+    await screen.findByTestId('chat-form-outcome');
+    expect(loadSaved('wizard:app:1:k')).toBeNull();
+  });
+
+  it('offers no Save and finish later without a place to keep the answers', () => {
+    render(ChatForm, { props: { spec: WIDE, from: 'Control', onsubmit: vi.fn() } });
+    expect(screen.queryByTestId('form-save-later')).toBeNull();
   });
 });

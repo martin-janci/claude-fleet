@@ -509,7 +509,10 @@ handed over (`control_handoffs`, migration 140, redesign 9.3).
 
 Routines are landed (`service/routines/`, migrations 131 and 139, redesign
 8.5 to 8.10): a saved prompt that starts a session on a cron schedule, on a
-fleet event or when a person presses Run now. The scheduler stops on
+fleet event or when a person presses Run now. Since M15 G2.4 (migration
+156) the events include a pull request's review, failing or passing checks
+and merge, read from the `pull_requests` changes reconcile records, with a
+repo filter, "me or anyone in its org" and a rate per PR. The scheduler stops on
 `automation.paused`, a fire past the routine's day budget is skipped, a run
 past its run budget fails and pauses the routine, and a run whose account
 is at or past `accounts.pause_at` is skipped (8.7). Each finished run

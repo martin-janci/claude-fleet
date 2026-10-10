@@ -2,7 +2,10 @@
   Redesign step 9.9 (Jev K2): under what the person just sent in Control,
   where it goes: "About Hub federation v2 · Proposed by Jev · Change", or,
   for a message too short or unclear to route, a question with the
-  missions and sessions to pick from. Mounted beside Control's composer;
+  missions and sessions to pick from. Gap plan G3.9: a receipt about a
+  session offers "↳ Send to <session>", which hands the message on (and
+  then reads "↳ Sent to session <name> ↗"); one about a mission opens it.
+  Mounted beside Control's composer;
   it watches the outbox for this session's prompts once
   they are sent, and routes each one once.
 -->
@@ -11,7 +14,8 @@
   import ProposedBy from './ProposedBy.svelte';
   import { outbox, type OutboxMessage } from './outbox';
   import { focusSession } from './session_focus';
-  import { CONTROL, choose, optionOf, receipts, routeSent, shownOption, targetOf, type Receipt } from './control_route';
+  import { openMission } from './missions';
+  import { CONTROL, choose, handOn, optionOf, receipts, routeSent, shownOption, targetOf, type Receipt } from './control_route';
 
   let { sessionId }: { sessionId: number } = $props();
 
@@ -19,6 +23,14 @@
   const seen = new Set<string>();
   let primed = false;
   let changing = $state<string | null>(null);
+  /** Why a hand-on did not happen, per receipt. */
+  let handErrors = $state<Record<string, string>>({});
+
+  async function send(r: Receipt) {
+    const why = await handOn(r.key);
+    const { [r.key]: _drop, ...rest } = handErrors;
+    handErrors = why ? { ...rest, [r.key]: why } : rest;
+  }
 
   const DELIVERED: ReadonlySet<OutboxMessage['state']> = new Set(['sent', 'queued', 'received']);
 
@@ -48,8 +60,13 @@
   }
 
   function open(r: Receipt) {
-    const t = targetOf(r.route, shownOption(r));
-    if (!t || t.kind !== 'session') return;
+    const t = r.handed ?? targetOf(r.route, shownOption(r));
+    if (!t) return;
+    if (t.kind === 'mission') {
+      openMission(t.id);
+      if (r.chosen === null) void choose(r.key, optionOf(t));
+      return;
+    }
     if (focusSession(t.id, t.name) && r.chosen === null) void choose(r.key, optionOf(t));
   }
 
@@ -64,9 +81,13 @@
     {#each $receipts as r (r.key)}
       {@const text = label(r)}
       <div class="receipt" data-testid="control-route-receipt" data-outcome={r.route.outcome}>
-        {#if text && changing !== r.key}
+        {#if r.handed}
+          <button type="button" class="target link" data-testid="control-route-handed" onclick={() => open(r)}
+            >↳ Sent to session {r.handed.name} ↗</button
+          >
+        {:else if text && changing !== r.key}
           {@const t = targetOf(r.route, shownOption(r))}
-          {#if t?.kind === 'session'}
+          {#if t}
             <button type="button" class="target link" data-testid="control-route-target" onclick={() => open(r)}
               >{text}</button
             >
@@ -85,6 +106,14 @@
             <button type="button" class="link" data-testid="control-route-change" onclick={() => (changing = r.key)}
               >Change</button
             >
+          {/if}
+          {#if t?.kind === 'session'}
+            <button type="button" class="hand" data-testid="control-route-send" onclick={() => void send(r)}
+              >↳ Send to {t.name}</button
+            >
+          {/if}
+          {#if handErrors[r.key]}
+            <span class="hand-error" role="alert" data-testid="control-route-send-error">{handErrors[r.key]}</span>
           {/if}
         {:else}
           <span class="ask" data-testid="control-route-ask">Which mission or session is this about?</span>
@@ -129,6 +158,21 @@
     color: var(--accent);
     cursor: pointer;
     font: inherit;
+  }
+  .hand {
+    font: inherit;
+    padding: 1px 8px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border);
+    background: var(--bg-raise);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  .hand:hover {
+    border-color: var(--accent);
+  }
+  .hand-error {
+    color: var(--usage-crit);
   }
   .choices {
     display: flex;

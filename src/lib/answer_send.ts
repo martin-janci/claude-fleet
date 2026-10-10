@@ -55,6 +55,16 @@ export async function sendAnswer(session: SessionRow, view: AnswerView, key: str
   }
   const why = hubActionBlocked('send_prompt', get(hubStatus), get(hubConnection)) ?? sessionActionBlocked(session, 'answer_dialog');
   if (why !== null) return { ok: false, blocked: why };
-  const r = await answerDialog(session.host_alias, session.tmux_name, key);
-  return r.ok ? { ok: true } : { ok: false, error: r.error.message };
+  const r = await answerDialog(session.host_alias, session.tmux_name, key, {
+    kind: fresh.view.kind,
+    question: fresh.view.question,
+    options: fresh.view.options.map((o) => ({ n: o.n, label: o.label })),
+    detail: fresh.view.detail,
+    selected: fresh.view.options.find((o) => o.selected)?.n ?? null,
+  });
+  if (r.ok) return { ok: true };
+  // The backend's own check, made right before its press: the dialog moved
+  // between this read and the key.
+  if (r.error.code === 'E_CONFLICT') return { ok: false, stale: r.error.message };
+  return { ok: false, error: r.error.message };
 }

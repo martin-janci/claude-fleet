@@ -359,6 +359,15 @@ pub struct QueuePromptParams {
     /// Operator only: the nonce a person approved.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+    /// Send later: not typed before this unix second.
+    #[serde(default)]
+    pub not_before: Option<i64>,
+    /// Hold it while the session's account is at or past accounts.pause_at.
+    #[serde(default)]
+    pub until_limit_reset: bool,
+    /// Drop it instead if the session is archived before it goes out.
+    #[serde(default)]
+    pub skip_if_archived: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -400,10 +409,17 @@ pub struct SendPromptParams {
     #[serde(default)]
     pub client_msg_id: Option<String>,
     /// Press a key instead; `1`-`9` picks that `pending_input` option
-    /// (toggles it when `multi`). Not recorded; `prompt` must be empty.
+    /// (toggles if `multi`). `prompt` must be empty.
     #[serde(default)]
     #[schemars(extend("enum" = crate::tmux::NamedKey::all_names()))]
     pub keys: Option<String>,
+    /// With `keys`: its `pending_input`; E_CONFLICT if it moved.
+    // Advertised as a bare object: the nested `ExpectDialog` schema cost
+    // every client ~500 bytes of tool definitions on every connect
+    // (`the_served_definition_budget_stays_bounded`). Still parsed strictly.
+    #[serde(default)]
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
+    pub expect: Option<crate::service::sessions::ExpectDialog>,
     /// Operator only: the nonce a person approved.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
@@ -839,6 +855,16 @@ pub struct SetSessionTagsParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DecideRelatedSessionParams {
+    /// The session whose `related_session` proposal this answers.
+    pub session_id: i64,
+    /// The proposal's `run_id`.
+    pub run_id: i64,
+    /// true: Link (same work, stays listed); false: Not related.
+    pub linked: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RepoLogParams {
     /// Fleet session id.
     pub session_id: i64,
@@ -952,7 +978,7 @@ pub struct PlanSyncParams {
     /// Only this host; omit for every reachable one.
     #[serde(default)]
     pub host_alias: Option<String>,
-    /// Only this kind: skill | agent | hook | mcp_server | plugin_ref.
+    /// Only this kind: skill | agent | hook | mcp_server | plugin_ref | command.
     #[serde(default)]
     pub kind: Option<String>,
     /// Only this asset.
@@ -1332,12 +1358,12 @@ pub struct UpdateAdminParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RoutinesParams {
-    /// list | get | runs | failing | save | delete | set_enabled | skip_next | run_now.
+    /// list | get | runs | failing | save | preview | delete | set_enabled | skip_next | run_now.
     pub action: String,
-    /// Every action but list, and save of a change.
+    /// Every action but list, and save or preview of a change.
     #[serde(default)]
     pub routine_id: Option<i64>,
-    /// save: the whole routine.
+    /// save, preview: the whole routine.
     #[serde(default)]
     pub routine: Option<crate::service::routines::RoutineInput>,
     /// set_enabled.

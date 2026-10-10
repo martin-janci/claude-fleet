@@ -182,6 +182,7 @@ fn only_the_owner_reaches_a_private_sessions_download() {
     // A person's own device, through the one constructor.
     let device = |person: i64, org: Option<i64>| {
         Caller {
+            api: None,
             host_alias: None,
             client: Some(ClientRef {
                 id: 1,
@@ -201,6 +202,7 @@ fn only_the_owner_reaches_a_private_sessions_download() {
     // No pane header here, and the row is `private` rather than `unclaimed`,
     // so §4.4 refuses it either way — which is the point.
     let host_token = Caller {
+        api: None,
         host_alias: Some("web-1".into()),
         client: None,
         mode: TokenMode::Full,
@@ -422,6 +424,7 @@ fn a_reaped_sessions_download_stays_the_owners() {
     s.delete_session(session).unwrap();
     let device = |person: i64| {
         Caller {
+            api: None,
             host_alias: None,
             client: Some(ClientRef {
                 id: 1,

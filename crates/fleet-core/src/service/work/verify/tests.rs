@@ -7,6 +7,7 @@ use crate::store::TaskReport;
 
 fn person(store: &Mutex<Store>, id: i64) -> ViewScope {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(ClientRef {
             id: 7,
@@ -221,6 +222,7 @@ fn only_a_person_records_a_check_and_only_of_a_real_line() {
         codes::E_INVALID
     );
     let host = Caller {
+        api: None,
         host_alias: Some("h".into()),
         client: None,
         mode: TokenMode::Full,

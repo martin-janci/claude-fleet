@@ -152,7 +152,9 @@ describe('WorkTaskDetail', () => {
       'Placing it elsewhere is local to fleet: it never changes Jira.',
     );
     expect(screen.getByTestId('work-task-repos').textContent).toBe('acme/api');
-    // Every session with its state and why; evidence lines under it.
+    // Every session with its state and why, on the Sessions tab; evidence
+    // lines under it.
+    await fireEvent.click(screen.getByTestId('work-task-tab-sessions'));
     const links = screen.getAllByTestId('work-task-link');
     expect(links.map((l) => l.getAttribute('data-kind'))).toEqual(['primary', 'suggested', 'past', 'past']);
     expect(within(links[0]).getByTestId('work-task-link-state').textContent).toBe('active · primary');
@@ -160,6 +162,8 @@ describe('WorkTaskDetail', () => {
     expect(within(links[1]).getByTestId('work-task-link-why').textContent).toContain('R6');
     // Past, newest first.
     expect(links[2].textContent).toContain('old-2');
+    // The last outcome is Activity's.
+    await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
     expect(screen.getByTestId('work-task-outcome').textContent).toContain('Fixed the token refresh.');
     // A tracker's task has no org to assign: its tracker's is its org.
     expect(screen.queryByTestId('work-task-assign-org')).toBeNull();
@@ -207,6 +211,10 @@ describe('WorkTaskDetail', () => {
     handlers.work_task = () => withPrs;
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
+    // The Delivery block names the live PR with its checks.
+    expect(screen.getByTestId('work-task-delivery-pr').textContent).toContain('PR #5');
+    expect(screen.getByTestId('work-task-delivery-pr').textContent).toContain('✕ 1 failing');
+    await fireEvent.click(screen.getByTestId('work-task-tab-sessions'));
     const chips = screen.getAllByTestId('work-task-link-result');
     expect(chips).toHaveLength(1);
     expect(chips[0]).toHaveTextContent('Failed · cannot merge');
@@ -396,7 +404,7 @@ describe('WorkTaskDetail', () => {
     await flush();
     await flush();
     expect((screen.getByTestId('start-popover-project') as HTMLSelectElement).value).toBe('4');
-    expect(screen.getByTestId('start-popover-suggested').textContent).toMatch(/Proposed by Jev\s+88%/);
+    expect(screen.getByTestId('start-popover-suggested').textContent).toMatch(/Proposed by Jev\s+likely/);
     // The pre-selection is read back with its host and plan; nothing starts by itself.
     expect(calls('preview_start_work').at(-1)).toEqual({ item_id: 12, with_brief: true, project_id: 4 });
     expect(calls('start_work')).toHaveLength(0);
@@ -453,7 +461,6 @@ describe('WorkTaskDetail', () => {
     await flush();
     expect(screen.getByTestId('work-org-confirm').hasAttribute('disabled')).toBe(true);
     await fireEvent.change(screen.getByTestId('work-org-target'), { target: { value: '2' } });
-    await fireEvent.click(screen.getByTestId('work-org-review'));
     await flush();
     expect(calls('work_org_impact')[0]).toEqual({ task_id: 'item:77', org_id: 2 });
     expect(screen.getByTestId('work-org-impact-link').textContent).toContain('api');
@@ -483,7 +490,6 @@ describe('WorkTaskDetail', () => {
     await flush();
     await fireEvent.click(screen.getByTestId('work-task-assign-org'));
     await fireEvent.change(screen.getByTestId('work-org-target'), { target: { value: '2' } });
-    await fireEvent.click(screen.getByTestId('work-org-review'));
     await flush();
     await fireEvent.click(screen.getByTestId('work-org-confirm'));
     await flush();
@@ -507,15 +513,12 @@ describe('WorkTaskDetail', () => {
     const options = Array.from((screen.getByTestId('work-org-target') as HTMLSelectElement).options, (o) => o.value);
     expect(options).toEqual(['', '1', '2']);
     await fireEvent.change(screen.getByTestId('work-org-target'), { target: { value: '2' } });
-    await fireEvent.click(screen.getByTestId('work-org-review'));
     await flush();
     expect(screen.getByTestId('work-org-impact')).toBeTruthy();
     await fireEvent.change(screen.getByTestId('work-org-target'), { target: { value: '1' } });
     await flush();
-    expect(screen.queryByTestId('work-org-impact')).toBeNull();
-    expect(screen.getByTestId('work-org-confirm').hasAttribute('disabled')).toBe(true);
-    await fireEvent.click(screen.getByTestId('work-org-review'));
-    await flush();
+    // The new target's impact is read at once; the old one is gone.
+    expect(calls('work_org_impact').map((a) => a.org_id)).toEqual([2, 1]);
     handlers.assign_work_org = () => localTask.task;
     await fireEvent.click(screen.getByTestId('work-org-confirm'));
     await flush();
@@ -583,7 +586,6 @@ describe('WorkTaskDetail', () => {
     await flush();
     await fireEvent.click(screen.getByTestId('work-task-assign-org'));
     await fireEvent.change(screen.getByTestId('work-org-target'), { target: { value: '2' } });
-    await fireEvent.click(screen.getByTestId('work-org-review'));
     await flush();
     expect(screen.getByTestId('work-org-refused').textContent).toContain('assign_tracker');
     expect(screen.getByTestId('work-org-confirm').hasAttribute('disabled')).toBe(true);
@@ -598,7 +600,7 @@ describe('WorkTaskDetail', () => {
     await fireEvent.click(screen.getByTestId('work-task-place'));
     await flush();
     expect(screen.getByTestId('work-place-note').textContent).toContain('never changes Jira');
-    await fireEvent.click(screen.getAllByTestId('work-place-label').find((b) => b.textContent === 'Payments')!);
+    await fireEvent.click(screen.getAllByTestId('work-place-label').find((b) => b.dataset.label === 'Payments')!);
     await fireEvent.click(screen.getByTestId('work-place-submit'));
     await flush();
     expect(calls('place_work')[0]).toEqual({ task_id: 'item:12', group: 'Payments', expected_version: 0 });
@@ -641,7 +643,8 @@ describe('WorkTaskDetail', () => {
     expect((screen.getByTestId('rule-container') as HTMLInputElement).value).toBe('ABC');
     expect((screen.getByTestId('rule-tracker') as HTMLSelectElement).value).toBe('1');
     expect(screen.getByTestId('rule-save').hasAttribute('disabled')).toBe(true);
-    await fireEvent.click(screen.getByTestId('rule-preview-btn'));
+    // The preview runs by itself once the draft is still (G2.2).
+    await new Promise((r) => setTimeout(r, 450));
     await flush();
     expect(screen.getAllByTestId('rule-preview-row')[0].textContent).toContain('ABC → Payments');
     expect(screen.getByTestId('rule-preview-kept').textContent).toContain('2 placed by a person');
@@ -650,7 +653,8 @@ describe('WorkTaskDetail', () => {
     await flush();
     expect(screen.getByTestId('rule-save').hasAttribute('disabled')).toBe(true);
     expect(screen.getByTestId('rule-preview-stale')).toBeTruthy();
-    await fireEvent.click(screen.getByTestId('rule-preview-btn'));
+    // The preview runs by itself once the draft is still (G2.2).
+    await new Promise((r) => setTimeout(r, 450));
     await flush();
     await fireEvent.click(screen.getByTestId('rule-save'));
     await flush();
@@ -735,7 +739,7 @@ describe('WorkTaskDetail', () => {
     expect(get(selectedTaskId)).toBe('item:12');
   });
 
-  it('placement and rules sit behind a disclosure; the work sections come before Sessions, the steps after', async () => {
+  it('placement and rules sit behind a disclosure; the work sections are Overview’s, the steps Activity’s', async () => {
     handlers.work_task = () => ({
       ...trackerTask,
       subtasks: [{ task_id: 'item:41', item_id: 41, key: 'TASK-41', title: 'SELECT stats', origin: 'manual', status: 'todo', live_sessions: 0 }],
@@ -748,12 +752,80 @@ describe('WorkTaskDetail', () => {
     expect(within(more).getByTestId('work-task-place')).toBeTruthy();
     expect(within(more).getByTestId('work-task-org')).toBeTruthy();
     await fireEvent.click(screen.getByText('Placement & rules'));
-    const sessionsHead = screen.getByText('Sessions');
-    const before = (a: Node, b: Node) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
-    expect(before(screen.getByTestId('task-subtasks'), sessionsHead)).toBe(true);
-    expect(before(sessionsHead, screen.getByTestId('task-steps'))).toBe(true);
+    expect(screen.getByTestId('task-subtasks')).toBeTruthy();
+    expect(screen.queryByTestId('task-steps')).toBeNull();
+    await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
+    expect(screen.queryByTestId('task-subtasks')).toBeNull();
     expect(screen.getByTestId('task-step').textContent).toContain('Read ABC-12');
   });
+  describe('G3.4: tabs, Delivery, inline status, the start rule', () => {
+    it('Sessions counts its links; Activity says when nothing happened', async () => {
+      handlers.work_task = () => ({ ...localTask, last_outcome: null });
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      expect(screen.getByTestId('work-task-tab-overview').getAttribute('aria-selected')).toBe('true');
+      expect(screen.getByTestId('work-task-tab-sessions').textContent).toBe('Sessions1');
+      expect(screen.queryByTestId('work-task-tab-comments')).toBeNull();
+      await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
+      expect(screen.getByTestId('work-task-no-activity')).toBeTruthy();
+    });
+
+    it('sets a native task’s status from the header, without the edit dialog', async () => {
+      handlers.set_work_status = (a) => ({ id: a.item_id, status_category: a.status });
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      const pick = screen.getByTestId('work-task-status-pick') as HTMLSelectElement;
+      expect(pick.value).toBe('in_progress');
+      pick.value = 'done';
+      await fireEvent.change(pick);
+      await flush();
+      expect(calls('set_work_status')[0]).toEqual({ item_id: 77, status: 'done' });
+    });
+
+    it('a refused status says why on the page', async () => {
+      handlers.set_work_status = () => {
+        throw { code: 'E_FORBIDDEN', message: 'not yours' };
+      };
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      const pick = screen.getByTestId('work-task-status-pick') as HTMLSelectElement;
+      pick.value = 'done';
+      await fireEvent.change(pick);
+      await flush();
+      expect(screen.getByTestId('work-task-status-error').textContent).toContain('not yours');
+    });
+
+    it('a ticket has no inline status pick', async () => {
+      render(WorkTaskDetail, { taskId: 'item:12' });
+      await flush();
+      expect(screen.queryByTestId('work-task-status-pick')).toBeNull();
+    });
+
+    it('Delivery names the column, the spend over its span and the owner; the rule names where a start lands', async () => {
+      handlers.work_task = () => ({
+        ...trackerTask,
+        task: { ...trackerTask.task, key: 'PD-12', status_name: 'QA Review', cost_micros: 4_200_000, assignees: ['Ana'], mine: false },
+        last_outcome: { ...trackerTask.last_outcome!, pr_url: 'https://github.com/o/r/pull/9' },
+      });
+      handlers.start_rules = () => [
+        { id: 1, pattern: 'PD-*', project_id: 3, project: 'acme/pos', host_alias: null, state: 'active', created_at: 1, updated_at: 1 },
+        { id: 2, pattern: 'PD-1*', project_id: 4, project: 'acme/web', host_alias: 'mac', state: 'active', created_at: 1, updated_at: 1 },
+        { id: 3, pattern: 'PD-12', project_id: 5, project: 'acme/old', host_alias: null, state: 'dismissed', created_at: 1, updated_at: 1 },
+      ];
+      render(WorkTaskDetail, { taskId: 'item:12' });
+      await flush();
+      expect(screen.getByTestId('work-task-delivery-column').textContent).toBe('QA Review');
+      expect(screen.getByTestId('work-task-delivery-spend').textContent?.trim()).toMatch(/^\$4\.20\sover /);
+      expect(screen.getByTestId('work-task-delivery-owner').textContent).toBe('Ana');
+      // No live PR: the last outcome's.
+      expect(screen.getByTestId('work-task-delivery-pr').textContent).toContain('PR #9');
+      // The most specific active rule wins; a dismissed one never.
+      const rule = screen.getByTestId('work-task-start-rule').textContent?.replace(/\s+/g, ' ');
+      expect(rule).toContain('Starts in acme/web on mac');
+      expect(rule).toContain('rule PD-1*');
+    });
+  });
+
   describe('K5: Jev proposes a group (redesign 6.9)', () => {
     const proposed: TaskDetail = {
       ...localTask,
@@ -766,7 +838,7 @@ describe('WorkTaskDetail', () => {
       render(WorkTaskDetail, { props: { taskId: 'item:77' } });
       await flush();
       expect(screen.getByTestId('work-task-group-proposal').textContent).toContain('Jev proposes “Payments”');
-      expect(screen.getByTestId('work-task-group-proposed-by').textContent).toContain('77%');
+      expect(screen.getByTestId('work-task-group-proposed-by').textContent).toContain('likely');
       await fireEvent.click(screen.getByTestId('work-task-group-proposal-place'));
       await flush();
       expect(calls('place_work')[0]).toEqual({ task_id: 'item:77', group: 'Payments', expected_version: 0 });

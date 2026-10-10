@@ -1972,6 +1972,7 @@ mod tests {
     #[test]
     fn a_host_bound_stream_never_carries_work_frames() {
         let host = Caller {
+            api: None,
             host_alias: Some("mefistos".into()),
             client: None,
             mode: crate::mcp::auth::TokenMode::Full,
@@ -1991,6 +1992,7 @@ mod tests {
         // has nothing to say about a tracker ticket, and narrowing this
         // predicate would blank the work graph on a person's own desktop.
         let persons_device = Caller {
+            api: None,
             host_alias: None,
             client: Some(super::super::auth::ClientRef {
                 id: 1,
@@ -2132,6 +2134,7 @@ mod tests {
         /// (`Caller::view_scope`).
         fn scope(&self, person: i64) -> ViewScope {
             let caller = Caller {
+                api: None,
                 host_alias: None,
                 client: Some(super::super::auth::ClientRef {
                     id: 1,
@@ -2346,6 +2349,7 @@ mod tests {
         // inversion (`person.is_none() && host.is_none() && org.is_all()`)
         // would have passed every frame in the fleet to exactly this caller.
         let unbound = Caller {
+            api: None,
             host_alias: None,
             client: Some(super::super::auth::ClientRef {
                 id: 2,
@@ -2936,6 +2940,7 @@ mod tests {
     #[test]
     fn a_host_bound_stream_never_carries_grant_frames() {
         let host = Caller {
+            api: None,
             host_alias: Some("h".into()),
             client: None,
             mode: crate::mcp::auth::TokenMode::Full,
@@ -2967,6 +2972,7 @@ mod tests {
     fn a_peer_caller_is_refused_and_anyone_else_is_not() {
         use super::super::auth::{refuses_peer, ClientRef, TokenMode};
         let peer = Caller {
+            api: None,
             host_alias: None,
             client: Some(ClientRef {
                 id: 1,

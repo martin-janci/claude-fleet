@@ -58,6 +58,7 @@ fn ok_json_compact_is_compact_and_strips_nulls() {
 
 fn host_caller(alias: &str, mode: TokenMode) -> Caller {
     Caller {
+        api: None,
         host_alias: Some(alias.into()),
         client: None,
         mode,
@@ -78,6 +79,7 @@ const OWNER_PERSON: i64 = 1;
 /// let through. [`another_person`] makes the colleague's.
 fn client_caller(name: &str, mode: TokenMode) -> Caller {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 7,
@@ -131,6 +133,7 @@ fn readonly_token_is_refused_mutating_tools_and_allowed_reads() {
         "dispatch_task",
         "cancel_task",
         "set_session_tags",
+        "decide_related_session",
         "work_link",
     ] {
         let err = enforce_mode(&ro, t).expect_err(t);
@@ -753,6 +756,7 @@ async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
                 force: false,
                 client_msg_id: None,
                 confirm_nonce: None,
+                expect: None,
             }),
         )
         .await
@@ -772,6 +776,7 @@ async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
                 force: false,
                 client_msg_id: None,
                 confirm_nonce: None,
+                expect: None,
             }),
         )
         .await
@@ -844,6 +849,7 @@ async fn keys_press_a_key_without_a_marker_and_without_recording_a_prompt() {
                 force: false,
                 client_msg_id: None,
                 confirm_nonce: None,
+                expect: None,
             }),
         )
         .await
@@ -1044,6 +1050,7 @@ fn a_client_name_cannot_forge_a_second_audit_line() {
         id
     };
     let sneaky = Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 7,
@@ -1576,7 +1583,7 @@ fn the_control_api_guide_names_every_attention_reason_and_status() {
 /// into the store: a test run alone saw a `local` row of whatever Claude was
 /// running on the box, and passed in the full suite only because another
 /// test had taken the gate first.
-fn test_tools(store: Store) -> FleetTools {
+pub(super) fn test_tools(store: Store) -> FleetTools {
     if store
         .get_setting(crate::service::hub::SETTING_LOCAL_HOST)
         .unwrap()
@@ -2635,6 +2642,7 @@ fn router_sum_serves_every_tool() {
         include_str!("devices.rs"),
         include_str!("prs.rs"),
         include_str!("pr_shepherd.rs"),
+        include_str!("api_tokens.rs"),
         include_str!("routines.rs"),
         include_str!("start_rules.rs"),
         include_str!("presence.rs"),
@@ -2971,7 +2979,7 @@ fn pair_params(name: &str) -> PairClientParams {
 }
 
 /// The JSON a tool result carries.
-fn result_json(r: &CallToolResult) -> serde_json::Value {
+pub(super) fn result_json(r: &CallToolResult) -> serde_json::Value {
     serde_json::from_str(text_of(&r.content[0])).expect("tool result is JSON")
 }
 
@@ -3488,6 +3496,7 @@ fn a_trusted_client_delivers_unmarked_and_an_ordinary_one_does_not() {
     assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
 
     let host = Caller {
+        api: None,
         host_alias: Some("mefistos".into()),
         client: None,
         mode: TokenMode::Full,
@@ -3589,6 +3598,7 @@ async fn set_client_trust_grants_and_withdraws_and_list_clients_shows_it() {
 #[test]
 fn marker_origin_can_never_be_split_by_a_client_name() {
     let c = Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 1,
@@ -3611,6 +3621,7 @@ fn marker_origin_can_never_be_split_by_a_client_name() {
     // `U+2028`, `U+2029` and `U+0085` are not `char::is_control`, but a
     // renderer or an LLM may still read them as a line break — so they go too.
     let sneaky = Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 1,
@@ -4703,6 +4714,7 @@ async fn send_prompt_with_a_body_is_refused_into_a_blocked_session() {
                 client_msg_id: None,
                 keys: None,
                 confirm_nonce: None,
+                expect: None,
             }),
         )
         .await
@@ -4744,6 +4756,7 @@ async fn an_empty_prompt_without_submit_is_refused_before_the_gate() {
                 client_msg_id: None,
                 keys: None,
                 confirm_nonce: None,
+                expect: None,
             }),
         )
         .await
@@ -4778,6 +4791,7 @@ async fn an_empty_prompt_without_submit_is_refused_regardless_of_session_state()
                 client_msg_id: None,
                 keys: None,
                 confirm_nonce: None,
+                expect: None,
             }),
         )
         .await
@@ -5256,6 +5270,11 @@ fn one_full_row() -> serde_json::Value {
     // With live links, for the same reason: `work_rev` is skipped at 0, and a
     // first cut of review round 3 read that as "no such key" (R3-4).
     row.work_rev = 42;
+    // With a PR and a profile, for the same reason: `pr_evidence` and
+    // `claude_profile` are skipped when absent (M15 G5.5's phone fields).
+    row.pr_url = Some("https://github.com/o/r/pull/7".to_string());
+    row.pr_evidence = Some(crate::service::outcome::PrEvidence::default());
+    row.claude_profile = Some("work".to_string());
     // Through the constructor, so the derived `needs_attention` is stamped
     // the same way `list_sessions` stamps it — the view is pinned against
     // what the wire actually carries, not against a hand-built row.
@@ -5273,6 +5292,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
         &[
             "account_uuid",
             "ci_status",
+            "claude_profile",
             "claude_status",
             "context_pct",
             "created_at",
@@ -5292,6 +5312,8 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "owner_person_id",
             "pending_form",
             "pending_input",
+            "pr_evidence",
+            "pr_url",
             "project_id",
             "safe_kill_state",
             "started_at",
@@ -7185,6 +7207,21 @@ fn the_phone_view_keeps_tags_so_a_phone_edit_does_not_wipe_them() {
     rows[0]["tags"] = serde_json::json!(["mobile", "wip"]);
     project_rows(&mut rows, PHONE_SESSION_FIELDS);
     assert_eq!(rows[0]["tags"], serde_json::json!(["mobile", "wip"]));
+}
+
+/// fleet-mobile's CI check count reads `pr_evidence`, its PR fact `pr_url`
+/// and Switch account `claude_profile`: a re-list without them blanked all
+/// three until the next full frame (M15, from G5.5).
+#[test]
+fn the_phone_view_keeps_the_pr_and_the_profile() {
+    let mut rows = one_full_row();
+    project_rows(&mut rows, PHONE_SESSION_FIELDS);
+    assert_eq!(
+        rows[0]["pr_url"],
+        serde_json::json!("https://github.com/o/r/pull/7")
+    );
+    assert!(rows[0]["pr_evidence"].is_object(), "{}", rows[0]);
+    assert_eq!(rows[0]["claude_profile"], serde_json::json!("work"));
 }
 
 /// A projection that is not an array of rows is left alone rather than
@@ -9897,6 +9934,7 @@ async fn add_project_and_list_github_repos_are_fenced_to_the_callers_host_and_or
     s.set_host_org("hostb", Some(org_b)).unwrap();
     let t = tools_over_fake_ssh(s, dir.path());
     let bound_a = Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 7,
@@ -10369,6 +10407,7 @@ async fn add_project_never_binds_an_mcp_callers_call_id() {
 /// A paired device belonging to `person`, bound to no org.
 fn device_of(person: i64, owner: i64) -> Caller {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 11,
@@ -10744,6 +10783,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("wait_for_reply", &["Read"]),
     // orchestration.rs
     ("cancel_task", &["Drive"]),
+    ("decide_related_session", &["Own"]),
     // Both ends are `Drive`. Naming a session as the REQUESTER writes to it
     // three ways — a `tasks` row, a `task_done` timeline row and, on the
     // worker's Stop, an inbox message whose body the caller's prompt produced
@@ -12548,6 +12588,7 @@ fn gate_fixture() -> Gate {
 /// provisioned MCP entry would send.
 fn pane_caller(pane: Option<&str>) -> Caller {
     Caller {
+        api: None,
         host_alias: Some("h".into()),
         client: None,
         mode: TokenMode::Full,
@@ -15689,6 +15730,7 @@ async fn fleet_health_for_an_org_bound_client_counts_only_its_own_sessions() {
             .unwrap();
     }
     let bound = Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 12,

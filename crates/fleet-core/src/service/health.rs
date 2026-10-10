@@ -1596,6 +1596,7 @@ mod tests {
         // the one constructor (`view_scope_tests::only_caller_view_scope_constructs_a_view_scope`).
         let nobodys_person = s.create_person("nobody", None).unwrap().id;
         let nobodys_scope = crate::mcp::auth::Caller {
+            api: None,
             host_alias: None,
             client: Some(crate::mcp::auth::ClientRef {
                 id: 99,

@@ -178,9 +178,9 @@ export function boardMoveRefusal(t: WorkTask): string | null {
 
 /** The live session a card shows (the primary first): what no tracker's
  *  board can show. */
-export function boardLiveSession(t: WorkTask): { name: string; host: string | null } | null {
+export function boardLiveSession(t: WorkTask): { name: string; host: string | null; session_id: number } | null {
   const live = (t.sessions ?? []).filter((s) => s.state === 'active' && s.session_id != null);
   const s = live.find((l) => l.primary) ?? live[0];
   if (!s) return null;
-  return { name: s.name || `#${s.session_id}`, host: s.host ?? null };
+  return { name: s.name || `#${s.session_id}`, host: s.host ?? null, session_id: s.session_id as number };
 }

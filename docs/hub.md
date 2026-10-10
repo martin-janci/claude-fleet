@@ -831,9 +831,13 @@ explicit version to keep that safe:
   simply never acts on. A `kind` a side DOES recognise, but cannot parse the
   rest of, is still corruption and still ends the connection — evolution is
   forgiven, damage is not.
-- **Which order to upgrade in, today.** At `PROTO_VERSION` 1 there is nothing
-  older to be compatible with, so this is moot right now — but it will not
-  stay moot. The rule for whoever bumps `PROTO_VERSION` next (enforced by a
+- **Which order to upgrade in, today.** `PROTO_VERSION` is 2 (chunked
+  payloads: `upload_chunk` / `result_chunk`, 1 MiB each) and
+  `MIN_SUPPORTED_PROTO` stays 1, so a proto-2 hub keeps every proto-1 agent
+  working — it simply sends that agent whole frames, as before. Upgrade the
+  hub first; a proto-2 agent dialling a proto-1 hub is refused as "update the
+  hub" and waits at the slowest backoff until it is. The rule for whoever
+  bumps `PROTO_VERSION` next (enforced by a
   doc comment on `MIN_SUPPORTED_PROTO` in `fleet-proto`, not by this doc):
   hold `MIN_SUPPORTED_PROTO` at the version BEFORE the bump for at least one
   release. Only under that rule is either order actually safe — the hub
@@ -2225,7 +2229,9 @@ columns the phone app reads — the session list's `id`, `tmux_name`,
 `last_activity_at`, `ci_status`, `pending_input`, `needs_attention`, and the
 session card's `is_controller`, `tags`, `turn_seq`, `safe_kill_state`,
 `started_at`, `last_turn_at`, `last_stop_at`, `usage_cost_micros`,
-`usage_model`, plus the work graph's `work` (the row's primary work link). The first cut — the list's sixteen alone — measured
+`usage_model`, plus the work graph's `work` (the row's primary work link)
+and the PR fact, CI check count and Switch account's `pr_url`,
+`pr_evidence` and `claude_profile`. The first cut — the list's sixteen alone — measured
 **46 990 → 16 733 B of JSON (−64 %), 7 712 → 3 023 B gzipped** on the same
 44-session fleet; the card's nine are short scalars and do not change that
 picture. The first cut left the card's columns out, and a phone that

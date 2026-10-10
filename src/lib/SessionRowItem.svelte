@@ -757,6 +757,10 @@
             {#if workKey}
               <WorkChip {workKey} />
             {/if}
+            {#each sess.tags ?? [] as t (t)}
+              <!-- The session's label (its tags, gap plan G2.7). -->
+              <span class="label-chip" data-testid="row-label" title="Label: {t}">{t}</span>
+            {/each}
           </span>
           {#if suggestionKey && suggestion}
             <WorkChip
@@ -1361,6 +1365,16 @@
     font-size: var(--text-2xs);
     color: var(--fg-muted);
     font-variant-numeric: tabular-nums;
+  }
+  .label-chip {
+    flex: 0 0 auto;
+    padding: 0 5px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+    line-height: 14px;
+    white-space: nowrap;
   }
   .sess-name {
     font-family: var(--font-mono);

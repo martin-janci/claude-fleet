@@ -12,7 +12,7 @@
     type DiffRange,
     type RepoTree,
   } from './files';
-  import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoCreateBranch, repoDeleteBranch, repoDeleteMergedBranches, repoStage, repoUnstage, repoCommitCreate, draftCommitMessage, type Commit, type CommitDetail, type Branch } from './history';
+  import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoDeleteBranch, repoDeleteMergedBranches, repoStage, repoUnstage, repoCommitCreate, repoPush, draftCommitMessage, type Commit, type CommitDetail, type Branch } from './history';
   import type { Result } from './result';
   import { readPref, writePref } from './prefs';
   import { openPathRequest } from './app_views';
@@ -27,9 +27,9 @@
   import { matchShortcut } from './shortcuts';
   import { detectMac } from './terminal_keys';
   import ConfirmDialog from './ConfirmDialog.svelte';
-  import PromptDialog from './PromptDialog.svelte';
-  import { validateBranchName } from './branch-slug';
+  import NewBranchSheet from './NewBranchSheet.svelte';
   import { hubStatus, hubBlock } from './hub';
+  import { pushError } from './toasts';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -251,9 +251,6 @@
     | { kind: 'delete-merged'; names: string[] }
     | { kind: 'new-branch'; startPoint: string | null };
   let dialog = $state<FilesDialog | null>(null);
-  // "Check out the new branch now?" — a checkbox inside the prompt instead
-  // of a second confirm box.
-  let newBranchCheckout = $state(true);
 
   function closeDialog(): void {
     dialog = null;
@@ -303,17 +300,15 @@
   }
 
   function promptCreateBranch(startPoint: string | null): void {
-    newBranchCheckout = true;
     dialog = { kind: 'new-branch', startPoint };
   }
 
-  function doCreateBranch(name: string, startPoint: string | null): void {
-    const checkout = newBranchCheckout;
+  // The sheet made the branch (it keeps its own input on a failure).
+  function branchCreated(): void {
     closeDialog();
-    void runAction(
-      repoCreateBranch(session.id, name, { startPoint, checkout }),
-      () => { loadBranches(); if (mode === 'history') loadHistory(); else historyLoaded = false; },
-    );
+    void loadBranches();
+    if (mode === 'history') void loadHistory();
+    else historyLoaded = false;
   }
 
   function stageToggle(path: string, staged: boolean): void {
@@ -321,8 +316,26 @@
     void runAction(p, () => loadChanges());
   }
 
-  function commitStaged(message: string): void {
-    void runAction(repoCommitCreate(session.id, message), () => { loadChanges(); historyLoaded = false; reloadKey++; });
+  // The commit form (gap plan G2.7): commit or amend, then push when asked.
+  // A failed push after a good commit says the commit is made, so nobody
+  // commits it twice.
+  async function commitStaged(message: string, opts: { amend: boolean; push: boolean }): Promise<void> {
+    const sid = session.id;
+    const firstPush = branch?.upstream === null;
+    const r = await repoCommitCreate(sid, message, opts.amend);
+    if (sid !== session.id) return;
+    if (!r.ok) {
+      applyFailure(r);
+      return;
+    }
+    if (opts.push) {
+      const p = await repoPush(sid, firstPush);
+      if (sid !== session.id) return;
+      if (!p.ok) pushError(p.error, `${opts.amend ? 'Amended' : 'Committed'}; the push failed`);
+    }
+    void loadChanges();
+    historyLoaded = false;
+    reloadKey++;
   }
 
   function onMode(m: typeof mode): void {
@@ -482,7 +495,7 @@
             {onSelect}
             enableStaging={true}
             onStageToggle={stageToggle}
-            onCommit={commitStaged}
+            onCommit={(m, o) => void commitStaged(m, o)}
             draftCommit={() => draftCommitMessage(session.id)}
             {writeBlocked}
             branch={mode === 'changes' ? branch : null}
@@ -566,31 +579,16 @@
     remote branches stay.
   </ConfirmDialog>
 {:else if dialog?.kind === 'new-branch'}
-  {@const startPoint = dialog.startPoint}
-  <PromptDialog
-    title="New branch"
-    label="Branch name"
-    placeholder="feature/my-change"
-    confirmLabel="Create"
-    validate={validateBranchName}
-    onsubmit={(name) => doCreateBranch(name, startPoint)}
-    oncancel={closeDialog}
-  >
-    {#if startPoint}
-      <p class="dlg-hint">Starting from <code>{startPoint.slice(0, 8)}</code>.</p>
-    {/if}
-    <label class="dlg-check">
-      <input type="checkbox" bind:checked={newBranchCheckout} data-testid="new-branch-checkout" />
-      Check out the new branch now
-    </label>
-  </PromptDialog>
+  <NewBranchSheet
+    sessionId={session.id}
+    startPoint={dialog.startPoint}
+    ondone={branchCreated}
+    onclose={closeDialog}
+  />
 {/if}
 
 <style>
   .branch-notice { margin: 0; padding: 0.3rem 0.7rem; font-size: var(--text-2xs); color: var(--fg-muted); }
-  .dlg-hint { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); }
-  .dlg-hint code { font-family: var(--font-mono); }
-  .dlg-check { display: flex; align-items: center; gap: 0.4rem; font-size: var(--text-2xs); cursor: pointer; }
   .panel-wrap {
     display: flex;
     flex-direction: column;

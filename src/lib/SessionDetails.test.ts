@@ -150,7 +150,7 @@ describe('SessionDetails', () => {
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();
     const pick = (await screen.findByTestId('session-login-pick')) as HTMLSelectElement;
-    expect(Array.from(pick.options).map((o) => o.textContent)).toEqual(['Host login', 'work (work@x.com)']);
+    expect(Array.from(pick.options).map((o) => o.textContent)).toEqual(['Host login · current', 'work (work@x.com)']);
     expect(screen.queryByTestId('session-login-switch')).toBeNull();
     await fireEvent.change(pick, { target: { value: 'work' } });
     await tick();
@@ -217,7 +217,52 @@ describe('SessionDetails', () => {
       expect(screen.getByTestId('related-sessions').textContent).toMatch(/Related sessions\s*1/);
       expect(screen.getByTestId('related-proposed-row').textContent).toContain('dev-twin');
       expect(screen.getByTestId('related-proposed-row').textContent).toContain('same work?');
-      expect(screen.getByTestId('related-proposed-by').textContent).toContain('81%');
+      expect(screen.getByTestId('related-proposed-by').textContent).toContain('likely');
+    });
+
+    it('Link and Not related answer it (gap plan G4.3)', async () => {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const asked = { ...me, proposals: [{ ...me.proposals[0], run_id: 41 }] };
+      const linkedRow = { ...asked, proposals: [{ ...asked.proposals[0], linked: true }] };
+      vi.mocked(invoke).mockReset();
+      vi.mocked(invoke).mockImplementation(async (cmd: string) => (cmd === 'decide_related_session' ? linkedRow : null));
+      sessions.set([asked, twin]);
+      render(SessionDetails, { props: { session: asked } });
+      await tick();
+      expect(screen.getByTestId('related-not-related')).toBeTruthy();
+      await fireEvent.click(screen.getByTestId('related-link'));
+      await waitFor(() =>
+        expect(vi.mocked(invoke)).toHaveBeenCalledWith('decide_related_session', {
+          args: { session_id: 1, run_id: 41, linked: true },
+        }),
+      );
+    });
+
+    it('a linked partner is listed without the answers', async () => {
+      const linked = { ...me, proposals: [{ ...me.proposals[0], run_id: 41, linked: true }] };
+      sessions.set([linked, twin]);
+      render(SessionDetails, { props: { session: linked } });
+      await tick();
+      expect(screen.getByTestId('related-linked-row').textContent).toContain('dev-twin');
+      expect(screen.getByTestId('related-linked-row').textContent).toContain('linked');
+      expect(screen.queryByTestId('related-link')).toBeNull();
+      expect(screen.queryByTestId('related-proposed-by')).toBeNull();
+    });
+
+    it('Not related sends linked: false', async () => {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const asked = { ...me, proposals: [{ ...me.proposals[0], run_id: 41 }] };
+      vi.mocked(invoke).mockReset();
+      vi.mocked(invoke).mockImplementation(async (cmd: string) => (cmd === 'decide_related_session' ? { ...asked, proposals: [] } : null));
+      sessions.set([asked, twin]);
+      render(SessionDetails, { props: { session: asked } });
+      await tick();
+      await fireEvent.click(screen.getByTestId('related-not-related'));
+      await waitFor(() =>
+        expect(vi.mocked(invoke)).toHaveBeenCalledWith('decide_related_session', {
+          args: { session_id: 1, run_id: 41, linked: false },
+        }),
+      );
     });
 
     it('shows nothing when the session is not in the list', async () => {
@@ -542,23 +587,24 @@ describe('SessionDetails label editing and timeline', () => {
     });
   });
 
-  it('Rename edits the label, focused', async () => {
+  it('Rename and label… opens the sheet on the name the session has (G2.7)', async () => {
     render(SessionDetails, { props: { session: { ...sampleSession, friendly_name: 'Fix login' } } });
     await tick();
     await fireEvent.click(screen.getByTestId('label-from-details'));
-    const input = (await screen.findByTestId('details-label')) as HTMLInputElement;
+    const input = (await screen.findByTestId('rename-label-name')) as HTMLInputElement;
     expect(input.value).toBe('Fix login');
-    expect(document.activeElement).toBe(input);
-    expect(input.getAttribute('aria-label')).toContain('Label for dev-foo');
+    expect(screen.getByTestId('rename-label-sheet')).toBeTruthy();
   });
 
-  it('Enter saves the label through set_session_friendly_name', async () => {
+  it('Save writes the name through set_session_friendly_name', async () => {
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();
     await fireEvent.click(await screen.findByTestId('label-from-details'));
-    const input = await screen.findByTestId('details-label');
+    const input = await screen.findByTestId('rename-label-name');
     await fireEvent.input(input, { target: { value: 'New label' } });
-    await fireEvent.keyDown(input, { key: 'Enter' });
+    await fireEvent.click(screen.getByTestId('rename-label-save'));
+    await tick();
+    await Promise.resolve();
     await tick();
     const calls = inv().mock.calls;
     const call = calls.filter((c) => c[0] === 'set_session_friendly_name');
@@ -567,6 +613,13 @@ describe('SessionDetails label editing and timeline', () => {
       args: { host_alias: 'mefistos', tmux_name: 'dev-foo', friendly_name: 'New label' },
     });
     expect(calls.some((c) => c[0] === 'rename_session')).toBe(false);
+    expect(calls.some((c) => c[0] === 'set_session_tags')).toBe(false);
+  });
+
+  it('shows the label (the session tags) among the facts', async () => {
+    render(SessionDetails, { props: { session: { ...sampleSession, tags: ['release', 'wip'] } } });
+    await tick();
+    expect(screen.getByTestId('details-tags').textContent).toBe('releasewip');
   });
 
   it('Rename tmux session opens the tmux-name editor; Escape cancels', async () => {
@@ -1202,14 +1255,14 @@ describe('SessionDetails action hierarchy (redesign 1.5)', () => {
       Array.from(screen.getByTestId(group).querySelectorAll('button')).map((el) => el.getAttribute('data-testid'));
     expect(ids('actions-steer')).toEqual([
       'send-prompt-from-details',
-      'open-review',
       'switch-account-from-details',
       'change-model-from-details',
-      'restart-from-details',
     ]);
     expect(ids('actions-place')).toEqual(
-      expect.arrayContaining(['recreate-from-details', 'label-from-details', 'rename-from-details']),
+      expect.arrayContaining(['restart-from-details', 'recreate-from-details', 'label-from-details', 'rename-from-details']),
     );
+    // Start a review run lives in the Reviews block (G4.3), not with Steer.
+    expect(screen.getByTestId('reviews-panel').contains(screen.getByTestId('open-review'))).toBe(true);
     expect(ids('actions-share')[0]).toBe('share-from-details');
     // The destructive ones sit apart, Kill last.
     const all = Array.from(screen.getByTestId('details-actions').querySelectorAll('button')).map((el) =>
@@ -1251,5 +1304,68 @@ describe('SessionDetails accessibility (7.2)', () => {
     const { container } = render(SessionDetails, { props: { session: sampleSession } });
     await screen.findByTestId('session-host');
     await expectAccessible(container);
+  });
+});
+
+describe('SessionDetails reviews block (gap plan G4.3)', () => {
+  const source = { ...sampleSession, id: 1, tmux_name: 'dev-source', kind: 'work', reviews_session_id: null };
+
+  it('lists each review run with who ran it, and opens the run', async () => {
+    const run = {
+      ...sampleSession,
+      id: 2,
+      tmux_name: 'review-dev-source',
+      kind: 'review',
+      reviews_session_id: 1,
+      agent: 'claude' as const,
+      last_prompt: 'Use the pr-review skill for this review.\nReview the whole branch.',
+    };
+    const plain = { ...sampleSession, id: 3, tmux_name: 'review-2', kind: 'review', reviews_session_id: 1 };
+    sessions.set([source, run, plain]);
+    render(SessionDetails, { props: { session: source } });
+    await tick();
+    const rows = screen.getAllByTestId('reviews-row');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain('review-dev-source');
+    expect(rows[0].textContent).toContain('pr-review skill · Claude Code');
+    // No skill recorded: the agent alone, never a guessed one.
+    expect(rows[1].textContent).toContain('Claude Code');
+    expect(rows[1].textContent).not.toContain('skill');
+    expect(screen.queryByTestId('reviews-empty')).toBeNull();
+    const { selectedSession } = await import('./selection');
+    await fireEvent.click(rows[0]);
+    expect(get(selectedSession)?.id).toBe(2);
+  });
+
+  it('shows the PR review decision GitHub reports', async () => {
+    const withPr = {
+      ...source,
+      pr_url: 'https://github.com/o/r/pull/476',
+      pr_evidence: { draft: false, review_decision: 'CHANGES_REQUESTED', checks: { total: 0, pending: 0, skipped: 0, failing_total: 0 } },
+    } as unknown as SessionRow;
+    sessions.set([withPr]);
+    render(SessionDetails, { props: { session: withPr } });
+    await tick();
+    expect(screen.getByTestId('reviews-pr-decision').textContent).toContain('PR #476 · changes requested');
+    expect(screen.queryByTestId('reviews-empty')).toBeNull();
+  });
+
+  it('with no run yet says so, and Start a review run opens the review dialog', async () => {
+    sessions.set([source]);
+    render(SessionDetails, { props: { session: source } });
+    await tick();
+    expect(screen.getByTestId('reviews-empty').textContent).toContain('No review run yet');
+    const start = screen.getByTestId('open-review');
+    expect(start.textContent).toBe('Start a review run…');
+    await fireEvent.click(start);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+  });
+
+  it('an external row has no Reviews block', async () => {
+    const ext = { ...source, kind: 'external', tmux_name: 'bg:x' };
+    sessions.set([ext]);
+    render(SessionDetails, { props: { session: ext } });
+    await tick();
+    expect(screen.queryByTestId('reviews-panel')).toBeNull();
   });
 });

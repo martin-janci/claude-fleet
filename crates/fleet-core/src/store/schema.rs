@@ -315,6 +315,29 @@ fn trackers_has_settings(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 155: `deferred_prompts` already has
+/// its `not_before` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn deferred_prompts_has_not_before(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('deferred_prompts') WHERE name = 'not_before'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 156: `routines` already has its
+/// `event_rate_secs` column (the last of the three it adds).
+fn routines_has_event_rate(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routines') WHERE name = 'event_rate_secs'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 052: `work_links` already has its
 /// `archived_at` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
@@ -1740,6 +1763,22 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/154_work_item_due.sql"),
         already_applied: Some(work_items_has_due_at),
     },
+    // M15 step G1.8: Send later's time choices on `deferred_prompts` — ADD
+    // COLUMNs, so a guard.
+    Migration {
+        version: 155,
+        sql: include_str!("../../migrations/155_deferred_prompt_timing.sql"),
+        already_applied: Some(deferred_prompts_has_not_before),
+    },
+    // M15 step G2.4: a routine's pull request triggers (repo, author, rate)
+    // on `routines` — ADD COLUMNs, so a guard.
+    Migration {
+        version: 156,
+        sql: include_str!("../../migrations/156_routine_triggers.sql"),
+        already_applied: Some(routines_has_event_rate),
+    },
+    // M15 step G2.8: named Control API tokens — a new table, idempotent.
+    Migration::plain(157, include_str!("../../migrations/157_control_tokens.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -4737,13 +4776,16 @@ mod tests {
     /// token cache honest for one kind of write; a migration that rebuilds
     /// `host_tokens` or `client_tokens` (CREATE new / copy / DROP / RENAME)
     /// drops them silently, and this is what then fails.
-    const AUTH_EPOCH_TRIGGERS: [&str; 6] = [
+    const AUTH_EPOCH_TRIGGERS: [&str; 9] = [
         "auth_epoch_host_tokens_insert",
         "auth_epoch_host_tokens_update",
         "auth_epoch_host_tokens_delete",
         "auth_epoch_client_tokens_insert",
         "auth_epoch_client_tokens_update",
         "auth_epoch_client_tokens_delete",
+        "auth_epoch_control_tokens_insert",
+        "auth_epoch_control_tokens_update",
+        "auth_epoch_control_tokens_delete",
     ];
 
     /// Hub store latency, task 7: the token cache in `authorize` keys on
@@ -4831,6 +4873,23 @@ mod tests {
             ],
             "client_tokens changed: add the column to auth_epoch_client_tokens_update \
              (migration 060) unless it is liveness-only like last_seen_at"
+        );
+        assert_eq!(
+            cols("control_tokens"),
+            [
+                "id",
+                "name",
+                "token_sha256",
+                "scope",
+                "hosts",
+                "expires_at",
+                "created_at",
+                // Liveness, left out of auth_epoch_control_tokens_update.
+                "last_used_at",
+                "revoked_at"
+            ],
+            "control_tokens changed: add the column to auth_epoch_control_tokens_update \
+             (migration 157) unless it is liveness-only like last_used_at"
         );
     }
 

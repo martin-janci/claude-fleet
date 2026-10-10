@@ -16,13 +16,16 @@
     type WorkItemStatus,
   } from './work';
   import { readErrorText, workTask, type TaskDetail } from './work_view';
+  import { openExternal } from './open_external';
+  import { providerInfo } from './trackers';
 
   // Edit a task written in Fleet: its title, notes, status, assignees and due date.
   // Reads the task itself (the board and the lists hold no notes), and
   // writes only what changed: `edit_work_item` for the text, then
   // `set_work_status` for the status, both Routed, so a paired desktop
-  // edits on its hub. A tracker's ticket is not offered here: its text and
-  // status are its tracker's.
+  // edits on its hub. A tracker's ticket is not edited here: its text and
+  // status are its tracker's, and fleet writes back only a PR link
+  // (decision D3), so the dialog says so and offers "Open in Jira Cloud ↗".
   //
   // The form kit (G1.2) through DialogSheet: the title is checked once the
   // person leaves it, the off Save says why under it, a failure (a hub
@@ -98,6 +101,10 @@
   void load();
 
   const task = $derived(detail?.task ?? null);
+  /** The tracker's name for a ticket: "Jira", else the connection's name. */
+  const trackerLabel = $derived(
+    providerInfo(task?.provider)?.label ?? (task?.tracker_name || task?.provider || 'its tracker'),
+  );
   const editable = $derived(task !== null && task.kind === 'local' && task.item_id != null);
   /** A job mirror's notes are its dispatch prompt: shown, never edited. */
   const notesLocked = $derived(task?.origin === 'agent');
@@ -204,13 +211,25 @@
   errorTestid={loadError ? 'edit-task-load-error' : 'edit-task-error'}
   confirmTitle={editable ? why : null}
 >
+  {#snippet secondary()}
+    {#if task && !editable && task.url}
+      <!-- The quiet footer link (FormsWork): the ticket's own page. -->
+      <button
+        type="button"
+        class="btn btn--quiet open-ext"
+        data-testid="edit-task-open-tracker"
+        onclick={() => void openExternal(task?.url ?? '')}>Open in {trackerLabel} ↗</button
+      >
+    {/if}
+  {/snippet}
   {#if loadError}
     <!-- Nothing to edit: the banner says why. -->
   {:else if !task}
     <p class="note" data-testid="edit-task-loading">Loading…</p>
   {:else if !editable}
     <p class="note" data-testid="edit-task-tracker">
-      {task.key ?? 'This task'} belongs to {task.tracker_name || task.provider || 'its tracker'}: edit it there.
+      {task.key ?? 'This task'} belongs to {trackerLabel}: edit it there. Fleet writes nothing back to a
+      tracker but a pull request link.
     </p>
   {:else}
     <label class="field">

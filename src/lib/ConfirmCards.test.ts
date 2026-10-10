@@ -23,6 +23,7 @@ import { get } from 'svelte/store';
 import ConfirmCards from './ConfirmCards.svelte';
 import McpConfirmDialog from './McpConfirmDialog.svelte';
 import { confirmQueue, resetConfirmsForTests } from './confirms';
+import { clearToasts, toasts } from './toasts';
 import { expectAccessible } from './a11y_check';
 
 // Redesign step 9.2: the operator's confirms are cards in Control's
@@ -31,6 +32,7 @@ import { expectAccessible } from './a11y_check';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 let confirmOk = true;
+let confirmAnswered = true;
 
 const KILL = {
   nonce: 'n-op',
@@ -45,12 +47,14 @@ const OTHER = { nonce: 'n-host', tool: 'set_clipboard', summary: '', caller: 'ho
 beforeEach(() => {
   resetConfirmsForTests();
   confirmOk = true;
+  confirmAnswered = true;
+  clearToasts();
   inv.mockReset();
   inv.mockImplementation(async (cmd: string) => {
     if (cmd === 'mcp_pending_confirms') return [];
     if (cmd === 'mcp_confirm') {
       if (!confirmOk) throw { code: 'E_HUB', message: 'hub unreachable' };
-      return true;
+      return confirmAnswered;
     }
     return null;
   });
@@ -116,6 +120,17 @@ describe('confirms as transcript cards', () => {
     expect(screen.getByTestId('confirm-card')).toBeTruthy();
   });
 
+  it('an answer the backend refused (expired, or answered elsewhere first) is said, not shown as done', async () => {
+    confirmAnswered = false;
+    await mountBoth();
+    await emit('mcp:confirm-required', KILL);
+    await tick();
+    await fireEvent.click(screen.getByTestId('confirm-card-approve'));
+    await tick();
+    expect(get(confirmQueue)).toEqual([]);
+    expect(get(toasts).map((t) => t.message).join('\n')).toContain('already been answered or had expired');
+  });
+
   it('requests raised before the window mounted are listed again, operator flag and all', async () => {
     inv.mockImplementation(async (cmd: string) => (cmd === 'mcp_pending_confirms' ? [KILL, { nonce: 'old', tool: 'new_session' }] : true));
     await mountBoth();
@@ -154,5 +169,59 @@ describe('ConfirmCards: accessibility', () => {
     await tick();
     expect(screen.getByTestId('confirm-card')).toBeTruthy();
     await expectAccessible(container);
+  });
+});
+
+// G4.9 (the fleet agent board): a plan of two or more steps is one card,
+// "Confirm 2 · Cancel", answered step by step in the order asked.
+describe('a multi-step plan is one card', () => {
+  const MOVE = { ...KILL, nonce: 'n-move', tool: 'new_session', summary: 'host=mercury name=review', asked_at: KILL.asked_at + 5 };
+
+  it('lists each step under one Confirm 2 / Cancel', async () => {
+    await mountBoth();
+    await emit('mcp:confirm-required', KILL);
+    await emit('mcp:confirm-required', MOVE);
+    await tick();
+    expect(screen.queryByTestId('confirm-card')).toBeNull();
+    const card = screen.getByTestId('confirm-plan');
+    expect(card.textContent).toContain('2 steps need your OK');
+    expect(screen.getAllByTestId('confirm-plan-step').map((li) => li.textContent)).toEqual([
+      'Kill a session kill_session host=local name=dev-x',
+      'Start a session new_session host=mercury name=review',
+    ]);
+    expect(screen.getByTestId('confirm-plan-approve').textContent).toContain('Confirm 2');
+  });
+
+  it('Confirm approves every step, oldest first', async () => {
+    await mountBoth();
+    await emit('mcp:confirm-required', KILL);
+    await emit('mcp:confirm-required', MOVE);
+    await tick();
+    await fireEvent.click(screen.getByTestId('confirm-plan-approve'));
+    await vi.waitFor(() => expect(get(confirmQueue)).toEqual([]));
+    const answers = inv.mock.calls.filter((c) => c[0] === 'mcp_confirm').map((c) => c[1]);
+    expect(answers).toEqual([
+      { nonce: 'n-op', approved: true },
+      { nonce: 'n-move', approved: true },
+    ]);
+    expect(screen.queryByTestId('confirm-plan')).toBeNull();
+  });
+
+  it('Cancel denies every step', async () => {
+    await mountBoth();
+    await emit('mcp:confirm-required', KILL);
+    await emit('mcp:confirm-required', MOVE);
+    await tick();
+    await fireEvent.click(screen.getByTestId('confirm-plan-cancel'));
+    await vi.waitFor(() => expect(get(confirmQueue)).toEqual([]));
+    const answers = inv.mock.calls.filter((c) => c[0] === 'mcp_confirm').map((c) => c[1]);
+    expect(answers.every((a) => a.approved === false)).toBe(true);
+  });
+
+  it('the card that arrives takes focus on its first answer, unless the person is typing', async () => {
+    await mountBoth();
+    await emit('mcp:confirm-required', KILL);
+    await tick();
+    expect(document.activeElement).toBe(screen.getByTestId('confirm-card-approve'));
   });
 });

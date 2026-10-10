@@ -5,7 +5,7 @@
 // is the agent's spec while it is being written, purged after 10 minutes
 // and cleared when the form opens, so it is not a place for answers.
 import { visibleSteps } from './form_model';
-import type { FormSpec, Values } from './forms';
+import { optionsOfField, type FormSpec, type Values } from './forms';
 
 const PREFIX = 'fleet.form.saved.';
 
@@ -20,6 +20,27 @@ export function loadSaved(key: string): Values | null {
   } catch {
     return null;
   }
+}
+
+/** What of `kept` still fits `spec` as it opens now: a field it still has,
+ *  and for a choice an option it still offers (the fleet's hosts or
+ *  projects may have changed since), or own text where it takes some. */
+export function restorable(spec: FormSpec, kept: Values): Values {
+  const fields = new Map(spec.steps.flatMap((s) => s.fields ?? []).map((f) => [f.name, f] as const));
+  const out: Values = {};
+  for (const [name, v] of Object.entries(kept)) {
+    const f = fields.get(name);
+    if (!f || f.type === 'secret' || f.disabled_reason !== undefined) continue;
+    const offered = new Set(optionsOfField(f).map((o) => o.value));
+    if (f.type === 'select' && !(typeof v === 'string' && (offered.has(v) || f.other))) continue;
+    if (f.type === 'multiselect') {
+      if (!Array.isArray(v)) continue;
+      out[name] = v.filter((x) => typeof x === 'string' && offered.has(x));
+      continue;
+    }
+    out[name] = v;
+  }
+  return out;
 }
 
 /** The values worth keeping: on a visible field, not a secret, not disabled. */

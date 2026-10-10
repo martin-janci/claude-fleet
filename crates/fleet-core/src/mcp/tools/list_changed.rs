@@ -185,6 +185,7 @@ mod tests {
     fn every_caller_but_a_peer_is_notified() {
         assert!(wants_notification(&Caller::master()));
         let host = Caller {
+            api: None,
             host_alias: Some("a".into()),
             client: None,
             mode: TokenMode::Full,
@@ -193,6 +194,7 @@ mod tests {
         };
         assert!(wants_notification(&host));
         let client = |mode| Caller {
+            api: None,
             host_alias: None,
             client: Some(ClientRef {
                 id: 1,

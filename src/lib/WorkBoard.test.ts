@@ -362,3 +362,102 @@ describe('WorkBoard with filters that match nothing (review r13)', () => {
     });
   });
 });
+
+describe('WorkBoard G3.5: add per column, select, start, PR chip', () => {
+  it('+ on a status column adds a task in that status; a tracker column has none', async () => {
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, payload?: { args: never }) => {
+      if (cmd === 'work_tree') return page();
+      if (cmd === 'create_work_task') return { id: 99, source: 'local', title: 'New one', status_category: 'todo' };
+      if (cmd === 'set_work_status') return setStatus(payload!.args);
+      return null;
+    });
+    render(WorkBoard);
+    await flush();
+    expect(screen.queryByTestId('work-board-add-doing:in review')).toBeNull();
+    await fireEvent.click(screen.getByTestId('work-board-add-doing'));
+    const input = screen.getByTestId('work-board-add-input') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'New one' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await flush();
+    expect(calls('create_work_task')[0][1]).toEqual({ args: { title: 'New one' } });
+    expect(calls('set_work_status')[0][1]).toEqual({ args: { item_id: 99, status: 'in_progress' } });
+    expect(screen.queryByTestId('work-board-add-input')).toBeNull();
+  });
+
+  it('+ on To do creates without a status write', async () => {
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tree') return page();
+      if (cmd === 'create_work_task') return { id: 98, source: 'local', title: 'x', status_category: 'todo' };
+      return null;
+    });
+    render(WorkBoard);
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-board-add-todo'));
+    const input = screen.getByTestId('work-board-add-input') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'x' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await flush();
+    expect(calls('create_work_task')).toHaveLength(1);
+    expect(calls('set_work_status')).toHaveLength(0);
+  });
+
+  it('x selects cards and the bar moves them together; refused ones stay selected with their reason', async () => {
+    render(WorkBoard);
+    await flush();
+    await fireEvent.keyDown(card('Write notes'), { key: 'x' });
+    await fireEvent.click(card('Login fails'), { shiftKey: true });
+    expect(screen.getByTestId('work-board-pickbar').textContent).toContain('2 selected');
+    expect(card('Write notes').getAttribute('aria-pressed')).toBe('true');
+    // Shift+click selects; it does not open.
+    expect(get(selectedTaskId)).not.toBe('item:12');
+    const sel = screen.getByTestId('work-board-pick-move') as HTMLSelectElement;
+    sel.value = 'done';
+    await fireEvent.change(sel);
+    await flush();
+    expect(calls('set_work_status').map((c) => c[1])).toEqual([{ args: { item_id: 1, status: 'done' } }]);
+    expect(column('done').textContent).toContain('Write notes');
+    // The ticket is refused on its card and stays picked.
+    expect(screen.getByTestId('work-board-pickbar').textContent).toContain('1 selected');
+    await fireEvent.keyDown(card('Login fails'), { key: 'x' });
+    expect(screen.queryByTestId('work-board-pickbar')).toBeNull();
+  });
+
+  it('the open card carries its Work button; s on a card opens it and asks to start new', async () => {
+    selectedTaskId.set(null);
+    render(WorkBoard);
+    await flush();
+    expect(screen.queryByTestId('work-board-card-work')).toBeNull();
+    await fireEvent.keyDown(card('Write notes'), { key: 's' });
+    await flush();
+    expect(get(selectedTaskId)).toBe('item:1');
+    expect(screen.getByTestId('work-board-card-work')).toBeTruthy();
+    // Start new asks for a preview of the start.
+    expect(calls('preview_start_work').length + calls('start_work').length).toBeGreaterThan(0);
+  });
+
+  it('a card shows its live pull request with failing checks', async () => {
+    const { sessions } = await import('./sessions');
+    const { session } = await import('./hosts_fixture');
+    sessions.set([
+      session('mefistos', 'abc-12 login', {
+        id: 7,
+        pr_evidence: {
+          head_oid: 'a', local_head: 'a', ahead: 0, dirty: false, draft: false, state: 'OPEN',
+          checks: { total: 3, pending: 0, skipped: 0, failing_total: 1, failing: [{ name: 'rust' }] },
+        },
+      }),
+    ]);
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd !== 'work_tree') return null;
+      const p = page();
+      p.tasks[1] = { ...p.tasks[1], sessions: [link({ session_id: 7, name: 'abc-12 login', pr_url: 'https://github.com/o/r/pull/478' })] };
+      return p;
+    });
+    render(WorkBoard);
+    await flush();
+    expect(card('Login fails').querySelector('[data-testid="work-board-pr"]')?.textContent).toBe('PR #478 ✕ 1');
+    // The agent that runs in its live session.
+    expect(card('Login fails').querySelector('[data-testid="work-board-agent"]')?.textContent).toBe(' · Claude Code');
+    sessions.set([]);
+  });
+});

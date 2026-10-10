@@ -21,6 +21,8 @@ export interface Notice {
   kind: ToastKind;
   code: string | null;
   message: string;
+  /** The toast's second line, when it had one. */
+  sub?: string;
   /** How many times it was pushed (a deduped toast counts each). */
   count: number;
   read: boolean;
@@ -36,18 +38,19 @@ let nextId = 1;
 export function recordNotice(
   toastId: number,
   fresh: boolean,
-  n: { kind: ToastKind; code: string | null; message: string },
+  n: { kind: ToastKind; code: string | null; message: string; sub?: string },
   now = Date.now(),
 ): void {
   notices.update((list) => {
     if (!fresh) {
       const i = list.findIndex((x) => x.toastId === toastId);
       if (i >= 0) {
-        const bumped = { ...list[i], at: now, count: list[i].count + 1, read: false };
+        const bumped = { ...list[i], at: now, count: list[i].count + 1, read: false, ...(n.sub !== undefined ? { sub: n.sub } : {}) };
         return [bumped, ...list.slice(0, i), ...list.slice(i + 1)];
       }
     }
-    const entry: Notice = { id: nextId++, toastId, at: now, ...n, count: 1, read: false };
+    const { sub, ...rest } = n;
+    const entry: Notice = { id: nextId++, toastId, at: now, ...rest, ...(sub ? { sub } : {}), count: 1, read: false };
     return [entry, ...list].slice(0, MAX_NOTIFICATIONS);
   });
 }

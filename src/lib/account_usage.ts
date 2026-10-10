@@ -625,3 +625,38 @@ export function statusMessage(
 
   return { lines, checking: false, copyDetail: snapshot.detail };
 }
+
+// ── a login's headroom, in one line ──
+
+/**
+ * What a login choice says about its account (gap plan step G2.7, the
+ * FormsSession board's Switch login): `5h 75% · week 85% left`, `85% left`
+ * with one window, or `weekly limit until Fri 11:00` once a window is used
+ * up. A window whose reset has passed says nothing (its number is gone).
+ * Null with no reading at all.
+ */
+export function loginHeadroomText(
+  snapshot: AccountUsageSnapshot | null | undefined,
+  now: number,
+  locale?: string,
+  timeZone?: string,
+): string | null {
+  const usage = snapshot?.usage ?? null;
+  if (!usage || snapshot?.fetched_at == null) return null;
+  const live = (w: UsageWindow | null): UsageWindow | null =>
+    w && !(w.resets_at != null && w.resets_at <= now) ? w : null;
+  const five = live(usage.five_hour);
+  const week = live(usage.seven_day);
+  const spent = (w: UsageWindow | null) => w !== null && severityLeft(w) === 0;
+  if (spent(week)) {
+    const at = week!.resets_at;
+    return at == null ? 'weekly limit reached' : `weekly limit until ${weekdayClock(at, locale, timeZone)}`;
+  }
+  if (spent(five)) {
+    const at = five!.resets_at;
+    return at == null ? '5-hour limit reached' : `5-hour limit until ${clock(at, locale, timeZone)}`;
+  }
+  if (five && week) return `5h ${leftPct(five)}% · week ${leftPct(week)}% left`;
+  const one = five ?? week;
+  return one ? `${leftPct(one)}% left` : null;
+}

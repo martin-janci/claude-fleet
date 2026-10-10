@@ -51,10 +51,11 @@ const GIT_PREFIX: &str = "__FLEET_GIT__\t";
 /// at 4k by `--jq` and never stored. `state` tells tidy-up a merged PR (M7).
 /// `headRefOid` … `isDraft` are result evidence's: the commit the checks
 /// describe, and what else stands between the PR and a merge.
-/// `mergedAt` is the Pull requests view's (redesign 6.4).
+/// `mergedAt` is the Pull requests view's (redesign 6.4); `additions` and
+/// `deletions` its diffstat (gap plan G3.10).
 const PR_FIELDS: &str =
     "url,statusCheckRollup,headRefName,title,body,closingIssuesReferences,state,\
-     headRefOid,reviewDecision,mergeStateStatus,isDraft,mergedAt";
+     headRefOid,reviewDecision,mergeStateStatus,isDraft,mergedAt,additions,deletions";
 /// The fields an older `gh` without `closingIssuesReferences` (or `--jq`)
 /// still answers: the probe falls back to them.
 const PR_FIELDS_BASIC: &str = "url,statusCheckRollup";
@@ -120,6 +121,13 @@ pub struct PrEvidence {
     pub head_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged_at: Option<i64>,
+    /// `additions` / `deletions`: the PR's diffstat, lines added and removed
+    /// (gap plan G3.10, "+18 −6"). Absent from readings stored before they
+    /// were added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additions: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u32>,
 }
 
 /// Most characters of a PR title kept for the Pull requests view.
@@ -374,6 +382,11 @@ fn evidence_from_json(v: &serde_json::Value) -> PrEvidence {
             .filter(|x| !x.is_empty())
             .map(str::to_string)
     };
+    let count = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_u64())
+            .and_then(|n| u32::try_from(n).ok())
+    };
     PrEvidence {
         head_oid: text("headRefOid").map(|o| o.to_ascii_lowercase()),
         review_decision: text("reviewDecision").map(|d| d.to_ascii_uppercase()),
@@ -383,6 +396,8 @@ fn evidence_from_json(v: &serde_json::Value) -> PrEvidence {
         head_ref: text("headRefName"),
         merged_at: text("mergedAt").and_then(|t| crate::service::account_usage::parse_rfc3339(&t)),
         draft: v.get("isDraft").and_then(|d| d.as_bool()).unwrap_or(false),
+        additions: count("additions"),
+        deletions: count("deletions"),
         checks: v
             .get("statusCheckRollup")
             .and_then(|r| r.as_array())
@@ -867,6 +882,23 @@ mod tests {
         let ev = pr_info_from_json(&v.to_string()).evidence.unwrap();
         assert_eq!(ev.merged_at, None);
         assert!(PR_FIELDS.contains("mergedAt"));
+    }
+
+    /// Gap plan G3.10: the diffstat rides the evidence; a gh that leaves it
+    /// out (or a negative number) reads as unknown, not as zero.
+    #[test]
+    fn evidence_carries_the_diffstat() {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&full_answer(serde_json::json!([]))).unwrap();
+        v["additions"] = 18.into();
+        v["deletions"] = 6.into();
+        let ev = pr_info_from_json(&v.to_string()).evidence.unwrap();
+        assert_eq!((ev.additions, ev.deletions), (Some(18), Some(6)));
+        v["additions"] = (-1).into();
+        v.as_object_mut().unwrap().remove("deletions");
+        let ev = pr_info_from_json(&v.to_string()).evidence.unwrap();
+        assert_eq!((ev.additions, ev.deletions), (None, None));
+        assert!(PR_FIELDS.contains("additions,deletions"));
     }
 
     #[test]

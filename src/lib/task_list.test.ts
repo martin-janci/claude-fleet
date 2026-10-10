@@ -207,7 +207,7 @@ describe('the board', () => {
           ],
         }),
       ),
-    ).toEqual({ name: 'first', host: 'a' });
+    ).toEqual({ name: 'first', host: 'a', session_id: 7 });
     expect(boardLiveSession(task({ sessions: [link({ state: 'suggested' }), link({ state: 'ended', session_id: null })] }))).toBeNull();
   });
 });

@@ -2042,6 +2042,77 @@ impl Store {
         Ok(self.emit_session(row_id)?)
     }
 
+    /// One fresh read of a session's pane, written through: the dialog fast
+    /// path (`service::sessions::activity::sync_dialog`), so a permission
+    /// dialog's buttons appear, and an answered one's disappear, within a
+    /// second instead of on the next 20 s reconcile tick.
+    ///
+    /// Deliberately narrow — the tick stays the authority for everything
+    /// else:
+    ///  - a pane blocked on a parsed dialog sets `blocked` and that dialog;
+    ///  - a pane `working` / `idle` with no dialog clears `pending_input`,
+    ///    and moves a stored `blocked` to what the pane shows (an answer
+    ///    mid-turn fires no hook, so nothing else would);
+    ///  - anything else (a stuck pane, a blocked pane whose dialog did not
+    ///    parse, an unreadable status) and any `shell` or stuck row is left
+    ///    alone.
+    ///
+    /// Emits `session:updated` only when something changed.
+    pub fn record_dialog_probe(
+        &self,
+        row_id: i64,
+        status: Option<crate::service::pane_intel::ClaudeStatus>,
+        pending: Option<&crate::service::pane_intel::PendingInput>,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        use crate::service::pane_intel::ClaudeStatus;
+        let Some(before) = self.get_session_by_id(row_id)? else {
+            return Ok(None);
+        };
+        if before.kind == "shell" || before.stuck_kind.is_some() {
+            return Ok(None);
+        }
+        let (new_status, new_pending) = match (status, pending) {
+            (Some(ClaudeStatus::Blocked), Some(p)) if !p.options.is_empty() => {
+                ("blocked".to_string(), Some(p))
+            }
+            (Some(st @ (ClaudeStatus::Working | ClaudeStatus::Idle)), None) => {
+                let st = if before.claude_status.as_deref() == Some("blocked") {
+                    st.as_str().to_string()
+                } else {
+                    match before.claude_status.clone() {
+                        Some(cur) => cur,
+                        None => return Ok(None),
+                    }
+                };
+                (st, None)
+            }
+            _ => return Ok(None),
+        };
+        if before.claude_status.as_deref() == Some(new_status.as_str())
+            && before.pending_input.as_ref() == new_pending
+        {
+            return Ok(None);
+        }
+        let now = now_unix();
+        let sql = format!(
+            "UPDATE sessions SET claude_status = ?2, pending_input = ?3, \
+             idle_since = {idle} WHERE id = ?1",
+            idle = idle_since_sql("?2", "?4"),
+        );
+        self.conn.execute(
+            &sql,
+            rusqlite::params![row_id, new_status, encode_pending_input(new_pending), now],
+        )?;
+        if before.claude_status.as_deref() != Some(new_status.as_str()) {
+            if let Err(e) =
+                self.insert_session_event(row_id, "status_change", Some(new_status.as_str()))
+            {
+                tracing::warn!(session_id = row_id, error = %e, "[dialog] status_change not recorded");
+            }
+        }
+        Ok(self.emit_session(row_id)?)
+    }
+
     /// Test shorthand: [`Self::record_stop_hook_for_row`] on the row bound
     /// to `claude_session_id`.
     #[cfg(test)]
@@ -2508,8 +2579,8 @@ mod tests {
 
     #[test]
     fn pending_input_round_trips_and_defaults_to_none() {
-        // The reconcile upsert (`Store::apply_host_reconcile`) is the only
-        // production writer of this column; seed it directly here with a
+        // The reconcile upsert (`Store::apply_host_reconcile`) and the dialog
+        // fast path (`record_dialog_probe`) write this column; seed it here with a
         // raw UPDATE, the same way `map_session_row`/`encode_pending_input`
         // read and write it, to check the round trip without a dedicated
         // single-row setter.
@@ -2557,6 +2628,94 @@ mod tests {
         )
         .unwrap();
         assert!(row.pending_input.is_none());
+    }
+
+    /// The dialog fast path: a fresh pane read writes the dialog through,
+    /// and a later read with no dialog clears it and leaves `blocked` —
+    /// without waiting for a tick, and only when something changed.
+    #[test]
+    fn record_dialog_probe_writes_a_dialog_and_clears_it_after_the_answer() {
+        use crate::service::pane_intel::ClaudeStatus;
+        let s = store();
+        let id = s
+            .upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let dialog = PendingInput {
+            kind: "permission".into(),
+            question: Some("Do you want to proceed?".into()),
+            options: vec![
+                PendingOption {
+                    n: 1,
+                    label: "Yes".into(),
+                    selected: true,
+                    checked: false,
+                },
+                PendingOption {
+                    n: 2,
+                    label: "No".into(),
+                    selected: false,
+                    checked: false,
+                },
+            ],
+            multi: false,
+            detail: Some("Bash(git push)".into()),
+        };
+        let row = s
+            .record_dialog_probe(id, Some(ClaudeStatus::Blocked), Some(&dialog))
+            .unwrap()
+            .expect("a change is announced");
+        assert_eq!(row.claude_status.as_deref(), Some("blocked"));
+        assert_eq!(row.pending_input.as_ref(), Some(&dialog));
+        // The same read again changes nothing and announces nothing.
+        assert!(s
+            .record_dialog_probe(id, Some(ClaudeStatus::Blocked), Some(&dialog))
+            .unwrap()
+            .is_none());
+        // A blocked pane whose dialog did not parse leaves the row alone.
+        assert!(s
+            .record_dialog_probe(id, Some(ClaudeStatus::Blocked), None)
+            .unwrap()
+            .is_none());
+        // Answered mid-turn: no hook fires, but the pane is working again.
+        let row = s
+            .record_dialog_probe(id, Some(ClaudeStatus::Working), None)
+            .unwrap()
+            .expect("the answered dialog leaves");
+        assert_eq!(row.claude_status.as_deref(), Some("working"));
+        assert_eq!(row.pending_input, None);
+    }
+
+    /// A stuck row or a shell is the tick's to judge, and a pane that is not
+    /// blocked never moves a status other than `blocked`.
+    #[test]
+    fn record_dialog_probe_leaves_stuck_shell_and_other_statuses_alone() {
+        use crate::service::pane_intel::ClaudeStatus;
+        let s = store();
+        let id = s
+            .upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'failed' WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        assert!(s
+            .record_dialog_probe(id, Some(ClaudeStatus::Idle), None)
+            .unwrap()
+            .is_none());
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'blocked', stuck_kind = 'trust_prompt' WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        assert!(s
+            .record_dialog_probe(id, Some(ClaudeStatus::Working), None)
+            .unwrap()
+            .is_none());
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.claude_status.as_deref(), Some("blocked"));
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! missed while the process was down runs once at the next pass, and the
 //! next one is counted from then.
 
-use super::{record_skip, usd, EVENTS};
+use super::{record_skip, repo_matches, usd, EVENTS, PR_EVENTS};
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{lock, IpcError};
 use crate::service::decide::routine_run_outcome::{self, PaneReader, TmuxPanes};
@@ -115,6 +115,20 @@ pub async fn fire(
     scheduled_for: Option<i64>,
     now: i64,
 ) -> Result<RoutineRunRow, IpcError> {
+    fire_with(deps, r, trigger, trigger_ref, scheduled_for, None, now).await
+}
+
+/// [`fire`], with a line on what fired it added under the prompt (a pull
+/// request event names its PR, so the run knows which one).
+pub async fn fire_with(
+    deps: &Deps,
+    r: &RoutineRow,
+    trigger: &str,
+    trigger_ref: Option<&str>,
+    scheduled_for: Option<i64>,
+    context: Option<&str>,
+    now: i64,
+) -> Result<RoutineRunRow, IpcError> {
     let (owner, _starting) = {
         let s = lock(&deps.store)?;
         if let Some(why) = refusal(&s, r, now)? {
@@ -142,7 +156,11 @@ pub async fn fire(
     let (state, reason, session_id) = match spawned {
         Ok(row) => {
             let meta = serde_json::json!({ "routine_id": r.id, "source": "routine" }).to_string();
-            match s.enqueue_handover(row.id, &r.prompt, Some(&meta)) {
+            let prompt = match context {
+                Some(c) => format!("{}\n\n{c}", r.prompt),
+                None => r.prompt.clone(),
+            };
+            match s.enqueue_handover(row.id, &prompt, Some(&meta)) {
                 Ok(_) => ("running", None, Some(row.id)),
                 Err(e) => (
                     "failed",
@@ -304,6 +322,87 @@ fn event_fires(s: &Store, r: &RoutineRow, sid: i64) -> Result<bool, IpcError> {
     })
 }
 
+/// One event that may fire an event routine: the run's `trigger_ref`, the
+/// subject its rate counts (`pr:<id>:` or `session:<id>:`), and the line
+/// added under its prompt.
+struct EventFire {
+    reference: String,
+    subject: String,
+    context: Option<String>,
+}
+
+/// What a pull request event says, for the line under the prompt.
+fn pr_event_words(kind: &str, pr: &crate::store::PullRequestRow) -> String {
+    match kind {
+        crate::store::PR_EVENT_REVIEW => match pr.review_decision.as_deref() {
+            Some("CHANGES_REQUESTED") => "got a review asking for changes".into(),
+            _ => "was approved".into(),
+        },
+        crate::store::PR_EVENT_CI_FAILED => "has failing checks".into(),
+        crate::store::PR_EVENT_CI_PASSED => "has its checks passing".into(),
+        crate::store::PR_EVENT_MERGED => "was merged".into(),
+        other => other.replace('_', " "),
+    }
+}
+
+/// Whether event `eid` of `kind` on session `sid` may fire `r`, and how.
+/// A session event: [`event_fires`]. A pull request event (its detail is
+/// the PR's URL): the PR passes the routine's repo filter, and is its
+/// owner's ([`event_fires`] on the session that opened it) or, with
+/// `event_author: anyone`, any PR seen on a host of the routine's org,
+/// never one a routine's session opened. An unassigned routine has no org
+/// to widen to: anyone is its owner's.
+fn event_fire(
+    s: &Store,
+    r: &RoutineRow,
+    kind: &str,
+    eid: i64,
+    sid: i64,
+    detail: Option<&str>,
+) -> Result<Option<EventFire>, IpcError> {
+    if !PR_EVENTS.contains(&kind) {
+        return Ok(event_fires(s, r, sid)?.then(|| EventFire {
+            reference: format!("session:{sid}:{eid}"),
+            subject: format!("session:{sid}:"),
+            context: None,
+        }));
+    }
+    let Some(pr) = detail
+        .map(|u| s.pull_request_by_url(u))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    if let Some(f) = r.event_repo.as_deref() {
+        if !repo_matches(f, pr.repo.as_deref()) {
+            return Ok(None);
+        }
+    }
+    let anyone = r.event_author.as_deref() == Some("anyone") && r.org_id.is_some();
+    let passes = if anyone {
+        let in_org = match pr.host_alias.as_deref() {
+            Some(h) => s.host_org(h)? == r.org_id,
+            None => false,
+        };
+        let by_routine = s
+            .get_session_by_id(sid)?
+            .is_some_and(|row| row.origin.as_deref() == Some("routine"));
+        in_org && !by_routine
+    } else {
+        event_fires(s, r, sid)?
+    };
+    Ok(passes.then(|| EventFire {
+        reference: format!("pr:{}:{eid}", pr.id),
+        subject: format!("pr:{}:", pr.id),
+        context: Some(format!(
+            "Started because pull request {} {}.",
+            pr.url,
+            pr_event_words(kind, &pr)
+        )),
+    }))
+}
+
 /// One cron routine, under its lease: skip it when a person asked, else
 /// fire it; then count its next fire from `now`.
 async fn tick_cron(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError> {
@@ -363,7 +462,7 @@ pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<
         };
         let kind = kind.as_str();
         let events = s.events_of_kind_after(r.event_cursor, kind, EVENTS_PER_PASS)?;
-        let Some(&(last, _)) = events.last() else {
+        let Some(&(last, _, _)) = events.last() else {
             // Nothing of this kind since the cursor: move it to the newest
             // event anyway (same lock, so nothing slipped in between), or a
             // rare kind rescans every event since the routine was made, on
@@ -377,19 +476,28 @@ pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<
         };
         s.set_routine_event_cursor(r.id, last)?;
         let mut fires = Vec::new();
-        for (eid, sid) in events {
-            if event_fires(&s, &r, sid)? {
-                fires.push(format!("session:{sid}:{eid}"));
+        for (eid, sid, detail) in events {
+            if let Some(f) = event_fire(&s, &r, kind, eid, sid, detail.as_deref())? {
+                fires.push(f);
             }
         }
         (r, fires)
     };
     let r = &r;
     let mut res = Ok(());
-    for reference in fires {
+    for f in fires {
         // An error here ends the pass, not the lease: it is released below,
-        // so the routine is not held for the lease's two minutes.
-        let busy = lock(&deps.store).and_then(|s| refusal(&s, r, now).map(|w| w.is_some()));
+        // so the routine is not held for the lease's two minutes. A fire
+        // inside the rate is dropped like a busy one; it reads the runs this
+        // pass already started, so two events of one PR fire once.
+        let busy = lock(&deps.store).and_then(|s| {
+            if let Some(rate) = r.event_rate_secs {
+                if s.routine_fired_on_since(r.id, &f.subject, now - rate)? {
+                    return Ok(true);
+                }
+            }
+            refusal(&s, r, now).map(|w| w.is_some())
+        });
         match busy {
             Ok(true) => continue,
             Ok(false) => {}
@@ -398,7 +506,8 @@ pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<
                 break;
             }
         }
-        if let Err(e) = fire(deps, r, "event", Some(&reference), None, now).await {
+        let ctx = f.context.as_deref();
+        if let Err(e) = fire_with(deps, r, "event", Some(&f.reference), None, ctx, now).await {
             res = Err(e);
         }
     }

@@ -45,7 +45,8 @@ use fleet_core::service::sessions::{
     self, AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
     LostCandidate, LostTargetArgs, NewSessionArgs, PlaceTranscriptArgs, PlacedTranscript,
     RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs,
-    RestoreReport, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs, TouchSessionViewedArgs,
+    RestoreReport, SendPromptArgs, SetFriendlyNameArgs, SetSessionTagsArgs, SpawnReviewArgs,
+    TouchSessionViewedArgs,
 };
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{DeferredPromptRow, SessionRow, Store};
@@ -145,6 +146,26 @@ pub async fn set_session_friendly_name(
     routed::set_session_friendly_name(&backend, args, &store).await
 }
 
+/// A session's tags, written as one list (the Label field, M15 G2.7).
+#[tauri::command]
+pub async fn set_session_tags(
+    args: SetSessionTagsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::set_session_tags(&backend, args, &store).await
+}
+
+/// Link or Not related on a session's related-session proposal (M15 G4.3).
+#[tauri::command]
+pub async fn decide_related_session(
+    args: fleet_core::service::decide::related_session::DecideRelatedSessionArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::decide_related_session(&backend, args, &store).await
+}
+
 /// The session on screen (redesign 2.3): its finished turns read as seen.
 #[tauri::command]
 pub async fn touch_session_viewed(
@@ -191,7 +212,28 @@ pub async fn send_prompt(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    routed::send_prompt(&backend, args, &store, &ssh).await
+    // A key into a standalone session (a dialog answer): re-read just that
+    // pane afterwards, as the hub's own `send_prompt` does, so the answered
+    // dialog leaves the row now rather than on the next tick.
+    let key_target = (args.keys.is_some() && backend.hub().is_none())
+        .then(|| (args.host_alias.clone(), args.tmux_name.clone()));
+    routed::send_prompt(&backend, args, &store, &ssh).await?;
+    if let Some((host, name)) = key_target {
+        let id = store.lock().ok().and_then(|s| {
+            s.find_sessions_by_tmux_name(&name, Some(&host))
+                .ok()
+                .and_then(|rows| rows.first().map(|r| r.id))
+        });
+        if let Some(id) = id {
+            fleet_core::service::sessions::spawn_dialog_followup(
+                Arc::clone(&*store),
+                Arc::clone(&*ssh),
+                id,
+                fleet_core::service::sessions::DialogFollowup::Answered,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Send prompt's "busy sessions get it when they are idle" (step 5.10).
@@ -787,6 +829,30 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("set_session_friendly_name", &args).await,
             None => sessions::set_session_friendly_name(args, store),
+        }
+    }
+
+    pub async fn set_session_tags(
+        backend: &FleetBackend,
+        args: SetSessionTagsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("set_session_tags", &args).await,
+            None => sessions::set_session_tags(args, store),
+        }
+    }
+
+    pub async fn decide_related_session(
+        backend: &FleetBackend,
+        args: fleet_core::service::decide::related_session::DecideRelatedSessionArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("decide_related_session", &args).await,
+            None => {
+                fleet_core::service::decide::related_session::decide_related_session(args, store)
+            }
         }
     }
 

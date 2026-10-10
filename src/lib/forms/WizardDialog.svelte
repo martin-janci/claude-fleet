@@ -11,6 +11,9 @@
   //
   // The form kit (G1.2): a failure is a banner at the top of the body, and
   // closing a wizard the person has filled in asks "Discard changes?" once.
+  // A wizard whose spec says `save_later` (Get started) offers "Save and
+  // finish later": the answers stay on this device under the wizard's id,
+  // the dialog closes without asking, and the next open starts from them.
   import type { Snippet } from 'svelte';
   import Modal from '../Modal.svelte';
   import Loader from '../Loader.svelte';
@@ -67,7 +70,14 @@
       buttonLoader={false}
       ownDefaults
       serverProblems={problems}
-      onsubmit={run}
+      saveKey={`wizard:${wizard.id}`}
+      onsavelater={onclose}
+      onsubmit={(v) => {
+        // Pressed: nothing left to finish later (a refusal keeps the
+        // answers in the open dialog).
+        form?.forgetSaved();
+        run(v);
+      }}
       oncancel={guard.request} />
     {#if guard.asking}<DiscardAsk onkeep={guard.keep} ondiscard={guard.discard} />{/if}
     {#if busy}

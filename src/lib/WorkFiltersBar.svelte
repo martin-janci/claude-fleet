@@ -45,6 +45,7 @@
     type WorkView,
   } from './work_view';
   import WorkConflictNotice from './WorkConflictNotice.svelte';
+  import { railWorkViewId } from './work_rail_view';
 
   let {
     orgs,
@@ -193,6 +194,8 @@
   let notice = $state<string | ConflictNotice | null>(null);
   let naming = $state(false);
   let newName = $state('');
+  // "Show its count on the rail" (G2.2): this device's choice, one view.
+  let onRail = $state(false);
   let busy = $state(false);
 
   const active = $derived(views.find((v) => v.id === $activeWorkViewId) ?? null);
@@ -252,6 +255,8 @@
     naming = false;
     newName = '';
     notice = `Saved “${r.value.name}”.`;
+    if (onRail) railWorkViewId.set(r.value.id);
+    onRail = false;
     await loadViews();
     activeWorkViewId.set(r.value.id);
   }
@@ -281,6 +286,7 @@
       return;
     }
     activeWorkViewId.set(null);
+    if ($railWorkViewId === v.id) railWorkViewId.set(null);
     notice = `Deleted “${v.name}”.`;
     await loadViews();
   }
@@ -339,6 +345,17 @@
         title={deleteBlocked ?? `Delete “${active.name}”`}
         onclick={() => void deleteCurrent()}>Delete</button
       >
+      <button
+        class="btn btn--quiet"
+        type="button"
+        data-testid="work-view-rail-toggle"
+        aria-pressed={$railWorkViewId === active.id}
+        title={$railWorkViewId === active.id
+          ? `Stop showing how many tasks “${active.name}” has on the rail`
+          : `Show how many tasks “${active.name}” has on the rail's Work item (this device)`}
+        onclick={() => railWorkViewId.set($railWorkViewId === active.id ? null : active.id)}
+        >{$railWorkViewId === active.id ? 'On the rail ✓' : 'Count on rail'}</button
+      >
     {/if}
     <button
       class="btn btn--quiet"
@@ -362,6 +379,10 @@
         bind:value={newName}
         maxlength="80"
       />
+      <label class="rail-check" title="This device's rail; one view at a time">
+        <input type="checkbox" bind:checked={onRail} data-testid="work-view-rail" />
+        Show its count on the rail
+      </label>
       <button class="btn btn--primary" type="submit" data-testid="work-view-save" disabled={!newName.trim() || busy}>Save</button>
       <button class="btn btn--quiet" type="button" onclick={() => (naming = false)}>Cancel</button>
     </form>
@@ -747,7 +768,7 @@
     min-width: 0;
   }
   .views select,
-  .name-row input {
+  .name-row input[type='text'] {
     font: inherit;
     height: var(--control-h-lg);
     padding: 0 6px;
@@ -756,9 +777,20 @@
     background: var(--bg);
     color: var(--fg);
   }
-  .name-row input {
+  .name-row input[type='text'] {
     flex: 1 1 auto;
     min-width: 0;
+  }
+  .name-row {
+    flex-wrap: wrap;
+  }
+  .rail-check {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    font-size: var(--control-font-sm);
+    color: var(--fg-muted);
+    white-space: nowrap;
   }
   .notice {
     margin: 0;

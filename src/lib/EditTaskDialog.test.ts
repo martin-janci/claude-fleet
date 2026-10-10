@@ -6,6 +6,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn(async () => undefined) }));
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import { clearToasts, runToastAction, toasts } from './toasts';
@@ -282,5 +284,30 @@ describe('EditTaskDialog', () => {
     // Nothing to fill in, and Save stays off.
     expect(screen.queryByTestId('edit-task-title')).toBeNull();
     expect((screen.getByTestId('edit-task-submit') as HTMLButtonElement).disabled).toBe(true);
+    // No URL, no link.
+    expect(screen.queryByTestId('edit-task-open-tracker')).toBeNull();
+  });
+
+  it("a tracker's ticket says nothing is written back and opens the ticket in its tracker (G2.1)", async () => {
+    answer({
+      task: task({
+        kind: 'tracker',
+        item_id: 3,
+        key: 'PD-2988',
+        provider: 'jira',
+        tracker_name: 'Jira PD',
+        url: 'https://acme.atlassian.net/browse/PD-2988',
+      }),
+    });
+    render(EditTaskDialog, { props: { taskId: 'item:3', onclose: vi.fn() } });
+    await waitFor(() => expect(screen.getByTestId('edit-task-tracker').textContent).toMatch(/PD-2988 belongs to Jira/));
+    expect(screen.getByTestId('edit-task-tracker').textContent).toMatch(/writes nothing back/);
+    const open = screen.getByTestId('edit-task-open-tracker');
+    expect(open.textContent).toBe('Open in Jira Cloud ↗');
+    await fireEvent.click(open);
+    await waitFor(() => expect(vi.mocked(openUrl)).toHaveBeenCalledWith('https://acme.atlassian.net/browse/PD-2988'));
+    // Nothing was written.
+    expect(calls('edit_work_item')).toHaveLength(0);
+    expect(calls('set_work_status')).toHaveLength(0);
   });
 });

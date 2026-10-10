@@ -2301,6 +2301,7 @@ fn a_task_carries_what_is_proposed_about_it() {
             confidence_pct: Some(90),
             run_id: Some(id),
             at: Some(1_000),
+            linked: None,
         }]
     );
     assert!(task_of(&p, "TK-3").proposals.is_empty());

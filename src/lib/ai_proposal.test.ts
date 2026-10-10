@@ -1,6 +1,6 @@
 // Redesign step 3.11: the never-decides list and when a proposal may
 // pre-select anything.
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { LOADER_DELAY_MS } from './Loader.svelte';
 import { describe, it, expect, vi } from 'vitest';
@@ -14,6 +14,9 @@ import type { SessionRow } from './sessions';
 import type { SettingProposal } from './pages/review';
 import {
   NEVER_DECIDES,
+  aiChangeLine,
+  confidenceWord,
+  correctionLine,
   draftedBy,
   neverDecides,
   neverDecidesField,
@@ -154,13 +157,43 @@ describe('ProposedBy', () => {
     const row = screen.getByTestId('proposed-by');
     expect(row.textContent).toContain('Proposed by Jev');
     expect(row.textContent).toContain('same repo, 2 idle slots');
-    expect(row.textContent).toContain('82%');
+    expect(row.textContent).toContain('likely');
+    expect(row.textContent).not.toMatch(/\d+\s*%/);
     await fireEvent.click(screen.getByTestId('proposed-by-change'));
     expect(onchange).toHaveBeenCalledOnce();
   });
   it('shows nothing under the floor', () => {
     render(ProposedBy, { proposal: jev('p3', 40), field: 'project' });
     expect(screen.queryByTestId('proposed-by')).toBeNull();
+  });
+  it('a rule has no confidence word', () => {
+    render(ProposedBy, { proposal: { value: 'p3', source: 'rule', reason: 'last used' }, field: 'project' });
+    expect(screen.queryByTestId('proposed-by-confidence')).toBeNull();
+  });
+});
+
+describe('confidence is a word, never a percentage (G4.9)', () => {
+  it('words each band', () => {
+    expect(confidenceWord(95)).toBe('almost sure');
+    expect(confidenceWord(82)).toBe('likely');
+    expect(confidenceWord(55)).toBe('maybe');
+    expect(confidenceWord(20)).toBe('unsure');
+    expect(confidenceWord(null)).toBeNull();
+  });
+  it('no component renders a confidence as a percentage', () => {
+    // Copy lint: a confidence value followed by `%` in markup is the bug
+    // the AI patterns board names.
+    const files = readdirSync('src', { recursive: true })
+      .map(String)
+      .filter((n) => n.endsWith('.svelte'));
+    const offenders = files.filter((n) => /confidence[\w.?]*\}%/.test(readFileSync(`src/${n}`, 'utf8')));
+    expect(offenders).toEqual([]);
+  });
+  it('words the correction and the AI-change line', () => {
+    expect(correctionLine('papaya-pos', 'papaya-api')).toBe(
+      'You changed papaya-pos → papaya-api · recorded as a correction',
+    );
+    expect(aiChangeLine('Linked to PD-2592', 'jev', true)).toBe('Linked to PD-2592 · Proposed by Jev · you confirmed');
   });
 });
 
@@ -183,10 +216,46 @@ describe('DraftField', () => {
     );
     await fireEvent.input(input, { target: { value: 'Fix the pairing flake for good' } });
     expect(input.classList.contains('ai-pre')).toBe(false);
+    expect(screen.getByTestId('draft-field-edited').textContent).toBe('Edited');
+    expect(screen.getByTestId('draft-field-meta').textContent).toContain('your text now');
+    expect(screen.queryByTestId('draft-field-drafted')).toBeNull();
     await fireEvent.click(screen.getByTestId('draft-field-clear'));
     expect(input.value).toBe('');
     expect(onclear).toHaveBeenCalledOnce();
-    expect(screen.queryByTestId('draft-field-meta')).toBeNull();
+    // Clear is undoable: only the Undo is left on the line.
+    expect(screen.queryByTestId('draft-field-clear')).toBeNull();
+    await fireEvent.click(screen.getByTestId('draft-field-undo'));
+    expect(input.value).toBe('Fix the pairing flake for good');
+    expect(screen.getByTestId('draft-field-edited')).toBeTruthy();
+    expect(screen.queryByTestId('draft-field-undo')).toBeNull();
+  });
+  it('Regenerate replaces an untouched draft at once, with Undo back to it', async () => {
+    const onregenerate = vi.fn();
+    const { rerender } = render(DraftField, { value: 'First draft', label: 'Summary', onregenerate });
+    await fireEvent.click(screen.getByTestId('draft-field-regenerate'));
+    expect(onregenerate).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId('draft-field-ask')).toBeNull();
+    await rerender({ value: 'Second draft', label: 'Summary', onregenerate });
+    const input = screen.getByTestId('draft-field-input') as HTMLTextAreaElement;
+    expect(input.value).toBe('Second draft');
+    await fireEvent.click(screen.getByTestId('draft-field-undo'));
+    expect(input.value).toBe('First draft');
+  });
+  it('Regenerate asks before it replaces edited text', async () => {
+    const onregenerate = vi.fn();
+    render(DraftField, { value: 'Draft', label: 'Summary', onregenerate });
+    const input = screen.getByTestId('draft-field-input') as HTMLTextAreaElement;
+    await fireEvent.input(input, { target: { value: 'My own words' } });
+    await fireEvent.click(screen.getByTestId('draft-field-regenerate'));
+    expect(onregenerate).not.toHaveBeenCalled();
+    expect(screen.getByTestId('draft-field-ask').textContent).toContain('Replace your text with a new draft?');
+    await fireEvent.click(screen.getByTestId('draft-field-keep'));
+    expect(screen.queryByTestId('draft-field-ask')).toBeNull();
+    expect(input.value).toBe('My own words');
+    await fireEvent.click(screen.getByTestId('draft-field-regenerate'));
+    await fireEvent.click(screen.getByTestId('draft-field-replace'));
+    expect(onregenerate).toHaveBeenCalledOnce();
+    expect(screen.getByTestId('draft-field-undo')).toBeTruthy();
   });
   it('says it is drafting and disables Regenerate while busy', () => {
     render(DraftField, { value: '', label: 'Summary', busy: true, onregenerate: () => {} });

@@ -133,6 +133,11 @@ pub struct TodayShipped {
     pub at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// Where it came from (gap plan G3.2, "from Morning PR sweep"): the
+    /// routine whose run started the session, or `mission <name>` for a
+    /// mission's task. Absent when a person started it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
 }
 
 /// A ticket that moved to done, as [`digest`] reads it.
@@ -140,6 +145,8 @@ pub struct TodayShipped {
 pub struct DoneItem {
     pub item: WorkItemRow,
     pub org_id: Option<i64>,
+    /// [`TodayShipped::from`].
+    pub from: Option<String>,
 }
 
 /// An ended link with what it was about.
@@ -149,6 +156,8 @@ pub struct EndedWork {
     pub key: Option<String>,
     pub title: String,
     pub url: Option<String>,
+    /// [`TodayShipped::from`].
+    pub from: Option<String>,
 }
 
 /// Why a session is stale, if it is.
@@ -340,6 +349,7 @@ pub fn digest_in(
             pr_url: None,
             at,
             org_id: d.org_id,
+            from: d.from.clone(),
         });
     }
     for e in ended {
@@ -357,6 +367,9 @@ pub fn digest_in(
                 .find(|s| s.key.is_some() && s.key == e.key && s.pr_url.is_none())
             {
                 s.pr_url = Some(pr);
+                if s.from.is_none() {
+                    s.from = e.from.clone();
+                }
             }
             continue;
         }
@@ -368,6 +381,7 @@ pub fn digest_in(
             pr_url: Some(pr),
             at,
             org_id: e.link.org_id,
+            from: e.from.clone(),
         });
     }
     shipped.sort_by(|a, b| b.at.cmp(&a.at).then(a.key.cmp(&b.key)));
@@ -473,7 +487,8 @@ pub fn today(
             continue;
         }
         let org_id = s.item_org(item.id)?;
-        done.push(DoneItem { item, org_id });
+        let from = s.shipped_from(None, Some(item.id))?;
+        done.push(DoneItem { item, org_id, from });
     }
 
     // Work that ended since `since`, as the caller may read it.
@@ -497,7 +512,9 @@ pub fn today(
             .map(|id| s.get_work_item(id))
             .transpose()?
             .flatten();
+        let from = s.shipped_from(link.participant_id, link.item_id)?;
         ended.push(EndedWork {
+            from,
             key: item
                 .as_ref()
                 .and_then(|i| i.key.clone())
@@ -678,6 +695,7 @@ mod tests {
                 due_at: None,
             },
             org_id: None,
+            from: None,
         }
     }
 
@@ -715,7 +733,34 @@ mod tests {
             key: key.map(str::to_string),
             title: String::new(),
             url: None,
+            from: None,
         }
+    }
+
+    /// Gap plan G3.2: a shipped PR says where it came from; a done ticket
+    /// that also shipped a PR takes the PR's provenance.
+    #[test]
+    fn shipped_carries_where_it_came_from() {
+        let mut pr = ended(Some("B-1"), Some("https://github.com/o/r/pull/2"), NOW - 5);
+        pr.from = Some("Morning PR sweep".into());
+        let mut also = ended(Some("A-1"), Some("https://github.com/o/r/pull/1"), NOW - 5);
+        also.from = Some("mission Hub federation v2".into());
+        let t = digest(
+            &[],
+            &[item("A-1", "done", NOW - 10)],
+            &[pr, also],
+            NOW,
+            SINCE,
+            DEFAULT_CONTEXT_RED_PCT,
+        );
+        let from = |k: &str| {
+            t.shipped
+                .iter()
+                .find(|s| s.key.as_deref() == Some(k))
+                .and_then(|s| s.from.clone())
+        };
+        assert_eq!(from("B-1").as_deref(), Some("Morning PR sweep"));
+        assert_eq!(from("A-1").as_deref(), Some("mission Hub federation v2"));
     }
 
     #[test]

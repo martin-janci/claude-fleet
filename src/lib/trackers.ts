@@ -9,6 +9,8 @@ import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { acceptCommandRow, type SessionRow } from './sessions';
 import { bumpWorkChanged } from './work';
+import { confidenceWord } from './ai_proposal';
+import { offerRuleAfterStart } from './rule_offer_toast';
 
 /** `trackers.state`. Anything else a newer hub sends is treated as not ok. */
 export type TrackerState =
@@ -210,6 +212,8 @@ export async function startWork(args: StartWorkArgs): Promise<Result<SessionRow>
   if (r.ok) {
     acceptCommandRow(r.value);
     bumpWorkChanged();
+    // A start can be the one that makes fleet offer a start rule (8.11).
+    void offerRuleAfterStart(r.value.work?.key);
   }
   return r;
 }
@@ -411,8 +415,13 @@ export function pendingProposals(tp: TrackerProposals | null | undefined): Secti
   return tp.proposals.filter((p) => !p.person && !p.followup);
 }
 
-/** A confidence as two decimals ("0.82"), or "–". */
+/** A confidence as a word ("likely"), never a number (G4.9), or "–". */
 export function formatConfidence(c: number | null | undefined): string {
+  return typeof c === 'number' && Number.isFinite(c) ? (confidenceWord(c <= 1 ? c * 100 : c) ?? '–') : '–';
+}
+
+/** A probability for the why line ("0.82"), or "–". */
+function formatProbability(c: number | null | undefined): string {
   return typeof c === 'number' && Number.isFinite(c) ? c.toFixed(2) : '–';
 }
 
@@ -420,7 +429,7 @@ export function formatConfidence(c: number | null | undefined): string {
 export function proposalWhy(p: SectionProposal): string {
   return (p.top ?? [])
     .slice(0, 2)
-    .map(([k, v]) => `${categoryLabel(k)} ${formatConfidence(v)}`)
+    .map(([k, v]) => `${categoryLabel(k)} ${formatProbability(v)}`)
     .join(' · ');
 }
 

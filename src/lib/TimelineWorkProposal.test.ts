@@ -59,7 +59,7 @@ describe('J1 in the Details timeline (6.8)', () => {
     const by = await screen.findByTestId('timeline-proposed-by');
     expect(by.textContent).toContain('Proposed by Jev');
     expect(by.textContent).toContain('from the first prompt');
-    expect(by.textContent).toContain('82%');
+    expect(by.textContent).toContain('likely');
     expect(invoke).not.toHaveBeenCalledWith('confirm_session_work', expect.anything());
     await fireEvent.click(screen.getByTestId('timeline-work-link'));
     expect(invoke).toHaveBeenCalledWith('confirm_session_work', { args: { session_id: 7, link_id: 31 } });

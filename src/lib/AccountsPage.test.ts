@@ -7,7 +7,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AccountsPage from './AccountsPage.svelte';
 import { get } from 'svelte/store';
 import { hostsViewRequest } from './app_views';
-import { accountsPageRequest } from './account_pill';
+import { accountsPageRequest, accountsPausedRequest, openPausedSessions } from './account_pill';
 import { hosts } from './hosts';
 import { accounts } from './accounts';
 import { sessions } from './sessions';
@@ -262,6 +262,17 @@ describe('AccountsPage: spend, routines and paused sessions (4.1 / 4.2)', () => 
     expect(inv.mock.calls.find((c) => c[0] === 'restart_session')?.[1]).toEqual({
       args: { host_alias: 'mefistos', name: 'admin-1', profile: 'work' },
     });
+  });
+
+  it('the limit-hit toast\'s Show paused sessions opens the account narrowed to its paused sessions (G4.8)', async () => {
+    accountUsage.set(atLimit());
+    openPausedSessions(ADMIN.uuid);
+    render(AccountsPage, props);
+    await waitFor(() => expect(screen.getByTestId('account-detail').textContent).toContain('Paused by its limit'));
+    expect(within(screen.getByTestId('account-sessions')).getAllByRole('button')).toHaveLength(2);
+    expect(get(accountsPausedRequest)).toBe(false);
+    await fireEvent.click(screen.getByTestId('account-paused-all'));
+    expect(screen.getByTestId('account-detail').textContent).toContain('Sessions on it');
   });
 
   it('an account under its limit shows no paused line', () => {

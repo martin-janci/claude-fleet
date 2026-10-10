@@ -304,3 +304,21 @@ describe('SessionRowItem: a session ⌘N just started (step 5.14)', () => {
     }
   });
 });
+
+describe('SessionRowItem label (G2.7)', () => {
+  it('shows the session tags as its label in the row', async () => {
+    render(SessionRowItem, {
+      props: baseProps({ ...sampleSession, status: 'running', lost_at: null, tags: ['release'] } as SessionRow),
+    });
+    await tick();
+    expect(screen.getAllByTestId('row-label').map((e) => e.textContent)).toEqual(['release']);
+  });
+
+  it('shows none without tags', async () => {
+    render(SessionRowItem, {
+      props: baseProps({ ...sampleSession, status: 'running', lost_at: null, tags: [] } as SessionRow),
+    });
+    await tick();
+    expect(screen.queryByTestId('row-label')).toBeNull();
+  });
+});

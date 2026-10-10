@@ -456,7 +456,8 @@ pub const PROPOSAL_MIN_CONFIDENCE: f64 = 0.5;
 /// shape every row carries, so the UI draws "Proposed by Jev · why ·
 /// Change" one way. Only a live `assist` answer is proposed: never a
 /// shadow run, a fallback, `unsure`, one under [`PROPOSAL_MIN_CONFIDENCE`],
-/// or one a person already confirmed, corrected or rejected.
+/// or one a person already confirmed, corrected or rejected (save a linked
+/// `related_session`, see [`DecisionProposal::linked`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DecisionProposal {
     /// The question: a `decide` feature (`start_project`, `turn_outcome`,
@@ -481,6 +482,12 @@ pub struct DecisionProposal {
     /// When it was decided, unix seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<i64>,
+    /// `Some(true)` on a `related_session` a person confirmed with Link
+    /// (M15 G4.3): no longer a proposal but the row's linked partner, kept
+    /// so Details lists it. Absent on every other proposal and from an
+    /// older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked: Option<bool>,
 }
 
 /// `DecisionProposal::source` for a `decision_runs.provider`.

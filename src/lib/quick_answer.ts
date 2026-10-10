@@ -45,7 +45,7 @@ export const RISKY_WORDS = [
   'approve',
 ] as const;
 
-const RISKY = new RegExp(`\\b(?:${RISKY_WORDS.join('|')})\\b|don'?t ask again`, 'i');
+const RISKY = new RegExp(`\\b(?:${RISKY_WORDS.join('|')})\\b|don['’]?t ask again`, 'i');
 
 /** An option AI never proposes: a push, a permission, a step hard to undo. */
 export function risky(label: string): boolean {

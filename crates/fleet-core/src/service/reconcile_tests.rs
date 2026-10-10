@@ -725,10 +725,9 @@ async fn a_pass_that_probed_before_a_hook_rebind_does_not_undo_it() {
     // agents` call, still reporting `aaa`) answers fast and real — it is
     // fully computed, `claude_session_id: Some("aaa")` included, well before
     // any write happens. What stalls is a DIFFERENT host: every host's probe
-    // runs as its own spawned task (`JoinSet`), and `reconcile_sessions_with`
-    // does not start writing ANY host until every task in the set has
-    // finished — so hanging `local`'s probe holds the whole pass at the
-    // collection step while the /clear hooks land on alpha's row:
+    // runs as its own spawned task (`JoinSet`), and the hanging `local`
+    // probe holds the pass at the collection step (these fake deps have no
+    // pass budget) while the /clear hooks land on alpha's row:
     // SessionEnd(clear) closes `aaa`, SessionStart(clear) rebinds it to
     // `bbb` and stamps `last_hook_at`. By the time the reconcile WRITE
     // finally runs for alpha (after `local`'s hang resolves),
@@ -1560,4 +1559,60 @@ async fn two_concurrent_creates_of_one_name_do_not_cross_stamp() {
     // and refuse ann. What must never happen is the row changing hands.
     f.pass().await;
     assert_eq!(f.row("dev-o-r", "alpha").owner_person_id, Some(ann));
+}
+
+/// One wedged host used to hold the whole pass — and the tick, and every
+/// other host's rows — for `HOST_PROBE_TIMEOUT`. With a pass budget the pass
+/// completes without it, the next pass leaves it alone while its probe is
+/// still running, and its result (and a fresh probe) land once it answers.
+#[tokio::test]
+async fn a_slow_host_does_not_hold_the_pass_or_the_next_one() {
+    let mut f = Fleet::new(&["alpha", "slow"]);
+    f.deps = f.deps.with_pass_budget(Duration::from_millis(100));
+    f.list("alpha", "work|1|2|0|/tmp/w|%3\n");
+    f.pane("alpha", "work", IDLE);
+    f.list("slow", "job|1|2|0|/tmp/j|%4\n");
+    f.pane("slow", "job", IDLE);
+    f.fake.on_host_once(
+        "slow",
+        Match::script_contains("---FLEET:end"),
+        Reply::Hang {
+            for_: Duration::from_millis(400),
+        },
+    );
+
+    let started = std::time::Instant::now();
+    f.pass().await;
+    assert!(
+        started.elapsed() < Duration::from_millis(350),
+        "the pass did not wait for the slow host: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        f.try_row("work", "alpha").is_some(),
+        "the fast host is written"
+    );
+    assert!(
+        f.try_row("job", "slow").is_none(),
+        "the slow one is not, yet"
+    );
+    assert!(f.deps.probe_in_flight("slow"));
+
+    // While its probe still runs, the next pass leaves the host alone.
+    let calls = f.fake.calls_for("slow").len();
+    f.pass().await;
+    assert_eq!(
+        f.fake.calls_for("slow").len(),
+        calls,
+        "not probed twice at once"
+    );
+
+    // Once it answered, the next pass writes it and probes it again.
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    assert!(!f.deps.probe_in_flight("slow"));
+    f.pass().await;
+    assert!(
+        f.try_row("job", "slow").is_some(),
+        "the host is back in the pass"
+    );
 }

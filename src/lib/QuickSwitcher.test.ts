@@ -2,6 +2,7 @@ import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
+import { ownNewTaskChord } from './new_task';
 import QuickSwitcher from './QuickSwitcher.svelte';
 import { sessions, type SessionRow } from './sessions';
 import { projects } from './projects';
@@ -621,6 +622,21 @@ describe('QuickSwitcher — New session mode', () => {
     await tick();
     expect(screen.queryByTestId('mode-chip')).toBeNull();
     expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+  });
+
+  it('stands aside while a Work view owns the chord for New task (G2.1)', async () => {
+    render(QuickSwitcher);
+    const release = ownNewTaskChord();
+    try {
+      await fireEvent.keyDown(window, { key: 'N', ctrlKey: true, shiftKey: true });
+      await tick();
+      expect(screen.queryByTestId('mode-chip')).toBeNull();
+    } finally {
+      release();
+    }
+    await fireEvent.keyDown(window, { key: 'N', ctrlKey: true, shiftKey: true });
+    await tick();
+    expect(screen.getByTestId('mode-chip')).toBeTruthy();
   });
 
   it('the Hosts view request opens it with that host as context', async () => {

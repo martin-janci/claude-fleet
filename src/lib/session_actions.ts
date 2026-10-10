@@ -60,21 +60,22 @@ export interface SessionActionDef {
   synonyms?: readonly string[];
 }
 
-/** In Details' order: destructive actions last. */
+/** In Details' order (SessionDetails board): Steer, the Reviews block's
+ *  Start a review run, Place, Share, then the destructive ones last. */
 export const ROW_ACTIONS: readonly SessionActionDef[] = [
-  { id: 'label', label: 'Rename', detailsTestId: 'label-from-details', synonyms: ['label', 'name'] },
-  { id: 'rename', label: 'Rename tmux session', detailsTestId: 'rename-from-details', synonyms: ['tmux'] },
-  { id: 'restart', label: 'Restart…', detailsTestId: 'restart-from-details', synonyms: ['restart', 'reload'] },
-  { id: 'repair', label: 'Repair workspace…', detailsTestId: 'repair-from-details', synonyms: ['repair', 'worktree', 'fix'] },
   { id: 'send_prompt', label: 'Send prompt…', detailsTestId: 'send-prompt-from-details', synonyms: ['prompt', 'message', 'send'] },
-  { id: 'review', label: 'Review…', detailsTestId: 'open-review', synonyms: ['review', 'check'] },
   { id: 'fork', label: 'Fork…', detailsTestId: 'fork-from-details', synonyms: ['fork', 'branch', 'copy', 'duplicate'] },
   { id: 'rewind', label: 'Rewind…', detailsTestId: 'rewind-from-details', synonyms: ['rewind', 'undo', 'back', 'turn'] },
   { id: 'switch_account', label: 'Switch account…', detailsTestId: 'switch-account-from-details', synonyms: ['account', 'login', 'profile', 'limit'] },
   { id: 'change_model', label: 'Change model…', detailsTestId: 'change-model-from-details', synonyms: ['model', 'opus', 'sonnet', 'haiku'] },
-  { id: 'recreate', label: 'Recreate…', detailsTestId: 'recreate-from-details', synonyms: ['recreate'] },
+  { id: 'review', label: 'Start a review run…', detailsTestId: 'open-review', synonyms: ['review', 'check'] },
   { id: 'move', label: 'Move to host…', detailsTestId: 'move-from-details', synonyms: ['move', 'host', 'transfer'] },
-  { id: 'share', label: 'Share…', detailsTestId: 'share-from-details', synonyms: ['share', 'grant', 'watch', 'drive'] },
+  { id: 'restart', label: 'Restart…', detailsTestId: 'restart-from-details', synonyms: ['restart', 'reload'] },
+  { id: 'recreate', label: 'Recreate…', detailsTestId: 'recreate-from-details', synonyms: ['recreate'] },
+  { id: 'repair', label: 'Repair workspace…', detailsTestId: 'repair-from-details', synonyms: ['repair', 'worktree', 'fix'] },
+  { id: 'label', label: 'Rename and label…', detailsTestId: 'label-from-details', synonyms: ['label', 'name', 'rename', 'tag'] },
+  { id: 'rename', label: 'Rename tmux session', detailsTestId: 'rename-from-details', synonyms: ['tmux'] },
+  { id: 'share', label: 'Share…', detailsTestId: 'share-from-details', synonyms: ['share', 'grant', 'watch', 'answer', 'drive', 'steer', 'visibility', 'private'] },
   { id: 'copy_transcript', label: 'Copy transcript', detailsTestId: 'copy-transcript-from-details', synonyms: ['copy', 'transcript', 'conversation', 'export'] },
   { id: 'archive', label: 'Archive', detailsTestId: 'archive-from-details', synonyms: ['archive', 'done', 'hide'] },
   { id: 'remove_from_list', label: 'Remove from list', detailsTestId: 'remove-from-list-details', synonyms: ['remove', 'dismiss'] },

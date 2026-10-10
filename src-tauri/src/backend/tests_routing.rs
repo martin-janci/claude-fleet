@@ -851,6 +851,26 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "api_tokens",
+            "api_tokens",
+            json!({ "action": "create", "name": "ci", "scope": "act", "expires_in_days": 90 }),
+            r#"{"id":1,"name":"ci","scope":"act","hosts":null,"expires_at":9,"created_at":1,"last_used_at":null,"revoked_at":null,"token":"flt_live_x","env_line":"FLEET_MCP_TOKEN=flt_live_x"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::api_tokens::routed::api_tokens(
+                    b,
+                    s,
+                    fleet_core::service::control_tokens::ApiTokensArgs {
+                        action: "create".into(),
+                        name: Some("ci".into()),
+                        scope: Some("act".into()),
+                        expires_in_days: Some(90),
+                        hosts: None,
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "start_rules",
             "start_rules",
             json!({ "action": "accept", "rule_id": 3 }),
@@ -2412,7 +2432,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
         LostTargetArgs, NewSessionArgs, PlaceTranscriptArgs, RecreateSessionArgs,
         RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs, SendPromptArgs,
-        SetFriendlyNameArgs, SpawnReviewArgs, TouchSessionViewedArgs,
+        SetFriendlyNameArgs, SetSessionTagsArgs, SpawnReviewArgs, TouchSessionViewedArgs,
     };
 
     vec![
@@ -2742,6 +2762,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         prompt: "".into(),
                         submit: true,
                         keys: Some("Enter".into()),
+                        expect: None,
                     },
                     s,
                     h,
@@ -2839,6 +2860,41 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         host_alias: "trn".into(),
                         tmux_name: "demo".into(),
                         friendly_name: "the demo".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_session_tags",
+            "set_session_tags",
+            json!({ "session_id": 7, "tags": ["release"] }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::set_session_tags(
+                    b,
+                    SetSessionTagsArgs {
+                        session_id: 7,
+                        tags: vec!["release".into()],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "decide_related_session",
+            "decide_related_session",
+            json!({ "session_id": 7, "run_id": 3, "linked": true }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::decide_related_session(
+                    b,
+                    fleet_core::service::decide::related_session::DecideRelatedSessionArgs {
+                        session_id: 7,
+                        run_id: 3,
+                        linked: true,
                     },
                     s,
                 ))
@@ -3351,6 +3407,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     fleet_core::service::sessions::QueuePromptArgs {
                         session_id: 7,
                         prompt: "rebase on main".into(),
+                        ..Default::default()
                     },
                     s,
                     h,
@@ -4247,6 +4304,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                             lane: Some("A".into()),
                             needs: vec!["0.9".into()],
                             status: None,
+                            project_id: None,
                         }],
                     },
                     s,
@@ -6600,6 +6658,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/start_rules.rs",
         include_str!("../commands/start_rules.rs"),
+    ),
+    (
+        "commands/api_tokens.rs",
+        include_str!("../commands/api_tokens.rs"),
     ),
     (
         "commands/presence.rs",

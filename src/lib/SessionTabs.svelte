@@ -23,6 +23,7 @@
   import { accessOf } from './access';
   import { editorBlockedReason, openSessionInEditor } from './editor';
   import PresenceStrip from './PresenceStrip.svelte';
+  import VisibilityBadge from './VisibilityBadge.svelte';
   import { sessionBlocked, shareSheetFor } from './share';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
@@ -109,6 +110,7 @@
     <div class="title-row">
       <span class="name" data-testid="session-head-name">{name}</span>
       <span class="state state-{state}" data-testid="session-head-state">{STATE_LABELS[state]}</span>
+      <VisibilityBadge {session} />
       <span class="grow"></span>
       {#if ctxPct !== null && ctxLevel !== null}
         <span class="ctx" data-testid="session-head-context" data-level={ctxLevel} title="Context window used">

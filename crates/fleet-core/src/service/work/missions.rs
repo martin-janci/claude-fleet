@@ -22,7 +22,9 @@ use super::WorkLinkArgs;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs;
 use crate::service::view_scope::ViewScope;
-use crate::store::{MissionEventRow, MissionPatch, MissionRow, NewMission, Store, WorkItemRow};
+use crate::store::{
+    MissionEventRow, MissionPatch, MissionRow, NewMission, PullRequestRow, Store, WorkItemRow,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -86,6 +88,40 @@ pub struct MissionDetail {
     /// draft or a finished mission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<super::orchestrate::MissionPlan>,
+    /// What a finished mission leaves (Orbit Fleet G3.7): its live sessions
+    /// and its pull requests. Absent unless the mission is finished, and
+    /// from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish: Option<MissionFinish>,
+}
+
+/// A finished mission's leftovers, as far as the caller may see them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionFinish {
+    /// The sessions still running on its member items: what "Archive N
+    /// sessions" ends. Each is ended through the session's own Clean up
+    /// (`discard_kill_session`, or the agent's safe remove when its tree is
+    /// dirty), so its person fence is the session's.
+    #[serde(default)]
+    pub sessions: Vec<FinishSession>,
+    /// The pull requests its work opened, newest change first.
+    #[serde(default)]
+    pub prs: Vec<PullRequestRow>,
+}
+
+/// One live session of a finished mission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinishSession {
+    pub session_id: i64,
+    /// The member item it works on.
+    pub item_id: i64,
+    pub host_alias: String,
+    pub tmux_name: String,
+    pub kind: String,
+    /// Its own worktree's size in kB, from the host probe's last
+    /// measurement (G1.9): what archiving it frees. Absent until measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_kb: Option<i64>,
 }
 
 fn not_found(id: i64) -> IpcError {
@@ -202,6 +238,11 @@ pub fn mission(
     let events = s.mission_events(id, before_event, MISSION_EVENTS_PAGE)?;
     let may_change = may_change_mission(&s, scope, &mission)?;
     let plan = super::orchestrate::plan_for(&s, &mission)?;
+    let finish = if crate::store::MISSION_FINAL_STATES.contains(&mission.state.as_str()) {
+        Some(finish(&s, scope, id)?)
+    } else {
+        None
+    };
     Ok(MissionDetail {
         mission,
         items,
@@ -210,7 +251,48 @@ pub fn mission(
         graph,
         may_change,
         plan,
+        finish,
     })
+}
+
+/// A finished mission's live sessions and pull requests, each behind the
+/// session's own fence: a session the caller may not see is not listed, and
+/// a PR is listed only where `prs` would list it.
+fn finish(s: &Store, scope: &ViewScope, id: i64) -> Result<MissionFinish, IpcError> {
+    let mut sessions = Vec::new();
+    for (sid, item_id) in s.mission_live_sessions(id)? {
+        let Some(row) = s.get_session_by_id(sid)? else {
+            continue;
+        };
+        if row.status != "running" || !scope.sees_session_row(&row).is_visible() {
+            continue;
+        }
+        let worktree_kb = match row.worktree_id {
+            Some(wt) => s.worktree_path(wt)?.and_then(|path| {
+                crate::service::sessions::worktree_sizes::size_kb(&row.host_alias, &path)
+                    .map(|(kb, _)| kb)
+            }),
+            None => None,
+        };
+        sessions.push(FinishSession {
+            session_id: row.id,
+            item_id,
+            host_alias: row.host_alias,
+            tmux_name: row.tmux_name,
+            kind: row.kind,
+            worktree_kb,
+        });
+    }
+    let mut prs = Vec::new();
+    for url in s.mission_pr_urls(id)? {
+        if let Some(pr) = s.pull_request_by_url(&url)? {
+            if crate::service::prs::visible(s, scope, &pr)? {
+                prs.push(pr);
+            }
+        }
+    }
+    prs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(b.id.cmp(&a.id)));
+    Ok(MissionFinish { sessions, prs })
 }
 
 /// `work_link { action: mission_save, mission, mission_id?, item_id?,
@@ -367,7 +449,7 @@ pub fn set_state(
     let to = args.status.as_deref().ok_or_else(|| {
         IpcError::new(
             codes::E_INVALID,
-            "mission_state needs status: active | paused | completed | failed | cancelled",
+            "mission_state needs status: active | paused (reopens a finished one) | completed | failed | cancelled",
         )
     })?;
     let s = lock(store)?;

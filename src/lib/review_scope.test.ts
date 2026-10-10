@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { reviewPreamble, reviewPrompt, reviewerSkills, REVIEW_SCOPES } from './review_scope';
+import { reviewPreamble, reviewPrompt, reviewerOf, reviewerSkills, REVIEW_SCOPES } from './review_scope';
 import type { AssetInventoryRow } from './assets';
 
 const row = (over: Partial<AssetInventoryRow>): AssetInventoryRow => ({
@@ -36,5 +36,22 @@ describe('review scope and reviewer', () => {
       row({ name: 'pr-review' }),
     ];
     expect(reviewerSkills(rows, 'mac')).toEqual(['code-review', 'pr-review', 'worktree']);
+  });
+});
+
+describe('reviewerOf (gap plan G4.3)', () => {
+  it('names the skill from the seeded prompt and the agent', () => {
+    expect(reviewerOf({ kind: 'review', agent: 'claude', last_prompt: 'Use the pr-review skill for this review.\nRead and comment only.' })).toBe(
+      'pr-review skill · Claude Code',
+    );
+  });
+  it('reads back what the Review dialog seeds', () => {
+    expect(reviewerOf({ kind: 'review', agent: 'claude', last_prompt: reviewPrompt('code-review', 'branch', 'x') })).toBe(
+      'code-review skill · Claude Code',
+    );
+  });
+  it('is the agent alone when no skill is recorded', () => {
+    expect(reviewerOf({ kind: 'review', agent: 'codex', last_prompt: 'please look' })).toBe('Codex');
+    expect(reviewerOf({ kind: 'review', last_prompt: null })).toBe('Claude Code');
   });
 });

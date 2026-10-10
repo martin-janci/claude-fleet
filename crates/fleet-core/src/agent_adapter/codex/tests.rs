@@ -208,6 +208,18 @@ fn a_command_approval_is_a_permission_card() {
     );
 }
 
+/// An MCP server's approval has no "Would you like to" line; its title is
+/// the question.
+#[test]
+fn an_mcp_elicitation_names_its_server_as_the_question() {
+    let pane = APPROVAL.replace(
+        "Would you like to run the following command?",
+        "github needs your approval.",
+    );
+    let p = codex().analyze_pane(&pane).pending_input.expect("a card");
+    assert_eq!(p.question.as_deref(), Some("github needs your approval."));
+}
+
 #[test]
 fn a_plan_mode_question_is_an_input_card() {
     let i = codex().analyze_pane(QUESTION);

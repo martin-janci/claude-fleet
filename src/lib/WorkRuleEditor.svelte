@@ -4,7 +4,10 @@
   // and never touches the tracker. A rule is saved only after a preview of
   // exactly the draft being saved: which tasks move from where to where,
   // and how many a person placed by hand (those stay where they are).
-  import { untrack } from 'svelte';
+  // The preview runs by itself a moment after each edit (gap plan G2.2):
+  // "Matches 6 open tasks now: …" follows the draft as it is typed, and
+  // Save waits for the preview of exactly what is on screen.
+  import { onDestroy, untrack } from 'svelte';
   import Modal from './Modal.svelte';
   import { trackers as trackerStore } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
@@ -26,12 +29,16 @@
     initial,
     onclose,
     onsaved,
+    previewDebounceMs = 400,
   }: {
     /** The rule to edit (with its `version` as `expected_version`), or a
      *  prefilled new one. */
     initial: WorkRuleDraft;
     onclose: () => void;
     onsaved?: (r: WorkRule) => void;
+    /** How long the draft must be still before it is previewed, ms;
+     *  injectable for tests. */
+    previewDebounceMs?: number;
   } = $props();
 
   const saveBlocked = $derived(hubActionBlocked('save_work_rule', $hubStatus, $hubConnection));
@@ -51,6 +58,8 @@
   let previewedSig = $state<string | null>(null);
   let busy = $state(false);
   let failure = $state<string | null>(null);
+  // A save that lost a race: kept while the fresh preview runs.
+  let conflict = $state<string | null>(null);
 
   const trackerOptions = $derived(
     $workTreeMeta.trackers.length > 0
@@ -77,29 +86,64 @@
   const complete = $derived(name.trim() !== '' && group.trim() !== '' && hasCondition);
   const previewCurrent = $derived(previewedSig === sig && preview !== null);
 
+  // One preview in flight at a time is not needed: each answers for the
+  // draft it was asked of, and only the newest one's answer is kept.
+  let previewSeq = 0;
+  let previewing = $state(false);
+  let previewTimer: ReturnType<typeof setTimeout> | undefined;
+
   async function runPreview() {
-    if (!complete || busy) return;
-    busy = true;
-    failure = null;
+    if (!complete) return;
+    const mine = ++previewSeq;
+    previewing = true;
     const s = sig;
     const r = await workRulePreview(draft);
-    busy = false;
+    if (mine !== previewSeq) return;
+    previewing = false;
     if (!r.ok) {
       failure = r.error.message;
       return;
     }
+    failure = null;
     preview = {
       affected: Array.isArray(r.value?.affected) ? r.value.affected : [],
       total: r.value?.total ?? 0,
       kept_manual: r.value?.kept_manual ?? 0,
+      matched: typeof r.value?.matched === 'number' ? r.value.matched : undefined,
+      matched_sample: Array.isArray(r.value?.matched_sample) ? r.value.matched_sample : [],
     };
     previewedSig = s;
   }
+
+  // Live: a complete draft not yet previewed is previewed once it has been
+  // still for `previewDebounceMs`.
+  $effect(() => {
+    const want = complete && sig !== previewedSig;
+    clearTimeout(previewTimer);
+    if (!want) {
+      previewSeq++;
+      previewing = false;
+      return;
+    }
+    previewTimer = setTimeout(() => void runPreview(), previewDebounceMs);
+  });
+  onDestroy(() => clearTimeout(previewTimer));
+
+  const matchLine = $derived.by(() => {
+    const p = preview;
+    if (!p || !previewCurrent || p.matched === undefined) return null;
+    if (p.matched === 0) return 'Matches no open task now.';
+    const names = p.matched_sample ?? [];
+    const more = p.matched - names.length;
+    const head = `Matches ${p.matched} open task${p.matched === 1 ? '' : 's'} now`;
+    return names.length > 0 ? `${head}: ${names.join(', ')}${more > 0 ? ` +${more}` : ''}` : `${head}.`;
+  });
 
   async function save() {
     if (!previewCurrent || busy || saveBlocked !== null) return;
     busy = true;
     failure = null;
+    conflict = null;
     const r = await saveWorkRule({ ...draft, expected_version: expectedVersion });
     busy = false;
     if (!r.ok) {
@@ -110,11 +154,11 @@
         const now = list.ok && Array.isArray(list.value) ? list.value.find((x) => x.id === start.id) : undefined;
         expectedVersion = now ? now.version : start.id != null ? undefined : 0;
         previewedSig = null;
-        failure = now
-          ? `This rule changed elsewhere — now “${now.name}”, ${now.enabled ? 'on' : 'off'}, placing in “${now.group}” (version ${now.version}). Preview again to see what saving now would do.`
+        conflict = now
+          ? `This rule changed elsewhere — now “${now.name}”, ${now.enabled ? 'on' : 'off'}, placing in “${now.group}” (version ${now.version}). Check the new preview: it shows what saving now would do.`
           : start.id != null
             ? 'This rule was deleted elsewhere.'
-            : 'A rule like this was saved elsewhere at the same time. Preview again.';
+            : 'A rule like this was saved elsewhere at the same time. Check the new preview before saving.';
         return;
       }
       failure = r.error.message;
@@ -130,7 +174,7 @@
     class="form"
     onsubmit={(e) => {
       e.preventDefault();
-      void (previewCurrent ? save() : runPreview());
+      if (previewCurrent) void save();
     }}
   >
     <p class="note">
@@ -180,6 +224,7 @@
 
     {#if preview && previewCurrent}
       <div class="preview" data-testid="rule-preview">
+        {#if matchLine}<p class="match" data-testid="rule-match-count">{matchLine}</p>{/if}
         <p>
           {preview.total === 0 ? 'No task moves.' : `${preview.total} task${preview.total === 1 ? '' : 's'} would move.`}
           {#if preview.kept_manual > 0}
@@ -200,26 +245,28 @@
           {/if}
         {/if}
       </div>
-    {:else if preview}
-      <p class="muted" data-testid="rule-preview-stale">The rule changed since the preview; preview again before saving.</p>
+    {:else if complete}
+      <p class="muted" data-testid="rule-preview-stale" aria-live="polite">
+        {previewing || preview === null ? 'Checking which tasks it matches…' : 'The rule changed; checking again…'}
+      </p>
     {/if}
     {#if !hasCondition}
       <p class="muted">Give the rule at least one condition.</p>
+    {/if}
+    {#if conflict}
+      <p class="err" role="alert" data-testid="rule-error">{conflict}</p>
     {/if}
     {#if failure}
       <p class="err" role="alert" data-testid="rule-error">{failure}</p>
     {/if}
     <div class="actions">
       <button type="button" class="btn btn--quiet" onclick={onclose}>Cancel</button>
-      <button type="button" class="btn" data-testid="rule-preview-btn" disabled={!complete || busy} onclick={() => void runPreview()}
-        >Preview</button
-      >
       <button
         type="button"
         class="btn btn--primary"
         data-testid="rule-save"
         disabled={!previewCurrent || busy || saveBlocked !== null}
-        title={saveBlocked ?? (previewCurrent ? 'Save the rule' : 'Preview the rule first')}
+        title={saveBlocked ?? (previewCurrent ? 'Save the rule' : 'Wait for the preview of this rule')}
         onclick={() => void save()}>Save rule</button
       >
     </div>
@@ -243,6 +290,7 @@
   .note { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); }
   .preview { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.4rem 0.5rem; max-height: 14rem; overflow: auto; }
   .preview p { margin: 0 0 0.3rem; }
+  .preview .match { font-weight: 600; }
   .preview ul { margin: 0; padding-left: 1rem; }
   .preview li { display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .task { overflow-wrap: anywhere; }

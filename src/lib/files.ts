@@ -12,6 +12,10 @@ export interface ChangedFile {
   status: string;
   staged: boolean;
   orig_path: string | null;
+  /** Lines added / removed (M15 G1.10); absent for a binary or untracked
+   *  file, and from an older hub. */
+  added?: number;
+  removed?: number;
 }
 
 /** Flat worktree listing — tracked + untracked, gitignore respected. */
@@ -84,6 +88,9 @@ export interface BranchDiff {
   aheadOfBase: number;
   /** The files the branch changes against its merge base with the base. */
   baseFiles: ChangedFile[];
+  /** Commits on the base since the branch left it ("N behind main");
+   *  absent without a base, and from an older hub. */
+  behindBase?: number;
 }
 
 export function repoChanges(sessionId: number): Promise<Result<ChangedFile[]>> {

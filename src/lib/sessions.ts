@@ -562,6 +562,28 @@ export async function setFriendlyName(
   return r;
 }
 
+/** Replace the session's tags (the Label field, M15 G2.7): the whole
+ *  list, empty clears. Validated again by the backend (1–32 characters of
+ *  letters, digits, `_ . : -`, at most 16). */
+export async function setSessionTags(sessionId: number, tags: readonly string[]): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('set_session_tags', {
+    args: { session_id: sessionId, tags: [...tags] },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
+/** Link or Not related on the session's `related_session` proposal (M15
+ *  G4.3): Link keeps the other session listed as linked, Not related
+ *  withdraws it. Answers the session's row. */
+export async function decideRelatedSession(sessionId: number, runId: number, linked: boolean): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('decide_related_session', {
+    args: { session_id: sessionId, run_id: runId, linked },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
 /** Mark the session viewed now (redesign 2.3): its finished turns read as
  *  seen and it leaves the `done_unread` bucket. A watcher's call is refused
  *  by the hub (the stamp is one per row); that is not an error to show. */
@@ -1042,10 +1064,31 @@ export async function sendPrompt(
  * key-only write to the `answer` gate and every other `send_prompt` to
  * `drive`.
  */
-export async function answerDialog(hostAlias: string, tmuxName: string, key: string): Promise<Result<void>> {
+export async function answerDialog(
+  hostAlias: string,
+  tmuxName: string,
+  key: string,
+  expect?: ExpectDialog,
+): Promise<Result<void>> {
   return invokeCmd<void>('send_prompt', {
-    args: { host_alias: hostAlias, tmux_name: tmuxName, prompt: '', keys: key },
+    args: { host_alias: hostAlias, tmux_name: tmuxName, prompt: '', keys: key, ...(expect ? { expect } : {}) },
   });
+}
+
+/**
+ * The dialog an answer is for, sent with its key: the backend re-reads the
+ * pane and presses only while it still shows this (`E_CONFLICT` otherwise),
+ * in one step rather than a read here and a press a round trip later. A
+ * backend too old to know the field ignores it, and the caller's own re-read
+ * still stands.
+ */
+export interface ExpectDialog {
+  kind: string;
+  question: string | null;
+  options: { n: number; label: string }[];
+  detail: string | null;
+  /** For Enter: the option that must still be highlighted. */
+  selected: number | null;
 }
 
 /** What `queue_prompt` did with one prompt (step 5.10). */
@@ -1068,12 +1111,39 @@ export interface QueuedPrompt {
   failed_at?: number | null;
   error?: string | null;
   cancelled_at?: number | null;
+  /** Send later: not typed before this unix second. */
+  not_before?: number | null;
+  /** Held while the session's account is at its usage limit. */
+  until_limit_reset?: boolean;
+  /** Dropped instead if the session is archived first. */
+  skip_if_archived?: boolean;
+  skipped_at?: number | null;
+}
+
+/** Send later's time choices (M15 G1.8). Every field is optional: none set
+ *  is the plain "when it is idle". */
+export interface SendLaterTiming {
+  /** Unix seconds before which the prompt is not typed. */
+  notBefore?: number;
+  /** Wait until the session's account is under its usage limit again. */
+  untilLimitReset?: boolean;
+  /** Skip it if the session is archived first. */
+  skipIfArchived?: boolean;
 }
 
 /** Send a prompt as a new turn: now when the session is idle, else once its
- *  turn ends (never into a dialog). */
-export function queuePrompt(sessionId: number, prompt: string): Promise<Result<QueuePromptResult>> {
-  return invokeCmd<QueuePromptResult>('queue_prompt', { args: { session_id: sessionId, prompt } });
+ *  turn ends (never into a dialog). `timing` holds it for later. */
+export function queuePrompt(
+  sessionId: number,
+  prompt: string,
+  timing: SendLaterTiming = {},
+): Promise<Result<QueuePromptResult>> {
+  const args: Record<string, unknown> = { session_id: sessionId, prompt };
+  // Only what is set goes on the wire, so an older hub reads the call it knows.
+  if (timing.notBefore !== undefined) args.not_before = Math.floor(timing.notBefore);
+  if (timing.untilLimitReset) args.until_limit_reset = true;
+  if (timing.skipIfArchived) args.skip_if_archived = true;
+  return invokeCmd<QueuePromptResult>('queue_prompt', { args });
 }
 
 export function queuedPrompts(sessionId: number): Promise<Result<QueuedPrompt[]>> {

@@ -227,7 +227,7 @@ describe('TaskList', () => {
     sessions.set([]);
   });
 
-  it('▾ adds a project and notes to the new task', async () => {
+  it('▾ opens New task with the typed title, a project and notes (G2.1)', async () => {
     (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd === 'work_tree') return page;
       if (cmd === 'list_projects')
@@ -242,17 +242,48 @@ describe('TaskList', () => {
     });
     render(TaskList);
     await flush();
-    await fireEvent.click(screen.getByTestId('task-add-more'));
-    await flush();
-    const select = screen.getByTestId('task-add-project') as HTMLSelectElement;
-    select.value = select.options[1].value;
-    await fireEvent.change(select);
-    await fireEvent.input(screen.getByTestId('task-add-notes'), { target: { value: 'Rebase first' } });
     const input = screen.getByTestId('task-add-input') as HTMLInputElement;
     await fireEvent.input(input, { target: { value: 'New' } });
-    await fireEvent.keyDown(input, { key: 'Enter' });
+    await fireEvent.click(screen.getByTestId('task-add-more'));
+    await flush();
+    expect((screen.getByTestId('new-task-title') as HTMLInputElement).value).toBe('New');
+    const select = screen.getByTestId('new-task-project') as HTMLSelectElement;
+    select.value = select.options[1].value;
+    await fireEvent.change(select);
+    await fireEvent.input(screen.getByTestId('new-task-notes'), { target: { value: 'Rebase first' } });
+    await fireEvent.click(screen.getByTestId('new-task-submit'));
     await flush();
     expect(calls('create_work_task')[0][1]).toEqual({ args: { title: 'New', project_id: 3, notes: 'Rebase first' } });
+    expect(screen.queryByTestId('new-task-dialog')).toBeNull();
+    expect(input.value).toBe('');
+  });
+
+  it('"Start a session for it now" opens the new task\'s start menu once its row mounts (G2.1)', async () => {
+    let created = false;
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tree') return created ? page : { ...page, tasks: page.tasks.slice(1) };
+      if (cmd === 'list_projects') return [];
+      if (cmd === 'create_work_task') {
+        created = true;
+        return { id: 1, key: 'TASK-1', title: 'Write notes', source: 'local' };
+      }
+      if (cmd === 'preview_start_work') return cleanPreview;
+      return null;
+    });
+    render(TaskList, { debounceMs: 0, maxWaitMs: 0 });
+    await flush();
+    await fireEvent.click(screen.getByTestId('task-add-more'));
+    await flush();
+    await fireEvent.input(screen.getByTestId('new-task-title'), { target: { value: 'Write notes' } });
+    await fireEvent.click(screen.getByTestId('new-task-start-now'));
+    await fireEvent.click(screen.getByTestId('new-task-submit'));
+    await flush();
+    await new Promise((r) => setTimeout(r, 10));
+    await flush();
+    // A clean preview still asks: the person picks in the start menu.
+    expect(calls('preview_start_work')).toHaveLength(1);
+    expect(screen.getByTestId('start-popover')).toBeTruthy();
+    expect(calls('start_work')).toHaveLength(0);
   });
 
   it('renders tracker text as text', async () => {

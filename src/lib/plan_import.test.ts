@@ -1,7 +1,7 @@
 // "Import plan": a markdown plan read into step rows, the transition
 // plan's shape included (milestone tables plus a Lanes table).
 import { describe, it, expect } from 'vitest';
-import { importLine, parsePlan, shortTitle } from './plan_import';
+import { importLine, initialRepoPicks, matchRepo, missingRepoLines, parsePlan, shortTitle, wireRows } from './plan_import';
 
 const PLAN = `
 # Plan
@@ -93,5 +93,46 @@ describe('importLine', () => {
       'Imported: 3 added, 1 updated, 2 links added, 1 removed.',
     );
     expect(importLine({ created: 0, updated: 0, unchanged: 0, deps_added: 0, deps_removed: 0 })).toBe('Nothing to import.');
+  });
+});
+
+describe('a repo per row (G2.5)', () => {
+  const projects = [
+    { id: 3, owner: 'acme', repo: 'api' },
+    { id: 5, owner: 'acme', repo: 'web' },
+    { id: 6, owner: 'other', repo: 'web' },
+  ];
+  const plan = parsePlan(`| # | Step | Repo |
+|---|---|---|
+| 1.1 | Schema | acme/api |
+| 1.2 | UI | web |
+| 1.3 | Docs | — |
+| 1.4 | API | API |`);
+
+  it('reads the Repo column; a table without one needs none', () => {
+    expect(plan.hasRepos).toBe(true);
+    expect(plan.rows.map((r) => r.repo)).toEqual(['acme/api', 'web', undefined, 'API']);
+    expect(parsePlan('| # | Step |\n|---|---|\n| 1.1 | A |').hasRepos).toBe(false);
+  });
+
+  it('matches owner/repo, or a repository name only one project has', () => {
+    expect(matchRepo('acme/api', projects)).toBe(3);
+    expect(matchRepo('https://github.com/acme/web.git', projects)).toBe(5);
+    expect(matchRepo('API', projects)).toBe(3);
+    expect(matchRepo('web', projects)).toBeNull();
+    expect(matchRepo('', projects)).toBeNull();
+  });
+
+  it('names each row with no repo, numbered from 1, and sends the picks without the cell', () => {
+    const picks = initialRepoPicks(plan.rows, projects);
+    expect(missingRepoLines(plan, picks)).toEqual(['Row 2 has no repo: pick one', 'Row 3 has no repo: pick one']);
+    const done = { ...picks, '1.2': 6, '1.3': 5 };
+    expect(missingRepoLines(plan, done)).toEqual([]);
+    expect(wireRows(plan.rows, done)).toEqual([
+      { step: '1.1', title: 'Schema', project_id: 3 },
+      { step: '1.2', title: 'UI', project_id: 6 },
+      { step: '1.3', title: 'Docs', project_id: 5 },
+      { step: '1.4', title: 'API', project_id: 3 },
+    ]);
   });
 });

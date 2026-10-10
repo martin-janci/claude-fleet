@@ -52,7 +52,7 @@
   } from './work_view';
   import WorkConflictNotice from './WorkConflictNotice.svelte';
   import ProposedBy from './ProposedBy.svelte';
-  import { preselect } from './ai_proposal';
+  import { aiChangeLine, confidenceWord, preselect, wordConfidenceIn } from './ai_proposal';
   import type { IpcError, Result } from './result';
 
   let {
@@ -182,7 +182,12 @@
       return;
     }
     cleared(it.link_id);
-    summary = `${what}: ${taskLabel(it.task)} · ${sessionName(it)}`;
+    // A confirmed suggestion of the decision model is an AI-caused change
+    // (G4.9): it reads as the AI patterns board's line, with its Undo.
+    const by = undoable === 'confirm' && it.kind === 'suggestion' ? reviewProposal(it) : null;
+    summary = by
+      ? `✓ ${aiChangeLine(`Linked ${sessionName(it)} to ${taskLabel(it.task)}`, by.source, true)}`
+      : `${what}: ${taskLabel(it.task)} · ${sessionName(it)}`;
     undo = null;
     if (undoable) {
       // The Undo is a compare-and-set too (M14.3): it names the version the
@@ -600,12 +605,12 @@
             <button class="link muted" type="button" title="Open the session" onclick={() => openSession(it)}
               >{sessionName(it)}{#if it.host}&nbsp;· {it.host}{/if}</button
             >
-            {#if it.confidence != null}<span class="conf" class:conf--high={isHighConfidence(it)} title="Confidence from detection" data-testid="work-review-confidence">{it.confidence}%</span>{/if}
+            {#if it.confidence != null}<span class="conf" class:conf--high={isHighConfidence(it)} title="Confidence from detection" data-testid="work-review-confidence">{confidenceWord(it.confidence)}</span>{/if}
             {#if it.strength}<span class="muted">· {it.strength}{#if it.rule}&nbsp;{it.rule}{/if}</span>{/if}
             {#if it.created_at}<span class="muted">· {shortAge(it.created_at)}</span>{/if}
           </div>
           {#each it.why ?? [] as w, wi (wi)}
-            <p class="why" data-testid="work-review-why">{w}</p>
+            <p class="why" data-testid="work-review-why">{wordConfidenceIn(w)}</p>
           {/each}
           {#if failures.get(it.link_id)}
             {@const f = failures.get(it.link_id)}

@@ -42,6 +42,12 @@ export interface RoutineRow {
   paused_reason?: string;
   created_at: number;
   updated_at: number;
+  /** A pull request event fires only for this repo: `owner/name` or `name` (M15 G2.4). */
+  event_repo?: string;
+  /** `anyone`: PRs of any session in its org; absent = its owner's. */
+  event_author?: string;
+  /** At most one run per PR (or session) in this many seconds. */
+  event_rate_secs?: number;
 }
 
 /** One run of a routine. */
@@ -120,6 +126,23 @@ export interface RoutineInput {
   budget_run_micros?: number;
   budget_day_micros?: number;
   overlap?: RoutineOverlap;
+  event_repo?: string;
+  event_author?: EventAuthor;
+  event_rate_secs?: number;
+}
+
+/** `preview`: the editor's dry run (gap plan G2.3, fleet-core
+ *  `routines::RoutinePreview`). Nothing is written. */
+export interface RoutinePreview {
+  /** The schedule's next fires (unix seconds), at the offset below. */
+  next_runs: number[];
+  utc_offset_min: number;
+  /** Why save would refuse it; absent when it would save. */
+  problem?: string;
+  /** The account the chosen login bills. */
+  account?: RoutineAccount;
+  /** Every login on the host on a known account, the host's own first. */
+  logins: RoutineAccount[];
 }
 
 type Args = { action: string; routine_id?: number; routine?: RoutineInput; enabled?: boolean; skip?: boolean; limit?: number };
@@ -133,6 +156,8 @@ export const getRoutine = (id: number) => call<RoutineDetail>({ action: 'get', r
 export const failingRoutines = () => call<FailingRoutine[]>({ action: 'failing' });
 export const saveRoutine = (routine: RoutineInput, id?: number) =>
   call<RoutineRow>({ action: 'save', routine, ...(id !== undefined ? { routine_id: id } : {}) });
+export const previewRoutine = (routine: RoutineInput, id?: number) =>
+  call<RoutinePreview>({ action: 'preview', routine, ...(id !== undefined ? { routine_id: id } : {}) });
 export const deleteRoutine = (id: number) => call<{ removed: boolean }>({ action: 'delete', routine_id: id });
 export const setRoutineEnabled = (id: number, enabled: boolean) =>
   call<RoutineRow>({ action: 'set_enabled', routine_id: id, enabled });
@@ -234,7 +259,10 @@ export function cronWords(cron: string | undefined): string {
 /** When it runs, in words. */
 export function triggerWords(r: Pick<RoutineRow, 'trigger' | 'cron' | 'event'>): string {
   if (r.trigger === 'cron') return cronWords(r.cron);
-  if (r.trigger === 'event') return `When a session is ${eventWords(r.event)}`;
+  if (r.trigger === 'event') {
+    if (isPrEvent(r.event)) return `When ${eventLabel(r.event).replace(/^A /, 'a ')}`;
+    return `When a session is ${eventWords(r.event)}`;
+  }
   return 'Run now only';
 }
 
@@ -246,6 +274,78 @@ const EVENT_WORDS: Record<string, string> = {
 };
 export function eventWords(e: string | undefined): string {
   return (e && EVENT_WORDS[e]) || e || 'event';
+}
+
+// Pull request triggers (M15 step G2.4; fleet-core `routines::PR_EVENTS`):
+// reconcile writes one on the timeline of the session that opened a PR when
+// its review, checks or state change. Only they take a repo filter and
+// `anyone`; every event may hold a rate.
+export type EventAuthor = 'me' | 'anyone';
+const PR_EVENT_LABELS: Record<string, string> = {
+  pr_review: 'A pull request gets a review',
+  pr_ci_failed: 'A pull request’s checks fail',
+  pr_ci_passed: 'A pull request’s checks pass',
+  pr_merged: 'A pull request is merged',
+};
+/** The events the editor offers, session ones first. */
+export const EVENT_CHOICES: readonly string[] = ['stuck', 'lost', 'turn_done', ...Object.keys(PR_EVENT_LABELS)];
+export function isPrEvent(e: string | undefined): boolean {
+  return !!e && e in PR_EVENT_LABELS;
+}
+/** An event as the editor's select names it. */
+export function eventLabel(e: string | undefined): string {
+  return (e && PR_EVENT_LABELS[e]) || `A session is ${eventWords(e)}`;
+}
+/** The rate choices: absent is "every time". */
+export const RATE_CHOICES: readonly { secs?: number; label: string }[] = [
+  { label: 'every time' },
+  { secs: 600, label: 'once per 10 minutes' },
+  { secs: 3600, label: 'once per hour' },
+  { secs: 86400, label: 'once per day' },
+];
+
+/** An event routine's filters, as the editor holds them. */
+export interface EventFilter {
+  repo: string;
+  author: EventAuthor;
+  /** Seconds as text, '' for every time. */
+  rate: string;
+}
+export function eventFilterOf(r: Pick<RoutineInput, 'event_repo' | 'event_author' | 'event_rate_secs'>): EventFilter {
+  return {
+    repo: r.event_repo ?? '',
+    author: r.event_author === 'anyone' ? 'anyone' : 'me',
+    rate: r.event_rate_secs ? String(r.event_rate_secs) : '',
+  };
+}
+/** The fields `save` sends for `event`: none for another trigger, and the
+ *  repo and author only for a pull request event (the hub refuses them on
+ *  a session one). */
+export function eventFilterInput(
+  trigger: string,
+  event: string | undefined,
+  f: EventFilter,
+): Pick<RoutineInput, 'event_repo' | 'event_author' | 'event_rate_secs'> {
+  if (trigger !== 'event') return {};
+  const rate = Number(f.rate);
+  const out: Pick<RoutineInput, 'event_repo' | 'event_author' | 'event_rate_secs'> =
+    Number.isInteger(rate) && rate > 0 ? { event_rate_secs: rate } : {};
+  if (!isPrEvent(event)) return out;
+  const repo = f.repo.trim();
+  if (repo) out.event_repo = repo;
+  if (f.author === 'anyone') out.event_author = 'anyone';
+  return out;
+}
+/** "only in acme/web · anyone's · once per PR per hour", or '' when nothing narrows it. */
+export function eventFilterWords(r: Pick<RoutineRow, 'event' | 'event_repo' | 'event_author' | 'event_rate_secs'>): string {
+  const pr = isPrEvent(r.event);
+  const parts: string[] = [];
+  if (pr && r.event_repo) parts.push(`only in ${r.event_repo}`);
+  if (pr) parts.push(r.event_author === 'anyone' ? 'anyone’s' : 'mine');
+  const rate = RATE_CHOICES.find((c) => c.secs === r.event_rate_secs);
+  if (r.event_rate_secs)
+    parts.push(rate ? rate.label.replace('once per', `once per ${pr ? 'PR' : 'session'} per`) : `once per ${r.event_rate_secs}s`);
+  return parts.join(' · ');
 }
 
 /** On / Paused / Paused by fleet, the routine's switch in words. */
@@ -462,4 +562,125 @@ export function routineDeleteLoss(detail: Pick<RoutineDetail, 'runs'>): { loss: 
         ? `Its ${n} or more runs go with it.`
         : `Its ${n === 1 ? 'run goes' : `${n} runs go`} with it.`;
   return { loss: n, lead: `${runs} Sessions it started keep running. This can't be undone.` };
+}
+
+// ---- the schedule picker and its next run (gap plan G2.3) -----------------
+
+/** The picker's days: each a cron day-of-week field, `hourly` and `custom`
+ *  aside. */
+export type ScheduleDays = 'daily' | 'weekdays' | 'weekends' | '0' | '1' | '2' | '3' | '4' | '5' | '6' | 'hourly' | 'custom';
+
+export const SCHEDULE_DAYS: { id: ScheduleDays; label: string }[] = [
+  { id: 'weekdays', label: 'Weekdays' },
+  { id: 'daily', label: 'Every day' },
+  { id: 'weekends', label: 'Weekends' },
+  ...['1', '2', '3', '4', '5', '6', '0'].map((d) => ({ id: d as ScheduleDays, label: DAYS[Number(d)] })),
+  { id: 'hourly', label: 'Every hour' },
+  { id: 'custom', label: 'Custom (cron)' },
+];
+
+const DOW: Partial<Record<ScheduleDays, string>> = { daily: '*', weekdays: '1-5', weekends: '0,6' };
+
+/** A cron line as the picker reads it: days and an `HH:MM` time (for
+ *  `hourly`, the minute as `:MM`); a line it cannot show is `custom`. */
+export function schedulePick(cron: string | undefined): { days: ScheduleDays; time: string } {
+  const c = (cron ?? '').trim();
+  const custom = { days: 'custom' as const, time: '09:00' };
+  if (c === '@hourly') return { days: 'hourly', time: '00' };
+  if (c === '@daily') return { days: 'daily', time: '00:00' };
+  const p = c.split(/\s+/);
+  if (p.length !== 5) return custom;
+  const [min, hour, dom, mon, dow] = p;
+  if (!/^\d{1,2}$/.test(min) || Number(min) > 59 || dom !== '*' || mon !== '*') return custom;
+  if (hour === '*' && dow === '*') return { days: 'hourly', time: pad(Number(min)) };
+  if (!/^\d{1,2}$/.test(hour) || Number(hour) > 23) return custom;
+  const time = `${pad(Number(hour))}:${pad(Number(min))}`;
+  const days = (Object.keys(DOW) as ScheduleDays[]).find((k) => DOW[k] === dow) ?? (dow === '6,0' ? 'weekends' : /^[0-6]$/.test(dow) ? (dow as ScheduleDays) : null);
+  return days ? { days, time } : custom;
+}
+
+/** The cron line the picker means; `null` for `custom` or a bad time. */
+export function scheduleCron(days: ScheduleDays, time: string): string | null {
+  if (days === 'custom') return null;
+  if (days === 'hourly') {
+    const m = /^:?(\d{1,2})$/.exec(time.trim()) ?? /^\d{1,2}:(\d{2})$/.exec(time.trim());
+    if (!m || Number(m[1]) > 59) return null;
+    return `${Number(m[1])} * * * *`;
+  }
+  const m = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
+  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) return null;
+  return `${Number(m[2])} ${Number(m[1])} * * ${DOW[days] ?? days}`;
+}
+
+/** The device's IANA time zone ("Europe/Bratislava"), or null. */
+export function deviceZone(): string | null {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Minutes east of UTC in `timeZone` (the device's when absent) at `sec`. */
+export function zoneOffsetMin(sec: number, timeZone?: string): number {
+  if (!timeZone) return -new Date(sec * 1000).getTimezoneOffset();
+  const name = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'longOffset' })
+    .formatToParts(new Date(sec * 1000))
+    .find((p) => p.type === 'timeZoneName')?.value;
+  const m = /GMT([+-])(\d{2}):?(\d{2})?/.exec(name ?? '');
+  if (!m) return 0;
+  return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] ?? 0));
+}
+
+/** "UTC+02:00" from minutes east. */
+export function offsetWords(min: number): string {
+  const a = Math.abs(min);
+  return `UTC${min < 0 ? '−' : '+'}${pad(Math.floor(a / 60))}:${pad(a % 60)}`;
+}
+
+/** A fire as the board says it: "Mon 12 Oct, 08:30", in `timeZone` (the
+ *  device's when absent). */
+export function nextRunLabel(sec: number, timeZone?: string): string {
+  const d = new Date(sec * 1000);
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(d);
+  const v = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  return `${v('weekday')} ${v('day')} ${v('month')}, ${v('hour')}:${v('minute')}`;
+}
+
+/**
+ * The first of `runs` whose wall-clock time moved because a clock change
+ * lies between now and it: a routine keeps the UTC offset it was saved at
+ * (fleet-core `routines::cron`), so past a daylight-saving change it fires
+ * an hour off. `null` when none moved.
+ */
+export function clockChange(
+  runs: readonly number[],
+  savedOffsetMin: number,
+  timeZone?: string,
+): { at: number; shiftMin: number } | null {
+  for (const at of runs) {
+    const shift = zoneOffsetMin(at, timeZone) - savedOffsetMin;
+    if (shift !== 0) return { at, shiftMin: shift };
+  }
+  return null;
+}
+
+/** The editor's dry-run line: "Dry run: on mercury, in acme/web, as
+ *  me@x.com, at most $2.00 a run." */
+export function dryRunLine(
+  d: { host_alias: string; profile?: string; budget_run_micros?: number },
+  project: string,
+  account: string | null,
+): string {
+  const as = account ?? (d.profile ? `profile ${d.profile}` : "the host's own login");
+  const cap = d.budget_run_micros !== undefined ? `at most ${dollars(d.budget_run_micros)} a run` : 'no limit a run';
+  return `Dry run: on ${d.host_alias}, in ${project}, as ${as}, ${cap}.`;
 }

@@ -174,3 +174,21 @@ describe('LostTargetForm (4.12)', () => {
     expect(screen.queryByTestId('lost-target-error')).toBeNull();
   });
 });
+
+describe('LostTargetForm Ignore (G2.7)', () => {
+  beforeEach(() => mockedTarget.mockReset());
+
+  it('offers no Ignore when the caller cannot ignore', async () => {
+    mount({ unsure: true });
+    await settle();
+    expect(screen.queryByTestId('lost-target-ignore')).toBeNull();
+  });
+
+  it('runs onignore', async () => {
+    const onignore = vi.fn();
+    mount({ unsure: true }, { action: 'Restore', requireProject: true, onignore });
+    await settle();
+    await fireEvent.click(screen.getByTestId('lost-target-ignore'));
+    expect(onignore).toHaveBeenCalledTimes(1);
+  });
+});

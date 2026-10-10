@@ -6,6 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import FormCard from './FormCard.svelte';
 import type { FormView } from './forms';
+import { loadSaved } from './saved_answers';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -293,5 +294,29 @@ describe('FormCard', () => {
     await screen.findByTestId('form-field-env-stg');
     expect(screen.queryByTestId('form-proposed-env')).toBeNull();
     expect(screen.getByTestId('form-field-env-prod')).toHaveAttribute('aria-checked', 'false');
+  });
+
+  // G1.3: an agent's form whose spec says `save_later` folds to one line
+  // with Resume, keeps what was typed (never the secret) and forgets it once
+  // declined.
+  it('saves to finish later, resumes from the kept answers, and forgets them on Decline', async () => {
+    localStorage.clear();
+    const v = view();
+    v.spec.save_later = true;
+    inv.mockImplementation(async (cmd: string) => (cmd === 'get_form' ? v : view({ state: 'declined' })));
+    const first = render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    await fireEvent.click(await screen.findByTestId('form-field-env-prod'));
+    await fireEvent.click(screen.getByTestId('form-save-later'));
+    expect(screen.getByTestId('form-saved-later')).toHaveTextContent('saved to finish later · expires');
+    expect(screen.queryByTestId('form-card')).toBeNull();
+    expect(loadSaved('f_a')).toEqual({ env: 'prod' });
+    first.unmount();
+
+    render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    expect(await screen.findByTestId('form-field-env-prod')).toHaveAttribute('aria-checked', 'true');
+    await fireEvent.click(screen.getByTestId('form-decline'));
+    await fireEvent.click(screen.getByTestId('form-decline-confirm'));
+    await screen.findByTestId('form-outcome');
+    expect(loadSaved('f_a')).toBeNull();
   });
 });

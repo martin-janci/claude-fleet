@@ -79,6 +79,7 @@ fn keys(k: &TestKey) -> TrustedKeys {
 
 fn client(id: i64, mode: TokenMode, org: Option<i64>) -> Caller {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(ClientRef {
             id,
@@ -95,6 +96,7 @@ fn client(id: i64, mode: TokenMode, org: Option<i64>) -> Caller {
 
 fn host(alias: &str) -> Caller {
     Caller {
+        api: None,
         host_alias: Some(alias.into()),
         client: None,
         mode: TokenMode::Full,

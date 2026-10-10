@@ -584,6 +584,11 @@ export interface RulePreview {
   total: number;
   /** Tasks placed by a person that the rule leaves where they are. */
   kept_manual: number;
+  /** Open tasks the draft's conditions match now, moved or not (G2.2);
+   *  absent from an older hub. */
+  matched?: number;
+  /** The first few of them, by key (else title). */
+  matched_sample?: string[];
 }
 
 export interface WorkView {
@@ -616,6 +621,10 @@ export interface OrgImpact {
   hosts_gaining: string[];
   bound_clients_losing: number;
   bound_clients_gaining: number;
+  /** People whose org-bound devices lose / gain the task (G2.2); absent
+   *  when none, or from an older hub. */
+  people_losing?: string[];
+  people_gaining?: string[];
   journal_entries: number;
   summaries: number;
   impact_token?: string | null;

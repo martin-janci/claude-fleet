@@ -5,7 +5,13 @@
    * agent's own screen, then shell terminals 1..N, with + New, Split and
    * Clear. Pure presentation: `TerminalView` owns the list and the actions.
    */
-  import { MAX_SHELL_TERMINALS, TERMINAL_STARTS, terminalStartLabel, type TerminalStart } from './terminals';
+  import {
+    MAX_SHELL_TERMINALS,
+    TERMINAL_STARTS,
+    terminalStartLabel,
+    type ShellActivity,
+    type TerminalStart,
+  } from './terminals';
   import { shortcutLabel } from './shortcuts';
   import { detectMac } from './terminal_keys';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -26,6 +32,7 @@
     host = null,
     opensOn = 'worktree',
     onopenson = undefined,
+    activity = {},
   }: {
     /** The agent tab's name, as the session bar names it. */
     agentLabel?: string;
@@ -47,7 +54,16 @@
     /** Where + New starts the next terminal (Terminals board). */
     opensOn?: TerminalStart;
     onopenson?: (at: TerminalStart) => void;
+    /** What runs in each shell, by number (Terminals board, "pnpm dev ·
+     *  running"); a shell missing here says nothing. */
+    activity?: Readonly<Record<number, ShellActivity>>;
   } = $props();
+
+  function shellTitle(n: number): string {
+    const a = activity[n];
+    const what = !a ? '' : a.state === 'running' ? ` · ${a.command} running` : ` · ${a.command}, at its prompt`;
+    return `Shell ${n}${what} · next tab ${nextChord}`;
+  }
 
   // The shell's actions menu (Terminals board, "Terminal actions"): the
   // ⋯ button or a right-click on a shell tab. Kill terminal… asks first.
@@ -107,14 +123,17 @@
         class="tab"
         class:on={active === n}
         aria-selected={active === n}
-        title="Shell {n} · next tab {nextChord}"
+        title={shellTitle(n)}
         onclick={() => onselect(n)}
         oncontextmenu={(e) => {
           e.preventDefault();
           onselect(n);
           void openMenu(n);
         }}
-        data-testid="terminal-tab-{n}">Shell {n}</button
+        data-testid="terminal-tab-{n}"
+        >Shell {n}{#if activity[n]?.state === 'running'}<span class="run" data-testid="terminal-running-{n}"
+            ><span class="run-dot" aria-hidden="true"></span>{activity[n]?.command}<span class="sr-only"> running</span></span
+          >{/if}</button
       >
       <button
         type="button"
@@ -292,6 +311,27 @@
   }
   .spacer {
     flex: 1 1 auto;
+  }
+  .run {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-left: 0.35rem;
+    color: var(--fg-muted);
+  }
+  .run-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--status-working);
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
   .menu-wrap {
     position: relative;

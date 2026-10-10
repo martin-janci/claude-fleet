@@ -7,6 +7,7 @@
 // presses the button and confirms. Pure but for the invoke wrappers;
 // LostTargetForm.svelte renders.
 import { invokeCmd, type Result } from './result';
+import { readPref, writePref } from './prefs';
 import type { ProposalLike } from './ai_proposal';
 import type { ProjectRow } from './projects';
 import type { LostCandidate, SessionRow } from './sessions';
@@ -131,4 +132,36 @@ export function placeTranscript(args: {
   project_id: number;
 }): Promise<Result<PlacedTranscript>> {
   return invokeCmd<PlacedTranscript>('place_transcript', { args });
+}
+
+// ── Ignore (gap plan step G2.7, the FormsSession board's "Adopt a lost
+// session · Ignore") ──
+//
+// A found conversation a person does not want back is left out of the list
+// on later searches. Nothing on the host changes and the hub keeps nothing:
+// the choice is this device's (a pref), so it is undone with Undo or "Show
+// ignored", and another device still lists it.
+
+const IGNORED_PREF = 'lost.ignored-conversations';
+const isIgnoredMap = (v: unknown): v is Record<string, string[]> =>
+  typeof v === 'object' &&
+  v !== null &&
+  !Array.isArray(v) &&
+  Object.values(v).every((ids) => Array.isArray(ids) && ids.every((id) => typeof id === 'string'));
+
+/** The conversations ignored on `host`, by `claude_session_id`. */
+export function ignoredConversations(host: string): ReadonlySet<string> {
+  return new Set(readPref(IGNORED_PREF, {}, isIgnoredMap)[host] ?? []);
+}
+
+/** Ignore (`ignored`) or bring back one found conversation on `host`. */
+export function setConversationIgnored(host: string, claudeSessionId: string, ignored: boolean): void {
+  const all = readPref(IGNORED_PREF, {}, isIgnoredMap);
+  const ids = new Set(all[host] ?? []);
+  if (ignored) ids.add(claudeSessionId);
+  else ids.delete(claudeSessionId);
+  const next = { ...all };
+  if (ids.size > 0) next[host] = [...ids];
+  else delete next[host];
+  writePref(IGNORED_PREF, next);
 }

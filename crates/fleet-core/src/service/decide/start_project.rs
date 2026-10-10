@@ -130,6 +130,7 @@ impl SuggestedProject {
             confidence_pct: self.confidence_pct,
             run_id: self.run_id,
             at: None,
+            linked: None,
         }
     }
 }

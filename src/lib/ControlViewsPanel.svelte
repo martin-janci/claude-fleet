@@ -7,6 +7,11 @@
   where they live, not copies. A session opened from Needs you shows its
   conversation here (step 9.5, board MCSession): "‹" or Esc goes back, ⤢
   opens the full session.
+
+  Gap plan G3.10: Needs you opens on a fleet line ("4 need you · 6 running
+  · 9 idle"), a search, the Inbox's rows with a paused-limit row's Switch
+  account and Wait inline, then Running, Idle and Done today folds. Tasks
+  (☑) and Routines (◷) join the strip.
 -->
 <script lang="ts">
   import { tablistKeys } from './tablist_keys';
@@ -22,10 +27,20 @@
   import LibraryView from './LibraryView.svelte';
   import ConversationPanel from './ConversationPanel.svelte';
   import ControlMissions from './ControlMissions.svelte';
+  import ControlTasksView from './ControlTasksView.svelte';
+  import ControlRoutinesView from './ControlRoutinesView.svelte';
+  import LimitActions from './LimitActions.svelte';
+  import { classify } from './attention';
+  import { attentionFacts } from './attention_facts';
+  import { accountByUuid, accountLabel } from './accounts';
+  import { openRoutines } from './routines';
   import {
     CONTROL_VIEWS,
     ELSEWHERE,
     controlViews,
+    fleetFolds,
+    fleetLine,
+    visibleFleet,
     moveView,
     needsYouList,
     openElsewhere,
@@ -47,7 +62,17 @@
   const landed = CONTROL_VIEWS.filter((v) => v.landed);
 
   /** The views that live somewhere else too; the Library lives only here. */
-  const HAS_PLACE: ReadonlySet<ControlViewId> = new Set(['needs-you', 'session', 'prs', 'today']);
+  const HAS_PLACE: ReadonlySet<ControlViewId> = new Set(['needs-you', 'session', 'tasks', 'routines', 'prs', 'today']);
+
+  let query = $state('');
+  const folds = $derived(fleetFolds($visibleFleet.rows, $visibleFleet.opts, query));
+  /** The line counts the whole fleet, not what the search left. */
+  const line = $derived(fleetLine(query.trim() ? fleetFolds($visibleFleet.rows, $visibleFleet.opts) : folds));
+  const FOLDS = [
+    { key: 'running', label: 'Working' },
+    { key: 'idle', label: 'Idle' },
+    { key: 'doneToday', label: 'Done today' },
+  ] as const;
 
   /** ⤢: the view's own place. */
   function expand(id: ControlViewId) {
@@ -58,9 +83,11 @@
       // The full session, revealed in the list as any deliberate open is.
       selectSessionExplicitly($selectedSession);
       leave('control');
-    } else if (id === 'session' || id === 'prs') {
-      if (id === 'prs') sidebarView.set('work');
+    } else if (id === 'session' || id === 'prs' || id === 'tasks') {
+      if (id !== 'session') sidebarView.set('work');
       leave('control');
+    } else if (id === 'routines') {
+      openRoutines();
     } else if (id === 'today') {
       controlTab.set('today');
     }
@@ -88,6 +115,14 @@
     back();
   }
 </script>
+
+{#snippet row(s: SessionRow, testid: string)}
+  <button type="button" class="row" data-testid={testid} onclick={() => openRow(s)}>
+    <span class="row-name">{displayName(s, true)}</span>
+    <span class="row-why">{claudeStatusLabel(s.claude_status)} · {s.host_alias}</span>
+    {#if s.last_activity_at}<span class="row-age">{timeAgo(s.last_activity_at)}</span>{/if}
+  </button>
+{/snippet}
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <aside class="views" aria-label="Views" data-testid="control-views" onkeydown={onKeydown}>
@@ -185,21 +220,45 @@
 
   <div class="body" role="tabpanel" aria-label={activeDef.label} data-testid="control-view-{active}">
     {#if active === 'needs-you'}
-      {#if $needsYouList.length === 0}
-        <p class="empty">Nothing needs you.</p>
+      <div class="fleet">
+        <p class="hello" data-testid="control-fleet-line">Welcome back. {line}</p>
+        <label class="search">
+          <span aria-hidden="true">⌕</span>
+          <input type="search" placeholder="Search sessions" aria-label="Search sessions" bind:value={query} data-testid="control-views-search" />
+        </label>
+      </div>
+      {#if folds.needs.length === 0}
+        <p class="empty">{query.trim() ? 'Nothing that needs you matches.' : 'Nothing needs you.'}</p>
       {:else}
         <ul class="rows">
-          {#each $needsYouList as s (s.id)}
+          {#each folds.needs as s (s.id)}
             <li>
-              <button type="button" class="row" data-testid="control-needs-you-row" onclick={() => openRow(s)}>
-                <span class="row-name">{displayName(s, true)}</span>
-                <span class="row-why">{claudeStatusLabel(s.claude_status)}</span>
-                {#if s.last_activity_at}<span class="row-age">{timeAgo(s.last_activity_at)}</span>{/if}
-              </button>
+              {@render row(s, 'control-needs-you-row')}
+              {#if classify(s, $visibleFleet.opts) === 'account_limit'}
+                <div class="limit" data-testid="control-needs-you-limit">
+                  <LimitActions
+                    sess={s}
+                    resetsAt={$attentionFacts?.limited_accounts?.[s.account_uuid ?? '']?.resets_at ?? null}
+                    accountName={(u) => accountLabel($accountByUuid.get(u))}
+                  />
+                </div>
+              {/if}
             </li>
           {/each}
         </ul>
       {/if}
+      {#each FOLDS as f (f.key)}
+        {#if folds[f.key].length > 0}
+          <details class="fold" data-testid="control-fold-{f.key}">
+            <summary>{f.label} <span class="fold-n">{folds[f.key].length}</span></summary>
+            <ul class="rows">
+              {#each folds[f.key] as s (s.id)}
+                <li>{@render row(s, 'control-fold-row')}</li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
+      {/each}
     {:else if active === 'session'}
       {#if $selectedSession}
         <div class="focus" data-testid="control-session-focus">
@@ -222,6 +281,10 @@
       {:else}
         <p class="empty">No session in focus. Pick one in Needs you, Sessions or the Inbox.</p>
       {/if}
+    {:else if active === 'tasks'}
+      <ControlTasksView />
+    {:else if active === 'routines'}
+      <ControlRoutinesView />
     {:else if active === 'prs'}
       <WorkPrs />
     {:else if active === 'library'}
@@ -378,6 +441,49 @@
   .row-age {
     grid-column: 2;
     grid-row: 1;
+  }
+  .fleet {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .hello {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+  }
+  .search {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    color: var(--fg-muted);
+  }
+  .search input {
+    flex: 1 1 auto;
+    min-width: 0;
+    font: inherit;
+    font-size: var(--text-xs);
+    color: var(--fg);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 2px 6px;
+  }
+  .limit {
+    padding: 0 var(--space-3) var(--space-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .fold summary {
+    cursor: pointer;
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .fold-n {
+    margin-left: var(--space-1);
   }
   .focus {
     display: flex;

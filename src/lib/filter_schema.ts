@@ -12,6 +12,7 @@
 // each control renders.
 import type { SessionFacetId, WorkFacetId } from './filter_facets';
 import type { SidebarGroupBy } from './sessions';
+import type { InboxGroupBy } from './inbox';
 import type { WorkGroupBy } from './work_view';
 
 /** The Sessions panel's headings, in order. */
@@ -95,6 +96,13 @@ export const SESSION_GROUPS: readonly GroupOption<SidebarGroupBy>[] = [
   { id: 'host', label: 'Host' },
   { id: 'agent', label: 'Agent' },
   { id: 'org', label: 'Organisation', title: 'Its org, else its project’s owner' },
+];
+
+/** The Inbox's groupings (gap plan G3.1, the Main board's "Group: state"):
+ *  the model's state sections, or one queue worst first. */
+export const INBOX_GROUPS: readonly GroupOption<InboxGroupBy>[] = [
+  { id: 'state', label: 'State', title: 'Needs you, then Failed' },
+  { id: 'none', label: 'None', title: 'One list, worst first' },
 ];
 
 /** The Work view's groupings: its List layout (by status), or its Grouped

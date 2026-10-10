@@ -46,6 +46,52 @@ pub struct PullRequestRow {
     pub project_id: Option<i64>,
     pub first_seen_at: i64,
     pub updated_at: i64,
+    /// The diffstat, lines added and removed (gap plan G3.10). Not stored:
+    /// `prs { list }` reads it from the opening session's latest probe of
+    /// this PR (`sessions.pr_evidence`), so it is absent once that session
+    /// is gone or on another PR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additions: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u32>,
+}
+
+/// Timeline kinds a change of a PR row writes (M15 step G2.4), on the
+/// session that opened it, its URL as the detail: what an event routine on
+/// a pull request fires on (`service::routines::EVENTS`).
+pub const PR_EVENT_REVIEW: &str = "pr_review";
+pub const PR_EVENT_CI_FAILED: &str = "pr_ci_failed";
+pub const PR_EVENT_CI_PASSED: &str = "pr_ci_passed";
+pub const PR_EVENT_MERGED: &str = "pr_merged";
+
+/// What one change of a PR row is, as timeline kinds: a review decision
+/// (approved, changes requested) it did not have, checks that turned
+/// failing or passing, and a merge. A PR seen for the first time is news
+/// for its review and checks only while open; one first seen merged or
+/// closed is history, and fires nothing.
+pub fn pr_events(before: Option<&PullRequestRow>, after: &PullRequestRow) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if before.is_none() && after.state != "OPEN" {
+        return out;
+    }
+    let review = after.review_decision.as_deref();
+    if matches!(review, Some("APPROVED" | "CHANGES_REQUESTED"))
+        && before.and_then(|b| b.review_decision.as_deref()) != review
+    {
+        out.push(PR_EVENT_REVIEW);
+    }
+    let ci = after.ci_status.as_deref();
+    if before.and_then(|b| b.ci_status.as_deref()) != ci {
+        match ci {
+            Some("failing") => out.push(PR_EVENT_CI_FAILED),
+            Some("passing") => out.push(PR_EVENT_CI_PASSED),
+            _ => {}
+        }
+    }
+    if after.state == "MERGED" && before.is_some_and(|b| b.state != "MERGED") {
+        out.push(PR_EVENT_MERGED);
+    }
+    out
 }
 
 /// The session a reconcile pass saw on a PR.
@@ -81,6 +127,8 @@ fn row(r: &rusqlite::Row<'_>) -> Result<PullRequestRow> {
         project_id: r.get(15)?,
         first_seen_at: r.get(16)?,
         updated_at: r.get(17)?,
+        additions: None,
+        deletions: None,
     })
 }
 
@@ -190,7 +238,53 @@ impl Store {
                 params![url, now],
             )?;
         }
+        if let Some(after) = after.as_ref().filter(|_| changed) {
+            Self::write_pr_events_in_tx(tx, before.as_ref(), after, by.session_id, now)?;
+        }
         Ok(changed)
+    }
+
+    /// Write [`pr_events`] of one change on the timeline of the session that
+    /// opened the PR, or of the session that saw it when the opener's row
+    /// is gone. Quiet: no bus frame, a routine's tick reads them.
+    fn write_pr_events_in_tx(
+        tx: &rusqlite::Connection,
+        before: Option<&PullRequestRow>,
+        after: &PullRequestRow,
+        seen_by: i64,
+        now: i64,
+    ) -> Result<()> {
+        let kinds = pr_events(before, after);
+        if kinds.is_empty() {
+            return Ok(());
+        }
+        let opener = match after.session_id {
+            Some(id) => tx
+                .query_row("SELECT id FROM sessions WHERE id = ?1", [id], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .optional()?,
+            None => None,
+        };
+        let session = opener.unwrap_or(seen_by);
+        for kind in kinds {
+            tx.execute(
+                "INSERT INTO session_events (session_id, at, kind, detail) VALUES (?1, ?2, ?3, ?4)",
+                params![session, now, kind, after.url],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The pull request at `url`.
+    pub fn pull_request_by_url(&self, url: &str) -> Result<Option<PullRequestRow>> {
+        self.conn
+            .query_row(
+                &format!("SELECT {COLS} FROM pull_requests WHERE url = ?1"),
+                params![url],
+                row,
+            )
+            .optional()
     }
 
     /// Every pull request, the most recently changed first. `states` narrows

@@ -221,3 +221,45 @@ export function recordAttachments(host: string, tmux: string, remote: readonly s
     remote.map((path) => ({ path })),
   );
 }
+
+// ── table (gap plan G3.10, board MCViews) ──
+
+/** The Library table's columns: Name ▴ / Modified / Size. */
+export type LibrarySortKey = 'name' | 'modified' | 'size';
+export type SortDir = 'asc' | 'desc';
+export interface LibrarySort {
+  key: LibrarySortKey;
+  dir: SortDir;
+}
+
+/** What a column header's first press sorts by: names A to Z, the newest
+ *  and the largest first. */
+export const FIRST_DIR: Record<LibrarySortKey, SortDir> = { name: 'asc', modified: 'desc', size: 'desc' };
+
+/** A header press: the same column flips, another starts at its first
+ *  direction. */
+export function nextSort(cur: LibrarySort, key: LibrarySortKey): LibrarySort {
+  if (cur.key === key) return { key, dir: cur.dir === 'asc' ? 'desc' : 'asc' };
+  return { key, dir: FIRST_DIR[key] };
+}
+
+/** Entries in the table's order. A row without the column's value (a
+ *  repo's size) sorts last either way; ties keep the name order. */
+export function sortEntries(rows: readonly LibraryEntry[], s: LibrarySort): LibraryEntry[] {
+  const val = (e: LibraryEntry): string | number | null =>
+    s.key === 'name' ? e.name.toLowerCase() : s.key === 'size' ? (e.size ?? null) : e.at;
+  const sign = s.dir === 'asc' ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const x = val(a);
+    const y = val(b);
+    if (x === null || y === null) {
+      if (x !== y) return x === null ? 1 : -1;
+    } else if (x !== y) {
+      return (x < y ? -1 : 1) * sign;
+    }
+    return a.name.localeCompare(b.name);
+  });
+}
+
+/** The Library's layout: a sortable table or a grid of tiles. */
+export type LibraryLayout = 'list' | 'grid';

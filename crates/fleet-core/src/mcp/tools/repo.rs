@@ -468,7 +468,8 @@ impl FleetTools {
     }
 
     #[tool(description = "A session's changed files (git status) in its \
-        worktree.")]
+        worktree, each with added/removed line counts against HEAD when git \
+        diffs it.")]
     pub(super) async fn repo_changes(
         &self,
         Extension(caller): Extension<Caller>,
@@ -688,8 +689,9 @@ impl FleetTools {
         ok_json_compact(&v)
     }
 
-    #[tool(description = "One commit's metadata + changed files: {hash, \
-        subject, body, author, date, files}.")]
+    #[tool(description = "One commit's metadata + changed files with \
+        added/removed line counts: {hash, subject, body, author, date, files, \
+        pushed}.")]
     pub(super) async fn repo_commit(
         &self,
         Extension(caller): Extension<Caller>,
@@ -740,7 +742,7 @@ impl FleetTools {
     #[tool(description = "What a session's branch carries: the commits no \
         remote has and the files they change, and the files it changes \
         against the base branch: {branch, upstream, unpushed, unpushedFiles, \
-        truncated, base, aheadOfBase, baseFiles}.")]
+        truncated, base, aheadOfBase, baseFiles, behindBase}.")]
     pub(super) async fn repo_branch_diff(
         &self,
         Extension(caller): Extension<Caller>,
