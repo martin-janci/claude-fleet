@@ -106,7 +106,7 @@ describe('ForkSheet', () => {
     await fireEvent.click(screen.getByTestId('fork-confirm'));
     await settle();
     expect(onclose).not.toHaveBeenCalled();
-    expect(screen.getByTestId('fork-error').textContent).toBe(NEW_WORKTREE_OLD_HUB);
+    expect(screen.getByTestId('fork-error').textContent?.trim()).toBe(NEW_WORKTREE_OLD_HUB);
   });
 
   it('a refused fork does not close the sheet', async () => {

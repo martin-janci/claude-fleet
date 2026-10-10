@@ -399,11 +399,12 @@ function* realEvents(): Generator<KeyboardEvent> {
 
 describe('shortcut freeze: views matched through the registry answer every key as 0.5.4 did', () => {
   it('covers every matched scope that had a 0.5.4 handler', () => {
-    const since38 = ['session-list', 'question-card', 'form-card'];
+    // 'form' (G1.2) is new since 0.5.4 too: DialogSheet/WizardDialog/FormWizard.
+    const since38 = ['session-list', 'question-card', 'form-card', 'form'];
     expect(Object.keys(FROZEN_054).sort()).toEqual(Object.keys(MATCHED_SCOPES).filter((k) => !since38.includes(k)).sort());
-    // 13 of the 16 scopes ask the registry; the other 3 are SCOPE_SOURCES.
-    expect(Object.keys(MATCHED_SCOPES)).toHaveLength(13);
-    expect(new Set([...Object.keys(MATCHED_SCOPES), ...Object.keys(SCOPE_SOURCES), 'global']).size).toBe(17);
+    // 14 of the 17 scopes ask the registry; the other 3 are SCOPE_SOURCES.
+    expect(Object.keys(MATCHED_SCOPES)).toHaveLength(14);
+    expect(new Set([...Object.keys(MATCHED_SCOPES), ...Object.keys(SCOPE_SOURCES), 'global']).size).toBe(18);
   });
 
   for (const [scope, frozen] of Object.entries(FROZEN_054)) {
