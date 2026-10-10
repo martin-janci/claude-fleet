@@ -2814,6 +2814,28 @@ async fn run_matrix(isolate: bool) {
         )
         .await;
     }
+    // A person planning a sprint (owner decision 2026-10-10): never a
+    // session; another org's sprint is unknown to a client bound to A.
+    m.row(
+        "work_link",
+        "bucket_admin",
+        move |_, _| {
+            json!({ "action": "bucket_admin",
+                    "bucket_op": { "action": "bucket_update", "bucket_id": bucket_b, "goal": "g" } })
+        },
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not plan"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's sprint"),
+                Who::Master => is_ok(who, a, "bucket_admin"),
+                _ => {}
+            }
+        },
+    )
+    .await;
     // An A bucket with B's ticket: B's bound client cannot reach the
     // bucket, A's cannot reach the ticket — each as unknown.
     m.row(

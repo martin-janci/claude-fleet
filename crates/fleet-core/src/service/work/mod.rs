@@ -284,6 +284,10 @@ pub struct WorkLinkArgs {
     /// Bucket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bucket_id: Option<i64>,
+    /// bucket_admin: a work_admin bucket_* call's fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub bucket_op: Option<crate::service::trackers::admin::WorkAdminArgs>,
     /// Mission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mission_id: Option<i64>,
@@ -542,6 +546,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "view_delete",
     "bucket_add",
     "bucket_remove",
+    "bucket_admin",
     "mission_save",
     "mission_state",
     "mission_repo",
@@ -633,6 +638,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("work_bucket", "work", "bucket"),
     ("add_work_to_bucket", "work_link", "bucket_add"),
     ("remove_work_from_bucket", "work_link", "bucket_remove"),
+    ("work_bucket_admin", "work_link", "bucket_admin"),
     // Orchestration O1: missions.
     ("work_missions", "work", "missions"),
     ("work_mission", "work", "mission"),

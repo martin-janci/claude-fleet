@@ -56,7 +56,6 @@
     "tracker_sync_metrics",
     "tunnel_status",
     "update_tracker",
-    "work_bucket_admin",
     "work_retention_status",
     "work_retention_sweep"
   ],
@@ -316,6 +315,7 @@
     "update_org",
     "verify_work_item",
     "work_bucket",
+    "work_bucket_admin",
     "work_buckets",
     "work_lookup",
     "work_mission",

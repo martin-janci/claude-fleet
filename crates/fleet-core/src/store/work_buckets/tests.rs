@@ -621,3 +621,54 @@ fn an_org_delete_finds_a_free_name_when_the_suffix_is_taken_too() {
     let moved = s.get_bucket(of_a.id).unwrap().unwrap();
     assert_eq!(moved.name, format!("S (#{}-2)", of_a.id));
 }
+
+fn personal(s: &Store, name: &str, owner: i64) -> BucketRow {
+    s.create_bucket(&NewBucket {
+        kind: "sprint",
+        name,
+        owner_person_id: Some(owner),
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_personal_sprint_is_one_per_owner_beside_the_teams() {
+    let s = store();
+    let team = sprint(&s, "Sprint 1");
+    // The name is unique per owner: Ana and Bo each keep a "Sprint 1".
+    let ana = personal(&s, "Sprint 1", 1);
+    let bo = personal(&s, "Sprint 1", 2);
+    assert_eq!(ana.owner_person_id, Some(1));
+    let dup = s
+        .create_bucket(&NewBucket {
+            kind: "sprint",
+            name: "Sprint 1",
+            owner_person_id: Some(1),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_eq!(dup.code, codes::E_EXISTS);
+    // One current sprint per owner: the team's and Ana's hold the same item.
+    let item = local(&s, "task");
+    s.add_bucket_item(team.id, item).unwrap();
+    s.add_bucket_item(ana.id, item).unwrap();
+    let other_ana = personal(&s, "Sprint 2", 1);
+    let e = s.add_bucket_item(other_ana.id, item).unwrap_err();
+    assert_eq!(e.code, codes::E_CONFLICT);
+    assert_eq!(e.details.unwrap()["sprint_id"], ana.id);
+    // Carry-over stays within one plan.
+    let e = s.close_sprint(ana.id, None, Some(bo.id), None).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    let e = s
+        .close_sprint(ana.id, None, Some(team.id), None)
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    s.close_sprint(ana.id, None, Some(other_ana.id), None)
+        .unwrap();
+    assert_eq!(members(&s, other_ana.id).len(), 1);
+    // A personal bucket links to no tracker.
+    let t = jira(&s);
+    let e = s.add_bucket_ref(bo.id, t, "S1", None).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+}

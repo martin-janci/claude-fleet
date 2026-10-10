@@ -12112,6 +12112,11 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
     ("work_link", "rule_delete", "a placement rule"),
     ("work_link", "view_save", "a saved view"),
     ("work_link", "view_delete", "a saved view"),
+    (
+        "work_link",
+        "bucket_admin",
+        "a sprint or release itself (no item, no session): fenced by `buckets::may_plan`",
+    ),
 ];
 
 /// The coverage gate: **does every call that can reach a session row say how

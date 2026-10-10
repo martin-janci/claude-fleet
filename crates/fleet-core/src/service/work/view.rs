@@ -2981,7 +2981,20 @@ pub fn tree(
                 }
             }
             Some(kind @ ("sprint" | "release")) => {
-                for m in s.bucket_membership(kind)? {
+                // A personal bucket shows to its person alone, and wins over
+                // the team's: the reader's own plan is the one they group by.
+                let (mine, team): (Vec<_>, Vec<_>) = s
+                    .bucket_membership(kind)?
+                    .into_iter()
+                    .partition(|m| m.owner_person_id.is_some());
+                for m in mine {
+                    if view.may_own_person_row(m.org_id, m.owner_person_id) {
+                        g.buckets_by_item
+                            .entry(m.item_id)
+                            .or_insert((m.bucket_id, m.name));
+                    }
+                }
+                for m in team {
                     if scope.sees_org(m.org_id) {
                         g.buckets_by_item
                             .entry(m.item_id)

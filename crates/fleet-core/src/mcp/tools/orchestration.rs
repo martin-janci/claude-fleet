@@ -1113,14 +1113,16 @@ impl FleetTools {
             // Sprints and releases (design 2026-09-28 §7): org-fenced by
             // the bucket's own org, members by each item's.
             WorkAction::Buckets => ok_json_compact(
-                &w::buckets::buckets(&self.store, &scope, args.kind.as_deref())
+                &w::buckets::buckets(&self.store, &view_scope, args.kind.as_deref())
                     .map_err(to_mcp_err)?,
             ),
             WorkAction::Bucket => {
                 let id = args
                     .bucket_id
                     .ok_or_else(|| mcp_err("E_INVALID", "bucket needs bucket_id", None))?;
-                ok_json_compact(&w::buckets::bucket(&self.store, &scope, id).map_err(to_mcp_err)?)
+                ok_json_compact(
+                    &w::buckets::bucket(&self.store, &view_scope, id).map_err(to_mcp_err)?,
+                )
             }
             // Missions (orchestration O1): a mission is a PERSON's, so the
             // whole `view_scope` — its owner, its org's members, the org
@@ -1726,19 +1728,55 @@ impl FleetTools {
         // (`planned_item`). The org fence (bucket and item, each answering as
         // unknown outside the scope) is inside, and the person fence is
         // `set_status`'s: planning someone's live work is theirs to drive.
+        // A personal bucket is its person's alone, so the whole
+        // `view_scope` decides which bucket the caller sees.
         if args.action == "bucket_add" {
             let item_id = planned_item(&caller, &args)?;
             self.require_drive_on_item_sessions(&caller, item_id)?;
+            let view_scope = self.view_scope(&caller)?;
             return ok_json(
-                &crate::service::work::buckets::bucket_add(&args, &self.store, &scope)
+                &crate::service::work::buckets::bucket_add(&args, &self.store, &view_scope)
                     .map_err(to_mcp_err)?,
             );
         }
         if args.action == "bucket_remove" {
             let item_id = planned_item(&caller, &args)?;
             self.require_drive_on_item_sessions(&caller, item_id)?;
+            let view_scope = self.view_scope(&caller)?;
             return ok_json(
-                &crate::service::work::buckets::bucket_remove(&args, &self.store, &scope)
+                &crate::service::work::buckets::bucket_remove(&args, &self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        // A person's sprints and releases (owner decision 2026-10-10):
+        // their personal ones, and an org's team ones as its admin — or
+        // member, when the org allows it (`buckets::may_plan`, inside). Never
+        // a per-host token: a session does not decide a plan.
+        if args.action == "bucket_admin" {
+            if caller.host_alias.is_some() {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "a session does not plan sprints or releases; a person does",
+                    None,
+                ));
+            }
+            let op = args.bucket_op.as_ref().ok_or_else(|| {
+                mcp_err(
+                    "E_INVALID",
+                    "bucket_admin needs bucket_op: {action: bucket_create | bucket_update \
+                     | bucket_close | bucket_delete, ...}",
+                    None,
+                )
+            })?;
+            // The master is the fleet's administrator: what its work_admin
+            // may do, its bucket_admin may too.
+            let view_scope = if caller.is_master() {
+                crate::service::view_scope::ViewScope::internal()
+            } else {
+                self.view_scope(&caller)?
+            };
+            return ok_json(
+                &crate::service::work::buckets::person_admin(op, &self.store, &view_scope)
                     .map_err(to_mcp_err)?,
             );
         }

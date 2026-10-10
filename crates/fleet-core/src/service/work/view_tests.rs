@@ -2543,6 +2543,7 @@ fn a_tree_query_groups_by_sprint_and_release() {
                 kind,
                 name,
                 org_id: org,
+                owner_person_id: None,
                 starts_at: None,
                 ends_at: None,
                 goal: None,

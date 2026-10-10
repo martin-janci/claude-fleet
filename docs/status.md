@@ -275,9 +275,15 @@ the sprint that held it) or takes them out, and *Sprints & releases*
 (`WorkBuckets.svelte`): create, start, release, close with the carry-over
 confirmed (E9) and delete. Desktop commands `work_buckets` / `work_bucket`
 (→ `work`) and `add_work_to_bucket` / `remove_work_from_bucket` (→
-`work_link`) route; `work_bucket_admin` is `work_admin`, so a paired desktop
-refuses it (`E_LOCAL_ONLY`) and plans only into buckets the hub's admin
-made. The board is scoped to a sprint (§6c): a picker over All tasks, each
+`work_link`) route; so does `work_bucket_admin`, as `work_link { action:
+bucket_admin, bucket_op }` (owner decision 2026-10-10,
+`buckets::person_admin` / `may_plan`): a person creates and changes
+personal sprints and releases of their own (migration 159,
+`work_buckets.owner_person_id`; one current sprint per owner, a personal
+one wins a group by sprint for its person, never linked to a tracker), and
+an org's team ones as its admin — or member, when the org turns the per-org
+`work.members_plan_sprints` on (off by default; a viewer never). Standalone
+it stays `work_admin`. The board is scoped to a sprint (§6c): a picker over All tasks, each
 open sprint and *No sprint (backlog)* (`boardScope`, kept per machine; a
 sprint is the section of a group by sprint, `boardFilters`, so no new read),
 the sprint's roll-up, dates and goal above the columns with *Start sprint* /
