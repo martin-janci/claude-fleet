@@ -12,7 +12,7 @@ import WorkPrs from './WorkPrs.svelte';
 import { expectAccessible } from './a11y_check';
 import { sessions } from './sessions';
 import { session } from './hosts_fixture';
-import { prChecksLabel, prRef, prStateLabel, type PullRequestRow } from './prs';
+import { prChecksLabel, prDiffstat, prRef, prStateLabel, type PullRequestRow } from './prs';
 
 const pr = (over: Partial<PullRequestRow> = {}): PullRequestRow => ({
   id: 1,
@@ -75,6 +75,17 @@ describe('WorkPrs', () => {
     expect(within(items[0]).getByTestId('work-pr-session').textContent).toContain('api');
     await fireEvent.click(within(items[0]).getByTestId('work-pr-open'));
     expect(openExternal).toHaveBeenCalledWith('https://github.com/o/r/pull/42');
+  });
+
+  it('shows the diffstat when the hub knows it (gap plan G3.10)', async () => {
+    rows = [pr({ additions: 18, deletions: 6 }), pr({ id: 3, number: 44 })];
+    render(WorkPrs);
+    await flush();
+    const [known, unknown] = screen.getAllByTestId('work-pr');
+    expect(within(known).getByTestId('work-pr-diffstat').textContent).toContain('+18 −6');
+    expect(within(unknown).queryByTestId('work-pr-diffstat')).toBeNull();
+    expect(prDiffstat({ additions: 3 })).toBe('+3 −0');
+    expect(prDiffstat({})).toBe('');
   });
 
   it('the Merged filter lists merged PRs with when, and a gone session as text', async () => {

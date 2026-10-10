@@ -27,6 +27,10 @@ export interface PullRequestRow {
   project_id?: number | null;
   first_seen_at: number;
   updated_at: number;
+  /** The diffstat (gap plan G3.10), from the opening session's latest
+   *  probe; absent once that session is gone or from an older hub. */
+  additions?: number | null;
+  deletions?: number | null;
 }
 
 export interface PrList {
@@ -77,4 +81,10 @@ export function reviewDecisionWords(decision: string | null | undefined): string
 /** `owner/name#42`, or the URL when the repo could not be read from it. */
 export function prRef(pr: Pick<PullRequestRow, 'repo' | 'number' | 'url'>): string {
   return pr.repo && pr.number != null ? `${pr.repo}#${pr.number}` : pr.url;
+}
+
+/** "+18 −6": the diffstat, or '' when it is not known. */
+export function prDiffstat(pr: Pick<PullRequestRow, 'additions' | 'deletions'>): string {
+  if (pr.additions == null && pr.deletions == null) return '';
+  return `+${pr.additions ?? 0} \u2212${pr.deletions ?? 0}`;
 }

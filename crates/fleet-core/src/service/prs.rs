@@ -73,13 +73,34 @@ fn states(state: Option<&str>) -> Result<&'static [&'static str], IpcError> {
 /// rule as the session row; a PR whose session is gone is seen only by the
 /// hub's own unnarrowed reader or the one person of a one-person hub.
 pub(crate) fn visible(s: &Store, scope: &ViewScope, pr: &PullRequestRow) -> Result<bool, IpcError> {
+    Ok(visible_with_diffstat(s, scope, pr)?.is_some())
+}
+
+/// A PR's diffstat: lines added, lines removed.
+type Diffstat = (Option<u32>, Option<u32>);
+
+/// [`visible`], answering the PR's diffstat (lines added, removed) when it
+/// is: read from the opening session's probe while that session's PR is
+/// still this one (gap plan G3.10). `None` = not visible.
+fn visible_with_diffstat(
+    s: &Store,
+    scope: &ViewScope,
+    pr: &PullRequestRow,
+) -> Result<Option<Diffstat>, IpcError> {
     let row = match pr.session_id {
         Some(id) => s.get_session_by_id(id)?,
         None => None,
     };
     Ok(match row {
-        Some(row) => scope.sees_session_row(&row).is_visible(),
-        None => scope.is_unrestricted() || scope.is_sole_person(),
+        Some(row) if scope.sees_session_row(&row).is_visible() => {
+            let ev = row
+                .pr_evidence
+                .as_ref()
+                .filter(|_| row.pr_url.as_deref() == Some(pr.url.as_str()));
+            Some((ev.and_then(|e| e.additions), ev.and_then(|e| e.deletions)))
+        }
+        Some(_) => None,
+        None => (scope.is_unrestricted() || scope.is_sole_person()).then_some((None, None)),
     })
 }
 
@@ -101,8 +122,12 @@ pub fn list(store: &Mutex<Store>, scope: &ViewScope, args: &PrsArgs) -> Result<P
         if args.project_id.is_some_and(|p| pr.project_id != Some(p)) {
             continue;
         }
-        if visible(&s, scope, &pr)? {
-            items.push(pr);
+        if let Some((additions, deletions)) = visible_with_diffstat(&s, scope, &pr)? {
+            items.push(PullRequestRow {
+                additions,
+                deletions,
+                ..pr
+            });
         }
     }
     let total = u32::try_from(items.len()).unwrap_or(u32::MAX);
@@ -184,6 +209,44 @@ mod tests {
             ..PrsArgs::default()
         };
         assert!(list(&st, &all, &bad).is_err(), "list is the only action");
+    }
+
+    /// Gap plan G3.10: a row carries its diffstat from the opening
+    /// session's probe, and only while that session is still on this PR.
+    #[test]
+    fn the_diffstat_comes_from_the_opening_sessions_probe_of_that_pr() {
+        let st = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = st.lock().unwrap();
+            s.insert_host("trn", None).unwrap();
+            let a = s
+                .upsert_session("a", "trn", None, None, 1, 1, "running", None)
+                .unwrap();
+            let b = s
+                .upsert_session("b", "trn", None, None, 1, 1, "running", None)
+                .unwrap();
+            let ev = r#"{"additions":18,"deletions":6}"#;
+            for (id, n) in [(a, 1), (b, 9)] {
+                s.conn_ref()
+                    .execute(
+                        "UPDATE sessions SET pr_url = ?1, pr_evidence = ?2 WHERE id = ?3",
+                        rusqlite::params![format!("https://github.com/o/r/pull/{n}"), ev, id],
+                    )
+                    .unwrap();
+            }
+            seed(&s, 1, "OPEN", a, None, 100);
+            // b has moved on to PR 9: its probe says nothing about PR 2.
+            seed(&s, 2, "MERGED", b, None, 200);
+        }
+        let l = list(&st, &ViewScope::internal(), &args(None)).unwrap();
+        let stat = |n: i64| {
+            let p = l.items.iter().find(|p| p.number == Some(n)).unwrap();
+            (p.additions, p.deletions)
+        };
+        assert_eq!(stat(1), (Some(18), Some(6)));
+        assert_eq!(stat(2), (None, None));
+        let json = serde_json::to_value(&l.items[0]).unwrap();
+        assert!(json.get("additions").is_none(), "unknown is left out");
     }
 
     #[test]

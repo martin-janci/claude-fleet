@@ -85,12 +85,64 @@ describe('LibraryView (step 9.7)', () => {
       { id: 3, at: 200, kind: 'attachment', host_alias: 'mac', session_name: 'fix-login', path: '/w/a.md', name: 'a.md' },
     ];
     const { getByTestId, queryAllByTestId, container } = render(LibraryView);
-    await fireEvent.click(getByTestId('library-filter-repos'));
+    await fireEvent.change(getByTestId('library-type'), { target: { value: 'repos' } });
     expect(queryAllByTestId('library-row')).toHaveLength(0);
     expect(getByTestId('library-empty')).toBeTruthy();
-    await fireEvent.click(getByTestId('library-filter-uploads'));
+    await fireEvent.change(getByTestId('library-type'), { target: { value: 'uploads' } });
     await waitFor(() => expect(queryAllByTestId('library-row')).toHaveLength(1));
     await expectAccessible(container);
+  });
+});
+
+// Gap plan G3.10 (board MCViews): a sortable table, a grid, Link a repo.
+describe('LibraryView table (G3.10)', () => {
+  const item = (id: number, name: string, at: number, size?: number) => ({
+    id,
+    at,
+    kind: 'upload',
+    host_alias: 'mac',
+    session_name: 'fix-login',
+    path: `/w/${name}`,
+    name,
+    size,
+  });
+  const names = (rows: HTMLElement[]) => rows.map((r) => r.querySelector('.name')!.textContent);
+
+  it('sorts by a header press: newest first, then Name A to Z and back, Size largest first', async () => {
+    backend.items = [item(1, 'b.md', 100, 5), item(2, 'a.md', 300, 50), item(3, 'c.md', 200)];
+    const { getAllByTestId, getByTestId, container } = render(LibraryView);
+    await waitFor(() => expect(getAllByTestId('library-row')).toHaveLength(3));
+    expect(names(getAllByTestId('library-row'))).toEqual(['a.md', 'c.md', 'b.md']);
+    await fireEvent.click(getByTestId('library-sort-name'));
+    expect(names(getAllByTestId('library-row'))).toEqual(['a.md', 'b.md', 'c.md']);
+    expect(getByTestId('library-sort-name').closest('th')!.getAttribute('aria-sort')).toBe('ascending');
+    await fireEvent.click(getByTestId('library-sort-name'));
+    expect(names(getAllByTestId('library-row'))).toEqual(['c.md', 'b.md', 'a.md']);
+    await fireEvent.click(getByTestId('library-sort-size'));
+    // No size sorts last.
+    expect(names(getAllByTestId('library-row'))).toEqual(['a.md', 'b.md', 'c.md']);
+    await expectAccessible(container);
+  });
+
+  it('the grid shows the same rows as tiles, and the choice is kept', async () => {
+    backend.items = [item(1, 'b.md', 100, 5)];
+    const first = render(LibraryView);
+    await fireEvent.click(first.getByTestId('library-layout-grid'));
+    await waitFor(() => expect(first.getByTestId('library-grid')).toBeTruthy());
+    expect(first.queryByTestId('library-table')).toBeNull();
+    first.unmount();
+    const again = render(LibraryView);
+    await waitFor(() => expect(again.getByTestId('library-grid')).toBeTruthy());
+    await fireEvent.click(again.getByTestId('library-layout-list'));
+  });
+
+  it('Link a repo… asks for Add project', async () => {
+    const { addProjectRequest } = await import('./app_views');
+    const { get } = await import('svelte/store');
+    const { getByTestId } = render(LibraryView);
+    await fireEvent.click(getByTestId('library-link-repo'));
+    expect(get(addProjectRequest)).toEqual({ cloneUrl: undefined });
+    addProjectRequest.set(null);
   });
 });
 

@@ -46,6 +46,14 @@ pub struct PullRequestRow {
     pub project_id: Option<i64>,
     pub first_seen_at: i64,
     pub updated_at: i64,
+    /// The diffstat, lines added and removed (gap plan G3.10). Not stored:
+    /// `prs { list }` reads it from the opening session's latest probe of
+    /// this PR (`sessions.pr_evidence`), so it is absent once that session
+    /// is gone or on another PR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additions: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u32>,
 }
 
 /// Timeline kinds a change of a PR row writes (M15 step G2.4), on the
@@ -119,6 +127,8 @@ fn row(r: &rusqlite::Row<'_>) -> Result<PullRequestRow> {
         project_id: r.get(15)?,
         first_seen_at: r.get(16)?,
         updated_at: r.get(17)?,
+        additions: None,
+        deletions: None,
     })
 }
 
