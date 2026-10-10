@@ -779,6 +779,7 @@ async fn an_answer_only_device_presses_keys_and_never_types_a_prompt() {
                 force: false,
                 client_msg_id: None,
                 confirm_nonce: None,
+                expect: None,
             }),
         )
         .await
@@ -804,6 +805,7 @@ async fn an_answer_only_device_presses_keys_and_never_types_a_prompt() {
                 force: false,
                 client_msg_id: None,
                 confirm_nonce: None,
+                expect: None,
             }),
         )
         .await
