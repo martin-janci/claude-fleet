@@ -9,6 +9,7 @@ import type { HostRow } from './hosts';
 import type { OfIconName } from './kit/icons';
 import { accountLabel, type AccountRow } from './accounts';
 import type { SessionRow } from './sessions';
+import { fold, foldedIncludes } from './text_fold';
 import type { AccountUsageSnapshot, UsageStatus, UsageWindow } from './account_usage_store';
 import type { HookHealth } from './hook_health';
 import { formatAge } from './hook_health';
@@ -75,16 +76,16 @@ export function groupHostsByAccount(
 
 /** Groups narrowed to hosts matching `query` (alias, ssh alias, account label or email). */
 export function filterGroups(groups: readonly HostGroup[], query: string): HostGroup[] {
-  const q = query.trim().toLowerCase();
+  const q = fold(query.trim());
   if (!q) return [...groups];
   const out: HostGroup[] = [];
   for (const g of groups) {
     const groupHit =
-      g.label.toLowerCase().includes(q) || (g.account?.email ?? '').toLowerCase().includes(q);
+      foldedIncludes(g.label, q) || foldedIncludes(g.account?.email, q);
     const hosts = groupHit
       ? g.hosts
       : g.hosts.filter(
-          (h) => h.alias.toLowerCase().includes(q) || (h.ssh_alias ?? '').toLowerCase().includes(q),
+          (h) => foldedIncludes(h.alias, q) || foldedIncludes(h.ssh_alias, q),
         );
     if (hosts.length > 0) out.push({ ...g, hosts });
   }

@@ -6,6 +6,8 @@
 // Where the API is missing (jsdom, older engines) every entry point is a
 // no-op and the row outline is the only highlight the user gets.
 
+import { fold } from './text_fold';
+
 /** The subset of `CSS.highlights` this module uses. */
 export type HighlightRegistry = {
   set(name: string, highlight: unknown): void;
@@ -55,7 +57,7 @@ export function collectMatchRanges(
   root: ParentNode,
   opts: { keys: ReadonlySet<string>; current: string | null; query: string },
 ): { all: Range[]; current: Range[] } {
-  const q = opts.query.trim().toLowerCase();
+  const q = fold(opts.query.trim());
   const all: Range[] = [];
   const current: Range[] = [];
   if (q === '' || opts.keys.size === 0) return { all, current };
@@ -68,7 +70,11 @@ export function collectMatchRanges(
         n.parentElement?.closest(CHROME) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
     });
     for (let n = walker.nextNode(); n && all.length < HL_MAX_RANGES; n = walker.nextNode()) {
-      const text = (n.textContent ?? '').toLowerCase();
+      // Folded only while that keeps every offset where it was, so the
+      // ranges land on the conversation's own text.
+      const raw = n.textContent ?? '';
+      const folded = fold(raw);
+      const text = folded.length === raw.length ? folded : raw.toLowerCase();
       for (let at = text.indexOf(q); at !== -1 && all.length < HL_MAX_RANGES; at = text.indexOf(q, at + q.length)) {
         const r = document.createRange();
         r.setStart(n, at);

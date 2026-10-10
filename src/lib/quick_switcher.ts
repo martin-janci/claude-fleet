@@ -4,6 +4,7 @@
 // Rows are sessions (Enter attaches), projects (Enter opens the
 // new-session dialog for that project), hosts (`host: <alias>`, Enter opens
 // the Hosts view on that host) and — with a tracker (work graph M3) — tickets
+// and the person's own tasks (TASK-n), with or without a tracker
 // (Enter jumps to the live session, or opens the dialog prefilled; ⌘↵ starts
 // with the defaults) plus a lookup row for a pasted URL or an unknown exact
 // key, like VS Code's quick open mixing "recently opened" with "create new". Host rows always rank below every session row so
@@ -13,6 +14,7 @@
 import { matchShortcut, shortcutLabel, type KeyEventLike } from './shortcuts';
 import { get, writable } from 'svelte/store';
 import { fuzzyMatchFields } from './fuzzy';
+import type { PrefixMode } from './commands';
 import type { ProjectTreeRow } from './projects';
 import { readPref, writePref } from './prefs';
 import type { SessionRow } from './sessions';
@@ -21,15 +23,21 @@ import { catalogOf, type AssetListing } from './assets';
 import { displayKey, keyFamily, type TicketRow } from './trackers';
 import { rowMatches, sessionFilterRow, type FilterRow } from './sidebar_index';
 
-/** A cached tracker ticket and the section it is listed under. */
+/** A cached tracker ticket or own task and the section it is listed under. */
 export interface SwitcherTicket {
   ticket: TicketRow;
-  /** `My work` | `Current sprint` | `Recent`. */
+  /** One of `TICKET_SECTIONS`. */
   section: string;
 }
 
-/** Section order for tickets on an empty query. */
-export const TICKET_SECTIONS = ['My work', 'Current sprint', 'Recent'] as const;
+/** Section order for tickets: the tracker views, the person's own tasks,
+ *  then what a query found in the rest of the cache. */
+export const TICKET_SECTIONS = ['My work', 'My tasks', 'Current sprint', 'Recent', 'Search'] as const;
+
+/** A query this long (after a prefix) also searches the hub's whole ticket
+ *  cache, once typing pauses for the debounce. */
+export const TICKET_SEARCH_MIN = 2;
+export const TICKET_SEARCH_DEBOUNCE_MS = 200;
 
 export interface SwitcherEntry {
   /** `ticket`: a cached tracker ticket (work graph M3); `lookup`: resolve
@@ -513,4 +521,28 @@ export function scopeEntries(
     }
     return true;
   });
+}
+
+/** The switcher's empty list, in the words of what was searched: a `#`
+ *  query names tasks and tickets, `@` hosts, `>` commands; a plain one
+ *  offers ⌘↵ to create a session with that name. */
+export function switcherEmptyText(
+  prefix: { mode: PrefixMode; rest: string },
+  hasTrackers: boolean,
+  modKey: string,
+): string {
+  const q = prefix.rest.trim();
+  switch (prefix.mode) {
+    case 'work':
+      if (!q) return hasTrackers ? 'No tasks or tickets yet.' : 'No tasks yet.';
+      return hasTrackers
+        ? `No task or ticket matches “${q}”.`
+        : `No task matches “${q}”. Connect a tracker in Settings → Work to search tickets too.`;
+    case 'hosts':
+      return q ? `No host matches “${q}”.` : 'No hosts yet.';
+    case 'commands':
+      return q ? `No command matches “${q}”.` : 'No commands here.';
+    case 'all':
+      return q ? `Nothing matches “${q}”. ${modKey}↵ creates a session with that name.` : 'No sessions yet.';
+  }
 }

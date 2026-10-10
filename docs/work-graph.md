@@ -523,7 +523,9 @@ Trackers give you:
 
 - titles and statuses on the chips and group headers;
 - **⌘K → My work** (and *Current sprint* / *Current cycle* where there is
-  one, *Recent*, and favourite filters), which searches the cache;
+  one, *Recent*, and favourite filters); a query of two or more letters
+  also searches the whole cache (key, title and assignees, every word,
+  accents ignored), so an older ticket is found by its title;
 - starting work from a ticket in one step;
 - ticket cards with acceptance criteria;
 - the "done" signal that tidy-up uses.
@@ -659,8 +661,10 @@ put in a session's event history. Disconnecting a tracker deletes it.
 
 ## Starting work
 
-- **From ⌘K:** type a key or paste a ticket URL, or pick a ticket from
-  *My work*, then ↵. Fleet starts it with a brief at once and selects the
+- **From ⌘K:** type a key, words of its title or paste a ticket URL, or
+  pick a ticket from *My work* or one of your own tasks from *My tasks*
+  (listed with or without a tracker; `#` narrows ⌘K to tasks and
+  tickets), then ↵. Fleet starts it with a brief at once and selects the
   new session; when the project is ambiguous it opens the New session
   dialog on that ticket instead, and when a session is already on it, it
   jumps there.

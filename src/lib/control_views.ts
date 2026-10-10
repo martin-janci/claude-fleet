@@ -25,6 +25,7 @@ import type { WorkTask } from './work_view';
 import { readPref, writePref } from './prefs';
 import { goTo, leave } from './destination';
 import { sidebarView } from './work_view';
+import { fold, foldedIncludes } from './text_fold';
 
 export type ControlViewId = 'needs-you' | 'session' | 'tasks' | 'routines' | 'prs' | 'library' | 'today';
 
@@ -169,12 +170,12 @@ export const visibleFleet = derived(
   },
 );
 
-/** Does a row match the panel's search: its name, host, project path or
- *  last prompt, case-insensitive. An empty query matches everything. */
+/** Does a row match the panel's search: its name, tmux name, host or last
+ *  prompt, case and accents ignored. An empty query matches everything. */
 export function matchesQuery(s: SessionRow, query: string): boolean {
-  const q = query.trim().toLowerCase();
+  const q = fold(query.trim());
   if (!q) return true;
-  return [displayName(s, true), s.tmux_name, s.host_alias, s.last_prompt ?? ''].some((f) => f.toLowerCase().includes(q));
+  return [displayName(s, true), s.tmux_name, s.host_alias, s.last_prompt].some((f) => foldedIncludes(f, q));
 }
 
 export interface FleetFolds {

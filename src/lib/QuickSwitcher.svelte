@@ -59,6 +59,9 @@
     type SwitcherEntry,
     type SwitcherTicket,
     scopeEntries,
+    TICKET_SEARCH_MIN,
+    TICKET_SEARCH_DEBOUNCE_MS,
+    switcherEmptyText,
   } from './quick_switcher';
   import { effectiveScope, scopeOf } from './orgs';
   import {
@@ -128,8 +131,8 @@
   });
   onDestroy(unsubSelected);
 
-  // Tickets (work graph M3): the cached My work / Current sprint / Recent,
-  // loaded when the switcher opens and there is a tracker.
+  // Tickets (work graph M3): the cached My work / Current sprint / Recent
+  // when there is a tracker, and the person's own tasks (TASK-n) always.
   let tickets = $state<SwitcherTicket[]>([]);
   // Only the newest load lands (review r07).
   let ticketsSeq = 0;
@@ -137,18 +140,22 @@
   let ticketsLoading = $state(false);
   async function loadTickets() {
     const mine = ++ticketsSeq;
-    if ($trackers.length === 0) {
-      tickets = [];
-      ticketsLoading = false;
-      return;
-    }
     ticketsLoading = true;
-    const views: [string, string][] = [
-      ['mine', 'My work'],
-      ['sprint', 'Current sprint'],
-      ['recent', 'Recent'],
-    ];
-    const answers = await Promise.all(views.map(([view]) => workTickets({ view, limit: 20 })));
+    const views: [string, string][] =
+      $trackers.length === 0
+        ? []
+        : [
+            ['mine', 'My work'],
+            ['sprint', 'Current sprint'],
+            ['recent', 'Recent'],
+          ];
+    // The unfiltered list with `include_local` puts the caller's tasks after
+    // the tickets; only the tasks are kept from it (an older hub ignores the
+    // flag and answers tickets alone).
+    const [answers, own] = await Promise.all([
+      Promise.all(views.map(([view]) => workTickets({ view, limit: 20 }))),
+      workTickets({ include_local: true, limit: 40 }),
+    ]);
     if (mine !== ticketsSeq) return;
     ticketsLoading = false;
     const out: SwitcherTicket[] = [];
@@ -157,8 +164,31 @@
         for (const ticket of r.value) out.push({ ticket, section: views[i][1] });
       }
     });
+    if (own.ok && Array.isArray(own.value)) {
+      for (const ticket of own.value) if (ticket.source === 'local') out.push({ ticket, section: 'My tasks' });
+    }
     tickets = out;
   }
+  // A query also searches the whole cache on the hub (key, title and
+  // assignees, every word, accents ignored), so a ticket outside the three
+  // views is found by its title, not only by its exact key.
+  let searched = $state<SwitcherTicket[]>([]);
+  let searchedSeq = 0;
+  $effect(() => {
+    const q = prefix.rest.trim();
+    const wanted = open && q.length >= TICKET_SEARCH_MIN && (prefix.mode === 'all' || prefix.mode === 'work');
+    const mine = ++searchedSeq;
+    if (!wanted) {
+      searched = [];
+      return;
+    }
+    const t = setTimeout(async () => {
+      const r = await workTickets({ query: q, include_local: true, limit: 30 });
+      if (mine !== searchedSeq) return;
+      searched = r.ok && Array.isArray(r.value) ? r.value.map((ticket) => ({ ticket, section: 'Search' })) : [];
+    }, TICKET_SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  });
   // Work graph M6: a provider badge per ticket, once trackers of two or
   // more providers exist.
   const ticketBadges = $derived(
@@ -171,7 +201,8 @@
         : [],
     ),
   );
-  const ticketRows = $derived(ticketEntries(tickets, ticketBadges));
+  // The views first: a key in both keeps its view's section.
+  const ticketRows = $derived(ticketEntries([...tickets, ...searched], ticketBadges));
   // Step 3.13: what the switcher holds shows at once; until the first
   // session list answers, one line says which hosts it is still hearing
   // from, with the kit's Dot wave (it appears only after 400 ms).
@@ -186,7 +217,7 @@
   // Step 9.12: the search's current step (the hosts it still hears from,
   // then the ticket views), with the Dot wave while it is short and Comet
   // trails once it has run long (`search_loader.ts`). One loader on the line.
-  const searchStep = $derived(stillHearing ?? (ticketsLoading ? 'Reading your tickets: My work, Current sprint, Recent' : null));
+  const searchStep = $derived(stillHearing ?? (ticketsLoading ? ($trackers.length > 0 ? 'Reading your tickets: My work, Current sprint, Recent' : 'Reading your tasks') : null));
   let searchSince = $state(0);
   let searchNow = $state(0);
   $effect(() => {
@@ -935,7 +966,7 @@
           ? pendingTicket
             ? `Repository for ${pendingTicket.key ?? 'this ticket'}…`
             : 'project or ticket…'
-          : 'Jump to a session, host, ticket or asset… (name, key, project, host, branch, status, or paste a ticket URL)'}
+          : 'Jump to a session, host, task, ticket or asset… (name, key, title, project, host, branch, or paste a ticket URL)'}
         autocomplete="off"
         spellcheck="false"
       />
@@ -947,7 +978,7 @@
         onactivate={(k) => (activeKey = k)}
         onpick={pick}
         maxHeight={mode === 'new' ? 'min(70vh, 34rem)' : 'min(60vh, 24rem)'}
-        emptyText={query ? `No session matches “${query}” — ${modKey}↵ creates one with that name.` : 'No sessions yet.'}
+        emptyText={switcherEmptyText(prefix, $trackers.length > 0, modKey)}
         ariaLabel={mode === 'new' ? 'Projects and tickets' : 'Sessions'}
         listId={LIST_ID}
         testid="switcher-list"

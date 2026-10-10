@@ -1,3 +1,5 @@
+import { fold } from './text_fold';
+
 // Small fuzzy matcher for the quick switcher — VS Code quick-open style
 // subsequence matching with bonuses for word starts and runs, no dependency.
 //
@@ -10,11 +12,11 @@ const WORD_BREAK = new Set(['-', '_', ' ', '/', ':', '.', '@']);
 /**
  * Score how well `query` matches `text` as an in-order subsequence.
  * Returns `null` when it does not match at all. Higher is better. Both
- * sides are compared case-insensitively.
+ * sides are compared with case and accents ignored (`text_fold.ts`).
  */
 export function fuzzyScore(query: string, text: string): number | null {
-  const q = query.toLowerCase();
-  const t = text.toLowerCase();
+  const q = fold(query);
+  const t = fold(text);
   if (q.length === 0) return 0;
   if (q.length > t.length) return null;
   // Fast path: exact substring gets a big bonus (position-weighted).

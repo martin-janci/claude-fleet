@@ -94,7 +94,7 @@ pub struct WorkTreeFilters {
     /// Something to review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<bool>,
-    /// Key or title text.
+    /// Key or title text: every word, in any order, case and accents ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
     /// One group id.
@@ -2406,9 +2406,12 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
         return false;
     }
     if let Some(q) = f.query.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
-        let q = q.to_lowercase();
-        let hay = format!("{} {}", t.key.as_deref().unwrap_or_default(), t.title).to_lowercase();
-        if !hay.contains(&q) {
+        let hay = crate::search_text::fold(&format!(
+            "{} {}",
+            t.key.as_deref().unwrap_or_default(),
+            t.title
+        ));
+        if !crate::search_text::matches_words(&hay, q) {
             return false;
         }
     }

@@ -87,6 +87,7 @@
   } from './app_views';
   import { hintAnchor } from './hints';
   import { openNewSessionPicker } from './switcher_request';
+  import { fold, foldedIncludes } from './text_fold';
   import { requestNewSession } from './new_session_request';
   import { foldedIds, lostFolds } from './lost_fold';
   import LostFoldRow from './LostFoldRow.svelte';
@@ -319,8 +320,8 @@
   /** A past-only group matches a search by its key or a link's name. */
   function pastGroupMatchesSearch(key: string, links: WorkLink[], q: string): boolean {
     if (!q) return true;
-    const needle = q.toLowerCase();
-    return key.toLowerCase().includes(needle) || links.some((l) => (l.snap_name ?? '').toLowerCase().includes(needle));
+    const needle = fold(q);
+    return foldedIncludes(key, needle) || links.some((l) => foldedIncludes(l.snap_name, needle));
   }
   /** The triage predicate (needs-you, recency, then `work` — the work
    *  filters), with no focus: the list's own, and the archived count's with
@@ -362,7 +363,7 @@
   // (a window onto a hub) or once something is shared, since a standalone
   // desktop owns every row and the tabs would only repeat All.
   const tabCounts = $derived.by(() => {
-    const q = viewSearch.toLowerCase();
+    const q = fold(viewSearch);
     const pool = $sessions.filter(
       (s) => s.kind !== 'external' && sessionVisible(s, viewHost, viewBg, rowBase, viewScope) && sessionMatchesSearch(s, q),
     );
@@ -755,9 +756,9 @@
    *  (its sessions in the list). */
   function matchesSearch(p: ProjectTreeRow, q: string, rows: SessionRow[]): boolean {
     if (!q) return true;
-    const needle = q.toLowerCase();
-    if (p.project.owner.toLowerCase().includes(needle)) return true;
-    if (p.project.repo.toLowerCase().includes(needle)) return true;
+    const needle = fold(q);
+    if (foldedIncludes(p.project.owner, needle)) return true;
+    if (foldedIncludes(p.project.repo, needle)) return true;
     return rows.some((s) => sessionMatchesSearch(s, needle));
   }
 
@@ -834,8 +835,8 @@
   const workKeyed = $derived(workIndex?.keyed ?? null);
   function workGroupMatchesSearch(g: WorkGroup, q: string): boolean {
     if (!q) return true;
-    const needle = q.toLowerCase();
-    if (g.key.toLowerCase().includes(needle)) return true;
+    const needle = fold(q);
+    if (foldedIncludes(g.key, needle)) return true;
     return g.sessions.some((s) => sessionMatchesSearch(s, needle));
   }
   const workGroups = $derived(
@@ -964,7 +965,7 @@
   // `external` rows never land here — they have their own read-only
   // "Outside fleet" section below.
   function orphansOf(pred: SessionPredicate): SessionRow[] {
-    const q = viewSearch.toLowerCase();
+    const q = fold(viewSearch);
     return $sessions.filter(
       (s) =>
         s.project_id === null &&
@@ -976,7 +977,7 @@
   const orphanSessions = $derived(orphansOf(treePredicate));
   const sharedWithMe = $derived.by((): SessionRow[] => {
     if (!splitShared || tab === 'mine') return [];
-    const q = viewSearch.toLowerCase();
+    const q = fold(viewSearch);
     const base = rowBase;
     return $sessions.filter(
       (s) =>
@@ -1066,7 +1067,7 @@
     focus
       ? []
       : buildOutsideFleet($sessions, $effectiveHostFilter, scopeSel).filter(
-          (s) => (!rowPredicate || rowPredicate(s)) && sessionMatchesSearch(s, viewSearch.toLowerCase()),
+          (s) => (!rowPredicate || rowPredicate(s)) && sessionMatchesSearch(s, fold(viewSearch)),
         ),
   );
 

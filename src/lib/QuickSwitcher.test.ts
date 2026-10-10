@@ -1169,3 +1169,61 @@ describe('QuickSwitcher in the New layout', () => {
     expect(screen.queryByText('openmarket · 3 projects')).toBeNull();
   });
 });
+
+// ---- tasks and the cache-wide ticket search ---------------------------------
+
+describe('QuickSwitcher finds work beyond the three views', () => {
+  const item = (id: number, key: string, title: string, source = 'jira') => ({
+    id,
+    tracker_id: source === 'local' ? null : 1,
+    source,
+    key,
+    title,
+    status_category: 'todo',
+    created_at: 1,
+    updated_at: 1,
+  });
+  let calls: { view?: string; query?: string; include_local?: boolean }[] = [];
+  beforeEach(() => {
+    calls = [];
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd !== 'work_tickets') return null;
+      const a = (args as { args: { view?: string; query?: string; include_local?: boolean } }).args;
+      calls.push(a);
+      if (a.query) return [item(7, 'ABC-7', 'Oprava prihlásenia cez SSO')];
+      // The unfiltered list: a ticket, then the caller's own task.
+      if (a.include_local) return [item(1, 'ABC-1', 'Some ticket'), item(9, 'TASK-9', 'Napísať úlohu', 'local')];
+      return [];
+    });
+  });
+
+  it("lists the person's own tasks with no tracker connected", async () => {
+    __trackers.set([]);
+    render(QuickSwitcher);
+    await openSwitcher();
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-ticket')).toHaveLength(1));
+    expect(screen.getByText('My tasks')).toBeTruthy();
+    // Only the tasks are kept from the unfiltered list.
+    expect(screen.queryByText(/Some ticket/)).toBeNull();
+    expect(calls.every((c) => c.view === undefined)).toBe(true);
+  });
+
+  it('a typed title searches the whole cache, accents ignored', async () => {
+    __trackers.set([
+      { id: 1, provider: 'jira', name: 'acme', site_url: 'https://acme.atlassian.net', state: 'ok', created_at: 1, config: { key_prefixes: ['ABC'] } },
+    ]);
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: '#prihlasenia sso' } });
+    await vi.waitFor(() => expect(calls.some((c) => c.query === 'prihlasenia sso' && c.include_local)).toBe(true));
+    await vi.waitFor(() => expect(screen.getByText(/Oprava prihlásenia/)).toBeTruthy());
+  });
+
+  it('an empty # search names tasks, not sessions', async () => {
+    __trackers.set([]);
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: '#nothing-like-this' } });
+    await vi.waitFor(() => expect(screen.getByText(/No task matches “nothing-like-this”/)).toBeTruthy());
+  });
+});
