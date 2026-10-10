@@ -1156,24 +1156,24 @@ in [the settings reference](settings-reference.md).
 
 <!-- BEGIN GENERATED: settings work. -->
 <!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current -->
-| Setting | Default | Range | What it does |
-|---|---|---|---|
-| `work.retention.journal_days` | `365` | 0–3650 days, `0` = forever | Days a work journal row is kept once its conversation ended and its work is done or unlinked. |
-| `work.retention.tracker_items_days` | `180` | 0–3650 days, `0` = forever | Days a done ticket that no session links to is kept in the cache. |
-| `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | Days handover, nudge, tidy and withdrawn-suggestion timeline events are kept; the newest of each kind per session always stays. |
-| `work.recent_days` | `14` | 1–365 days | How long ended work with no live session keeps a sidebar group. |
-| `work.sync_interval_secs` | `300` | seconds, `0` = off | Seconds between tracker sync passes. Under a minute is raised to one. Applies after a restart. |
-| `work.describe_cache_secs` | `300` | seconds, shown in minutes, `0` = off | How long a fetched ticket description is reused before the tracker is asked again; never longer than the done-tickets retention window. |
-| `work.trusted_branch_projects` | `[]` | JSON array of ids | Projects where a sole ticket key in the branch name links automatically; elsewhere it is a suggestion. Set from the work popover. |
-| `work.evidence_snippets` | `true` | on / off | Keep a short, redacted prompt snippet around a detected ticket key as evidence. Off keeps only the matched text. |
-| `work.session_start_context` | `false` | on / off | Give Claude the linked ticket at session start. Makes the start hook synchronous, which can add up to 2 s when the hub is down. Experimental. Applies when the hooks are next installed. |
-| `work.classify_nudge` | `false` | on / off | After three prompts with no ticket, ask Claude once which of your few open tickets it is on. Its answer is only ever a suggestion. Experimental. |
-| `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | The model Summarise runs on for a past session, on that session's own host and account. |
-| `work.tidy_done_days` | `2` | 1–365 days | Days a linked ticket must be done before Tidy up suggests its session. |
-| `work.tidy_idle_hours` | `4` | 1–720 hours | Hours a session must be idle before any tidy reason suggests it. |
-| `work.tidy_idle_unlinked_days` | `7` | 1–90 days | Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied. |
-| `work.auto_tidy` | `false` | on / off | Let the GC sweep act on the allowed tidy reasons by itself, by safe kill or archive only. Off, Tidy up only suggests. An organisation can override it. Asks to confirm. |
-| `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | The tidy reasons auto-tidy may act on. |
+| Setting | Default | Range | Scope | What it does |
+|---|---|---|---|---|
+| `work.retention.journal_days` | `365` | 0–3650 days, `0` = forever | fleet | Days a work journal row is kept once its conversation ended and its work is done or unlinked. |
+| `work.retention.tracker_items_days` | `180` | 0–3650 days, `0` = forever | fleet | Days a done ticket that no session links to is kept in the cache. |
+| `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | fleet | Days handover, nudge, tidy and withdrawn-suggestion timeline events are kept; the newest of each kind per session always stays. |
+| `work.recent_days` | `14` | 1–365 days | fleet | How long ended work with no live session keeps a sidebar group. |
+| `work.sync_interval_secs` | `300` | seconds, `0` = off | fleet | Seconds between tracker sync passes. Under a minute is raised to one. Applies after a restart. |
+| `work.describe_cache_secs` | `300` | seconds, shown in minutes, `0` = off | fleet | How long a fetched ticket description is reused before the tracker is asked again; never longer than the done-tickets retention window. |
+| `work.trusted_branch_projects` | `[]` | JSON array of ids | fleet | Projects where a sole ticket key in the branch name links automatically; elsewhere it is a suggestion. Set from the work popover. |
+| `work.evidence_snippets` | `true` | on / off | fleet | Keep a short, redacted prompt snippet around a detected ticket key as evidence. Off keeps only the matched text. |
+| `work.session_start_context` | `false` | on / off | fleet | Give Claude the linked ticket at session start. Makes the start hook synchronous, which can add up to 2 s when the hub is down. Experimental. Applies when the hooks are next installed. |
+| `work.classify_nudge` | `false` | on / off | fleet, per org | After three prompts with no ticket, ask Claude once which of your few open tickets it is on. Its answer is only ever a suggestion. Experimental. |
+| `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet, per org | The model Summarise runs on for a past session, on that session's own host and account. |
+| `work.tidy_done_days` | `2` | 1–365 days | fleet | Days a linked ticket must be done before Tidy up suggests its session. |
+| `work.tidy_idle_hours` | `4` | 1–720 hours | fleet | Hours a session must be idle before any tidy reason suggests it. |
+| `work.tidy_idle_unlinked_days` | `7` | 1–90 days | fleet, per org | Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied. |
+| `work.auto_tidy` | `false` | on / off | fleet | Let the GC sweep act on the allowed tidy reasons by itself, by safe kill or archive only. Off, Tidy up only suggests. An organisation can override it. Asks to confirm. |
+| `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | fleet | The tidy reasons auto-tidy may act on. |
 <!-- END GENERATED: settings work. -->
 
 Per-org settings, set on the org (Settings → Organisations, or

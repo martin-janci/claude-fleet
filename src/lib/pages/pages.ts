@@ -238,6 +238,46 @@ export interface Descriptor {
   ai: 'suggest' | 'fill' | 'never';
   owned_by?: string;
   option_labels?: [string, string][];
+  /** An org may set its own value. */
+  per_org?: boolean;
+  /** Where the value lives (G1.5): one fleet value, one an org may
+   *  override, or the running process's own. Absent from an older hub. */
+  scope?: 'fleet' | 'org' | 'process';
+  /** The orgs that set their own value, by name. Absent when none did. */
+  org_values?: { org_id: number; org: string; value: string }[];
+}
+
+/** A settings row's scope pill (G1.5) and the words beside it. */
+export interface ScopeWords {
+  /** "hub", "this device", "org Acme" or "2 orgs". */
+  pill: string;
+  /** "overrides the hub", when an org's own value takes over; else empty. */
+  note: string;
+  /** Longer form for a tooltip. */
+  title: string;
+}
+
+/** Where `d`'s value lives, as its row says it. `remote`: this desktop is
+ *  paired with a hub, so the fleet's values are the hub's. */
+export function scopeWords(d: Descriptor, remote: boolean): ScopeWords {
+  const home = remote ? 'hub' : 'this device';
+  const title =
+    d.scope === 'process'
+      ? remote
+        ? 'The hub’s own value: each app and hub keeps its own.'
+        : 'This app’s own value.'
+      : remote
+        ? 'One value for the whole fleet, kept on the hub.'
+        : 'One value for the whole fleet, kept in this app.';
+  const orgs = d.org_values ?? [];
+  if (orgs.length === 0) return { pill: home, note: '', title };
+  const over = `overrides the ${remote ? 'hub' : 'fleet'}`;
+  const list = orgs.map((o) => `${o.org}: ${o.value === '' ? '(empty)' : o.value}`).join(', ');
+  return {
+    pill: orgs.length === 1 ? `org ${orgs[0].org}` : `${orgs.length} orgs`,
+    note: orgs.length === 1 ? over : over.replace('overrides', 'override'),
+    title: `Their sessions read their own value (${list}); the rest read this one.`,
+  };
 }
 
 // ── stores ──
