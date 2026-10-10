@@ -57,7 +57,7 @@ pub fn apply_hook(
         Some("PostCompact") => apply_post_compact_hook(store, ssh, payload, ctx),
         Some("SessionEnd") => apply_session_end_hook(store, payload, ctx),
         Some("StopFailure") => apply_stop_failure_hook(store, ssh, payload, ctx),
-        Some("Notification") => apply_notification_hook(store, payload, ctx),
+        Some("Notification") => apply_notification_hook(store, ssh, payload, ctx),
         // `EnterWorktree` is the real tool (the installed matcher).
         // `WorktreeCreate` is a hook EVENT that replaces git worktree
         // creation, not a tool — no PostToolUse ever carries it; it is still
@@ -1462,6 +1462,7 @@ pub(crate) fn notification_effect(
 /// current conversation may change its status.
 fn apply_notification_hook(
     store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
     payload: &HookPayload,
     ctx: &HookContext,
 ) -> Result<(), IpcError> {
@@ -1475,11 +1476,11 @@ fn apply_notification_hook(
     };
     let s = lock(store)?;
     // Task 3: one transaction — pure store logic, no SSH/spawn.
-    s.atomically(|s| {
+    let raised = s.atomically(|s| {
         let Some((row, Binding::Current)) =
             resolve_and_rebind(s, payload, ctx, StartSource::Unknown)?
         else {
-            return Ok(());
+            return Ok(None);
         };
         remember_transcript_path(s, row.id, payload, session_id)?;
         // J2: a hook speaking about the turn that ended (the row still idle
@@ -1502,8 +1503,30 @@ fn apply_notification_hook(
         if let Some(row) = s.record_notification_hook_for_row(row.id, status, stuck)? {
             best_effort_event_for(s, row.id, Some(session_id), "notification", Some(kind))?;
         }
-        Ok(())
-    })
+        Ok(Some(row.id))
+    })?;
+    drop(s);
+    // The hook says "blocked" at once, but the dialog's question and options
+    // come only from a pane read — until now the next 20 s tick's. Read just
+    // this pane now, so the buttons arrive with the status (after the
+    // transaction: no SSH under the store lock).
+    if let (Some(row_id), true) = (raised, raises_dialog(kind)) {
+        crate::service::sessions::spawn_dialog_followup(
+            Arc::clone(store),
+            Arc::clone(ssh),
+            row_id,
+            crate::service::sessions::DialogFollowup::Raised,
+        );
+    }
+    Ok(())
+}
+
+/// The Notification types that put a dialog with options on the pane.
+pub(crate) fn raises_dialog(notification_type: &str) -> bool {
+    matches!(
+        notification_type,
+        "permission_prompt" | "elicitation_dialog" | "elicitation_url_dialog"
+    )
 }
 
 /// Timeline writes never fail the hook that produced them — unless the
@@ -2774,7 +2797,8 @@ mod tests {
     }
 
     /// Seed `pending_input` directly with a raw UPDATE — the reconcile
-    /// upsert is the only production writer of this column — so a test can
+    /// upsert and the dialog fast path (`record_dialog_probe`) are its only
+    /// production writers — so a test can
     /// check that a hook path clears a stale dialog.
     fn seed_pending_input(s: &Store, id: i64) {
         s.conn_ref()

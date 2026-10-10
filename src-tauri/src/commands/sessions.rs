@@ -191,7 +191,28 @@ pub async fn send_prompt(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    routed::send_prompt(&backend, args, &store, &ssh).await
+    // A key into a standalone session (a dialog answer): re-read just that
+    // pane afterwards, as the hub's own `send_prompt` does, so the answered
+    // dialog leaves the row now rather than on the next tick.
+    let key_target = (args.keys.is_some() && backend.hub().is_none())
+        .then(|| (args.host_alias.clone(), args.tmux_name.clone()));
+    routed::send_prompt(&backend, args, &store, &ssh).await?;
+    if let Some((host, name)) = key_target {
+        let id = store.lock().ok().and_then(|s| {
+            s.find_sessions_by_tmux_name(&name, Some(&host))
+                .ok()
+                .and_then(|rows| rows.first().map(|r| r.id))
+        });
+        if let Some(id) = id {
+            fleet_core::service::sessions::spawn_dialog_followup(
+                Arc::clone(&*store),
+                Arc::clone(&*ssh),
+                id,
+                fleet_core::service::sessions::DialogFollowup::Answered,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Send prompt's "busy sessions get it when they are idle" (step 5.10).

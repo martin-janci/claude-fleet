@@ -98,6 +98,73 @@ pub async fn session_activity(
     Ok(probe_with(agent, &tail))
 }
 
+/// Probe one session's pane and write what it shows about a dialog through
+/// to the row ([`Store::record_dialog_probe`]): the fast path that keeps a
+/// small, urgent fact — "a dialog is up, with these options" / "it was
+/// answered" — from waiting for the 20 s reconcile tick and its whole-host
+/// probe. One `capture-pane`, one SSH round trip.
+pub async fn sync_dialog(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    session_id: i64,
+) -> Result<ActivityProbe, IpcError> {
+    let probe = session_activity(store, ssh, session_id).await?;
+    if probe.stuck_kind.is_none() {
+        let status = probe
+            .claude_status
+            .as_deref()
+            .and_then(|s| s.parse::<pane_intel::ClaudeStatus>().ok());
+        let s = lock(store)?;
+        s.record_dialog_probe(session_id, status, probe.pending_input.as_ref())?;
+    }
+    Ok(probe)
+}
+
+/// When a dialog fast-path read is made, in ms after the event that asked
+/// for it. Claude Code redraws within a few hundred ms of a key or of
+/// raising a dialog; the later reads catch a slow host, or the NEXT dialog
+/// a tool call raises right after an approval.
+pub const DIALOG_FOLLOWUP_MS: [u64; 3] = [300, 1_200, 3_500];
+
+/// Spawn the dialog fast path for `session_id`: re-read its pane at
+/// [`DIALOG_FOLLOWUP_MS`] and write the dialog through. Called when the
+/// Notification hook says a dialog went up, and after a key was pressed
+/// into a session. Stops early once a read finds a parsed dialog after a
+/// [`DialogFollowup::Raised`] (the buttons are up). Best-effort: a failed
+/// read is logged and the tick catches up.
+pub fn spawn_dialog_followup(
+    store: Arc<Mutex<Store>>,
+    ssh: Arc<SshClient>,
+    session_id: i64,
+    why: DialogFollowup,
+) {
+    let _ = crate::rt::try_spawn(async move {
+        let mut waited = 0;
+        for at in DIALOG_FOLLOWUP_MS {
+            tokio::time::sleep(std::time::Duration::from_millis(at - waited)).await;
+            waited = at;
+            match sync_dialog(&store, &ssh, session_id).await {
+                Ok(p) if why == DialogFollowup::Raised && p.pending_input.is_some() => return,
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(session_id, error = %e.message, "[dialog] fast-path read failed");
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// Why [`spawn_dialog_followup`] runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogFollowup {
+    /// The Notification hook: a dialog went up; read until it is parsed.
+    Raised,
+    /// A key went into the session: read until the pane settles, so the
+    /// answered dialog leaves and a following one comes up.
+    Answered,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

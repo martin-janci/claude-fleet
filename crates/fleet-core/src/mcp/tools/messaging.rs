@@ -89,6 +89,15 @@ impl FleetTools {
             sessions::send_keys(&row.host_alias, &row.tmux_name, key, &self.store, &self.ssh)
                 .await
                 .map_err(to_mcp_err)?;
+            // Re-read just this pane so the answered dialog leaves the row
+            // (and a following one comes up) now, not on the next tick: an
+            // answer mid-turn fires no hook.
+            sessions::spawn_dialog_followup(
+                Arc::clone(&self.store),
+                Arc::clone(&self.ssh),
+                row.id,
+                sessions::DialogFollowup::Answered,
+            );
             return ok_json(&serde_json::json!({
                 "delivered": true,
                 "session_id": row.id,
