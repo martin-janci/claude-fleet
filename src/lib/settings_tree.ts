@@ -11,6 +11,7 @@ import type { Page } from './pages/pages';
 export type PanelId =
   | 'appearance'
   | 'hosts'
+  | 'automation-limits'
   | 'notifications'
   | 'shortcuts'
   | 'composer'
@@ -141,6 +142,9 @@ export const SETTINGS_TREE: readonly SettingsGroup[] = [
     title: 'Elsewhere',
     items: [
       { id: 'accounts-hosts', label: 'Accounts & hosts', panel: 'hosts', elsewhere: true },
+      // M15 G7.13: the routines' daily budget and Pause all live in the
+      // Automation view (SettingsHub board, Elsewhere).
+      { id: 'automation-limits', label: 'Automation limits', panel: 'automation-limits', elsewhere: true },
       { id: 'guides', label: 'Guides', page: 'guides' },
     ],
   },

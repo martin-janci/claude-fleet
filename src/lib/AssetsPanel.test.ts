@@ -815,6 +815,15 @@ describe('AssetsPanel switcher requests', () => {
     await waitFor(() => expect(get(assetsViewRequest)).toBeNull());
   });
 
+  it('a newKind request opens New asset on that kind (M15 G7.13)', async () => {
+    byCmd(base);
+    requestAssetsView({ newKind: 'hook' });
+    render(AssetsPanel, { visible: true });
+    const dialog = await screen.findByTestId('new-asset-dialog');
+    expect((dialog.querySelector('select') as HTMLSelectElement).value).toBe('hook');
+    await waitFor(() => expect(get(assetsViewRequest)).toBeNull());
+  });
+
   it('a select request while the panel is open moves from another view to the row', async () => {
     byCmd(base);
     render(AssetsPanel, { visible: true });

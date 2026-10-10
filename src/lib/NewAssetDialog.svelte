@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import Loader from './Loader.svelte';
   import Modal from './Modal.svelte';
   import { catalog, catalogOf, createAsset, KIND_ORDER, KIND_ONE, type AssetKind } from './assets';
@@ -7,7 +8,10 @@
     onclose,
     onsaved,
     onwrite,
+    initialKind = 'skill',
   }: {
+    /** The kind it opens on (M15 G7.13: Toolkit's "+ Add skill"). */
+    initialKind?: AssetKind;
     onclose: () => void;
     /** Fires after a successful create; the caller selects the asset and
      *  opens the editor. */
@@ -18,7 +22,7 @@
     onwrite?: (instructions: string) => void;
   } = $props();
 
-  let kind = $state<AssetKind>('skill');
+  let kind = $state<AssetKind>(untrack(() => initialKind));
   let name = $state('');
   let duplicateFrom = $state('');
   let busy = $state(false);

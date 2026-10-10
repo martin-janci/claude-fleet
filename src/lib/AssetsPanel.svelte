@@ -67,6 +67,7 @@
   let lastPlan = $state<SyncPlan | null>(null);
   let showSecrets = $state(false);
   let showNewAsset = $state(false);
+  let newAssetKind = $state<AssetKind>('skill');
   let showLintAll = $state(false);
   let showCommitPrompt = $state(false);
   /** "Write it with Claude…" from New asset (G2.6): its seeded instructions. */
@@ -248,6 +249,14 @@
       clearPlan();
       view = 'library';
       selectedKey = r.select;
+    }
+    // "+ Add skill" (M15 G7.13): New asset on that kind, where a new asset
+    // could be made by hand here (the workspace's own New asset button).
+    if (r.newKind && workspaceShown && !catalogBlocked && busy === '') {
+      clearPlan();
+      newAssetKind = r.newKind;
+      showNewAsset = true;
+      return;
     }
     // Rescan, Sync and Propose change things: a client without the grant (the
     // read-only overview) or without a catalog, or a panel or a card verb
@@ -527,7 +536,11 @@
   {/if}
   {#if showNewAsset}
     <NewAssetDialog
-      onclose={() => (showNewAsset = false)}
+      initialKind={newAssetKind}
+      onclose={() => {
+        showNewAsset = false;
+        newAssetKind = 'skill';
+      }}
       onsaved={onAssetCreated}
       onwrite={authorNewBlocked === null
         ? (instructions) => {

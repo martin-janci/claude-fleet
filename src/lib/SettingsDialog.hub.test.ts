@@ -200,6 +200,30 @@ describe('the Hub section, paired', () => {
     route();
   });
 
+  it('heads the section with last sync, the other devices and Unpair… (M15 G7.13)', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const inv = route({
+      list_devices: [
+        { name: 'laptop', mode: 'full', trusted: true, created_at: 1, catalogs: [], person_id: 1, last_seen_at: now - 4, this_device: true },
+        { name: 'phone', mode: 'full', trusted: true, created_at: 1, catalogs: [], person_id: 1 },
+        { name: 'tablet', mode: 'answer', trusted: true, created_at: 1, catalogs: [], person_id: 1 },
+      ],
+      hub_disconnect: { ...STANDALONE, restart_required: true },
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    const head = await screen.findByTestId('hub-status-header');
+    expect(head.textContent).toContain('Paired with https://fleet.example.com');
+    await waitFor(() => expect(screen.getByTestId('hub-last-sync').textContent).toMatch(/^last sync \d+ s ago$/));
+    expect(screen.getByTestId('hub-device-count').textContent).toBe('2 more of your devices');
+    // Unpair… asks first; Cancel sends nothing, Unpair disconnects.
+    await fireEvent.click(screen.getByTestId('hub-unpair'));
+    await fireEvent.click(screen.getByTestId('hub-unpair-cancel'));
+    expect(inv.mock.calls.some((c) => c[0] === 'hub_disconnect')).toBe(false);
+    await fireEvent.click(screen.getByTestId('hub-unpair'));
+    await fireEvent.click(screen.getByTestId('hub-unpair-confirm-btn'));
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'hub_disconnect')).toBe(true));
+  });
+
   it('names the hub and the client this desktop is paired as', async () => {
     render(SettingsDialog, { props: { onClose: () => {} } });
     const section = await screen.findByTestId('hub-section');

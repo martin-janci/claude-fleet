@@ -20,6 +20,8 @@
   import { allPages, guideProposals, loadGuides } from './pages/guides';
   import { hosts } from './hosts';
   import { basePathLine, checkHost } from './host_check';
+  import { devices, loadDevices } from './devices';
+  import { hubHeaderFacts, othersText } from './hub_header';
   import StartRules from './StartRules.svelte';
   import { mcpStatus } from './mcp';
   import { healthCheck } from './ipc';
@@ -93,6 +95,12 @@
   );
   const offlineCount = $derived($hosts.filter((h) => !h.reachable).length);
 
+  async function openAutomation() {
+    onClose();
+    await tick();
+    goTo('automation');
+  }
+
   async function openHosts() {
     onClose();
     // After the dialog has unmounted and restored focus, so the Hosts view
@@ -161,6 +169,11 @@
       if (r.error.code === 'E_HUB_PLAINTEXT') hubPlaintextRefused = true;
     }
   }
+
+  // M15 G7.13: the status header (SettingsHub board). Unpair… asks first,
+  // then is Disconnect.
+  const hubFacts = $derived(hubHeaderFacts($devices, Math.floor(Date.now() / 1000)));
+  let unpairAsk = $state(false);
 
   async function doDisconnect() {
     hubBusy = true;
@@ -278,6 +291,8 @@
           if (r.ok && r.value) hubVersion = r.value.version;
           else hubVersionFailed = true;
         });
+        // M15 G7.13: the status header's last sync and device count.
+        void loadDevices();
         await loadHubPages();
       }
       return;
@@ -499,12 +514,51 @@
     </p>
     </div>
 
+    <div class="panel" hidden={panel !== 'automation-limits'} data-testid="settings-panel-automation-limits">
+    <section class="block hosts-line" data-testid="settings-automation-limits">
+      <h4>Automation limits</h4>
+      <span class="hosts-summary">The routines' daily budget, today's spend and Pause all</span>
+      <button class="hook-btn" onclick={openAutomation} data-testid="settings-open-automation">Open Automation</button>
+    </section>
+    <p class="hook-desc">
+      Automation has its own view, beside Work and Toolkit. Its foot shows what the routines spent today
+      against their budget, with Pause all; the budget itself is under System › Automation here.
+    </p>
+    </div>
+
     <div class="panel" hidden={panel !== 'hub'} data-testid="settings-panel-hub">
     <section class="block" data-testid="hub-section">
       <div class="section-header">
         <h4>Hub</h4>
       </div>
       {#if isRemote}
+        <div class="hub-status" data-testid="hub-status-header">
+          <span
+            >Paired with <code>{$hubStatus.url}</code>{#if hubVersion} · hub {hubVersion}{/if} · this desktop is a client{#if hubFacts.lastSync}
+              · <span data-testid="hub-last-sync">{hubFacts.lastSync}</span>{/if}{#if othersText(hubFacts.others)}
+              · <span data-testid="hub-device-count">{othersText(hubFacts.others)}</span>{/if}</span
+          >
+          <span class="grow"></span>
+          <button class="hook-btn" data-testid="hub-open-devices" onclick={() => select('devices')}>People &amp; devices</button>
+          {#if !unpairAsk}
+            <button class="hook-btn" data-testid="hub-unpair" disabled={hubBusy} onclick={() => (unpairAsk = true)}>Unpair…</button>
+          {/if}
+        </div>
+        {#if unpairAsk}
+          <div class="mcp-field" data-testid="hub-unpair-confirm">
+            <span class="hook-desc">Unpair from <code>{$hubStatus.url}</code>? This machine forgets the pairing; the hub keeps the client until an operator revokes it.</span>
+            <button class="hook-btn" data-testid="hub-unpair-cancel" onclick={() => (unpairAsk = false)}>Cancel</button>
+            <button
+              class="hook-btn"
+              data-testid="hub-unpair-confirm-btn"
+              disabled={hubBusy}
+              onclick={async () => {
+                await doDisconnect();
+                unpairAsk = false;
+              }}>Unpair</button
+            >
+          </div>
+        {/if}
         <p class="mcp-blurb" data-testid="hub-connected">
           This window is a <strong>client</strong> of
           <code>{$hubStatus.url}</code>, paired as
@@ -1110,6 +1164,15 @@
   }
 
   .log-path code { word-break: break-all; }
+
+  .hub-status {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    font-size: var(--text-xs);
+  }
+  .hub-status .grow { flex: 1; }
 
   .hosts-line {
     display: flex;

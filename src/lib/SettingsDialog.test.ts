@@ -101,6 +101,17 @@ describe('SettingsDialog', () => {
     hostsViewRequest.set(null);
   });
 
+  it('Elsewhere › Automation limits opens the Automation view (M15 G7.13)', async () => {
+    const { destination } = await import('./destination');
+    const onClose = vi.fn();
+    render(SettingsDialog, { props: { onClose } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('settings-open-automation'));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(get(destination)).toBe('automation'));
+    destination.set('session');
+  });
+
   it('provisioning refreshes the host-token cache the Hosts view reads', async () => {
     const { hostTokens: tokenCache } = await import('./host_actions');
     tokenCache.set(new Map());
@@ -446,6 +457,7 @@ describe('SettingsDialog — generated pages (declarative pages P3)', () => {
       ['work', 'work-section'],
       ['control-api', 'mcp-section'],
       ['accounts-hosts', 'settings-hosts-line'],
+      ['automation-limits', 'settings-automation-limits'],
       ['appearance', 'onboarding-section'],
     ] as const) {
       await fireEvent.click(screen.getByTestId(`settings-nav-${leaf}`));
