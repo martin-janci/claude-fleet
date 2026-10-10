@@ -300,6 +300,25 @@ describe('deleting a routine (G1.4, the destructive confirm)', () => {
   });
 });
 
+describe('no routines yet (G3.13)', () => {
+  it('the empty state starts a blank routine or the template, right there', async () => {
+    route([]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routines-empty');
+    await fireEvent.click(screen.getByTestId('routines-empty-template'));
+    expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Morning PR sweep');
+  });
+
+  it('+ New routine opens a blank one', async () => {
+    route([]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routines-empty');
+    await fireEvent.click(screen.getByTestId('routines-empty-new'));
+    expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('');
+    expect(screen.getByTestId('routine-editor')).toBeTruthy();
+  });
+});
+
 describe('the routine editor (G2.3: schedule picker, next run, account, dry run, Run once now)', () => {
   // Monday 12 October 2026, 06:30 UTC.
   const mon = Date.UTC(2026, 9, 12, 6, 30) / 1000;

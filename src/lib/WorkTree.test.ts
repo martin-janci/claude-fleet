@@ -290,6 +290,22 @@ describe('WorkTree', () => {
     }
   });
 
+  it('with no tracker connected, the empty state offers Create a task and Connect a tracker (G3.13)', async () => {
+    const { settingsOpen, settingsSection } = await import('./app_views');
+    treeImpl = () => ({ ...firstPage, tasks: [], groups: [], trackers: [], total: 0 });
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('work-tree-no-tracker').textContent).toContain('No tracker connected');
+    await fireEvent.click(screen.getByTestId('work-empty-connect'));
+    expect(get(settingsSection)).toBe('trackers');
+    expect(get(settingsOpen)).toBe(true);
+    settingsOpen.set(false);
+    settingsSection.set(null);
+    await fireEvent.click(screen.getByTestId('work-empty-create'));
+    await flush();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
   it('empty, error with Retry, and an older hub', async () => {
     treeImpl = () => ({ ...firstPage, tasks: [], groups: [], total: 0 });
     const { unmount } = render(WorkTree);

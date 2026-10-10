@@ -27,7 +27,7 @@
   import { get } from 'svelte/store';
   import { sessions } from './sessions';
   import { selectedSession, selectSessionExplicitly } from './selection';
-  import { workBoardOpen, workViewChordLabel } from './app_views';
+  import { openSettingsAt, workBoardOpen, workViewChordLabel } from './app_views';
   import { detectMac } from './terminal_keys';
   import { isNewTaskChord, ownNewTaskChord } from './new_task';
   import { shortcutLabel } from './shortcuts';
@@ -741,8 +741,20 @@
               workViewFilters.set({});
             }}>Clear filters</button
           >
+        {:else if archivedHidden === 0 && page.trackers.length === 0}
+          <!-- Gap plan G3.13 (board Finish, "Work · no tracker connected"). -->
+          <div data-testid="work-tree-no-tracker">
+            <p><strong>No tracker connected.</strong> Fleet tracks its own tasks, or reads tickets from Jira, GitHub, Linear or Asana.</p>
+            <div class="empty-actions">
+              <button class="btn is-bounded" type="button" data-testid="work-empty-create" onclick={() => (newTaskOpen = true)}>Create a task…</button>
+              <button class="btn btn--quiet is-bounded" type="button" data-testid="work-empty-connect" onclick={() => openSettingsAt('trackers')}
+                >Connect a tracker…</button
+              >
+            </div>
+          </div>
         {:else if archivedHidden === 0}
           <p>No work yet. Tasks appear here once a session is linked to a ticket, or you name its work. Back to Sessions: {chord}.</p>
+          <button class="btn btn--quiet is-bounded" type="button" data-testid="work-empty-create" onclick={() => (newTaskOpen = true)}>Create a task…</button>
         {/if}
         {#if archivedHidden > 0}
           {@render archivedRow()}
@@ -849,6 +861,11 @@
 {/if}
 
 <style>
+  .empty-actions {
+    display: flex;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
   .review-count {
     min-width: 18px;
     height: 16px;
