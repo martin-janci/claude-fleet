@@ -357,7 +357,7 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 Administer the company: orgs (work_admin's org actions), devices (list, pair_device → code + QR, revoke, trust, bind, hand over, grant a catalog), people and members (roles, a member's grants). Hub owner's device: all; an org admin's: their org. Changes need a trusted full device, never locking out the one in use.
 
-Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `host_alias`, `isolate_sessions`, `jev`, `jev_reply`, `keep_grants`, `key`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path_prefix`, `person`, `person_id`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
+Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `host_alias`, `hosts`, `isolate_sessions`, `jev`, `jev_reply`, `keep_grants`, `key`, `members_own_sessions_only`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path`, `path_prefix`, `person`, `person_id`, `project_id`, `remote`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
 
 ### `pair_client`
 
@@ -1015,6 +1015,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::orgs::set_org_member`
 - `commands::orgs::remove_org_member`
 - `commands::orgs::org_member_grants`
+- `commands::orgs::org_rule_preview`
+- `commands::orgs::add_org_project`
+- `commands::orgs::remove_org_project`
 - `commands::orgs::list_orgs`
 - `commands::orgs::org_suggestions`
 - `commands::org_devices::list_devices`

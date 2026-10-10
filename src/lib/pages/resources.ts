@@ -7,7 +7,7 @@ import { invokeCmd, type Result } from '../result';
 import { loadOrgs, ruleChip, type OrgRuleRow } from '../orgs';
 import { loadTrackers } from '../trackers';
 import { loadCatalogStatuses } from '../assets_workspace';
-import { loadDevices } from '../devices';
+import { loadDevices, loadPeople } from '../devices';
 
 export type Bind =
   | { from: 'record'; name: string }
@@ -18,7 +18,7 @@ export type Bind =
   | { from: 'true' }
   | { from: 'false' };
 
-export type OptionSource = 'hosts' | 'trackers' | 'orgs' | 'devices' | 'catalogs';
+export type OptionSource = 'hosts' | 'trackers' | 'orgs' | 'devices' | 'catalogs' | 'people';
 
 export type ParamSpec = { name: string; label: string; required: boolean } & (
   | { type: 'text'; max: number; placeholder: string }
@@ -26,6 +26,10 @@ export type ParamSpec = { name: string; label: string; required: boolean } & (
   | { type: 'secret' }
   | { type: 'options'; source: OptionSource }
   | { type: 'choice'; options: [string, string][] }
+  /** Free text with the source's values offered (pick one or type a new one). */
+  | { type: 'suggest'; max: number; placeholder: string; source: OptionSource }
+  /** A switch, sent as a boolean. */
+  | { type: 'toggle'; default: boolean }
 );
 
 /** How an action's answer is shown (`ResultView`). */
@@ -47,6 +51,9 @@ export interface ActionSpec {
   result?: ResultView;
   /** The loader beside the form while it runs. */
   busy?: 'counter-orbit';
+  /** A read-only command run with the form's arguments as it is filled in;
+   *  its answer's `sentence` is shown under the form (M15 G2.10). */
+  preview?: string;
 }
 
 export type ItemLabel =
@@ -56,7 +63,8 @@ export type ItemLabel =
   | { type: 'device' }
   | { type: 'member' }
   | { type: 'admin_need' }
-  | { type: 'person_spend' };
+  | { type: 'person_spend' }
+  | { type: 'org_project' };
 
 /** A tile's line under its value (`Sub`). */
 export type Sub = { type: 'budget'; field: string } | { type: 'count'; field: string; text: string };
@@ -223,12 +231,29 @@ export function itemLabel(label: ItemLabel, item: unknown): string {
   if (label.type === 'device') return deviceChip(item as DeviceItem);
   if (label.type === 'admin_need') return needLine(item as AdminNeed).text;
   if (label.type === 'person_spend') return personSpendName(item as PersonSpend);
+  if (label.type === 'org_project') return projectLine(item as OrgProject);
   if (label.type === 'member') {
     const m = item as { name?: string; display_name?: string; role?: string };
     return `${m.display_name || m.name || ''} · ${m.role ?? ''}`;
   }
   const v = (item as Record<string, unknown> | null)?.[label.field];
   return v === undefined || v === null ? '' : String(v);
+}
+
+/** An entry of an org's project catalog (`store::OrgProjectRow`, M15 G2.10). */
+export interface OrgProject {
+  id: number;
+  name: string;
+  remote?: string;
+  path?: string;
+  hosts?: string[];
+}
+
+/** "api · git@github.com:acme/api.git · ~/src/api · on hetzner-a, hetzner-b". */
+export function projectLine(p: OrgProject): string {
+  const parts = [p.name, p.remote, p.path].filter((x): x is string => !!x);
+  if (p.hosts?.length) parts.push(`on ${p.hosts.join(', ')}`);
+  return parts.join(' · ');
 }
 
 /** One person's share of an org's spend (`service::org_spend::PersonSpend`);
@@ -374,7 +399,8 @@ export interface DeviceItem {
 }
 
 function deviceChip(d: DeviceItem): string {
-  const tags = [d.mode === 'readonly' ? 'read-only' : null, d.trusted ? 'trusted' : null].filter(Boolean);
+  const mode = d.mode === 'readonly' ? 'watch only' : d.mode === 'answer' ? 'answer only' : null;
+  const tags = [mode, d.trusted ? 'trusted' : null].filter(Boolean);
   return tags.length ? `${d.name} · ${tags.join(', ')}` : d.name;
 }
 
@@ -439,8 +465,9 @@ export function buildArgs(
         break;
       case 'param': {
         const spec = action.params.find((p) => p.name === bind.name);
-        const v = (params[bind.name] ?? '').trim();
-        if (v === '') out[arg] = null;
+        const v = (params[bind.name] ?? (spec?.type === 'toggle' ? String(spec.default) : '')).trim();
+        if (spec?.type === 'toggle') out[arg] = v === 'true';
+        else if (v === '') out[arg] = null;
         else if (spec?.type === 'options' && /^\d+$/.test(v)) out[arg] = Number(v);
         else out[arg] = v;
         break;
@@ -462,6 +489,7 @@ export function buildArgs(
 /** A param's value as the form holds it: what was typed or picked, else
  *  a choice's first option (preselected). */
 export function paramValue(p: ParamSpec, params: Record<string, string>): string {
+  if (p.type === 'toggle') return params[p.name] ?? String(p.default);
   return params[p.name] ?? (p.type === 'choice' ? (p.options[0]?.[0] ?? '') : '');
 }
 
@@ -479,6 +507,15 @@ export function runAction(action: ActionSpec, args: Record<string, unknown>): Pr
   return invokeCmd<unknown>(action.command, { args });
 }
 
+/** An action's preview (`ActionSpec.preview`): its one-line answer, or
+ *  null when it has none, the form is not filled in yet, or the command
+ *  refused (the form says why on Add). */
+export async function previewAction(action: ActionSpec, args: Record<string, unknown>): Promise<string | null> {
+  if (!action.preview) return null;
+  const r = await invokeCmd<{ sentence?: string }>(action.preview, { args });
+  return r.ok && typeof r.value?.sentence === 'string' ? r.value.sentence : null;
+}
+
 export function listRecords(r: ResourceType): Promise<Result<ResourceRecord[]>> {
   return invokeCmd<ResourceRecord[]>(r.list);
 }
@@ -489,11 +526,11 @@ export function listRecords(r: ResourceType): Promise<Result<ResourceRecord[]>> 
  * like the custom components.
  */
 export const RESOURCE_RELOADERS: Record<string, (() => Promise<unknown>)[]> = {
-  org: [loadOrgs, loadTrackers, loadDevices],
+  org: [loadOrgs, loadTrackers, loadDevices, loadPeople],
   tracker: [loadTrackers, loadOrgs],
   catalog: [loadCatalogStatuses, loadOrgs],
-  device: [loadDevices, loadOrgs, loadCatalogStatuses],
-  person: [loadDevices],
+  device: [loadDevices, loadOrgs, loadCatalogStatuses, loadPeople],
+  person: [loadDevices, loadPeople],
 };
 
 export async function afterChange(r: ResourceType): Promise<void> {

@@ -955,6 +955,9 @@ pub struct OrgDetail {
     /// The asset catalogs it owns (`catalogs.org_id`), by name.
     #[serde(default)]
     pub catalogs: Vec<String>,
+    /// M15 step G2.10: its project catalog. Absent from an older hub.
+    #[serde(default)]
+    pub projects: Vec<crate::store::OrgProjectRow>,
     /// Its live sessions the caller may count, as `work { action: scopes }`
     /// counts them.
     #[serde(default)]
@@ -1122,6 +1125,180 @@ pub fn org_details(
     devices: AdminView,
 ) -> Result<Vec<OrgDetail>, IpcError> {
     org_details_locked(&*lock(store)?, view, devices)
+}
+
+// --- rule preview (M15 step G2.10) ----------------------------------------------
+
+/// One "Match by" value as the rule it makes (the org form's single rule
+/// form, `pages::resources::ORG_RULE_MATCH`): `repository` takes `owner/name`
+/// (or the repository's GitHub URL), `owner` a GitHub owner, `path` a path
+/// prefix, `host` a host alias. The rule's `org_id` is the caller's.
+pub fn rule_from_match(org_id: i64, match_by: &str, value: &str) -> Result<OrgRuleRow, IpcError> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Err(IpcError::new(codes::E_INVALID, "say what the rule matches"));
+    }
+    let mut rule = OrgRuleRow {
+        id: 0,
+        org_id,
+        owner: None,
+        repo: None,
+        path_prefix: None,
+        host_alias: None,
+    };
+    match match_by.trim() {
+        "repository" => {
+            let bare = v
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_start_matches("git@github.com:")
+                .trim_start_matches("github.com/")
+                .trim_end_matches('/')
+                .trim_end_matches(".git");
+            let Some((owner, repo)) = bare
+                .split_once('/')
+                .filter(|(o, r)| !o.is_empty() && !r.is_empty() && !r.contains('/'))
+            else {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("a repository is owner/name, not {v:?}"),
+                ));
+            };
+            rule.owner = Some(owner.to_string());
+            rule.repo = Some(repo.to_string());
+        }
+        "owner" => rule.owner = Some(v.to_string()),
+        "path" => rule.path_prefix = Some(v.to_string()),
+        "host" => rule.host_alias = Some(v.to_string()),
+        other => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("match_by is repository, path, host or owner, not {other:?}"),
+            ))
+        }
+    }
+    Ok(rule)
+}
+
+/// What an unsaved org rule would do now: the live sessions its condition
+/// matches, and how many of them would move into the org, from where.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RulePreview {
+    /// Live sessions the rule's condition matches.
+    pub matches: usize,
+    /// Of those, the ones that would move into the org (another rule that is
+    /// more specific keeps the rest where they are).
+    pub moving: usize,
+    /// Where the moving ones are now, largest first.
+    #[serde(default)]
+    pub from: Vec<RuleMoveFrom>,
+    /// Matched sessions a more specific rule keeps elsewhere.
+    #[serde(default)]
+    pub kept: usize,
+    /// "Matches 14 sessions now; 3 of them are in Personal and would move."
+    pub sentence: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleMoveFrom {
+    /// The org they are in now; `None` = no org (Personal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
+    /// Its name, or `Personal`.
+    pub name: String,
+    pub count: usize,
+}
+
+/// Preview `rule` for `org` (M15 step G2.10): normalised and checked as
+/// `add_rule` would, then answered over the live sessions without writing.
+/// Counts only, never a session: an admin previewing a rule learns how many
+/// of the fleet's sessions it reaches, which the org overview's counts
+/// already tell the hub's owner.
+pub fn rule_preview(s: &Store, org: i64, rule: OrgRuleRow) -> Result<RulePreview, IpcError> {
+    if s.get_org(org)?.is_none() {
+        return Err(not_found("org", org));
+    }
+    let rule = crate::store::normalize_rule(OrgRuleRow {
+        org_id: org,
+        ..rule
+    })?;
+    let rows = s.preview_org_rule(&rule)?;
+    let names: std::collections::HashMap<i64, String> =
+        s.list_orgs()?.into_iter().map(|o| (o.id, o.name)).collect();
+    let matches = rows.iter().filter(|r| r.matched).count();
+    let mut from: std::collections::BTreeMap<Option<i64>, usize> = Default::default();
+    let mut kept = 0;
+    for r in rows.iter().filter(|r| r.matched) {
+        if r.after == Some(org) && r.before != Some(org) {
+            *from.entry(r.before).or_default() += 1;
+        } else if r.after != Some(org) {
+            kept += 1;
+        }
+    }
+    let mut from: Vec<RuleMoveFrom> = from
+        .into_iter()
+        .map(|(o, count)| RuleMoveFrom {
+            org_id: o,
+            name: o
+                .and_then(|o| names.get(&o).cloned())
+                .unwrap_or_else(|| "Personal".into()),
+            count,
+        })
+        .collect();
+    from.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+    let moving: usize = from.iter().map(|f| f.count).sum();
+    let sentence = rule_preview_sentence(matches, moving, &from, kept);
+    Ok(RulePreview {
+        matches,
+        moving,
+        from,
+        kept,
+        sentence,
+    })
+}
+
+fn sessions_word(n: usize) -> String {
+    format!("{n} {}", if n == 1 { "session" } else { "sessions" })
+}
+
+/// The preview in one sentence, the form's live impact line.
+fn rule_preview_sentence(
+    matches: usize,
+    moving: usize,
+    from: &[RuleMoveFrom],
+    kept: usize,
+) -> String {
+    if matches == 0 {
+        return "Matches no session now; it applies to sessions started later.".into();
+    }
+    let mut out = format!("Matches {} now", sessions_word(matches));
+    if moving == 0 {
+        out.push_str("; none would move");
+    } else if let [only] = from {
+        out.push_str(&format!(
+            "; {moving} of them {} in {} and would move",
+            if moving == 1 { "is" } else { "are" },
+            only.name
+        ));
+    } else {
+        let wheres: Vec<String> = from
+            .iter()
+            .map(|f| format!("{} from {}", f.count, f.name))
+            .collect();
+        out.push_str(&format!(
+            "; {moving} of them would move ({})",
+            wheres.join(", ")
+        ));
+    }
+    if kept > 0 {
+        out.push_str(&format!(
+            "; a more specific rule keeps {} where {}",
+            sessions_word(kept),
+            if kept == 1 { "it is" } else { "they are" }
+        ));
+    }
+    out.push('.');
+    out
 }
 
 // --- administration (work graph M5.2) ------------------------------------------
@@ -1455,6 +1632,7 @@ fn org_details_locked(
                     .collect()
             }),
             rules: rules.iter().filter(|r| r.org_id == o.id).cloned().collect(),
+            projects: s.org_projects(o.id)?,
             hosts: hosts
                 .iter()
                 .filter(|h| h.org_id == Some(o.id))

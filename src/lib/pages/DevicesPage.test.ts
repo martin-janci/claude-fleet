@@ -81,7 +81,7 @@ describe('Settings → Devices', () => {
     await waitFor(() => expect(screen.getAllByTestId('resource-row')).toHaveLength(2));
     const [me, other] = screen.getAllByTestId('resource-row');
     expect(within(me).getAllByTestId('resource-badge').map((b) => b.textContent)).toEqual(['Full', 'this device', 'trusted']);
-    expect(within(other).getAllByTestId('resource-badge').map((b) => b.textContent)).toEqual(['Read-only']);
+    expect(within(other).getAllByTestId('resource-badge').map((b) => b.textContent)).toEqual(['Watch only']);
   });
 
   it('binds to an org picked from the orgs, and grants and takes back a catalog', async () => {

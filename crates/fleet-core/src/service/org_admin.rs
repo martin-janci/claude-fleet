@@ -48,7 +48,7 @@ use std::sync::Mutex;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "OrgAdminParams")]
 pub struct OrgAdminArgs {
-    /// list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|set_org_setting|list_devices|pair_device|revoke_device|set_device_trust|rename_device|set_device_mode|bind_device|set_device_person|grant_catalog|list_people|rename_person|disable_person|list_members|set_member|remove_member|member_grants|revoke_member_grants|narrow_member_grants|set_hub_org|set_admins_see_unclaimed
+    /// list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|set_org_setting|list_devices|pair_device|revoke_device|set_device_trust|rename_device|set_device_mode|bind_device|set_device_person|grant_catalog|list_people|rename_person|disable_person|list_members|set_member|remove_member|member_grants|revoke_member_grants|narrow_member_grants|set_hub_org|set_admins_see_unclaimed|rule_preview|add_project|remove_project
     pub action: String,
     /// Org name (add/update_org), or a person's or device's new name
     /// (rename_person, rename_device).
@@ -141,6 +141,23 @@ pub struct OrgAdminArgs {
     /// update_org: its admins see the unclaimed count (hub owner only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admins_see_unclaimed: Option<bool>,
+    /// update_org: members see only their own sessions (default on); off,
+    /// they watch each other's sessions in the org.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members_own_sessions_only: Option<bool>,
+    /// add_project: its git remote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// add_project: where it is checked out on the hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// add_project: host aliases it may run on, comma-separated; empty =
+    /// every host of the org.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<String>,
+    /// remove_project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
 }
 
 impl OrgAdminArgs {
@@ -164,6 +181,9 @@ impl OrgAdminArgs {
             ("key", &self.key),
             ("value", &self.value),
             ("role", &self.role),
+            ("remote", &self.remote),
+            ("path", &self.path),
+            ("hosts", &self.hosts),
         ] {
             if let Some(v) = v {
                 out.push_str(&format!(" {k}={}", v.escape_debug()));
@@ -174,6 +194,7 @@ impl OrgAdminArgs {
             ("rule_id", self.rule_id),
             ("tracker_id", self.tracker_id),
             ("person_id", self.person_id),
+            ("project_id", self.project_id),
         ] {
             if let Some(v) = v {
                 out.push_str(&format!(" {k}={v}"));
@@ -185,6 +206,7 @@ impl OrgAdminArgs {
             ("keep_grants", self.keep_grants),
             ("owns_hub", self.owns_hub),
             ("admins_see_unclaimed", self.admins_see_unclaimed),
+            ("members_own_sessions_only", self.members_own_sessions_only),
         ] {
             if let Some(v) = v {
                 out.push_str(&format!(" {k}={v}"));
@@ -227,6 +249,11 @@ pub enum Action {
     SetHubOrg,
     /// The org's admins see the unclaimed count on its hosts (answer 3).
     SetAdminsSeeUnclaimed,
+    /// M15 step G2.10: what a rule would match and move, before it is added.
+    RulePreview,
+    /// M15 step G2.10: the org's project catalog.
+    AddProject,
+    RemoveProject,
 }
 
 impl Action {
@@ -253,6 +280,9 @@ impl Action {
             "narrow_member_grants" => Action::NarrowMemberGrants,
             "set_hub_org" => Action::SetHubOrg,
             "set_admins_see_unclaimed" => Action::SetAdminsSeeUnclaimed,
+            "rule_preview" => Action::RulePreview,
+            "add_project" => Action::AddProject,
+            "remove_project" => Action::RemoveProject,
             // A device's org is `bind_device`, which keeps the lock-out rule
             // `assign_client` does not know about.
             other => match OrgAction::parse(other) {
@@ -277,6 +307,7 @@ impl Action {
                 | Action::ListPeople
                 | Action::ListMembers
                 | Action::MemberGrants
+                | Action::RulePreview
         )
     }
 }
@@ -403,9 +434,17 @@ pub fn count_member_sessions(
         Some(p) => s.grants_for_person(p)?,
         None => Default::default(),
     };
+    // M15 step G2.10: a teammate's session is open to a fellow member.
+    let team = match viewer {
+        Some(p) => team_reach(s, p)?,
+        None => Default::default(),
+    };
     let mut by_owner: std::collections::HashMap<i64, (u32, u32)> = Default::default();
     for (owner, session) in s.live_owned_sessions_in_org(org)? {
-        let open = viewer.is_none() || viewer == Some(owner) || grants.contains_key(&session);
+        let open = viewer.is_none()
+            || viewer == Some(owner)
+            || grants.contains_key(&session)
+            || team.covers(Some(org), Some(owner));
         let e = by_owner.entry(owner).or_default();
         e.0 += 1;
         if !open {
@@ -458,6 +497,41 @@ pub fn unclaimed_reach(
     } else {
         UnclaimedReach::Orgs(orgs)
     })
+}
+
+/// Whose sessions `person` watches as a teammate (M15 step G2.10): for each
+/// org they are a live member of whose "members see only their own
+/// sessions" switch is off, the org's other live members. Nobody's for a
+/// disabled person.
+pub fn team_reach(
+    s: &Store,
+    person: i64,
+) -> Result<crate::service::view_scope::TeamReach, IpcError> {
+    let mut out = std::collections::BTreeMap::new();
+    let live_person = |p: i64| -> Result<bool, IpcError> {
+        Ok(s.get_person(p)?.is_some_and(|p| p.disabled_at.is_none()))
+    };
+    if !live_person(person)? {
+        return Ok(Default::default());
+    }
+    for m in s.memberships_of(person)? {
+        if !m.is_live()
+            || s.get_org(m.org_id)?
+                .is_none_or(|o| o.members_own_sessions_only)
+        {
+            continue;
+        }
+        let mut others = std::collections::BTreeSet::new();
+        for t in s.org_members(m.org_id)? {
+            if t.person_id != person && live_person(t.person_id)? {
+                others.insert(t.person_id);
+            }
+        }
+        if !others.is_empty() {
+            out.insert(m.org_id, others);
+        }
+    }
+    Ok(crate::service::view_scope::TeamReach::from_map(out))
 }
 
 /// One live member of an org, as the org page lists them (phase D).
@@ -564,6 +638,12 @@ fn check(s: &Store, action: Action, args: &OrgAdminArgs, me: Me<'_>) -> Result<(
             if args.admins_see_unclaimed.is_some() {
                 return Err(forbidden("who sees the unclaimed count"));
             }
+            // Off lets every member read the others' sessions, an org admin
+            // included: wider than the counts phase D gives an admin, so it
+            // is the hub owner's call. Turning it back on only narrows.
+            if args.members_own_sessions_only == Some(false) {
+                return Err(forbidden("whether members see each other's sessions"));
+            }
             Ok(())
         }
         Action::Org(OrgAction::AssignHost | OrgAction::UnassignHost) if hub => Ok(()),
@@ -575,7 +655,7 @@ fn check(s: &Store, action: Action, args: &OrgAdminArgs, me: Me<'_>) -> Result<(
         Action::Org(OrgAction::AddOrg | OrgAction::RemoveOrg) => {
             Err(forbidden("adding or removing an org"))
         }
-        Action::Org(OrgAction::AddRule | OrgAction::RemoveRule) => {
+        Action::Org(OrgAction::AddRule | OrgAction::RemoveRule) | Action::RulePreview => {
             Err(forbidden("an org's routing rules"))
         }
         Action::Org(OrgAction::AssignTracker | OrgAction::AssignClient) => {
@@ -587,7 +667,10 @@ fn check(s: &Store, action: Action, args: &OrgAdminArgs, me: Me<'_>) -> Result<(
         | Action::RemoveMember
         | Action::MemberGrants
         | Action::RevokeMemberGrants
-        | Action::NarrowMemberGrants => own_org(),
+        | Action::NarrowMemberGrants
+        | Action::AddProject => own_org(),
+        // The entry's org is checked in the arm, against the entry.
+        Action::RemoveProject => Ok(()),
         // The device's org is checked in the arm, against the device.
         Action::PairDevice
         | Action::RevokeDevice
@@ -849,6 +932,28 @@ fn device_json(s: &Store, name: &str, me: Me<'_>) -> Result<serde_json::Value, I
     to_json(&row)
 }
 
+/// `orgs::admin`'s arguments out of `org_admin`'s.
+fn org_work_args(args: &OrgAdminArgs, org_id: Option<i64>) -> WorkAdminArgs {
+    WorkAdminArgs {
+        action: args.action.clone(),
+        name: args.name.clone(),
+        org_id,
+        color: args.color.clone(),
+        isolate_sessions: args.isolate_sessions,
+        auto_tidy: args.auto_tidy.clone(),
+        jev: args.jev.clone(),
+        jev_reply: args.jev_reply.clone(),
+        bound_sees_unassigned: args.bound_sees_unassigned,
+        rule_id: args.rule_id,
+        owner: args.owner.clone(),
+        repo: args.repo.clone(),
+        path_prefix: args.path_prefix.clone(),
+        host_alias: args.host_alias.clone(),
+        tracker_id: args.tracker_id,
+        ..Default::default()
+    }
+}
+
 /// Run one action except `pair_device` (the MCP tool mints codes through the
 /// hub's pairing registry). The caller already decided `me` may write when
 /// the action is not a read.
@@ -888,29 +993,71 @@ pub fn run(
                 if let Some(on) = args.admins_see_unclaimed {
                     s.set_org_admins_see_unclaimed(o, on)?;
                 }
+                if let Some(on) = args.members_own_sessions_only {
+                    s.set_org_members_own_sessions_only(o, on)?;
+                    tracing::info!(
+                        org = o,
+                        on,
+                        "[org_admin] set members see only their own sessions"
+                    );
+                }
             }
-            orgs::admin(
-                a,
-                &WorkAdminArgs {
-                    action: args.action.clone(),
-                    name: args.name.clone(),
-                    org_id,
-                    color: args.color.clone(),
-                    isolate_sessions: args.isolate_sessions,
-                    auto_tidy: args.auto_tidy.clone(),
-                    jev: args.jev.clone(),
-                    jev_reply: args.jev_reply.clone(),
-                    bound_sees_unassigned: args.bound_sees_unassigned,
-                    rule_id: args.rule_id,
+            if let (OrgAction::AddOrg, Some(on)) = (a, args.members_own_sessions_only) {
+                let out = orgs::admin(a, &org_work_args(args, None), &s)?;
+                if let Some(id) = out["id"].as_i64() {
+                    return to_json(&s.set_org_members_own_sessions_only(id, on)?);
+                }
+                return Ok(out);
+            }
+            orgs::admin(a, &org_work_args(args, org_id), &s)
+        }
+        Action::RulePreview => {
+            let org = org_of(&s, args)?.ok_or_else(|| {
+                IpcError::new(codes::E_INVALID, "rule_preview needs org_id or org")
+            })?;
+            to_json(&orgs::rule_preview(
+                &s,
+                org,
+                crate::store::OrgRuleRow {
+                    id: 0,
+                    org_id: org,
                     owner: args.owner.clone(),
                     repo: args.repo.clone(),
                     path_prefix: args.path_prefix.clone(),
                     host_alias: args.host_alias.clone(),
-                    tracker_id: args.tracker_id,
-                    ..Default::default()
                 },
-                &s,
-            )
+            )?)
+        }
+        Action::AddProject => {
+            let org = org_of(&s, args)?.ok_or_else(|| {
+                IpcError::new(codes::E_INVALID, "add_project needs org_id or org")
+            })?;
+            let row = s.add_org_project(
+                org,
+                &crate::store::NewOrgProject {
+                    name: need(&args.name, name, "name")?,
+                    remote: args.remote.as_deref(),
+                    path: args.path.as_deref(),
+                    hosts: args.hosts.as_deref(),
+                },
+            )?;
+            tracing::info!(org, project = row.id, "[org_admin] added a project");
+            to_json(&row)
+        }
+        Action::RemoveProject => {
+            let id = *need(&args.project_id, name, "project_id")?;
+            let row = s
+                .get_org_project(id)?
+                .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no project {id}")))?;
+            if let Authority::Org { org, .. } = me.authority {
+                if row.org_id != org {
+                    return Err(IpcError::new(
+                        codes::E_FORBIDDEN,
+                        "an org admin administers their own org only",
+                    ));
+                }
+            }
+            Ok(serde_json::json!({ "removed": s.remove_org_project(id)? }))
         }
         Action::SetOrgSetting => {
             let org = org_of(&s, args)?.ok_or_else(|| {

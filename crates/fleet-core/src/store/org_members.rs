@@ -371,7 +371,7 @@ impl Store {
             };
             let d = effective_device(Some(p), r.org_id, owner, mine);
             r.org_id = d.org_id;
-            if d.readonly && r.mode == "full" {
+            if d.readonly && matches!(r.mode.as_str(), "full" | "answer") {
                 r.mode = "readonly".into();
             }
         }

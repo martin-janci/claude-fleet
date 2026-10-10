@@ -20,6 +20,15 @@ impl FleetTools {
         Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<SendPromptParams>,
     ) -> Result<CallToolResult, McpError> {
+        // An answer-only device (M15 step G2.10) presses a dialog key and
+        // never types: refused before the target is even resolved.
+        if caller.mode == TokenMode::Answer && p.keys.is_none() {
+            return Err(mcp_err(
+                codes::E_FORBIDDEN,
+                "an answer-only device answers a dialog (keys) and never sends a prompt",
+                None,
+            ));
+        }
         // Prompt body intentionally not logged.
         audit(
             "send_prompt",
@@ -69,7 +78,9 @@ impl FleetTools {
                     None,
                 ));
             }
-            let drives = {
+            // An answer-only device is held to the answer rule on its own
+            // sessions too: the key must answer the dialog on screen.
+            let drives = caller.mode != TokenMode::Answer && {
                 let s = lock(&self.store).map_err(to_mcp_err)?;
                 reaches_row(&s, &caller, &row, Reach::Drive)?
             };
@@ -726,10 +737,11 @@ impl FleetTools {
         )?;
         // A readonly token reads the inbox (`inbox` is a readonly tool) but
         // stamping `read_at` is a write, so it is served as a watcher is.
-        let mark_read = p.mark_read && caller.mode != TokenMode::Readonly && {
-            let s = lock(&self.store).map_err(to_mcp_err)?;
-            super::support::reaches_row(&s, &caller, &row, Reach::Drive)?
-        };
+        let mark_read =
+            p.mark_read && !matches!(caller.mode, TokenMode::Readonly | TokenMode::Answer) && {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                super::support::reaches_row(&s, &caller, &row, Reach::Drive)?
+            };
         let limit = bounded_limit(p.limit, 50);
 
         // fresh_for absent: no cursor touched, and 0 => [] as always. A

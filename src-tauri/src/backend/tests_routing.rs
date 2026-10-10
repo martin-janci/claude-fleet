@@ -1967,6 +1967,24 @@ fn org_admin_read_cases() -> Vec<Case> {
     use fleet_core::service::org_admin::OrgAdminArgs;
     vec![
         (
+            "org_rule_preview",
+            "org_admin",
+            json!({ "action": "rule_preview", "org_id": 1, "owner": "acme" }),
+            r#"{"matches":0,"moving":0,"from":[],"kept":0,"sentence":""}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::org_rule_preview(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        owner: Some("acme".into()),
+                        ..OrgAdminArgs::new("rule_preview")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "list_devices",
             "org_admin",
             json!({ "action": "list_devices" }),
@@ -2162,6 +2180,42 @@ fn org_admin_mutation_cases() -> Vec<Case> {
                     OrgAdminArgs {
                         rule_id: Some(3),
                         ..OrgAdminArgs::new("remove_rule")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "add_org_project",
+            "org_admin",
+            json!({ "action": "add_project", "org_id": 1, "name": "api", "hosts": "h" }),
+            r#"{"id":4}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::add_org_project(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        name: Some("api".into()),
+                        hosts: Some("h".into()),
+                        ..OrgAdminArgs::new("add_project")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_org_project",
+            "org_admin",
+            json!({ "action": "remove_project", "project_id": 4 }),
+            r#"{"removed":4}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::remove_org_project(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        project_id: Some(4),
+                        ..OrgAdminArgs::new("remove_project")
                     },
                 ))
                 .map(|_| ())

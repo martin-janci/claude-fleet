@@ -403,7 +403,12 @@
                   </div>
                   {#if !readonly}
                     {#each f.add as a (a.id)}
-                      <ActionForm action={a} {busy} options={(p) => options(f, p)} onrun={(params) => runItem(a, null, params)} />
+                      <ActionForm
+                        action={a}
+                        {busy}
+                        options={(p) => options(f, p)}
+                        argsFor={(params) => buildArgs(a, record, null, params)}
+                        onrun={(params) => runItem(a, null, params)} />
                     {/each}
                   {/if}
                 {:else if f.type === 'settings'}

@@ -739,6 +739,99 @@ async fn merge_host_folds_the_old_alias_into_the_new_one() {
     assert!(s.get_session("dev-old", "local").unwrap().is_some());
 }
 
+/// M15 step G2.10: an answer-only device reads what a readonly one reads,
+/// plus `send_prompt` and `ask` — and each of those narrows itself to
+/// answering (below). Everything else that writes is refused.
+#[test]
+fn an_answer_only_device_reads_and_answers_and_nothing_more() {
+    let a = client_caller("phone", TokenMode::Answer);
+    for t in ["list_sessions", "capture_session", "send_prompt", "ask"] {
+        assert!(enforce_mode(&a, t).is_ok(), "{t}");
+        assert!(present::visible_to(&a, t), "{t}");
+    }
+    for t in [
+        "kill_session",
+        "new_session",
+        "send_message",
+        "set_friendly_name",
+        "run_prompt",
+    ] {
+        let e = enforce_mode(&a, t).expect_err(t);
+        assert!(e.message.contains("answer-only"), "{t}: {}", e.message);
+        assert!(!present::visible_to(&a, t), "{t}");
+    }
+}
+
+#[tokio::test]
+async fn an_answer_only_device_presses_keys_and_never_types_a_prompt() {
+    let (tools, _store, sid) = keys_test_tools();
+    let typed = tools
+        .send_prompt(
+            Extension(client_caller("phone", TokenMode::Answer)),
+            Parameters(SendPromptParams {
+                session_id: Some(sid),
+                host_alias: None,
+                tmux_name: None,
+                prompt: "rm -rf".into(),
+                submit: true,
+                raw: false,
+                keys: None,
+                force: false,
+                client_msg_id: None,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .expect_err("a prompt");
+    assert!(
+        typed.message.starts_with("E_FORBIDDEN") && typed.message.contains("never sends a prompt"),
+        "{}",
+        typed.message
+    );
+    // A key that is no answer (an interrupt) is refused before the pane is
+    // read, as for an answer grant: its own session is held to the rule.
+    let interrupt = tools
+        .send_prompt(
+            Extension(client_caller("phone", TokenMode::Answer)),
+            Parameters(SendPromptParams {
+                session_id: Some(sid),
+                host_alias: None,
+                tmux_name: None,
+                prompt: String::new(),
+                submit: true,
+                raw: false,
+                keys: Some("C-c".into()),
+                force: false,
+                client_msg_id: None,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .expect_err("an interrupt");
+    assert!(
+        interrupt.message.starts_with("E_FORBIDDEN"),
+        "{}",
+        interrupt.message
+    );
+}
+
+#[tokio::test]
+async fn an_answer_only_device_answers_forms_and_never_opens_one() {
+    let g = gate_fixture();
+    let t = test_tools(g.store);
+    let err = t
+        .ask(
+            Extension(client_caller("phone", TokenMode::Answer)),
+            Parameters(AskParams {
+                form: Some(small_form()),
+                ..ask_p()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("never opens one"), "{err:?}");
+}
+
 #[tokio::test]
 async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
     let (tools, _store, sid) = keys_test_tools();
@@ -3653,6 +3746,8 @@ fn every_caller_kind() -> Vec<(&'static str, Caller)> {
             client_caller("phone", TokenMode::Readonly),
         ),
         ("client peer", client_caller("hub-b", TokenMode::Peer)),
+        // M15 step G2.10: a person's answer-only device.
+        ("client answer", client_caller("phone", TokenMode::Answer)),
         // `fleet-updater`'s token (update-channel design §6.1): `/update/*`
         // and nothing else. Listed here so every gate loop in this file
         // covers it — it is a paired client row bound to no org, which is

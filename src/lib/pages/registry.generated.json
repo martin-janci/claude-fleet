@@ -4377,6 +4377,10 @@
                   "type": "field"
                 },
                 {
+                  "key": "projects",
+                  "type": "field"
+                },
+                {
                   "key": "hosts",
                   "type": "field"
                 },
@@ -4467,6 +4471,10 @@
                   "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way.",
                   "tone": "warn",
                   "type": "notice"
+                },
+                {
+                  "key": "members_own_sessions_only",
+                  "type": "field"
                 },
                 {
                   "key": "bound_sees_unassigned",
@@ -5175,6 +5183,13 @@
               "from": "param",
               "name": "color"
             }
+          ],
+          [
+            "isolate_sessions",
+            {
+              "from": "param",
+              "name": "isolate_sessions"
+            }
           ]
         ],
         "command": "add_org",
@@ -5195,6 +5210,13 @@
             "name": "color",
             "required": false,
             "type": "color"
+          },
+          {
+            "default": false,
+            "label": "Its sessions are visible only to its members",
+            "name": "isolate_sessions",
+            "required": false,
+            "type": "toggle"
           }
         ],
         "report": false
@@ -5369,108 +5391,59 @@
                   }
                 ],
                 [
-                  "owner",
+                  "match_by",
                   {
                     "from": "param",
-                    "name": "owner"
+                    "name": "match_by"
                   }
                 ],
                 [
-                  "repo",
+                  "value",
                   {
                     "from": "param",
-                    "name": "repo"
+                    "name": "value"
                   }
                 ]
               ],
               "command": "add_org_rule",
               "envelope": "args",
-              "id": "org.add_owner_rule",
-              "label": "Add owner rule",
+              "id": "org.add_rule",
+              "label": "Add rule",
               "params": [
                 {
-                  "label": "GitHub owner",
-                  "max": 100,
-                  "name": "owner",
-                  "placeholder": "acme",
+                  "label": "Match by",
+                  "name": "match_by",
+                  "options": [
+                    [
+                      "repository",
+                      "Repository"
+                    ],
+                    [
+                      "path",
+                      "Path"
+                    ],
+                    [
+                      "host",
+                      "Host"
+                    ],
+                    [
+                      "owner",
+                      "Owner"
+                    ]
+                  ],
                   "required": true,
-                  "type": "text"
+                  "type": "choice"
                 },
                 {
-                  "label": "Repository (optional)",
-                  "max": 100,
-                  "name": "repo",
-                  "placeholder": "api",
-                  "required": false,
-                  "type": "text"
-                }
-              ],
-              "report": false
-            },
-            {
-              "bind": [
-                [
-                  "org_id",
-                  {
-                    "from": "record",
-                    "name": "id"
-                  }
-                ],
-                [
-                  "path_prefix",
-                  {
-                    "from": "param",
-                    "name": "path_prefix"
-                  }
-                ]
-              ],
-              "command": "add_org_rule",
-              "envelope": "args",
-              "id": "org.add_path_rule",
-              "label": "Add path rule",
-              "params": [
-                {
-                  "label": "Path prefix",
+                  "label": "Matches",
                   "max": 1024,
-                  "name": "path_prefix",
-                  "placeholder": "/home/me/work/acme",
+                  "name": "value",
+                  "placeholder": "acme/api · /home/me/work/acme · hetzner-a · acme",
                   "required": true,
                   "type": "text"
                 }
               ],
-              "report": false
-            },
-            {
-              "bind": [
-                [
-                  "org_id",
-                  {
-                    "from": "record",
-                    "name": "id"
-                  }
-                ],
-                [
-                  "host_alias",
-                  {
-                    "from": "param",
-                    "name": "host_alias"
-                  }
-                ]
-              ],
-              "command": "add_org_rule",
-              "envelope": "args",
-              "id": "org.add_host_rule",
-              "label": "Add host rule",
-              "params": [
-                {
-                  "label": "Host",
-                  "max": 100,
-                  "name": "host_alias",
-                  "placeholder": "hetzner-a",
-                  "required": true,
-                  "type": "text"
-                }
-              ],
+              "preview": "org_rule_preview",
               "report": false
             }
           ],
@@ -5494,6 +5467,112 @@
             "envelope": "args",
             "id": "org.remove_rule",
             "label": "Remove rule",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "from": "param",
+                    "name": "name"
+                  }
+                ],
+                [
+                  "remote",
+                  {
+                    "from": "param",
+                    "name": "remote"
+                  }
+                ],
+                [
+                  "path",
+                  {
+                    "from": "param",
+                    "name": "path"
+                  }
+                ],
+                [
+                  "hosts",
+                  {
+                    "from": "param",
+                    "name": "hosts"
+                  }
+                ]
+              ],
+              "command": "add_org_project",
+              "envelope": "args",
+              "id": "org.add_project",
+              "label": "Add project",
+              "params": [
+                {
+                  "label": "Name",
+                  "max": 80,
+                  "name": "name",
+                  "placeholder": "api",
+                  "required": true,
+                  "type": "text"
+                },
+                {
+                  "label": "Remote (optional)",
+                  "max": 1024,
+                  "name": "remote",
+                  "placeholder": "git@github.com:acme/api.git",
+                  "required": false,
+                  "type": "text"
+                },
+                {
+                  "label": "Path on hosts (optional)",
+                  "max": 1024,
+                  "name": "path",
+                  "placeholder": "~/src/api",
+                  "required": false,
+                  "type": "text"
+                },
+                {
+                  "label": "Hosts allowed (optional; every host of the org when empty)",
+                  "max": 1024,
+                  "name": "hosts",
+                  "placeholder": "hetzner-a, hetzner-b",
+                  "required": false,
+                  "type": "text"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "The org's project catalog: a project its people work on, with its remote, where it is checked out and the hosts it may run on (none: every host of the org).",
+          "id": "projects",
+          "item_label": {
+            "type": "org_project"
+          },
+          "label": "Projects",
+          "remove": {
+            "bind": [
+              [
+                "project_id",
+                {
+                  "from": "item_field",
+                  "name": "id"
+                }
+              ]
+            ],
+            "command": "remove_org_project",
+            "envelope": "args",
+            "id": "org.remove_project",
+            "label": "Remove the project",
             "params": [],
             "report": false
           },
@@ -5738,7 +5817,8 @@
                   "name": "person",
                   "placeholder": "jane",
                   "required": true,
-                  "type": "text"
+                  "source": "people",
+                  "type": "suggest"
                 },
                 {
                   "label": "Role",
@@ -5831,6 +5911,20 @@
           "help": "Also hide this org's sessions from other orgs' hosts, and theirs from its hosts: list, peer status, messages. Work data is fenced either way.",
           "id": "isolate_sessions",
           "label": "Isolate sessions",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "members see the team's sessions",
+            "when": "false"
+          },
+          "confirm": "Its members will watch each other's sessions in this org: what each one's Claude is doing and has said. They still cannot answer or drive them without a share.",
+          "default": true,
+          "edit": "members_own_sessions_only",
+          "help": "On (the default): a member sees their own sessions and what is shared with them. Off: the org's members also watch each other's sessions in it — read only; answering or driving one still needs a share. Only the hub's owner turns it off; an org admin can turn it back on.",
+          "id": "members_own_sessions_only",
+          "label": "Members see only their own sessions",
           "on_off": false,
           "type": "bool"
         },
@@ -6501,9 +6595,10 @@
               "label": "Person",
               "max": 64,
               "name": "person",
-              "placeholder": "ada",
+              "placeholder": "jane",
               "required": true,
-              "type": "text"
+              "source": "people",
+              "type": "suggest"
             }
           ],
           "report": false
@@ -6562,8 +6657,12 @@
                 "Full"
               ],
               [
+                "answer",
+                "Answer only"
+              ],
+              [
                 "readonly",
-                "Read-only"
+                "Watch only"
               ]
             ],
             "required": true,
@@ -6580,9 +6679,10 @@
             "label": "Belongs to (optional; you when empty)",
             "max": 64,
             "name": "person",
-            "placeholder": "ada",
+            "placeholder": "jane",
             "required": false,
-            "type": "text"
+            "source": "people",
+            "type": "suggest"
           }
         ],
         "report": false,
@@ -6621,7 +6721,7 @@
             "when": "label"
           },
           "edit": "mode",
-          "help": "Full drives sessions; read-only watches. A viewer's device stays read-only whatever it says here.",
+          "help": "Full drives sessions; answer only answers their questions and permission prompts and never types a prompt; watch only reads. A viewer's device watches only whatever it says here.",
           "id": "mode",
           "label": "Mode",
           "options": [
@@ -6630,8 +6730,12 @@
               "Full"
             ],
             [
+              "answer",
+              "Answer only"
+            ],
+            [
               "readonly",
-              "Read-only"
+              "Watch only"
             ]
           ],
           "type": "choice"

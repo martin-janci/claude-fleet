@@ -9,7 +9,9 @@ import { invokeCmd, type Result } from './result';
  *  updater token). */
 export interface DeviceSummary {
   name: string;
-  mode: 'full' | 'readonly' | string;
+  /** `answer`: answers questions and permission prompts, never types a
+   *  prompt (M15 G2.10). */
+  mode: 'full' | 'answer' | 'readonly' | string;
   trusted: boolean;
   org_id?: number;
   org?: string;
@@ -37,6 +39,27 @@ export interface Pairing {
 }
 
 export const devices = writable<DeviceSummary[]>([]);
+
+/** `list_people`: a person this hub knows (Settings → People). */
+export interface PersonSummary {
+  id: number;
+  name: string;
+  display_name?: string;
+  owner: boolean;
+  created_at: number;
+  disabled_at?: number;
+  devices: string[];
+}
+
+export const people = writable<PersonSummary[]>([]);
+
+/** Re-read the people (M15 G2.10: the person pickers offer them). A failure
+ *  leaves the list as it was, as for the devices. */
+export async function loadPeople(): Promise<Result<PersonSummary[]>> {
+  const r = await invokeCmd<PersonSummary[]>('list_people');
+  if (r.ok) people.set(Array.isArray(r.value) ? r.value : []);
+  return r;
+}
 
 /** Re-read the devices. A failure (a readonly device the hub refuses, an
  *  older hub) leaves the list as it was: it only feeds option selects. */

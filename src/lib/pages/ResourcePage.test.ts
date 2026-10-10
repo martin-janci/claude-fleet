@@ -91,7 +91,7 @@ describe('Organisations (master_detail over the org resource)', () => {
     expect(screen.getByTestId('item-catalogs').textContent).toContain('acme-assets');
     await openRecordTab('Devices');
     expect(screen.getAllByTestId('item-devices').map((c) => c.textContent?.replace('×', '').trim())).toEqual([
-      'phone · read-only, trusted',
+      'phone · watch only, trusted',
       'laptop',
     ]);
     // A catalog is shown, never changed here; a device is unbound from it
@@ -218,7 +218,7 @@ describe('Organisations (master_detail over the org resource)', () => {
     await waitFor(() => expect(argsOf(inv, 'update_org')).toEqual({ org_id: 1, bound_sees_unassigned: false }));
   });
 
-  it('adds an org by name, adds owner and path rules, removes a rule, a host and the org', async () => {
+  it('adds an org by name, adds repository and path rules, removes a rule, a host and the org', async () => {
     const inv = route({ add_org: { id: 9, name: 'Company B', created_at: 1 } });
     show();
     await fireEvent.click(await screen.findByTestId('resource-add'));
@@ -226,15 +226,20 @@ describe('Organisations (master_detail over the org resource)', () => {
     expect(run.disabled).toBe(true);
     await fireEvent.input(screen.getByTestId('param-org.add-name'), { target: { value: ' Company B ' } });
     await fireEvent.click(run);
-    await waitFor(() => expect(argsOf(inv, 'add_org')).toEqual({ name: 'Company B', color: null }));
+    await waitFor(() => expect(argsOf(inv, 'add_org')).toEqual({ name: 'Company B', color: null, isolate_sessions: false }));
 
-    await fireEvent.input(screen.getByTestId('param-org.add_owner_rule-owner'), { target: { value: 'acme' } });
-    await fireEvent.input(screen.getByTestId('param-org.add_owner_rule-repo'), { target: { value: 'api' } });
-    await fireEvent.click(screen.getByTestId('run-org.add_owner_rule'));
-    await waitFor(() => expect(argsOf(inv, 'add_org_rule')).toEqual({ org_id: 1, owner: 'acme', repo: 'api' }));
-    await fireEvent.input(screen.getByTestId('param-org.add_path_rule-path_prefix'), { target: { value: '/w/b' } });
-    await fireEvent.click(screen.getByTestId('run-org.add_path_rule'));
-    await waitFor(() => expect(argsOf(inv, 'add_org_rule')).toEqual({ org_id: 1, path_prefix: '/w/b' }));
+    // M15 G2.10: one rule form, "Match by" and its value.
+    const by = screen.getByTestId('param-org.add_rule-match_by') as HTMLSelectElement;
+    expect(Array.from(by.options).map((o) => o.textContent)).toEqual(['Repository', 'Path', 'Host', 'Owner']);
+    await fireEvent.input(screen.getByTestId('param-org.add_rule-value'), { target: { value: 'acme/api' } });
+    await fireEvent.click(screen.getByTestId('run-org.add_rule'));
+    await waitFor(() =>
+      expect(argsOf(inv, 'add_org_rule')).toEqual({ org_id: 1, match_by: 'repository', value: 'acme/api' }),
+    );
+    await fireEvent.change(screen.getByTestId('param-org.add_rule-match_by'), { target: { value: 'path' } });
+    await fireEvent.input(screen.getByTestId('param-org.add_rule-value'), { target: { value: '/w/b' } });
+    await fireEvent.click(screen.getByTestId('run-org.add_rule'));
+    await waitFor(() => expect(argsOf(inv, 'add_org_rule')).toEqual({ org_id: 1, match_by: 'path', value: '/w/b' }));
 
     await fireEvent.click(screen.getByLabelText('Remove rule: acme/*'));
     await waitFor(() => expect(argsOf(inv, 'remove_org_rule')).toEqual({ rule_id: 3 }));
@@ -245,6 +250,85 @@ describe('Organisations (master_detail over the org resource)', () => {
     expect((await screen.findByTestId('record-remove')).textContent).toContain('become unassigned');
     await fireEvent.click(screen.getByTestId('record-confirm'));
     await waitFor(() => expect(argsOf(inv, 'remove_org')).toEqual({ org_id: 1 }));
+  });
+
+  it('M15 G2.10: a new org can be visible only to its members from the start', async () => {
+    const inv = route({ add_org: { id: 9, name: 'Company B', created_at: 1 } });
+    show();
+    await fireEvent.click(await screen.findByTestId('resource-add'));
+    await fireEvent.input(screen.getByTestId('param-org.add-name'), { target: { value: 'Company B' } });
+    const box = screen.getByTestId('param-org.add-isolate_sessions') as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(box.closest('label')?.textContent).toContain('visible only to its members');
+    await fireEvent.click(box);
+    await fireEvent.click(screen.getByTestId('run-org.add'));
+    await waitFor(() => expect(argsOf(inv, 'add_org')).toEqual({ name: 'Company B', color: null, isolate_sessions: true }));
+  });
+
+  it('M15 G2.10: the rule form says what the rule would match and move while it is typed', async () => {
+    const inv = route({
+      org_rule_preview: { matches: 14, moving: 3, from: [], kept: 0, sentence: 'Matches 14 sessions now; 3 of them are in Personal and would move.' },
+    });
+    show();
+    await openRecordTab('Overview');
+    await fireEvent.change(await screen.findByTestId('param-org.add_rule-match_by'), { target: { value: 'owner' } });
+    await fireEvent.input(screen.getByTestId('param-org.add_rule-value'), { target: { value: 'beta' } });
+    expect((await screen.findByTestId('preview-org.add_rule', {}, { timeout: 2000 })).textContent).toBe(
+      'Matches 14 sessions now; 3 of them are in Personal and would move.',
+    );
+    expect(argsOf(inv, 'org_rule_preview')).toEqual({ org_id: 1, match_by: 'owner', value: 'beta' });
+    expect(calls(inv, 'add_org_rule')).toHaveLength(0);
+  });
+
+  it('M15 G2.10: the project catalog lists entries and adds and removes one', async () => {
+    const inv = route({
+      list_orgs: [{ ...acme, projects: [{ id: 7, org_id: 1, name: 'api', remote: 'git@github.com:acme/api.git', hosts: ['hetzner-a'], created_at: 1 }] }],
+    });
+    show();
+    await openRecordTab('Overview');
+    const chips = await screen.findAllByTestId('item-projects');
+    expect(chips[0].textContent).toContain('api · git@github.com:acme/api.git · on hetzner-a');
+    await fireEvent.input(screen.getByTestId('param-org.add_project-name'), { target: { value: 'web' } });
+    await fireEvent.input(screen.getByTestId('param-org.add_project-hosts'), { target: { value: 'hetzner-a' } });
+    await fireEvent.click(screen.getByTestId('run-org.add_project'));
+    await waitFor(() =>
+      expect(argsOf(inv, 'add_org_project')).toEqual({ org_id: 1, name: 'web', remote: null, path: null, hosts: 'hetzner-a' }),
+    );
+    await fireEvent.click(screen.getByLabelText('Remove the project: api · git@github.com:acme/api.git · on hetzner-a'));
+    await waitFor(() => expect(argsOf(inv, 'remove_org_project')).toEqual({ project_id: 7 }));
+  });
+
+  it('M15 G2.10: "members see only their own sessions" is on by default; off asks first', async () => {
+    const inv = route();
+    show();
+    await openRecordTab('Settings');
+    const box = (await screen.findByTestId('edit-members_own_sessions_only')) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    await fireEvent.click(box);
+    await fireEvent.click(screen.getByTestId('record-apply'));
+    expect((await screen.findByTestId('confirm-dialog')).textContent).toContain('watch each other');
+    await fireEvent.click(screen.getByTestId('record-confirm'));
+    await waitFor(() => expect(argsOf(inv, 'update_org')).toEqual({ org_id: 1, members_own_sessions_only: false }));
+  });
+
+  it('M15 G2.10: adding a member offers the people the hub knows, and a new name still goes', async () => {
+    const inv = route({
+      list_orgs: [{ ...acme, members: [] }],
+      list_people: [
+        { id: 1, name: 'martin', owner: true, created_at: 1, devices: [] },
+        { id: 2, name: 'jane', display_name: 'Jane D', owner: false, created_at: 1, devices: [] },
+        { id: 3, name: 'gone', owner: false, created_at: 1, disabled_at: 5, devices: [] },
+      ],
+    });
+    show();
+    await openRecordTab('Members');
+    const list = await screen.findByTestId('suggest-org.set_member-person');
+    await waitFor(() =>
+      expect(Array.from(list.querySelectorAll('option')).map((o) => o.getAttribute('value'))).toEqual(['martin', 'jane']),
+    );
+    await fireEvent.input(screen.getByTestId('param-org.set_member-person'), { target: { value: 'newbie' } });
+    await fireEvent.click(screen.getByTestId('run-org.set_member'));
+    await waitFor(() => expect(argsOf(inv, 'set_org_member')).toEqual({ org_id: 1, person: 'newbie', role: 'member' }));
   });
 
   it('a failed command is a toast, and the list is still re-read', async () => {

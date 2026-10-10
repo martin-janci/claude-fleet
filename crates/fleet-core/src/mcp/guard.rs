@@ -1550,6 +1550,23 @@ pub fn is_readonly_tool(name: &str) -> bool {
     policy(name).is_some_and(|p| p.readonly)
 }
 
+/// The tools an "answer only" device (`TokenMode::Answer`, M15 step G2.10)
+/// may call beyond the readonly ones. Each narrows itself to answering:
+/// `send_prompt` takes a dialog key and never a prompt, `ask` answers or
+/// declines a form and never opens one.
+pub const ANSWER_TOOLS: &[&str] = &["send_prompt", "ask"];
+
+/// May a token in `mode` call `tool` at all (the readonly and answer-only
+/// half of `enforce_mode`)?
+pub fn mode_allows_tool(mode: crate::mcp::auth::TokenMode, tool: &str) -> bool {
+    use crate::mcp::auth::TokenMode;
+    match mode {
+        TokenMode::Readonly => is_readonly_tool(tool),
+        TokenMode::Answer => is_readonly_tool(tool) || ANSWER_TOOLS.contains(&tool),
+        _ => true,
+    }
+}
+
 /// Tools gated by the `mcp.confirm_destructive` toggle.
 pub fn needs_confirmation(name: &str) -> bool {
     policy(name).is_some_and(|p| p.confirm)

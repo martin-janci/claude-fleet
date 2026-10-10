@@ -73,6 +73,10 @@
             },
             {
               "type": "field",
+              "key": "projects"
+            },
+            {
+              "type": "field",
               "key": "hosts"
             },
             {
@@ -162,6 +166,10 @@
               "type": "notice",
               "tone": "warn",
               "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way."
+            },
+            {
+              "type": "field",
+              "key": "members_own_sessions_only"
             },
             {
               "type": "field",

@@ -435,7 +435,7 @@ pub(crate) async fn handle_agent(
     };
     // A readonly token may observe the fleet; an agent is handed every
     // command the hub runs on its host, secret-file uploads included.
-    if caller.mode == TokenMode::Readonly {
+    if matches!(caller.mode, TokenMode::Readonly | TokenMode::Answer) {
         tracing::warn!(host = %alias, "[agent] refused an upgrade: readonly host token");
         return (StatusCode::FORBIDDEN, READONLY_HOST).into_response();
     }

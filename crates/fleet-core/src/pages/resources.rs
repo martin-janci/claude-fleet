@@ -58,6 +58,9 @@ pub enum OptionSource {
     Devices,
     /// Asset catalogs, by name.
     Catalogs,
+    /// The people this hub knows, by name (what `list_people` answers;
+    /// M15 step G2.10).
+    People,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -76,6 +79,17 @@ pub enum ParamKind {
     /// One of a fixed set (`(value, label)`); the first is preselected.
     Choice {
         options: &'static [(&'static str, &'static str)],
+    },
+    /// Free text with the source's values offered as you type: pick one
+    /// that exists or type a new one (a person, M15 step G2.10).
+    Suggest {
+        max: usize,
+        placeholder: &'static str,
+        source: OptionSource,
+    },
+    /// A switch, sent as a boolean; `default` is where it starts.
+    Toggle {
+        default: bool,
     },
 }
 
@@ -118,6 +132,11 @@ pub struct ActionSpec {
     /// command that takes a while (linking two hubs exchanges keys).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub busy: Option<BusyLoader>,
+    /// A read-only command run with the form's arguments while the person
+    /// fills it in; its answer's `sentence` is shown under the form (an org
+    /// rule's live impact, M15 step G2.10). It writes nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<&'static str>,
 }
 
 /// A loader an action shows while it runs: a closed set from the loader kit.
@@ -162,6 +181,13 @@ impl ActionSpec {
             report: false,
             result: None,
             busy: None,
+            preview: None,
+        }
+    }
+    pub const fn preview(self, command: &'static str) -> Self {
+        ActionSpec {
+            preview: Some(command),
+            ..self
         }
     }
     pub const fn params(self, params: &'static [ParamSpec]) -> Self {
@@ -293,6 +319,9 @@ pub enum ItemLabel {
     /// PersonSpend`): a table row of who, then today, 7 days and the month
     /// in dollars; nobody's reads "Routines, missions and unclaimed".
     PersonSpend,
+    /// An org's catalog project (M15 step G2.10): its name, then its remote,
+    /// path and hosts when set.
+    OrgProject,
 }
 
 /// A line under a field's value where its section shows tiles: a closed
@@ -473,42 +502,54 @@ const fn text(max: usize, placeholder: &'static str) -> ParamKind {
     ParamKind::Text { max, placeholder }
 }
 
-/// An org's rule, added one kind at a time: each form asks for one thing.
-const ORG_RULE_ADDS: &[ActionSpec] = &[
-    ActionSpec::new(
-        "org.add_owner_rule",
-        "Add owner rule",
-        "add_org_rule",
-        &[
-            ORG_ID,
-            ("owner", Bind::Param("owner")),
-            ("repo", Bind::Param("repo")),
-        ],
-    )
-    .params(&[
-        param("owner", "GitHub owner", text(100, "acme"), true),
-        param("repo", "Repository (optional)", text(100, "api"), false),
-    ]),
-    ActionSpec::new(
-        "org.add_path_rule",
-        "Add path rule",
-        "add_org_rule",
-        &[ORG_ID, ("path_prefix", Bind::Param("path_prefix"))],
-    )
-    .params(&[param(
-        "path_prefix",
-        "Path prefix",
-        text(1024, "/home/me/work/acme"),
-        true,
-    )]),
-    ActionSpec::new(
-        "org.add_host_rule",
-        "Add host rule",
-        "add_org_rule",
-        &[ORG_ID, ("host_alias", Bind::Param("host_alias"))],
-    )
-    .params(&[param("host_alias", "Host", text(100, "hetzner-a"), true)]),
+/// A person: one this hub knows, picked as you type, or a new name.
+const fn person() -> ParamKind {
+    ParamKind::Suggest {
+        max: 64,
+        placeholder: "jane",
+        source: OptionSource::People,
+    }
+}
+
+/// What an org rule matches by (M15 step G2.10): `add_org_rule` turns the
+/// one value into the rule's owner / repo, path prefix or host
+/// (`service::orgs::rule_from_match`).
+pub const ORG_RULE_MATCH: &[(&str, &str)] = &[
+    ("repository", "Repository"),
+    ("path", "Path"),
+    ("host", "Host"),
+    ("owner", "Owner"),
 ];
+
+/// An org's rule: one form, a "Match by" choice and its value, with the live
+/// impact under it while it is typed.
+const ORG_RULE_ADDS: &[ActionSpec] = &[ActionSpec::new(
+    "org.add_rule",
+    "Add rule",
+    "add_org_rule",
+    &[
+        ORG_ID,
+        ("match_by", Bind::Param("match_by")),
+        ("value", Bind::Param("value")),
+    ],
+)
+.params(&[
+    param(
+        "match_by",
+        "Match by",
+        ParamKind::Choice {
+            options: ORG_RULE_MATCH,
+        },
+        true,
+    ),
+    param(
+        "value",
+        "Matches",
+        text(1024, "acme/api · /home/me/work/acme · hetzner-a · acme"),
+        true,
+    ),
+])
+.preview("org_rule_preview")];
 
 /// The roles of an org member (`store::ORG_ROLES`), as a form offers them.
 pub const ORG_ROLE_CHOICES: &[(&str, &str)] = &[
@@ -587,6 +628,38 @@ const ORG: ResourceType = ResourceType {
             },
         ),
         FieldSpec::new(
+            "projects",
+            "Projects",
+            "The org's project catalog: a project its people work on, with its remote, where it is checked out and the hosts it may run on (none: every host of the org).",
+            FieldKind::Items {
+                item_label: ItemLabel::OrgProject,
+                remove: Some(ActionSpec::new(
+                    "org.remove_project",
+                    "Remove the project",
+                    "remove_org_project",
+                    &[("project_id", Bind::ItemField("id"))],
+                )),
+                add: &[ActionSpec::new(
+                    "org.add_project",
+                    "Add project",
+                    "add_org_project",
+                    &[
+                        ORG_ID,
+                        ("name", Bind::Param("name")),
+                        ("remote", Bind::Param("remote")),
+                        ("path", Bind::Param("path")),
+                        ("hosts", Bind::Param("hosts")),
+                    ],
+                )
+                .params(&[
+                    param("name", "Name", text(80, "api"), true),
+                    param("remote", "Remote (optional)", text(1024, "git@github.com:acme/api.git"), false),
+                    param("path", "Path on hosts (optional)", text(1024, "~/src/api"), false),
+                    param("hosts", "Hosts allowed (optional; every host of the org when empty)", text(1024, "hetzner-a, hetzner-b"), false),
+                ])],
+            },
+        ),
+        FieldSpec::new(
             "hosts",
             "Hosts",
             "A host in an org: its per-host token reads only this org's (and unassigned) work.",
@@ -657,7 +730,7 @@ const ORG: ResourceType = ResourceType {
                     &[ORG_ID, ("person", Bind::Param("person")), ("role", Bind::Param("role"))],
                 )
                 .params(&[
-                    param("person", "Person", text(64, "jane"), true),
+                    param("person", "Person", person(), true),
                     param("role", "Role", ParamKind::Choice { options: ORG_ROLE_CHOICES }, true),
                 ])],
             },
@@ -687,6 +760,15 @@ const ORG: ResourceType = ResourceType {
         .edit("isolate_sessions")
         .badge(Badge::True { text: "isolates sessions" })
         .confirm("Hosts outside this org will no longer list or message its sessions, and its hosts will not see other orgs' sessions. It can break a controller that dispatches across companies."),
+        FieldSpec::new(
+            "members_own_sessions_only",
+            "Members see only their own sessions",
+            "On (the default): a member sees their own sessions and what is shared with them. Off: the org's members also watch each other's sessions in it — read only; answering or driving one still needs a share. Only the hub's owner turns it off; an org admin can turn it back on.",
+            FieldKind::Bool { on_off: false, default: true },
+        )
+        .edit("members_own_sessions_only")
+        .badge(Badge::False { text: "members see the team's sessions" })
+        .confirm("Its members will watch each other's sessions in this org: what each one's Claude is doing and has said. They still cannot answer or drive them without a share."),
         FieldSpec::new(
             "auto_tidy",
             "Auto-tidy",
@@ -723,8 +805,26 @@ const ORG: ResourceType = ResourceType {
         .badge(Badge::False { text: "bound devices: own only" }),
     ],
     create: Some(
-        ActionSpec::new("org.add", "Add organisation", "add_org", &[("name", Bind::Param("name")), ("color", Bind::Param("color"))])
-            .params(&[param("name", "Name", text(80, "Company A"), true), param("color", "Colour", ParamKind::Color, false)]),
+        ActionSpec::new(
+            "org.add",
+            "Add organisation",
+            "add_org",
+            &[
+                ("name", Bind::Param("name")),
+                ("color", Bind::Param("color")),
+                ("isolate_sessions", Bind::Param("isolate_sessions")),
+            ],
+        )
+        .params(&[
+            param("name", "Name", text(80, "Company A"), true),
+            param("color", "Colour", ParamKind::Color, false),
+            param(
+                "isolate_sessions",
+                "Its sessions are visible only to its members",
+                ParamKind::Toggle { default: false },
+                false,
+            ),
+        ]),
     ),
     update: Some(ActionSpec::new("org.update", "Apply", "update_org", &[ORG_ID])),
     delete: Some(
@@ -895,7 +995,11 @@ const CATALOG: ResourceType = ResourceType {
 const DEVICE: (&str, Bind) = ("device", Bind::Record("name"));
 
 /// A device's modes as `DeviceSummary.mode` says them.
-const DEVICE_MODES: &[(&str, &str)] = &[("full", "Full"), ("readonly", "Read-only")];
+const DEVICE_MODES: &[(&str, &str)] = &[
+    ("full", "Full"),
+    ("answer", "Answer only"),
+    ("readonly", "Watch only"),
+];
 
 const DEVICE_RESOURCE: ResourceType = ResourceType {
     id: "device",
@@ -909,7 +1013,7 @@ const DEVICE_RESOURCE: ResourceType = ResourceType {
     empty: "No paired devices. Pair a phone or a browser with Pair a device.",
     fields: &[
         FieldSpec::new("name", "Name", "How the apps and the audit name it. Its grants, catalogs and person follow a new name.", FieldKind::Text { max: 64 }).edit("name"),
-        FieldSpec::new("mode", "Mode", "Full drives sessions; read-only watches. A viewer's device stays read-only whatever it says here.", FieldKind::Choice { options: DEVICE_MODES })
+        FieldSpec::new("mode", "Mode", "Full drives sessions; answer only answers their questions and permission prompts and never types a prompt; watch only reads. A viewer's device watches only whatever it says here.", FieldKind::Choice { options: DEVICE_MODES })
             .edit("mode")
             .badge(Badge::Label),
         FieldSpec::new("this_device", "This device", "The device you are using now. It cannot revoke, untrust, bind, hand over or make itself read-only.", FieldKind::Bool { on_off: false, default: false })
@@ -960,7 +1064,7 @@ const DEVICE_RESOURCE: ResourceType = ResourceType {
             param("device", "Name", text(64, "ada-phone"), true),
             param("mode", "Mode", ParamKind::Choice { options: DEVICE_MODES }, true),
             param("org", "Bind to org (optional)", ParamKind::Options { source: OptionSource::Orgs }, false),
-            param("person", "Belongs to (optional; you when empty)", text(64, "ada"), false),
+            param("person", "Belongs to (optional; you when empty)", person(), false),
         ])
         .result(ResultView::Pairing),
     ),
@@ -976,7 +1080,7 @@ const DEVICE_RESOURCE: ResourceType = ResourceType {
         ActionSpec::new("device.unbind", "Unbind from its org", "bind_device_org", &[DEVICE])
             .confirm("From its next request it sees every org again."),
         ActionSpec::new("device.hand_over", "Hand to a person", "set_device_person", &[DEVICE, ("person", Bind::Param("person"))])
-            .params(&[param("person", "Person", text(64, "ada"), true)])
+            .params(&[param("person", "Person", person(), true)])
             .confirm("From its next request it sees that person's sessions and the ones shared with them, and no others."),
     ],
     create_flow: None,
@@ -1171,6 +1275,7 @@ pub fn commands() -> Vec<&'static str> {
         out.push(r.list);
         for a in r.actions() {
             out.push(a.command);
+            out.extend(a.preview);
         }
         if r.create_flow.is_some() {
             out.extend(["flow_start", "flow_submit", "flow_back", "flow_cancel"]);
@@ -1335,6 +1440,7 @@ mod tests {
             commands(),
             [
                 "add_org",
+                "add_org_project",
                 "add_org_rule",
                 "assign_host_org",
                 "assign_tracker_org",
@@ -1363,10 +1469,12 @@ mod tests {
                 "list_peer_links",
                 "list_people",
                 "list_trackers",
+                "org_rule_preview",
                 "pair_device",
                 "release_debug_device",
                 "remove_org",
                 "remove_org_member",
+                "remove_org_project",
                 "remove_org_rule",
                 "remove_tracker",
                 "rename_person",

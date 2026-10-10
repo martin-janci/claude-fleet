@@ -36,6 +36,7 @@ mod nl_census;
 mod orchestration;
 mod org_activity;
 mod org_members;
+mod org_projects;
 mod orgs;
 mod participants;
 mod peer_links;
@@ -144,6 +145,7 @@ pub use org_members::{
     effective_device, role_receives_shares, validate_org_role, DeviceOrg, OrgMemberRow, NO_ORG,
     ORG_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_VIEWER,
 };
+pub use org_projects::{NewOrgProject, OrgProjectRow, ORG_PROJECT_NAME_MAX_CHARS};
 pub use orgs::{
     normalize_rule, org_of_session, validate_org_color, validate_org_name, OrgRow, OrgRuleRow,
     SessionOrgFacts, ORG_JEV_REPLY_KEY, ORG_NAME_MAX_CHARS,
