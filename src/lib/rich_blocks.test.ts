@@ -117,7 +117,7 @@ describe('checkUiBlock', () => {
   });
 
   it('names what is wrong, where', () => {
-    expect(check({ kind: 'chart' })).toEqual({ ok: false, problems: ['`kind` must be one of report, steps, guide, callout, facts, choices, form, progress, results, error, setting'] });
+    expect(check({ kind: 'chart' })).toEqual({ ok: false, problems: ['`kind` must be one of report, steps, guide, callout, facts, choices, form, progress, results, error, setting, wizard'] });
     expect(checkUiBlock('{"spec": "fleet.ui/2", "kind": "callout", "body": "x"}')).toEqual({ ok: false, problems: ['`spec` must be "fleet.ui/1"'] });
     expect(check({ kind: 'callout', tone: 'loud', body: 'x' })).toEqual({ ok: false, problems: ['`tone` must be one of info, tip, success, warning, danger'] });
     expect(check({ kind: 'choices', options: [{ label: 'A' }] })).toEqual({ ok: false, problems: ['option 1: `prompt` is required'] });
@@ -175,5 +175,30 @@ describe('the new kinds', () => {
   it('draws a results block in a reply as a card', () => {
     const segs = splitRich(ui({ kind: 'results', items: [{ type: 'stat', label: 'p95', value: 412 }] }));
     expect(segs.map((s) => s.t)).toEqual(['ui']);
+  });
+});
+
+describe('splitRich: work handovers (agent_handover.rs)', () => {
+  const N = '7c86f9ed8943';
+  const block = (body: string, nonce = N) => `WORK_HANDOVER_BEGIN_${nonce}\n${body}\nWORK_HANDOVER_END_${nonce}`;
+
+  it('draws the text between the markers as a handover, prose around it as Markdown', () => {
+    const s = splitRich(`Sure.\n${block('Done: the parser.\nLeft: tests.')}\nAnything else?`);
+    expect(s.map((x) => x.t)).toEqual(['md', 'handover', 'md']);
+    const h = s[1];
+    if (h.t !== 'handover') throw new Error('not a handover');
+    expect(h.nonce).toBe(N);
+    expect(h.raw).toBe('Done: the parser.\nLeft: tests.');
+    expect(h.handover.sections.map((x) => x.kind)).toEqual(['done', 'left']);
+  });
+
+  it('stays Markdown while the END marker has not arrived, or names another nonce', () => {
+    expect(splitRich(`WORK_HANDOVER_BEGIN_${N}\nDone: half`).map((x) => x.t)).toEqual(['md']);
+    expect(splitRich(`WORK_HANDOVER_BEGIN_${N}\nDone: x\nWORK_HANDOVER_END_other`).map((x) => x.t)).toEqual(['md']);
+  });
+
+  it('is no card when empty, and stays code inside a fence', () => {
+    expect(splitRich(block('')).map((x) => x.t)).toEqual(['md']);
+    expect(splitRich('```\n' + block('Done: x') + '\n```').map((x) => x.t)).toEqual(['md']);
   });
 });

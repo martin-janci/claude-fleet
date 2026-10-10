@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Icon from './lib/kit/Icon.svelte';
+  import StatusBar from './lib/kit/StatusBar.svelte';
   import { applyWorkEvents, loadTrackers, sessionsMentioning } from './lib/trackers';
   import { loadOrgs, cycleScope } from './lib/orgs';
   import type { WorkEvent } from './lib/trackers';
@@ -42,7 +44,7 @@
   import { toggleControl, toggleToday } from './lib/control';
   import type { RailId } from './lib/rail';
   import { loadProjects, applyProjectEvents } from './lib/projects';
-  import { loadSessions, applySessionEvents, sessions, sessionsAnswered, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
+  import { loadSessions, applySessionEvents, applyStartProgress, sessions, sessionsAnswered, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
   import { bootstrapError as bootstrapFailure } from './lib/bootstrap_state';
   import { errorText } from './lib/error_copy';
   import { loadHosts, applyHostEvents, hosts } from './lib/hosts';
@@ -107,6 +109,7 @@
   import { startUpdateChecks } from './lib/updates';
   import { derived, get } from 'svelte/store';
   import { destination, goTo, leave } from './lib/destination';
+  import { clampListWidth, listWidthDefault } from './lib/layout_tokens';
 
   const isNumber = (v: unknown): v is number => typeof v === 'number';
   const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
@@ -114,7 +117,7 @@
   // Sidebar width is global. Sidebar collapsed state is also global — unlike
   // the center pane (which the user wants per-session), the sidebar is the
   // project tree itself and doesn't make sense to differ between sessions.
-  let sidebarPx = $state(readPref('layout.sidebar', 280, isNumber));
+  let sidebarPx = $state(readPref('layout.sidebar', listWidthDefault(), isNumber));
   let sidebarCollapsed = $state(readPref('layout.sidebar-collapsed', false, isBool));
   // sidebarPx changes on every resize-drag frame; debounce the localStorage
   // write so a drag persists once (on settle) instead of per frame.
@@ -309,6 +312,7 @@
       onCatalogLoaded: () => { void loadAssets(); void repoStatus(); },
       onSyncProgress: (p) => syncProgress.set(p),
       onMoveProgress: applyMoveProgress,
+      onStartProgress: applyStartProgress,
       onWorkEvents: onWorkEvents,
       // `work:changed` (M14): the Work view re-reads.
       onWorkChanged: noteWorkChanged,
@@ -540,7 +544,7 @@
   });
 
   function onResizeSidebar(delta: number) {
-    sidebarPx = Math.max(180, Math.min(640, sidebarPx + delta));
+    sidebarPx = clampListWidth(sidebarPx + delta);
   }
   function toggleSidebar() {
     sidebarCollapsed = !sidebarCollapsed;
@@ -1262,7 +1266,7 @@
   <DownloadsSheet onclose={() => downloadsOpen.set(false)} />
 {/if}
 
-<footer class="status">
+<StatusBar testid="status-bar">
   <StatusBarMark />
   <!-- Review r13 (step 1.3): a sentence and the next step; the codes stay
        under Details. -->
@@ -1341,30 +1345,35 @@
            sending a fleet-wide credential in the clear, and a decision
            nobody is ever reminded of stops being a decision. -->
       <span class="err hub-warning" data-testid="hub-warning" title={$hubStatus.warning}
-        >⚠ {$hubStatus.warning}</span
+        ><Icon name="warning" size={12} /> {$hubStatus.warning}</span
       >
     {/if}
   {/if}
-  <!-- The usage segment is the embed page `embed.status_footer`. -->
-  <EmbedSlot
-    slot="status_footer"
-    ctx={{
-      now: nowSec,
-      hosts: $hosts,
-      accounts: $accounts,
-      snapshots: $accountUsage,
-      onopenhost: (host) => openHosts(host),
-    }}
-  />
-  <!-- The manual's StatusBar ends on the shortcuts sheet (3.17). -->
-  <button
-    type="button"
-    class="hub-badge footer-end"
-    data-testid="footer-shortcuts"
-    title="Keyboard shortcuts  ?"
-    onclick={() => shortcutSheetOpen.set(true)}>? Shortcuts…</button
+  <!-- The usage segment is the embed page `embed.status_footer`. Wrapped:
+       a direct child's `slot=` would read as a named slot of StatusBar. -->
+  <span class="footer-embed"
+    ><EmbedSlot
+      slot="status_footer"
+      ctx={{
+        now: nowSec,
+        hosts: $hosts,
+        accounts: $accounts,
+        snapshots: $accountUsage,
+        onopenhost: (host) => openHosts(host),
+      }}
+    /></span
   >
-</footer>
+  <!-- The manual's StatusBar ends on the shortcuts sheet (3.17). -->
+  {#snippet end()}
+    <button
+      type="button"
+      class="hub-badge"
+      data-testid="footer-shortcuts"
+      title="Keyboard shortcuts  ?"
+      onclick={() => shortcutSheetOpen.set(true)}>? Shortcuts…</button
+    >
+  {/snippet}
+</StatusBar>
 
 <style>
   .layout {
@@ -1378,24 +1387,10 @@
     width: 100vw;
     background: var(--bg);
   }
-  .status {
-    /* border-box: --status-h is the occupied height, border included. */
-    box-sizing: border-box;
-    height: var(--status-h);
-    line-height: calc(var(--status-h) - 1px);
-    padding: 0 0.75rem;
-    background: var(--bg-pane);
-    border-top: 1px solid var(--border);
-    font-size: var(--text-2xs);
-    color: var(--fg-muted);
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-  }
-  .footer-end {
-    margin-left: auto;
-  }
-  .status .err { color: var(--danger); }
+  /* The footer is the kit's StatusBar (manual: StatusBar, --status-h
+     border included). */
+  .err { color: var(--danger); }
+  .footer-embed { display: contents; }
   .status-details { display: inline; }
   .status-details summary { display: inline; cursor: pointer; }
   .status-retry {

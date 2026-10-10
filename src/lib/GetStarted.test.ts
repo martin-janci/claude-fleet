@@ -8,6 +8,7 @@ import { get } from 'svelte/store';
 import GetStarted from './GetStarted.svelte';
 import { buildingFirstFleet, getStartedFolded, getStartedItems, type GetStartedInputs } from './get_started';
 import { creatingStart, startedIds } from './sessions';
+import { NO_START_STEPS } from './start_steps';
 import { resetStarting } from './session_starting';
 import { hosts, type HostRow } from './hosts';
 import { accounts, type AccountRow } from './accounts';
@@ -108,6 +109,8 @@ describe('GetStarted', () => {
     expect(get(destination)).toBe('accounts');
     await fireEvent.click(screen.getByTestId('get-started-session'));
     expect(await screen.findByRole('dialog')).toBeTruthy();
+    // Step 10.12: Get started runs on its own form spec.
+    expect(screen.getByTestId('wizard-get_started')).toBeTruthy();
     expect(get(switcherRequest)).toBeNull();
     await fireEvent.click(screen.getByTestId('get-started-github'));
     expect(get(settingsSection)).toBe('trackers');
@@ -144,7 +147,7 @@ describe('Galaxy while the first fleet is built', () => {
   it('shows the Galaxy while the first session starts, and drops it once its agent is up', async () => {
     vi.useFakeTimers();
     try {
-      creatingStart.set({ host_alias: 'mac', name: '', kind: 'work' });
+      creatingStart.set({ host_alias: 'mac', name: '', kind: 'work', token: 't1', steps: NO_START_STEPS });
       render(GetStarted);
       await vi.advanceTimersByTimeAsync(400);
       expect(screen.getByTestId('get-started-building').textContent).toContain('Building your fleet');
@@ -164,7 +167,7 @@ describe('Galaxy while the first fleet is built', () => {
 
   it('a fleet with a session up starts its next one without the Galaxy', async () => {
     sessions.set([{ id: 1, kind: 'work', claude_status: 'idle' } as SessionRow]);
-    creatingStart.set({ host_alias: 'mac', name: '', kind: 'work' });
+    creatingStart.set({ host_alias: 'mac', name: '', kind: 'work', token: 't1', steps: NO_START_STEPS });
     render(GetStarted);
     expect(screen.queryByTestId('get-started-building')).toBeNull();
   });

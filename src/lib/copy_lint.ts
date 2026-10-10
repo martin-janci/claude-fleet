@@ -507,3 +507,61 @@ export function lintSvelte(file: string, src: string, index: DialogIndex): CopyF
   }
   return out;
 }
+
+/** Words that read as a state but are not one of the six: written as a label
+ *  ("Blocked", "Queued · …") they make a seventh status word. Blocked shows
+ *  as Needs you with its reason ("Needs you · blocked on mefistos, which is
+ *  down"), stuck and a red PR as Failed, queued and held as Idle or Paused.
+ *  The loaders' captions are not statuses and keep their verbs: the manual's
+ *  Loaders in use board draws "Thinking · reading hub/pair.rs · 14 s" and
+ *  "Planning · reading 3 sessions and 2 PRs". */
+export const NOT_STATUS_WORDS = [
+  'Blocked',
+  'Stuck',
+  'Queued',
+  'Waiting',
+  'Unknown',
+  'Ready',
+  'Running',
+  'Stopped',
+  'Pending',
+  'Partly done',
+  'Looks done',
+] as const;
+
+const SEVENTH_WORD = new RegExp(
+  String.raw`(?:['"\x60>]|<strong>)(${NOT_STATUS_WORDS.join('|')})(?: · |['"\x60<])`,
+);
+
+/** A non-status word written as a whole label or a status's head, in any
+ *  source line that is not a comment. */
+export function seventhWords(file: string, src: string): CopyFinding[] {
+  const out: CopyFinding[] = [];
+  src.split('\n').forEach((l, i) => {
+    if (/^\s*(?:\/\/|\*|\/\*|<!--)/.test(l)) return;
+    const m = l.match(SEVENTH_WORD);
+    if (m) out.push({ rule: 'status-word', file, line: i + 1, text: m[1] });
+  });
+  return out;
+}
+
+/** Text markers markup may still draw (manual, Iconography: compact markers
+ *  are text glyphs): ✓ ✗ for checks, ✦ a Jev proposal, ✎ an LLM draft, ✔ a
+ *  ticked multi-select box, ★ a primary link, ☐ an unmet condition, ↗ a link
+ *  that leaves the app. Anything else pictographic (⚠ 🔗 🔍 🤖 ⏸ 🔒 🎉) is
+ *  an emoji standing in for an icon: draw the kit's `Icon` or `StatusDot`. */
+const MARKERS = '✓✗✦✎✔★☐↗↔↕©®™';
+const PICTOGRAPH = new RegExp(`(?![${MARKERS}])\\p{Extended_Pictographic}`, 'u');
+
+/** A pictograph in a `.svelte` file's markup (not its script, style or
+ *  comments). */
+export function pictographs(file: string, src: string): CopyFinding[] {
+  const out: CopyFinding[] = [];
+  markupOf(src)
+    .split('\n')
+    .forEach((l, i) => {
+      const m = l.match(PICTOGRAPH);
+      if (m) out.push({ rule: 'glyph-prefix', file, line: i + 1, text: m[0] });
+    });
+  return out;
+}

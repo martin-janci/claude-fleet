@@ -29,7 +29,7 @@ describe('PrResult', () => {
   it('a green, pushed PR is Ready for its head commit', () => {
     render(PrResult, { session: row({ pr_evidence: ev() }), nowSec: NOW });
     expect(screen.getByTestId('pr-result')).toHaveAttribute('data-verdict', 'ready');
-    expect(screen.getByTestId('pr-result-verdict')).toHaveTextContent('Ready');
+    expect(screen.getByTestId('pr-result-verdict')).toHaveTextContent('Done · ready to merge');
     expect(screen.getByTestId('pr-result')).toHaveTextContent('1490bc3');
     expect(screen.getByTestId('pr-result-checked')).toHaveTextContent('checked 2m ago');
     expect(screen.getByTestId('pr-result-reason')).toHaveTextContent('Checks passed for 1490bc3');

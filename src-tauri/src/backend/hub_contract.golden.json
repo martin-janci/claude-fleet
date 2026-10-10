@@ -226,6 +226,7 @@
       "created_at",
       "current_activity",
       "effort_level",
+      "form_draft",
       "friendly_name",
       "host_alias",
       "id",
@@ -486,6 +487,7 @@
       "reason",
       "run_id",
       "source",
+      "ticket",
       "unsure"
     ],
     "MissionRow": [
@@ -711,6 +713,7 @@
       "created_at",
       "current_activity",
       "effort_level",
+      "form_draft",
       "friendly_name",
       "host_alias",
       "id",

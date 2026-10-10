@@ -106,9 +106,15 @@ pub struct NewSessionParams {
     /// Login profile (~/.claude-profiles/<name>).
     #[serde(default)]
     pub profile: Option<String>,
-    /// claude (default) or shell.
+    /// claude (default), codex or shell.
     #[serde(default)]
     pub agent: Option<String>,
+    /// Opaque id (1–64 of A-Za-z0-9_-) its `start:progress` events carry.
+    #[serde(default)]
+    pub start_token: Option<String>,
+    /// The person chose a login past `accounts.pause_at`.
+    #[serde(default)]
+    pub over_limit_ok: Option<bool>,
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
@@ -151,6 +157,9 @@ pub struct ShellTerminalsParams {
     /// takes the lowest free one.
     #[serde(default)]
     pub n: Option<u32>,
+    /// open only: worktree (default) or home.
+    #[serde(default)]
+    pub at: crate::service::sessions::ShellTerminalStart,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -399,9 +408,10 @@ pub struct SendPromptParams {
     /// session.
     #[serde(default)]
     pub client_msg_id: Option<String>,
-    /// Press a key instead: `Enter`, `Escape`, `Tab`, `C-c`, or `1`-`9`
-    /// (that `pending_input` option; toggles it when `multi`). Unmarked, not recorded; `prompt` must be empty.
+    /// Press a key instead; `1`-`9` picks that `pending_input` option
+    /// (toggles it when `multi`). Not recorded; `prompt` must be empty.
     #[serde(default)]
+    #[schemars(extend("enum" = crate::tmux::NamedKey::all_names()))]
     pub keys: Option<String>,
     /// Operator only: the nonce a person approved.
     #[serde(default)]
@@ -1134,9 +1144,12 @@ pub struct AskParams {
     /// A fleet.form/1 form for your own session's chat (docs/forms.md).
     #[serde(default)]
     pub form: Option<serde_json::Value>,
-    /// form: why you ask (≤500 chars).
+    /// form / draft: why you ask (≤500 chars).
     #[serde(default)]
     pub why: Option<String>,
+    /// The form's JSON so far (≤16 KiB), drawn in until `form`; "" drops it.
+    #[serde(default)]
+    pub draft: Option<String>,
     /// Wait again on this pending form_id.
     #[serde(default)]
     pub wait: Option<String>,

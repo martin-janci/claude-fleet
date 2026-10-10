@@ -742,6 +742,11 @@ pub fn payload_fits(name: &str, payload: &Value) -> Result<(), String> {
             .and_then(|()| string("step"))
             .and_then(|()| string("state"))
             .and_then(|()| integer("index")),
+        // `session_loaders.ts` `applyStartProgress` keys the start by
+        // `token` and moves the step named by `step` to `state`.
+        "start:progress" => string("token")
+            .and_then(|()| string("step"))
+            .and_then(|()| string("state")),
         _ => Ok(()),
     }
 }

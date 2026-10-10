@@ -5,6 +5,8 @@ import {
   indexDialogs,
   isStatusCopy,
   lintSvelte,
+  seventhWords,
+  pictographs,
   type CopyFinding,
   type DialogIndex,
 } from './copy_lint';
@@ -13,6 +15,11 @@ import { claudeStatusLabel, stuckStatus } from './attention';
 import { backgroundStatusWord, type BackgroundStatus } from './conversation';
 import { CLAUDE_STATUSES, STUCK_KINDS } from './sessions';
 import { ROW_ACTIONS } from './session_actions';
+import { ATTENTION_STATES } from './attention';
+import { STATE_LABELS } from './row_groups';
+import { verdictLabel, type Verdict } from './evidence';
+import { nodeLabel } from './missions';
+import { outcomeLabel } from './mission_triage';
 
 // Redesign step 7.8, the copy pass: the manual's content rules
 // (docs/ux/2026-10-08-orbit-fleet-redesign/design-system/README.md,
@@ -75,6 +82,11 @@ describe('the status words', () => {
       ...STUCK_KINDS.map((k) => stuckStatus(k)),
       stuckStatus(null),
       ...(['running', 'done', 'failed', 'stopped', 'idle'] as BackgroundStatus[]).map(backgroundStatusWord),
+      // Seven attention states, six words: Blocked reads Needs you.
+      ...ATTENTION_STATES.map((s) => STATE_LABELS[s]),
+      ...(['ready', 'waiting', 'unknown', 'blocked', 'merged', 'closed'] as Verdict[]).map(verdictLabel),
+      ...['done', 'running', 'doing', 'verifying', 'failed', 'blocked', 'proposed', 'held', 'waiting', 'ready', 'rejected'].map(nodeLabel),
+      ...['done', 'partial', 'blocked', 'failed'].map(outcomeLabel),
     ];
     for (const w of words) expect(isStatusCopy(w), w).toBe(true);
   });
@@ -85,6 +97,43 @@ describe('the status words', () => {
     const hits = Object.entries({ ...svelte, ...ts }).flatMap(([f, s]) =>
       s.split('\n').flatMap((l, i) => (old.test(l) ? [`${f}:${i + 1}: ${l.trim()}`] : [])),
     );
+    expect(hits).toEqual([]);
+  });
+});
+
+describe('no seventh status word', () => {
+  it('flags a non-status word as a label or a status head, not in prose or a comment', () => {
+    const src = [
+      "const L = { blocked: 'Blocked' };",
+      "return { label: 'Queued · Claude reads it after this turn' };",
+      '<p class="why"><strong>Stuck</strong> · {why}</p>',
+      '// "Blocked" in a comment is fine',
+      "const s = 'Blocked on TASK-212 until it lands';",
+      "return 'Thinking · reading hub/pair.rs';",
+    ].join('\n');
+    expect(seventhWords('src/X.ts', src).map((f) => `${f.line} ${f.text}`)).toEqual(['1 Blocked', '2 Queued', '3 Stuck']);
+  });
+
+  it('no source writes one', () => {
+    const { svelte, ts } = sources();
+    const hits = Object.entries({ ...svelte, ...ts }).flatMap(([f, s]) => seventhWords(f, s).map((h) => `${f}:${h.line}: ${h.text}`));
+    expect(hits).toEqual([]);
+  });
+});
+
+describe('icons, not emoji (manual: Iconography)', () => {
+  it('flags a pictograph in markup, keeps the text markers and ignores script', () => {
+    const src = `<script>const g = '⚠';</script>
+<span class="warn">⚠</span>
+<span>🔗{n}</span>
+<span>✓ passed</span><span>✦ Proposed</span>
+<!-- 🤖 in a comment -->`;
+    expect(pictographs('src/X.svelte', src).map((f) => `${f.line} ${f.text}`)).toEqual(['2 ⚠', '3 🔗']);
+  });
+
+  it('no component draws one', () => {
+    const { svelte } = sources();
+    const hits = Object.entries(svelte).flatMap(([f, s]) => pictographs(f, s).map((h) => `${f}:${h.line}: ${h.text}`));
     expect(hits).toEqual([]);
   });
 });

@@ -2324,6 +2324,7 @@ pub(crate) async fn spec_for_session_with(
                 "sessions outside tmux have no worktree or tmux pane to repair",
             ));
         }
+        crate::service::sessions::refuse_unvalidated_agent(&row.agent)?;
         (
             seed_for_session(&s, &row)?,
             crate::service::sessions::stored_launch(&s, row.id)?,

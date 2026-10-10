@@ -235,6 +235,22 @@ pub(super) fn worktree_key_for_host(path: &str, paths: &HostPaths) -> Option<Str
     Some(recorded.unwrap_or(key))
 }
 
+/// [`find_project_id_for_path`] for a directory on `local` with no worktree
+/// rows: the project whose base contains `cwd` (the longest wins). The Lost
+/// and found rule as the decide benches replay it (`decide::bench::choice`),
+/// with no store at hand.
+#[cfg(feature = "nl-detect")]
+pub(crate) fn project_for_local_path(projects: &[ProjectRow], cwd: &str) -> Option<i64> {
+    let paths = HostPaths {
+        root: String::new(),
+        layout: crate::projects::Layout::Github,
+        worktrees: Vec::new(),
+        named: Vec::new(),
+        codex_panes: Vec::new(),
+    };
+    find_project_id_for_path(projects, "local", std::path::Path::new(cwd), &paths)
+}
+
 /// Match a session's cwd to a known project id. `projects` is passed in by the
 /// caller (fetched once per reconcile) rather than queried per session.
 pub(crate) fn find_project_id_for_path(

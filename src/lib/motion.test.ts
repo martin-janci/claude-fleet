@@ -113,3 +113,43 @@ describe('no transition uses a raw duration', () => {
     expect(offenders).toEqual(PENDING);
   });
 });
+
+// The same rule for loops: an `animation` (or `animation-duration`) reads a
+// token (`--loop-*`, `--dur-*`, `--loader-reduced`), never a raw time, and
+// Reduced / Off reach it by the Loader kit's rule: one --loader-reduced fade,
+// or still. The kit's own generated stylesheet is the manual's drawing; the
+// Loader governs it (`ofl--still`, loader-kit.css), so it is left out here.
+describe('no animation uses a raw duration', () => {
+  const files = (dir: string): string[] =>
+    readdirSync(dir, { recursive: true })
+      .filter((n) => /\.(svelte|css)$/.test(n))
+      .map((n) => `${dir}/${n.replaceAll('\\', '/')}`)
+      .filter((f) => !f.endsWith('/loader-kit.generated.css'));
+
+  const RAW = /animation(?:-duration)?\s*:[^;{}"]*\b\d*\.?\d+m?s\b/g;
+
+  it('reads raw times, and lets tokens by', () => {
+    const hits = (css: string) => css.match(RAW)?.length ?? 0;
+    expect(hits('.a { animation: spin 1.6s linear infinite; }')).toBe(1);
+    expect(hits('.a { animation-duration: 300ms; }')).toBe(1);
+    expect(hits('.a { animation: spin var(--loop-slow) linear infinite; }')).toBe(0);
+    expect(hits('.a { animation: none; }')).toBe(0);
+  });
+
+  it('every animation reads a token', () => {
+    const offenders: Record<string, string[]> = {};
+    for (const f of files('src')) {
+      const src = readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+      const m = src.match(RAW);
+      if (m) offenders[f] = m;
+    }
+    expect(offenders).toEqual({});
+  });
+
+  it('app.css defines the loop tokens and the fade they become', () => {
+    const css = readFileSync('src/app.css', 'utf8');
+    expect(css).toMatch(/--loop-fast:\s*[\d.]+m?s;/);
+    expect(css).toMatch(/--loop-slow:\s*[\d.]+m?s;/);
+    expect(css).toMatch(/@keyframes motion-fade\s*\{/);
+  });
+});

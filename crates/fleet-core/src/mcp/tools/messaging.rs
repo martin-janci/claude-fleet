@@ -961,11 +961,25 @@ pub(crate) fn answer_key_allowed(
 /// The half of [`answer_key_allowed`] that needs no pane: refused before the
 /// pane is read, so a key no dialog takes costs no round trip.
 fn answer_key_kind(key: crate::tmux::NamedKey) -> Result<(), String> {
+    use crate::tmux::NamedKey;
     match key {
-        crate::tmux::NamedKey::CtrlC => {
-            Err("an answer grant presses a dialog's keys, not C-c".into())
-        }
-        _ => Ok(()),
+        // A dialog's keys: its options, its cursor, confirm and cancel.
+        NamedKey::Enter
+        | NamedKey::Escape
+        | NamedKey::Tab
+        | NamedKey::Up
+        | NamedKey::Down
+        | NamedKey::Digit(_) => Ok(()),
+        // Interrupting, editing the input line or switching modes drives
+        // the session; it answers nothing.
+        NamedKey::CtrlC
+        | NamedKey::Ctrl(_)
+        | NamedKey::Left
+        | NamedKey::Right
+        | NamedKey::BackTab => Err(format!(
+            "an answer grant presses a dialog's keys, not {}",
+            key.tmux_name()
+        )),
     }
 }
 
@@ -999,7 +1013,7 @@ mod answer_key_tests {
     #[test]
     fn an_answer_grant_presses_the_dialogs_own_keys() {
         let d = dialog(3);
-        for k in ["1", "2", "3", "Enter", "Escape", "Tab"] {
+        for k in ["1", "2", "3", "Enter", "Escape", "Tab", "Up", "Down"] {
             assert_eq!(answer_key_allowed(key(k), Some(&d)), Ok(()), "{k}");
         }
     }
@@ -1015,6 +1029,10 @@ mod answer_key_tests {
             answer_key_allowed(key("C-c"), Some(&d)).is_err(),
             "C-c interrupts"
         );
+        // The phone key bar's driving keys (14.14) are not a dialog's.
+        for k in ["C-r", "C-u", "Left", "Right", "BTab"] {
+            assert!(answer_key_allowed(key(k), Some(&d)).is_err(), "{k}");
+        }
         for k in ["1", "Enter", "Escape", "Tab"] {
             assert!(
                 answer_key_allowed(key(k), None).is_err(),

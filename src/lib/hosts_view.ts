@@ -6,6 +6,7 @@
 // banner, and the plain-language consequence copy for the destructive
 // confirms. Everything takes `now` (unix seconds) so tests are deterministic.
 import type { HostRow } from './hosts';
+import type { OfIconName } from './kit/icons';
 import { accountLabel, type AccountRow } from './accounts';
 import type { SessionRow } from './sessions';
 import type { AccountUsageSnapshot, UsageStatus, UsageWindow } from './account_usage_store';
@@ -105,7 +106,8 @@ export interface SessionCounts {
   total: number;
   working: number;
   blocked: number;
-  /** `6 ⚡2 ⏸1` (zero parts omitted). */
+  /** `6 · 2 working · 1 needs you` (zero parts omitted): the manual's
+   *  status words, no glyphs. A blocked Claude asks for a permission. */
   text: string;
   title: string;
 }
@@ -122,10 +124,10 @@ export function sessionCounts(alias: string, rows: readonly SessionRow[]): Sessi
     else if (s.claude_status === 'blocked') blocked++;
   }
   const parts = [String(total)];
-  if (working) parts.push(`⚡${working}`);
-  if (blocked) parts.push(`⏸${blocked}`);
-  const title = `${total} session${total === 1 ? '' : 's'}, ${working} working, ${blocked} blocked`;
-  return { total, working, blocked, text: parts.join(' '), title };
+  if (working) parts.push(`${working} working`);
+  if (blocked) parts.push(`${blocked} needs you`);
+  const title = `${total} session${total === 1 ? '' : 's'}, ${working} working, ${blocked} need${blocked === 1 ? 's' : ''} you`;
+  return { total, working, blocked, text: parts.join(' · '), title };
 }
 
 // ── attention ──
@@ -176,7 +178,8 @@ export type AttentionKind =
 
 export interface HostAttention {
   kind: AttentionKind;
-  glyph: string;
+  /** The mark, from the manual's icon set. */
+  icon: OfIconName;
   /** The tooltip explaining the mark. */
   title: string;
 }
@@ -210,20 +213,20 @@ export function hostAttention(args: {
     if (hook.state === 'seen') {
       return {
         kind: 'token_missing',
-        glyph: '🔑',
+        icon: 'key',
         title: `${host.alias} has no control-API token (it may have been revoked), so its fleet hooks can no longer report. Provision hosts to mint one.`,
       };
     }
     return {
       kind: 'hooks_missing',
-      glyph: '🔑',
+      icon: 'key',
       title: `Fleet hooks are not installed on ${host.alias}: it has no control-API token. Provision hosts to install them.`,
     };
   }
   if (tokensLoaded && hook.state === 'never_seen' && sessionCount > 0) {
     return {
       kind: 'hooks_stale',
-      glyph: '⚠',
+      icon: 'warning',
       title: `Fleet hooks are installed on ${host.alias}, but none of its sessions has reported a finished turn. The hooks may be stale — re-provision the host.`,
     };
   }
@@ -235,7 +238,7 @@ export function hostAttention(args: {
   if (host.provision_warning) {
     return {
       kind: 'provision_warning',
-      glyph: '⚠',
+      icon: 'warning',
       title: `${host.alias}: the last provisioning did not finish cleanly — ${host.provision_warning}. Fleet will retry it; to retry now, fleet-hub provision --host ${host.alias} --content-only.`,
     };
   }
@@ -243,7 +246,7 @@ export function hostAttention(args: {
   if (host.provision_stale) {
     return {
       kind: 'provision_stale',
-      glyph: '↻',
+      icon: 'recreate',
       title: `${host.alias} was provisioned with an older fleet (content differs from this build): re-provision it — fleet-hub provision --host ${host.alias} --content-only.`,
     };
   }
@@ -254,7 +257,7 @@ export function hostAttention(args: {
   if (overrides.length > 0) {
     return {
       kind: 'auth_override',
-      glyph: '⚿',
+      icon: 'key',
       title: `${host.alias}: ${overrides.join(', ')} ${overrides.length === 1 ? 'is' : 'are'} set in its shell or tmux environment and outrank${overrides.length === 1 ? 's' : ''} the /login account, so new Claude sessions there use that credential instead. Unset it (and restart tmux) to use the login.`,
     };
   }
@@ -265,7 +268,7 @@ export function hostAttention(args: {
   if (disk && healthSampleFresh(host, now) && disk.pct >= diskLowPct) {
     return {
       kind: 'disk_low',
-      glyph: '▮',
+      icon: 'disk',
       title: `${host.alias} is at ${disk.pct}% disk in $HOME (${gb(host.disk_home_free_kb ?? 0)} free): transcripts, worktrees and moves onto it will fail with ENOSPC.`,
     };
   }
@@ -279,7 +282,7 @@ export function hostAttention(args: {
   ) {
     return {
       kind: 'agent_old',
-      glyph: '⬆',
+      icon: 'upgrade',
       title: `fleet-agent ${host.agent_version} on ${host.alias}, hub ${hubVersion}: upgrade the agent (fleet-agent install with the existing token, then systemctl restart fleet-agent).`,
     };
   }
@@ -293,7 +296,7 @@ export function hostAttention(args: {
   ) {
     return {
       kind: 'claude_old',
-      glyph: '⬆',
+      icon: 'upgrade',
       title: `Claude Code ${host.claude_version} on ${host.alias} is older than ${newestClaude}, the newest in the fleet (checked ${formatAge(now - (host.claude_version_at ?? now))} ago).`,
     };
   }

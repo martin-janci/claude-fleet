@@ -126,6 +126,42 @@ export async function moveToHeadroom(
   return out;
 }
 
+/** Bulk move to an account the person picked (step 4.4): resume each
+ *  session under the login on its host that is logged in to `accountUuid`.
+ *  `null` is the default, the login with the most headroom
+ *  ({@link moveToHeadroom}). A session already on that account stays; one
+ *  whose host has no login on it has nowhere to go. A picked account moves
+ *  a session whether or not it is past the line: the person chose it. */
+export async function moveToAccount(
+  rows: Parameters<typeof moveToHeadroom>[0],
+  accountUuid: string | null,
+  restart: (host: string, name: string, profile: string) => Promise<Result<unknown>>,
+): Promise<{ moved: number; stayed: number; nowhere: number; failed: number }> {
+  if (accountUuid === null) return moveToHeadroom(rows, restart);
+  const out = { moved: 0, stayed: 0, nowhere: 0, failed: 0 };
+  for (const s of rows) {
+    const r0 = await checkAccountHeadroom(s.host_alias, s.claude_profile ?? null);
+    if (!r0.ok) {
+      out.failed += 1;
+      continue;
+    }
+    const h = headroomForAccount(r0.value, s.account_uuid);
+    if ((s.account_uuid ?? h.chosen?.account_uuid) === accountUuid) {
+      out.stayed += 1;
+      continue;
+    }
+    const to = h.logins.find((l) => l.account_uuid === accountUuid);
+    if (!to) {
+      out.nowhere += 1;
+      continue;
+    }
+    const r = await restart(s.host_alias, s.tmux_name, to.profile ?? '');
+    if (r.ok) out.moved += 1;
+    else out.failed += 1;
+  }
+  return out;
+}
+
 /** The New session dialog's default (step 4.5): the login with the most
  *  headroom among those with a reading; `null` when none has one. */
 export function freestLogin(logins: readonly HostLogin[]): HostLogin | null {

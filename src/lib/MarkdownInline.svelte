@@ -40,7 +40,7 @@
 
 <style>
   .md-code {
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-family: var(--mono);
     font-size: 0.88em;
     padding: 0.08em 0.35em;
     border-radius: var(--radius-sm);

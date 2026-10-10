@@ -16,7 +16,7 @@ import { sessions, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectSession, clearSelection } from './selection';
 import { clearToasts } from './toasts';
 import { get } from 'svelte/store';
-import { nextTerminalTab, requestTerminalTab, shellTerminalName, terminalPane, terminalPtyId } from './terminals';
+import { nextTerminalTab, requestTerminalTab, shellTerminalName, terminalOpensOn, terminalPane, terminalPtyId } from './terminals';
 
 const row = {
   id: 1, tmux_name: 'api', host_alias: 'alpha', project_id: null, worktree_id: null, created_at: 1,
@@ -135,6 +135,72 @@ describe('shell terminals strip (step 5.3)', () => {
     expect(screen.queryByTestId('terminal-tab-1')).toBeNull();
     expect(calls('pty_open').map((c) => args(c)).at(-1)).toMatchObject({ id: 'agent' });
     expect(calls('kill_session')).toHaveLength(0);
+  });
+
+  it('Kill terminal… in the shell\'s menu asks first, then closes only that terminal', async () => {
+    open = [1, 2];
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-tab-2'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-menu-toggle'));
+    const menu = screen.getByTestId('terminal-menu');
+    expect(menu.getAttribute('role')).toBe('menu');
+    expect(Array.from(menu.querySelectorAll('[role=menuitem]')).map((m) => m.textContent?.trim())).toEqual([
+      'Clear',
+      'Split right',
+      'Pop out ↗',
+      'Kill terminal…the session keeps running',
+    ]);
+    await fireEvent.click(screen.getByTestId('terminal-kill'));
+    // Nothing is closed until the person confirms.
+    expect(calls('shell_terminals').filter((c) => args(c).action === 'close')).toHaveLength(0);
+    expect(screen.getByTestId('confirm-dialog').textContent).toContain('Kill Shell 2?');
+    await fireEvent.click(screen.getByTestId('terminal-kill-confirm'));
+    await settle();
+    expect(args(calls('shell_terminals').at(-1)!)).toMatchObject({ action: 'close', n: 2 });
+    expect(screen.queryByTestId('terminal-tab-2')).toBeNull();
+    expect(screen.getByTestId('terminal-tab-1')).toBeTruthy();
+    expect(calls('kill_session')).toHaveLength(0);
+  });
+
+  it('a right-click on a shell tab opens the same menu, and Cancel kills nothing', async () => {
+    open = [1];
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    await fireEvent.contextMenu(screen.getByTestId('terminal-tab-1'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-kill'));
+    await fireEvent.click(screen.getByText('Cancel'));
+    await settle();
+    expect(calls('shell_terminals').filter((c) => args(c).action === 'close')).toHaveLength(0);
+    expect(screen.getByTestId('terminal-tab-1')).toBeTruthy();
+  });
+
+  it('"New terminal opens on" names the session\'s host, and + New starts where it says', async () => {
+    terminalOpensOn.set('worktree');
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    const pick = screen.getByTestId('terminal-opens-on') as HTMLSelectElement;
+    expect(Array.from(pick.options).map((o) => o.textContent)).toEqual(['This worktree · alpha', 'Home folder · alpha']);
+    expect(pick.value).toBe('worktree');
+    await fireEvent.click(screen.getByTestId('terminal-new'));
+    await settle();
+    // The default says what it always said: no `at` on the wire.
+    // (An open naming its `n` is the pane re-ensuring a terminal it shows.)
+    const news = () => calls('shell_terminals').filter((c) => args(c).action === 'open' && args(c).n == null);
+    expect(args(news()[0])).not.toHaveProperty('at');
+
+    await fireEvent.change(pick, { target: { value: 'home' } });
+    expect(get(terminalOpensOn)).toBe('home');
+    await fireEvent.click(screen.getByTestId('terminal-new'));
+    await settle();
+    expect(news()).toHaveLength(2);
+    expect(args(news()[1])).toMatchObject({ action: 'open', at: 'home' });
+    terminalOpensOn.set('worktree');
   });
 
   it('Ctrl+Alt+T opens a terminal and Ctrl+` walks the tabs, neither reaching the pty', async () => {

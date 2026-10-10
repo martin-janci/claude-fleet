@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   import Loader from './Loader.svelte';
   import WorkSettings from './WorkSettings.svelte';
   import ShortcutSettings from './ShortcutSettings.svelte';
@@ -480,7 +481,7 @@
           {/if}
         </p>
         {#if $hubStatus.warning}
-          <p class="err" data-testid="hub-status-warning">⚠ {$hubStatus.warning}</p>
+          <p class="err" data-testid="hub-status-warning"><Icon name="warning" size={12} /> {$hubStatus.warning}</p>
         {/if}
         <!-- The trap: with `mcp.confirm_destructive` on, the hub refuses a
              kill, a worktree delete, a move or a task cancel until someone
@@ -526,7 +527,7 @@
              "This app runs its own fleet" here, as this section used to, was
              the opposite of the truth: it runs NO fleet until this is fixed. -->
         <p class="err" data-testid="hub-unavailable-reason">
-          ⚠ This app is set to use
+          <Icon name="warning" size={12} /> This app is set to use
           {#if $hubStatus.configured_url}<code>{$hubStatus.configured_url}</code>{:else}a hub{/if},
           but this launch cannot: {plainUnavailableReason($hubStatus.unavailable)}.
         </p>
@@ -571,7 +572,7 @@
                reads it — a blank URL is standalone — so this is the only place
                it is ever mentioned, and the only place it can be cleared. -->
           <p class="err" data-testid="hub-stranded-token">
-            ⚠ A hub <strong>client token</strong> is still stored on this
+            <Icon name="warning" size={12} /> A hub <strong>client token</strong> is still stored on this
             machine, left behind by a pairing that did not finish. Nothing uses
             it: no hub is configured, and this app runs its own fleet. It is a
             credential for someone else's fleet sitting in this machine's

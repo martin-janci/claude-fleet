@@ -92,7 +92,7 @@ pub struct WorkArgs {
     /// Today: unix start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
-    /// item:<id> or ref:<KEY>.
+    /// item:<id> or ref:<KEY>; reject: item:<id> merges into it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     /// Tree filters.
@@ -230,7 +230,7 @@ pub struct WorkLinkArgs {
     /// set_status: todo | in_progress | done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    /// item:<id> or ref:<KEY>.
+    /// item:<id> or ref:<KEY>; reject: item:<id> merges into it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     /// Version seen (0 none).

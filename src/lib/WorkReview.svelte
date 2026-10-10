@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { viewKey } from './shortcuts';
   // The Review tab of the Work view (work graph M14): link suggestions and
   // conflicts (a cross-org link, an unavailable ticket, a session with work
   // but no primary), each with its why. One at a time — Confirm / Reject /
@@ -35,6 +36,7 @@
     readErrorText,
     reconsiderWorkLink,
     reviewKindLabel,
+    reviewDuplicateProposal,
     reviewProposal,
     setPrimaryWork,
     taskLabel,
@@ -50,6 +52,7 @@
   } from './work_view';
   import WorkConflictNotice from './WorkConflictNotice.svelte';
   import ProposedBy from './ProposedBy.svelte';
+  import { preselect } from './ai_proposal';
   import type { IpcError, Result } from './result';
 
   let {
@@ -453,31 +456,31 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // The keys are the registry's `work-review` rows (step 0.1).
+    const act = viewKey('work-review', e);
+    if (!act) return;
     const target = e.target as HTMLElement | null;
     if (target && target !== e.currentTarget && !target.classList.contains('item')) {
-      if (!['j', 'k', 'ArrowDown', 'ArrowUp'].includes(e.key)) return;
+      if (act !== 'work-review.down' && act !== 'work-review.up') return;
       if (target.tagName === 'INPUT' || target.tagName === 'SELECT') return;
     }
     const it = items[focusIdx];
-    switch (e.key) {
-      case 'j':
-      case 'ArrowDown':
+    switch (act) {
+      case 'work-review.down':
         focusIdx = Math.min(items.length - 1, focusIdx + 1);
         break;
-      case 'k':
-      case 'ArrowUp':
+      case 'work-review.up':
         focusIdx = Math.max(0, focusIdx - 1);
         break;
-      case 'y':
+      case 'work-review.yes':
         if (it?.kind === 'suggestion') void confirm(it);
         else if (it && it.kind !== 'no_primary') void keep(it);
         else if (it) void makePrimary(it);
         break;
-      case 'n':
+      case 'work-review.no':
         if (it?.kind === 'suggestion') void reject(it);
         break;
-      case 'x':
+      case 'work-review.pick':
         if (it) togglePick(it);
         break;
       default:
@@ -568,6 +571,30 @@
               testid="work-review-proposed-by"
               onchange={mine === null && !busy ? () => openChange(it) : undefined}
             />
+          {/if}
+          {#if it.kind === 'suggestion' && it.duplicate_of && preselect('tracker_duplicate', reviewDuplicateProposal(it)) != null}
+            {@const dup = it.duplicate_of}
+            {@const dupLabel = dup.key ?? taskLabel({ task_id: dup.task_id, title: dup.title })}
+            <!-- Redesign 6.8, J7: this local task may be the same work as a
+                 tracker ticket. Linking the ticket instead is a person's
+                 click (the same Change… as above); nothing merges. -->
+            <div class="dup" data-testid="work-review-duplicate">
+              <span>May duplicate {dupLabel}</span>
+              <ProposedBy
+                proposal={reviewDuplicateProposal(it)}
+                field="tracker_duplicate"
+                testid="work-review-duplicate-proposed-by"
+                onchange={mine === null && !busy ? () => openChange(it) : undefined}
+              />
+              <button
+                class="btn btn--quiet"
+                type="button"
+                data-testid="work-review-duplicate-link"
+                disabled={busy || mine !== null}
+                title={mine ?? ''}
+                onclick={() => void changeTo(it, { item_id: dup.item_id })}>Link {dupLabel} instead</button
+              >
+            </div>
           {/if}
           <div class="sub">
             <button class="link muted" type="button" title="Open the session" onclick={() => openSession(it)}
@@ -749,5 +776,13 @@
   }
   .error {
     color: var(--usage-crit);
+  }
+  .dup {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
   }
 </style>

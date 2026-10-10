@@ -2339,6 +2339,86 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Proposing the main ticket in Review when a session's first prompt names several. A branch naming one decides without Jev. Shadow only records; assist suggests.",
+      "key": "decide.jev.main_ticket",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: main ticket",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Flagging in Review a new local task that may be the same work as an open tracker ticket. Shadow only records; assist suggests.",
+      "key": "decide.jev.tracker_duplicate",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: local task duplicates a ticket",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -3764,6 +3844,16 @@
               "type": "field"
             },
             {
+              "hint": "Marks the main ticket in Review when a session's first prompt names several; you still confirm it.",
+              "key": "decide.jev.main_ticket",
+              "type": "field"
+            },
+            {
+              "hint": "Marks a new local task in Review that may repeat a tracker ticket; linking the ticket instead is yours.",
+              "key": "decide.jev.tracker_duplicate",
+              "type": "field"
+            },
+            {
               "key": "decide.jev.unassigned",
               "type": "field"
             },
@@ -4075,176 +4165,206 @@
       ],
       "parent": "settings",
       "resource": "org",
-      "sections": [
+      "spec": "fleet.page/1",
+      "tabs": [
         {
-          "items": [
+          "sections": [
             {
-              "key": "name",
-              "type": "field"
+              "items": [
+                {
+                  "key": "name",
+                  "type": "field"
+                },
+                {
+                  "key": "color",
+                  "type": "field"
+                }
+              ],
+              "title": "Organisation"
             },
             {
-              "key": "color",
-              "type": "field"
+              "items": [
+                {
+                  "key": "spent_today_micros",
+                  "type": "field"
+                },
+                {
+                  "key": "spent_month_micros",
+                  "type": "field"
+                },
+                {
+                  "key": "spent_week_micros",
+                  "type": "field"
+                },
+                {
+                  "key": "session_count",
+                  "type": "field"
+                }
+              ],
+              "tiles": true,
+              "title": "Overview"
+            },
+            {
+              "items": [
+                {
+                  "key": "needs_admin",
+                  "type": "field"
+                },
+                {
+                  "key": "needs_you",
+                  "type": "field"
+                }
+              ],
+              "title": "Needs an admin"
+            },
+            {
+              "items": [
+                {
+                  "key": "rules",
+                  "type": "field"
+                },
+                {
+                  "key": "hosts",
+                  "type": "field"
+                },
+                {
+                  "key": "trackers",
+                  "type": "field"
+                },
+                {
+                  "key": "catalogs",
+                  "type": "field"
+                }
+              ],
+              "title": "What belongs to it"
             }
           ],
-          "title": "Organisation"
-        },
-        {
-          "items": [
-            {
-              "key": "spent_today_micros",
-              "type": "field"
-            },
-            {
-              "key": "spent_month_micros",
-              "type": "field"
-            },
-            {
-              "key": "spent_week_micros",
-              "type": "field"
-            },
-            {
-              "key": "session_count",
-              "type": "field"
-            }
-          ],
-          "tiles": true,
           "title": "Overview"
         },
         {
-          "items": [
+          "sections": [
             {
-              "key": "spend_series",
-              "type": "field"
-            },
-            {
-              "key": "spend_by_person",
-              "type": "field"
-            }
-          ],
-          "title": "Spend"
-        },
-        {
-          "items": [
-            {
-              "key": "needs_admin",
-              "type": "field"
-            },
-            {
-              "key": "needs_you",
-              "type": "field"
-            }
-          ],
-          "title": "Needs an admin"
-        },
-        {
-          "items": [
-            {
-              "key": "rules",
-              "type": "field"
-            },
-            {
-              "key": "hosts",
-              "type": "field"
-            },
-            {
-              "key": "trackers",
-              "type": "field"
-            },
-            {
-              "key": "catalogs",
-              "type": "field"
-            }
-          ],
-          "title": "What belongs to it"
-        },
-        {
-          "items": [
-            {
-              "key": "members",
-              "type": "field"
-            },
-            {
-              "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. Adding a member offers a pairing code for their device; Pair a device mints another.",
-              "tone": "info",
-              "type": "notice"
+              "items": [
+                {
+                  "key": "members",
+                  "type": "field"
+                },
+                {
+                  "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. Adding a member offers a pairing code for their device; Pair a device mints another.",
+                  "tone": "info",
+                  "type": "notice"
+                }
+              ],
+              "title": "Members"
             }
           ],
           "title": "Members"
         },
         {
-          "items": [
+          "sections": [
             {
-              "key": "devices",
-              "type": "field"
-            },
-            {
-              "text": "Pair a new phone, browser or desktop in Settings → Devices, and bind it to this org there or here.",
-              "tone": "info",
-              "type": "notice"
+              "items": [
+                {
+                  "key": "devices",
+                  "type": "field"
+                },
+                {
+                  "text": "Pair a new phone, browser or desktop in Settings → Devices, and bind it to this org there or here.",
+                  "tone": "info",
+                  "type": "notice"
+                }
+              ],
+              "title": "Devices"
             }
           ],
           "title": "Devices"
         },
         {
-          "items": [
+          "sections": [
             {
-              "key": "isolate_sessions",
-              "type": "field"
-            },
-            {
-              "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way.",
-              "tone": "warn",
-              "type": "notice"
-            },
-            {
-              "key": "bound_sees_unassigned",
-              "type": "field"
-            },
-            {
-              "key": "owns_hub",
-              "type": "field"
-            },
-            {
-              "key": "admins_see_unclaimed",
-              "type": "field"
+              "items": [
+                {
+                  "key": "spend_series",
+                  "type": "field"
+                },
+                {
+                  "key": "spend_by_person",
+                  "type": "field"
+                },
+                {
+                  "text": "Spend by person is shown only to an admin who sees every session; otherwise it is hidden whole, never in part. Fleet warns at a budget; it never stops a session.",
+                  "tone": "info",
+                  "type": "notice"
+                }
+              ],
+              "title": "Spend"
             }
           ],
-          "title": "Boundary"
+          "title": "Spend"
         },
         {
-          "items": [
+          "sections": [
             {
-              "key": "auto_tidy",
-              "type": "field"
+              "items": [
+                {
+                  "key": "isolate_sessions",
+                  "type": "field"
+                },
+                {
+                  "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way.",
+                  "tone": "warn",
+                  "type": "notice"
+                },
+                {
+                  "key": "bound_sees_unassigned",
+                  "type": "field"
+                },
+                {
+                  "key": "owns_hub",
+                  "type": "field"
+                },
+                {
+                  "key": "admins_see_unclaimed",
+                  "type": "field"
+                }
+              ],
+              "title": "Boundary"
             },
             {
-              "key": "jev_allowed",
-              "type": "field"
+              "items": [
+                {
+                  "key": "auto_tidy",
+                  "type": "field"
+                },
+                {
+                  "key": "jev_allowed",
+                  "type": "field"
+                },
+                {
+                  "key": "jev_reply_allowed",
+                  "type": "field"
+                }
+              ],
+              "title": "Automation"
             },
             {
-              "key": "jev_reply_allowed",
-              "type": "field"
+              "items": [
+                {
+                  "key": "settings",
+                  "type": "field"
+                },
+                {
+                  "text": "The fleet-wide values are in Settings → Limits and Settings → Work; what is set here applies to this org's sessions only.",
+                  "tone": "info",
+                  "type": "notice"
+                }
+              ],
+              "title": "Its own settings"
             }
           ],
-          "title": "Automation"
-        },
-        {
-          "items": [
-            {
-              "key": "settings",
-              "type": "field"
-            },
-            {
-              "text": "The fleet-wide values are in Settings → Limits and Settings → Work; what is set here applies to this org's sessions only.",
-              "tone": "info",
-              "type": "notice"
-            }
-          ],
-          "title": "Its own settings"
+          "title": "Settings"
         }
       ],
-      "spec": "fleet.page/1",
       "title": "Organisations"
     },
     {
@@ -4399,6 +4519,17 @@
       "title": "People"
     },
     {
+      "graph": {
+        "center": "This hub",
+        "facts": [
+          "latency",
+          "messages_today"
+        ],
+        "state": "state",
+        "up": [
+          "connected"
+        ]
+      },
       "id": "settings.federation",
       "intro": "Other fleets' hubs this hub is linked to. Sessions on both sides can message each other through the link. Linking and unlinking need this device to be trusted.",
       "layout": "master_detail",
@@ -5571,7 +5702,7 @@
           "edit": "jev",
           "help": "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
           "id": "jev_allowed",
-          "label": "Allow Jev (decision model) for this organisation's work",
+          "label": "Allow Jev (decision model) for {title}'s work",
           "on_off": true,
           "type": "bool"
         },

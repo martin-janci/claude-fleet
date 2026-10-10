@@ -5,9 +5,11 @@
    * agent's own screen, then shell terminals 1..N, with + New, Split and
    * Clear. Pure presentation: `TerminalView` owns the list and the actions.
    */
-  import { MAX_SHELL_TERMINALS } from './terminals';
+  import { MAX_SHELL_TERMINALS, TERMINAL_STARTS, terminalStartLabel, type TerminalStart } from './terminals';
   import { shortcutLabel } from './shortcuts';
   import { detectMac } from './terminal_keys';
+  import ConfirmDialog from './ConfirmDialog.svelte';
+  import { tick } from 'svelte';
 
   let {
     agentLabel = 'Claude Code',
@@ -21,6 +23,9 @@
     onsplit,
     onclear,
     onpopout = undefined,
+    host = null,
+    opensOn = 'worktree',
+    onopenson = undefined,
   }: {
     /** The agent tab's name, as the session bar names it. */
     agentLabel?: string;
@@ -36,7 +41,46 @@
     onclear: () => void;
     /** Pop the picked tab out into its own window (step 5.4). */
     onpopout?: () => void;
+    /** The session's host, for the "New terminal opens on" picker; null
+     *  hides the picker. */
+    host?: string | null;
+    /** Where + New starts the next terminal (Terminals board). */
+    opensOn?: TerminalStart;
+    onopenson?: (at: TerminalStart) => void;
   } = $props();
+
+  // The shell's actions menu (Terminals board, "Terminal actions"): the
+  // ⋯ button or a right-click on a shell tab. Kill terminal… asks first.
+  let menuFor = $state<number | null>(null);
+  let killAsk = $state<number | null>(null);
+  let menuEl = $state<HTMLElement | null>(null);
+
+  async function openMenu(n: number) {
+    menuFor = n;
+    await tick();
+    menuEl?.querySelector<HTMLElement>('[role=menuitem]')?.focus();
+  }
+  function closeMenu() {
+    menuFor = null;
+  }
+  function menuKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeMenu();
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const items = Array.from(menuEl?.querySelectorAll<HTMLElement>('[role=menuitem]') ?? []);
+    if (!items.length) return;
+    e.preventDefault();
+    const i = items.indexOf(document.activeElement as HTMLElement);
+    items[e.key === 'ArrowDown' ? (i + 1) % items.length : (i - 1 + items.length) % items.length].focus();
+  }
+  function pick(fn: () => void) {
+    closeMenu();
+    fn();
+  }
 
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
   const newChord = shortcutLabel('new-terminal', isMac);
@@ -65,6 +109,11 @@
         aria-selected={active === n}
         title="Shell {n} · next tab {nextChord}"
         onclick={() => onselect(n)}
+        oncontextmenu={(e) => {
+          e.preventDefault();
+          onselect(n);
+          void openMenu(n);
+        }}
         data-testid="terminal-tab-{n}">Shell {n}</button
       >
       <button
@@ -97,6 +146,44 @@
     >
   {/if}
   {#if active !== null}
+    <span class="menu-wrap">
+      <button
+        type="button"
+        class="act"
+        aria-haspopup="menu"
+        aria-expanded={menuFor === active}
+        aria-label="Shell {active} actions"
+        title="Shell {active} actions"
+        disabled={busy}
+        onclick={() => (menuFor === active ? closeMenu() : void openMenu(active as number))}
+        data-testid="terminal-menu-toggle">⋯</button
+      >
+      {#if menuFor !== null && menuFor === active}
+        {@const n = menuFor}
+        <!-- svelte-ignore a11y_interactive_supports_focus -->
+        <div class="menu" role="menu" aria-label="Terminal actions" bind:this={menuEl} onkeydown={menuKey} data-testid="terminal-menu">
+          <button type="button" role="menuitem" class="mi" onclick={() => pick(onclear)}>Clear</button>
+          <button type="button" role="menuitem" class="mi" onclick={() => pick(onsplit)}
+            >{split ? 'Show one terminal' : 'Split right'}</button
+          >
+          {#if onpopout}
+            <button type="button" role="menuitem" class="mi" onclick={() => pick(onpopout)}>Pop out ↗</button>
+          {/if}
+          <div class="sep" role="separator"></div>
+          <button
+            type="button"
+            role="menuitem"
+            class="mi mi--danger"
+            onclick={() => {
+              // Read now: `n` follows `menuFor`, which closing the menu clears.
+              const which = n;
+              pick(() => (killAsk = which));
+            }}
+            data-testid="terminal-kill">Kill terminal…<span class="meta">the session keeps running</span></button
+          >
+        </div>
+      {/if}
+    </span>
     <button
       type="button"
       class="act"
@@ -110,7 +197,38 @@
       >Clear</button
     >
   {/if}
+  {#if host && onopenson}
+    <label class="opens-on" title="Where + New starts the next terminal. A terminal always runs on the session's host.">
+      <span class="meta">New terminal opens on</span>
+      <select
+        value={opensOn}
+        onchange={(e) => onopenson?.((e.currentTarget as HTMLSelectElement).value as TerminalStart)}
+        data-testid="terminal-opens-on"
+      >
+        {#each TERMINAL_STARTS as at (at)}
+          <option value={at}>{terminalStartLabel(at, host)}</option>
+        {/each}
+      </select>
+    </label>
+  {/if}
 </div>
+
+{#if killAsk !== null}
+  {@const n = killAsk}
+  <ConfirmDialog
+    title="Kill Shell {n}?"
+    message="Its tmux session ends and anything running in it stops. The session and its agent keep running."
+    confirmLabel="Kill terminal"
+    danger
+    confirmTestId="terminal-kill-confirm"
+    onconfirm={() => {
+      const which = n;
+      killAsk = null;
+      onclose(which);
+    }}
+    oncancel={() => (killAsk = null)}
+  />
+{/if}
 
 <style>
   .strip {
@@ -174,5 +292,74 @@
   }
   .spacer {
     flex: 1 1 auto;
+  }
+  .menu-wrap {
+    position: relative;
+    display: inline-flex;
+  }
+  .menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 3;
+    width: 16rem;
+    padding: 0.3rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-pop);
+  }
+  .mi {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    height: var(--control-h-lg);
+    padding: 0 0.5rem;
+    border: none;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    text-align: left;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .mi:hover,
+  .mi:focus-visible {
+    background: var(--accent-soft);
+  }
+  .mi:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
+  }
+  .mi--danger {
+    color: var(--status-failed);
+  }
+  .mi .meta {
+    margin-left: auto;
+  }
+  .sep {
+    height: 1px;
+    margin: 0.25rem 0;
+    background: var(--border);
+  }
+  .meta {
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+  }
+  .opens-on {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-left: 0.25rem;
+  }
+  .opens-on select {
+    font: inherit;
+    font-size: var(--text-2xs);
+    color: var(--fg);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.1rem 0.3rem;
   }
 </style>

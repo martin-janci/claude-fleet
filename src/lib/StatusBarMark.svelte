@@ -8,8 +8,9 @@
   // It shows nothing while the fleet is still arriving (the empty pane's
   // Particle swarm is that screen's loader, step 3.13) or while the link is
   // reconnecting (the banner's Gravity well is), so a screen keeps one
-  // loader. The OS tray and dock (Breathe, Chase, Halo, Signal lost there
-  // too) need a native tray this app does not have yet.
+  // loader. The OS tray says the same with its own four frames (step 3.17,
+  // tray_state.ts and src-tauri's commands/tray.rs), and the macOS dock
+  // wears the Inbox count as its Halo badge.
   //
   // Step 3.15: a warm start has no splash, so Breathe shows here while the
   // list re-syncs; after a cold one, a host that had not answered yet says

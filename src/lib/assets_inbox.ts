@@ -103,8 +103,10 @@ export function buildInbox(input: InboxInput): Inbox {
 
   for (const c of input.cards ?? []) {
     // An applied card that held hosts back stays too (final review I1): its
-    // held lines and Sync {host} buttons are what the person acts on.
-    const section = isOpenCard(c) ? sections.cards : isUndoBanner(c) || heldBack(c) ? sections.applied : null;
+    // held lines and Sync {host} buttons are what the person acts on. So
+    // does what `catalog.auto` synced on its own (redesign 8.7): an
+    // automatic write is always seen.
+    const section = isOpenCard(c) ? sections.cards : isUndoBanner(c) || heldBack(c) || c.auto ? sections.applied : null;
     section?.push({
       key: keyOf({ type: 'card', id: c.id }), kind: c.kind, name: c.summary, why: c.error ?? '',
       dots: {}, query: { kind: c.kind, name: c.summary, hosts: [] }, card: c,
