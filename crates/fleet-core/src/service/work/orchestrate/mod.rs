@@ -760,6 +760,38 @@ async fn apply_card(
     }
 }
 
+/// A card being decided right now, released when the decision is written
+/// (or fails). Process-wide: one hub decides each card once.
+#[derive(Debug)]
+struct CardClaim(i64);
+
+static CARDS_IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<i64>>> =
+    std::sync::LazyLock::new(Default::default);
+
+impl CardClaim {
+    fn take(id: i64) -> Result<Self, IpcError> {
+        let mut held = CARDS_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !held.insert(id) {
+            return Err(IpcError::new(
+                codes::E_INVALID_STATE,
+                format!("card {id} is being decided already"),
+            ));
+        }
+        Ok(Self(id))
+    }
+}
+
+impl Drop for CardClaim {
+    fn drop(&mut self) {
+        CARDS_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
 /// `work_link { action: card_decide, card_id, ok, note? }`: a person
 /// applies a card (`ok: true`) or dismisses it. A question is answered by
 /// applying it with the answer as `note`.
@@ -795,6 +827,11 @@ pub async fn decide_card(
         }
         (m, card)
     };
+    // Claimed before applying: `apply_card` runs with the store unlocked
+    // (it may dispatch a run or propose a tree), so the desktop and the
+    // phone pressing Apply together both passed the `open` check above and
+    // both applied the card. The second now hears it is being decided.
+    let _claim = CardClaim::take(id)?;
     let who = super::graph::actor(scope);
     let (state, note) = if ok {
         match apply_card(
@@ -827,7 +864,14 @@ pub async fn decide_card(
         ("dismissed", args.note.clone())
     };
     let s = lock(&deps.store)?;
-    s.decide_card(id, state, &who, note.as_deref())?;
+    if !s.decide_card(id, state, &who, note.as_deref())? {
+        // Closed meanwhile by something other than a person's decision (a
+        // stale sweep): say so rather than report a decision not recorded.
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!("card {id} was closed while it was being decided"),
+        ));
+    }
     event(
         &s,
         m.id,

@@ -164,6 +164,14 @@ describe('answerFingerprint', () => {
     );
   });
 
+  it('changes when the tool call being approved changes', () => {
+    // Same question, same options: only the command differs. A press meant
+    // for the first must not approve the second.
+    const build = { ...dialog, detail: 'Bash(rm -rf build)' };
+    const home = { ...dialog, detail: 'Bash(rm -rf ~)' };
+    expect(answerFingerprint(home)).not.toBe(answerFingerprint(build));
+  });
+
   it('ignores which option is currently highlighted', () => {
     // Arrow keys move the ❯ glyph without changing the question being asked;
     // that must not read as "the dialog changed under you".

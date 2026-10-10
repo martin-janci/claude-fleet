@@ -945,7 +945,16 @@ fn unix_now() -> i64 {
 /// transaction commits and then flushes them in one burst (one pass every
 /// ~20 s on a hub), so the buffer has to absorb a whole pass over a busy
 /// fleet, not a steady trickle.
-pub const BROADCAST_CAPACITY: usize = 256;
+///
+/// A subscriber that falls this far behind is `lagged`: its stream closes
+/// and its client re-lists the whole fleet — so the small, urgent frame that
+/// arrives next (a dialog going up) waits for that. Every subscriber shares
+/// the one ring and the `?kinds=` filter runs after the receive, so frames a
+/// phone never asked for count against it too. 256 was one busy pass; 2048
+/// (the device-communication analysis's own figure, phase 4 item 12) is a
+/// few passes for a phone whose socket stalls for a moment. The cost is the
+/// ring's slots, a few MB at most on a hub.
+pub const BROADCAST_CAPACITY: usize = 2048;
 
 /// Events kept for replay. At the measured churn of a busy fleet — about
 /// 0.64 frames a second — 512 slots is roughly thirteen minutes of history,

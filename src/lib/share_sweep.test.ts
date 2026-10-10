@@ -594,7 +594,7 @@ const KEY_ONLY_WRITERS: readonly {
     file: './sessions.ts',
     from: 'send_prompt',
     to: 'answer_dialog',
-    pins: ["args: { host_alias: hostAlias, tmux_name: tmuxName, prompt: '', keys: key },"],
+    pins: ["args: { host_alias: hostAlias, tmux_name: tmuxName, prompt: '', keys: key, ...(expect ? { expect } : {}) },"],
   },
 ];
 

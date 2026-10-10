@@ -98,7 +98,7 @@ pub const RISKY_WORDS: &[&str] = &[
 
 static RISKY: LazyLock<Regex> = LazyLock::new(|| {
     let words = RISKY_WORDS.join("|");
-    Regex::new(&format!(r"(?i)\b(?:{words})\b|don'?t ask again")).expect("risky words")
+    Regex::new(&format!(r"(?i)\b(?:{words})\b|don['’]?t ask again")).expect("risky words")
 });
 
 /// PURE: an option AI never proposes (see [`RISKY_WORDS`]).

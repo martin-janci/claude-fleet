@@ -2711,6 +2711,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         prompt: "".into(),
                         submit: true,
                         keys: Some("Enter".into()),
+                        expect: None,
                     },
                     s,
                     h,

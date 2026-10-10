@@ -73,8 +73,8 @@ use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use fleet_proto::{
-    decode_agent_frame_lenient_within, decode_agent_frame_within, encode_hub_frame, AgentFrame,
-    Decoded, HubFrame, MAX_FRAME_BYTES,
+    decode_agent_frame_lenient_within, decode_agent_frame_within, decode_b64, encode_b64,
+    encode_hub_frame, AgentFrame, Decoded, HubFrame, MAX_FRAME_BYTES,
 };
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
@@ -725,24 +725,50 @@ async fn write_loop(
     alias: String,
     conn_id: ConnId,
 ) {
+    // Small frames first, then pings, then bulk ones (an upload's chunks,
+    // a big upload): an `exec` or a `cancel` queued behind a 200 MiB file
+    // waited for all of it. Each lane keeps its own order, so an upload's
+    // chunks still precede its final frame. `welcome` is small and queued
+    // before anything else, so it stays the first frame down the socket.
+    let mut small: std::collections::VecDeque<HubFrame> = Default::default();
+    let mut bulk: std::collections::VecDeque<HubFrame> = Default::default();
+    let mut closed = false;
     loop {
-        // `biased`, and `rx` listed first: the registry's own queue — which
-        // `welcome` is queued onto before this connection is even
-        // registered (`serve`) — always wins a tie over a heartbeat `ping`
-        // that happens to be ready in the same instant. Without `biased`,
-        // `select!` picks pseudo-randomly between two ready branches, so a
-        // ping racing registration could in principle reach the agent
-        // before `welcome` does. This is what makes `welcome` UNCONDITIONALLY
-        // the first frame down an accepted connection, not just first
-        // unless a ping wins a coin flip.
-        let frame = tokio::select! {
-            biased;
-            frame = rx.recv() => match frame {
-                Some(frame) => frame,
-                None => break,
+        while let Ok(frame) = rx.try_recv() {
+            if is_bulk(&frame) {
+                bulk.push_back(frame);
+            } else {
+                small.push_back(frame);
+            }
+        }
+        let ready = small
+            .pop_front()
+            .or_else(|| pings.try_recv().ok())
+            .or_else(|| bulk.pop_front());
+        let frame = match ready {
+            Some(frame) => frame,
+            None if closed => break,
+            // `biased`, and `rx` listed first: the registry's own queue —
+            // which `welcome` is queued onto before this connection is even
+            // registered (`serve`) — always wins a tie over a heartbeat
+            // `ping` that happens to be ready in the same instant. Without
+            // `biased`, `select!` picks pseudo-randomly between two ready
+            // branches, so a ping racing registration could in principle
+            // reach the agent before `welcome` does. This is what makes
+            // `welcome` UNCONDITIONALLY the first frame down an accepted
+            // connection, not just first unless a ping wins a coin flip.
+            None => tokio::select! {
+                biased;
+                frame = rx.recv() => match frame {
+                    Some(frame) => frame,
+                    None => {
+                        closed = true;
+                        continue;
+                    }
+                },
+                // Disabled once the read loop has dropped its sender.
+                Some(ping) = pings.recv() => ping,
             },
-            // Disabled once the read loop has dropped its sender.
-            Some(ping) = pings.recv() => ping,
         };
         // Armed BEFORE the frame goes out, so the answer can never beat its
         // own budget onto the socket.
@@ -782,6 +808,22 @@ async fn write_loop(
     }
     let _ = tokio::time::timeout(CLOSE_TIMEOUT, sink.close()).await;
 }
+
+/// A frame the writer sends after the small ones: an upload's chunk, the
+/// final `upload` of a chunked one (however small its last piece — it must
+/// not overtake its own chunks), or an upload too big for one frame's lane.
+fn is_bulk(frame: &HubFrame) -> bool {
+    match frame {
+        HubFrame::UploadChunk { .. } => true,
+        HubFrame::Upload {
+            bytes_b64, chunks, ..
+        } => *chunks > 0 || bytes_b64.len() > BULK_FRAME_BYTES,
+        _ => false,
+    }
+}
+
+/// Past this many bytes of payload an outbound frame rides the bulk lane.
+const BULK_FRAME_BYTES: usize = 64 * 1024;
 
 /// A registered connection, as the read loop needs to know it.
 struct Registered<'a> {
@@ -824,6 +866,9 @@ async fn read_loop(
     // file does not cover. The handshake is already behind us here — see
     // the crate doc.
     let mut unknown_kinds = fleet_proto::UnknownKinds::new();
+    // Pieces of chunked results (proto 2), by request id, until their final
+    // `result` — each bounded by that request's own budget.
+    let mut assembly = fleet_proto::Assembly::default();
     loop {
         // A beat that has come due is taken first, before any read, however
         // many frames are waiting: see `Ticker`. Otherwise wait for either.
@@ -916,7 +961,51 @@ async fn read_loop(
                                     tracing::warn!(host = %alias, code = %e.code, error = %e.message, "[agent] report batch refused");
                                 }
                             }
+                            Ok(Decoded::Frame(AgentFrame::ResultChunk {
+                                id,
+                                stdout_b64,
+                                stderr_b64,
+                            })) => {
+                                // Only for a request this hub is waiting on,
+                                // and only up to what its answer may cost.
+                                let limit = budgets
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .armed
+                                    .get(&id)
+                                    .map(|(budget, _)| *budget);
+                                let pushed = match limit {
+                                    None => {
+                                        Err("a result chunk for no request in flight".to_string())
+                                    }
+                                    Some(limit) => decode_b64(&stdout_b64)
+                                        .and_then(|out| {
+                                            decode_b64(&stderr_b64).map(|err| (out, err))
+                                        })
+                                        .and_then(|(out, err)| {
+                                            assembly.push(&id, &out, &err, limit)
+                                        })
+                                        .map_err(|e| e.to_string()),
+                                };
+                                if let Err(why) = pushed {
+                                    tracing::warn!(
+                                        host = %alias, conn = conn_id, why,
+                                        "[agent] refusing a result chunk; closing"
+                                    );
+                                    return;
+                                }
+                            }
                             Ok(Decoded::Frame(frame)) => {
+                                let frame = match reassembled(&mut assembly, frame) {
+                                    Ok(frame) => frame,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            host = %alias, conn = conn_id, error = %e,
+                                            "[agent] refusing a chunked result; closing"
+                                        );
+                                        return;
+                                    }
+                                };
                                 if let Some(id) = answered_id(&frame) {
                                     budgets.lock().unwrap_or_else(|e| e.into_inner()).done(id);
                                 }
@@ -978,6 +1067,46 @@ async fn read_loop(
     }
 }
 
+/// A `result` with the chunks that came before it put back in front of its
+/// own pieces, as one ordinary `result` — what every caller already reads.
+/// Any other frame, and an unchunked `result`, passes through.
+fn reassembled(
+    assembly: &mut fleet_proto::Assembly,
+    frame: AgentFrame,
+) -> Result<AgentFrame, fleet_proto::ProtoError> {
+    let AgentFrame::Result {
+        id,
+        exit_code,
+        stdout_b64,
+        stderr_b64,
+        truncated,
+        chunks,
+    } = frame
+    else {
+        return Ok(frame);
+    };
+    let Some(mut pieces) = assembly.finish(&id, chunks)? else {
+        return Ok(AgentFrame::Result {
+            id,
+            exit_code,
+            stdout_b64,
+            stderr_b64,
+            truncated,
+            chunks,
+        });
+    };
+    pieces.first.extend(decode_b64(&stdout_b64)?);
+    pieces.second.extend(decode_b64(&stderr_b64)?);
+    Ok(AgentFrame::Result {
+        id,
+        exit_code,
+        stdout_b64: encode_b64(&pieces.first),
+        stderr_b64: encode_b64(&pieces.second),
+        truncated,
+        chunks: 0,
+    })
+}
+
 /// What the read loop woke up for.
 enum Step {
     Beat,
@@ -1036,7 +1165,10 @@ fn answer_budget(frame: &HubFrame) -> Option<(String, usize, Instant)> {
             exec_budget(*cap_bytes),
             Instant::now() + Duration::from_millis(*timeout_ms) + LATE_ANSWER_GRACE,
         )),
-        HubFrame::Upload { .. } | HubFrame::Cancel { .. } | HubFrame::Ping { .. } => None,
+        HubFrame::Upload { .. }
+        | HubFrame::UploadChunk { .. }
+        | HubFrame::Cancel { .. }
+        | HubFrame::Ping { .. } => None,
         // Sent once, straight onto the outbound channel, before this
         // connection is even registered — never through a path that awaits
         // an answer.
@@ -1056,13 +1188,37 @@ fn exec_budget(cap_bytes: Option<u64>) -> usize {
 fn answered_id(frame: &AgentFrame) -> Option<&str> {
     match frame {
         AgentFrame::Result { id, .. } | AgentFrame::Pong { id } => Some(id),
-        AgentFrame::Hello { .. } | AgentFrame::Report { .. } => None,
+        // Not an answer yet: its `result` releases the budget.
+        AgentFrame::ResultChunk { .. } | AgentFrame::Hello { .. } | AgentFrame::Report { .. } => {
+            None
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A chunked upload's final frame rides behind its chunks however small
+    /// its last piece; an ordinary small upload does not.
+    #[test]
+    fn a_chunked_upload_s_final_frame_stays_behind_its_chunks() {
+        let upload = |chunks, len| HubFrame::Upload {
+            id: "u".into(),
+            path: "/p".into(),
+            mode: 0o600,
+            bytes_b64: "a".repeat(len),
+            chunks,
+        };
+        assert!(is_bulk(&HubFrame::UploadChunk {
+            id: "u".into(),
+            bytes_b64: String::new()
+        }));
+        assert!(is_bulk(&upload(3, 4)));
+        assert!(!is_bulk(&upload(0, 4)));
+        assert!(is_bulk(&upload(0, BULK_FRAME_BYTES + 1)));
+    }
+
     use crate::agent::registry::AgentRegistry;
     use crate::store::Store;
     use fleet_proto::{encode_agent_frame, encode_b64, AgentFrame, HubFrame, MAX_FRAME_BYTES};
@@ -1346,6 +1502,7 @@ mod tests {
 
     fn result_of(id: &str, stdout: &[u8], stderr: &[u8]) -> AgentFrame {
         AgentFrame::Result {
+            chunks: 0,
             id: id.into(),
             exit_code: 0,
             stdout_b64: encode_b64(stdout),
@@ -1577,6 +1734,7 @@ mod tests {
         // A frame far bigger than the loopback buffers, to a client that
         // never reads: the writer blocks in `send`.
         let big = HubFrame::Upload {
+            chunks: 0,
             id: "stuck".into(),
             path: "/tmp/x".into(),
             mode: 0o600,

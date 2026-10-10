@@ -147,7 +147,7 @@
    *  Claude writes these labels, so this reads them rather than guessing
    *  from the ordinal (which differs between dialog kinds). */
   function isSticky(o: AnswerOption): boolean {
-    return /don'?t ask again|auto[- ]?accept/i.test(o.label);
+    return /don['’]?t ask again|auto[- ]?accept/i.test(o.label);
   }
 
   /** A multi-select's free-text row: a tick on it answers nothing without

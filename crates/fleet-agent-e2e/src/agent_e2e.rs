@@ -279,6 +279,31 @@ async fn hub_and_agent_talking_over_a_real_socket() {
         assert_eq!(mode_of(&dest), remote_mode, "local {local_mode:o}");
     }
 
+    // Proto 2 both ways: a file over one chunk (1 MiB) goes up in `upload_chunk`s and
+    // comes back in `result_chunk`s, byte for byte.
+    let big: Vec<u8> = (0..(3 * 1024 * 1024 + 11))
+        .map(|i| (i * 7 % 251) as u8)
+        .collect();
+    let src = local.path().join("big");
+    std::fs::write(&src, &big).unwrap();
+    let dest = home.path().join("uploads/big");
+    SshExec::upload_file(&hub.ssh, "laptop", &src, dest.to_str().unwrap(), PATIENCE)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), big, "uploaded whole");
+    let out = SshExec::run(
+        &hub.ssh,
+        "laptop",
+        &[&format!(
+            "cat {}",
+            fleet_core::shell::quote(dest.to_str().unwrap())
+        )],
+        PATIENCE,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.stdout, big, "read back whole");
+
     // A killed connection: the agent dials again, the new connection
     // REPLACES the old one, and the very next call succeeds.
     proxy.cut();

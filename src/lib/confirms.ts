@@ -1,7 +1,7 @@
 import { derived, get, writable } from 'svelte/store';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { mcpConfirm, mcpPendingConfirms, MCP_CONFIRM_EVENT, type ConfirmRequest } from './mcp';
-import { pushError } from './toasts';
+import { push, pushError } from './toasts';
 import { CONFIRM_CHANGED_EVENT } from './events';
 
 /**
@@ -62,10 +62,24 @@ export async function answerConfirm(nonce: string, approved: boolean): Promise<b
     return false;
   }
   confirmQueue.update((q) => q.filter((x) => x.nonce !== nonce));
+  if (r.value === false) {
+    // The backend refused the answer: the request expired, or another
+    // device answered it first (the first answer wins). Saying nothing here
+    // let the person believe their approve or deny was the one that counted.
+    push({
+      kind: 'error',
+      message: `That ${req.tool} request had already been answered or had expired — your ${approved ? 'approval' : 'denial'} was not recorded.`,
+    });
+    void resync();
+    return false;
+  }
   return true;
 }
 
 let started = false;
+
+/** How often a non-empty queue is re-read so expired requests leave it. */
+export const EXPIRY_RESYNC_MS = 30_000;
 
 /**
  * Replace the queue with what the backend lists now. A hub-backed desktop
@@ -98,6 +112,13 @@ export function startConfirmQueue(): () => void {
   });
   void listen<ConfirmRequest>(MCP_CONFIRM_EVENT, (e) => enqueueConfirm(normalise(e.payload))).then(keep);
   void listen(CONFIRM_CHANGED_EVENT, () => void resync()).then(keep);
+  // A request that expires announces nothing, so re-read the queue now and
+  // then while something is on it: otherwise its card or dialog stays up
+  // until an unrelated change, and answering it only reports "expired".
+  const expiry = setInterval(() => {
+    if (get(confirmQueue).length > 0) void resync();
+  }, EXPIRY_RESYNC_MS);
+  keep(() => clearInterval(expiry));
   return () => {
     disposed = true;
     started = false;

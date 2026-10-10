@@ -98,6 +98,164 @@ pub async fn session_activity(
     Ok(probe_with(agent, &tail))
 }
 
+// The dialog a client drew its answer from, sent with the key so the hub
+// checks it against a fresh read of the pane and presses in the same step
+// (`send_prompt { keys, expect }`). Without it the check was the client's:
+// a read, a round trip back, then the press — and another client answering,
+// or the dialog closing, inside that window put the key into whatever came
+// next. Compared field by field as the clients' own fingerprints do: kind,
+// question, each option's number and label, and the tool call (`detail`);
+// `selected` (the option that must still be highlighted) only for Enter.
+//
+// Plain comments, not doc comments: these would become the tool schema's
+// descriptions, which every MCP client pays for on every connect
+// (`the_served_definition_budget_stays_bounded`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ExpectDialog {
+    pub kind: String,
+    #[serde(default)]
+    pub question: Option<String>,
+    #[serde(default)]
+    pub options: Vec<ExpectOption>,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub selected: Option<u8>,
+}
+
+// One option of an `ExpectDialog`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ExpectOption {
+    pub n: u8,
+    pub label: String,
+}
+
+/// PURE: whether `on_screen` is still the dialog `expect` describes, for
+/// pressing `key`. `E_CONFLICT` with a sentence a client can show as is.
+pub fn dialog_still_matches(
+    expect: &ExpectDialog,
+    on_screen: Option<&pane_intel::PendingInput>,
+    key: crate::tmux::NamedKey,
+) -> Result<(), IpcError> {
+    let Some(p) = on_screen else {
+        return Err(IpcError::new(
+            codes::E_CONFLICT,
+            "That dialog is gone — nothing was sent.",
+        ));
+    };
+    let same = p.kind == expect.kind
+        && p.question == expect.question
+        && p.detail == expect.detail
+        && p.options.len() == expect.options.len()
+        && p.options
+            .iter()
+            .zip(&expect.options)
+            .all(|(a, b)| a.n == b.n && a.label == b.label);
+    if !same {
+        return Err(IpcError::new(
+            codes::E_CONFLICT,
+            "The dialog changed — nothing was sent.",
+        ));
+    }
+    if key == crate::tmux::NamedKey::Enter {
+        if let Some(want) = expect.selected {
+            if p.options.iter().find(|o| o.selected).map(|o| o.n) != Some(want) {
+                return Err(IpcError::new(
+                    codes::E_CONFLICT,
+                    "A different answer is highlighted now — nothing was sent.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read the pane of `session_id` and refuse unless it still shows the
+/// dialog `expect` describes ([`dialog_still_matches`]); the caller presses
+/// right after, with no client round trip in between.
+pub async fn check_expected_dialog(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    session_id: i64,
+    expect: &ExpectDialog,
+    key: crate::tmux::NamedKey,
+) -> Result<(), IpcError> {
+    let probe = session_activity(store, ssh, session_id).await?;
+    let on_screen = probe.pending_input.as_ref().filter(|_| {
+        probe.stuck_kind.is_none() && probe.claude_status.as_deref() == Some("blocked")
+    });
+    dialog_still_matches(expect, on_screen, key)
+}
+
+/// Probe one session's pane and write what it shows about a dialog through
+/// to the row ([`Store::record_dialog_probe`]): the fast path that keeps a
+/// small, urgent fact — "a dialog is up, with these options" / "it was
+/// answered" — from waiting for the 20 s reconcile tick and its whole-host
+/// probe. One `capture-pane`, one SSH round trip.
+pub async fn sync_dialog(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    session_id: i64,
+) -> Result<ActivityProbe, IpcError> {
+    let probe = session_activity(store, ssh, session_id).await?;
+    if probe.stuck_kind.is_none() {
+        let status = probe
+            .claude_status
+            .as_deref()
+            .and_then(|s| s.parse::<pane_intel::ClaudeStatus>().ok());
+        let s = lock(store)?;
+        s.record_dialog_probe(session_id, status, probe.pending_input.as_ref())?;
+    }
+    Ok(probe)
+}
+
+/// When a dialog fast-path read is made, in ms after the event that asked
+/// for it. Claude Code redraws within a few hundred ms of a key or of
+/// raising a dialog; the later reads catch a slow host, or the NEXT dialog
+/// a tool call raises right after an approval.
+pub const DIALOG_FOLLOWUP_MS: [u64; 3] = [300, 1_200, 3_500];
+
+/// Spawn the dialog fast path for `session_id`: re-read its pane at
+/// [`DIALOG_FOLLOWUP_MS`] and write the dialog through. Called when the
+/// Notification hook says a dialog went up, and after a key was pressed
+/// into a session. Stops early once a read finds a parsed dialog after a
+/// [`DialogFollowup::Raised`] (the buttons are up). Best-effort: a failed
+/// read is logged and the tick catches up.
+pub fn spawn_dialog_followup(
+    store: Arc<Mutex<Store>>,
+    ssh: Arc<SshClient>,
+    session_id: i64,
+    why: DialogFollowup,
+) {
+    let _ = crate::rt::try_spawn(async move {
+        let mut waited = 0;
+        for at in DIALOG_FOLLOWUP_MS {
+            tokio::time::sleep(std::time::Duration::from_millis(at - waited)).await;
+            waited = at;
+            match sync_dialog(&store, &ssh, session_id).await {
+                Ok(p) if why == DialogFollowup::Raised && p.pending_input.is_some() => return,
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(session_id, error = %e.message, "[dialog] fast-path read failed");
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// Why [`spawn_dialog_followup`] runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogFollowup {
+    /// The Notification hook: a dialog went up; read until it is parsed.
+    Raised,
+    /// A key went into the session: read until the pane settles, so the
+    /// answered dialog leaves and a following one comes up.
+    Answered,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +278,76 @@ mod tests {
         let p = probe_from_tail("❯ \n  ⏸ manual mode on · ? for shortcuts");
         assert_eq!(p.claude_status.as_deref(), Some("idle"));
         assert_eq!(p.spinner, None);
+    }
+
+    fn dialog() -> pane_intel::PendingInput {
+        pane_intel::PendingInput {
+            kind: "permission".into(),
+            question: Some("Do you want to proceed?".into()),
+            options: vec![
+                pane_intel::PendingOption {
+                    n: 1,
+                    label: "Yes".into(),
+                    selected: true,
+                    checked: false,
+                },
+                pane_intel::PendingOption {
+                    n: 2,
+                    label: "No".into(),
+                    selected: false,
+                    checked: false,
+                },
+            ],
+            multi: false,
+            detail: Some("Bash(rm -rf build)".into()),
+        }
+    }
+
+    fn expect_of(p: &pane_intel::PendingInput) -> ExpectDialog {
+        ExpectDialog {
+            kind: p.kind.clone(),
+            question: p.question.clone(),
+            options: p
+                .options
+                .iter()
+                .map(|o| ExpectOption {
+                    n: o.n,
+                    label: o.label.clone(),
+                })
+                .collect(),
+            detail: p.detail.clone(),
+            selected: p.options.iter().find(|o| o.selected).map(|o| o.n),
+        }
+    }
+
+    #[test]
+    fn the_expected_dialog_is_pressed_only_while_it_is_on_screen() {
+        use crate::tmux::NamedKey;
+        let d = dialog();
+        let expect = expect_of(&d);
+        let one = NamedKey::parse("1").unwrap();
+        assert!(dialog_still_matches(&expect, Some(&d), one).is_ok());
+        // Gone.
+        assert_eq!(
+            dialog_still_matches(&expect, None, one).unwrap_err().code,
+            codes::E_CONFLICT
+        );
+        // Same question and options, another command.
+        let other = pane_intel::PendingInput {
+            detail: Some("Bash(rm -rf ~)".into()),
+            ..d.clone()
+        };
+        assert!(dialog_still_matches(&expect, Some(&other), one).is_err());
+        // Enter with the highlight moved to "No".
+        let mut moved = d.clone();
+        for o in &mut moved.options {
+            o.selected = o.n == 2;
+        }
+        assert!(dialog_still_matches(&expect, Some(&moved), NamedKey::Enter).is_err());
+        assert!(
+            dialog_still_matches(&expect, Some(&moved), one).is_ok(),
+            "a digit names its option; the highlight does not matter"
+        );
     }
 
     /// The probe reads 12 lines precisely so a dialog's question still fits
