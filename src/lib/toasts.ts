@@ -80,6 +80,13 @@ const timers = new Map<number, ReturnType<typeof setTimeout>>();
 const deadlines = new Map<number, number>();
 /** What was left on a held timer, for `releaseToast`. */
 const held = new Map<number, number>();
+/**
+ * Why each toast is held: the pointer, focus, or both. The countdown resumes
+ * only when the last reason goes, so the pointer leaving a toast whose Undo
+ * still has focus does not dismiss it out from under the keyboard.
+ */
+export type ToastHold = 'pointer' | 'focus';
+const holds = new Map<number, Set<ToastHold>>();
 
 /**
  * Each auto-dismissing toast's current countdown: its length, and an arm
@@ -97,6 +104,7 @@ function clearTimer(id: number): void {
   }
   deadlines.delete(id);
   held.delete(id);
+  holds.delete(id);
   toastCountdowns.update((c) => {
     if (!(id in c)) return c;
     const { [id]: _gone, ...rest } = c;
@@ -195,7 +203,10 @@ function arm(id: number, ms: number): void {
  * Stop a toast's countdown while the pointer or focus is on it (the Motion
  * board: "stays 6 s, longer on hover"). A sticky toast has nothing to hold.
  */
-export function holdToast(id: number): void {
+export function holdToast(id: number, why: ToastHold = 'pointer'): void {
+  const reasons = holds.get(id) ?? new Set<ToastHold>();
+  reasons.add(why);
+  holds.set(id, reasons);
   const t = timers.get(id);
   if (!t) return;
   clearTimeout(t);
@@ -204,7 +215,11 @@ export function holdToast(id: number): void {
 }
 
 /** Resume a held countdown with the time it had left. */
-export function releaseToast(id: number): void {
+export function releaseToast(id: number, why: ToastHold = 'pointer'): void {
+  const reasons = holds.get(id);
+  reasons?.delete(why);
+  if (reasons && reasons.size > 0) return;
+  holds.delete(id);
   const left = held.get(id);
   if (left === undefined) return;
   held.delete(id);
@@ -235,6 +250,7 @@ export function clearToasts(): void {
   timers.clear();
   deadlines.clear();
   held.clear();
+  holds.clear();
   toastCountdowns.set({});
   toasts.set([]);
   droppedToasts.set(0);

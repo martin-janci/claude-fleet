@@ -59,6 +59,8 @@ fn an_array_wrapped_in_prose_or_a_fence_is_still_read() {
         format!("Here is the plan:\n```json\n{arr}\n```\nLet me know."),
         format!("I looked at the mission [2 items].\n\n```\n{arr}\n```"),
         format!("{arr}\n\nThe note explains the split."),
+        // An empty array in the prose does not stand in for the answer.
+        format!("Nothing changed ([]) since last time.\n```json\n{arr}\n```"),
     ] {
         let c = parse_commands(&a).unwrap_or_else(|e| panic!("{a}: {e}"));
         assert_eq!(c.len(), 2, "{a}");

@@ -86,12 +86,16 @@ pub fn branches(s: &Store, m: &MissionRow) -> Vec<Branch> {
     out
 }
 
-/// The script that merges every pair of `heads` in the repo at `cwd`.
-pub fn merge_tree_script(cwd: &str, heads: &[String]) -> String {
+/// The script that merges every pair of `heads` in the repo, run in the
+/// first of `cwds` (the branches' worktrees) still on disk: one removed
+/// worktree must not leave the others unchecked while its heads stay cached.
+pub fn merge_tree_script(cwds: &[&str], heads: &[String]) -> String {
+    let dirs: Vec<String> = cwds.iter().map(|d| shq(d)).collect();
     let mut s = format!(
-        "cd {} 2>/dev/null || {{ echo __FLEET_MT_NOREPO; exit 0; }}\n\
+        "ok=; for d in {}; do cd -- \"$d\" 2>/dev/null && {{ ok=1; break; }}; done\n\
+         [ -n \"$ok\" ] || {{ echo __FLEET_MT_NOREPO; exit 0; }}\n\
          git merge-tree -h 2>&1 | grep -q -- --write-tree || {{ echo __FLEET_MT_OLD; exit 0; }}\n",
-        shq(cwd)
+        dirs.join(" ")
     );
     for i in 0..heads.len() {
         for j in i + 1..heads.len() {
@@ -194,7 +198,8 @@ pub async fn check(deps: &Deps, m: &MissionRow) -> Vec<PairState> {
     let mut out = Vec::new();
     for ((host, _), group) in groups.into_iter().filter(|(_, g)| g.len() >= 2) {
         let heads: Vec<String> = group.iter().map(|b| b.head.clone()).collect();
-        let script = merge_tree_script(&group[0].path, &heads);
+        let cwds: Vec<&str> = group.iter().map(|b| b.path.as_str()).collect();
+        let script = merge_tree_script(&cwds, &heads);
         let stdout = match crate::service::catalog::inventory::run_host_script(
             &deps.ssh, &host, &script,
         )
