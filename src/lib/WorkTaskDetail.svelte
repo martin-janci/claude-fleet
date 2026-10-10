@@ -45,7 +45,20 @@
   import { setWorkStatus, type WorkItemStatus } from './work';
   import { listStartRules, ruleProject, type StartRuleView } from './start_rules';
   import { projects } from './projects';
-  import { deliveryOf, hasDelivery, startRuleFor, subtaskProgress, TASK_TAB_LABELS, TASK_TABS, type TaskTab } from './task_detail';
+  import {
+    activityEvents,
+    COMMENT_MAX,
+    commentAuthor,
+    commentOnWork,
+    deleteWorkComment,
+    deliveryOf,
+    hasDelivery,
+    startRuleFor,
+    subtaskProgress,
+    TASK_TAB_LABELS,
+    TASK_TABS,
+    type TaskTab,
+  } from './task_detail';
   import {
     dependencyName,
     groupSessionLinks,
@@ -275,9 +288,47 @@
     if (row) selectSessionExplicitly(row);
   }
 
-  // G3.4: the page is tabbed (Overview, Sessions, Activity); the tab stays
-  // as the selection moves from task to task.
+  // G3.4: the page is tabbed (Overview, Sessions, Activity, Comments); the
+  // tab stays as the selection moves from task to task.
   let tab = $state<TaskTab>('overview');
+
+  // Activity's dated lines: sessions that started, were suggested, turned
+  // down or stopped, and comments.
+  const events = $derived(detail ? activityEvents(detail) : []);
+
+  // Comments: kept in fleet, never sent to a tracker; deleting is the
+  // author's own.
+  const commentBlocked = $derived(hubActionBlocked('comment_on_work', $hubStatus, $hubConnection));
+  const uncommentBlocked = $derived(hubActionBlocked('delete_work_comment', $hubStatus, $hubConnection));
+  let draft = $state('');
+  let commenting = $state(false);
+  let commentError = $state<string | null>(null);
+  let confirmDelete = $state<number | null>(null);
+  async function postComment() {
+    const t = detail?.task;
+    if (!t || t.item_id == null || commenting || !draft.trim()) return;
+    commenting = true;
+    commentError = null;
+    const r = await commentOnWork(t.item_id, draft);
+    commenting = false;
+    if (!r.ok) {
+      commentError = readErrorText(r.error);
+      return;
+    }
+    draft = '';
+    // Shown at once; the write's bump re-reads the whole detail.
+    if (detail) detail = { ...detail, comments: [...(detail.comments ?? []), { ...r.value, mine: true }] };
+  }
+  async function removeComment(id: number) {
+    confirmDelete = null;
+    commentError = null;
+    const r = await deleteWorkComment(id);
+    if (!r.ok) {
+      commentError = readErrorText(r.error);
+      return;
+    }
+    if (detail) detail = { ...detail, comments: (detail.comments ?? []).filter((c) => c.id !== id) };
+  }
 
   // Inline status (a native task's own): set here, without the edit dialog.
   let statusError = $state<string | null>(null);
@@ -317,6 +368,8 @@
   const sourceLabel = $derived(
     !task ? '' : task.kind === 'local' ? 'local work' : task.kind === 'ref' ? 'bare key' : (providerInfo(task.provider)?.label ?? task.provider ?? 'tracker'),
   );
+  /** A comment author's mark: the first letter of the name. */
+  const initialOf = (name: string): string => ([...name.trim()][0] ?? '?').toUpperCase();
   /** "2 / 4" in the header chips, with any subtasks. */
   const subtaskCount = $derived(subtaskProgress(detail?.subtasks));
   /** The task's own "finishes when" (G7.6), as one line. */
@@ -458,6 +511,7 @@
           onclick={() => (tab = t)}
           >{TASK_TAB_LABELS[t]}{#if t === 'sessions' && (task.sessions ?? []).length > 0}<span class="tab-count"
               >{(task.sessions ?? []).length + (task.sessions_more ?? 0)}</span
+            >{:else if t === 'comments' && (detail?.comments ?? []).length > 0}<span class="tab-count">{(detail?.comments ?? []).length}</span
             >{/if}</button
         >
       {/each}
@@ -728,8 +782,15 @@
 
     {#if tab === 'activity'}
       <div class="pane-body">
-        {#if !detail?.last_outcome && !detail?.placement && (detail?.steps ?? []).length === 0}
+        {#if !detail?.last_outcome && !detail?.placement && (detail?.steps ?? []).length === 0 && events.length === 0}
           <p class="muted" data-testid="work-task-no-activity">Nothing has happened on this task yet.</p>
+        {/if}
+        {#if events.length > 0}
+          <ol class="events" data-testid="work-task-events">
+            {#each events as e, i (i)}
+              <li data-kind={e.kind}><span class="when">{timeAgo(e.at)}</span><span class="what">{e.text}</span></li>
+            {/each}
+          </ol>
         {/if}
         {#if detail?.placement}
           <p class="muted small" data-testid="work-task-activity-placed">
@@ -754,6 +815,86 @@
         {/if}
 
         {#if detail}<TaskWorkSections {detail} part="steps" />{/if}
+      </div>
+    {/if}
+
+    {#if tab === 'comments'}
+      <div class="pane-body comments-pane">
+        {#if (detail?.comments ?? []).length === 0}
+          <p class="muted" data-testid="work-task-comments-empty">No comments yet. They stay in fleet; nothing is written to a tracker.</p>
+        {:else}
+          <ul class="comments">
+            {#each detail?.comments ?? [] as c (c.id)}
+              {@const who = commentAuthor(c)}
+              <li class="comment" data-testid="work-task-comment">
+                <span class="avatar" aria-hidden="true">{initialOf(who)}</span>
+                <div class="cmain">
+                  <div class="chead">
+                    <strong>{who}</strong>
+                    <span class="muted small">{timeAgo(c.created_at)}</span>
+                    {#if c.mine}
+                      <span class="cacts">
+                        {#if confirmDelete === c.id}
+                          <button class="btn btn--crit" type="button" data-testid="work-task-comment-delete-confirm" onclick={() => void removeComment(c.id)}
+                            >Delete</button
+                          >
+                          <button class="btn btn--quiet" type="button" onclick={() => (confirmDelete = null)}>Keep</button>
+                        {:else}
+                          <button
+                            class="btn btn--quiet"
+                            type="button"
+                            data-testid="work-task-comment-delete"
+                            disabled={uncommentBlocked !== null}
+                            title={uncommentBlocked ?? 'Delete your comment'}
+                            onclick={() => (confirmDelete = c.id)}>Delete…</button
+                          >
+                        {/if}
+                      </span>
+                    {/if}
+                  </div>
+                  <div class="cbody prose"><MarkdownView source={c.body} /></div>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if task.item_id != null}
+          <form
+            class="composer"
+            onsubmit={(e) => {
+              e.preventDefault();
+              void postComment();
+            }}
+          >
+            <textarea
+              rows="3"
+              bind:value={draft}
+              maxlength={COMMENT_MAX}
+              placeholder="Add a comment: kept in fleet, never sent to the tracker"
+              aria-label="Comment"
+              data-testid="work-task-comment-input"
+              onkeydown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  void postComment();
+                }
+              }}
+            ></textarea>
+            <div class="composer-row">
+              {#if commentError}<span class="err" role="alert" data-testid="work-task-comment-error">{commentError}</span>{/if}
+              <span class="muted small hint-keys">Markdown · ⌘↵ to post</span>
+              <button
+                class="btn"
+                type="submit"
+                data-testid="work-task-comment-post"
+                disabled={commentBlocked !== null || commenting || !draft.trim()}
+                title={commentBlocked ?? 'Post (Ctrl/⌘+Enter)'}>{commenting ? 'Posting…' : 'Comment'}</button
+              >
+            </div>
+          </form>
+        {:else}
+          <p class="muted small" data-testid="work-task-comments-bare-key">A bare key has no task in fleet to comment on yet.</p>
+        {/if}
       </div>
     {/if}
   {/if}
@@ -792,6 +933,56 @@
 {/if}
 
 <style>
+  .events,
+  .comments {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-size: var(--text-xs);
+  }
+  .events li {
+    padding: 2px 0;
+  }
+  .events .when {
+    display: inline-block;
+    min-width: 5.5em;
+  }
+  .comment {
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .chead {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+  }
+  .cbody {
+    margin: 2px 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .composer {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 6px;
+  }
+  .composer textarea {
+    font: inherit;
+    font-size: var(--text-xs);
+    padding: 4px 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--fg);
+    resize: vertical;
+  }
+  .composer-row {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 8px;
+  }
   .task-detail {
     display: flex;
     flex-direction: column;
@@ -1192,5 +1383,98 @@
   }
   .error p {
     margin: 0 0 0.4rem;
+  }
+  /* ── activity and comments ── */
+  .events {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    border-left: 2px solid var(--border);
+  }
+  .events li {
+    display: flex;
+    gap: var(--space-2);
+    padding: 3px 0 3px var(--space-3);
+    font-size: var(--text-xs);
+  }
+  .events .when {
+    flex: none;
+    min-width: 4.5em;
+    color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .comments-pane {
+    max-width: var(--prose-max);
+  }
+  .comments {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .comment {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    gap: var(--space-2);
+    padding: var(--space-2) 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-pill);
+    display: grid;
+    place-items: center;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: var(--text-2xs);
+    font-weight: 600;
+  }
+  .chead {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  .cacts {
+    margin-left: auto;
+    display: inline-flex;
+    gap: 4px;
+  }
+  .cbody {
+    margin-top: 2px;
+  }
+  .composer {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: var(--space-2);
+    padding: var(--space-2);
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-pane);
+  }
+  .composer:focus-within {
+    border-color: var(--accent);
+  }
+  .composer textarea {
+    font: inherit;
+    resize: vertical;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--fg);
+    min-height: 3.5em;
+  }
+  .composer-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .hint-keys {
+    margin-left: auto;
   }
 </style>

@@ -609,6 +609,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Wizard state (M15 G7.2): a person's wizard, kept to resume on their
+    // other device. A person's; a host's token is not served it.
+    ToolPolicy {
+        name: "wizard_state",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Presence (redesign 11.7b): reports into the hub's in-memory board and
     // reads it back; touches no row. A person's tool, not a host token's.
     ToolPolicy {
@@ -1684,7 +1693,8 @@ pub fn is_client_tool(name: &str) -> bool {
 /// `routines` (Orbit Fleet 8.5) is a person's too: a session does not
 /// schedule sessions. `library` (9.7) is the index beside the downloads, a
 /// person's for the same reason. So is `start_rules` (8.11): a session does
-/// not decide where everyone's tasks start.
+/// not decide where everyone's tasks start. And `wizard_state` (G7.2): a
+/// session runs no wizard, and a row is a person's.
 ///
 /// The five sharing surfaces joined them in multi-user M1 (T12) for a
 /// different reason: a per-host token proves no PERSON
@@ -1701,6 +1711,7 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "remove_download",
     "routines",
     "start_rules",
+    "wizard_state",
     "session_share",
     "session_unshare",
     "session_narrow",

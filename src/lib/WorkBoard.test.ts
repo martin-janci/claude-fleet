@@ -14,6 +14,7 @@ import { link, task } from './work_view_fixture';
 import { selectedTaskId, sidebarView, workViewFilters, type WorkTreePage } from './work_view';
 import { activeHintId, hintDef, markSeen, resetHints } from './hints';
 import { onboardingWelcomed } from './onboarding';
+import { boardScope } from './work_buckets';
 
 const NOW = Math.floor(Date.now() / 1000);
 const page = (): WorkTreePage => ({
@@ -61,6 +62,7 @@ const card = (title: string) =>
 let setStatus: (args: { item_id: number; status: string }) => unknown;
 
 beforeEach(() => {
+  boardScope.set('all');
   workViewFilters.set({ tracker: 1, status: 'done' });
   setStatus = (a) => ({ id: a.item_id, source: 'local', key: 'TASK-1', title: 'Write notes', status_category: a.status });
   (invoke as ReturnType<typeof vi.fn>).mockReset();
@@ -268,6 +270,96 @@ describe('WorkBoard with filters that match nothing (review r13)', () => {
     render(WorkBoard);
     await flush();
     expect(screen.queryByTestId('work-board-no-match')).toBeNull();
+  });
+  describe('scoped to a sprint (sprints design §6c)', () => {
+    const DAY = 86400;
+    const sprintRow = (over: Record<string, unknown> = {}) => ({
+      id: 4,
+      kind: 'sprint',
+      name: 'Sprint 24',
+      state: 'active',
+      goal: 'Login works',
+      total: 2,
+      done: 1,
+      created_at: 0,
+      updated_at: 0,
+      version: 1,
+      ...over,
+    });
+    let sprints: Record<string, unknown>[];
+    beforeEach(() => {
+      sprints = [sprintRow(), sprintRow({ id: 5, name: 'Sprint 25', state: 'planned', goal: null }), sprintRow({ id: 3, name: 'Sprint 23', state: 'closed' })];
+      (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+        if (cmd === 'work_buckets') return sprints;
+        if (cmd === 'work_bucket_admin') return { bucket: sprintRow({ id: 5, state: 'active' }) };
+        if (cmd === 'work_tree') {
+          const p = page();
+          // An old done task: outside the 7-day window, inside the sprint.
+          p.tasks.push(task({ task_id: 'item:30', item_id: 30, key: 'TASK-30', title: 'Shipped long ago', kind: 'local', status_category: 'done', sessions: [], last_activity_at: NOW - 30 * DAY }));
+          return p;
+        }
+        return null;
+      });
+    });
+    const lastFilters = () => {
+      const c = calls('work_tree');
+      return (c[c.length - 1][1] as { args: { filters: Record<string, unknown> } }).args.filters;
+    };
+
+    it('offers the open sprints and the backlog, and reads one sprint as its section', async () => {
+      render(WorkBoard);
+      await flush();
+      const pick = screen.getByTestId('work-board-scope') as HTMLSelectElement;
+      expect(Array.from(pick.options).map((o) => o.textContent)).toEqual([
+        'All tasks',
+        'Sprint 24 · active',
+        'Sprint 25 · planned',
+        'No sprint (backlog)',
+      ]);
+      expect(lastFilters().group_by).toBeUndefined();
+      // Every task: Done is the last week.
+      expect(screen.getByTestId('work-board-done-hidden').textContent).toContain('1 older');
+
+      pick.value = '4';
+      await fireEvent.change(pick);
+      await flush();
+      expect(lastFilters()).toMatchObject({ tracker: 1, archived: true, group_by: 'sprint', group: 'sprint:4' });
+      expect(lastFilters().status).toBeUndefined();
+      expect(get(boardScope)).toBe(4);
+      // The sprint's own line, and everything it delivered in Done.
+      expect(screen.getByTestId('work-board-sprint').textContent).toContain('Active · 1/2 done');
+      expect(screen.getByTestId('work-board-sprint').textContent).toContain('Login works');
+      expect(column('done').textContent).toContain('Shipped long ago');
+      expect(screen.queryByTestId('work-board-done-hidden')).toBeNull();
+      expect(screen.queryByTestId('work-board-sprint-start')).toBeNull();
+
+      pick.value = 'none';
+      await fireEvent.change(pick);
+      await flush();
+      expect(lastFilters()).toMatchObject({ group_by: 'sprint', group: 'none' });
+      expect(screen.queryByTestId('work-board-sprint')).toBeNull();
+    });
+
+    it('starts a planned sprint from its line', async () => {
+      boardScope.set(5);
+      render(WorkBoard);
+      await flush();
+      await fireEvent.click(screen.getByTestId('work-board-sprint-start'));
+      await flush();
+      expect(calls('work_bucket_admin').map((c) => c[1])).toEqual([
+        { args: { action: 'bucket_update', bucket_id: 5, expected_version: 1, state: 'active' } },
+      ]);
+    });
+
+    it('falls back to every task when the chosen sprint closed', async () => {
+      boardScope.set(3);
+      render(WorkBoard);
+      await flush();
+      await flush();
+      expect((screen.getByTestId('work-board-scope') as HTMLSelectElement).value).toBe('all');
+      expect(lastFilters().group).toBeUndefined();
+      expect(screen.queryByTestId('work-board-sprint')).toBeNull();
+    });
   });
 });
 

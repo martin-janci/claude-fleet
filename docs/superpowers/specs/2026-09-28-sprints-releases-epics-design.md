@@ -3,10 +3,13 @@
 **Date:** 2026-09-28
 **Status:** phase 1 (status of native items) landed; the backend of phases 2–3
 (`work_buckets`, sprints, releases, provider mapping, adoption, the MCP
-actions) landed with migration 108. The board (phase 5) is built as a
-first cut, columns by status over the Work view's filters, not yet scoped
-to a sprint. The Work view axis, bulk assignment and epics (phase 4) are
-not built.
+actions) landed with migration 108. The board (phase 5) is built: columns
+by status over the Work view's filters, scoped to one sprint or to the
+backlog with no sprint. The Work view axis (§6a), bulk assignment (§6b) and the
+sprint lifecycle dialog (§5, E9) are built on the desktop. Epics (phase
+4) are built with a depth of ONE, not §3's three: a local item with a
+parent is never a parent, because `item_org` (and every org fence on it)
+walks one level; deeper needs that walk changed first.
 **Builds on:** `2026-09-24-work-graph-design.md` (§0 is authoritative) and the
 work-graph roadmap's decisions D1–D36. This document is a delta against §0: it
 adds planning structure to the native side of the work graph and does not

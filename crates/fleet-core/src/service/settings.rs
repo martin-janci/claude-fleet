@@ -523,12 +523,20 @@ pub const WORK_SESSION_START_CONTEXT: &str = "work.session_start_context";
 /// (`work_link { source: agent_inferred }` — only ever a suggestion). Off by
 /// default: it spends context on a guess. Read on every prompt.
 pub const WORK_CLASSIFY_NUDGE: &str = "work.classify_nudge";
+/// Whether an organisation's plain members (not only its admins) create and
+/// change the team's sprints and releases (owner decision 2026-10-10). Off by
+/// default; a viewer never does, and anyone may keep personal ones.
+pub const WORK_MEMBERS_PLAN_SPRINTS: &str = "work.members_plan_sprints";
 /// The model a dead session's on-demand summary runs on (work graph M13.4c,
 /// decisions D10 / D27), on the session's own host and account. A choice of
 /// Claude Code's model aliases, never free text: it ends up in a command.
 pub const WORK_SUMMARY_MODEL: &str = "work.summary_model";
 /// The aliases [`WORK_SUMMARY_MODEL`] accepts.
 pub const SUMMARY_MODELS: &[&str] = &["haiku", "sonnet", "opus"];
+/// The model context help runs on (`service::context_help`): a person's
+/// question at a shell or composer prompt line, answered on the session's
+/// own host and account. One of [`SUMMARY_MODELS`]; Haiku by default.
+pub const WORK_HELP_MODEL: &str = "work.help_model";
 
 // ── writing help (gap plan G4.6): each LLM draft is off until turned on ──
 /// Files › Changed drafts a commit message from the staged diff
@@ -1296,6 +1304,14 @@ pub const SPECS: &[Spec] = &[
     .tags(&[Tag::Experimental, Tag::Ai])
     .per_org(),
     Spec::new(
+        WORK_MEMBERS_PLAN_SPRINTS,
+        "false",
+        Kind::Bool,
+        "Members plan sprints",
+        "Let an organisation's members, not only its admins, create and change its sprints and releases. Viewers never can; anyone can keep personal ones.",
+    )
+    .per_org(),
+    Spec::new(
         WORK_SUMMARY_MODEL,
         "haiku",
         Kind::Choice(SUMMARY_MODELS),
@@ -1304,6 +1320,14 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Ai])
     .per_org(),
+    Spec::new(
+        WORK_HELP_MODEL,
+        "haiku",
+        Kind::Choice(SUMMARY_MODELS),
+        "Context help model",
+        "The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account.",
+    )
+    .tags(&[Tag::Ai]),
     Spec::new(
         WORK_DRAFT_COMMIT_MESSAGES,
         "false",

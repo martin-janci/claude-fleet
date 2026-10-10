@@ -33,6 +33,9 @@
     opensOn = 'worktree',
     onopenson = undefined,
     activity = {},
+    onhelp = undefined,
+    helpModel = 'haiku',
+    helpOpen = false,
   }: {
     /** The agent tab's name, as the session bar names it. */
     agentLabel?: string;
@@ -57,6 +60,12 @@
     /** What runs in each shell, by number (Terminals board, "pnpm dev ·
      *  running"); a shell missing here says nothing. */
     activity?: Readonly<Record<number, ShellActivity>>;
+    /** Context help on the picked shell (`ContextHelp.svelte`); absent
+     *  hides the button. */
+    onhelp?: () => void;
+    /** Who answers, for the button's words. */
+    helpModel?: string;
+    helpOpen?: boolean;
   } = $props();
 
   function shellTitle(n: number): string {
@@ -215,6 +224,17 @@
     <button type="button" class="act" title="Clear this shell's screen" onclick={onclear} data-testid="terminal-clear"
       >Clear</button
     >
+    {#if onhelp}
+      <button
+        type="button"
+        class="act"
+        class:on={helpOpen}
+        aria-pressed={helpOpen}
+        title="Ask {helpModel} about this shell, with its history as context"
+        onclick={onhelp}
+        data-testid="terminal-help">Ask {helpModel}</button
+      >
+    {/if}
   {/if}
   {#if host && onopenson}
     <label class="opens-on" title="Where + New starts the next terminal. A terminal always runs on the session's host.">

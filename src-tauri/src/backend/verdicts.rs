@@ -366,6 +366,22 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("set_work_status", Verdict::Routed { tool: "work_link" }),
     // Task editing: a person's title, notes and assignees for a native item.
     ("edit_work_item", Verdict::Routed { tool: "work_link" }),
+    // Epics (sprints design 2026-09-28 §3): a local item filed under an epic.
+    ("set_work_parent", Verdict::Routed { tool: "work_link" }),
+    // Task comments: a note on a task, kept in fleet; deleting is the author's.
+    ("comment_on_work", Verdict::Routed { tool: "work_link" }),
+    ("delete_work_comment", Verdict::Routed { tool: "work_link" }),
+    // Sprints and releases (design 2026-09-28 §6a/§6b): reads and
+    // membership route; so do the buckets themselves, as work_link's
+    // bucket_admin (owner decision 2026-10-10: the hub decides who plans).
+    ("work_buckets", Verdict::Routed { tool: "work" }),
+    ("work_bucket", Verdict::Routed { tool: "work" }),
+    ("add_work_to_bucket", Verdict::Routed { tool: "work_link" }),
+    (
+        "remove_work_from_bucket",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("work_bucket_admin", Verdict::Routed { tool: "work_link" }),
     (
         "accept_work_proposal",
         Verdict::Routed { tool: "work_link" },
@@ -956,6 +972,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "start_rules",
         Verdict::Routed {
             tool: "start_rules",
+        },
+    ),
+    // A wizard left half-way (G7.2) is kept on the hub, so it resumes on
+    // the person's other devices.
+    (
+        "wizard_state",
+        Verdict::Routed {
+            tool: "wizard_state",
         },
     ),
     (
@@ -1912,6 +1936,16 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                   under, and pty_open is the same in both modes, so there is one answer \
                   either way; E_PTY_CLOSED when nothing is attached under that id, which \
                   includes every session the pane declined to attach",
+        },
+    ),
+    (
+        "context_help",
+        Verdict::SameInBoth {
+            why: "the terminal's helper takes the terminal's path: one claude -p over this \
+                  machine's own ssh to the alias passed in, with the context the caller \
+                  sends and the shell's scrollback read over that same ssh; it reads no \
+                  state.db and the hub is not in the path. The pane offers it only where it \
+                  offers the attach (a session this client owns)",
         },
     ),
     (

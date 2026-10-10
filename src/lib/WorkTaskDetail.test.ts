@@ -927,14 +927,59 @@ describe('WorkTaskDetail', () => {
 
   describe('G3.4: tabs, Delivery, inline status, the start rule', () => {
     it('Sessions counts its links; Activity says when nothing happened', async () => {
-      handlers.work_task = () => ({ ...localTask, last_outcome: null });
+      handlers.work_task = () => ({ ...localTask, last_outcome: null, task: { ...localTask.task, sessions: [] } });
       render(WorkTaskDetail, { taskId: 'item:77' });
       await flush();
       expect(screen.getByTestId('work-task-tab-overview').getAttribute('aria-selected')).toBe('true');
-      expect(screen.getByTestId('work-task-tab-sessions').textContent).toBe('Sessions1');
-      expect(screen.queryByTestId('work-task-tab-comments')).toBeNull();
+      expect(screen.getByTestId('work-task-tab-comments').textContent).toBe('Comments');
       await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
       expect(screen.getByTestId('work-task-no-activity')).toBeTruthy();
+    });
+
+    it('Sessions counts its links; Activity lists the sessions that worked on it', async () => {
+      handlers.work_task = () => ({
+        ...localTask,
+        last_outcome: null,
+        task: { ...localTask.task, sessions: [link({ link_id: 5, session_id: 9, name: 'api', host: 'h-a', created_at: 1_790_000_000 })] },
+      });
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      expect(screen.getByTestId('work-task-tab-sessions').textContent).toBe('Sessions1');
+      await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
+      expect(screen.queryByTestId('work-task-no-activity')).toBeNull();
+      expect(screen.getByTestId('work-task-events').textContent).toContain('api on h-a started on it');
+    });
+
+    it('Comments: lists them, posts one, and deletes only the reader’s own', async () => {
+      const comments = [
+        { id: 1, item_id: 77, author: 'client:phone', body: 'Cache is 4 GB', created_at: 1_790_000_000 },
+        { id: 2, item_id: 77, author: 'desktop', body: 'Mine', created_at: 1_790_000_100, mine: true },
+      ];
+      handlers.work_task = () => ({ ...localTask, comments });
+      handlers.comment_on_work = (a) => ({ id: 3, item_id: a.item_id, author: 'desktop', body: a.body, created_at: 1_790_000_200 });
+      handlers.delete_work_comment = (a) => ({ ...comments[1], id: a.comment_id });
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      expect(screen.getByTestId('work-task-tab-comments').textContent).toBe('Comments2');
+      await fireEvent.click(screen.getByTestId('work-task-tab-comments'));
+      const rows = screen.getAllByTestId('work-task-comment');
+      expect(rows.map((r) => r.querySelector('strong')?.textContent)).toEqual(['phone', 'You']);
+      // Only the reader's own comment offers Delete.
+      expect(screen.getAllByTestId('work-task-comment-delete')).toHaveLength(1);
+
+      const input = screen.getByTestId('work-task-comment-input') as HTMLTextAreaElement;
+      await fireEvent.input(input, { target: { value: '  Cleared it  ' } });
+      await fireEvent.click(screen.getByTestId('work-task-comment-post'));
+      await flush();
+      expect(calls('comment_on_work')).toEqual([{ item_id: 77, body: 'Cleared it' }]);
+      expect(screen.getAllByTestId('work-task-comment')).toHaveLength(3);
+      expect(input.value).toBe('');
+
+      // The new one is the reader's too: delete the older of the two.
+      await fireEvent.click(screen.getAllByTestId('work-task-comment-delete')[0]);
+      await fireEvent.click(screen.getByTestId('work-task-comment-delete-confirm'));
+      await flush();
+      expect(calls('delete_work_comment')).toEqual([{ comment_id: 2 }]);
     });
 
     it('sets a native task’s status from the header, without the edit dialog', async () => {

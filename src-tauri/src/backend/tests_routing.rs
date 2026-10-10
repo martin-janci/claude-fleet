@@ -1018,6 +1018,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "wizard_state",
+            "wizard_state",
+            json!({ "action": "get", "kind": "add_project" }),
+            r#"{"kind":"add_project","key":"","step":2,"answers":{},"checks":[],"created_at":1,"updated_at":2}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::wizard_state::routed::wizard_state(
+                    b,
+                    s,
+                    fleet_core::service::wizard_state::WizardStateArgs {
+                        action: "get".into(),
+                        kind: Some("add_project".into()),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "control_handoffs",
             "control_handoffs",
             json!({ "limit": 5 }),
@@ -1333,6 +1351,59 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Task comments.
+        (
+            "comment_on_work",
+            "work_link",
+            json!({ "session_id": null, "action": "comment", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "notes": "Looks good" }),
+            r#"{"id":3,"item_id":9,"author":"client:desk","body":"Looks good","created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::comment_on_work(
+                    b,
+                    commands::work_view::CommentOnWorkArgs {
+                        item_id: 9,
+                        body: "Looks good".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "delete_work_comment",
+            "work_link",
+            json!({ "session_id": null, "action": "comment_delete", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "comment_id": 3 }),
+            r#"{"id":3,"item_id":9,"author":"client:desk","body":"Looks good","created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::delete_work_comment(
+                    b,
+                    commands::work_view::DeleteWorkCommentArgs { comment_id: 3 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Epics (sprints design 2026-09-28 §3).
+        (
+            "set_work_parent",
+            "work_link",
+            json!({ "session_id": null, "action": "set_parent", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "parent": "item:5" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::set_work_parent(
+                    b,
+                    commands::work::SetWorkParentArgs {
+                        item_id: 9,
+                        parent: "item:5".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // Task editing.
         (
             "edit_work_item",
@@ -1350,6 +1421,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                         notes: Some(String::new()),
                         assignees: Some(vec!["Ana".into()]),
                         due_at: Some("2026-10-16".into()),
+                        epic: None,
                     },
                     s,
                 ))
@@ -1923,6 +1995,37 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 block_on(commands::work_view::routed::work_views(
                     b,
                     commands::work_view::NoArgs {},
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Sprints and releases (design 2026-09-28 §6a).
+        (
+            "work_buckets",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "buckets", "kind": "sprint" }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_buckets(
+                    b,
+                    commands::work_view::WorkBucketsArgs {
+                        kind: Some("sprint".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_bucket",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "bucket", "bucket_id": 4 }),
+            r#"{"bucket":{"id":4,"kind":"sprint","name":"Sprint 24","state":"active","created_at":1,"updated_at":1,"version":1},"members":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_bucket(
+                    b,
+                    commands::work_view::WorkBucketArgs { bucket_id: 4 },
                     s,
                 ))
                 .map(|_| ())
@@ -4404,6 +4507,62 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Sprints and releases (design 2026-09-28 §6b).
+        (
+            "add_work_to_bucket",
+            "work_link",
+            json!({ "session_id": null, "action": "bucket_add", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "bucket_id": 4 }),
+            r#"{"id":4,"kind":"sprint","name":"Sprint 24","state":"active","created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::add_work_to_bucket(
+                    b,
+                    commands::work_view::BucketMemberArgs {
+                        bucket_id: 4,
+                        item_id: 9,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_work_from_bucket",
+            "work_link",
+            json!({ "session_id": null, "action": "bucket_remove", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "bucket_id": 4 }),
+            r#"{"id":4,"kind":"sprint","name":"Sprint 24","state":"active","created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::remove_work_from_bucket(
+                    b,
+                    commands::work_view::BucketMemberArgs {
+                        bucket_id: 4,
+                        item_id: 9,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_bucket_admin",
+            "work_link",
+            json!({ "session_id": null, "action": "bucket_admin", "key": null, "item_id": null,
+                    "link_id": null, "source": null,
+                    "bucket_op": { "action": "bucket_create", "kind": "sprint", "name": "Mine" } }),
+            r#"{"bucket":{"id":4,"kind":"sprint","name":"Mine","state":"planned","created_at":1,"updated_at":1,"version":1}}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_bucket_admin(
+                    b,
+                    serde_json::from_value(json!({
+                        "action": "bucket_create", "kind": "sprint", "name": "Mine"
+                    }))
+                    .unwrap(),
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // ── orchestration O1: missions ────────────────────────────────────
         (
             "save_mission",
@@ -6856,6 +7015,10 @@ const SOURCES: &[(&str, &str)] = &[
     ("commands/assets.rs", include_str!("../commands/assets.rs")),
     ("commands/cancel.rs", include_str!("../commands/cancel.rs")),
     (
+        "commands/context_help.rs",
+        include_str!("../commands/context_help.rs"),
+    ),
+    (
         "commands/diagnostics.rs",
         include_str!("../commands/diagnostics.rs"),
     ),
@@ -6903,6 +7066,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/start_rules.rs",
         include_str!("../commands/start_rules.rs"),
+    ),
+    (
+        "commands/wizard_state.rs",
+        include_str!("../commands/wizard_state.rs"),
     ),
     (
         "commands/api_tokens.rs",

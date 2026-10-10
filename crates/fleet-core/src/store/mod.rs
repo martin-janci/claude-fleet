@@ -72,8 +72,10 @@ mod tracker_writes;
 mod trackers;
 mod update;
 mod usage;
+mod wizard_state;
 mod work;
 mod work_buckets;
+mod work_comments;
 mod work_describe;
 mod work_detect;
 mod work_journal;
@@ -89,8 +91,8 @@ pub use access_requests::{AccessRequestRow, ACCESS_REQUEST_COOLDOWN_SECS};
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
 pub use aux_usage::{
     AuxUsageRow, NewAuxUsage, AUX_ORIGINS, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE,
-    AUX_ORIGIN_MORNING_BRIEF, AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE, AUX_ORIGIN_SUMMARY,
-    AUX_ORIGIN_TRIAGE, AUX_ORIGIN_WATCH_SUMMARY,
+    AUX_ORIGIN_CONTEXT_HELP, AUX_ORIGIN_MORNING_BRIEF, AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE,
+    AUX_ORIGIN_SUMMARY, AUX_ORIGIN_TRIAGE, AUX_ORIGIN_WATCH_SUMMARY,
 };
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use changesets::{
@@ -216,14 +218,16 @@ pub use update::{
     UpdateDesiredRow, UpdateDocRow, UpdateEventRow, UpdateObservedRow, UpdateOrgPolicyRow,
     UpdateRolloutRow, UPDATE_EVENT_RETENTION_SECS,
 };
+pub use wizard_state::{WizardStateRow, WizardStateWrite};
 pub use work::{
     canonical_key, github_ref, normalize_work_ref, primary_conflict, split_github_repo, Decider,
     WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, PERSON_SOURCES, WORK_LINK_SOURCES,
 };
 pub use work_buckets::{
-    bucket_states, BucketMemberRow, BucketPatch, BucketRefRow, BucketRow, ItemBucketRow, NewBucket,
-    SprintClosed, BUCKET_KINDS,
+    bucket_states, BucketMemberRow, BucketMembership, BucketPatch, BucketRefRow, BucketRow,
+    ItemBucketRow, NewBucket, SprintClosed, BUCKET_KINDS,
 };
+pub use work_comments::{validate_comment, CommentRow, COMMENTS_SERVED_MAX, COMMENT_MAX_CHARS};
 pub use work_detect::{
     DetectionState, WITHDRAWN_CARRIED, WITHDRAWN_DECAY, WITHDRAWN_REASONS, WITHDRAWN_WITHDRAW,
     WORK_SUGGESTION_WITHDRAWN,
@@ -236,8 +240,9 @@ pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
 pub use work_status::STATUS_CATEGORIES;
 pub use work_tasks::{
-    job_status, parse_due_date, validate_assignees, validate_due_date, ItemEdit, NativeItem,
-    Proposal, TreeEntry, TreeRef, ACCEPT_UNDO_SECS, PROPOSALS_OPEN_CAP, TASK_KEY_PREFIX,
+    is_epic, job_status, parse_due_date, validate_assignees, validate_due_date, ItemEdit,
+    NativeItem, Proposal, TreeEntry, TreeRef, ACCEPT_UNDO_SECS, EPIC_KIND, LOCAL_DEPTH_MAX,
+    PROPOSALS_OPEN_CAP, TASK_KEY_PREFIX,
 };
 pub use work_tidy::ReopenedWork;
 pub use work_usage::{DetectionCounts, JournalCounts};

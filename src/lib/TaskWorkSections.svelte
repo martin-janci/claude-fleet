@@ -17,8 +17,16 @@
 
   const showWork = $derived(part !== 'steps');
   const showSteps = $derived(part !== 'work');
-  // A subtask's parent is never itself a subtask; a bare key has no item.
-  const canAddSubtask = $derived(detail.task.item_id != null && !detail.task.parent_task_id);
+  // Local work goes three levels deep (epic → task → subtask); a ticket
+  // takes subtasks at any depth (its tracker owns that); a bare key has no
+  // item. An older hub sends no `level`: then a subtask takes none, as before.
+  const LOCAL_DEPTH_MAX = 3;
+  const canAddSubtask = $derived(
+    detail.task.item_id != null &&
+      (detail.task.kind !== 'local'
+        ? !detail.task.parent_task_id
+        : (detail.task.level ?? (detail.task.parent_task_id ? LOCAL_DEPTH_MAX : 1)) < LOCAL_DEPTH_MAX),
+  );
 
   let adding = $state(false);
   let newTitle = $state('');

@@ -16,6 +16,13 @@
   // (`Caps.write` is false for all), so none moves. A card shows its live
   // session and host.
   //
+  // Scope (sprints design §6c): every task (the default), one open sprint —
+  // its tasks only, its roll-up, goal and dates above the columns, Start /
+  // Close sprint… there, and Done holding everything it delivered rather
+  // than the last week — or the tasks in no sprint, the backlog a sprint is
+  // planned from. One `work_tree` read either way: a sprint is the section
+  // of a group by sprint (`boardFilters`).
+  //
   // The drag is pointer events, not HTML5 drag and drop: the window takes
   // OS file drops (`dragDropEnabled`), which on Windows swallows the
   // webview's own. ← / → on a focused card move it too. Tracker and agent
@@ -50,6 +57,19 @@
   import { providerInfo } from './trackers';
   import { hintAnchor } from './hints';
   import EditTaskDialog from './EditTaskDialog.svelte';
+  import WorkBuckets from './WorkBuckets.svelte';
+  import {
+    advanceBucket,
+    boardFilters,
+    boardScope,
+    bucketSummary,
+    liveScope,
+    openBuckets,
+    unixToDay,
+    workBuckets,
+    type BoardScope,
+    type BucketRow,
+  } from './work_buckets';
   import TaskBlockedSpend from './TaskBlockedSpend.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
@@ -93,18 +113,39 @@
   let editing = $state<string | null>(null);
   const editBlocked = $derived(hubActionBlocked('edit_work_item', $hubStatus, $hubConnection));
   const moveBlocked = $derived(hubActionBlocked('set_work_status', $hubStatus, $hubConnection));
-  const columns = $derived(groupTasksForBoard(tasks, Math.floor(Date.now() / 1000), overrides, moved));
+  /** The sprints, once read (`null` before). */
+  let sprints = $state.raw<BucketRow[] | null>(null);
+  const scope = $derived(liveScope($boardScope, sprints));
+  const sprint = $derived(typeof scope === 'number' ? (sprints ?? []).find((b) => b.id === scope) : undefined);
+  const openSprints = $derived(openBuckets(sprints ?? [], 'sprint'));
+  const adminBlocked = $derived(hubActionBlocked('work_bucket_admin', $hubStatus, $hubConnection));
+  let closingSprint = $state<number | null>(null);
+  let scopeNotice = $state<string | null>(null);
+  const columns = $derived(
+    groupTasksForBoard(tasks, Math.floor(Date.now() / 1000), overrides, moved, typeof scope !== 'number'),
+  );
   /** Some column is a tracker's own name: say where the columns come from. */
   const trackerLanes = $derived(columns.lanes.some((l) => l.id !== l.status));
   const laneById = (id: string | undefined) => columns.lanes.find((l) => l.id === id);
   /** The column a card shows in now: a pending move's, else its own. */
   const laneOfCard = (t: WorkTask): BoardLane => laneById(overrides.get(t.task_id)) ?? boardLaneOf(t);
 
+  let sprintSeq = 0;
+  async function loadSprints() {
+    const mine = ++sprintSeq;
+    const r = await workBuckets('sprint');
+    if (mine !== sprintSeq) return;
+    // An older hub (or a refusal) leaves the board unscoped, as before.
+    sprints = r.ok && Array.isArray(r.value) ? r.value : [];
+  }
+
   let seq = 0;
+  /** The scope the tasks shown were read for. */
+  let readScope: BoardScope = 'all';
   async function load() {
     const mine = ++seq;
-    const { status: _s, ...filters } = get(workViewFilters);
-    const r = await workTree({ filters: { ...filters, archived: true }, limit: 200, per_task: 3, with_missions: true });
+    const want = liveScope(get(boardScope), sprints);
+    const r = await workTree({ filters: boardFilters(get(workViewFilters), want), limit: 200, per_task: 3, with_missions: true });
     if (mine !== seq) return;
     loaded = true;
     if (!r.ok) {
@@ -113,6 +154,7 @@
     }
     error = null;
     tasks = Array.isArray(r.value?.tasks) ? r.value.tasks : [];
+    readScope = want;
     more = !!r.value?.next_cursor;
     // What the hub now says wins over a placement made before it answered.
     overrides = new Map();
@@ -125,12 +167,22 @@
     lastFilters = k;
     void load();
   });
+  // A sprint chosen, or one that closed under the board: read again.
+  $effect(() => {
+    if (loaded && scope !== readScope) void load();
+  });
   const offChanged = onWorkChangedDebounced(
-    () => void load(),
+    () => {
+      void loadSprints();
+      void load();
+    },
     () => debounceMs,
     () => maxWaitMs,
   );
-  onMount(() => void load());
+  onMount(() => {
+    void loadSprints();
+    void load();
+  });
   onDestroy(() => {
     offFilters();
     offChanged();
@@ -321,6 +373,24 @@
     }
   }
 
+  function pickScope(v: string) {
+    scopeNotice = null;
+    boardScope.set(v === 'all' || v === 'none' ? v : Number(v));
+  }
+
+  async function startSprint(b: BucketRow) {
+    const r = await advanceBucket(b);
+    scopeNotice = r.ok ? (r.value?.warning ? `Started. ${r.value.warning}.` : null) : readErrorText(r.error);
+    if (r.ok) void loadSprints();
+  }
+
+  /** "12 Oct – 23 Oct". */
+  function sprintDates(b: BucketRow): string {
+    const d = (s: number | null | undefined) => (typeof s === 'number' ? unixToDay(s) : '');
+    if (!b.starts_at && !b.ends_at) return '';
+    return `${d(b.starts_at) || '…'} – ${d(b.ends_at) || '…'}`;
+  }
+
   function badge(t: WorkTask): string {
     if (t.kind === 'local') return 'local';
     if (t.kind === 'ref') return 'key';
@@ -335,6 +405,21 @@
     <!-- How to move a task is a one-time hint now (redesign 1.4), not a line on
          every visit; a reason the board cannot move tasks still shows here. -->
     <h2 use:hintAnchor={{ id: 'board-move', when: !moveBlocked }}>Board</h2>
+    {#if sprints && (sprints.length > 0 || scope !== 'all')}
+      <select
+        class="scope"
+        aria-label="Show on the board"
+        data-testid="work-board-scope"
+        value={String(scope)}
+        onchange={(e) => pickScope((e.currentTarget as HTMLSelectElement).value)}
+      >
+        <option value="all">All tasks</option>
+        {#each openSprints as b (b.id)}
+          <option value={String(b.id)}>{b.name}{b.state === 'active' ? ' · active' : ' · planned'}</option>
+        {/each}
+        <option value="none">No sprint (backlog)</option>
+      </select>
+    {/if}
     {#if moveBlocked}<span class="muted" data-testid="work-board-hint">{moveBlocked}</span>{/if}
     {#if onclose}
       <button class="btn btn--quiet btn--icon" type="button" title="Close the board" aria-label="Close the board"
@@ -343,6 +428,34 @@
     {/if}
   </header>
 
+  {#if sprint}
+    <div class="sprint" data-testid="work-board-sprint">
+      <span class="sprint-sum">{bucketSummary(sprint)}</span>
+      {#if sprintDates(sprint)}<span class="muted">{sprintDates(sprint)}</span>{/if}
+      {#if sprint.goal}<span class="muted goal" title="Sprint goal">{sprint.goal}</span>{/if}
+      <span class="sprint-actions">
+        {#if sprint.state === 'planned'}
+          <button
+            class="btn btn--quiet"
+            type="button"
+            data-testid="work-board-sprint-start"
+            disabled={adminBlocked !== null}
+            title={adminBlocked ?? 'Start this sprint'}
+            onclick={() => void startSprint(sprint)}>Start sprint</button
+          >
+        {/if}
+        <button
+          class="btn btn--quiet"
+          type="button"
+          data-testid="work-board-sprint-close"
+          disabled={adminBlocked !== null}
+          title={adminBlocked ?? 'Close it, and choose what carries over'}
+          onclick={() => (closingSprint = sprint.id)}>Close sprint…</button
+        >
+      </span>
+    </div>
+  {/if}
+  {#if scopeNotice}<p class="muted pad" role="status" data-testid="work-board-scope-notice">{scopeNotice}</p>{/if}
   {#if picked.size > 0}
     <div class="pickbar" role="toolbar" aria-label="Selected cards" data-testid="work-board-pickbar">
       <span>{picked.size} selected</span>
@@ -402,7 +515,7 @@
           aria-label={lane.label}
         >
           <h3>
-            {lane.label}{#if lane.id === 'done'}<span class="window"> · last 7 days</span>{/if}
+            {lane.label}{#if lane.id === 'done' && typeof scope !== 'number'}<span class="window"> · last 7 days</span>{/if}
             <span class="count">{nodes.length}</span>
             {#if lane.id === lane.status}
               <button
@@ -464,6 +577,11 @@
   </div>
 {/if}
 
+{#if closingSprint != null}
+  <!-- Its close bumps `workChanged`, which re-reads the board. -->
+  <WorkBuckets closeId={closingSprint} onclose={() => (closingSprint = null)} />
+{/if}
+
 {#if editing}
   <EditTaskDialog taskId={editing} onclose={() => (editing = null)} ondone={() => void load()} />
 {/if}
@@ -505,7 +623,9 @@
       <span class="meta">
         {#if t.status_name}<span>{t.status_name}</span>{/if}
         {#if t.project_label}<span>{t.project_label}</span>{/if}
-        {#if n.children.length > 0}<span>{n.children.length} subtask{n.children.length === 1 ? '' : 's'}</span>{/if}
+        {#if t.epic}<span class="epic" data-testid="work-board-epic">Epic</span>{/if}
+        {#if (t.children_total ?? 0) > 0}<span data-testid="work-board-rollup">{t.children_done ?? 0}/{t.children_total} done</span>
+        {:else if n.children.length > 0}<span>{n.children.length} subtask{n.children.length === 1 ? '' : 's'}</span>{/if}
         {#if (t.open_proposals ?? 0) > 0}<span class="prop">{t.open_proposals} to review</span>{/if}
         {#if mission}<span class="mission" data-testid="work-board-mission">{mission}</span>{/if}
         <TaskBlockedSpend task={t} lookup={taskById} testid="work-board-card" />
@@ -567,6 +687,38 @@
     margin: 4px 0 0;
     color: var(--fg-muted);
     font-size: var(--text-2xs);
+  }
+  .scope {
+    font: inherit;
+    font-size: var(--text-xs);
+    max-width: 16rem;
+  }
+  .sprint {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+  }
+  .sprint-sum {
+    font-weight: 500;
+  }
+  .goal {
+    font-style: italic;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sprint-actions {
+    margin-left: auto;
+    display: flex;
+    gap: var(--space-1);
+  }
+  .epic {
+    color: var(--accent);
+    font-weight: 500;
   }
   .board-note {
     margin: var(--space-2) 0 0;

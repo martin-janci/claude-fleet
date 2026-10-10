@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 ///   items, or an action / brake of its loop;
 /// - `jev`: a decision Jev was asked for;
 /// - `planner`, `summary`, `commit_message`, `release_note`,
-///   `morning_brief`, `brief`, `watch_summary`, `triage`: fleet's own
+///   `morning_brief`, `brief`, `watch_summary`, `triage`, `context_help`: fleet's own
 ///   `claude -p` runs, by origin ([`super::AUX_ORIGINS`]);
 /// - `routine`: a routine's fire (a schedule, an event or Run now).
 pub const RUN_KINDS: &[&str] = &[
@@ -52,6 +52,7 @@ pub const RUN_KINDS: &[&str] = &[
     "brief",
     "watch_summary",
     "triage",
+    "context_help",
     "routine",
 ];
 

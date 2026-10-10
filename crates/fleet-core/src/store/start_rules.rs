@@ -7,7 +7,7 @@ use crate::ipc_error::IpcError;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
-/// How a rule's starts run beyond the project and host (migration 161): the
+/// How a rule's starts run beyond the project and host (migration 163): the
 /// fallback host, the account, the model and effort, the agent. `None`
 /// everywhere = the host's defaults.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -36,7 +36,7 @@ pub struct StartRuleRow {
     /// `None` = the project's last host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_alias: Option<String>,
-    /// Where a start lands when `host_alias` is unreachable (migration 161).
+    /// Where a start lands when `host_alias` is unreachable (migration 163).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_host: Option<String>,
     /// The credential profile the session bills (the Account); `None` = the

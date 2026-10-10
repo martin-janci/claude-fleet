@@ -2610,6 +2610,239 @@ fn a_tree_query_groups_by_the_account_its_sessions_run_on() {
     assert_eq!(group_of(&p, "TK-3").id, "none");
 }
 
+/// Sprints design 2026-09-28 §6a: a group by sprint or release, named only
+/// for the buckets the caller may see.
+#[test]
+fn a_tree_query_groups_by_sprint_and_release() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        let bucket = |kind: &str, name: &str, org: Option<i64>| {
+            s.create_bucket(&crate::store::NewBucket {
+                kind,
+                name,
+                org_id: org,
+                owner_person_id: None,
+                starts_at: None,
+                ends_at: None,
+                goal: None,
+            })
+            .unwrap()
+            .id
+        };
+        let sprint = bucket("sprint", "Sprint 24", Some(w.org_a));
+        s.add_bucket_item(sprint, w.t1).unwrap();
+        // An unassigned sprint: a client bound to org A without unassigned
+        // work does not see it.
+        let secret = bucket("sprint", "Unassigned sprint", None);
+        s.add_bucket_item(secret, w.t2).unwrap();
+        // Two releases: the one still planned names the section.
+        let shipped = bucket("release", "0.2.0", Some(w.org_a));
+        s.add_bucket_item(shipped, w.t1).unwrap();
+        s.update_bucket(
+            shipped,
+            None,
+            &crate::store::BucketPatch {
+                state: Some("released".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let next = bucket("release", "0.3.0", Some(w.org_a));
+        s.add_bucket_item(next, w.t1).unwrap();
+    }
+    let p = page(&w, &OrgScope::All, by("sprint"));
+    assert_eq!(group_of(&p, "TK-1").label, "Sprint 24");
+    assert!(group_of(&p, "TK-1").id.starts_with("sprint:"));
+    assert_eq!(group_of(&p, "TK-1").source, "sprint");
+    assert_eq!(group_of(&p, "TK-3").id, "none");
+    assert_eq!(group_of(&p, "TK-3").label, "No sprint");
+
+    let p = page(&w, &OrgScope::All, by("release"));
+    assert_eq!(group_of(&p, "TK-1").label, "0.3.0");
+    assert_eq!(group_of(&p, "TK-3").label, "No release");
+
+    // A section of the grouping reads by itself.
+    let id = group_of(&page(&w, &OrgScope::All, by("sprint")), "TK-1")
+        .id
+        .clone();
+    let p = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            group: Some(id),
+            ..by("sprint")
+        },
+    );
+    assert_eq!(keys(&p), vec!["TK-1"]);
+
+    let p = page(&w, &OrgScope::All, by("sprint"));
+    assert_eq!(group_of(&p, "TK-2").label, "Unassigned sprint");
+    // Org A's client sees TK-2 but not the unassigned sprint: no name, no
+    // section.
+    let p = page(&w, &strict(w.org_a), by("sprint"));
+    assert_eq!(group_of(&p, "TK-2").id, "none");
+    let dump = serde_json::to_string(&p).unwrap();
+    assert!(!dump.contains("Unassigned sprint"), "{dump}");
+}
+
+/// Sprints design 2026-09-28 §3, §6a: an epic is its own section, its
+/// tasks sit in it, and it carries its children's roll-up.
+#[test]
+fn a_tree_query_groups_by_epic_and_rolls_its_children_up() {
+    let w = world();
+    let (epic, done_one) = {
+        let s = w.st.lock().unwrap();
+        let native = |title: &str, parent: Option<i64>| {
+            s.create_native_item(&crate::store::NativeItem {
+                title,
+                parent_id: parent,
+                project_id: None,
+                notes: None,
+            })
+            .unwrap()
+        };
+        let epic = native("Login revamp", None);
+        s.set_local_epic(epic.id, true).unwrap();
+        native("Fix login", Some(epic.id));
+        let done_one = native("Write tests", Some(epic.id));
+        s.set_item_status(done_one.id, "done").unwrap();
+        native("Loose task", None);
+        (epic, done_one)
+    };
+    let key = |id: i64| format!("TASK-{id}");
+    let p = page(&w, &OrgScope::All, by("epic"));
+    let e = task_of(&p, &key(epic.id));
+    assert!(e.epic);
+    assert_eq!((e.children_total, e.children_done), (2, 1));
+    assert_eq!(e.group.id, format!("epic:{}", epic.id));
+    assert_eq!(e.group.label, format!("{} · Login revamp", key(epic.id)));
+    let d = task_of(&p, &key(done_one.id));
+    assert!(!d.epic);
+    assert_eq!(d.group.id, format!("epic:{}", epic.id));
+    assert_eq!(d.parent_task_id, Some(format!("item:{}", epic.id)));
+    assert_eq!(group_of(&p, &key(epic.id + 3)).label, "No epic");
+
+    // A subtask of an epic's task sits in the epic's section too, two
+    // levels down (owner decision 2026-10-10: three levels).
+    let sub = {
+        let s = w.st.lock().unwrap();
+        s.create_native_item(&crate::store::NativeItem {
+            title: "Edge case",
+            parent_id: Some(done_one.id),
+            project_id: None,
+            notes: None,
+        })
+        .unwrap()
+    };
+    let p = page(&w, &OrgScope::All, by("epic"));
+    let st = task_of(&p, &key(sub.id));
+    assert_eq!(st.group.id, format!("epic:{}", epic.id));
+    assert_eq!((st.level, task_of(&p, &key(epic.id)).level), (3, 1));
+    assert_eq!(group_of(&p, "TK-1").id, "none");
+}
+
+/// Task comments: served with the task, oldest first; who wrote one is a
+/// device label, withheld from a scoped caller as a placement's author is.
+#[test]
+fn a_task_serves_its_comments_and_withholds_their_author_from_a_scoped_caller() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        s.add_comment(w.t1, "client:phone", Some(4), "first")
+            .unwrap();
+        s.add_comment(w.t1, "desktop", None, "second").unwrap();
+    }
+    let all = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", w.t1)).unwrap();
+    assert_eq!(
+        all.comments
+            .iter()
+            .map(|c| (c.author.as_str(), c.body.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("client:phone", "first"), ("desktop", "second")]
+    );
+    let scoped = task(&w.st, &vs(&strict(w.org_a)), &format!("item:{}", w.t1)).unwrap();
+    assert_eq!(scoped.comments.len(), 2);
+    assert!(scoped
+        .comments
+        .iter()
+        .all(|c| c.author.is_empty() && c.author_person_id.is_none()));
+}
+
+/// Owner decision 2026-10-10: one person does not learn another's device
+/// names. A comment's author shows to its own person; a placement's author
+/// (a device label with no person) to nobody but the hub itself and the one
+/// person of a one-person hub.
+#[test]
+fn a_person_sees_their_own_device_names_and_no_one_elses() {
+    use crate::mcp::auth::{Caller, ClientRef, TokenMode};
+    use crate::service::view_scope::ViewScope;
+    // A person's paired device, scoped the way a request is.
+    let device = |w: &W, p: i64| -> ViewScope {
+        Caller {
+            api: None,
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 7,
+                name: "phone".into(),
+                trusted: false,
+                org_id: None,
+                person_id: Some(p),
+            }),
+            mode: TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
+        }
+        .view_scope(&w.st.lock().unwrap())
+        .unwrap()
+    };
+    let w = world();
+    let ana = w.st.lock().unwrap().create_person("ana", None).unwrap().id;
+    let id = format!("item:{}", w.t1);
+    w.st.lock()
+        .unwrap()
+        .add_comment(w.t1, "client:ana-phone", Some(ana), "mine")
+        .unwrap();
+    structure::place(
+        &w.st,
+        &vs(&OrgScope::All),
+        &id,
+        Some("Now"),
+        None,
+        Some(0),
+        "client:bo-laptop",
+    )
+    .unwrap();
+    let authors = |v: &ViewScope| -> Vec<String> {
+        task(&w.st, v, &id)
+            .unwrap()
+            .comments
+            .into_iter()
+            .map(|c| c.author)
+            .collect()
+    };
+    let placed_by = |v: &ViewScope| task(&w.st, v, &id).unwrap().placement.unwrap().updated_by;
+    // The hub itself sees every device.
+    assert_eq!(
+        placed_by(&vs(&OrgScope::All)).as_deref(),
+        Some("client:bo-laptop")
+    );
+    // Each person sees their own device names and no one else's.
+    let bo = w.st.lock().unwrap().create_person("bo", None).unwrap().id;
+    w.st.lock()
+        .unwrap()
+        .add_comment(w.t1, "client:bo-laptop", Some(bo), "theirs")
+        .unwrap();
+    assert_eq!(authors(&device(&w, ana)), ["client:ana-phone", ""]);
+    assert_eq!(authors(&device(&w, bo)), ["", "client:bo-laptop"]);
+    assert_eq!(placed_by(&device(&w, ana)), None);
+    assert_eq!(placed_by(&device(&w, bo)), None);
+    assert_eq!(
+        authors(&vs(&OrgScope::All)),
+        ["client:ana-phone", "client:bo-laptop"]
+    );
+}
+
 #[test]
 fn an_unknown_grouping_is_refused_not_ignored() {
     let w = world();

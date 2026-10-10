@@ -282,9 +282,59 @@ A native task is edited (title, description, status, assignees) from its
 card's ✎ or E, the List row's ✎ and the task page's *Edit*:
 `EditTaskDialog` writes `edit_work_item` → `work_link { edit }` and
 `set_work_status`; a tracker's ticket stays its tracker's to edit.
-It is not yet scoped to a sprint: the Work view's Sprint / Release axis and
-bulk assignment are not built, nor are epics for local items (phase 4). E9–E11 run on their
-defaults.
+The Work view's Sprint / Release axis (§6a) and bulk assignment (§6b) are
+built: `filters.group_by: sprint | release` (`view::regroup`, the bucket of
+each item read once per tree by `Store::bucket_membership`, fenced by
+`sees_org`), a section header with the bucket's roll-up, a selection in the
+Grouped tree that plans tasks into a sprint or release (moving one out of
+the sprint that held it) or takes them out, and *Sprints & releases*
+(`WorkBuckets.svelte`): create, start, release, close with the carry-over
+confirmed (E9) and delete. Desktop commands `work_buckets` / `work_bucket`
+(→ `work`) and `add_work_to_bucket` / `remove_work_from_bucket` (→
+`work_link`) route; so does `work_bucket_admin`, as `work_link { action:
+bucket_admin, bucket_op }` (owner decision 2026-10-10,
+`buckets::person_admin` / `may_plan`): a person creates and changes
+personal sprints and releases of their own (migration 162,
+`work_buckets.owner_person_id`; one current sprint per owner, a personal
+one wins a group by sprint for its person, never linked to a tracker), and
+an org's team ones as its admin — or member, when the org turns the per-org
+`work.members_plan_sprints` on (off by default; a viewer never). Standalone
+it stays `work_admin`. The board is scoped to a sprint (§6c): a picker over All tasks, each
+open sprint and *No sprint (backlog)* (`boardScope`, kept per machine; a
+sprint is the section of a group by sprint, `boardFilters`, so no new read),
+the sprint's roll-up, dates and goal above the columns with *Start sprint* /
+*Close sprint…* (the close dialog of E9), and Done holding everything the
+sprint delivered rather than the last week; a sprint that closes falls back
+to All tasks. Epics for local items (phase 4, §3) are built: `work_link {
+edit, epic }` marks a top-level local item an epic (`kind = 'epic'`,
+`Store::set_local_epic`), `work_link { set_parent }` (`set_work_parent`,
+routed) files a local item under an epic or a task or takes it out to the
+top (`Store::set_local_parent`), `filters.group_by: epic` sections the Work
+view by the epic a task is or is filed under, and every task carries its
+children's roll-up (`children_total` / `children_done`, computed, never
+closing the parent). The selection's *Under epic…* files tasks in bulk, the
+Edit dialog's *Epic* box marks one, and the row and the Board card show
+*Epic* and *n/m done*. Depth stays ONE, not the spec's three: a local item
+with a parent is never a parent (`parent_for_new_child` now checks every
+local item, not only a native one), because `item_org` — and the org fences
+built on it — walks one level; a filed task cannot hold subtasks, and a task
+with subtasks is not filed. Going deeper is the owner's decision (it moves
+the org fence). Not yet: the phone. E9–E11 run on their defaults.
+
+Task comments (migration 161, `work_item_comments`; the Comments tab G3.4
+had cut is back on the owner's word, 2026-10-10): `work_link { comment,
+item_id, notes }` (`comment_on_work`) and `{ comment_delete, comment_id }`
+(`delete_work_comment`), both routed. A comment is about the ITEM — its
+org fence, `edit`'s person gate for writing — stays in fleet (never a
+tracker's), and is deleted by its author alone (the person when both sides
+prove one, else the caller's label). `work { task }` serves them oldest
+first with `mine`. Device names are their person's (owner decision
+2026-10-10): a comment's author shows to its own person only, and
+`Placement.updated_by` (a device label with no person) only to the hub
+itself and the one person of a one-person hub. The
+task page's Activity tab also lists each session that started, was
+suggested, turned down or stopped, and each comment. Not yet: comments on
+the phone.
 
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub

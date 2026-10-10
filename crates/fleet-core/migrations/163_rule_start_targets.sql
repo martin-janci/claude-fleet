@@ -24,4 +24,4 @@ ALTER TABLE start_rules ADD COLUMN agent TEXT;
 -- skipped gets work_rules only from the repair that runs after every
 -- migration, so `Store::ensure_work_rules_start_columns` adds them then.
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (161);
+INSERT OR IGNORE INTO schema_version (version) VALUES (163);

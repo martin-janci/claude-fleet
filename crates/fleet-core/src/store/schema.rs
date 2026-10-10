@@ -358,7 +358,18 @@ fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 161: `start_rules` already has its
+/// `already_applied` guard of migration 164: `wizard_state` exists (and
+/// `host_setups`, which it replaced, is gone). See [`Migration`].
+fn has_wizard_state(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wizard_state'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 163: `start_rules` already has its
 /// `agent` column. See [`Migration`].
 fn start_rules_has_agent(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -762,6 +773,16 @@ fn hosts_has_last_reachable_at(conn: &Connection) -> rusqlite::Result<bool> {
 fn work_items_has_due_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'due_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// already_applied guard of migration 162.
+fn work_buckets_has_owner(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_buckets') WHERE name = 'owner_person_id'",
         [],
         |r| r.get(0),
     )?;
@@ -1831,12 +1852,32 @@ const MIGRATIONS: &[Migration] = &[
         160,
         include_str!("../../migrations/160_access_requests.sql"),
     ),
+    // Task comments: a new table, idempotent.
+    Migration::plain(
+        161,
+        include_str!("../../migrations/161_work_item_comments.sql"),
+    ),
+    // Personal sprints: `work_buckets.owner_person_id` — an ADD COLUMN, so a
+    // guard.
+    Migration {
+        version: 162,
+        sql: include_str!("../../migrations/162_work_bucket_owner.sql"),
+        already_applied: Some(work_buckets_has_owner),
+    },
     // M15 step G7.1: start and placement rules name how a start runs (host
     // fallback, account, model, effort, agent) — ADD COLUMNs, so a guard.
     Migration {
-        version: 161,
-        sql: include_str!("../../migrations/161_rule_start_targets.sql"),
+        version: 163,
+        sql: include_str!("../../migrations/163_rule_start_targets.sql"),
         already_applied: Some(start_rules_has_agent),
+    },
+    // M15 step G7.2: `wizard_state`, the add-host wizard's drafts
+    // generalised so any wizard resumes on another device. It moves the
+    // `host_setups` rows and drops that table, so a guard.
+    Migration {
+        version: 164,
+        sql: include_str!("../../migrations/164_wizard_state.sql"),
+        already_applied: Some(has_wizard_state),
     },
 ];
 
@@ -2108,9 +2149,9 @@ impl Store {
     /// ADD COLUMN plus `IF NOT EXISTS` / `DROP … IF EXISTS` DDL, and 065's
     /// trigger rebuild is still the latest one, so running them late is
     /// what running them in order would have left.
-    /// Migration 161's `work_rules` half (gap plan G7.1): `host_alias` and
+    /// Migration 163's `work_rules` half (gap plan G7.1): `host_alias` and
     /// `profile`, "its sessions start here". In Rust, after the repair of a
-    /// skipped 066 (which creates `work_rules`), so a database that met 161
+    /// skipped 066 (which creates `work_rules`), so a database that met 163
     /// before it had the table still gets them. Idempotent.
     fn ensure_work_rules_start_columns(&self) -> Result<()> {
         let has_table: i64 = self.conn.query_row(
@@ -6218,6 +6259,27 @@ mod tests {
         s.migrate().unwrap();
         assert_eq!(row(wid).name, "feat-imports", "a re-run changes nothing");
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// 164 (gap plan G7.2): the add-host wizard's drafts move from
+    /// `host_setups` into `wizard_state` as `add_host` rows, and the old
+    /// table goes; the store still reads them as drafts.
+    #[test]
+    fn migration_164_moves_the_add_host_drafts_into_wizard_state() {
+        let s = store_at_version(163);
+        s.conn
+            .execute_batch(
+                "INSERT INTO host_setups (ssh_alias, alias, step, checks, answers, created_at, updated_at)
+                 VALUES ('mercury', 'merc', 3, '[{\"key\":\"ssh\",\"state\":\"ok\",\"label\":\"SSH\",\"detail\":\"18 ms\"}]',
+                         '{\"install_agent\":true}', 5, 6);",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        assert!(!s.has_table("host_setups").unwrap());
+        let d = s.host_setup("mercury").unwrap().expect("the draft moved");
+        assert_eq!((d.alias.as_str(), d.step, d.created_at), ("merc", 3, 5));
+        assert_eq!(d.checks[0].detail, "18 ms");
+        assert_eq!(d.answers["install_agent"], true);
     }
 
     /// The hub-ops-accounting branch numbered its `usage_daily` rebuild

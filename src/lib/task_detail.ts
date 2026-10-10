@@ -4,17 +4,85 @@
 // spent and over how long, and who owns it by when. Pure: the page and its
 // tests read these.
 import { formatDuration } from './account_usage';
+import { invokeCmd, type Result } from './result';
 import type { SessionRow } from './sessions';
-import { ownerDueChip } from './work';
+import { bumpWorkChanged, ownerDueChip } from './work';
 import { prChip, prNumber, type PrChip } from './work_row';
-import { taskSpend, type LastOutcome, type WorkTask } from './work_view';
+import { occurrenceKind, taskSpend, type LastOutcome, type TaskComment, type TaskDetail, type WorkTask, type WorkTaskLink } from './work_view';
 import type { StartRule } from './start_rules';
 
-/** The Task detail's tabs. Comments are not one: fleet keeps no comments on
- *  a task (cut, gap plan decisions). */
-export const TASK_TABS = ['overview', 'sessions', 'activity'] as const;
+/** The Task detail's tabs. Comments came back (G3.4 had cut them): fleet
+ *  keeps a task's comments itself (migration 161) and never writes one to a
+ *  tracker. */
+export const TASK_TABS = ['overview', 'sessions', 'activity', 'comments'] as const;
 export type TaskTab = (typeof TASK_TABS)[number];
-export const TASK_TAB_LABELS: Record<TaskTab, string> = { overview: 'Overview', sessions: 'Sessions', activity: 'Activity' };
+export const TASK_TAB_LABELS: Record<TaskTab, string> = {
+  overview: 'Overview',
+  sessions: 'Sessions',
+  activity: 'Activity',
+  comments: 'Comments',
+};
+
+/** Longest comment, in characters (the hub's `COMMENT_MAX_CHARS`). */
+export const COMMENT_MAX = 4000;
+
+export async function commentOnWork(itemId: number, body: string): Promise<Result<TaskComment>> {
+  const r = await invokeCmd<TaskComment>('comment_on_work', { args: { item_id: itemId, body: body.trim() } });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
+export async function deleteWorkComment(commentId: number): Promise<Result<TaskComment>> {
+  const r = await invokeCmd<TaskComment>('delete_work_comment', { args: { comment_id: commentId } });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
+/** Who wrote a comment, as a person reads it: `client:phone` → `phone`. */
+export function commentAuthor(c: Pick<TaskComment, 'author' | 'mine'>): string {
+  if (c.mine) return 'You';
+  const a = (c.author ?? '').trim();
+  if (!a) return 'Someone';
+  if (a === 'desktop') return 'This desktop';
+  if (a === 'master') return 'The hub';
+  const m = /^(client|host|token):(.+)$/.exec(a);
+  if (!m) return a;
+  return m[1] === 'host' ? `An agent on ${m[2]}` : m[2];
+}
+
+/** One dated line of a task's Activity. */
+export interface ActivityEvent {
+  at: number;
+  kind: 'linked' | 'suggested' | 'rejected' | 'ended' | 'comment';
+  text: string;
+}
+
+const linkName = (l: WorkTaskLink) => l.name ?? (l.session_id != null ? `session ${l.session_id}` : `link ${l.link_id}`);
+
+/** What happened to the task beside its placement and outcome, newest
+ *  first: each session that started, was suggested, turned down or
+ *  stopped, and each comment. */
+export function activityEvents(d: Pick<TaskDetail, 'task' | 'comments'>): ActivityEvent[] {
+  const out: ActivityEvent[] = [];
+  for (const l of d.task.sessions ?? []) {
+    const name = linkName(l);
+    const where = l.host ? ` on ${l.host}` : '';
+    const kind = occurrenceKind(l);
+    if (l.created_at) {
+      out.push(
+        kind === 'suggested' || (kind === 'rejected' && !l.ended_at)
+          ? { at: l.created_at, kind: 'suggested', text: `${name}${where} was suggested` }
+          : { at: l.created_at, kind: 'linked', text: `${name}${where} started on it` },
+      );
+    }
+    if (kind === 'rejected' && l.decided_at) out.push({ at: l.decided_at, kind: 'rejected', text: `${name} was marked “not this”` });
+    if (l.ended_at && kind !== 'rejected') {
+      out.push({ at: l.ended_at, kind: 'ended', text: `${name} stopped${l.end_reason ? ` (${l.end_reason})` : ''}` });
+    }
+  }
+  for (const c of d.comments ?? []) out.push({ at: c.created_at, kind: 'comment', text: `${commentAuthor(c)} commented` });
+  return out.sort((a, b) => b.at - a.at);
+}
 
 export interface Delivery {
   /** A live session's PR with its checks, else the last outcome's PR. */

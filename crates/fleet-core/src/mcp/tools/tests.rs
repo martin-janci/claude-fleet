@@ -2783,6 +2783,7 @@ fn router_sum_serves_every_tool() {
         include_str!("add_account.rs"),
         include_str!("routines.rs"),
         include_str!("start_rules.rs"),
+        include_str!("wizard_state.rs"),
         include_str!("presence.rs"),
         include_str!("library.rs"),
         include_str!("runs.rs"),
@@ -11831,6 +11832,10 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // Task editing: the text the owner's sidebar shows for their own row,
     // behind `set_status`'s gate.
     ("work_link", "edit", &["Drive"]),
+    // Epics: where a person's live work is filed, behind `edit`'s gate.
+    ("work_link", "set_parent", &["Drive"]),
+    // A comment is written into the owner's task: `edit`'s gate.
+    ("work_link", "comment", &["Drive"]),
     // Sprint and release membership: `set_status`'s person gate, on the
     // item planned.
     ("work_link", "bucket_add", &["Drive"]),
@@ -12063,6 +12068,12 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
 /// INSTEAD of a session.
 const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
     (
+        "work_link",
+        "comment_delete",
+        "a comment, by id: its item's org fence first (outside it, unknown), \
+         then its author's alone; no session is named or answered",
+    ),
+    (
         "work",
         "missions",
         "missions, each fenced by its org and then its owner or the org's \
@@ -12252,6 +12263,11 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
     ("work_link", "rule_delete", "a placement rule"),
     ("work_link", "view_save", "a saved view"),
     ("work_link", "view_delete", "a saved view"),
+    (
+        "work_link",
+        "bucket_admin",
+        "a sprint or release itself (no item, no session): fenced by `buckets::may_plan`",
+    ),
 ];
 
 /// The coverage gate: **does every call that can reach a session row say how
