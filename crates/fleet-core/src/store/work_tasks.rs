@@ -2,8 +2,11 @@
 //! subtasks written in fleet (`origin = 'manual'`), agent proposals
 //! (`'proposed'`) and the mirror of a dispatched job (`'agent'`). Every one is
 //! a local item with a `TASK-<id>` key, so the key-driven start path and
-//! branch detection work on them unchanged. Depth is one: a native subtask
-//! is never a parent.
+//! branch detection work on them unchanged. Depth is one: a local item
+//! with a parent is never a parent (`parent_for_new_child`,
+//! [`Store::set_local_parent`]), which is what lets `item_org` walk one
+//! level only. An epic (sprints design 2026-09-28 §3, `kind = 'epic'`) is a
+//! top-level local item whose children are its tasks.
 //!
 //! The only writers of `origin`, `project_id`, `notes`, `task_id` and the
 //! proposal columns, and (with `work_status.rs`) of `status_set_by`:
@@ -17,6 +20,15 @@ use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 
 pub const TASK_KEY_PREFIX: &str = "TASK";
+/// `work_items.kind` of a local epic (sprints design 2026-09-28 §3, E2).
+pub const EPIC_KIND: &str = "epic";
+
+/// An epic: a local one, or a tracker's (Jira's issue type "Epic").
+pub fn is_epic(item: &WorkItemRow) -> bool {
+    item.kind
+        .as_deref()
+        .is_some_and(|k| k.eq_ignore_ascii_case(EPIC_KIND))
+}
 /// Open proposals one parent may hold (counter-review risk 2).
 pub const PROPOSALS_OPEN_CAP: usize = 10;
 
@@ -184,8 +196,9 @@ impl Store {
                 format!("work item {parent_id} not found"),
             )
         })?;
-        let native = matches!(p.origin.as_deref(), Some("manual" | "proposed" | "agent"));
-        if native && p.parent_id.is_some() {
+        // Every local item, not only a native one: `set_local_parent` can
+        // give a named piece of work a parent too.
+        if p.source == "local" && p.parent_id.is_some() {
             return Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
@@ -658,6 +671,152 @@ impl Store {
                 rejected: false,
             },
         )?;
+        self.get_work_item(item_id)
+    }
+
+    /// A person files a local item under `parent` (`Some`), or takes it out
+    /// to the top (`None`) — sprints design 2026-09-28 §3. `None` when the
+    /// item is unknown or not local. Refused (`E_INVALID`, naming why):
+    /// a tracker's ticket (its tracker owns its parent); a delegated job or
+    /// an open proposal (their parent is what they were made for); an epic
+    /// (it sits at the top); an item that has children of its own, or a
+    /// parent that is itself under one (depth stays one, so `item_org`'s
+    /// one-level walk stays the whole hierarchy); the item itself, or a
+    /// parent of another organisation than the one the item is in now
+    /// (`E_FORBIDDEN`). Taken out to the top, an item that read its org
+    /// from its parent keeps that org as its own, so it never turns
+    /// unassigned by moving.
+    pub fn set_local_parent(
+        &self,
+        item_id: i64,
+        parent: Option<i64>,
+    ) -> Result<Option<WorkItemRow>, IpcError> {
+        let Some(before) = self.get_work_item(item_id)? else {
+            return Ok(None);
+        };
+        if before.source != "local" {
+            return Ok(None);
+        }
+        let label = |i: &WorkItemRow| i.key.clone().unwrap_or_else(|| format!("item {}", i.id));
+        let invalid = |m: String| IpcError::new(codes::E_INVALID, m);
+        if before.origin.as_deref() == Some("agent") {
+            return Err(invalid(format!(
+                "{} is a delegated job; it stays under the task it runs for",
+                label(&before)
+            )));
+        }
+        if matches!(
+            before.proposal_state.as_deref(),
+            Some("proposed" | "rejected")
+        ) {
+            return Err(invalid(format!(
+                "{} is a proposal; accept it before you move it",
+                label(&before)
+            )));
+        }
+        if before.parent_id == parent {
+            return Ok(Some(before));
+        }
+        let own_org: Option<i64> = self.conn.query_row(
+            "SELECT org_id FROM work_items WHERE id = ?1",
+            [item_id],
+            |r| r.get(0),
+        )?;
+        let mut stamp_org = None;
+        match parent {
+            Some(pid) => {
+                if pid == item_id {
+                    return Err(invalid(format!(
+                        "{} cannot be its own parent",
+                        label(&before)
+                    )));
+                }
+                if is_epic(&before) {
+                    return Err(invalid(format!(
+                        "{} is an epic; an epic sits at the top",
+                        label(&before)
+                    )));
+                }
+                let has_children: bool = self.conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM work_items WHERE parent_id = ?1)",
+                    [item_id],
+                    |r| r.get(0),
+                )?;
+                if has_children {
+                    return Err(invalid(format!(
+                        "{} has subtasks of its own; work goes one level under an epic or a \
+                         task, so move its subtasks first",
+                        label(&before)
+                    )));
+                }
+                let p = self.parent_for_new_child(pid)?;
+                let parent_org = self.item_org(pid)?;
+                // The org it has now, its own or read from its parent: a
+                // subtask moves between parents of one org only.
+                if let (Some(mine), Some(theirs)) = (self.item_org(item_id)?, parent_org) {
+                    if mine != theirs {
+                        return Err(IpcError::new(
+                            codes::E_FORBIDDEN,
+                            format!(
+                                "{} belongs to organisation {mine} and {} to organisation \
+                                 {theirs}; fleet does not file work across organisations",
+                                label(&before),
+                                label(&p)
+                            ),
+                        )
+                        .with_details(serde_json::json!({
+                            "work_org_id": mine, "parent_org_id": theirs, "cross_org": true
+                        })));
+                    }
+                }
+            }
+            None => {
+                if own_org.is_none() {
+                    stamp_org = self.item_org(item_id)?;
+                }
+            }
+        }
+        self.conn.execute(
+            "UPDATE work_items SET parent_id = ?1, org_id = COALESCE(org_id, ?2), updated_at = ?3 \
+              WHERE id = ?4 AND source = 'local'",
+            rusqlite::params![parent, stamp_org, now_unix(), item_id],
+        )?;
+        self.emit_work_item(item_id, super::tracker_items::SessionChange::default())?;
+        self.get_work_item(item_id)
+    }
+
+    /// A person marks a top-level local item an epic, or back a task.
+    /// `None` when the item is unknown or not local. An item under a parent
+    /// is refused: an epic sits at the top.
+    pub fn set_local_epic(
+        &self,
+        item_id: i64,
+        epic: bool,
+    ) -> Result<Option<WorkItemRow>, IpcError> {
+        let Some(before) = self.get_work_item(item_id)? else {
+            return Ok(None);
+        };
+        if before.source != "local" {
+            return Ok(None);
+        }
+        if is_epic(&before) == epic {
+            return Ok(Some(before));
+        }
+        if epic && before.parent_id.is_some() {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "{} is under another task; take it out to the top before you make it \
+                     an epic",
+                    before.key.as_deref().unwrap_or("this item")
+                ),
+            ));
+        }
+        self.conn.execute(
+            "UPDATE work_items SET kind = ?1, updated_at = ?2 WHERE id = ?3 AND source = 'local'",
+            rusqlite::params![epic.then_some(EPIC_KIND), now_unix(), item_id],
+        )?;
+        self.emit_work_item(item_id, super::tracker_items::SessionChange::default())?;
         self.get_work_item(item_id)
     }
 

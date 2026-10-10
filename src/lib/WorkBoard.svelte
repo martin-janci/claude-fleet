@@ -488,7 +488,9 @@
       <span class="meta">
         {#if t.status_name}<span>{t.status_name}</span>{/if}
         {#if t.project_label}<span>{t.project_label}</span>{/if}
-        {#if n.children.length > 0}<span>{n.children.length} subtask{n.children.length === 1 ? '' : 's'}</span>{/if}
+        {#if t.epic}<span class="epic" data-testid="work-board-epic">Epic</span>{/if}
+        {#if (t.children_total ?? 0) > 0}<span data-testid="work-board-rollup">{t.children_done ?? 0}/{t.children_total} done</span>
+        {:else if n.children.length > 0}<span>{n.children.length} subtask{n.children.length === 1 ? '' : 's'}</span>{/if}
         {#if (t.open_proposals ?? 0) > 0}<span class="prop">{t.open_proposals} to review</span>{/if}
         <TaskBlockedSpend task={t} lookup={taskById} testid="work-board-card" />
       </span>
@@ -547,6 +549,10 @@
     margin-left: auto;
     display: flex;
     gap: var(--space-1);
+  }
+  .epic {
+    color: var(--accent);
+    font-weight: 500;
   }
   .board-note {
     margin: var(--space-2) 0 0;

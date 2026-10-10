@@ -583,6 +583,7 @@ export async function editWorkItem(
   if (edit.notes !== undefined) args.notes = edit.notes;
   if (edit.assignees !== undefined) args.assignees = edit.assignees;
   if (edit.due_at !== undefined) args.due_at = edit.due_at;
+  if (edit.epic !== undefined) args.epic = edit.epic;
   const r = await invokeCmd<WorkItemRow>('edit_work_item', { args });
   if (r.ok) {
     if (edit.title !== undefined) patchWorkItemTitle(itemId, r.value.title);
@@ -598,6 +599,20 @@ export interface WorkItemEdit {
   assignees?: string[];
   /** `YYYY-MM-DD`; `''` clears. */
   due_at?: string;
+  /** A top-level task is an epic (sprints design §3). */
+  epic?: boolean;
+}
+
+/** File a local item under an epic or a task (`parentItemId`), or take it
+ *  out to the top (`null`) — sprints design 2026-09-28 §3. Refused
+ *  (`E_INVALID`, naming why) for a tracker's ticket, an epic, an item with
+ *  subtasks of its own or a parent that is itself filed under one, and
+ *  across organisations (`E_FORBIDDEN`). */
+export async function setWorkParent(itemId: number, parentItemId: number | null): Promise<Result<WorkItemRow>> {
+  const parent = parentItemId == null ? '' : `item:${parentItemId}`;
+  const r = await invokeCmd<WorkItemRow>('set_work_parent', { args: { item_id: itemId, parent } });
+  if (r.ok) bumpWorkChanged();
+  return r;
 }
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];

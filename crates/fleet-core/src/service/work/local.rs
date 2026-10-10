@@ -322,7 +322,8 @@ pub fn rename_local_item(
         .ok_or_else(|| orgs::not_found("work item", id))
 }
 
-/// `work_link { action: edit, item_id, title?, notes?, assignees?, due_at? }`: a
+/// `work_link { action: edit, item_id, title?, notes?, assignees?, due_at?,
+/// epic? }`: a
 /// person edits a local item (task editing). The same fences as
 /// [`rename_local_item`]: a tracker's ticket is `E_INVALID` (its tracker
 /// owns its text), and an item outside the scope answers as an unknown id.
@@ -338,10 +339,11 @@ pub fn edit_local_item(
         && args.notes.is_none()
         && args.assignees.is_none()
         && args.due_at.is_none()
+        && args.epic.is_none()
     {
         return Err(IpcError::new(
             codes::E_INVALID,
-            "edit needs title, notes, assignees or due_at",
+            "edit needs title, notes, assignees, due_at or epic",
         ));
     }
     let s = lock(store)?;
@@ -363,6 +365,12 @@ pub fn edit_local_item(
     if !local_item_visible(&s, scope, id)? {
         return Err(orgs::not_found("work item", id));
     }
+    // The epic flag first: its refusal (an item under a parent) leaves the
+    // rest of the edit unwritten too.
+    if let Some(epic) = args.epic {
+        s.set_local_epic(id, epic)?
+            .ok_or_else(|| orgs::not_found("work item", id))?;
+    }
     s.edit_local_item(
         id,
         &crate::store::ItemEdit {
@@ -373,6 +381,62 @@ pub fn edit_local_item(
         },
     )?
     .ok_or_else(|| orgs::not_found("work item", id))
+}
+
+/// `work_link { action: set_parent, item_id, parent }` (sprints design
+/// 2026-09-28 §3): a person files a local item under an epic or a task
+/// (`parent: "item:<id>"`), or takes it out to the top (`parent: ""`). The
+/// fences of [`edit_local_item`]: a tracker's ticket is `E_INVALID` (its
+/// tracker files it), and an item or a parent outside the scope answers as
+/// an unknown id. The rules of the hierarchy are
+/// [`Store::set_local_parent`]'s.
+pub fn set_parent(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+) -> Result<WorkItemRow, IpcError> {
+    let id = args
+        .item_id
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "set_parent needs item_id"))?;
+    let parent = match args.parent.as_deref().map(str::trim) {
+        None => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "set_parent needs parent: item:<id>, or \"\" for the top",
+            ))
+        }
+        Some("") => None,
+        Some(_) => parent_id(args)?,
+    };
+    let s = lock(store)?;
+    let Some(item) = s.get_work_item(id)? else {
+        return Err(orgs::not_found("work item", id));
+    };
+    if item.source != "local" {
+        if !scope.sees_org(s.item_org(id)?) {
+            return Err(orgs::not_found("work item", id));
+        }
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{} is a tracker's ticket; its tracker files it",
+                item.key.as_deref().unwrap_or("this item")
+            ),
+        ));
+    }
+    if !local_item_visible(&s, scope, id)? {
+        return Err(orgs::not_found("work item", id));
+    }
+    if let Some(p) = parent {
+        // This is the org boundary, not a privacy fence: it asks whether the
+        // PARENT ITEM exists for this caller, as `create_task`'s does, and an
+        // item's key and title are work data.
+        if !scope.is_all() {
+            visible_parent(&s, scope, p)?;
+        }
+    }
+    s.set_local_parent(id, parent)?
+        .ok_or_else(|| orgs::not_found("work item", id))
 }
 
 /// `item:<id>` → the id.

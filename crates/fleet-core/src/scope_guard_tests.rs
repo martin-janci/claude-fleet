@@ -479,7 +479,20 @@ const SCOPE_GUARDS: &[Guard] = &[
               (the planning write carries `require_drive_on_item_sessions` at \
               the tool layer, as `set_status` does). A SIXTH arrived with task \
               editing: `edit_local_item`, a write like the rename, behind the \
-              same `require_drive_on_item_sessions` at the tool layer",
+              same `require_drive_on_item_sessions` at the tool layer. A \
+              SEVENTH arrived with epics: `set_parent`, which files the ITEM \
+              under a parent, a write behind that same tool-layer gate",
+    },
+    Guard {
+        file: "crates/fleet-core/src/service/work/local.rs",
+        func: "set_parent",
+        nth: 0,
+        code: "if !scope.is_all() {",
+        verdict: Verdict::OrgBoundary,
+        why: "this is the org boundary, not a privacy fence: it asks whether \
+              the PARENT ITEM a task is filed under exists for this caller, \
+              through `visible_parent` — `create_task`'s question, on an \
+              item's key and title, which are work data",
     },
     Guard {
         file: "crates/fleet-core/src/service/work/local.rs",

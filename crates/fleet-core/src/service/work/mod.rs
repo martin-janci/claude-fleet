@@ -215,9 +215,12 @@ pub struct WorkLinkArgs {
     /// name/create/propose: title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// create/propose: parent, item:<id>.
+    /// create/propose/set_parent: parent, item:<id> (set_parent: "" = top).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// edit: a top-level local item is an epic (true) or a task (false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic: Option<bool>,
     /// create/propose/edit: notes (edit: "" clears).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
@@ -520,6 +523,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "name",
     "set_status",
     "edit",
+    "set_parent",
     "summarize",
     "set_primary",
     "reconsider",
@@ -594,6 +598,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("create_work_task", "work_link", "create"),
     ("set_work_status", "work_link", "set_status"),
     ("edit_work_item", "work_link", "edit"),
+    ("set_work_parent", "work_link", "set_parent"),
     ("accept_work_proposal", "work_link", "accept"),
     ("reject_work_proposal", "work_link", "reject"),
     ("summarize_past_work", "work_link", "summarize"),

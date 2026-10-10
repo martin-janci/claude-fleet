@@ -2605,6 +2605,45 @@ fn a_tree_query_groups_by_sprint_and_release() {
     assert!(!dump.contains("Unassigned sprint"), "{dump}");
 }
 
+/// Sprints design 2026-09-28 §3, §6a: an epic is its own section, its
+/// tasks sit in it, and it carries its children's roll-up.
+#[test]
+fn a_tree_query_groups_by_epic_and_rolls_its_children_up() {
+    let w = world();
+    let (epic, done_one) = {
+        let s = w.st.lock().unwrap();
+        let native = |title: &str, parent: Option<i64>| {
+            s.create_native_item(&crate::store::NativeItem {
+                title,
+                parent_id: parent,
+                project_id: None,
+                notes: None,
+            })
+            .unwrap()
+        };
+        let epic = native("Login revamp", None);
+        s.set_local_epic(epic.id, true).unwrap();
+        native("Fix login", Some(epic.id));
+        let done_one = native("Write tests", Some(epic.id));
+        s.set_item_status(done_one.id, "done").unwrap();
+        native("Loose task", None);
+        (epic, done_one)
+    };
+    let key = |id: i64| format!("TASK-{id}");
+    let p = page(&w, &OrgScope::All, by("epic"));
+    let e = task_of(&p, &key(epic.id));
+    assert!(e.epic);
+    assert_eq!((e.children_total, e.children_done), (2, 1));
+    assert_eq!(e.group.id, format!("epic:{}", epic.id));
+    assert_eq!(e.group.label, format!("{} · Login revamp", key(epic.id)));
+    let d = task_of(&p, &key(done_one.id));
+    assert!(!d.epic);
+    assert_eq!(d.group.id, format!("epic:{}", epic.id));
+    assert_eq!(d.parent_task_id, Some(format!("item:{}", epic.id)));
+    assert_eq!(group_of(&p, &key(epic.id + 3)).label, "No epic");
+    assert_eq!(group_of(&p, "TK-1").id, "none");
+}
+
 #[test]
 fn an_unknown_grouping_is_refused_not_ignored() {
     let w = world();

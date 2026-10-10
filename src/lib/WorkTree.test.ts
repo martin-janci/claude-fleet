@@ -776,4 +776,41 @@ describe('WorkTree', () => {
     expect(adds.map((c) => c[1])).toEqual([{ args: { bucket_id: 5, item_id: 20 } }]);
     expect(screen.getByTestId('work-bulk-notice').textContent).toBe('Planned 1 task into “Sprint 25”.');
   });
+
+  it('files the selected tasks under an epic (sprints design §3)', async () => {
+    const EPIC = { id: 'epic:9', label: 'TASK-9 · Login revamp', source: 'epic' };
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tree')
+        return {
+          ...firstPage,
+          tasks: [task({ task_id: 'item:20', item_id: 20, key: 'TASK-20', group: NONE, org_id: 1, sessions: [] })],
+          groups: [
+            { org_id: 1, org_name: 'Acme', group: NONE, count: 1 },
+            { org_id: 1, org_name: 'Acme', group: EPIC, count: 1 },
+          ],
+          next_cursor: null,
+        };
+      if (cmd === 'set_work_parent') return { id: 20, source: 'local', title: 't', parent_id: 9 };
+      if (cmd === 'work_review') return { items: [], total: 0, next_cursor: null };
+      return [];
+    });
+    render(WorkTree);
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-select-toggle'));
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-pick'));
+    const pick = screen.getByTestId('work-bulk-epic') as HTMLSelectElement;
+    expect(Array.from(pick.options).map((o) => o.textContent)).toEqual([
+      'Under epic…',
+      'TASK-9 · Login revamp',
+      'Out of its epic (to the top)',
+    ]);
+    pick.value = '9';
+    await fireEvent.change(pick);
+    await flush();
+    expect(vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'set_work_parent').map((c) => c[1])).toEqual([
+      { args: { item_id: 20, parent: 'item:9' } },
+    ]);
+    expect(screen.getByTestId('work-bulk-notice').textContent).toBe('Filed 1 task under “TASK-9 · Login revamp”.');
+  });
 });

@@ -283,7 +283,21 @@ sprint is the section of a group by sprint, `boardFilters`, so no new read),
 the sprint's roll-up, dates and goal above the columns with *Start sprint* /
 *Close sprint…* (the close dialog of E9), and Done holding everything the
 sprint delivered rather than the last week; a sprint that closes falls back
-to All tasks. Not yet: the phone, and epics for local items (phase 4). E9–E11 run on their defaults.
+to All tasks. Epics for local items (phase 4, §3) are built: `work_link {
+edit, epic }` marks a top-level local item an epic (`kind = 'epic'`,
+`Store::set_local_epic`), `work_link { set_parent }` (`set_work_parent`,
+routed) files a local item under an epic or a task or takes it out to the
+top (`Store::set_local_parent`), `filters.group_by: epic` sections the Work
+view by the epic a task is or is filed under, and every task carries its
+children's roll-up (`children_total` / `children_done`, computed, never
+closing the parent). The selection's *Under epic…* files tasks in bulk, the
+Edit dialog's *Epic* box marks one, and the row and the Board card show
+*Epic* and *n/m done*. Depth stays ONE, not the spec's three: a local item
+with a parent is never a parent (`parent_for_new_child` now checks every
+local item, not only a native one), because `item_org` — and the org fences
+built on it — walks one level; a filed task cannot hold subtasks, and a task
+with subtasks is not filed. Going deeper is the owner's decision (it moves
+the org fence). Not yet: the phone. E9–E11 run on their defaults.
 
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub

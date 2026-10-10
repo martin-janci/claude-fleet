@@ -44,6 +44,8 @@
   const live = $derived(liveLinks(t));
   const pr = $derived(prChip(t, rows));
   const cost = $derived(costChip(t));
+  /** An epic's, or any parent's, roll-up (sprints design §3). */
+  const rollup = $derived((t.children_total ?? 0) > 0 ? `${t.children_done ?? 0}/${t.children_total} done` : null);
   const lit = $derived(live.some((l) => isOccurrenceOf(l, currentSessionId)));
   const shown = $derived(title ?? (t.title || (t.key ? '' : t.task_id)));
 </script>
@@ -69,8 +71,10 @@
         >{#if line.failed}<span class="f">{line.lead}</span>{:else}{line.lead}{/if}{#if line.why}{' · '}{line.why}{/if}</span
       >
     </button>
-    {#if live.length > 0 || pr || cost || trackerDown(t) || (t.open_proposals ?? 0) > 0}
+    {#if live.length > 0 || pr || cost || trackerDown(t) || (t.open_proposals ?? 0) > 0 || t.epic || rollup}
       <div class="chips">
+        {#if t.epic}<span class="of-chip accent" data-testid="work-task-epic">Epic</span>{/if}
+        {#if rollup}<span class="of-chip tnum" data-testid="work-task-rollup" title="Tasks filed under it that are done">{rollup}</span>{/if}
         {#if live.length === 1}
           {@const l = live[0]}
           <button

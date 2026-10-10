@@ -112,6 +112,25 @@ describe('EditTaskDialog', () => {
     expect(calls('set_work_status')).toEqual([['set_work_status', { args: { item_id: 9, status: 'in_progress' } }]]);
   });
 
+  it('marks a top-level task an epic, and offers no epic to a filed task (sprints design §3)', async () => {
+    answer({ task: task(), notes: null });
+    const onclose = vi.fn();
+    render(EditTaskDialog, { props: { taskId: 'item:9', onclose } });
+    await waitFor(() => expect(screen.getByTestId('edit-task-epic')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('edit-task-epic'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('edit-task-submit'));
+    await waitFor(() => expect(onclose).toHaveBeenCalled());
+    expect(calls('edit_work_item')).toEqual([['edit_work_item', { args: { item_id: 9, epic: true } }]]);
+  });
+
+  it('offers no epic to a task filed under one', async () => {
+    answer({ task: task({ parent_task_id: 'item:5' }), notes: null });
+    render(EditTaskDialog, { props: { taskId: 'item:9', onclose: vi.fn() } });
+    await waitFor(() => expect(screen.getByTestId('edit-task-title')).toBeTruthy());
+    expect(screen.queryByTestId('edit-task-epic')).toBeNull();
+  });
+
   it('sets, then clears, a due date', async () => {
     answer({ task: task({ due_at: '2026-10-16' }), notes: null });
     const onclose = vi.fn();

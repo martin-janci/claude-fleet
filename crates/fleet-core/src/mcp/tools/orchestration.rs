@@ -1622,6 +1622,21 @@ impl FleetTools {
                     .map_err(to_mcp_err)?,
             );
         }
+        if args.action == "set_parent" {
+            // Epics (design 2026-09-28 §3, §7): a local item filed under an
+            // epic or a task. The ORG fence is inside `set_parent` (the item
+            // and the parent each answer as unknown outside the scope); the
+            // PERSON fence is `edit`'s — where a person's live work is filed
+            // is theirs to drive.
+            let item_id = args
+                .item_id
+                .ok_or_else(|| mcp_err("E_INVALID", "set_parent needs item_id", None))?;
+            self.require_drive_on_item_sessions(&caller, item_id)?;
+            return ok_json(
+                &crate::service::work::local::set_parent(&args, &self.store, &scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
         // Sprint and release membership (design 2026-09-28 §7): the team's
         // plan, which a session does not decide — so never a per-host token
         // (`planned_item`). The org fence (bucket and item, each answering as

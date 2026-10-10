@@ -5,10 +5,10 @@
 // `work_admin`, so a paired desktop is refused with `E_LOCAL_ONLY`).
 import { writable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
-import { bumpWorkChanged } from './work';
+import { bumpWorkChanged, setWorkParent } from './work';
 import { readPref, writePref } from './prefs';
 import type { WorkItemRow } from './trackers';
-import type { WorkTreeFilters } from './work_view';
+import { workTree, type WorkTreeFilters } from './work_view';
 
 export type BucketKind = 'sprint' | 'release';
 
@@ -239,4 +239,39 @@ export function liveScope(scope: BoardScope, sprints: readonly BucketRow[] | nul
   if (typeof scope !== 'number' || sprints === null) return scope;
   const b = sprints.find((x) => x.id === scope && x.kind === 'sprint');
   return b && b.state !== 'closed' ? scope : 'all';
+}
+
+/** An epic a task can be filed under: a section of a group by epic. */
+export interface EpicChoice {
+  itemId: number;
+  label: string;
+  orgId: number | null;
+}
+
+/** Every epic this reader sees (sprints design §3, §6b), from one
+ *  `work_tree` read grouped by epic: an epic is its own section, so each
+ *  one is there even with nothing filed under it yet. */
+export async function workEpics(): Promise<Result<EpicChoice[]>> {
+  const r = await workTree({ filters: { group_by: 'epic', archived: true }, limit: 1 });
+  if (!r.ok) return r;
+  const out: EpicChoice[] = [];
+  for (const g of Array.isArray(r.value?.groups) ? r.value.groups : []) {
+    const m = /^epic:(\d+)$/.exec(g.group.id);
+    if (m) out.push({ itemId: Number(m[1]), label: g.group.label, orgId: g.org_id ?? null });
+  }
+  out.sort((a, b) => a.label.localeCompare(b.label));
+  return { ok: true, value: out };
+}
+
+/** File every item under `parentItemId`, or take each out to the top
+ *  (`null`). One item's refusal does not stop the rest. */
+export async function fileUnder(parentItemId: number | null, itemIds: readonly number[]): Promise<BulkOutcome> {
+  const out: BulkOutcome = { done: 0, failed: [] };
+  for (const itemId of itemIds) {
+    if (itemId === parentItemId) continue;
+    const r = await setWorkParent(itemId, parentItemId);
+    if (r.ok) out.done++;
+    else out.failed.push({ itemId, error: r.error });
+  }
+  return out;
 }

@@ -40,7 +40,10 @@
   import {
     bucketIdOfGroup,
     bucketSummary,
+    fileUnder,
     openBuckets,
+    workEpics,
+    type EpicChoice,
     planInto,
     unplanFrom,
     workBuckets,
@@ -149,6 +152,15 @@
     if (mine !== bucketSeq) return;
     if (r.ok && Array.isArray(r.value)) buckets = r.value;
   }
+  // The epics a selection can be filed under (sprints design §3, §6b).
+  let epics = $state.raw<EpicChoice[]>([]);
+  let epicSeq = 0;
+  async function loadEpics() {
+    const mine = ++epicSeq;
+    const r = await workEpics();
+    if (mine !== epicSeq) return;
+    if (r.ok) epics = r.value;
+  }
   // Bulk assignment: the tasks picked (by work item; a bare key has none).
   let selecting = $state(false);
   let picked = $state.raw<Set<number>>(new Set());
@@ -158,7 +170,10 @@
     selecting = !selecting;
     picked = new Set();
     bulkNotice = null;
-    if (selecting) void loadBuckets();
+    if (selecting) {
+      void loadBuckets();
+      void loadEpics();
+    }
   }
   function togglePick(itemId: number) {
     const next = new Set(picked);
@@ -193,6 +208,16 @@
     bulkBusy = false;
     bulkNotice = outcomeText('Planned', `into “${b.name}”`, o);
     // Its bump (`planInto`) re-reads the view and, with it, the buckets.
+    if (o.failed.length === 0) picked = new Set();
+  }
+  async function filePicked(to: number | null) {
+    if (picked.size === 0) return;
+    bulkBusy = true;
+    const o = await fileUnder(to, [...picked]);
+    bulkBusy = false;
+    const name = to == null ? null : epics.find((e) => e.itemId === to)?.label;
+    bulkNotice = outcomeText(to == null ? 'Took' : 'Filed', to == null ? 'out to the top' : `under “${name ?? 'the epic'}”`, o);
+    // Each write bumped `workChanged`, which re-reads the view.
     if (o.failed.length === 0) picked = new Set();
   }
   async function unplanPicked() {
@@ -379,6 +404,7 @@
     }
     loadedOnce = true;
     if (filters.group_by === 'sprint' || filters.group_by === 'release' || selecting) void loadBuckets();
+    if (selecting) void loadEpics();
     flushReveal();
   }
 
@@ -922,6 +948,22 @@
       >
         <option value="">Add to release…</option>
         {#each releases as b (b.id)}<option value={b.id}>{b.name}</option>{/each}
+      </select>
+      <select
+        aria-label="File under an epic"
+        data-testid="work-bulk-epic"
+        disabled={bulkBusy || picked.size === 0}
+        title={epics.length === 0 ? 'No epic yet: mark a task an epic in its Edit dialog' : 'Files each task one level under the epic'}
+        onchange={(e) => {
+          const v = (e.currentTarget as HTMLSelectElement).value;
+          (e.currentTarget as HTMLSelectElement).value = '';
+          if (v === 'top') void filePicked(null);
+          else if (v) void filePicked(Number(v));
+        }}
+      >
+        <option value="">Under epic…</option>
+        {#each epics as e (e.itemId)}<option value={e.itemId}>{e.label}</option>{/each}
+        <option value="top">Out of its epic (to the top)</option>
       </select>
       {#if groupedByBucket}
         <button class="btn btn--quiet" type="button" data-testid="work-bulk-remove" disabled={bulkBusy || picked.size === 0} onclick={() => void unplanPicked()}

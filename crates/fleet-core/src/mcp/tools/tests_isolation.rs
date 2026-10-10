@@ -2593,6 +2593,53 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Epics: `edit`'s fences — host A's own local item filed (here: kept at
+    // the top) by whoever may see it, another host's answering as unknown,
+    // a ticket refused for who sees it.
+    let unknown_item_file = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "set_parent", "item_id": 999_999, "parent": "" }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "set_parent",
+        move |_, _| json!({ "action": "set_parent", "item_id": local_a, "parent": "" }),
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    same_as_unknown(a, &unknown_item_file, &local_a.to_string(), "999999")
+                }
+                _ => assert!(
+                    text(a).contains(&format!("\"id\":{local_a}")),
+                    "{who:?}: {a:?}"
+                ),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "set_parent",
+        |fx, _| json!({ "action": "set_parent", "item_id": fx.item_b, "parent": "" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA | Who::HostNone | Who::BoundA => {
+                    is_code(who, a, "E_NOTFOUND", "another org's ticket")
+                }
+                _ => is_code(who, a, "E_INVALID", "a ticket"),
+            }
+        },
+    )
+    .await;
     // Task editing: `set_status`'s fences — host A's own local item edited
     // by whoever may see it, another host's answering as unknown, a
     // ticket refused for who sees it.

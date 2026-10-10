@@ -1184,6 +1184,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Epics (sprints design 2026-09-28 §3).
+        (
+            "set_work_parent",
+            "work_link",
+            json!({ "session_id": null, "action": "set_parent", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "parent": "item:5" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::set_work_parent(
+                    b,
+                    commands::work::SetWorkParentArgs {
+                        item_id: 9,
+                        parent: "item:5".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // Task editing.
         (
             "edit_work_item",
@@ -1201,6 +1220,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                         notes: Some(String::new()),
                         assignees: Some(vec!["Ana".into()]),
                         due_at: Some("2026-10-16".into()),
+                        epic: None,
                     },
                     s,
                 ))

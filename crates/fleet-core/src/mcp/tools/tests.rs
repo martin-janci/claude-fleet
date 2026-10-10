@@ -11532,6 +11532,8 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // Task editing: the text the owner's sidebar shows for their own row,
     // behind `set_status`'s gate.
     ("work_link", "edit", &["Drive"]),
+    // Epics: where a person's live work is filed, behind `edit`'s gate.
+    ("work_link", "set_parent", &["Drive"]),
     // Sprint and release membership: `set_status`'s person gate, on the
     // item planned.
     ("work_link", "bucket_add", &["Drive"]),

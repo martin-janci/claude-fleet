@@ -12,6 +12,8 @@ import {
   closeSprint,
   createBucket,
   dayToUnix,
+  fileUnder,
+  workEpics,
   openBuckets,
   planInto,
   unixToDay,
@@ -139,5 +141,43 @@ describe('helpers', () => {
     expect(liveScope(9, all)).toBe('all');
     expect(liveScope(9, null)).toBe(9);
     expect(liveScope('none', all)).toBe('none');
+  });
+  it('lists the epics as the sections of a group by epic', async () => {
+    mock.mockResolvedValue({
+      tasks: [],
+      groups: [
+        { org_id: 1, group: { id: 'epic:9', label: 'TASK-9 · Login revamp', source: 'epic' }, count: 3 },
+        { org_id: 1, group: { id: 'none', label: 'No epic', source: 'none' }, count: 4 },
+        { org_id: null, group: { id: 'epic:2', label: 'ABC-2 · Billing', source: 'epic' }, count: 1 },
+      ],
+      orgs: [],
+      trackers: [],
+      total: 0,
+    });
+    const r = await workEpics();
+    expect(mock.mock.calls[0]).toEqual(['work_tree', { args: { filters: { group_by: 'epic', archived: true }, limit: 1 } }]);
+    expect(r).toEqual({
+      ok: true,
+      value: [
+        { itemId: 2, label: 'ABC-2 · Billing', orgId: null },
+        { itemId: 9, label: 'TASK-9 · Login revamp', orgId: 1 },
+      ],
+    });
+  });
+
+  it('files each item under an epic, or out to the top, past a refusal', async () => {
+    mock.mockImplementation(async (cmd: string, args?: { args?: { item_id: number } }) => {
+      if (cmd === 'set_work_parent' && args?.args?.item_id === 4) throw { code: 'E_INVALID', message: 'TASK-4 has subtasks' };
+      return { id: args?.args?.item_id ?? 0 };
+    });
+    const out = await fileUnder(9, [3, 4, 9]);
+    expect(out.done).toBe(1);
+    expect(out.failed.map((f) => f.itemId)).toEqual([4]);
+    await fileUnder(null, [3]);
+    expect(mock.mock.calls.filter((c) => c[0] === 'set_work_parent').map((c) => c[1])).toEqual([
+      { args: { item_id: 3, parent: 'item:9' } },
+      { args: { item_id: 4, parent: 'item:9' } },
+      { args: { item_id: 3, parent: '' } },
+    ]);
   });
 });
