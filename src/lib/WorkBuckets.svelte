@@ -25,7 +25,17 @@
     type BucketRow,
   } from './work_buckets';
 
-  let { onclose, onchanged }: { onclose: () => void; onchanged?: () => void } = $props();
+  let {
+    onclose,
+    onchanged,
+    closeId,
+  }: {
+    onclose: () => void;
+    onchanged?: () => void;
+    /** Open straight on closing this sprint (the board's *Close sprint…*);
+     *  the dialog closes with it. */
+    closeId?: number;
+  } = $props();
 
   const adminBlocked = $derived(hubActionBlocked('work_bucket_admin', $hubStatus, $hubConnection));
   const orgs = $derived($workTreeMeta?.orgs ?? []);
@@ -69,7 +79,11 @@
       error = readErrorText(r.error);
     }
   }
-  onMount(() => void load());
+  onMount(async () => {
+    await load();
+    const b = closeId != null ? buckets.find((x) => x.id === closeId && x.kind === 'sprint' && x.state !== 'closed') : undefined;
+    if (b) void startClose(b);
+  });
 
   function changed(msg: string) {
     notice = msg;
@@ -148,6 +162,11 @@
       return;
     }
     closing = null;
+    if (closeId != null) {
+      onchanged?.();
+      onclose();
+      return;
+    }
     const to = r.value.carry_to != null ? buckets.find((x) => x.id === r.value.carry_to)?.name : null;
     const n = r.value.carried.length;
     changed(to && n > 0 ? `Closed “${b.name}”; ${n} task${n === 1 ? '' : 's'} carried to “${to}”.` : `Closed “${b.name}”.`);
@@ -206,7 +225,7 @@
           <button class="btn btn--primary" type="button" data-testid="bucket-close-confirm" disabled={busy || closeLoading} onclick={() => void confirmClose()}
             >Close sprint</button
           >
-          <button class="btn btn--quiet" type="button" onclick={() => (closing = null)}>Cancel</button>
+          <button class="btn btn--quiet" type="button" onclick={() => (closeId != null ? onclose() : (closing = null))}>Cancel</button>
         </div>
       </section>
     {:else}

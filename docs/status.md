@@ -277,8 +277,13 @@ confirmed (E9) and delete. Desktop commands `work_buckets` / `work_bucket`
 (→ `work`) and `add_work_to_bucket` / `remove_work_from_bucket` (→
 `work_link`) route; `work_bucket_admin` is `work_admin`, so a paired desktop
 refuses it (`E_LOCAL_ONLY`) and plans only into buckets the hub's admin
-made. Not yet: the board scoped to a sprint, the phone, and epics for local
-items (phase 4). E9–E11 run on their defaults.
+made. The board is scoped to a sprint (§6c): a picker over All tasks, each
+open sprint and *No sprint (backlog)* (`boardScope`, kept per machine; a
+sprint is the section of a group by sprint, `boardFilters`, so no new read),
+the sprint's roll-up, dates and goal above the columns with *Start sprint* /
+*Close sprint…* (the close dialog of E9), and Done holding everything the
+sprint delivered rather than the last week; a sprint that closes falls back
+to All tasks. Not yet: the phone, and epics for local items (phase 4). E9–E11 run on their defaults.
 
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub

@@ -5,7 +5,9 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import {
+  boardFilters,
   bucketIdOfGroup,
+  liveScope,
   bucketSummary,
   closeSprint,
   createBucket,
@@ -122,5 +124,20 @@ describe('helpers', () => {
     ];
     expect(openBuckets(all, 'sprint').map((b) => b.id)).toEqual([3, 1]);
     expect(openBuckets(all, 'release').map((b) => b.id)).toEqual([4]);
+  });
+  it('narrows the board to one sprint, or to no sprint', () => {
+    const view = { tracker: 1, status: 'open' as const, group_by: 'person' as const };
+    expect(boardFilters(view, 'all')).toEqual({ tracker: 1, group_by: 'person', archived: true });
+    expect(boardFilters(view, 4)).toEqual({ tracker: 1, archived: true, group_by: 'sprint', group: 'sprint:4' });
+    expect(boardFilters(view, 'none')).toEqual({ tracker: 1, archived: true, group_by: 'sprint', group: 'none' });
+  });
+
+  it('keeps a sprint scope only while the sprint is open', () => {
+    const all = [bucket({ id: 4 }), bucket({ id: 3, state: 'closed' })];
+    expect(liveScope(4, all)).toBe(4);
+    expect(liveScope(3, all)).toBe('all');
+    expect(liveScope(9, all)).toBe('all');
+    expect(liveScope(9, null)).toBe(9);
+    expect(liveScope('none', all)).toBe('none');
   });
 });

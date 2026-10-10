@@ -3,9 +3,9 @@
 **Date:** 2026-09-28
 **Status:** phase 1 (status of native items) landed; the backend of phases 2–3
 (`work_buckets`, sprints, releases, provider mapping, adoption, the MCP
-actions) landed with migration 108. The board (phase 5) is built as a
-first cut, columns by status over the Work view's filters, not yet scoped
-to a sprint. The Work view axis (§6a), bulk assignment (§6b) and the
+actions) landed with migration 108. The board (phase 5) is built: columns
+by status over the Work view's filters, scoped to one sprint or to the
+backlog with no sprint. The Work view axis (§6a), bulk assignment (§6b) and the
 sprint lifecycle dialog (§5, E9) are built on the desktop; epics (phase 4)
 are not built.
 **Builds on:** `2026-09-24-work-graph-design.md` (§0 is authoritative) and the

@@ -3,9 +3,12 @@
 // (`add_work_to_bucket`, `remove_work_from_bucket`, both routed) and the
 // buckets themselves (`work_bucket_admin`: create, update, close, delete —
 // `work_admin`, so a paired desktop is refused with `E_LOCAL_ONLY`).
+import { writable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
 import { bumpWorkChanged } from './work';
+import { readPref, writePref } from './prefs';
 import type { WorkItemRow } from './trackers';
+import type { WorkTreeFilters } from './work_view';
 
 export type BucketKind = 'sprint' | 'release';
 
@@ -206,4 +209,34 @@ export async function unplanFrom(bucket: BucketRow, itemIds: readonly number[]):
   }
   if (out.done > 0) bumpWorkChanged();
   return out;
+}
+
+/** What the board shows (sprints design §6c): every task the Work view's
+ *  filters match (`all`), one sprint's tasks (its id), or the tasks in no
+ *  sprint (`none`, the backlog a sprint is planned from). */
+export type BoardScope = 'all' | 'none' | number;
+
+const isBoardScope = (v: unknown): v is BoardScope =>
+  v === 'all' || v === 'none' || (typeof v === 'number' && Number.isInteger(v) && v > 0);
+
+/** The board's scope, kept per machine. */
+export const boardScope = writable<BoardScope>(readPref('work.board.scope', 'all', isBoardScope));
+boardScope.subscribe((v) => writePref('work.board.scope', v));
+
+/** The board's read: the Work view's filters (their own grouping and
+ *  section dropped) narrowed to one sprint's section, or the no-sprint one,
+ *  of a group by sprint. */
+export function boardFilters(view: WorkTreeFilters, scope: BoardScope): WorkTreeFilters {
+  const { status: _s, ...rest } = view;
+  if (scope === 'all') return { ...rest, archived: true };
+  const { group: _g, group_by: _b, ...narrow } = rest;
+  return { ...narrow, archived: true, group_by: 'sprint', group: scope === 'none' ? 'none' : `sprint:${scope}` };
+}
+
+/** The scope to show: a sprint that is gone or closed (its tasks have left
+ *  it) falls back to every task. Before the sprints are read, as chosen. */
+export function liveScope(scope: BoardScope, sprints: readonly BucketRow[] | null): BoardScope {
+  if (typeof scope !== 'number' || sprints === null) return scope;
+  const b = sprints.find((x) => x.id === scope && x.kind === 'sprint');
+  return b && b.state !== 'closed' ? scope : 'all';
 }

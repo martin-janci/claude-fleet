@@ -122,6 +122,9 @@ export function groupTasksForBoard(
   nowSecs: number,
   overrides: ReadonlyMap<string, string> = new Map(),
   keep: ReadonlySet<string> = new Set(),
+  /** Done shows the last 7 days only; off for a sprint, whose Done is
+   *  everything it delivered. */
+  doneWindow = true,
 ): BoardColumns {
   const byId = new Map(tasks.map((t) => [t.task_id, t]));
   const kids = new Map<string, WorkTask[]>();
@@ -139,7 +142,7 @@ export function groupTasksForBoard(
     const own = boardLaneOf(t);
     if (!lanes.has(own.id)) lanes.set(own.id, own);
     const lane = lanes.get(overrides.get(t.task_id) ?? own.id) ?? lanes.get(own.id)!;
-    if (lane.status === 'done' && !keep.has(t.task_id) && (t.last_activity_at ?? 0) < nowSecs - DONE_WINDOW_SECS) {
+    if (doneWindow && lane.status === 'done' && !keep.has(t.task_id) && (t.last_activity_at ?? 0) < nowSecs - DONE_WINDOW_SECS) {
       out.doneHidden++;
       continue;
     }
