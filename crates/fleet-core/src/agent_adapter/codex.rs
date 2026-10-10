@@ -82,11 +82,7 @@ const SLASH: &[SlashCommand] = &[
         "Summarise the conversation to free context",
         false,
     ),
-    cmd(
-        "status",
-        "Show the session's configuration and token usage",
-        false,
-    ),
+    cmd("status", "Show the configuration and token usage", false),
     cmd("diff", "Show the git diff, untracked files included", false),
     cmd("review", "Review the current changes", false),
     cmd("plan", "Switch to Plan mode", false),

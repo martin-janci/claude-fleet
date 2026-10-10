@@ -1932,6 +1932,34 @@ pub struct RestartSessionArgs {
     /// switch IS a restart). `None` keeps the stored profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// Switch the model the relaunched agent runs: a model alias or id, or
+    /// `""` for the host's default. For an agent whose model is chosen at
+    /// launch only (Codex's `/model` takes no argument), this is how the
+    /// composer changes it: the conversation is resumed under the new
+    /// model. `None` keeps the stored model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Switch the reasoning effort the same way: one of
+    /// [`crate::validate::EFFORT_LEVELS`], or `""` for the host's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+/// The stored model / effort change a [`RestartSessionArgs::model`] or
+/// [`RestartSessionArgs::effort`] asks for, shaped like [`profile_switch`]:
+/// `None` = keep, `Some(None)` = the host's default, `Some(Some(v))` = `v`.
+pub(crate) fn launch_switch(
+    raw: Option<&str>,
+    check: fn(&str) -> Result<(), IpcError>,
+) -> Result<Option<Option<String>>, IpcError> {
+    match raw.map(str::trim) {
+        None => Ok(None),
+        Some("") => Ok(Some(None)),
+        Some(v) => {
+            check(v)?;
+            Ok(Some(Some(v.to_string())))
+        }
+    }
 }
 
 /// The stored-profile change a [`RestartSessionArgs::profile`] asks for:
@@ -1956,6 +1984,9 @@ pub async fn restart_session(
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name_addressable(&args.name)?;
     let switch = profile_switch(args.profile.as_deref())?;
+    let model_switch = launch_switch(args.model.as_deref(), crate::validate::claude_model)?;
+    let effort_switch = launch_switch(args.effort.as_deref(), crate::validate::effort_level)?;
+    let launch_switched = model_switch.is_some() || effort_switch.is_some();
     // EXEMPT from `service::operator::refuse_if_operator`, deliberately, and
     // alone among the session-addressed operations. This IS the agent
     // panel's `lost` recovery — `restartOperator()` in `src/lib/operator.ts`
@@ -1988,13 +2019,26 @@ pub async fn restart_session(
                         "a credential profile applies to Claude sessions only",
                     ));
                 }
+                if launch_switched && (r.kind == "shell" || crate::store::has_no_pane(&r.kind)) {
+                    return Err(IpcError::new(
+                        codes::E_INVALID,
+                        "a model or effort applies to agent sessions, not shell sessions",
+                    ));
+                }
                 // The new profile is launched from memory and stored only
                 // once the relaunch succeeded ([`relaunch_recording_login`]):
                 // written first, a refused repair or a failed respawn left the
-                // row naming a login the pane never ran under.
+                // row naming a login the pane never ran under. A model or
+                // effort switch is stored the same way, after the relaunch.
                 let mut launch = stored_launch(&s, r.id)?;
                 if let Some(profile) = switch.as_ref() {
                     launch.profile = profile.clone();
+                }
+                if let Some(model) = model_switch.as_ref() {
+                    launch.model = model.clone();
+                }
+                if let Some(effort) = effort_switch.as_ref() {
+                    launch.effort = effort.clone();
                 }
                 (
                     r.kind,
@@ -2005,11 +2049,11 @@ pub async fn restart_session(
                     gone_cwd,
                 )
             }
-            None if switch.is_some() => {
+            None if switch.is_some() || launch_switched => {
                 return Err(IpcError::new(
                     codes::E_NOTFOUND,
                     format!(
-                        "no session {} on {} to switch the profile of",
+                        "no session {} on {} to relaunch with a new profile, model or effort",
                         args.name, args.host_alias
                     ),
                 ));
@@ -2092,6 +2136,24 @@ pub async fn restart_session(
         Ok(())
     })
     .await?;
+    if launch_switched {
+        if let Some(id) = session_id {
+            // The pane already runs with the new values; a failed write only
+            // means a later restart falls back to the old ones.
+            let s = lock(store)?;
+            let stored = model_switch
+                .as_ref()
+                .map_or(Ok(()), |m| s.set_session_launch_model(id, m.as_deref()))
+                .and_then(|()| {
+                    effort_switch
+                        .as_ref()
+                        .map_or(Ok(()), |e| s.set_session_effort(id, e.as_deref()))
+                });
+            if let Err(e) = stored {
+                tracing::warn!(session = %args.name, error = %e, "[restart_session] storing the switched model / effort failed");
+            }
+        }
+    }
     // Any of the branches leaves a live tmux session under this name,
     // and the create branch may even have rebuilt it from nothing.
     record_tmux_created(store, &args.host_alias, &args.name);
