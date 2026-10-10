@@ -1,16 +1,21 @@
 {
   "schema": 1,
   "track": "dev",
-  "sequence": 4,
-  "generated_at": "2026-10-10T04:03:16Z",
-  "expires_at": "2026-10-24T04:03:16Z",
-  "current": "0.6.2-dev.51.desktop.gaabbfa3",
-  "recommended": "0.6.2-dev.51.desktop.gaabbfa3",
+  "sequence": 5,
+  "generated_at": "2026-10-10T05:12:53Z",
+  "expires_at": "2026-10-24T05:12:53Z",
+  "current": "0.6.2-dev.58.desktop.g7a0e164",
+  "recommended": "0.6.2-dev.58.desktop.g7a0e164",
   "minimum_supported": {},
   "mandatory": [],
   "rollback": null,
   "withdrawn": [],
   "releases": [
+    {
+      "version": "0.6.2-dev.58.desktop.g7a0e164",
+      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.2-dev.58.desktop.g7a0e164/release-manifest.json",
+      "manifest_sha256": "a1ab624aa2239fa6c4f2636d7ee08550b91a033415b59a0af505a1109339a442"
+    },
     {
       "version": "0.6.2-dev.51.desktop.gaabbfa3",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.2-dev.51.desktop.gaabbfa3/release-manifest.json",
