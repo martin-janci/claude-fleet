@@ -83,8 +83,10 @@ export const WORK_STAGE_LABELS: Record<WorkStage, string> = {
 
 /** `filters.group_by` (redesign step 6.2): the task's own group (a person,
  *  rule, tracker container, repo or key), one section per org, or its
- *  assignee, mission, account or repo. An older hub ignores it. */
-export const WORK_GROUP_BY = ['group', 'org', 'person', 'mission', 'account', 'repo'] as const;
+ *  assignee, mission, account, repo, sprint, release or epic. An older hub
+ *  refuses `sprint` / `release` / `epic` (`E_INVALID`, it lists what it
+ *  knows). */
+export const WORK_GROUP_BY = ['group', 'org', 'person', 'mission', 'account', 'repo', 'sprint', 'release', 'epic'] as const;
 export type WorkGroupBy = (typeof WORK_GROUP_BY)[number];
 
 export const STATUS_FILTERS = ['any', 'open', 'todo', 'in_progress', 'done'] as const;
@@ -207,6 +209,12 @@ export interface WorkTask {
   project_label?: string | null;
   /** A native subtask's parent (`item:<id>`); nested under it when listed. */
   parent_task_id?: string | null;
+  /** An epic: a local item marked one, or a tracker's Epic (sprints design §3). */
+  epic?: boolean;
+  /** Its children (proposals and jobs aside) and how many are done: the
+   *  roll-up. Absent when it has none. */
+  children_total?: number;
+  children_done?: number;
   /** A job mirror's state (the delegated job's `state`). */
   job_state?: string | null;
   /** The title is borrowed from the first session's name (the item has none). */
@@ -343,6 +351,21 @@ export interface TaskDetail {
   jobs?: JobView[];
   /** The steps agents took, per conversation. */
   steps?: StepGroup[];
+  /** What people and agents said about the task in fleet, oldest first. */
+  comments?: TaskComment[];
+}
+
+/** One comment on a task (`store::CommentRow`). Kept in fleet, never a tracker's. */
+export interface TaskComment {
+  id: number;
+  item_id: number;
+  /** Who wrote it (`client:<name>`, `host:<alias>`, `desktop`); empty when withheld. */
+  author: string;
+  /** Plain text: rendered as text, never as markup. */
+  body: string;
+  created_at: number;
+  /** This reader wrote it, so may delete it. */
+  mine?: boolean;
 }
 
 /** A native subtask on a task page. */

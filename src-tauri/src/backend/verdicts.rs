@@ -115,6 +115,13 @@ const SECTION_PROPOSALS_ARE_ADMIN: &str = "the decision model's Asana section pr
      on the hub with `fleet-hub decide proposals apply|reject`";
 
 /// Retention (work graph M12.3): the hub sweeps its own store.
+/// Sprints and releases: creating, changing, closing and deleting one is
+/// `work_admin`, master-only (sprints design 2026-09-28 §7).
+const BUCKETS_ARE_ADMIN: &str = "a sprint or release reshapes what every client sees: creating, \
+     changing, closing and deleting one is the hub's work_admin, master-only, and a paired client \
+     is never the fleet's administrator; plan them on the hub with a master token's work_admin \
+     bucket_create|bucket_update|bucket_close|bucket_delete (membership is routed)";
+
 /// Settings' Repair now and Restore lost sessions (gap plan G4.6) are this
 /// app's own fleet-wide passes; a paired client repairs or restores one
 /// host at a time from Hosts.
@@ -366,6 +373,26 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("set_work_status", Verdict::Routed { tool: "work_link" }),
     // Task editing: a person's title, notes and assignees for a native item.
     ("edit_work_item", Verdict::Routed { tool: "work_link" }),
+    // Epics (sprints design 2026-09-28 §3): a local item filed under an epic.
+    ("set_work_parent", Verdict::Routed { tool: "work_link" }),
+    // Task comments: a note on a task, kept in fleet; deleting is the author's.
+    ("comment_on_work", Verdict::Routed { tool: "work_link" }),
+    ("delete_work_comment", Verdict::Routed { tool: "work_link" }),
+    // Sprints and releases (design 2026-09-28 §6a/§6b): reads and
+    // membership route; the buckets themselves are work_admin.
+    ("work_buckets", Verdict::Routed { tool: "work" }),
+    ("work_bucket", Verdict::Routed { tool: "work" }),
+    ("add_work_to_bucket", Verdict::Routed { tool: "work_link" }),
+    (
+        "remove_work_from_bucket",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    (
+        "work_bucket_admin",
+        Verdict::LocalOnly {
+            instead: BUCKETS_ARE_ADMIN,
+        },
+    ),
     (
         "accept_work_proposal",
         Verdict::Routed { tool: "work_link" },

@@ -479,7 +479,20 @@ const SCOPE_GUARDS: &[Guard] = &[
               (the planning write carries `require_drive_on_item_sessions` at \
               the tool layer, as `set_status` does). A SIXTH arrived with task \
               editing: `edit_local_item`, a write like the rename, behind the \
-              same `require_drive_on_item_sessions` at the tool layer",
+              same `require_drive_on_item_sessions` at the tool layer. A \
+              SEVENTH arrived with epics: `set_parent`, which files the ITEM \
+              under a parent, a write behind that same tool-layer gate",
+    },
+    Guard {
+        file: "crates/fleet-core/src/service/work/local.rs",
+        func: "set_parent",
+        nth: 0,
+        code: "if !scope.is_all() {",
+        verdict: Verdict::OrgBoundary,
+        why: "this is the org boundary, not a privacy fence: it asks whether \
+              the PARENT ITEM a task is filed under exists for this caller, \
+              through `visible_parent` — `create_task`'s question, on an \
+              item's key and title, which are work data",
     },
     Guard {
         file: "crates/fleet-core/src/service/work/local.rs",
@@ -778,6 +791,17 @@ const SCOPE_GUARDS: &[Guard] = &[
     },
     Guard {
         file: "crates/fleet-core/src/service/work/view.rs",
+        func: "task",
+        nth: 1,
+        code: "if !scope.is_all() {",
+        verdict: Verdict::OrgBoundary,
+        why: "`CommentRow.author` is a DEVICE label exactly as \
+              `Placement.updated_by` is, on the same shared work, and is \
+              withheld from a scoped caller for the same org reason — the \
+              same open question as #0",
+    },
+    Guard {
+        file: "crates/fleet-core/src/service/work/view.rs",
         func: "task_visible",
         nth: 1,
         code: "OrgScope::All => true,",
@@ -933,6 +957,13 @@ const OPEN_QUESTIONS: &[(&str, &str, usize, &str)] = &[
         "task",
         0,
         "does a PERSON's own device get to learn another person's DEVICE          LABEL? `Placement.updated_by` is withheld from a scoped caller          only, and the eight rules do not cover device identity",
+    ),
+    (
+        "crates/fleet-core/src/service/work/view.rs",
+        "task",
+        1,
+        "the same device-identity question as #0, for a comment's author: \
+         withheld from a scoped caller only",
     ),
     (
         "crates/fleet-core/src/service/update/mod.rs",

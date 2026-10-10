@@ -11783,6 +11783,10 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // Task editing: the text the owner's sidebar shows for their own row,
     // behind `set_status`'s gate.
     ("work_link", "edit", &["Drive"]),
+    // Epics: where a person's live work is filed, behind `edit`'s gate.
+    ("work_link", "set_parent", &["Drive"]),
+    // A comment is written into the owner's task: `edit`'s gate.
+    ("work_link", "comment", &["Drive"]),
     // Sprint and release membership: `set_status`'s person gate, on the
     // item planned.
     ("work_link", "bucket_add", &["Drive"]),
@@ -12014,6 +12018,12 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
 /// a reviewer can check, not an exemption: each says what the arm acts on
 /// INSTEAD of a session.
 const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
+    (
+        "work_link",
+        "comment_delete",
+        "a comment, by id: its item's org fence first (outside it, unknown), \
+         then its author's alone; no session is named or answered",
+    ),
     (
         "work",
         "missions",

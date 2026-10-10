@@ -1820,6 +1820,11 @@ const MIGRATIONS: &[Migration] = &[
         160,
         include_str!("../../migrations/160_access_requests.sql"),
     ),
+    // Task comments: a new table, idempotent.
+    Migration::plain(
+        161,
+        include_str!("../../migrations/161_work_item_comments.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

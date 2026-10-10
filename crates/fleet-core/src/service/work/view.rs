@@ -112,9 +112,8 @@ pub struct WorkTreeFilters {
     /// any case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_name: Option<String>,
-    /// What a section under each org is: group (default; a person, rule,
-    /// tracker container, repo or key), org (one section per org), person,
-    /// mission, account or repo.
+    /// Section per org: group (default), org, person, mission, account,
+    /// repo, sprint, release or epic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_by: Option<String>,
     /// Any of these orgs (ids, or "none" for unassigned): the Work panel's
@@ -133,7 +132,13 @@ pub struct WorkTreeFilters {
 pub const STAGE_VALUES: [&str; 5] = ["backlog", "in_progress", "in_review", "blocked", "done"];
 
 /// [`WorkTreeFilters::group_by`]'s values.
-pub const GROUP_BY_VALUES: [&str; 6] = ["group", "org", "person", "mission", "account", "repo"];
+pub const GROUP_BY_VALUES: [&str; 9] = [
+    "group", "org", "person", "mission", "account", "repo", "sprint", "release", "epic",
+];
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
 
 /// Where a task sits and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,9 +290,21 @@ pub struct WorkTask {
     /// That project as `owner/repo` (or `repo` for a local owner).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_label: Option<String>,
-    /// A native subtask's parent (`item:<id>`).
+    /// A local item's parent (`item:<id>`): a native subtask's, or the
+    /// epic or task a person filed it under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_task_id: Option<String>,
+    /// An epic: a local item marked one, or a tracker's Epic (sprints design
+    /// 2026-09-28 §3).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub epic: bool,
+    /// Its children (proposals and delegated jobs aside), and how many of
+    /// them are done: an epic's roll-up, computed and never stored. A done
+    /// set does not close the parent.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub children_total: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub children_done: u32,
     /// A job mirror's state (the delegated job's `state`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_state: Option<String>,
@@ -614,6 +631,10 @@ pub struct TaskDetail {
     /// conversation, newest conversation first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<StepGroup>,
+    /// What people and agents said about the task in fleet, oldest first
+    /// (the newest `COMMENTS_SERVED_MAX`). Never a tracker's comments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<crate::store::CommentRow>,
 }
 
 /// The task one of a session's links points at, briefly.
@@ -839,6 +860,9 @@ pub(crate) struct Graph {
     pub(crate) job_states: HashMap<i64, String>,
     /// A task's item id → its proposals waiting for a decision.
     pub(crate) open_proposals: HashMap<i64, u32>,
+    /// Item id → (children, done children): the roll-up (sprints design §3).
+    /// Counts of ITEMS, as `open_proposals` is.
+    pub(crate) children: HashMap<i64, (u32, u32)>,
     /// A task's item id → what a rule, Jev or an LLM proposes about it
     /// (step 2.8, `WorkTask::proposals`).
     pub(crate) item_proposals: HashMap<i64, Vec<crate::store::DecisionProposal>>,
@@ -857,6 +881,10 @@ pub(crate) struct Graph {
     /// this caller may read: filled by [`tree`] only for a group by mission
     /// (redesign step 6.2), so every other read pays nothing for it.
     pub(crate) missions_by_item: HashMap<i64, (i64, String)>,
+    /// Item id → its sprint or release, `(id, name)`, for the buckets this
+    /// caller may see: filled by [`tree`] only for a group by sprint or
+    /// release (sprints design 2026-09-28 §6a).
+    pub(crate) buckets_by_item: HashMap<i64, (i64, String)>,
     /// Account uuid → how it is named (nickname, else email), filled by
     /// [`tree`] only for a group by account.
     pub(crate) account_labels: HashMap<String, String>,
@@ -997,7 +1025,18 @@ impl Graph {
             .filter(|(id, _)| items.contains_key(id))
             .collect();
         let mut open_proposals: HashMap<i64, u32> = HashMap::new();
+        let mut children: HashMap<i64, (u32, u32)> = HashMap::new();
         for i in items.values() {
+            let counted = i.item.origin.as_deref() != Some("agent")
+                && !matches!(
+                    i.item.proposal_state.as_deref(),
+                    Some("proposed" | "rejected")
+                );
+            if let (true, Some(parent)) = (counted, i.item.parent_id) {
+                let e = children.entry(parent).or_default();
+                e.0 += 1;
+                e.1 += u32::from(i.item.status_category == "done");
+            }
             if let (Some("proposed"), Some(parent)) =
                 (i.item.proposal_state.as_deref(), i.item.parent_id)
             {
@@ -1081,11 +1120,13 @@ impl Graph {
             // `SubtaskView.title` in `native_work`); they are not counted
             // here, since a mirror is never `proposal_state = 'proposed'`.
             open_proposals,
+            children,
             item_proposals,
             visible_proposers,
             deps,
             scope: scope.clone(),
             missions_by_item: HashMap::new(),
+            buckets_by_item: HashMap::new(),
             account_labels: HashMap::new(),
         })
     }
@@ -2071,9 +2112,13 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
     let project_id = item.and_then(|i| i.item.project_id);
     let project_label = project_id.and_then(|p| project_label(g, p));
     let parent_task_id = item
-        .filter(|i| is_native(&i.item))
+        .filter(|i| i.item.source == "local")
         .and_then(|i| i.item.parent_id)
         .map(|p| format!("item:{p}"));
+    let epic = item.is_some_and(|i| crate::store::is_epic(&i.item));
+    let (children_total, children_done) = item
+        .and_then(|i| g.children.get(&i.item.id).copied())
+        .unwrap_or_default();
     let job_state = item.and_then(|i| g.job_states.get(&i.item.id).cloned());
     let open_proposals = item
         .and_then(|i| g.open_proposals.get(&i.item.id).copied())
@@ -2126,6 +2171,9 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         project_id,
         project_label,
         parent_task_id,
+        epic,
+        children_total,
+        children_done,
         job_state,
         title_derived,
         open_proposals,
@@ -2197,14 +2245,6 @@ fn blocked_on(g: &Graph, id: i64) -> (bool, Vec<String>) {
 fn origin_of(item: Option<&crate::store::WorkItemRow>) -> String {
     item.and_then(|i| i.origin.clone())
         .unwrap_or_else(|| "detected".into())
-}
-
-/// A native item: a person's, an agent's proposal, or a job mirror.
-fn is_native(item: &crate::store::WorkItemRow) -> bool {
-    matches!(
-        item.origin.as_deref(),
-        Some("manual" | "proposed" | "agent")
-    )
 }
 
 /// A project as `owner/repo`, or `repo` for a local (or empty) owner.
@@ -2321,7 +2361,8 @@ pub fn check_filters(f: &WorkTreeFilters) -> Result<(), IpcError> {
     if let Some(by) = f.group_by.as_deref() {
         if !GROUP_BY_VALUES.contains(&by) {
             return Err(bad(format!(
-                "filters.group_by is group, org, person, mission, account or repo, not {by:?}"
+                "filters.group_by is group, org, person, mission, account, repo, sprint, \
+                 release or epic, not {by:?}"
             )));
         }
     }
@@ -2440,7 +2481,8 @@ fn hidden_as_archived(t: &WorkTask, f: &WorkTreeFilters) -> bool {
 /// (redesign step 6.2), under its org as always: one section per org
 /// (`org`), its first assignee (`person`), its mission (`mission`), the
 /// account its sessions run on (`account`, an active one first) or its repo
-/// (`repo`). `None` keeps its own group (`group`, the default). A task with
+/// (`repo`), its current sprint (`sprint`) or its release (`release`).
+/// `None` keeps its own group (`group`, the default). A task with
 /// nothing to group by sits in `none`, last.
 fn regroup(g: &Graph, s: &TaskSummary<'_>, by: &str) -> Option<GroupRef> {
     let t = &s.task;
@@ -2489,6 +2531,36 @@ fn regroup(g: &Graph, s: &TaskSummary<'_>, by: &str) -> Option<GroupRef> {
         "repo" => match t.repos.first().or(t.project_label.as_ref()) {
             Some(r) => mk(format!("repo:{r}"), r.clone(), "repo"),
             None => none("No repo"),
+        },
+        "epic" => {
+            let item = t.item_id.and_then(|i| g.items.get(&i));
+            let epic = item.and_then(|i| {
+                if crate::store::is_epic(&i.item) {
+                    return Some(i);
+                }
+                let p = g.items.get(&i.item.parent_id?)?;
+                // The epic's title names the section: only an epic of an
+                // org this caller sees (a child reads its org from it).
+                (crate::store::is_epic(&p.item) && g.scope.sees_org(g.item_org(p))).then_some(p)
+            });
+            match epic {
+                Some(e) => {
+                    let label = match e.item.key.as_deref() {
+                        Some(k) if !e.item.title.trim().is_empty() => {
+                            format!("{k} · {}", e.item.title)
+                        }
+                        Some(k) => k.to_string(),
+                        None => e.item.title.clone(),
+                    };
+                    mk(format!("epic:{}", e.item.id), label, "epic")
+                }
+                None => none("No epic"),
+            }
+        }
+        "sprint" | "release" => match t.item_id.and_then(|i| g.buckets_by_item.get(&i)) {
+            Some((id, name)) => mk(format!("{by}:{id}"), name.clone(), by),
+            None if by == "sprint" => none("No sprint"),
+            None => none("No release"),
         },
         _ => return None,
     })
@@ -2879,6 +2951,15 @@ pub fn tree(
                     }
                 }
             }
+            Some(kind @ ("sprint" | "release")) => {
+                for m in s.bucket_membership(kind)? {
+                    if scope.sees_org(m.org_id) {
+                        g.buckets_by_item
+                            .entry(m.item_id)
+                            .or_insert((m.bucket_id, m.name));
+                    }
+                }
+            }
             Some("account") => {
                 for a in s.list_accounts()? {
                     let label = a
@@ -2990,7 +3071,7 @@ pub fn task(
     // that journal; its native children, their jobs, live sessions and
     // the steps of every conversation of the task and its subtasks: a
     // second, short lock.
-    let (meta, journal, work) = {
+    let (meta, journal, work, comments) = {
         let s = lock(store)?;
         let meta = item
             .map(|i| s.work_item_meta(i.item.id))
@@ -3006,7 +3087,11 @@ pub fn task(
             None => Vec::new(),
         };
         let work = native_work(&s, &g, scope, item, task.key.as_deref())?;
-        (meta, journal, work)
+        let comments = match item {
+            Some(i) => s.item_comments(i.item.id)?,
+            None => Vec::new(),
+        };
+        (meta, journal, work, comments)
     };
     // The tracker that might serve the whole description, and the key to name
     // it by — flattened as every other `fence_ticket` call site flattens it
@@ -3147,6 +3232,22 @@ pub fn task(
             grp
         })
         .collect();
+    // Who wrote a comment is a device label, as `Placement.updated_by` is,
+    // and withheld for the same reason; the text is fenced for an agent.
+    let comments = comments
+        .into_iter()
+        .map(|mut c| {
+            // This is the org boundary, not a privacy fence: `CommentRow.author` is a device
+            // label on shared work, withheld from a scoped caller exactly as
+            // `Placement.updated_by` is (the same open owner decision).
+            if !scope.is_all() {
+                c.author = String::new();
+                c.author_person_id = None;
+            }
+            c.body = fence(c.body, "a comment");
+            c
+        })
+        .collect();
     Ok(TaskDetail {
         task,
         aliases,
@@ -3163,6 +3264,7 @@ pub fn task(
         rejected_proposals,
         jobs,
         steps,
+        comments,
     })
 }
 

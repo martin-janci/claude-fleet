@@ -508,3 +508,105 @@ fn merging_a_duplicate_proposal_moves_its_links_and_subtasks_then_closes_it() {
         codes::E_INVALID
     );
 }
+
+/// Sprints design 2026-09-28 §3: a local item filed under an epic, one level
+/// deep, never across organisations, and keeping its org when taken out.
+#[test]
+fn a_task_is_filed_under_an_epic_one_level_deep_and_keeps_its_org_out() {
+    let s = Store::open_in_memory().unwrap();
+    let acme = s.add_org("Acme", None, false).unwrap().id;
+    let other = s.add_org("Initech", None, false).unwrap().id;
+    let epic = s.create_native_item(&native("Login revamp")).unwrap();
+    s.set_local_item_org(epic.id, Some(acme)).unwrap();
+    let e = s.set_local_epic(epic.id, true).unwrap().unwrap();
+    assert!(is_epic(&e));
+    let task = s.create_native_item(&native("Fix login")).unwrap();
+
+    // Filed: it reads its org from the epic.
+    let t = s.set_local_parent(task.id, Some(epic.id)).unwrap().unwrap();
+    assert_eq!(t.parent_id, Some(epic.id));
+    assert_eq!(s.item_org(task.id).unwrap(), Some(acme));
+    // Again is no change.
+    assert_eq!(
+        s.set_local_parent(task.id, Some(epic.id))
+            .unwrap()
+            .unwrap()
+            .parent_id,
+        Some(epic.id)
+    );
+
+    // Depth stays one: nothing goes under a filed task, a task with
+    // children does not go under another, an epic stays at the top, and
+    // nothing is its own parent.
+    let sub = s.create_native_item(&native("Write tests")).unwrap();
+    let err = s.set_local_parent(sub.id, Some(task.id)).unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID, "{}", err.message);
+    assert!(s
+        .create_native_item(&NativeItem {
+            parent_id: Some(task.id),
+            ..native("Nested")
+        })
+        .is_err());
+    let other_epic = s.create_native_item(&native("Billing")).unwrap();
+    s.set_local_epic(other_epic.id, true).unwrap();
+    let err = s
+        .set_local_parent(epic.id, Some(other_epic.id))
+        .unwrap_err();
+    assert!(err.message.contains("epic"), "{}", err.message);
+    let err = s.set_local_parent(sub.id, Some(sub.id)).unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
+    let err = s.set_local_epic(task.id, true).unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
+    let parent = s.create_native_item(&native("Parent")).unwrap();
+    s.create_native_item(&NativeItem {
+        parent_id: Some(parent.id),
+        ..native("Child")
+    })
+    .unwrap();
+    let err = s
+        .set_local_parent(parent.id, Some(other_epic.id))
+        .unwrap_err();
+    assert!(err.message.contains("subtasks"), "{}", err.message);
+
+    // Never across organisations.
+    s.set_local_item_org(sub.id, Some(other)).unwrap();
+    let err = s.set_local_parent(sub.id, Some(epic.id)).unwrap_err();
+    assert_eq!(err.code, codes::E_FORBIDDEN, "{}", err.message);
+
+    // A subtask that reads its org from its parent moves within that org
+    // only.
+    let foreign = s.create_native_item(&native("Elsewhere")).unwrap();
+    s.set_local_item_org(foreign.id, Some(other)).unwrap();
+    let err = s.set_local_parent(task.id, Some(foreign.id)).unwrap_err();
+    assert_eq!(err.code, codes::E_FORBIDDEN, "{}", err.message);
+
+    // Taken out to the top, it keeps the org it read from the epic.
+    let t = s.set_local_parent(task.id, None).unwrap().unwrap();
+    assert_eq!(t.parent_id, None);
+    assert_eq!(s.item_org(task.id).unwrap(), Some(acme));
+    // And it can be a parent again.
+    s.create_native_item(&NativeItem {
+        parent_id: Some(task.id),
+        ..native("Subtask")
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_tracker_ticket_a_job_and_a_proposal_are_not_filed_by_hand() {
+    let s = Store::open_in_memory().unwrap();
+    let epic = s.create_native_item(&native("Epic")).unwrap();
+    let parent = s.create_native_item(&native("Parent")).unwrap();
+    let p = s
+        .propose_subtask(&Proposal {
+            parent_id: parent.id,
+            title: "Maybe",
+            notes: None,
+            why: None,
+            proposed_by: "agent · h1",
+        })
+        .unwrap();
+    let err = s.set_local_parent(p.id, Some(epic.id)).unwrap_err();
+    assert!(err.message.contains("proposal"), "{}", err.message);
+    assert!(s.set_local_parent(999_999, None).unwrap().is_none());
+}

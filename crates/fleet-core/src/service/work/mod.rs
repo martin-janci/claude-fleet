@@ -215,10 +215,16 @@ pub struct WorkLinkArgs {
     /// name/create/propose: title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// create/propose: parent, item:<id>.
+    /// create/propose/set_parent: item:<id> ("" = none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
-    /// create/propose/edit: notes (edit: "" clears).
+    /// edit: epic or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic: Option<bool>,
+    /// comment_delete: which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_id: Option<i64>,
+    /// create/propose/edit/comment: text (edit: "" clears).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     /// Display names ([] clears).
@@ -520,6 +526,9 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "name",
     "set_status",
     "edit",
+    "set_parent",
+    "comment",
+    "comment_delete",
     "summarize",
     "set_primary",
     "reconsider",
@@ -594,6 +603,9 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("create_work_task", "work_link", "create"),
     ("set_work_status", "work_link", "set_status"),
     ("edit_work_item", "work_link", "edit"),
+    ("set_work_parent", "work_link", "set_parent"),
+    ("comment_on_work", "work_link", "comment"),
+    ("delete_work_comment", "work_link", "comment_delete"),
     ("accept_work_proposal", "work_link", "accept"),
     ("reject_work_proposal", "work_link", "reject"),
     ("summarize_past_work", "work_link", "summarize"),
@@ -616,6 +628,11 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("delete_work_rule", "work_link", "rule_delete"),
     ("save_work_view", "work_link", "view_save"),
     ("delete_work_view", "work_link", "view_delete"),
+    // Sprints and releases (design 2026-09-28 §6a/§6b).
+    ("work_buckets", "work", "buckets"),
+    ("work_bucket", "work", "bucket"),
+    ("add_work_to_bucket", "work_link", "bucket_add"),
+    ("remove_work_from_bucket", "work_link", "bucket_remove"),
     // Orchestration O1: missions.
     ("work_missions", "work", "missions"),
     ("work_mission", "work", "mission"),

@@ -1060,9 +1060,21 @@ impl FleetTools {
                     .task_id
                     .as_deref()
                     .ok_or_else(|| mcp_err("E_INVALID", "task needs task_id", None))?;
-                ok_json_compact(
-                    &w::view::task(self.reader(), &view_scope, task_id).map_err(to_mcp_err)?,
-                )
+                let mut detail =
+                    w::view::task(self.reader(), &view_scope, task_id).map_err(to_mcp_err)?;
+                // Which comments are the caller's own (to delete), from the
+                // stored authorship: the answer may withhold the author.
+                if !detail.comments.is_empty() {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    let label = caller.label();
+                    for c in &mut detail.comments {
+                        c.mine = s
+                            .get_comment(c.id)
+                            .map_err(to_mcp_err)?
+                            .is_some_and(|row| row.written_by(view_scope.person, &label));
+                    }
+                }
+                ok_json_compact(&detail)
             }
             WorkAction::SessionTasks => {
                 let id = args
@@ -1657,6 +1669,55 @@ impl FleetTools {
             self.require_drive_on_item_sessions(&caller, item_id)?;
             return ok_json(
                 &crate::service::work::local::edit_local_item(&args, &self.store, &scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        // Task comments: about the ITEM, so its org fence (inside: an item
+        // outside the scope answers as unknown), and the person fence is
+        // `edit`'s — a comment is written into the owner's task. Deleting
+        // one is its author's alone.
+        if args.action == "comment" {
+            let item_id = args
+                .item_id
+                .ok_or_else(|| mcp_err("E_INVALID", "comment needs item_id", None))?;
+            self.require_drive_on_item_sessions(&caller, item_id)?;
+            let person = self.view_scope(&caller)?.person;
+            return ok_json(
+                &crate::service::work::local::comment(
+                    &args,
+                    &self.store,
+                    &scope,
+                    &caller.label(),
+                    person,
+                )
+                .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "comment_delete" {
+            let person = self.view_scope(&caller)?.person;
+            return ok_json(
+                &crate::service::work::local::comment_delete(
+                    &args,
+                    &self.store,
+                    &scope,
+                    &caller.label(),
+                    person,
+                )
+                .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "set_parent" {
+            // Epics (design 2026-09-28 §3, §7): a local item filed under an
+            // epic or a task. The ORG fence is inside `set_parent` (the item
+            // and the parent each answer as unknown outside the scope); the
+            // PERSON fence is `edit`'s — where a person's live work is filed
+            // is theirs to drive.
+            let item_id = args
+                .item_id
+                .ok_or_else(|| mcp_err("E_INVALID", "set_parent needs item_id", None))?;
+            self.require_drive_on_item_sessions(&caller, item_id)?;
+            return ok_json(
+                &crate::service::work::local::set_parent(&args, &self.store, &scope)
                     .map_err(to_mcp_err)?,
             );
         }
