@@ -12,7 +12,8 @@ impl FleetTools {
         on a cron schedule, a session or pull request event or Run now. list; get \
         {routine_id}: with its last runs; runs {routine_id, limit?}; failing: \
         each routine whose newest run failed, for the Inbox; save \
-        {routine, routine_id?}: the whole routine; delete; set_enabled \
+        {routine, routine_id?}: the whole routine; preview: save's dry run, \
+        writes nothing; delete; set_enabled \
         {enabled}; skip_next {skip?}; run_now. Pause all stops the \
         schedule, not run_now. E_NOTFOUND, E_INVALID.")]
     pub(super) async fn routines(
@@ -70,6 +71,22 @@ impl FleetTools {
                     &routines::save(store, &scope, p.routine_id, input).map_err(to_mcp_err)?,
                 )
             }
+            "preview" => {
+                let input = p
+                    .routine
+                    .as_ref()
+                    .ok_or_else(|| mcp_err(codes::E_INVALID, "preview needs routine", None))?;
+                ok_json_compact(
+                    &routines::preview(
+                        store,
+                        &scope,
+                        p.routine_id,
+                        input,
+                        crate::store::now_unix(),
+                    )
+                    .map_err(to_mcp_err)?,
+                )
+            }
             "delete" => {
                 let removed = routines::delete(store, &scope, id()?).map_err(to_mcp_err)?;
                 ok_json_compact(&serde_json::json!({ "removed": removed }))
@@ -97,8 +114,8 @@ impl FleetTools {
             other => Err(mcp_err(
                 codes::E_INVALID,
                 format!(
-                    "action must be list | get | runs | failing | save | delete | set_enabled | \
-                     skip_next | run_now, got {other:?}"
+                    "action must be list | get | runs | failing | save | preview | delete | \
+                     set_enabled | skip_next | run_now, got {other:?}"
                 ),
                 None,
             )),

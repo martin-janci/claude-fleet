@@ -1511,3 +1511,106 @@ fn a_repo_filter_matches_owner_and_name_or_name() {
     assert!(!repo_matches("web", Some("acme/webapp")));
     assert!(!repo_matches("web", None));
 }
+
+/// Gap plan G2.3: the editor's next runs across a daylight-saving change.
+/// Europe/Bratislava leaves CEST (+02:00) for CET (+01:00) on Sunday 25
+/// October 2026. A weekday 08:30 line saved at +120 keeps that offset, so
+/// past the change it fires at 06:30 UTC, 07:30 on the wall: the preview
+/// lists the instants the scheduler will use, and the editor shows them in
+/// the device's zone, the moved hour included.
+#[test]
+fn preview_lists_the_next_runs_the_scheduler_uses_across_a_dst_change() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let fri_oct23_noon = OCT8 + 15 * 86_400 + 12 * H;
+    let line = RoutineInput {
+        cron: Some("30 8 * * 1-5".into()),
+        utc_offset_min: Some(120),
+        ..input(&f)
+    };
+    let p = preview(&f.store, &ana, None, &line, fri_oct23_noon).unwrap();
+    let mon_oct26 = OCT8 + 18 * 86_400;
+    assert_eq!(
+        p.next_runs,
+        (0..5)
+            .map(|d| mon_oct26 + d * 86_400 + 6 * H + 30 * 60)
+            .collect::<Vec<_>>(),
+        "Mon–Fri at 08:30 +02:00, which is 07:30 once CET begins"
+    );
+    assert_eq!(p.utc_offset_min, 120);
+    // Saved again after the change, at +60, it is back on 08:30 local.
+    let after = RoutineInput {
+        utc_offset_min: Some(60),
+        ..line.clone()
+    };
+    let p = preview(&f.store, &ana, None, &after, fri_oct23_noon).unwrap();
+    assert_eq!(p.next_runs[0], mon_oct26 + 7 * H + 30 * 60);
+    // And it is the very fire save schedules.
+    let saved = save(&f.store, &ana, None, &line).unwrap();
+    let now = crate::store::now_unix();
+    assert_eq!(
+        saved.next_run_at,
+        preview(&f.store, &ana, None, &line, now)
+            .unwrap()
+            .next_runs
+            .first()
+            .copied()
+    );
+}
+
+/// Gap plan G2.3: a dry run writes nothing, says what save would refuse,
+/// and names the account the chosen login bills among the host's logins.
+#[test]
+fn preview_writes_nothing_and_says_what_save_would_refuse() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    {
+        let s = lock(&f.store).unwrap();
+        crate::service::account_limits::seed_usage(&s, "mac", None, "own", 10.0, OCT8);
+        crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 95.0, OCT8);
+    }
+    let blank = RoutineInput {
+        prompt: "  ".into(),
+        ..input(&f)
+    };
+    let p = preview(&f.store, &ana, None, &blank, OCT8).unwrap();
+    assert!(
+        p.problem.as_deref().is_some_and(|m| m.contains("prompt")),
+        "{p:?}"
+    );
+    assert!(list(&f.store, &ana).unwrap().is_empty(), "nothing saved");
+    assert_eq!(
+        p.logins
+            .iter()
+            .map(|l| l.login.profile.as_deref())
+            .collect::<Vec<_>>(),
+        vec![None, Some("work")],
+        "the host's own login first"
+    );
+    let a = p.account.expect("profile work is on a known account");
+    assert_eq!(a.login.account_uuid, "work");
+    let p = preview(&f.store, &ana, None, &input(&f), OCT8).unwrap();
+    assert_eq!(p.problem, None);
+    assert_eq!(p.next_runs.len(), PREVIEW_RUNS);
+    // An event routine has no next runs; an unknown host has no logins.
+    let ev = RoutineInput {
+        trigger: "event".into(),
+        event: Some("stuck".into()),
+        host_alias: "nowhere".into(),
+        ..input(&f)
+    };
+    let p = preview(&f.store, &ana, None, &ev, OCT8).unwrap();
+    assert!(p.next_runs.is_empty() && p.logins.is_empty());
+    assert!(p.problem.unwrap().contains("nowhere"));
+}
+
+/// A preview of a change is fenced like the change: another person's
+/// routine is unknown to them.
+#[test]
+fn preview_of_another_persons_routine_is_not_found() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let bo = person(&f.store, None, f.bo);
+    let e = preview(&f.store, &bo, Some(r.id), &input(&f), OCT8).unwrap_err();
+    assert_eq!(e.code, codes::E_NOTFOUND);
+}

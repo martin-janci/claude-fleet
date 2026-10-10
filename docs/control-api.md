@@ -882,7 +882,13 @@ Index by area (names only; see the reference for details):
   routine_id }` with its last runs; `runs { routine_id, limit? }`; `save {
   routine, routine_id? }` writes the whole routine (host, project,
   `profile` = the account it bills, prompt, `budget_run_micros`,
-  `budget_day_micros`, `overlap: skip | parallel`); `delete`; `set_enabled
+  `budget_day_micros`, `overlap: skip | parallel`); `preview { routine,
+  routine_id? }` is the editor's dry run (gap plan G2.3): it writes
+  nothing and answers `problem` (what `save` would refuse, absent when it
+  would save), `next_runs` (the schedule's next five fires at
+  `utc_offset_min`, which a daylight-saving change does not move), the
+  `account` its login bills and the host's `logins` for the Account
+  picker; `delete`; `set_enabled
   { enabled }`; `skip_next { skip? }`; `run_now`. Each run's session has
   origin `routine` and is the routine's owner's; the prompt is its
   handover. A run is `done` when its session's first turn finishes,

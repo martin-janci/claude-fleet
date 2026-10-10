@@ -527,6 +527,106 @@ pub(crate) fn next_fire_of(r: &RoutineRow, now: i64) -> Option<i64> {
         .next_after(now, r.utc_offset_min)
 }
 
+/// Why a change that moves a routine to another organisation's host is
+/// refused.
+const STAYS_IN_ORG: &str = "a routine stays in its organisation: pick a host of the same one";
+
+/// How many next fires a [`preview`] lists.
+pub const PREVIEW_RUNS: usize = 5;
+
+/// `routines { action: preview, routine, routine_id? }` (gap plan G2.3):
+/// the editor's dry run of a routine not saved yet. Nothing is written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutinePreview {
+    /// Its schedule's next fires after now (unix seconds), at most
+    /// [`PREVIEW_RUNS`], read at `utc_offset_min` as the scheduler reads
+    /// them; empty for an event or manual routine and for a line that does
+    /// not parse. A fixed offset does not follow a daylight-saving change
+    /// (see [`cron`]): the editor shows these in the device's zone, so a
+    /// fire past the change shows the hour it moved by.
+    pub next_runs: Vec<i64>,
+    /// The offset `next_runs` were read at, minutes east of UTC.
+    pub utc_offset_min: i64,
+    /// Why `save` would refuse it, in its words; absent when it would save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    /// The account its login bills, when the login is on a known account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<crate::service::account_limits::LoginAccount>,
+    /// Every login on its host that is on a known account, the host's own
+    /// first: the editor's Account picker. Empty for a host this caller
+    /// may not see.
+    #[serde(default)]
+    pub logins: Vec<crate::service::account_limits::LoginAccount>,
+}
+
+/// The dry run of `input`: what `save` would say, its next fires and the
+/// account it would bill. With `routine_id`, as a change of that routine,
+/// which this caller must be able to change.
+pub fn preview(
+    store: &Mutex<Store>,
+    scope: &ViewScope,
+    id: Option<i64>,
+    input: &RoutineInput,
+    now: i64,
+) -> Result<RoutinePreview, IpcError> {
+    let s = lock(store)?;
+    let before = id.map(|id| changeable(&s, scope, id)).transpose()?;
+    let problem = match check(&s, scope, input) {
+        Ok((_, org)) if before.as_ref().is_some_and(|b| b.org_id != org) => {
+            Some(STAYS_IN_ORG.to_string())
+        }
+        Ok(_) => None,
+        Err(e) => Some(e.message),
+    };
+    let offset = input
+        .utc_offset_min
+        .unwrap_or(0)
+        .clamp(-cron::MAX_OFFSET_MIN, cron::MAX_OFFSET_MIN);
+    let mut next_runs = Vec::new();
+    if input.trigger == "cron" {
+        if let Some(c) = input
+            .cron
+            .as_deref()
+            .and_then(|l| cron::Cron::parse(l).ok())
+        {
+            let mut at = now;
+            while next_runs.len() < PREVIEW_RUNS {
+                let Some(next) = c.next_after(at, offset) else {
+                    break;
+                };
+                next_runs.push(next);
+                at = next;
+            }
+        }
+    }
+    let alias = input.host_alias.as_str();
+    let host_seen = crate::validate::host_alias(alias).is_ok()
+        && s.get_host_row(alias)?.is_some()
+        && scope.org.sees_org(s.host_org(alias)?);
+    let logins = if host_seen {
+        crate::service::account_limits::login_accounts(&s, alias, now)?
+    } else {
+        Vec::new()
+    };
+    let profile = input
+        .profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    let account = logins
+        .iter()
+        .find(|l| l.login.profile.as_deref() == profile)
+        .cloned();
+    Ok(RoutinePreview {
+        next_runs,
+        utc_offset_min: offset,
+        problem,
+        account,
+        logins,
+    })
+}
+
 /// `routines { action: save, routine, routine_id? }`: without `routine_id`
 /// a new routine, the caller's; with it, a change of every field.
 pub fn save(
@@ -560,10 +660,7 @@ pub fn save(
             let before = changeable(&s, scope, id)?;
             let (f, org) = check(&s, scope, input)?;
             if org != before.org_id {
-                return Err(IpcError::new(
-                    codes::E_INVALID,
-                    "a routine stays in its organisation: pick a host of the same one",
-                ));
+                return Err(IpcError::new(codes::E_INVALID, STAYS_IN_ORG));
             }
             // A routine that starts listening for another event, or again
             // after being off, does not fire on what happened meanwhile.
