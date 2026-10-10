@@ -77,7 +77,7 @@ export function withChoices(spec: FormSpec, choices: Record<string, [string, str
     ...spec,
     steps: steps.map((s) => ({
       ...s,
-      fields: s.fields.map((f) => {
+      fields: (s.fields ?? []).map((f) => {
         if (!f.options) return f;
         const options: FormOption[] = choices[f.name] ?? f.options.filter((o) => !gone.has(`${f.name}=${readOption(o).value}`));
         const kept = f.value === undefined || options.some((o) => readOption(o).value === f.value);

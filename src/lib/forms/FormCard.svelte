@@ -6,6 +6,7 @@
   // (answered on the phone, withdrawn, expired).
   import { onDestroy } from 'svelte';
   import FormWizard from './FormWizard.svelte';
+  import SavedLaterLine from './SavedLaterLine.svelte';
   import { answerForm, declineForm, getForm, type FieldProblem, type FormView, type Values } from './forms';
   import { answerList, answerSummary, endedMark, endedWords, expiresIn } from './receipt';
   import { shortAge } from '../session_status';
@@ -123,14 +124,7 @@
   {@render receipt(form)}
   {#if error}<p class="err" data-testid="form-error">{error}</p>{/if}
 {:else if form && later}
-  <div class="receipt" data-testid="form-saved-later" role="status">
-    <div class="line">
-      <span class="mark" aria-hidden="true">◷</span>
-      <strong>{form.title}</strong>
-      <span class="meta">saved to finish later · {expiresIn(form.created_at, now)}</span>
-      <button type="button" class="link" data-testid="form-resume" onclick={() => (later = false)}>Resume</button>
-    </div>
-  </div>
+  <SavedLaterLine title={form.title} meta={`saved to finish later · ${expiresIn(form.created_at, now)}`} onresume={() => (later = false)} />
 {:else}
   <section class="card" data-testid="form-card" aria-label={`Form from ${sessionName}`}>
     {#if form}

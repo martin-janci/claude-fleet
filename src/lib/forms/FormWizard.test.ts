@@ -111,4 +111,13 @@ describe('FormWizard, the newer keys', () => {
     render(FormWizard, { props: { spec: { ...spec, save_later: false }, saveKey: 'f_1', onsubmit: vi.fn() } });
     expect(screen.queryByTestId('form-save-later')).toBeNull();
   });
+
+  it('starts from kept answers only where the form still offers them', () => {
+    localStorage.setItem('fleet.form.saved.f_2', JSON.stringify({ host: 'pluto', summary: 'Kept', gone: 'x' }));
+    const closed = { ...spec, steps: [{ ...spec.steps[0], fields: spec.steps[0].fields.map((f) => (f.name === 'host' ? { ...f, other: false } : f)) }, ...spec.steps.slice(1)] };
+    render(FormWizard, { props: { spec: closed, saveKey: 'f_2', onsubmit: vi.fn() } });
+    // "pluto" is no host this form offers any more: the proposal stands.
+    expect(screen.getByTestId('form-field-host-venus')).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByTestId('form-field-summary')).toHaveValue('Kept');
+  });
 });

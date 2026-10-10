@@ -3,6 +3,7 @@
   "title": "Get started",
   "intro": "Your first session in one go: a host, a project on it and an agent. Accounts, GitHub and the rest stay in the list.",
   "submit": "Build my fleet",
+  "save_later": true,
   "steps": [
     {
       "title": "Host",
@@ -74,6 +75,7 @@
         },
         { "name": "label", "type": "text", "label": "Label", "max_len": 120, "help": "Empty takes the branch's name." }
       ]
-    }
+    },
+    { "title": "Check it", "name": "Review", "kind": "review" }
   ]
 }

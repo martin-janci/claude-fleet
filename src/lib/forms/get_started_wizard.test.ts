@@ -11,6 +11,7 @@ import WizardDialog from './WizardDialog.svelte';
 import { buildFirstFleet, getStartedSource, getStartedWizard, runGetStarted } from './get_started_wizard';
 import { WIZARDS, type Wizard } from './wizards';
 import { readOption } from './forms';
+import { loadSaved } from './saved_answers';
 import type { SessionRow } from '../sessions';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
@@ -18,7 +19,10 @@ const fieldOf = (w: Wizard, name: string) => w.spec.steps.flatMap((s) => s.field
 const started = { id: 9, tmux_name: 'dev-acme-pos--first', friendly_name: null, host_alias: 'mercury', kind: 'work' } as unknown as SessionRow;
 const project = (id: number) => ({ project: { id, owner: 'acme', repo: 'pos', base_path: '/p', last_session_at: null, adopted: false, system: false }, worktrees: [] });
 
-beforeEach(() => inv.mockReset());
+beforeEach(() => {
+  inv.mockReset();
+  localStorage.clear();
+});
 
 describe('the Get started wizard', () => {
   it('is a fleet.form/1 spec with the Galaxy while it builds', () => {
@@ -34,7 +38,7 @@ describe('the Get started wizard', () => {
       ['mercury', 'mercury'],
     ]);
     expect(fieldOf(none, 'source')?.options?.map((o) => readOption(o).value)).toEqual(['clone', 'folder']);
-    expect(none.spec.steps.map((s) => s.title)).toEqual(['Host', 'Project', 'Agent']);
+    expect(none.spec.steps.map((s) => s.title)).toEqual(['Host', 'Project', 'Agent', 'Check it']);
     const some = getStartedWizard({ projects: [{ id: 4, owner: 'acme', repo: 'pos' }], hosts: [] });
     expect(fieldOf(some, 'source')?.options?.map((o) => readOption(o).value)).toEqual(['existing', 'clone', 'folder']);
     expect(fieldOf(some, 'project')?.options).toEqual([['4', 'acme/pos']]);
@@ -85,5 +89,38 @@ describe('the Get started wizard', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
     await fireEvent.click(screen.getByTestId('form-next'));
     expect(screen.getByTestId('form-step-title')).toHaveTextContent('Project');
+  });
+
+  // G1.3: the wizard spec that uses the review step and Save and finish later.
+  it('ends on a review with Edit links, and saves to finish later from the dialog', async () => {
+    const w = getStartedWizard({ projects: [], hosts: [{ alias: 'local' }, { alias: 'mercury' }] });
+    const run = vi.fn();
+    const onclose = vi.fn();
+    const d = render(WizardDialog, { props: { wizard: w, run, onclose } });
+    expect(screen.getByTestId('form-step-chips')).toHaveTextContent('Review');
+    await fireEvent.click(screen.getByTestId('form-field-host-mercury'));
+    await fireEvent.click(screen.getByTestId('form-next'));
+    await fireEvent.input(screen.getByTestId('form-field-url'), { target: { value: 'acme/pos' } });
+    await fireEvent.click(screen.getByTestId('form-save-later'));
+    // Closed without "Discard changes?": the answers are kept.
+    expect(onclose).toHaveBeenCalled();
+    expect(screen.queryByTestId('form-discard-ask')).toBeNull();
+    expect(loadSaved('wizard:get_started')).toMatchObject({ host: 'mercury', source: 'clone', url: 'acme/pos' });
+    d.unmount();
+
+    render(WizardDialog, { props: { wizard: w, run, onclose: vi.fn() } });
+    expect(screen.getByTestId('form-field-host-mercury')).toHaveAttribute('aria-checked', 'true');
+    await fireEvent.click(screen.getByTestId('form-next'));
+    expect(screen.getByTestId('form-field-url')).toHaveValue('acme/pos');
+    await fireEvent.click(screen.getByTestId('form-next'));
+    await fireEvent.click(screen.getByTestId('form-next'));
+    expect(screen.getByTestId('form-step-title')).toHaveTextContent('Check it');
+    expect(screen.getByTestId('form-review-step-1')).toHaveTextContent('acme/pos');
+    await fireEvent.click(screen.getByTestId('form-review-edit-0'));
+    expect(screen.getByTestId('form-step-title')).toHaveTextContent('Host');
+    for (let i = 0; i < 3; i++) await fireEvent.click(screen.getByTestId('form-next'));
+    await fireEvent.click(screen.getByTestId('form-submit'));
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ host: 'mercury', url: 'acme/pos' }));
+    expect(loadSaved('wizard:get_started')).toBeNull();
   });
 });

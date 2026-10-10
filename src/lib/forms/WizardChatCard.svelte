@@ -87,6 +87,7 @@
       {why}
       sending={sending ?? ready.wizard.sending}
       outcome={stateKey ? (endedByKey.get(stateKey) ?? null) : null}
+      saveKey={stateKey ? `wizard:${stateKey}` : null}
       onsubmit={submit}
       ondecline={() => undefined}
       onended={ended} />
