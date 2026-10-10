@@ -629,6 +629,12 @@ Scan hosts for installed skills/agents/hooks/MCP servers/plugins and recompute e
 
 Parameters: `host_alias`
 
+### `search`
+
+Search everything the hub indexes: tasks and tickets (key, title, brief, description), sessions (name, host, branch, tags, last prompt, notes), conversations (first prompt), pull requests, the work journal, and conversation text when the hub indexes transcripts (setting search.index_transcripts, off by default). Every word must match, in any order; case and accents are ignored and each word matches as a prefix. Only what you may see is returned. Returns { hits: [{ kind, ref, title, title_marks?, snippet, snippet_marks?, at, session_id?, session_name?, host_alias?, claude_session_id?, task_id?, key? }], transcripts_indexed }; marks are [start, end) in UTF-16 units.
+
+Parameters: `kinds`, `limit`, `query`
+
 ### `send_file`
 
 Send a file from a session's host to the user's phone and desktop (copied in the background, ≤ downloads.max_file_mb; zip a folder first). Your session_id: whoami. path: absolute or relative to the session's worktree root. E_NOTFOUND, E_LIMIT.
@@ -1017,6 +1023,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::trackers::work_retention_sweep`
 - `commands::trackers::list_trackers`
 - `commands::trackers::work_tickets`
+- `commands::search::search`
 - `commands::trackers::work_lookup`
 - `commands::trackers::start_work_multi`
 - `commands::trackers::start_work`

@@ -65,11 +65,14 @@
     planningEntries,
     recentQueries,
     noteQuery,
+    foundEntries,
   } from './quick_switcher';
+  import { requestConversationFind, searchEverything, type SearchHit } from './search_api';
   import { matchRanges } from './fuzzy';
   import {
     activeWorkViewId,
     knownWorkFacets,
+    showTaskInWorkView,
     sidebarView,
     workTree,
     workViewFilters,
@@ -202,6 +205,27 @@
     }, TICKET_SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(t);
   });
+  // Everywhere (search phase 3): a query of three letters or more also asks
+  // the hub's full-text index — what was said in conversations, notes,
+  // journals, pull requests. An older hub without `search` answers nothing.
+  const FOUND_MIN = 3;
+  let found = $state<SearchHit[]>([]);
+  let foundSeq = 0;
+  $effect(() => {
+    const q = prefix.rest.trim();
+    const wanted = open && mode === 'switch' && prefix.mode === 'all' && q.length >= FOUND_MIN;
+    const mine = ++foundSeq;
+    if (!wanted) {
+      found = [];
+      return;
+    }
+    const t = setTimeout(async () => {
+      const r = await searchEverything({ query: q, limit: 8 });
+      if (mine !== foundSeq) return;
+      found = r.ok && Array.isArray(r.value?.hits) ? r.value.hits : [];
+    }, TICKET_SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  });
   // Sprints and epics for the Planning rows: what the Work view last read,
   // else one small tree read the first time ⌘K opens.
   let facetsAsked = false;
@@ -279,6 +303,11 @@
         ...(settingChange ? [settingChange] : []),
         ...ticketRows,
         ...planningEntries($knownWorkFacets),
+        ...foundEntries(
+          found,
+          new Set($sessions.map((x) => x.id)),
+          new Set(tickets.map((t) => t.ticket.id)),
+        ),
         ...(lookupRow ? [lookupRow] : []),
       ],
       $effectiveScope,
@@ -313,7 +342,7 @@
     ranked.map((e) => ({
       key: e.key,
       label: e.label,
-      marks: prefix.rest.trim() ? matchRanges(prefix.rest, e.label) : undefined,
+      marks: e.marks ?? (prefix.rest.trim() ? matchRanges(prefix.rest, e.label) : undefined),
       description: e.description,
       meta: e.meta,
       badge: e.badge,
@@ -334,7 +363,9 @@
                       ? 'Settings'
                       : e.kind === 'planning'
                         ? 'Planning'
-                        : 'Projects',
+                        : e.kind === 'found'
+                          ? 'Everywhere'
+                          : 'Projects',
       testid: `switcher-${e.kind}`,
     })),
   );
@@ -498,6 +529,28 @@
   function hide() {
     open = false;
     menu = null;
+  }
+
+  /** A full-text hit: its task in the Work view, else its session — on the
+   *  Conversation tab with Find on the query when the words were said there. */
+  function openFound(h: SearchHit, query: string) {
+    if (h.kind === 'item' && h.task_id) {
+      const taskId = h.task_id;
+      hide();
+      void tick().then(() => showTaskInWorkView(taskId));
+      return;
+    }
+    const row = h.session_id != null ? $sessions.find((x) => x.id === h.session_id) : undefined;
+    if (!row) {
+      push({ kind: 'info', message: 'That conversation’s session is gone; its words are in the work journal.' });
+      return;
+    }
+    selectSessionExplicitly(row);
+    hide();
+    if (h.kind === 'transcript' || h.kind === 'conversation') {
+      sessionView.set('conversation');
+      void tick().then(() => requestConversationFind(row.id, query));
+    }
   }
 
   // The sidebar's "+ New session" and the Hosts view's `n` (which names the
@@ -744,6 +797,10 @@
       activeWorkViewId.set(null);
       workViewFilters.set({ ...filters });
       sidebarView.set('work');
+      return;
+    }
+    if (e.kind === 'found' && e.found) {
+      openFound(e.found, prefix.rest.trim());
       return;
     }
     if (e.kind === 'session' && e.session) {

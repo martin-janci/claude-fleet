@@ -521,6 +521,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // other work read and decision.
     ("list_trackers", Verdict::Routed { tool: "work" }),
     ("work_tickets", Verdict::Routed { tool: "work" }),
+    // Search phase 3: the hub's full-text index, fenced there per person.
+    ("search", Verdict::Routed { tool: "search" }),
     ("work_lookup", Verdict::Routed { tool: "work" }),
     ("start_work", Verdict::Routed { tool: "work_link" }),
     // Task → session spec P-6: cancel a start nobody worked in.

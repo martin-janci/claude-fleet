@@ -58,6 +58,7 @@ mod prs;
 mod repo;
 mod routines;
 mod runs;
+mod search;
 mod session_ops;
 mod sharing;
 mod start_rules;
@@ -392,6 +393,7 @@ impl FleetTools {
             + Self::presence_router()
             + Self::library_router()
             + Self::runs_router()
+            + Self::search_router()
     }
 }
 

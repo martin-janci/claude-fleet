@@ -503,6 +503,7 @@ pub fn run() {
             commands::trackers::work_retention_sweep,
             commands::trackers::list_trackers,
             commands::trackers::work_tickets,
+            commands::search::search,
             commands::trackers::work_lookup,
             commands::trackers::start_work_multi,
             commands::trackers::start_work,

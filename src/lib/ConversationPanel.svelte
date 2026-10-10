@@ -14,6 +14,7 @@
   // send-keys into the REPL), so anything typed here is what the terminal
   // would have received. bg / external rows have no REPL to type into, so
   // they stay read-only.
+  import { conversationFindRequest } from './search_api';
   import { untrack, tick, setContext, type Snippet } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
   import { sendPrompt, hasNoPane, sessions, sessionAgent, type SessionRow } from './sessions';
@@ -882,6 +883,15 @@
     if (next && scrollToRow(next.rowKey)) currentTurnPos += delta;
   }
 
+  // ⌘K found this session by what was said in it: Find opens on the query.
+  $effect(() => {
+    const req = $conversationFindRequest;
+    if (!req || req.sessionId !== session.id || !visible || !threadShown) return;
+    conversationFindRequest.set(null);
+    findQuery = req.query;
+    findIndex = 0;
+    void openFind();
+  });
   async function openFind() {
     // Nothing to search while the thread is loading or empty. The shortcut
     // checks this too (it also owns preventDefault); the header's ⌕ button

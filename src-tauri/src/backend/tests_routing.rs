@@ -833,6 +833,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "search",
+            "search",
+            json!({ "query": "prihlasenie sso", "limit": 5 }),
+            r#"{"hits":[{"kind":"item","ref":"7","title":"PAY-7 Prihlásenie cez SSO","snippet":"","at":1,"task_id":"item:7","key":"PAY-7"}],"transcripts_indexed":false}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::search::routed::search(
+                    b,
+                    fleet_core::service::search::SearchArgs {
+                        query: "prihlasenie sso".into(),
+                        kinds: Vec::new(),
+                        limit: Some(5),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "list_pull_requests",
             "prs",
             json!({ "action": "list", "state": "open" }),
@@ -6757,6 +6775,7 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/updates.rs"),
     ),
     ("commands/runs.rs", include_str!("../commands/runs.rs")),
+    ("commands/search.rs", include_str!("../commands/search.rs")),
     (
         "commands/routines.rs",
         include_str!("../commands/routines.rs"),

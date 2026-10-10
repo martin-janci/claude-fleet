@@ -23,6 +23,7 @@ import type { HostRow } from './hosts';
 import { catalogOf, type AssetListing } from './assets';
 import { displayKey, keyFamily, type TicketRow } from './trackers';
 import type { WorkTreeFacets, WorkTreeFilters } from './work_view';
+import type { SearchHit } from './search_api';
 import { rowMatches, sessionFilterRow, type FilterRow } from './sidebar_index';
 
 /** A cached tracker ticket or own task and the section it is listed under. */
@@ -44,7 +45,7 @@ export const TICKET_SEARCH_DEBOUNCE_MS = 200;
 export interface SwitcherEntry {
   /** `ticket`: a cached tracker ticket (work graph M3); `lookup`: resolve
    *  the pasted URL / typed key through the tracker. */
-  kind: 'session' | 'project' | 'host' | 'ticket' | 'lookup' | 'asset' | 'command' | 'setting' | 'planning';
+  kind: 'session' | 'project' | 'host' | 'ticket' | 'lookup' | 'asset' | 'command' | 'setting' | 'planning' | 'found';
   /** `session:<id>`, `project:<id>`, `host:<alias>`, `ticket:<KEY>`,
    *  `lookup:<query>`, `asset:<catalog>:<kind>/<name>` (the Assets
    *  workspace's own selection key) or `command:<rescan|sync|propose>`. */
@@ -75,6 +76,49 @@ export interface SwitcherEntry {
   /** Planning: the Work view's filters Enter opens it with (a sprint, an
    *  epic). */
   planning?: WorkTreeFilters;
+  /** Found: a hit of the hub's full-text search (search phase 3). */
+  found?: SearchHit;
+  /** `[start, end)` of the label the query matched, when the hub said. */
+  marks?: [number, number][];
+}
+
+const FOUND_KIND_LABELS: Record<string, string> = {
+  item: 'Task',
+  session: 'Session',
+  conversation: 'Conversation',
+  transcript: 'Said in',
+  pr: 'Pull request',
+  journal: 'Journal',
+};
+
+/** Rows for the hub's full-text hits, in the hub's order. A session hit
+ *  for a session ⌘K already lists, and a task hit for a ticket row it
+ *  already has, are left out: the row above is the same thing. */
+export function foundEntries(
+  hits: readonly SearchHit[],
+  listedSessionIds: ReadonlySet<number>,
+  listedItemIds: ReadonlySet<number>,
+): SwitcherEntry[] {
+  const out: SwitcherEntry[] = [];
+  for (const h of hits) {
+    if (h.kind === 'session' && h.session_id != null && listedSessionIds.has(h.session_id)) continue;
+    const itemId = h.task_id?.startsWith('item:') ? Number(h.task_id.slice(5)) : null;
+    if (h.kind === 'item' && itemId != null && listedItemIds.has(itemId)) continue;
+    const where = [h.session_name, h.host_alias].filter(Boolean).join(' · ');
+    const label = h.title || (h.session_name ?? h.snippet);
+    out.push({
+      kind: 'found',
+      key: `found:${h.kind}:${h.ref}`,
+      label,
+      description: [FOUND_KIND_LABELS[h.kind] ?? h.kind, where, h.snippet].filter(Boolean).join(' · '),
+      meta: h.kind === 'item' ? 'task' : h.session_id != null ? 'open' : '',
+      // What the hub matched, so ⌘K's own filter keeps the row.
+      fields: [label, h.snippet, h.session_name ?? '', h.key ?? ''].filter(Boolean),
+      found: h,
+      marks: h.title ? h.title_marks : undefined,
+    });
+  }
+  return out;
 }
 
 /** Rows that open the Work view on a sprint or an epic (search phase 2):
@@ -345,7 +389,7 @@ export function rankEntries(
   // it leads, and a command on the open session that the query matches
   // comes next.
   const isTail = (e: SwitcherEntry) =>
-    e.kind === 'asset' || e.kind === 'command' || e.kind === 'setting' || e.kind === 'planning';
+    e.kind === 'asset' || e.kind === 'command' || e.kind === 'setting' || e.kind === 'planning' || e.kind === 'found';
   const head = rankHead(
     entries.filter((e) => !isTail(e)),
     query,
@@ -362,9 +406,11 @@ export function rankEntries(
   const settings = entries.filter((e) => e.kind === 'setting');
   const commands = tailRows('command');
   const lead = q0 ? commands.filter((e) => e.section === 'This session') : [];
-  // Planning rows (a sprint, an epic) only answer a query.
+  // Planning rows (a sprint, an epic) only answer a query; so do the hub's
+  // full-text hits, which keep the hub's order (its rank, not ⌘K's).
   const planning = q0 ? tailRows('planning') : [];
-  const tail = [...planning, ...tailRows('asset'), ...commands.filter((e) => !lead.includes(e))];
+  const found = q0 ? entries.filter((e) => e.kind === 'found') : [];
+  const tail = [...planning, ...found, ...tailRows('asset'), ...commands.filter((e) => !lead.includes(e))];
   return [...settings, ...lead, ...head, ...tail];
 }
 

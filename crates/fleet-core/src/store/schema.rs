@@ -1820,6 +1820,10 @@ const MIGRATIONS: &[Migration] = &[
         160,
         include_str!("../../migrations/160_access_requests.sql"),
     ),
+    // Search phase 3: the full-text index (`search_docs`, FTS5
+    // `search_fts`) and the triggers that keep it in step. `IF NOT EXISTS`
+    // and an upsert backfill, then a rebuild: safe to re-run.
+    Migration::plain(161, include_str!("../../migrations/161_search_index.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

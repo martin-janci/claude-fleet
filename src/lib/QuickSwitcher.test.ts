@@ -1283,3 +1283,65 @@ describe('QuickSwitcher planning rows and recent searches', () => {
     expect(input.value).toBe('checkout');
   });
 });
+
+describe('QuickSwitcher searches everywhere on the hub', () => {
+  const hit = (over: Record<string, unknown>) => ({ ref: '1', title: '', snippet: '', at: 1, ...over });
+  beforeEach(() => {
+    __trackers.set([]);
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'search') {
+        const q = (args as { args: { query: string } }).args.query;
+        if (q !== 'token refresh') return { hits: [], transcripts_indexed: true };
+        return {
+          transcripts_indexed: true,
+          hits: [
+            hit({ kind: 'transcript', ref: 'c-1:0', snippet: 'the race is in the token refresh', snippet_marks: [[23, 33]], session_id: 1, session_name: 'blue-sirius', host_alias: 'mefistos' }),
+            hit({ kind: 'item', ref: '7', title: 'PAY-7 Token refresh fails', title_marks: [[6, 19]], task_id: 'item:7', key: 'PAY-7' }),
+          ],
+        };
+      }
+      return cmd === 'work_tickets' ? [] : null;
+    });
+  });
+
+  it('lists what was said and the tasks it found, under Everywhere', async () => {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'token refresh' } });
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-found')).toHaveLength(2));
+    expect(screen.getByText('Everywhere')).toBeTruthy();
+    const rows = screen.getAllByTestId('switcher-found').map((el) => el.textContent ?? '');
+    expect(rows[0]).toContain('Said in · blue-sirius · mefistos');
+    expect(Array.from(document.querySelectorAll('[data-testid="switcher-found"] mark.hit')).map((m) => m.textContent)).toContain(
+      'Token refresh',
+    );
+  });
+
+  it('a hit in a conversation opens its session on Find', async () => {
+    const { conversationFindRequest } = await import('./search_api');
+    const { sessionView } = await import('./prefs');
+    conversationFindRequest.set(null);
+    sessionView.set('terminal');
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'token refresh' } });
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-found')).toHaveLength(2));
+    const row = screen.getAllByTestId('switcher-found')[0];
+    await fireEvent.click(row);
+    await tick();
+    expect(get(selectedSession)?.id).toBe(1);
+    expect(get(sessionView)).toBe('conversation');
+    await vi.waitFor(() => expect(get(conversationFindRequest)).toMatchObject({ sessionId: 1, query: 'token refresh' }));
+  });
+
+  it('a task hit opens it in the Work view', async () => {
+    const { sidebarView } = await import('./work_view');
+    sidebarView.set('sessions');
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'token refresh' } });
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-found')).toHaveLength(2));
+    await fireEvent.click(screen.getAllByTestId('switcher-found')[1]);
+    await vi.waitFor(() => expect(get(sidebarView)).toBe('work'));
+  });
+});
