@@ -24,7 +24,18 @@ import {
   progressLabel,
   stateLabel,
   withoutConfigKeys,
+  brakeReason,
+  brakesLine,
+  durationWords,
+  loopFooter,
+  missionGroups,
+  missionReason,
+  ownerLine,
+  plannerRunsThisHour,
+  runStateLabel,
+  runsOf,
   type Mission,
+  type MissionDetail,
 } from './missions';
 
 type Handler = (args: Record<string, unknown>) => unknown;
@@ -922,5 +933,321 @@ describe('WorkMissions comet trails', () => {
     document.body.innerHTML = '';
     await open(detailWith(loop(), 'paused'));
     expect(screen.queryByTestId('mission-trails')).toBeNull();
+  });
+});
+
+// Gap G3.6: the Missions board's list and detail: groups by state, a reason
+// per row, the loop footer, the owner / planner / brakes lines and the
+// Plan / Runs / Log / Repos tabs.
+describe('the Missions board (gap G3.6)', () => {
+  const NOW = 1_800_000_000;
+  const card = (id: number, kind = 'ask', payload: Record<string, unknown> = { question: 'Which?' }) => ({
+    id,
+    mission_id: 1,
+    decision_id: `d${id}`,
+    source: 'planner',
+    kind,
+    payload,
+    state: 'open',
+    created_at: 1,
+  });
+  const autonomy = { asked: 3, ceiling: 1, effective: 1, why: '', enabled: true };
+  const planOf = (over: Record<string, unknown> = {}) => ({
+    steps: [],
+    cards: [],
+    autonomy,
+    cost_micros: 0,
+    counts: { total: 0, open: 0 },
+    ...over,
+  });
+
+  const fed = mission({ id: 1, name: 'Hub federation v2', state: 'active', total: 12, done: 7, updated_at: 50 });
+  const demo = mission({ id: 2, name: 'Demo mission', state: 'active', mode: 'continuous', total: 5, done: 3, updated_at: 40 });
+  const receipts = mission({ id: 3, name: 'Receipt documents', state: 'paused', updated_at: 30, policy: { no_progress_secs: 7200 } });
+  const installer = mission({ id: 4, name: 'Windows installer polish', state: 'draft', updated_at: 20 });
+  const done = mission({ id: 5, name: 'Shipped thing', state: 'completed', updated_at: 10 });
+  const failed = mission({ id: 6, name: 'Dropped thing', state: 'failed', updated_at: 9 });
+
+  const details: Record<number, MissionDetail> = {
+    1: {
+      mission: fed,
+      items: [item(20, 'Pairing spec'), item(21, 'Peer code redemption')],
+      graph: {
+        nodes: [
+          { item_id: 20, state: 'done', wave: 1 },
+          { item_id: 21, state: 'failed', wave: 3 },
+        ],
+      },
+      events: [],
+      phase: 'blocked',
+      plan: planOf({ cards: [card(1), card(2, 'run', {})] }),
+    },
+    2: {
+      mission: demo,
+      items: [item(30, 'A'), item(31, 'B')],
+      graph: {
+        nodes: [
+          { item_id: 30, state: 'done', wave: 1 },
+          { item_id: 31, state: 'running', wave: 2 },
+        ],
+      },
+      events: [],
+      phase: 'running',
+      plan: planOf(),
+    },
+    3: {
+      mission: receipts,
+      items: [],
+      events: [
+        { id: 9, at: 5, kind: 'no_progress', actor: 'loop', payload: { why: 'no run started or finished for 120 minutes' } },
+        { id: 8, at: 5, kind: 'state', actor: 'loop', payload: { from: 'active', to: 'paused' } },
+      ],
+      plan: planOf({ cards: [card(3)] }),
+    },
+    4: {
+      mission: installer,
+      items: [],
+      events: [],
+      plan: null,
+      graph: { nodes: [] },
+    },
+  };
+  // The draft's planner answer: one create card of six tasks.
+  details[4].plan = planOf({ cards: [card(4, 'create', { tree: [1, 2, 3, 4, 5, 6].map((n) => ({ title: `T${n}` })) })] });
+
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    handlers = {
+      work_missions: () => [installer, done, receipts, fed, failed, demo],
+      work_mission: (a) => details[Number(a.mission_id)],
+      pause_all_missions: () => [1, 2],
+    };
+    vi.mocked(invoke).mockImplementation(async (cmd: string, raw?: unknown) => {
+      const h = handlers[cmd];
+      return h ? h((raw as { args: Record<string, unknown> } | undefined)?.args ?? {}) : null;
+    });
+    localStorage.removeItem('cf:pref:work.missions.group');
+  });
+
+  const rowNames = () => screen.getAllByTestId('mission-row').map((r) => r.querySelector('.title')?.textContent);
+
+  it('groups the list Active, Paused, Drafts, then a folded Completed', async () => {
+    render(WorkMissions);
+    await flush();
+    expect(screen.getByTestId('missions-group-active').textContent).toContain('Active');
+    expect(screen.getByTestId('missions-group-active').textContent).toContain('2');
+    expect(screen.getByTestId('missions-group-paused').textContent).toContain('1');
+    expect(screen.getByTestId('missions-group-draft').textContent).toContain('Drafts');
+    expect(rowNames()).toEqual(['Hub federation v2', 'Demo mission', 'Receipt documents', 'Windows installer polish']);
+    const fold = screen.getByTestId('missions-group-finished');
+    expect(fold.textContent).toContain('Completed');
+    expect(fold.textContent).toContain('2');
+    expect(fold.getAttribute('aria-expanded')).toBe('false');
+    await fireEvent.click(fold);
+    expect(rowNames()).toContain('Shipped thing');
+    expect(rowNames()).toContain('Dropped thing');
+  });
+
+  it('reads only the missions still going for their reasons', async () => {
+    render(WorkMissions);
+    await flush();
+    expect(calls('work_mission').map((a) => a.mission_id).sort()).toEqual([1, 2, 3, 4]);
+  });
+
+  it('says on each row why the mission is where it is', async () => {
+    render(WorkMissions);
+    await flush();
+    const reasons = Object.fromEntries(
+      screen.getAllByTestId('mission-row').map((r) => [
+        r.querySelector('.title')?.textContent,
+        r.querySelector('[data-testid="mission-reason"]')?.textContent ?? null,
+      ]),
+    );
+    expect(reasons['Hub federation v2']).toBe('Needs you · 2 cards · wave 3');
+    expect(reasons['Demo mission']).toBe('Working · wave 2 · continuous');
+    expect(reasons['Receipt documents']).toBe('Brake: no progress in 2 h');
+    expect(reasons['Windows installer polish']).toBe('Planner proposed 6 tasks · not accepted');
+  });
+
+  it('ends the list with the loop and the fleet ceiling beside Pause all', async () => {
+    render(WorkMissions);
+    await flush();
+    const foot = screen.getByTestId('missions-footer');
+    expect(screen.getByTestId('missions-loop').textContent).toBe('Mission loop on · ceiling L1');
+    await fireEvent.click(foot.querySelector('[data-testid="missions-pause-all"]')!);
+    await flush();
+    expect(calls('pause_all_missions')).toHaveLength(1);
+  });
+
+  it('Group: None lists every mission flat with its state', async () => {
+    render(WorkMissions);
+    await flush();
+    await fireEvent.change(screen.getByTestId('missions-group'), { target: { value: 'none' } });
+    await flush();
+    expect(screen.queryByTestId('missions-group-active')).toBeNull();
+    expect(screen.getAllByTestId('mission-row')).toHaveLength(6);
+    expect(screen.getAllByTestId('mission-row')[0].textContent).toContain('Active');
+    expect(localStorage.getItem('cf:pref:work.missions.group')).toContain('none');
+  });
+
+  it('a mission shows its owner, planner runs this hour and brakes', async () => {
+    const { myPersonId } = await import('./access');
+    const { orgs } = await import('./orgs');
+    myPersonId.set(7);
+    orgs.set([{ id: 2, name: '32bit', created_at: 1, rules: [], hosts: [], trackers: [] }]);
+    vi.spyOn(Date, 'now').mockReturnValue(NOW * 1000);
+    const m = mission({
+      ...fed,
+      owner_person_id: 7,
+      org_id: 2,
+      policy: { max_planner_runs_per_hour: 4, no_progress_secs: 7200 },
+    });
+    details[1] = {
+      ...details[1],
+      mission: m,
+      events: [
+        { id: 3, at: NOW - 60, kind: 'planned', actor: 'loop' },
+        { id: 2, at: NOW - 1800, kind: 'planned', actor: 'person:7' },
+        { id: 1, at: NOW - 7200, kind: 'planned', actor: 'loop' },
+      ],
+      plan: planOf({
+        autonomy: { ...autonomy, grant: { id: 1, mission_id: 1, plan_version: 1, level: 1, granted_by: 'x', budget_micros: 40e6, created_at: 1, expires_at: NOW + 3600 } },
+      }),
+    };
+    handlers.work_missions = () => [m];
+    render(WorkMissions);
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    expect(screen.getByTestId('mission-owner').textContent).toBe('You · 32bit');
+    expect(screen.getByTestId('mission-planner-runs').textContent).toBe('2 of 4 runs this hour');
+    expect(screen.getByTestId('mission-brakes').textContent).toBe('Pause on spent budget ($40.00) or 2 h without progress');
+    vi.mocked(Date.now).mockRestore();
+    myPersonId.set(null);
+    orgs.set([]);
+  });
+
+  it('splits the detail into Plan, Runs, Log and Repos tabs', async () => {
+    const m = mission({ ...fed, repos: [{ project_id: 1, name: 'o/claude-fleet', created_at: 1 }] });
+    details[1] = {
+      mission: m,
+      items: [item(20, 'Pairing spec'), item(21, 'Peer code redemption')],
+      graph: {
+        nodes: [
+          { item_id: 20, state: 'done', wave: 1, attempt: { task_id: 51, role: 'implement', attempt: 1, state: 'done' } },
+          { item_id: 21, state: 'failed', wave: 1, attempt: { task_id: 53, role: 'implement', attempt: 2, state: 'failed' } },
+        ],
+      },
+      events: [
+        { id: 3, at: 100, kind: 'step', actor: 'loop', work_item_id: 21, payload: { step: 'retry', role: 'implement', task_id: 53 } },
+        { id: 2, at: 90, kind: 'step', actor: 'person:7', work_item_id: 21, payload: { step: 'run', role: 'implement', task_id: 52 } },
+        { id: 1, at: 80, kind: 'refused', actor: 'loop', payload: { step: 'run', why: 'no host' } },
+      ],
+      may_change: true,
+      plan: planOf(),
+    };
+    handlers.work_missions = () => [m];
+    render(WorkMissions);
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    expect(screen.getByTestId('mission-tab-plan').getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByTestId('mission-loop')).toBeTruthy();
+    expect(screen.getByTestId('mission-tab-runs').textContent).toBe('Runs3');
+    expect(screen.getByTestId('mission-tab-repos').textContent).toBe('Repos1');
+    expect(screen.queryByTestId('mission-events')).toBeNull();
+
+    await fireEvent.click(screen.getByTestId('mission-tab-runs'));
+    expect(screen.queryByTestId('mission-loop')).toBeNull();
+    const runs = screen.getAllByTestId('mission-run');
+    expect(runs.map((r) => r.getAttribute('data-state'))).toEqual(['failed', 'started', 'done']);
+    expect(runs[0].textContent).toContain('Peer code redemption');
+    expect(runs[0].textContent).toContain('implement #2 · Failed');
+    expect(runs[0].textContent).toContain('by the loop');
+    expect(runs[1].textContent).toContain('Idle · earlier run');
+
+    await fireEvent.click(screen.getByTestId('mission-tab-log'));
+    expect(screen.getByTestId('mission-events').textContent).toContain('Refused');
+    await fireEvent.click(screen.getByTestId('mission-tab-repos'));
+    expect(screen.getByTestId('mission-repos').textContent).toContain('o/claude-fleet');
+    // Another mission opens on Plan again.
+    await fireEvent.click(screen.getByTestId('mission-back'));
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    expect(screen.getByTestId('mission-tab-plan').getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('a mission with no run yet says so', async () => {
+    handlers.work_missions = () => [installer];
+    render(WorkMissions);
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-tab-runs'));
+    expect(screen.getByTestId('mission-runs-empty')).toBeTruthy();
+  });
+});
+
+describe('the Missions board helpers (gap G3.6)', () => {
+  it('words a span', () => {
+    expect(durationWords(600)).toBe('10 min');
+    expect(durationWords(3600)).toBe('1 h');
+    expect(durationWords(5400)).toBe('1 h 30 min');
+  });
+
+  it('words the brakes with and without a budget', () => {
+    expect(brakesLine(undefined)).toBe('Pause after 1 h without progress');
+    expect(brakesLine({ no_progress_secs: 7200 }, 20e6)).toBe('Pause on spent budget ($20.00) or 2 h without progress');
+  });
+
+  it('names the owner as You, a member, or a person number, with the org', () => {
+    const name = (id: number) => (id === 3 ? 'Ana' : null);
+    const org = (id: number) => (id === 2 ? '32bit' : null);
+    expect(ownerLine({ owner_person_id: 7, org_id: 2 }, 7, name, org)).toBe('You · 32bit');
+    expect(ownerLine({ owner_person_id: 3, org_id: null }, 7, name, org)).toBe('Ana');
+    expect(ownerLine({ owner_person_id: 9 }, null, name, org)).toBe('person 9');
+    expect(ownerLine({}, 7, name, org)).toBeNull();
+  });
+
+  it('counts planner runs in the last hour only', () => {
+    const ev = (at: number, kind = 'planned') => ({ id: at, at, kind, actor: 'loop' });
+    expect(plannerRunsThisHour([ev(1000), ev(3000), ev(3500, 'step'), ev(-10)], 3600)).toBe(2);
+  });
+
+  it('a paused mission names the brake only when the brake paused it last', () => {
+    const m = mission({ state: 'paused', policy: { no_progress_secs: 1800 } });
+    const ev = (id: number, kind: string) => ({ id, at: id, kind, actor: 'loop' });
+    expect(brakeReason({ mission: m, events: [ev(2, 'no_progress'), ev(1, 'state')] })).toBe('no progress in 30 min');
+    expect(brakeReason({ mission: m, events: [ev(3, 'budget')] })).toBe('budget spent');
+    // A person resumed and paused it again after the brake.
+    expect(brakeReason({ mission: m, events: [ev(3, 'state'), ev(2, 'no_progress')] })).toBeNull();
+  });
+
+  it('a row with no detail, or an ended one, says only what it knows', () => {
+    expect(missionReason(mission({ state: 'active' }), null)).toBeNull();
+    expect(missionReason(mission({ state: 'completed' }), null)).toBeNull();
+    expect(missionReason(mission({ state: 'cancelled' }), null)).toBe('Cancelled');
+    expect(missionGroups([mission({ state: 'failed' })]).map((g) => g.label)).toEqual(['Completed']);
+  });
+
+  it('the footer reads the loop from any open plan', () => {
+    const plan = { autonomy: { asked: 1, ceiling: 2, effective: 1, why: '', enabled: false }, cost_micros: 0, counts: { total: 0, open: 0 } };
+    expect(loopFooter([null, { mission: mission(), plan }])).toBe('Mission loop off · ceiling L2');
+    expect(loopFooter([])).toBeNull();
+  });
+
+  it('runs: every started step, the latest attempt carrying its state', () => {
+    const d: MissionDetail = {
+      mission: mission(),
+      events: [
+        { id: 2, at: 20, kind: 'step', actor: 'loop', work_item_id: 5, payload: { step: 'review', role: 'review', task_id: 9 } },
+        { id: 1, at: 10, kind: 'step', actor: 'loop', work_item_id: 5, payload: { step: 'run', task_id: null } },
+      ],
+      graph: { nodes: [{ item_id: 5, state: 'running', wave: 1, attempt: { task_id: 9, state: 'running', attempt: 1 } }] },
+    };
+    expect(runsOf(d)).toEqual([{ task_id: 9, item_id: 5, role: 'review', attempt: 1, state: 'running', at: 20, actor: 'loop' }]);
+    expect(runStateLabel('running')).toBe('Working');
+    expect(runStateLabel('cancelled')).toBe('Idle · cancelled');
   });
 });
