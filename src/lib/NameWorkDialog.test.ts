@@ -79,6 +79,45 @@ describe('NameWorkDialog', () => {
     expect(get(sessions).find((s) => s.id === 7)?.work?.title).toBe('Ops cleanup');
   });
 
+  it("offers the session agent's name as a draft, off until used, marked Drafted and undoable (G2.1)", async () => {
+    sessions.set([live({ friendly_name: 'Receipt rounding fix' })]);
+    vi.mocked(invoke).mockResolvedValue(named(7));
+    render(NameWorkDialog, {
+      props: { target: { mode: 'name', sessions: [{ id: 7, label: 'dev-foo' }] }, onclose: vi.fn() },
+    });
+    // Off by default: the title starts as the person's, empty.
+    const input = screen.getByTestId('name-work-title') as HTMLInputElement;
+    expect(input.value).toBe('');
+    expect(screen.queryByTestId('name-work-drafted')).toBeNull();
+    await type('name-work-title', 'Mine');
+    await fireEvent.click(screen.getByTestId('name-work-use-draft'));
+    await tick();
+    expect(input.value).toBe('Receipt rounding fix');
+    expect(screen.getByTestId('name-work-drafted-label').textContent).toBe('Drafted');
+    // Undo puts back what the person had typed.
+    await fireEvent.click(screen.getByTestId('name-work-draft-undo'));
+    await tick();
+    expect(input.value).toBe('Mine');
+    expect(screen.queryByTestId('name-work-drafted')).toBeNull();
+    // Used, then edited: it is the person's now, no pill.
+    await fireEvent.click(screen.getByTestId('name-work-use-draft'));
+    await tick();
+    await type('name-work-title', 'Receipt rounding');
+    expect(screen.queryByTestId('name-work-drafted')).toBeNull();
+    await fireEvent.click(screen.getByTestId('name-work-submit'));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('name_session_work', { args: { session_id: 7, title: 'Receipt rounding' } }),
+    );
+  });
+
+  it('offers no draft when the session has no agent name', async () => {
+    sessions.set([live({ friendly_name: null })]);
+    render(NameWorkDialog, {
+      props: { target: { mode: 'name', sessions: [{ id: 7, label: 'dev-foo' }] }, onclose: vi.fn() },
+    });
+    expect(screen.queryByTestId('name-work-use-draft')).toBeNull();
+  });
+
   it('leaves the key out when blank, and blocks an invalid title', async () => {
     vi.mocked(invoke).mockResolvedValue(named(7));
     render(NameWorkDialog, {

@@ -20,6 +20,7 @@
   import { copyText } from './clipboard';
   import { startWork } from './trackers';
   import StartPopover from './StartPopover.svelte';
+  import { startAskRequest, takeStartAsk } from './new_task';
   import StartProgressStrip from './StartProgressStrip.svelte';
   import AttachPicker from './AttachPicker.svelte';
   import { operatorRow } from './operator';
@@ -247,6 +248,14 @@
     popover = null;
     if (refocus) mainBtn?.focus();
   }
+
+  // New task's "Start a session for it now" (G2.1): the first button of
+  // the new task to mount opens its start menu.
+  $effect(() => {
+    const want = $startAskRequest;
+    if (want === null || want !== task.task_id || !canStart || busy) return;
+    if (takeStartAsk(want)) void tick().then(() => start(true));
+  });
 
   function primary(ev?: MouseEvent) {
     if (action === 'open') openLive();

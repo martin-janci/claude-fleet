@@ -24,10 +24,10 @@
   import WorkTaskRow from './WorkTaskRow.svelte';
   import { sessions } from './sessions';
   import { selectedSession, selectSessionExplicitly } from './selection';
-  import { projects, loadProjects } from './projects';
   import { workButtonFor } from './start_preview';
   import WorkButton from './WorkButton.svelte';
   import EditTaskDialog from './EditTaskDialog.svelte';
+  import NewTaskDialog from './NewTaskDialog.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { displayTitle, groupTasksByStatus, type StatusSections, type TaskNode } from './task_list';
@@ -50,9 +50,8 @@
   let error = $state<IpcError | null>(null);
   let doneOpen = $state(false);
   let addTitle = $state('');
+  /** The New task dialog is open (▾; G2.1), seeded with `addTitle`. */
   let addMore = $state(false);
-  let addProject = $state<number | null>(null);
-  let addNotes = $state('');
   let busy = $state(false);
   let actionError = $state<string | null>(null);
   /** The task whose edit dialog is open. */
@@ -67,7 +66,6 @@
       sections.done.length === 0 ? 'Done in the last 7 days' : null,
     ].filter((x): x is string => x !== null),
   );
-  const pickable = $derived(($projects ?? []).filter((p) => !p.project?.system));
 
   let seq = 0;
   async function load() {
@@ -105,7 +103,6 @@
   );
   onMount(() => {
     void load();
-    if ((get(projects) ?? []).length === 0) void loadProjects();
   });
   onDestroy(() => {
     offFilters();
@@ -116,7 +113,7 @@
     const title = addTitle.trim();
     if (!title || busy) return;
     busy = true;
-    const r = await createWorkTask({ title, projectId: addProject, notes: addNotes });
+    const r = await createWorkTask({ title });
     busy = false;
     if (!r.ok) {
       actionError = readErrorText(r.error);
@@ -124,8 +121,6 @@
     }
     actionError = null;
     addTitle = '';
-    addNotes = '';
-    addMore = false;
     void load();
   }
 
@@ -168,8 +163,6 @@
     if (row) selectSessionExplicitly(row, { task: t.task_id });
     else openTask(t.task_id, t.sessions);
   }
-  const projectName = (p: (typeof pickable)[number]) =>
-    p.project.owner && p.project.owner !== 'local' ? `${p.project.owner}/${p.project.repo}` : p.project.repo;
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -187,30 +180,12 @@
     <button
       class="btn btn--quiet btn--icon"
       type="button"
-      title="Project and notes"
-      aria-label="Project and notes"
+      title="New task with a project, notes or a start"
+      aria-label="New task with a project, notes or a start"
       data-testid="task-add-more"
-      aria-expanded={addMore}
-      onclick={() => (addMore = !addMore)}>▾</button
+      onclick={() => (addMore = true)}>▾</button
     >
   </div>
-  {#if addMore}
-    <div class="add-more">
-      <select aria-label="Project" data-testid="task-add-project" bind:value={addProject}>
-        <option value={null}>No project</option>
-        {#each pickable as p (p.project.id)}
-          <option value={p.project.id}>{projectName(p)}</option>
-        {/each}
-      </select>
-      <textarea
-        rows="3"
-        placeholder="Notes: the first prompt when you press Start"
-        aria-label="Notes"
-        data-testid="task-add-notes"
-        bind:value={addNotes}
-      ></textarea>
-    </div>
-  {/if}
   {#if actionError}<p class="err" role="alert" data-testid="task-list-action-error">{actionError}</p>{/if}
 
   {#if error}
@@ -234,6 +209,16 @@
   {/if}
 </div>
 
+{#if addMore}
+  <NewTaskDialog
+    initialTitle={addTitle}
+    onclose={() => (addMore = false)}
+    ondone={() => {
+      addTitle = '';
+      void load();
+    }}
+  />
+{/if}
 {#if editing}
   <EditTaskDialog taskId={editing} onclose={() => (editing = null)} ondone={() => void load()} />
 {/if}
@@ -320,11 +305,6 @@
     background: var(--bg);
     color: var(--fg);
     font: inherit;
-  }
-  .add-more {
-    display: grid;
-    gap: 6px;
-    padding-bottom: 6px;
   }
   h3 {
     display: flex;

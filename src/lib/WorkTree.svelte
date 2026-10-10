@@ -29,6 +29,9 @@
   import { selectedSession, selectSessionExplicitly } from './selection';
   import { workBoardOpen, workViewChordLabel } from './app_views';
   import { detectMac } from './terminal_keys';
+  import { isNewTaskChord, ownNewTaskChord } from './new_task';
+  import { shortcutLabel } from './shortcuts';
+  import NewTaskDialog from './NewTaskDialog.svelte';
   import WorkFiltersBar from './WorkFiltersBar.svelte';
   import { facetSentence, workFacets } from './filter_facets';
   import WorkReview from './WorkReview.svelte';
@@ -86,7 +89,9 @@
     maxWaitMs = 3000,
   }: { pageSize?: number; debounceMs?: number; maxWaitMs?: number } = $props();
 
-  const chord = workViewChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator));
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  const chord = workViewChordLabel(isMac);
+  const newTaskChord = shortcutLabel('work.new-task', isMac);
 
   let tab = $state<'tasks' | 'review' | 'missions' | 'prs'>('tasks');
   // A "Sent to a mission" chip in Control (redesign 9.3): the Missions tab,
@@ -451,10 +456,27 @@
     void load({ full });
   }
 
+  // ⌘N makes a task while Work is open (G2.1; the registry's `work`
+  // scope): the quick switcher stands aside while this view owns it.
+  let newTaskOpen = $state(false);
+  const releaseNewTask = ownNewTaskChord();
+  function onNewTaskChord(e: KeyboardEvent) {
+    if (!isNewTaskChord(e, isMac)) return;
+    // Another dialog owns the keyboard while open.
+    if ((e.target as Element | null)?.closest?.('dialog')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    newTaskOpen = true;
+  }
+
   onMount(() => {
     void load({ review: true });
+    // Capture phase, as the switcher's: beat the terminal to the chord.
+    window.addEventListener('keydown', onNewTaskChord, true);
   });
   onDestroy(() => {
+    window.removeEventListener('keydown', onNewTaskChord, true);
+    releaseNewTask();
     offFilters();
     offLayout();
     offChanged();
@@ -619,6 +641,14 @@
             onclick={() => pickTab('review')}>{reviewTotal}</button
           >
         {/if}
+      <button
+        class="btn btn--quiet btn--icon"
+        type="button"
+        title="New task ({newTaskChord})"
+        aria-label="New task"
+        data-testid="work-new-task"
+        onclick={() => (newTaskOpen = true)}>+</button
+      >
       <button
         class="btn btn--quiet btn--icon"
         type="button"
@@ -788,6 +818,9 @@
   </div>
 {/snippet}
 
+{#if newTaskOpen}
+  <NewTaskDialog onclose={() => (newTaskOpen = false)} />
+{/if}
 {#if rulesOpen}
   <WorkRules onclose={() => (rulesOpen = false)} />
 {/if}

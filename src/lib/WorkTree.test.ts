@@ -9,6 +9,8 @@ import { get } from 'svelte/store';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkTree from './WorkTree.svelte';
+import { newTaskOwnsChord } from './new_task';
+import { detectMac } from './terminal_keys';
 import { expectAccessible } from './a11y_check';
 import { workBoardOpen } from './app_views';
 import { sessions } from './sessions';
@@ -735,5 +737,36 @@ describe('WorkTree', () => {
     workLayout.set('list');
     await flush();
     await expectAccessible(container);
+  });
+});
+
+// G2.1 (FormsWork): ⌘N in Work makes a task; New session keeps it elsewhere.
+describe('WorkTree: New task on ⌘N', () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    workLayout.set('grouped');
+    treeImpl = () => firstPage;
+    mockHub();
+  });
+
+  it('opens New task from the chord and from +, and owns the chord only while mounted', async () => {
+    const isMac = detectMac(navigator);
+    const { unmount } = render(WorkTree);
+    await flush();
+    expect(newTaskOwnsChord()).toBe(true);
+    expect(screen.queryByTestId('new-task-dialog')).toBeNull();
+    window.dispatchEvent(
+      new KeyboardEvent('keydown', isMac ? { key: 'n', metaKey: true } : { key: 'N', ctrlKey: true, shiftKey: true }),
+    );
+    await flush();
+    expect(screen.getByTestId('new-task-dialog')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('sheet-cancel'));
+    await flush();
+    expect(screen.queryByTestId('new-task-dialog')).toBeNull();
+    await fireEvent.click(screen.getByTestId('work-new-task'));
+    await flush();
+    expect(screen.getByTestId('new-task-dialog')).toBeTruthy();
+    unmount();
+    expect(newTaskOwnsChord()).toBe(false);
   });
 });

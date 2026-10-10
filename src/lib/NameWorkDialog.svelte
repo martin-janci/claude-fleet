@@ -4,6 +4,8 @@
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionIdBlocked } from './share';
+  import { sessions } from './sessions';
+  import DraftedLabel from './DraftedLabel.svelte';
   import {
     LOCAL_WORK_TITLE_MAX,
     nameWorkForSessions,
@@ -49,6 +51,34 @@
   );
   let busy = $state(false);
   let failure = $state<string | null>(null);
+
+  /**
+   * The drafted name (G2.1, rule 7): the label the session's own agent gave
+   * it (`set_friendly_name`), offered and never filled in until the person
+   * asks. Using it shows "Drafted" until they edit it, with Undo back to what
+   * they had typed.
+   */
+  const draft = $derived.by(() => {
+    if (!naming || target.mode !== 'name') return null;
+    for (const s of target.sessions) {
+      const row = $sessions.find((r) => r.id === s.id);
+      const name = row?.friendly_name?.trim();
+      if (name && name !== row?.tmux_name && workTitleError(name) === null) return name;
+    }
+    return null;
+  });
+  /** What the title held before the draft went in; null when it is not in. */
+  let beforeDraft = $state<string | null>(null);
+  const showingDraft = $derived(beforeDraft !== null && draft !== null && title === draft);
+  function useDraft() {
+    if (draft === null) return;
+    beforeDraft = title;
+    title = draft;
+  }
+  function undoDraft() {
+    title = beforeDraft ?? '';
+    beforeDraft = null;
+  }
 
   const titleError = $derived(title.trim() === '' ? null : workTitleError(title));
   /**
@@ -153,6 +183,19 @@
     {#if titleError}
       <p class="err" data-testid="name-work-title-error">{titleError}</p>
     {/if}
+    {#if showingDraft}
+      <p class="draft" data-testid="name-work-drafted">
+        <DraftedLabel testid="name-work-drafted-label" />
+        <span class="note">by the session's agent</span>
+        <button type="button" class="link" data-testid="name-work-draft-undo" onclick={undoDraft}>Undo</button>
+      </p>
+    {:else if draft !== null && title.trim() !== draft}
+      <p class="draft">
+        <button type="button" class="link" data-testid="name-work-use-draft" onclick={useDraft}
+          >Use the drafted name “{draft}”</button
+        >
+      </p>
+    {/if}
     {#if target.mode === 'name'}
       <label class="field">
         <span>Key (optional)</span>
@@ -225,6 +268,15 @@
   .sess { display: flex; gap: 0.4rem; align-items: center; font-size: var(--text-xs); }
   .note { font-size: var(--text-2xs); color: var(--fg-muted); margin: 0; }
   .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
+  .draft { display: flex; gap: 0.4rem; align-items: center; margin: 0; font-size: var(--text-2xs); }
+  .link {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+  }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
   .actions button {
     font-size: var(--text-xs);
