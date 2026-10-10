@@ -826,6 +826,34 @@ describe('WorkTaskDetail', () => {
       expect(rule).toContain('Starts in acme/web on mac');
       expect(rule).toContain('rule PD-1*');
     });
+
+    it('placement shows the rule\'s host fallback, account, model and effort (G7.1)', async () => {
+      handlers.work_task = () => ({ ...trackerTask, task: { ...trackerTask.task, key: 'PD-12' } });
+      handlers.start_rules = () => [
+        { id: 2, pattern: 'PD-*', project_id: 4, project: 'acme/web', host_alias: 'mac', fallback_host: 'mercury', profile: 'work', model: 'opus', effort: 'high', state: 'active', created_at: 1, updated_at: 1 },
+      ];
+      render(WorkTaskDetail, { taskId: 'item:12' });
+      await flush();
+      expect(screen.getByTestId('work-task-start-rule').textContent?.replace(/\s+/g, ' ')).toContain('on mac, else mercury');
+      expect(screen.getByTestId('work-task-start-account').textContent).toBe('work');
+      expect(screen.getByTestId('work-task-start-model').textContent?.replace(/\s+/g, ' ')).toBe('opus · effort high');
+    });
+
+    it('with no start rule, the placing rule says where its sessions start', async () => {
+      handlers.work_task = () => ({
+        ...trackerTask,
+        task: { ...trackerTask.task, key: 'PD-12', group: { id: 'label:Payments', label: 'Payments', source: 'rule', rule_id: 7 } },
+      });
+      handlers.start_rules = () => [];
+      handlers.work_rules = () => [
+        { id: 7, name: 'Payments', enabled: true, version: 1, conditions: { key_prefix: 'PD' }, group: 'Payments', host_alias: 'mercury', profile: 'work' },
+      ];
+      render(WorkTaskDetail, { taskId: 'item:12' });
+      await flush();
+      const line = screen.getByTestId('work-task-placement-start').textContent?.replace(/\s+/g, ' ');
+      expect(line).toContain('Sessions start on mercury · account work');
+      expect(line).toContain('rule “Payments”');
+    });
   });
 
   describe('K5: Jev proposes a group (redesign 6.9)', () => {

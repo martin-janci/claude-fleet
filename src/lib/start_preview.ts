@@ -31,6 +31,28 @@ export interface StartPlanView {
   parallel?: boolean;
   /** The start rule that picked the repository (redesign 8.11). */
   rule_id?: number | null;
+  /** How the rules say it runs (G7.1): the account, model, effort, agent. */
+  profile?: string | null;
+  model?: string | null;
+  effort?: string | null;
+  agent?: string | null;
+  /** The rule's host, offline, when the start took its fallback. */
+  fell_back_from?: string | null;
+  /** The placement rule whose "its sessions start here" applied. */
+  placement_rule_id?: number | null;
+}
+
+/** "account work · opus · effort high · Codex · mac is offline": what the
+ *  rules set on a planned start beyond the repository and host. Empty when
+ *  nothing. */
+export function planLaunchLine(p: Pick<StartPlanView, 'profile' | 'model' | 'effort' | 'agent' | 'fell_back_from'>): string {
+  const parts: string[] = [];
+  if (p.agent === 'codex') parts.push('Codex');
+  if (p.profile) parts.push(`account ${p.profile}`);
+  if (p.model) parts.push(p.model);
+  if (p.effort) parts.push(`effort ${p.effort}`);
+  if (p.fell_back_from) parts.push(`${p.fell_back_from} is offline`);
+  return parts.join(' · ');
 }
 
 export interface StartPreview {

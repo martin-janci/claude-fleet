@@ -79,6 +79,8 @@
       enabled: r.enabled,
       conditions: { ...r.conditions },
       group: r.group,
+      host_alias: r.host_alias ?? null,
+      profile: r.profile ?? null,
       expected_version: r.version,
       ...patch,
     };
@@ -104,6 +106,8 @@
       enabled: false,
       conditions: r.conditions,
       group: r.group,
+      host_alias: r.host_alias ?? null,
+      profile: r.profile ?? null,
       expected_version: r.version,
     });
     busy = false;
@@ -154,7 +158,7 @@
           <li data-testid="rule-row" class:off={!r.enabled}>
             <div class="main">
               <span class="name">{r.name}</span>
-              <span class="muted">{conditionsText(r)} → <strong>{r.group}</strong></span>
+              <span class="muted">{conditionsText(r)} → <strong>{r.group}</strong>{#if r.host_alias || r.profile}<span data-testid="rule-starts"> · starts on {r.host_alias ?? "its usual host"}{r.profile ? ` · ${r.profile}` : ""}</span>{/if}</span>
             </div>
             <div class="actions">
               <button
@@ -194,6 +198,10 @@
     onclose={() => (editing = null)}
     onsaved={(r) => {
       notice = `Saved “${r.name}”.`;
+      void load();
+    }}
+    ondeleted={(name) => {
+      notice = `Deleted “${name}”.`;
       void load();
     }}
   />

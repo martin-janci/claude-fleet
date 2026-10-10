@@ -101,6 +101,13 @@ pub struct WorkRule {
     pub version: i64,
     pub conditions: RuleConditions,
     pub group: String,
+    /// "Its sessions start here" (migration 161): the host a start of a
+    /// task it matches lands on when no start rule names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_alias: Option<String>,
+    /// The account (credential profile) those sessions bill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -139,6 +146,20 @@ fn json_list(raw: Option<String>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The columns after `ITEM_COLUMNS` that make a [`ViewItem`].
+const VIEW_ITEM_EXTRA: &str = "CASE WHEN json_valid(w.meta) \
+          AND json_type(w.meta, '$.assignee_id') = 'text' \
+         THEN json_extract(w.meta, '$.assignee_id') END, containers, org_id";
+
+fn map_view_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<ViewItem> {
+    Ok(ViewItem {
+        item: map_item(r)?,
+        assignee_id: r.get(ITEM_COLUMN_COUNT)?,
+        containers: json_list(r.get(ITEM_COLUMN_COUNT + 1)?),
+        own_org: r.get(ITEM_COLUMN_COUNT + 2)?,
+    })
+}
+
 fn map_rule(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkRule> {
     Ok(WorkRule {
         id: r.get(0)?,
@@ -155,11 +176,13 @@ fn map_rule(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkRule> {
         version: r.get(9)?,
         created_at: r.get(10)?,
         updated_at: r.get(11)?,
+        host_alias: r.get(12)?,
+        profile: r.get(13)?,
     })
 }
 
 const RULE_COLUMNS: &str = "id, name, enabled, tracker_id, container, key_prefix, title_contains, \
-     repo, group_label, version, created_at, updated_at";
+     repo, group_label, version, created_at, updated_at, host_alias, profile";
 
 fn map_view(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkView> {
     let raw: String = r.get(2)?;
@@ -183,23 +206,27 @@ impl Store {
     /// link still names (kept for that link's history).
     pub fn work_view_items(&self) -> Result<Vec<ViewItem>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {ITEM_COLUMNS}, \
-                    CASE WHEN json_valid(w.meta) \
-                          AND json_type(w.meta, '$.assignee_id') = 'text' \
-                         THEN json_extract(w.meta, '$.assignee_id') END, \
-                    containers, org_id FROM work_items w \
+            "SELECT {ITEM_COLUMNS}, {VIEW_ITEM_EXTRA} FROM work_items w \
              WHERE w.tracker_id IS NULL OR w.tracker_id IN (SELECT id FROM trackers) \
                 OR EXISTS (SELECT 1 FROM work_links l WHERE l.item_id = w.id)"
         ))?;
-        let rows = stmt.query_map([], |r| {
-            Ok(ViewItem {
-                item: map_item(r)?,
-                assignee_id: r.get(ITEM_COLUMN_COUNT)?,
-                containers: json_list(r.get(ITEM_COLUMN_COUNT + 1)?),
-                own_org: r.get(ITEM_COLUMN_COUNT + 2)?,
-            })
-        })?;
+        let rows = stmt.query_map([], map_view_item)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Item `id` as the Work view reads it: what a placement rule matches
+    /// on, for a start of that one task (gap plan G7.1).
+    pub fn work_view_item(&self, id: i64) -> Result<Option<ViewItem>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {ITEM_COLUMNS}, {VIEW_ITEM_EXTRA} FROM work_items w WHERE w.id = ?1"
+                ),
+                [id],
+                map_view_item,
+            )
+            .optional()?)
     }
 
     /// Every link, with the live session its participant is on.
@@ -457,6 +484,7 @@ impl Store {
 
     /// Create a rule (`id` `None`) or replace rule `id` if it is still at
     /// `expected` (`None`: any). The caller validated the fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn save_work_rule(
         &self,
         id: Option<i64>,
@@ -464,15 +492,18 @@ impl Store {
         enabled: bool,
         c: &RuleConditions,
         group: &str,
+        start: (Option<&str>, Option<&str>),
         expected: Option<i64>,
     ) -> Result<WorkRule, IpcError> {
+        let (host, profile) = start;
         let now = now_unix();
         let id = match id {
             None => {
                 self.conn.execute(
                     "INSERT INTO work_rules (name, enabled, tracker_id, container, key_prefix, \
-                       title_contains, repo, group_label, version, created_at, updated_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9)",
+                       title_contains, repo, group_label, version, created_at, updated_at, \
+                       host_alias, profile) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9, ?10, ?11)",
                     rusqlite::params![
                         name,
                         enabled as i64,
@@ -482,7 +513,9 @@ impl Store {
                         c.title_contains,
                         c.repo,
                         group,
-                        now
+                        now,
+                        host,
+                        profile
                     ],
                 )?;
                 self.conn.last_insert_rowid()
@@ -500,7 +533,8 @@ impl Store {
                 self.conn.execute(
                     "UPDATE work_rules SET name = ?2, enabled = ?3, tracker_id = ?4, container = ?5, \
                        key_prefix = ?6, title_contains = ?7, repo = ?8, group_label = ?9, \
-                       version = version + 1, updated_at = ?10 WHERE id = ?1",
+                       version = version + 1, updated_at = ?10, host_alias = ?11, profile = ?12 \
+                     WHERE id = ?1",
                     rusqlite::params![
                         id,
                         name,
@@ -511,7 +545,9 @@ impl Store {
                         c.title_contains,
                         c.repo,
                         group,
-                        now
+                        now,
+                        host,
+                        profile
                     ],
                 )?;
                 tx.commit()?;

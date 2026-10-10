@@ -358,6 +358,17 @@ fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 161: `start_rules` already has its
+/// `agent` column. See [`Migration`].
+fn start_rules_has_agent(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('start_rules') WHERE name = 'agent'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 052: `work_links` already has its
 /// `archived_at` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
@@ -1820,6 +1831,13 @@ const MIGRATIONS: &[Migration] = &[
         160,
         include_str!("../../migrations/160_access_requests.sql"),
     ),
+    // M15 step G7.1: start and placement rules name how a start runs (host
+    // fallback, account, model, effort, agent) — ADD COLUMNs, so a guard.
+    Migration {
+        version: 161,
+        sql: include_str!("../../migrations/161_rule_start_targets.sql"),
+        already_applied: Some(start_rules_has_agent),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -1976,6 +1994,7 @@ impl Store {
             restored?;
         }
         self.repair_skipped_main_migrations()?;
+        self.ensure_work_rules_start_columns()?;
         self.backfill_stale_demoted()?;
         self.backfill_session_owner()?;
         self.reap_orphan_session_events()?;
@@ -2089,6 +2108,33 @@ impl Store {
     /// ADD COLUMN plus `IF NOT EXISTS` / `DROP … IF EXISTS` DDL, and 065's
     /// trigger rebuild is still the latest one, so running them late is
     /// what running them in order would have left.
+    /// Migration 161's `work_rules` half (gap plan G7.1): `host_alias` and
+    /// `profile`, "its sessions start here". In Rust, after the repair of a
+    /// skipped 066 (which creates `work_rules`), so a database that met 161
+    /// before it had the table still gets them. Idempotent.
+    fn ensure_work_rules_start_columns(&self) -> Result<()> {
+        let has_table: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'work_rules'",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_table == 0 {
+            return Ok(());
+        }
+        for column in ["host_alias", "profile"] {
+            let n: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('work_rules') WHERE name = ?1",
+                [column],
+                |r| r.get(0),
+            )?;
+            if n == 0 {
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE work_rules ADD COLUMN {column} TEXT;"))?;
+            }
+        }
+        Ok(())
+    }
+
     fn repair_skipped_main_migrations(&self) -> Result<()> {
         /// `(table, column, column definition)` added by `main`'s 034 and 036.
         const COLUMNS: &[(&str, &str, &str)] = &[

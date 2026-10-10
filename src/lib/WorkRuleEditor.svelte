@@ -12,8 +12,11 @@
   import { trackers as trackerStore } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { hosts } from './hosts';
+  import { accountChoices } from './start_rules';
   import {
     conflictOf,
+    deleteWorkRule,
     ruleWire,
     saveWorkRule,
     taskLabel,
@@ -29,6 +32,7 @@
     initial,
     onclose,
     onsaved,
+    ondeleted,
     previewDebounceMs = 400,
   }: {
     /** The rule to edit (with its `version` as `expected_version`), or a
@@ -36,12 +40,15 @@
     initial: WorkRuleDraft;
     onclose: () => void;
     onsaved?: (r: WorkRule) => void;
+    /** "Delete rule" inside the editor (gap plan G7.1): the rule's name. */
+    ondeleted?: (name: string) => void;
     /** How long the draft must be still before it is previewed, ms;
      *  injectable for tests. */
     previewDebounceMs?: number;
   } = $props();
 
   const saveBlocked = $derived(hubActionBlocked('save_work_rule', $hubStatus, $hubConnection));
+  const deleteBlocked = $derived(hubActionBlocked('delete_work_rule', $hubStatus, $hubConnection));
 
   const start = untrack(() => initial);
   let name = $state(start.name ?? '');
@@ -52,6 +59,11 @@
   let keyPrefix = $state(start.conditions?.key_prefix ?? '');
   let titleContains = $state(start.conditions?.title_contains ?? '');
   let repo = $state(start.conditions?.repo ?? '');
+  // "When a task matches, its sessions start here" (gap plan G7.1).
+  let host = $state(start.host_alias ?? '');
+  let profile = $state(start.profile ?? '');
+  const accounts = $derived(accountChoices($hosts, host, profile));
+  let confirmDelete = $state(false);
   let expectedVersion = $state<number | undefined>(start.id != null ? start.expected_version : 0);
 
   let preview = $state<RulePreview | null>(null);
@@ -79,6 +91,8 @@
       title_contains: titleContains,
       repo,
     },
+    host_alias: host || null,
+    profile: profile || null,
   });
   // What the preview was of: the draft as the wire takes it.
   const sig = $derived(JSON.stringify(ruleWire(draft)));
@@ -167,6 +181,21 @@
     onsaved?.(r.value);
     onclose();
   }
+
+  async function remove() {
+    if (start.id == null || busy || deleteBlocked !== null) return;
+    busy = true;
+    failure = null;
+    const r = await deleteWorkRule(start.id, expectedVersion);
+    busy = false;
+    confirmDelete = false;
+    if (!r.ok) {
+      failure = conflictOf(r.error) ? 'This rule changed elsewhere. Close it and open it again before deleting.' : r.error.message;
+      return;
+    }
+    ondeleted?.(start.name ?? name);
+    onclose();
+  }
 </script>
 
 <Modal title={start.id != null ? 'Edit placement rule' : 'Make a rule for similar tasks'} {onclose} width="520px" testid="work-rule-editor">
@@ -178,8 +207,8 @@
     }}
   >
     <p class="note">
-      A rule puts matching tasks under a group in the Work view. It is navigation only: it never links sessions,
-      never changes who sees what, and never changes the tracker.
+      A rule puts matching tasks under a group in the Work view. When a task matches, its sessions start on the host and
+      account below. It never links sessions, never changes who sees what, and never changes the tracker.
     </p>
     <label class="field">
       <span>Name</span>
@@ -217,9 +246,29 @@
       <span>Group</span>
       <input type="text" bind:value={group} placeholder="e.g. Payments" data-testid="rule-group" maxlength="80" />
     </label>
+    <div class="pair">
+      <label class="field">
+        <span>Host</span>
+        <select bind:value={host} data-testid="rule-host">
+          <option value="">its usual host</option>
+          {#each $hosts as h (h.alias)}
+            <option value={h.alias}>{h.alias}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="field">
+        <span>Account</span>
+        <select bind:value={profile} data-testid="rule-account">
+          <option value="">the host's own login</option>
+          {#each accounts as a (a.value)}
+            <option value={a.value}>{a.label}</option>
+          {/each}
+        </select>
+      </label>
+    </div>
     <label class="check">
       <input type="checkbox" bind:checked={enabled} data-testid="rule-enabled" />
-      Enabled
+      Rule is on
     </label>
 
     {#if preview && previewCurrent}
@@ -260,6 +309,22 @@
       <p class="err" role="alert" data-testid="rule-error">{failure}</p>
     {/if}
     <div class="actions">
+      {#if start.id != null}
+        {#if confirmDelete}
+          <button type="button" class="btn btn--crit" data-testid="rule-editor-delete-confirm" disabled={busy} onclick={() => void remove()}>Delete</button>
+          <button type="button" class="btn btn--quiet" onclick={() => (confirmDelete = false)}>Keep</button>
+        {:else}
+          <button
+            type="button"
+            class="btn btn--quiet"
+            data-testid="rule-editor-delete"
+            disabled={busy || deleteBlocked !== null}
+            title={deleteBlocked ?? 'Delete this rule'}
+            onclick={() => (confirmDelete = true)}>Delete rule</button
+          >
+        {/if}
+        <span class="spacer"></span>
+      {/if}
       <button type="button" class="btn btn--quiet" onclick={onclose}>Cancel</button>
       <button
         type="button"
@@ -297,4 +362,6 @@
   .muted { color: var(--fg-muted); margin: 0; }
   .err { color: var(--danger); margin: 0; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
+  .actions .spacer { flex: 1; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
 </style>

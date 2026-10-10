@@ -809,7 +809,7 @@ Parameters: `agent`, `confirm_nonce`, `prompt`, `source_session_id`
 
 ### `start_rules`
 
-Start rules: a task key pattern (PD-*) that names the project, and optionally the host, a start lands in, before the key's history and Jev. Fleet offers one after five identical starts. list: offers, active and dismissed rules; save {rule, rule_id?}: the whole rule, active; accept {rule_id}: an offer, replacing the pattern's other rule; dismiss {rule_id}: never offered again; delete {rule_id}. E_NOTFOUND, E_INVALID, E_EXISTS.
+Start rules: a task key pattern (PD-*) that names the project, and optionally the host (with a fallback host for when it is offline), the account, model, effort and agent (claude | codex) of a start, decided before the key's history and Jev. Fleet offers one after five identical starts. list: offers, active and dismissed rules; save {rule, rule_id?}: the whole rule, active; accept {rule_id}: an offer, replacing the pattern's other rule; dismiss {rule_id}: never offered again; delete {rule_id}. E_NOTFOUND, E_INVALID, E_EXISTS.
 
 Parameters: `action`, `rule`, `rule_id`
 

@@ -557,6 +557,11 @@ export interface WorkRule {
   version: number;
   conditions: WorkRuleConditions;
   group: string;
+  /** "Its sessions start here" (G7.1): the host a start of a matching task
+   *  lands on when no start rule names one. */
+  host_alias?: string | null;
+  /** The account (credential profile) those sessions bill. */
+  profile?: string | null;
   created_at?: number;
   updated_at?: number;
 }
@@ -568,6 +573,8 @@ export interface WorkRuleDraft {
   enabled: boolean;
   conditions: WorkRuleConditions;
   group: string;
+  host_alias?: string | null;
+  profile?: string | null;
   expected_version?: number;
 }
 
@@ -809,6 +816,8 @@ export function ruleWire(d: WorkRuleDraft): WorkRuleDraft {
       repo: s(c.repo),
     },
     group: d.group.trim(),
+    host_alias: s(d.host_alias) ?? undefined,
+    profile: s(d.profile) ?? undefined,
     expected_version: d.expected_version,
   }) as unknown as WorkRuleDraft;
 }

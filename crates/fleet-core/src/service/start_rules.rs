@@ -29,7 +29,7 @@
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs;
 use crate::service::view_scope::ViewScope;
-use crate::store::{now_unix, StartRuleRow, Store};
+use crate::store::{now_unix, StartRuleLaunch, StartRuleRow, Store, AGENT_CLAUDE, AGENT_CODEX};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -57,6 +57,25 @@ pub struct StartRuleInput {
     /// a new rule: a saved rule keeps its org.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// Where a start lands when the host is unreachable ("mac, else
+    /// mercury"); with no `host_alias`, when the project's last host is.
+    /// Absent = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_host: Option<String>,
+    /// The account: a credential profile on the host the session bills.
+    /// Absent = the host's own login. Claude Code only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// `claude --model` (`opus`, `sonnet[1m]`, a model id). Absent = the
+    /// host's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// low | medium | high | xhigh | max. Absent = the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The agent the session runs: claude | codex. Absent = Claude Code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 fn not_found(id: i64) -> IpcError {
@@ -240,6 +259,61 @@ pub fn tally(
     }
 }
 
+/// Where a start that rule `r` decides lands: its host while that host is
+/// reachable, else its fallback ("mac, else mercury"). With no host of its
+/// own, the fallback stands in when `last_host` (the project's last host)
+/// is unreachable. `None` = the rule leaves the host to the key's history.
+/// The flag says the fallback was taken.
+pub fn rule_host(
+    s: &Store,
+    r: &StartRuleRow,
+    last_host: Option<&str>,
+) -> Result<(Option<String>, bool), IpcError> {
+    let primary = r.host_alias.as_deref().or(last_host);
+    let Some(fallback) = r.fallback_host.as_deref() else {
+        return Ok((r.host_alias.clone(), false));
+    };
+    let reachable = |h: &str| -> Result<bool, IpcError> {
+        Ok(s.list_hosts()?.iter().any(|x| x.alias == h && x.reachable))
+    };
+    match primary {
+        Some(p) if reachable(p)? => Ok((r.host_alias.clone(), false)),
+        Some(_) if reachable(fallback)? => Ok((Some(fallback.to_string()), true)),
+        _ => Ok((r.host_alias.clone(), false)),
+    }
+}
+
+/// The placement rule (work_rules) whose "its sessions start here" applies
+/// to a start of task `item_id` / `key` in `repo` (`owner/repo`): the rule
+/// that places the task in the Work view (the oldest enabled one matching
+/// it), when it names a host or an account. `None` otherwise.
+pub fn placement_start(
+    s: &Store,
+    item_id: Option<i64>,
+    key: &str,
+    title: &str,
+    repo: Option<&str>,
+) -> Result<Option<crate::store::WorkRule>, IpcError> {
+    let item = match item_id {
+        Some(id) => s.work_view_item(id)?,
+        None => None,
+    };
+    let repos: Vec<String> = repo.map(str::to_string).into_iter().collect();
+    Ok(s.work_rules()?
+        .into_iter()
+        .find(|r| {
+            r.enabled
+                && crate::service::work::view::rule_matches(
+                    r,
+                    item.as_ref(),
+                    Some(key),
+                    title,
+                    &repos,
+                )
+        })
+        .filter(|r| r.host_alias.is_some() || r.profile.is_some()))
+}
+
 /// [`tally`] behind the store's lock, best effort: a start never fails on
 /// its tally.
 pub fn tally_logged(store: &Mutex<Store>, item_id: Option<i64>, key: &str, project_id: i64) {
@@ -375,7 +449,48 @@ pub fn list(store: &Mutex<Store>, scope: &ViewScope) -> Result<Vec<StartRuleView
     Ok(out)
 }
 
-fn check_target(s: &Store, input: &StartRuleInput) -> Result<(String, Option<String>), IpcError> {
+/// `v` trimmed, `None` when absent or empty.
+fn trimmed(v: Option<&str>) -> Option<String> {
+    v.map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(str::to_string)
+}
+
+/// A host alias a rule names, trimmed, or `E_NOTFOUND` when fleet has no
+/// such host.
+fn known_host(s: &Store, h: Option<&str>) -> Result<Option<String>, IpcError> {
+    let Some(h) = trimmed(h) else {
+        return Ok(None);
+    };
+    if !s.list_hosts()?.iter().any(|x| x.alias == h) {
+        return Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("host {h} not found"),
+        ));
+    }
+    Ok(Some(h))
+}
+
+/// A rule's host and account (a start rule's, a placement rule's "its
+/// sessions start here"), checked: a host fleet knows, a well-formed
+/// credential profile name.
+pub fn check_host_and_profile(
+    s: &Store,
+    host: Option<&str>,
+    profile: Option<&str>,
+) -> Result<(Option<String>, Option<String>), IpcError> {
+    let host = known_host(s, host)?;
+    let profile = trimmed(profile);
+    if let Some(p) = profile.as_deref() {
+        crate::validate::claude_profile(p)?;
+    }
+    Ok((host, profile))
+}
+
+fn check_target(
+    s: &Store,
+    input: &StartRuleInput,
+) -> Result<(String, Option<String>, StartRuleLaunch), IpcError> {
     let pattern = check_pattern(&input.pattern)?;
     match s.get_project(input.project_id)? {
         Some(p) if !p.system => {}
@@ -386,19 +501,48 @@ fn check_target(s: &Store, input: &StartRuleInput) -> Result<(String, Option<Str
             ))
         }
     }
-    let host = match input.host_alias.as_deref().map(str::trim) {
-        None | Some("") => None,
-        Some(h) => {
-            if !s.list_hosts()?.iter().any(|x| x.alias == h) {
-                return Err(IpcError::new(
-                    codes::E_NOTFOUND,
-                    format!("host {h} not found"),
-                ));
-            }
-            Some(h.to_string())
+    let (host, profile) =
+        check_host_and_profile(s, input.host_alias.as_deref(), input.profile.as_deref())?;
+    let fallback_host = known_host(s, input.fallback_host.as_deref())?;
+    if fallback_host.is_some() && fallback_host == host {
+        return Err(invalid(
+            "the fallback host is the rule's own host; pick another",
+        ));
+    }
+    let model = trimmed(input.model.as_deref());
+    if let Some(m) = model.as_deref() {
+        crate::validate::claude_model(m)?;
+    }
+    let effort = trimmed(input.effort.as_deref());
+    if let Some(e) = effort.as_deref() {
+        crate::validate::effort_level(e)?;
+    }
+    let agent = trimmed(input.agent.as_deref());
+    match agent.as_deref() {
+        None | Some(AGENT_CLAUDE) => {}
+        Some(AGENT_CODEX) if profile.is_some() => {
+            return Err(invalid(
+                "an account applies to Claude Code sessions; Codex keeps its own login",
+            ))
         }
-    };
-    Ok((pattern, host))
+        Some(AGENT_CODEX) => {}
+        Some(other) => {
+            return Err(invalid(format!(
+                "a rule starts claude or codex, not {other:?}"
+            )))
+        }
+    }
+    Ok((
+        pattern,
+        host,
+        StartRuleLaunch {
+            fallback_host,
+            profile,
+            model,
+            effort,
+            agent,
+        },
+    ))
 }
 
 /// The same pattern and project already has a row: one person's rule, or
@@ -424,7 +568,7 @@ pub fn save(
     input: &StartRuleInput,
 ) -> Result<StartRuleView, IpcError> {
     let s = lock(store)?;
-    let (pattern, host) = check_target(&s, input)?;
+    let (pattern, host, launch) = check_target(&s, input)?;
     let now = now_unix();
     let saved = match id {
         Some(id) => {
@@ -438,7 +582,14 @@ pub fn save(
                 }
                 s.delete_start_rule(other.id)?;
             }
-            s.update_start_rule(id, &pattern, input.project_id, host.as_deref(), now)?;
+            s.update_start_rule(
+                id,
+                &pattern,
+                input.project_id,
+                host.as_deref(),
+                &launch,
+                now,
+            )?;
             id
         }
         None => {
@@ -457,22 +608,39 @@ pub fn save(
                     ))
                 }
                 Some(r) => {
-                    s.update_start_rule(r.id, &pattern, input.project_id, host.as_deref(), now)?;
+                    s.update_start_rule(
+                        r.id,
+                        &pattern,
+                        input.project_id,
+                        host.as_deref(),
+                        &launch,
+                        now,
+                    )?;
                     s.set_start_rule_state(r.id, "active", scope.person, now)?;
                     r.id
                 }
                 None => {
-                    s.insert_start_rule(
-                        org,
-                        scope.person,
+                    let id = s
+                        .insert_start_rule(
+                            org,
+                            scope.person,
+                            &pattern,
+                            input.project_id,
+                            host.as_deref(),
+                            "active",
+                            0,
+                            now,
+                        )?
+                        .id;
+                    s.update_start_rule(
+                        id,
                         &pattern,
                         input.project_id,
                         host.as_deref(),
-                        "active",
-                        0,
+                        &launch,
                         now,
-                    )?
-                    .id
+                    )?;
+                    id
                 }
             }
         }

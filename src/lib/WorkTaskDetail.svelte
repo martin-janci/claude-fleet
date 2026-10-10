@@ -235,6 +235,11 @@
     const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 60_000);
     return () => clearInterval(t);
   });
+  // The placement rule that put the task in its group: its "its sessions
+  // start here" host and account apply when no start rule decides (G7.1).
+  const placingRule = $derived(
+    task?.group?.source === 'rule' && task.group.rule_id != null ? (rules.find((r) => r.id === task.group.rule_id && r.enabled) ?? null) : null,
+  );
   const ruleName = $derived(task?.group?.rule_id != null ? (rules.find((r) => r.id === task.group.rule_id)?.name ?? null) : null);
   const matchingRules = $derived((detail?.rules ?? []).map((id) => rules.find((r) => r.id === id)?.name ?? `rule ${id}`));
 
@@ -442,8 +447,23 @@
     {/if}
     {#if startRule}
       <p class="line" data-testid="work-task-start-rule">
-        Starts in <strong>{ruleProject(startRule, $projects.map((t) => t.project))}</strong>{#if startRule.host_alias}&nbsp;on {startRule.host_alias}{:else}&nbsp;on its last host{/if}
+        Starts in <strong>{ruleProject(startRule, $projects.map((t) => t.project))}</strong>{#if startRule.host_alias}&nbsp;on {startRule.host_alias}{:else}&nbsp;on its last host{/if}{#if startRule.fallback_host}, else {startRule.fallback_host}{/if}
         <span class="muted small">· rule {startRule.pattern}</span>
+      </p>
+      {#if startRule.profile || startRule.model || startRule.effort || startRule.agent === 'codex'}
+        <dl class="prov" data-testid="work-task-start-launch">
+          {#if startRule.agent === 'codex'}<dt>Agent</dt><dd>Codex</dd>{/if}
+          {#if startRule.profile}<dt>Account</dt><dd data-testid="work-task-start-account">{startRule.profile}</dd>{/if}
+          {#if startRule.model || startRule.effort}
+            <dt>Model</dt>
+            <dd data-testid="work-task-start-model">{startRule.model ?? "host's default"}{#if startRule.effort}&nbsp;· effort {startRule.effort}{/if}</dd>
+          {/if}
+        </dl>
+      {/if}
+    {:else if placingRule && (placingRule.host_alias || placingRule.profile)}
+      <p class="line" data-testid="work-task-placement-start">
+        Sessions start on <strong>{placingRule.host_alias ?? 'its usual host'}</strong>{#if placingRule.profile}&nbsp;· account {placingRule.profile}{/if}
+        <span class="muted small">· rule “{placingRule.name}”</span>
       </p>
     {/if}
 

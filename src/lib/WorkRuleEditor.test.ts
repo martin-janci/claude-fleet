@@ -14,6 +14,7 @@ import WorkRuleEditor from './WorkRuleEditor.svelte';
 import { ruleWire, workTreeMeta, type WorkRule, type WorkRuleDraft } from './work_view';
 import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
+import { hosts } from './hosts';
 
 const fresh: WorkRuleDraft = {
   name: 'Payments',
@@ -266,6 +267,39 @@ describe('WorkRuleEditor', () => {
     await preview();
     expect(screen.queryByTestId('rule-match-count')).toBeNull();
     expect(btn('rule-save').disabled).toBe(false);
+  });
+
+  it('names the host and account its sessions start on (G7.1)', async () => {
+    hosts.set([{ alias: 'mac', claude_profiles: [{ name: 'work', email: null }] }] as never);
+    mount(existing);
+    await fireEvent.change(screen.getByTestId('rule-host'), { target: { value: 'mac' } });
+    await flush();
+    await fireEvent.change(screen.getByTestId('rule-account'), { target: { value: 'work' } });
+    await flush();
+    await preview();
+    await fireEvent.click(btn('rule-save'));
+    await flush();
+    expect(calls('save_work_rule')[0].rule).toMatchObject({ id: 9, host_alias: 'mac', profile: 'work' });
+    hosts.set([]);
+  });
+
+  it('deletes the rule from inside the editor after a confirm', async () => {
+    handlers.delete_work_rule = () => ({ deleted: true });
+    const ondeleted = vi.fn();
+    render(WorkRuleEditor, { initial: existing, onclose, onsaved, ondeleted, previewDebounceMs: 0 });
+    await fireEvent.click(btn('rule-editor-delete'));
+    await flush();
+    expect(calls('delete_work_rule')).toEqual([]);
+    await fireEvent.click(btn('rule-editor-delete-confirm'));
+    await flush();
+    expect(calls('delete_work_rule')).toEqual([{ rule_id: 9, expected_version: 3 }]);
+    expect(ondeleted).toHaveBeenCalledWith('Payments');
+    expect(onclose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a new rule has no Delete', () => {
+    mount(fresh);
+    expect(screen.queryByTestId('rule-editor-delete')).toBeNull();
   });
 
   it('a tracker alone is a condition', async () => {

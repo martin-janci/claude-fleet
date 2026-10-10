@@ -22,6 +22,7 @@
     draftBrief,
     draftSource,
     previewStartWork,
+    planLaunchLine,
     projectLabel,
     projectProposal,
     startBlockedBy,
@@ -287,6 +288,9 @@
 
   {#if planned?.rule_id != null && choice.project_id === planned.project_id}
     <span class="hint" data-testid="start-popover-by-rule">Picked by a start rule: change the repository to start elsewhere.</span>
+  {/if}
+  {#if planned && planLaunchLine(planned)}
+    <span class="hint" data-testid="start-popover-launch">From a rule: {planLaunchLine(planned)}</span>
   {/if}
 
   <label class="field">
