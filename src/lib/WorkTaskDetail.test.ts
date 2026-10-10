@@ -453,7 +453,6 @@ describe('WorkTaskDetail', () => {
     await flush();
     expect(screen.getByTestId('work-org-confirm').hasAttribute('disabled')).toBe(true);
     await fireEvent.change(screen.getByTestId('work-org-target'), { target: { value: '2' } });
-    await fireEvent.click(screen.getByTestId('work-org-review'));
     await flush();
     expect(calls('work_org_impact')[0]).toEqual({ task_id: 'item:77', org_id: 2 });
     expect(screen.getByTestId('work-org-impact-link').textContent).toContain('api');
@@ -483,7 +482,6 @@ describe('WorkTaskDetail', () => {
     await flush();
     await fireEvent.click(screen.getByTestId('work-task-assign-org'));
     await fireEvent.change(screen.getByTestId('work-org-target'), { target: { value: '2' } });
-    await fireEvent.click(screen.getByTestId('work-org-review'));
     await flush();
     await fireEvent.click(screen.getByTestId('work-org-confirm'));
     await flush();
@@ -507,15 +505,12 @@ describe('WorkTaskDetail', () => {
     const options = Array.from((screen.getByTestId('work-org-target') as HTMLSelectElement).options, (o) => o.value);
     expect(options).toEqual(['', '1', '2']);
     await fireEvent.change(screen.getByTestId('work-org-target'), { target: { value: '2' } });
-    await fireEvent.click(screen.getByTestId('work-org-review'));
     await flush();
     expect(screen.getByTestId('work-org-impact')).toBeTruthy();
     await fireEvent.change(screen.getByTestId('work-org-target'), { target: { value: '1' } });
     await flush();
-    expect(screen.queryByTestId('work-org-impact')).toBeNull();
-    expect(screen.getByTestId('work-org-confirm').hasAttribute('disabled')).toBe(true);
-    await fireEvent.click(screen.getByTestId('work-org-review'));
-    await flush();
+    // The new target's impact is read at once; the old one is gone.
+    expect(calls('work_org_impact').map((a) => a.org_id)).toEqual([2, 1]);
     handlers.assign_work_org = () => localTask.task;
     await fireEvent.click(screen.getByTestId('work-org-confirm'));
     await flush();
@@ -583,7 +578,6 @@ describe('WorkTaskDetail', () => {
     await flush();
     await fireEvent.click(screen.getByTestId('work-task-assign-org'));
     await fireEvent.change(screen.getByTestId('work-org-target'), { target: { value: '2' } });
-    await fireEvent.click(screen.getByTestId('work-org-review'));
     await flush();
     expect(screen.getByTestId('work-org-refused').textContent).toContain('assign_tracker');
     expect(screen.getByTestId('work-org-confirm').hasAttribute('disabled')).toBe(true);
@@ -598,7 +592,7 @@ describe('WorkTaskDetail', () => {
     await fireEvent.click(screen.getByTestId('work-task-place'));
     await flush();
     expect(screen.getByTestId('work-place-note').textContent).toContain('never changes Jira');
-    await fireEvent.click(screen.getAllByTestId('work-place-label').find((b) => b.textContent === 'Payments')!);
+    await fireEvent.click(screen.getAllByTestId('work-place-label').find((b) => b.dataset.label === 'Payments')!);
     await fireEvent.click(screen.getByTestId('work-place-submit'));
     await flush();
     expect(calls('place_work')[0]).toEqual({ task_id: 'item:12', group: 'Payments', expected_version: 0 });
@@ -641,7 +635,8 @@ describe('WorkTaskDetail', () => {
     expect((screen.getByTestId('rule-container') as HTMLInputElement).value).toBe('ABC');
     expect((screen.getByTestId('rule-tracker') as HTMLSelectElement).value).toBe('1');
     expect(screen.getByTestId('rule-save').hasAttribute('disabled')).toBe(true);
-    await fireEvent.click(screen.getByTestId('rule-preview-btn'));
+    // The preview runs by itself once the draft is still (G2.2).
+    await new Promise((r) => setTimeout(r, 450));
     await flush();
     expect(screen.getAllByTestId('rule-preview-row')[0].textContent).toContain('ABC → Payments');
     expect(screen.getByTestId('rule-preview-kept').textContent).toContain('2 placed by a person');
@@ -650,7 +645,8 @@ describe('WorkTaskDetail', () => {
     await flush();
     expect(screen.getByTestId('rule-save').hasAttribute('disabled')).toBe(true);
     expect(screen.getByTestId('rule-preview-stale')).toBeTruthy();
-    await fireEvent.click(screen.getByTestId('rule-preview-btn'));
+    // The preview runs by itself once the draft is still (G2.2).
+    await new Promise((r) => setTimeout(r, 450));
     await flush();
     await fireEvent.click(screen.getByTestId('rule-save'));
     await flush();

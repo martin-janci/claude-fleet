@@ -4,6 +4,9 @@
   // note. Local placement only: a tracker's project is never changed. After
   // it is placed, "Make a rule for similar tasks…" is offered as its own,
   // separate step (a rule reaches beyond this task, so it is never implied).
+  // The Group field is a combobox (gap plan G2.2): the existing groups with
+  // how many tasks each holds, filtered as you type, and a "+ New group"
+  // row when what is typed is not one of them.
   import { untrack } from 'svelte';
   import Modal from './Modal.svelte';
   import { hubStatus, hubActionBlocked } from './hub';
@@ -54,11 +57,45 @@
   let failure = $state<string | ConflictNotice | null>(null);
   let placed = $state<string | null>(null);
 
-  const labels = $derived(
-    [...new Set($workTreeMeta.groups.filter((g) => g.group.source !== 'none').map((g) => g.group.label))].sort((a, b) =>
-      a.localeCompare(b),
-    ),
+  // Each group once, its count summed over the orgs it appears in.
+  const groups = $derived.by(() => {
+    const m = new Map<string, number>();
+    for (const g of $workTreeMeta.groups) {
+      if (g.group.source === 'none') continue;
+      m.set(g.group.label, (m.get(g.group.label) ?? 0) + (g.count ?? 0));
+    }
+    return [...m].map(([l, count]) => ({ label: l, count })).sort((a, b) => a.label.localeCompare(b.label));
+  });
+  const typed = $derived(label.trim());
+  const existing = $derived(groups.find((g) => g.label.toLowerCase() === typed.toLowerCase()) ?? null);
+  const shown = $derived(
+    (typed === '' || existing ? groups : groups.filter((g) => g.label.toLowerCase().includes(typed.toLowerCase()))).slice(0, 8),
   );
+  const offerNew = $derived(typed !== '' && existing === null);
+  // The option the arrow keys are on: an index into `shown`, then the
+  // "+ New group" row last; -1 none.
+  let activeIdx = $state(-1);
+  const optionCount = $derived(shown.length + (offerNew ? 1 : 0));
+  function pick(l: string) {
+    label = l;
+    activeIdx = -1;
+  }
+  function onGroupKey(e: KeyboardEvent) {
+    if (optionCount === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      activeIdx = (activeIdx + 1) % optionCount;
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      activeIdx = activeIdx <= 0 ? optionCount - 1 : activeIdx - 1;
+    } else if (e.key === 'Enter' && activeIdx >= 0) {
+      e.preventDefault();
+      pick(activeIdx < shown.length ? shown[activeIdx].label : typed);
+    }
+  }
+  function tasks(n: number): string {
+    return `${n} task${n === 1 ? '' : 's'}`;
+  }
   const isManual = $derived(task.group?.source === 'manual' || (task.placement_version ?? 0) > 0);
 
   async function place(group: string) {
@@ -124,23 +161,69 @@
         <span>Group</span>
         <input
           type="text"
-          list="work-place-labels"
+          role="combobox"
+          aria-expanded={optionCount > 0}
+          aria-controls="work-place-groups"
+          aria-autocomplete="list"
+          aria-activedescendant={activeIdx >= 0 ? `work-place-opt-${activeIdx}` : undefined}
           bind:value={label}
+          oninput={() => (activeIdx = -1)}
+          onkeydown={onGroupKey}
           placeholder="Pick a group or type a new one"
           data-autofocus=""
           maxlength="80"
           data-testid="work-place-group"
         />
-        <datalist id="work-place-labels">
-          {#each labels as l (l)}<option value={l}></option>{/each}
-        </datalist>
       </label>
-      {#if labels.length > 0}
-        <div class="chips">
-          {#each labels.slice(0, 12) as l (l)}
-            <button type="button" class="btn btn--chip" aria-pressed={label === l} data-testid="work-place-label" onclick={() => (label = l)}>{l}</button>
+      {#if existing}
+        <p class="note" data-testid="work-place-existing">existing · {tasks(existing.count)}</p>
+      {:else if offerNew}
+        <p class="note" data-testid="work-place-existing">new group</p>
+      {/if}
+      {#if optionCount > 0}
+        <ul class="options" id="work-place-groups" role="listbox" aria-label="Groups">
+          {#each shown as g, i (g.label)}
+            <li
+              id="work-place-opt-{i}"
+              role="option"
+              tabindex="-1"
+              class:active={activeIdx === i}
+              aria-selected={existing?.label === g.label}
+              data-testid="work-place-label"
+              data-label={g.label}
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => pick(g.label)}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  pick(g.label);
+                }
+              }}
+            >
+              <span class="opt-label">{g.label}</span>
+              <span class="opt-count" title={tasks(g.count)}>{g.count}</span>
+            </li>
           {/each}
-        </div>
+          {#if offerNew}
+            <li
+              id="work-place-opt-{shown.length}"
+              role="option"
+              tabindex="-1"
+              class="new"
+              class:active={activeIdx === shown.length}
+              aria-selected="false"
+              data-testid="work-place-new-group"
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => pick(typed)}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  pick(typed);
+                }
+              }}
+            >+ New group “{typed}”</li>
+          {/if}
+        </ul>
       {/if}
       <label class="field">
         <span>Note (optional)</span>
@@ -186,7 +269,28 @@
   }
   .what { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
   .note { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); }
-  .chips { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+  .options {
+    list-style: none;
+    margin: 0;
+    padding: 0.15rem 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    max-height: 12rem;
+    overflow: auto;
+  }
+  .options li {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.25rem 0.45rem;
+    cursor: pointer;
+  }
+  .options li:hover,
+  .options li.active { background: var(--bg-hover); }
+  .options li[aria-selected='true'] { font-weight: 600; }
+  .opt-label { overflow-wrap: anywhere; }
+  .opt-count { color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+  .options .new { color: var(--accent); }
   .err { color: var(--danger); margin: 0; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; flex-wrap: wrap; }
   p { margin: 0; }

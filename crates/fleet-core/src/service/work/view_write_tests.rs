@@ -662,6 +662,60 @@ fn a_forced_cross_org_link_is_reviewed_until_acked() {
     assert_eq!(err.code, codes::E_NOTFOUND);
 }
 
+/// Gap plan G2.2, the rule editor's live count: `matched` is every OPEN
+/// task (not done, not archived) the draft's conditions match, whether it
+/// would move them or not and whether it is enabled; `matched_sample` names
+/// the first few by key. A draft that matches nothing says 0.
+#[test]
+fn rule_preview_counts_the_open_tasks_the_draft_matches() {
+    let w = world();
+    let draft = RuleInput {
+        name: "Audit".into(),
+        conditions: RuleConditions {
+            key_prefix: Some("tk".into()),
+            ..Default::default()
+        },
+        group: "Compliance".into(),
+        ..Default::default()
+    };
+    let tree = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let open: Vec<String> = tree
+        .tasks
+        .iter()
+        .filter(|t| !t.archived && t.stage != "done")
+        .filter_map(|t| t.key.clone())
+        .filter(|k| k.to_ascii_uppercase().starts_with("TK-"))
+        .collect();
+    assert!(open.len() >= 2, "the world has open TK tasks: {open:?}");
+    let pv = structure::rule_preview(&w.st, &OrgScope::All, &draft).unwrap();
+    assert_eq!(pv.matched as usize, open.len(), "{pv:?}");
+    assert_eq!(
+        pv.matched_sample.len(),
+        open.len().min(structure::MATCHED_SAMPLE)
+    );
+    for k in &pv.matched_sample {
+        assert!(open.contains(k), "{k} is one of the open matches");
+    }
+    // Off, it moves nothing and still says what it matches.
+    let off = RuleInput {
+        enabled: Some(false),
+        ..draft.clone()
+    };
+    let pv_off = structure::rule_preview(&w.st, &OrgScope::All, &off).unwrap();
+    assert_eq!(pv_off.total, 0);
+    assert_eq!(pv_off.matched, pv.matched);
+    // Nothing matches: 0 and no names.
+    let none = RuleInput {
+        conditions: RuleConditions {
+            key_prefix: Some("NOPE".into()),
+            ..Default::default()
+        },
+        ..draft
+    };
+    let pv_none = structure::rule_preview(&w.st, &OrgScope::All, &none).unwrap();
+    assert_eq!((pv_none.matched, pv_none.matched_sample.len()), (0, 0));
+}
+
 /// UC6: a person's placement beats a rule, a rule beats the tracker;
 /// placements are compare-and-set; the rule preview is exactly what saving
 /// the rule does; a disabled rule is the way back.
@@ -1347,6 +1401,42 @@ fn a_local_task_moves_org_only_with_a_fresh_impact() {
     )
     .unwrap_err();
     assert_eq!(err.code, codes::E_FORBIDDEN);
+}
+
+/// Gap plan G2.2: the impact names the people whose org-bound devices lose
+/// or gain the task ("Ondrej loses access"); a device nobody owns is
+/// counted, never named.
+#[test]
+fn org_impact_names_the_people_whose_bound_devices_lose_or_gain_it() {
+    let w = world();
+    let local = {
+        let s = w.st.lock().unwrap();
+        s.set_org_bound_sees_unassigned(w.org_a, false).unwrap();
+        s.set_org_bound_sees_unassigned(w.org_b, true).unwrap();
+        let ondrej = s.create_person("ondrej", Some("Ondrej")).unwrap();
+        let eva = s.create_person("eva", None).unwrap();
+        s.insert_client_token("pa", "aa01", "full").unwrap();
+        s.insert_client_token("pb", "bb02", "full").unwrap();
+        s.set_client_org("pa", Some(w.org_a)).unwrap();
+        s.set_client_org("pb", Some(w.org_b)).unwrap();
+        s.set_client_person("pa", Some(eva.id)).unwrap();
+        s.set_client_person("pb", Some(ondrej.id)).unwrap();
+        s.name_session_work(w.s1, Some("LOC-8"), "Unassigned work")
+            .unwrap()
+            .0
+            .id
+    };
+    let tid = format!("item:{local}");
+    // No org → A: B's device (Ondrej's) saw unassigned work and loses it;
+    // A's (eva's) did not and gains it.
+    let imp = structure::org_impact(&w.st, &vs(&OrgScope::All), &tid, Some(w.org_a)).unwrap();
+    assert_eq!(imp.people_losing, vec!["Ondrej".to_string()]);
+    assert_eq!(imp.people_gaining, vec!["eva".to_string()]);
+    // Unowned again: counted, not named.
+    w.st.lock().unwrap().set_client_person("pb", None).unwrap();
+    let imp = structure::org_impact(&w.st, &vs(&OrgScope::All), &tid, Some(w.org_a)).unwrap();
+    assert_eq!(imp.bound_clients_losing, 1);
+    assert!(imp.people_losing.is_empty(), "{:?}", imp.people_losing);
 }
 
 /// D31 in the impact: a bound client counts as losing or gaining a task
