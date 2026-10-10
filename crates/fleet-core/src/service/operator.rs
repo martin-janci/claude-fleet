@@ -275,15 +275,19 @@ pub const BRAINSTORM_SKILL_PATH: &str = ".claude/skills/fleet-brainstorm/SKILL.m
 /// project commands of the operator's directory, which Claude Code runs as
 /// `/<name>` there and nowhere else. `src/lib/control_commands.ts` lists the
 /// same names for the composer's menu
-/// (`control_commands_are_mirrored_in_the_menu`).
+/// (`control_commands_are_mirrored_in_the_menu`). The desktop runs `/task`,
+/// `/done`, `/assign` and `/start` itself with the same grammar
+/// (`src/lib/control_slash.ts`, gap plan G3.9); the phone sends them here.
 pub const CONTROL_COMMANDS: [(&str, &str); 5] = [
     (
         "task",
         "---\n\
          description: Create a task\n\
-         argument-hint: <title>\n\
+         argument-hint: <title> due:<day> @owner\n\
          ---\n\
-         Create a task titled \"$ARGUMENTS\" with `work_link` action `create`. \
+         Create a task from \"$ARGUMENTS\" with `work_link` action `create`. \
+         A `due:<day>` word (today, tomorrow, a weekday or YYYY-MM-DD) is its \
+         `due_at` and an `@name` word its `assignees`; the rest is the title. \
          If a task or mission is in focus, ask whether it goes under it first. \
          Answer with the task's key and nothing else.\n",
     ),
@@ -303,7 +307,7 @@ pub const CONTROL_COMMANDS: [(&str, &str); 5] = [
         "done",
         "---\n\
          description: Mark a task done\n\
-         argument-hint: <task>\n\
+         argument-hint: #KEY\n\
          ---\n\
          Mark the task \"$ARGUMENTS\" done with `work_link` action `set_status`, \
          status `done`. If more than one task could be meant, list them and ask \
@@ -313,7 +317,7 @@ pub const CONTROL_COMMANDS: [(&str, &str); 5] = [
         "assign",
         "---\n\
          description: Assign a task to a session\n\
-         argument-hint: <task> to <session>\n\
+         argument-hint: #KEY @session\n\
          ---\n\
          Assign as asked: \"$ARGUMENTS\". Link the session to the task with \
          `work_link` action `link`, then brief the session on it with \
@@ -324,9 +328,10 @@ pub const CONTROL_COMMANDS: [(&str, &str); 5] = [
         "start",
         "---\n\
          description: Start a session on a task\n\
-         argument-hint: <task>\n\
+         argument-hint: #KEY @host\n\
          ---\n\
-         Start work on \"$ARGUMENTS\": pick the project and host it belongs to, \
+         Start work on \"$ARGUMENTS\": pick the project and host it belongs to \
+         (an `@host` word names the host), \
          start a session with `new_session` (the person approves it on the card), \
          link it to the task and brief it with `send_prompt` (the person approves \
          the brief on the card too). Say which host and project you picked and \

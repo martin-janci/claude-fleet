@@ -141,7 +141,7 @@ describe('the agent sheet sends through ConversationPanel, not around it', () =>
     render(AgentPanel);
     await settle();
 
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'co sa deje' } });
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
     await waitFor(() => expect(screen.getByTestId('conv-outgoing')).toBeTruthy());
@@ -155,7 +155,7 @@ describe('the agent sheet sends through ConversationPanel, not around it', () =>
     });
     await settle();
 
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'hello' } });
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
     await waitFor(() => expect(mockedSend).toHaveBeenCalled());
@@ -171,7 +171,7 @@ describe('the agent sheet sends through ConversationPanel, not around it', () =>
     });
     await settle();
 
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: '/clear' } });
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
     await waitFor(() => expect(mockedSend).toHaveBeenCalled());
@@ -250,7 +250,7 @@ describe('the sheet feeds the one composer its live state', () => {
     await rerender({ contextInput: { view: 'hosts', session: null, hostAlias: 'beta', branch: null, friendly: true } });
     expect(screen.getByTestId('agent-context-chip').textContent).toContain('beta');
 
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'hello' } });
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
     await waitFor(() => expect(mockedSend).toHaveBeenCalled());
@@ -265,7 +265,7 @@ describe('the sheet feeds the one composer its live state', () => {
     await settle();
     await fireEvent.click(screen.getByTestId('agent-context-chip'));
 
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'bare' } });
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
     await waitFor(() => expect(mockedSend).toHaveBeenCalled());
@@ -285,7 +285,7 @@ describe('the sheet feeds the one composer its live state', () => {
     render(AgentPanel);
     await settle();
 
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'druhy prompt' } });
     applySessionEvents([
       { type: 'updated', row: row({ claude_status: 'working', last_activity_at: 200 }) },
@@ -324,7 +324,7 @@ describe('the sheet feeds the one composer its live state', () => {
     ]);
     await waitFor(() => expect(screen.getByTestId('conv-composer-status')).toBeTruthy());
 
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'ahoj' } });
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
@@ -370,9 +370,85 @@ describe('operator commands', () => {
     await fireEvent.click(cmd);
     await tick();
     await tick();
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     expect(box.value).toContain('`work` tool, action `tidy`');
     expect(box.value).toContain('`tidy_apply`');
     expect(mockedSend).not.toHaveBeenCalled();
+  });
+});
+
+// Gap plan G3.9: Control runs /task, /done, /assign and /start itself, over
+// the backend actions Work uses; /plan and the built-ins reach the agent as
+// typed.
+describe("Control's own slash commands", () => {
+  async function settle() {
+    for (let i = 0; i < 6; i++) {
+      await tick();
+      await Promise.resolve();
+    }
+  }
+  const calls = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd).map((c) => c[1]);
+
+  async function type(text: string) {
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: text } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    return box;
+  }
+
+  it('says what the box takes: # task, @ host, / command', async () => {
+    render(AgentPanel);
+    await settle();
+    expect(screen.getByTestId('conv-composer-hint').textContent).toBe('# task · @ host · / command · ↵ send');
+  });
+
+  it('/task creates the task with its owner and due date, and never reaches the agent', async () => {
+    const { resetCommandReceiptsForTests } = await import('./control_slash');
+    resetCommandReceiptsForTests();
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'operator_status') return { ready: true, session: row(), blocked: null };
+      if (cmd === 'create_work_task') return { id: 9, key: 'TASK-9', title: 'Rotate the NAS password', source: 'local', status_category: 'todo' };
+      if (cmd === 'edit_work_item') return { id: 9, key: 'TASK-9', title: 'Rotate the NAS password', source: 'local', status_category: 'todo' };
+      return null;
+    });
+    render(AgentPanel);
+    await settle();
+    const box = await type('/task Rotate the NAS password due:2026-10-16 @Martin');
+    await waitFor(() => expect(screen.getByTestId('control-command-receipt').dataset.state).toBe('done'));
+    expect(calls('create_work_task')).toEqual([{ args: { title: 'Rotate the NAS password' } }]);
+    expect(calls('edit_work_item')).toEqual([{ args: { item_id: 9, due_at: '2026-10-16', assignees: ['Martin'] } }]);
+    expect(screen.getByTestId('control-command-line').textContent).toContain('Created TASK-9');
+    expect(screen.getByTestId('control-command-open').textContent).toBe('Open in Work ↗');
+    expect(box.value).toBe('');
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+
+  it('a mistyped command shows its usage and sends nothing', async () => {
+    const { resetCommandReceiptsForTests } = await import('./control_slash');
+    resetCommandReceiptsForTests();
+    render(AgentPanel);
+    await settle();
+    await type('/done');
+    await waitFor(() => expect(screen.getByTestId('control-command-line').textContent).toBe('Usage: /done #KEY'));
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+
+  it('/plan goes to the agent exactly as typed', async () => {
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(AgentPanel);
+    await settle();
+    await type('/plan the Windows installer polish');
+    await waitFor(() => expect(mockedSend).toHaveBeenCalled());
+    expect(mockedSend.mock.calls[0][2]).toBe('/plan the Windows installer polish');
+  });
+
+  it('the menu lists each command with what it takes', async () => {
+    render(AgentPanel);
+    await settle();
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: '/as' } });
+    await waitFor(() => expect(screen.getAllByTestId('conv-slash-item').length).toBeGreaterThan(0));
+    const item = screen.getAllByTestId('conv-slash-item').find((li) => li.textContent?.includes('/assign'));
+    expect(item?.querySelector('[data-testid="conv-slash-usage"]')?.textContent).toBe('#KEY @session');
   });
 });

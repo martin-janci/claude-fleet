@@ -4,7 +4,7 @@ import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
-const { box, focus } = vi.hoisted(() => {
+const { box, focus, enqueue, mission } = vi.hoisted(() => {
   let subs: ((v: unknown) => void)[] = [];
   let value: { msgs: Record<number, unknown[]> } = { msgs: {} };
   return {
@@ -20,14 +20,18 @@ const { box, focus } = vi.hoisted(() => {
       },
     },
     focus: vi.fn((..._a: unknown[]) => true),
+    enqueue: vi.fn((..._a: unknown[]) => 'm1'),
+    mission: vi.fn(),
   };
 });
-vi.mock('./outbox', () => ({ outbox: { store: box } }));
+vi.mock('./outbox', () => ({ outbox: { store: box, enqueue: (...a: unknown[]) => enqueue(...a) } }));
+vi.mock('./missions', () => ({ openMission: (...a: unknown[]) => mission(...a) }));
 vi.mock('./session_focus', () => ({ focusSession: (...a: unknown[]) => focus(...a) }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import ControlRouteReceipts from './ControlRouteReceipts.svelte';
 import { resetReceiptsForTests } from './control_route';
+import { sessions, type SessionRow } from './sessions';
 
 // Redesign step 9.9 (Jev K2): the receipt under a message sent in Control.
 
@@ -51,6 +55,9 @@ beforeEach(() => {
   resetReceiptsForTests();
   box.set({ msgs: {} });
   focus.mockClear();
+  enqueue.mockClear();
+  mission.mockClear();
+  sessions.set([{ id: 9, tmux_name: 'fed-v2', host_alias: 'mac', lost_at: null } as SessionRow]);
   inv.mockReset();
   route = {
     outcome: 'proposed',
@@ -129,5 +136,45 @@ describe('Control routing receipts', () => {
     render(ControlRouteReceipts, { sessionId: 1 });
     await send(msg('a', 'please summarise the fleet for me'));
     expect(screen.queryByTestId('control-route-receipts')).toBeNull();
+  });
+
+  // Gap plan G3.9: the receipt hands the message on, on the person's press.
+  it('a session receipt hands the message on and then says where it went', async () => {
+    route = { ...(route as object), target: 's9', proposal: { value: 's9', source: 'jev', confidence_pct: 70 } };
+    render(ControlRouteReceipts, { sessionId: 1 });
+    await send(msg('a', 'rebase fed-v2 on main'));
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(screen.getByTestId('control-route-send').textContent).toBe('↳ Send to fed-v2');
+    await fireEvent.click(screen.getByTestId('control-route-send'));
+    await tick();
+    expect(enqueue).toHaveBeenCalledWith(
+      { id: 9, host_alias: 'mac', tmux_name: 'fed-v2' },
+      { kind: 'prompt', text: 'rebase fed-v2 on main' },
+    );
+    expect(inv).toHaveBeenCalledWith('control_route_follow', { runId: 41, chosen: 's9' });
+    const handed = screen.getByTestId('control-route-handed');
+    expect(handed.textContent).toBe('↳ Sent to session fed-v2 ↗');
+    expect(screen.queryByTestId('control-route-send')).toBeNull();
+    await fireEvent.click(handed);
+    expect(focus).toHaveBeenCalledWith(9, 'fed-v2');
+  });
+
+  it('a session that is gone takes nothing and says so', async () => {
+    sessions.set([]);
+    route = { ...(route as object), target: 's9', proposal: { value: 's9', source: 'jev', confidence_pct: 70 } };
+    render(ControlRouteReceipts, { sessionId: 1 });
+    await send(msg('a', 'rebase fed-v2 on main'));
+    await fireEvent.click(screen.getByTestId('control-route-send'));
+    await tick();
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(screen.getByTestId('control-route-send-error').textContent).toBe('fed-v2 is no longer running.');
+  });
+
+  it('a mission receipt offers no send, and opens the mission', async () => {
+    render(ControlRouteReceipts, { sessionId: 1 });
+    await send(msg('a', 'How far did the federation handshake get?'));
+    expect(screen.queryByTestId('control-route-send')).toBeNull();
+    await fireEvent.click(screen.getByTestId('control-route-target'));
+    expect(mission).toHaveBeenCalledWith(3);
   });
 });

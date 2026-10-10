@@ -44,6 +44,14 @@
   import HandoffCards from './HandoffCards.svelte';
   import { controlThinking } from './control_loaders';
   import ControlRouteReceipts from './ControlRouteReceipts.svelte';
+  import ControlCommandReceipts from './ControlCommandReceipts.svelte';
+  import ControlSuggestions from './ControlSuggestions.svelte';
+  import { takeControlCommand } from './control_slash';
+
+  // Gap plan G3.9: the box's words in Control. `#KEY` names a task and
+  // `@name` a host or session in Control's commands; `/` opens them.
+  const CONTROL_HINT = '# task · @ host · / command · ↵ send';
+  const CONTROL_PLACEHOLDER = 'Ask the fleet, or start a task…';
 
   let { contextInput = null }: { contextInput?: AgentContextInput | null } = $props();
 
@@ -139,6 +147,10 @@
   <!-- Step 9.9 (Jev K2): where each message just sent here goes. Keyed, so
        another Control session primes afresh instead of routing its history. -->
   {#if session}{#key session.id}<ControlRouteReceipts sessionId={session.id} />{/key}{/if}
+  <!-- G3.9: what /task, /done, /assign and /start did (control_slash.ts). -->
+  <ControlCommandReceipts />
+  <!-- G3.9: suggestions read from the fleet's rows; a press runs them. -->
+  {#if session}<ControlSuggestions sessionId={session.id} />{/if}
   {#if ctx}
     <button
       class="chip"
@@ -206,6 +218,9 @@
       blockWhileBusy={true}
       composerAbove={chip}
       thinkingAs={controlThinking}
+      runCommand={takeControlCommand}
+      composerHint={CONTROL_HINT}
+      placeholder={CONTROL_PLACEHOLDER}
     />
   {/if}
 </div>
