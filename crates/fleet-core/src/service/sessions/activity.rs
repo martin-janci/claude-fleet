@@ -98,32 +98,33 @@ pub async fn session_activity(
     Ok(probe_with(agent, &tail))
 }
 
-/// The dialog a client drew its answer from, sent with the key so the hub
-/// checks it against a fresh read of the pane and presses in the same step
-/// (`send_prompt { keys, expect }`). Without it the check was the client's:
-/// a read, a round trip back, then the press — and another client answering,
-/// or the dialog closing, inside that window put the key into whatever came
-/// next. Compared field by field as the clients' own fingerprints do: kind,
-/// question, each option's number and label, and the tool call (`detail`).
+// The dialog a client drew its answer from, sent with the key so the hub
+// checks it against a fresh read of the pane and presses in the same step
+// (`send_prompt { keys, expect }`). Without it the check was the client's:
+// a read, a round trip back, then the press — and another client answering,
+// or the dialog closing, inside that window put the key into whatever came
+// next. Compared field by field as the clients' own fingerprints do: kind,
+// question, each option's number and label, and the tool call (`detail`);
+// `selected` (the option that must still be highlighted) only for Enter.
+//
+// Plain comments, not doc comments: these would become the tool schema's
+// descriptions, which every MCP client pays for on every connect
+// (`the_served_definition_budget_stays_bounded`).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ExpectDialog {
-    /// `permission` | `input`.
     pub kind: String,
     #[serde(default)]
     pub question: Option<String>,
     #[serde(default)]
     pub options: Vec<ExpectOption>,
-    /// The tool call a permission dialog asks about.
     #[serde(default)]
     pub detail: Option<String>,
-    /// For `Enter`, which picks the highlighted option: the option that must
-    /// still be highlighted. Ignored for any other key.
     #[serde(default)]
     pub selected: Option<u8>,
 }
 
-/// One option of an [`ExpectDialog`].
+// One option of an `ExpectDialog`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ExpectOption {

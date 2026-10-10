@@ -371,6 +371,49 @@ pub(crate) struct ReconcileDeps {
     /// applies. `ReconcileDeps::fake*` build a fresh `Arc` per call instead, so
     /// tests stay isolated from each other and from production's map.
     pub(super) last_agents: Arc<dashmap::DashMap<String, std::time::Instant>>,
+    /// How long a pass waits for its host probes before it completes without
+    /// the slow ones (`None`: for all of them, up to `probe_timeout`). A
+    /// probe still running then is detached, its host left out of the next
+    /// passes until it answers, and its result written at the start of the
+    /// next pass ([`LateProbes`]). One wedged host used to hold the gate for
+    /// `HOST_PROBE_TIMEOUT` (65 s), so every other host — and a dialog that
+    /// went up on one — waited 65 s instead of the 20 s tick.
+    pub(super) pass_budget: Option<std::time::Duration>,
+    /// The probes that outlived a pass's budget. Process-wide for `real()`
+    /// (built fresh per call, like `last_agents`); fresh per fake deps.
+    pub(super) late: Arc<std::sync::Mutex<LateProbes>>,
+}
+
+impl ReconcileDeps {
+    /// Whether a detached probe of `alias` is still running (tests).
+    #[cfg(test)]
+    pub(crate) fn probe_in_flight(&self, alias: &str) -> bool {
+        self.late.lock().is_ok_and(|l| l.in_flight.contains(alias))
+    }
+}
+
+/// How long a production pass waits for its host probes (see
+/// `ReconcileDeps::pass_budget`): well past a healthy host's few seconds,
+/// and under the 20 s tick, so the tick keeps its rhythm.
+pub(crate) const PASS_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Host probes that outlived their pass (`ReconcileDeps::pass_budget`).
+#[derive(Default)]
+pub(super) struct LateProbes {
+    /// Hosts whose detached probe is still running: left out of the passes
+    /// that start meanwhile (a forced pass probes them anyway).
+    pub(super) in_flight: std::collections::HashSet<String>,
+    /// Detached probes that finished, to write at the next pass's start.
+    pub(super) done: Vec<HostProbe>,
+    /// `started_at` of the newest probe written per host: a late result
+    /// older than it is dropped rather than written over newer rows.
+    pub(super) written: HashMap<String, i64>,
+}
+
+fn late_probes() -> Arc<std::sync::Mutex<LateProbes>> {
+    static LATE: std::sync::LazyLock<Arc<std::sync::Mutex<LateProbes>>> =
+        std::sync::LazyLock::new(Default::default);
+    Arc::clone(&LATE)
 }
 
 /// The process-wide `last_agents` map every `ReconcileDeps::real` shares (see
@@ -400,6 +443,8 @@ impl ReconcileDeps {
             local_host,
             agents_every: AGENTS_CADENCE,
             last_agents: last_agents_map(),
+            pass_budget: Some(PASS_BUDGET),
+            late: late_probes(),
         })
     }
 
@@ -434,6 +479,9 @@ impl ReconcileDeps {
             // A fresh map per fake deps: tests must stay isolated from each
             // other (and from production's shared map above).
             last_agents: Arc::new(dashmap::DashMap::new()),
+            // Tests wait for every probe unless they opt into a budget.
+            pass_budget: None,
+            late: Arc::default(),
         })
     }
 
@@ -474,6 +522,14 @@ impl ReconcileDeps {
     pub(crate) fn with_agents_every(self: Arc<Self>, every: std::time::Duration) -> Arc<Self> {
         let mut deps = self;
         Arc::get_mut(&mut deps).expect("fresh Arc").agents_every = every;
+        deps
+    }
+
+    /// Give a freshly built fake a pass budget (see `pass_budget`).
+    #[cfg(test)]
+    pub(crate) fn with_pass_budget(self: Arc<Self>, budget: std::time::Duration) -> Arc<Self> {
+        let mut deps = self;
+        Arc::get_mut(&mut deps).expect("fresh Arc").pass_budget = Some(budget);
         deps
     }
 }
@@ -1884,6 +1940,44 @@ pub(crate) async fn reconcile_sessions_with(
     store: &Mutex<Store>,
     deps: &Arc<ReconcileDeps>,
 ) -> Result<(), IpcError> {
+    reconcile_sessions_within(store, deps, deps.pass_budget).await
+}
+
+/// Write one host's probe, logging (not propagating) a failed write, and
+/// remember it as the newest written for its host.
+fn write_host_probe(
+    store: &Mutex<Store>,
+    deps: &ReconcileDeps,
+    probe: &HostProbe,
+    projects: &[crate::store::ProjectRow],
+) -> Result<(), IpcError> {
+    let mut s = lock(store)?;
+    // Per-host isolation: one host's DB write failure (e.g. an FK
+    // violation on a stale account_uuid) must NOT abort reconcile
+    // for every other host. The host's whole write is one
+    // transaction, so a failed host rolls back cleanly; we log it
+    // and carry on.
+    if let Err(e) = reconcile_write_one_host(&mut s, probe, projects) {
+        tracing::error!(
+            host = %probe.host.alias,
+            error = %e,
+            "[reconcile] write failed (rolled back; retried next pass)"
+        );
+    }
+    if let Ok(mut late) = deps.late.lock() {
+        let newest = late.written.entry(probe.host.alias.clone()).or_insert(0);
+        *newest = (*newest).max(probe.started_at);
+    }
+    Ok(())
+}
+
+/// [`reconcile_sessions_with`] with an explicit pass budget (`None`: wait for
+/// every probe — a forced listing's own pass).
+pub(super) async fn reconcile_sessions_within(
+    store: &Mutex<Store>,
+    deps: &Arc<ReconcileDeps>,
+    budget: Option<std::time::Duration>,
+) -> Result<(), IpcError> {
     // 0. Ensure the `local` row exists (idempotent; step 1 does this again
     //    but `sync_local_account` needs the row to already be there — on the
     //    very first pass of a fresh install there is no `local` row yet, and
@@ -1950,12 +2044,37 @@ pub(crate) async fn reconcile_sessions_with(
         let s = lock(store)?;
         s.list_projects()?
     };
+    // Probes that outlived an earlier pass and have answered since: written
+    // first (unless a newer probe of the host was written meanwhile), and
+    // the hosts still being probed are left out of this pass's fan-out.
+    let (late_done, still_in_flight) = match deps.late.lock() {
+        Ok(mut late) => (std::mem::take(&mut late.done), late.in_flight.clone()),
+        Err(_) => (Vec::new(), Default::default()),
+    };
+    for probe in late_done {
+        let newer = deps
+            .late
+            .lock()
+            .ok()
+            .and_then(|l| l.written.get(&probe.host.alias).copied())
+            .is_some_and(|w| w > probe.started_at);
+        if !newer {
+            write_host_probe(store, deps, &probe, &projects)?;
+        }
+    }
     let mut set = tokio::task::JoinSet::new();
+    let mut pending: HashMap<tokio::task::Id, String> = HashMap::new();
     // Hidden rows never enter the snapshot (`active_hosts`, step 1).
     for (host, paths) in hosts {
+        if budget.is_some() && still_in_flight.contains(&host.alias) {
+            continue;
+        }
+        let alias = host.alias.clone();
         let deps = Arc::clone(deps);
-        set.spawn(async move { probe_one_host(host, paths, &deps).await });
+        let handle = set.spawn(async move { probe_one_host(host, paths, &deps).await });
+        pending.insert(handle.id(), alias);
     }
+    let deadline = budget.map(|b| tokio::time::Instant::now() + b);
 
     // 3. Apply each host's result AS ITS PROBE COMPLETES, taking the store
     //    lock once per host (BE-12), rather than after every host has
@@ -1968,29 +2087,32 @@ pub(crate) async fn reconcile_sessions_with(
     //    under ONE `Store::atomically` transaction, events held until it
     //    commits, a failed host rolled back alone. Join errors (task panics)
     //    are logged and skipped — they don't abort the rest of reconcile.
-    while let Some(join) = set.join_next().await {
+    loop {
+        let next = match deadline {
+            Some(d) => match tokio::time::timeout_at(d, set.join_next_with_id()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    // Over budget: the rest finish on their own and are
+                    // written by a later pass; this one completes now.
+                    detach_late_probes(set, pending, &deps.late);
+                    break;
+                }
+            },
+            None => set.join_next_with_id().await,
+        };
+        let Some(join) = next else { break };
         let probe = match join {
-            Ok(probe) => probe,
+            Ok((id, probe)) => {
+                pending.remove(&id);
+                probe
+            }
             Err(e) => {
+                pending.remove(&e.id());
                 tracing::error!(error = %e, "[reconcile] probe task panicked");
                 continue;
             }
         };
-        {
-            let mut s = lock(store)?;
-            // Per-host isolation: one host's DB write failure (e.g. an FK
-            // violation on a stale account_uuid) must NOT abort reconcile
-            // for every other host. The host's whole write is one
-            // transaction, so a failed host rolls back cleanly; we log it
-            // and carry on.
-            if let Err(e) = reconcile_write_one_host(&mut s, &probe, &projects) {
-                tracing::error!(
-                    host = %probe.host.alias,
-                    error = %e,
-                    "[reconcile] write failed (rolled back; retried next pass)"
-                );
-            }
-        }
+        write_host_probe(store, deps, &probe, &projects)?;
         // The guard is dropped above; now give a waiting reader its turn
         // (Task 4). `std::sync::Mutex` is not fair: re-locking straight away
         // for the next host usually wins against a reader already blocked
@@ -2009,6 +2131,41 @@ pub(crate) async fn reconcile_sessions_with(
     //    `claude_session_id`s intact — until the host is shown again.
     reap_unprobed_local(store, deps, now_unix());
     Ok(())
+}
+
+/// Hand the probes still running when a pass's budget ran out to a task of
+/// their own: each one's host is marked in flight until it answers, and its
+/// result is parked for the next pass to write.
+fn detach_late_probes(
+    mut set: tokio::task::JoinSet<HostProbe>,
+    pending: HashMap<tokio::task::Id, String>,
+    late: &Arc<std::sync::Mutex<LateProbes>>,
+) {
+    if let Ok(mut l) = late.lock() {
+        l.in_flight.extend(pending.values().cloned());
+    }
+    tracing::info!(
+        hosts = ?pending.values().collect::<Vec<_>>(),
+        "[reconcile] pass over budget; slow hosts finish in the background"
+    );
+    let late = Arc::clone(late);
+    tokio::spawn(async move {
+        let mut pending = pending;
+        while let Some(join) = set.join_next_with_id().await {
+            let (alias, probe) = match join {
+                Ok((id, probe)) => (pending.remove(&id), Some(probe)),
+                Err(e) => (pending.remove(&e.id()), None),
+            };
+            if let Ok(mut l) = late.lock() {
+                if let Some(alias) = alias {
+                    l.in_flight.remove(&alias);
+                }
+                if let Some(probe) = probe {
+                    l.done.push(probe);
+                }
+            }
+        }
+    });
 }
 
 /// Step 4 of [`reconcile_sessions_with`]: ghost, then (next pass) delete the
@@ -2062,7 +2219,8 @@ async fn run_own_reconcile(
     gate: &ReconcileGate,
 ) -> Result<(), IpcError> {
     let pass = gate.begin().await;
-    reconcile_sessions_with(store, deps).await?;
+    // Every host, however slow: the caller asked for what is there NOW.
+    reconcile_sessions_within(store, deps, None).await?;
     pass.complete();
     Ok(())
 }

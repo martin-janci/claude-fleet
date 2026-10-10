@@ -404,8 +404,7 @@ pub struct SendPromptParams {
     #[serde(default)]
     #[schemars(extend("enum" = crate::tmux::NamedKey::all_names()))]
     pub keys: Option<String>,
-    /// With `keys`: the dialog the answer is for. The pane is re-read and
-    /// the key pressed only if it still shows it (E_CONFLICT otherwise).
+    /// With `keys`: press only if the pane still shows this dialog.
     #[serde(default)]
     pub expect: Option<crate::service::sessions::ExpectDialog>,
     /// Operator only: the nonce a person approved.

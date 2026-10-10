@@ -1632,6 +1632,8 @@ fn deps_with_cadence_for_tests() -> ReconcileDeps {
         local_host: true,
         agents_every: std::time::Duration::from_secs(60),
         last_agents: Arc::new(dashmap::DashMap::new()),
+        pass_budget: None,
+        late: Arc::default(),
     }
 }
 
