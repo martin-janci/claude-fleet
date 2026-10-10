@@ -9,6 +9,7 @@ import { invokeCmd, type Result } from './result';
 import type { WorkItemRow } from './trackers';
 import { bumpWorkChanged } from './work';
 import type { StatusWord } from './kit/status';
+import type { PullRequestRow } from './prs';
 
 /** One mission (`store::MissionRow`). */
 export interface Mission {
@@ -41,6 +42,10 @@ export interface Mission {
    *  `attention::MissionWait`). Absent when it waits on nobody, and from an
    *  older hub. */
   waiting_on?: MissionWait | null;
+  /** What it has spent, micro-USD; filled by the list and the detail. */
+  cost_micros?: number | null;
+  /** The live grant's budget, micro-USD, when it sets one. */
+  budget_micros?: number | null;
 }
 
 /** Why a mission waits on a person (`attention::MissionWaitReason`). */
@@ -193,6 +198,26 @@ export interface MissionDetail {
   may_change?: boolean;
   /** The loop (orchestration O4–O6); absent for a draft or finished one. */
   plan?: MissionPlan | null;
+  /** A finished mission's live sessions and pull requests (G3.7); absent
+   *  while it runs, and from an older hub. */
+  finish?: MissionFinish | null;
+}
+
+/** One live session of a finished mission (`missions::FinishSession`). */
+export interface FinishSession {
+  session_id: number;
+  item_id: number;
+  host_alias: string;
+  tmux_name: string;
+  kind: string;
+  /** Its worktree's size, kB, from the host probe; absent until measured. */
+  worktree_kb?: number | null;
+}
+
+/** `missions::MissionFinish`. */
+export interface MissionFinish {
+  sessions?: FinishSession[];
+  prs?: PullRequestRow[];
 }
 
 /** One next step of the loop (`orchestrate::steps::Step`). */
@@ -348,6 +373,7 @@ const MOVE_LABEL: Record<string, string> = {
 /** The button label for a move to `state`. */
 export function moveLabel(from: string, to: string): string {
   if (from === 'paused' && to === 'active') return 'Resume';
+  if (isFinal(from) && to === 'paused') return 'Reopen';
   return MOVE_LABEL[to] ?? to;
 }
 

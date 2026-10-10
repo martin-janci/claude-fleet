@@ -1129,6 +1129,13 @@ derive from them.
   waits on a person: `question` (an open `ask` card), `sign_grant` (it asks
   for autonomy and no live grant covers its plan) or `confirm` (open cards
   in its confirm queue), with `since` and `open_cards`.
+- **`finish`** (on `work { mission }` of a finished mission, G3.7; optional,
+  absent while it runs): `sessions`, the live sessions on its member items
+  that the caller may see (`session_id`, `item_id`, `host_alias`,
+  `tmux_name`, `kind`, `worktree_kb?` from the host probe), and `prs`, the
+  pull requests its work opened, as `prs { list }` rows behind the same
+  fence. A finished mission reopens with `work_link { mission_state,
+  status: paused }`; it does not go straight back to active.
 
 ### Errors and limits
 

@@ -69,7 +69,8 @@ pub const MISSION_STATES: [&str; 6] = [
     "failed",
     "cancelled",
 ];
-/// The states a mission does not leave.
+/// The states that end a mission. Nothing changes a finished mission; the
+/// one way out is a person's Reopen, back to `paused` (Orbit Fleet G3.7).
 pub const MISSION_FINAL_STATES: [&str; 3] = ["completed", "failed", "cancelled"];
 /// Every move the lifecycle allows, `(from, to)`.
 pub const MISSION_TRANSITIONS: &[(&str, &str)] = &[
@@ -83,6 +84,11 @@ pub const MISSION_TRANSITIONS: &[(&str, &str)] = &[
     ("paused", "completed"),
     ("paused", "failed"),
     ("paused", "cancelled"),
+    // Reopen (G3.7): a finished mission comes back paused, so its loop
+    // takes nothing until a person resumes it.
+    ("completed", "paused"),
+    ("failed", "paused"),
+    ("cancelled", "paused"),
 ];
 
 /// What a mission asks of its loop (`orchestration_projects.policy_json`,
@@ -870,6 +876,40 @@ impl Store {
         let n = tx.execute("DELETE FROM orchestration_projects WHERE id = ?1", [id])?;
         tx.commit()?;
         Ok(n > 0)
+    }
+
+    /// The live sessions working on a mission's member items (a confirmed,
+    /// unended link), each with the member item it serves: what a finished
+    /// mission offers to archive (G3.7). Oldest session first.
+    pub fn mission_live_sessions(&self, id: i64) -> Result<Vec<(i64, i64)>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.session_id, MIN(l.item_id) FROM work_links l \
+             JOIN work_items i ON i.id = l.item_id AND i.orchestration_project_id = ?1 \
+             JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+             WHERE l.state = 'confirmed' AND l.ended_at IS NULL AND p.session_id IS NOT NULL \
+             GROUP BY p.session_id ORDER BY p.session_id",
+        )?;
+        let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The pull request URLs a mission's work has had: a live session's
+    /// current one and the one each ended link recorded, so a PR stays on
+    /// the mission after its session is archived (G3.7).
+    pub fn mission_pr_urls(&self, id: i64) -> Result<Vec<String>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.pr_url FROM work_links l \
+             JOIN work_items i ON i.id = l.item_id AND i.orchestration_project_id = ?1 \
+             JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+             JOIN sessions s ON s.id = p.session_id \
+             WHERE l.state = 'confirmed' AND l.ended_at IS NULL AND s.pr_url IS NOT NULL \
+             UNION \
+             SELECT l.snap_pr_url FROM work_links l \
+             JOIN work_items i ON i.id = l.item_id AND i.orchestration_project_id = ?1 \
+             WHERE l.state = 'confirmed' AND l.snap_pr_url IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Add a repo to a mission's allow-list (or change its role), or remove

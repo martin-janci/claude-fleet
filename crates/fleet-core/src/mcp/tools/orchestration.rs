@@ -1161,7 +1161,8 @@ impl FleetTools {
         notes?, assignees?, due_at?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts \
         or rejects {item_id, no session_id}. bucket_add|bucket_remove \
         {bucket_id, item_id}: sprint/release. mission_save {mission, \
-        mission_id?, item_id?: root}; mission_state {mission_id, status}; \
+        mission_id?, item_id?: root}; mission_state {mission_id, status} (paused \
+        reopens a finished one); \
         mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; \
         mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; \
         propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. \

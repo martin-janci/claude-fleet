@@ -19,6 +19,7 @@
   import { projects } from './projects';
   import { readPref, writePref } from './prefs';
   import ReleaseNote from './ReleaseNote.svelte';
+  import MissionFinish from './MissionFinish.svelte';
   import MissionTriage from './MissionTriage.svelte';
   import type { NextStep } from './mission_triage';
   import MissionGraph from './MissionGraph.svelte';
@@ -146,18 +147,19 @@
   type DetailTab = 'plan' | 'runs' | 'log' | 'repos';
   let detailTab = $state<DetailTab>('plan');
   const runs = $derived(detail ? runsOf(detail) : []);
+  function personName(id: number): string | null {
+    for (const o of $orgs) {
+      const p = (o.members ?? []).find((x) => x.person_id === id);
+      if (p) return p.display_name || p.name;
+    }
+    return null;
+  }
   const owner = $derived(
     detail
       ? ownerLine(
           detail.mission,
           $myPersonId,
-          (id) => {
-            for (const o of $orgs) {
-              const p = (o.members ?? []).find((x) => x.person_id === id);
-              if (p) return p.display_name || p.name;
-            }
-            return null;
-          },
+          personName,
           (id) => $orgs.find((o) => o.id === id)?.name ?? null,
         )
       : null,
@@ -783,6 +785,19 @@
             </div>
           {/if}
         {/if}
+      {/if}
+
+      {#if isFinal(mission.state)}
+        <!-- Gap G3.7: the Finish board. Reopen moves it back to paused. -->
+        <MissionFinish
+          {detail}
+          completed={missions.filter((m) => isFinal(m.state)).length}
+          mayChange={!!detail.may_change}
+          reopenBlocked={changeBlocked}
+          nameOf={personName}
+          onreopen={() => move('paused')}
+          onarchived={load}
+        />
       {/if}
 
       <dl class="kv" data-testid="mission-facts">

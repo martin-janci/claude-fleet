@@ -72,7 +72,7 @@ fn states(state: Option<&str>) -> Result<&'static [&'static str], IpcError> {
 /// May `scope` see this PR? Through the session that opened it, by the same
 /// rule as the session row; a PR whose session is gone is seen only by the
 /// hub's own unnarrowed reader or the one person of a one-person hub.
-fn visible(s: &Store, scope: &ViewScope, pr: &PullRequestRow) -> Result<bool, IpcError> {
+pub(crate) fn visible(s: &Store, scope: &ViewScope, pr: &PullRequestRow) -> Result<bool, IpcError> {
     let row = match pr.session_id {
         Some(id) => s.get_session_by_id(id)?,
         None => None,
