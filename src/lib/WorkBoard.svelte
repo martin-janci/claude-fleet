@@ -21,9 +21,20 @@
   // webview's own. ← / → on a focused card move it too. Tracker and agent
   // text renders as text. A native card's edit button (or E on the focused card)
   // opens the edit dialog: title, description, status, assignees.
-  import { onDestroy, onMount } from 'svelte';
+  //
+  // Gap plan G3.5: a status's own column has "+" to add a task in that
+  // status; x selects cards (Shift+click too) and the selection bar moves
+  // them together; s starts a new session for the focused card; the card
+  // shows its pull request with its checks, and the open card its Work
+  // button (Start new, Continue ▾).
+  import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
-  import { onWorkChangedDebounced, ownerDueChip, setWorkStatus } from './work';
+  import { createWorkTask, onWorkChangedDebounced, ownerDueChip, setWorkStatus } from './work';
+  import { sessionAgent, sessions } from './sessions';
+  import { AGENT_LABELS } from './row_groups';
+  import { prChip } from './work_row';
+  import { workButtonFor } from './start_preview';
+  import WorkButton from './WorkButton.svelte';
   import {
     openTask,
     readErrorText,
@@ -159,6 +170,54 @@
     }
   }
 
+  // ── Add a task in a column (G3.5) ──
+  let addingIn = $state<string | null>(null);
+  let addTitle = $state('');
+  let addBusy = $state(false);
+  let addError = $state<string | null>(null);
+  async function addIn(lane: BoardLane) {
+    const title = addTitle.trim();
+    if (!title || addBusy) return;
+    addBusy = true;
+    addError = null;
+    const r = await createWorkTask({ title });
+    if (r.ok && BOARD_COLUMN_STATUS[lane.status] !== 'todo') {
+      const s = await setWorkStatus(r.value.id, BOARD_COLUMN_STATUS[lane.status]);
+      if (!s.ok) addError = `Added to To do: ${readErrorText(s.error)}`;
+    }
+    addBusy = false;
+    if (!r.ok) {
+      addError = readErrorText(r.error);
+      return;
+    }
+    addTitle = '';
+    if (!addError) addingIn = null;
+    void load();
+  }
+
+  // ── Multi-select (G3.5) ──
+  let picked = $state.raw<Set<string>>(new Set());
+  function togglePick(id: string) {
+    const next = new Set(picked);
+    if (!next.delete(id)) next.add(id);
+    picked = next;
+  }
+  const pickedTasks = $derived(tasks.filter((t) => picked.has(t.task_id)));
+  /** The status's own columns: where a selection can move to. */
+  const statusLanes = $derived(columns.lanes.filter((l) => l.id === l.status));
+  let movingAll = $state(false);
+  async function movePicked(laneId: string) {
+    const to = laneById(laneId);
+    if (!to || movingAll) return;
+    movingAll = true;
+    for (const t of pickedTasks) await move(t, to);
+    movingAll = false;
+    // The ones refused keep their error on the card and stay selected.
+    picked = new Set([...picked].filter((id) => cardErrors.has(id)));
+  }
+
+  const rowsById = $derived(new Map($sessions.map((r) => [r.id, r])));
+
   function open(t: WorkTask) {
     sidebarView.set('work');
     openTask(t.task_id, t.sessions);
@@ -210,9 +269,13 @@
     window.removeEventListener('pointercancel', endDrag);
   }
 
-  function onclick(t: WorkTask) {
+  function onclick(e: MouseEvent, t: WorkTask) {
     if (swallowClick) {
       swallowClick = false;
+      return;
+    }
+    if (e.shiftKey) {
+      togglePick(t.task_id);
       return;
     }
     open(t);
@@ -224,6 +287,18 @@
     if (act === 'work-board.edit' && !boardMoveRefusal(t) && !editBlocked) {
       e.preventDefault();
       editing = t.task_id;
+      return;
+    }
+    if (act === 'work-board.select') {
+      e.preventDefault();
+      togglePick(t.task_id);
+      return;
+    }
+    if (act === 'work-board.start') {
+      e.preventDefault();
+      // The open card carries the Work button: open it, then ask it.
+      if ($selectedTaskId !== t.task_id) open(t);
+      void tick().then(() => workButtonFor(t.task_id)?.ask());
       return;
     }
     if (act !== 'work-board.left' && act !== 'work-board.right') return;
@@ -265,6 +340,24 @@
     {/if}
   </header>
 
+  {#if picked.size > 0}
+    <div class="pickbar" role="toolbar" aria-label="Selected cards" data-testid="work-board-pickbar">
+      <span>{picked.size} selected</span>
+      <label
+        >Move to
+        <select
+          data-testid="work-board-pick-move"
+          disabled={movingAll || moveBlocked !== null}
+          value=""
+          onchange={(e) => void movePicked((e.currentTarget as HTMLSelectElement).value)}
+        >
+          <option value="" disabled>column…</option>
+          {#each statusLanes as l (l.id)}<option value={l.id}>{l.label}</option>{/each}
+        </select></label
+      >
+      <button class="btn btn--quiet" type="button" data-testid="work-board-pick-clear" onclick={() => (picked = new Set())}>Clear</button>
+    </div>
+  {/if}
   {#if error}
     <p class="err" role="alert" data-testid="work-board-error">
       {readErrorText(error)}
@@ -308,7 +401,40 @@
           <h3>
             {lane.label}{#if lane.id === 'done'}<span class="window"> · last 7 days</span>{/if}
             <span class="count">{nodes.length}</span>
+            {#if lane.id === lane.status}
+              <button
+                class="add"
+                type="button"
+                title="Add a task to {lane.label}"
+                aria-label="Add a task to {lane.label}"
+                data-testid="work-board-add-{lane.id}"
+                onclick={() => {
+                  addingIn = addingIn === lane.id ? null : lane.id;
+                  addError = null;
+                }}>+</button
+              >
+            {/if}
           </h3>
+          {#if addingIn === lane.id}
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              class="add-input"
+              placeholder="New task title"
+              aria-label="New task in {lane.label}"
+              data-testid="work-board-add-input"
+              autofocus
+              disabled={addBusy}
+              bind:value={addTitle}
+              onkeydown={(e) => {
+                if (e.key === 'Enter') void addIn(lane);
+                if (e.key === 'Escape') addingIn = null;
+              }}
+            />
+            {#if addError}<p class="card-err" role="alert" data-testid="work-board-add-error">{addError}</p>{/if}
+          {/if}
+          {#if over === lane.id && dragging && laneOfCard(dragging).id !== lane.id}
+            <p class="drop" data-testid="work-board-drop">Drop to move to {lane.label}</p>
+          {/if}
           <ul>
             {#each nodes as n (n.task.task_id)}
               {@render card(n, lane)}
@@ -345,19 +471,23 @@
   {@const live = boardLiveSession(t)}
   {@const err = cardErrors.get(t.task_id)}
   {@const owner = ownerDueChip(t)}
+  {@const pr = prChip(t, rowsById)}
+  {@const liveRow = live ? rowsById.get(live.session_id) : undefined}
   <li role="listitem">
     <button
       class="card"
       class:selected={$selectedTaskId === t.task_id}
       class:dragging={dragging?.task_id === t.task_id}
       class:locked={!!refusal}
+      class:picked={picked.has(t.task_id)}
+      aria-pressed={picked.has(t.task_id) ? 'true' : undefined}
       type="button"
       data-board-card={t.task_id}
       data-testid="work-board-card"
       title={refusal ?? undefined}
       aria-current={$selectedTaskId === t.task_id ? 'true' : undefined}
       onpointerdown={(e) => onpointerdown(e, t)}
-      onclick={() => onclick(t)}
+      onclick={(e) => onclick(e, t)}
       onkeydown={(e) => oncardkey(e, t, lane)}
     >
       <span class="top">
@@ -382,8 +512,20 @@
           data-testid="work-board-owner">{owner.text}</span
         >
       {/if}
+      {#if pr}
+        <span class="pr" data-testid="work-board-pr" title={pr.url}
+          >{pr.label}{#if pr.checks === 'passing'}<span class="ok" aria-label="checks passing">{' ✓'}</span>{:else if pr.checks === 'failing'}<span
+              class="bad"
+              aria-label="{pr.failing} failing">{` ✕ ${pr.failing}`}</span
+            >{:else if pr.checks === 'running'}<span class="muted" aria-label="checks running">{' …'}</span>{/if}</span
+        >
+      {/if}
       {#if live}
-        <span class="live" data-testid="work-board-live">● {live.host ? `${live.name} · ${live.host}` : live.name}</span>
+        <span class="live" data-testid="work-board-live"
+          >● {live.host ? `${live.name} · ${live.host}` : live.name}{#if liveRow}<span class="agent" data-testid="work-board-agent"
+              >{` · ${AGENT_LABELS[sessionAgent(liveRow)]}`}</span
+            >{/if}</span
+        >
       {/if}
     </button>
     {#if !refusal}
@@ -398,6 +540,9 @@
       >
     {/if}
     {#if err}<p class="card-err" role="alert" data-testid="work-board-card-error">{err}</p>{/if}
+    {#if $selectedTaskId === t.task_id}
+      <div class="card-work" data-testid="work-board-card-work"><WorkButton task={t} /></div>
+    {/if}
   </li>
 {/snippet}
 
@@ -629,6 +774,53 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .card.picked {
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  .pr {
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
+  .ok {
+    color: var(--status-done);
+  }
+  .bad {
+    color: var(--status-failed);
+  }
+  .add {
+    margin-left: auto;
+    border: 0;
+    background: none;
+    color: var(--fg-muted);
+    font: inherit;
+    cursor: pointer;
+  }
+  .add:hover {
+    color: var(--fg);
+  }
+  .add-input {
+    width: 100%;
+    margin-bottom: 4px;
+    font: inherit;
+  }
+  .drop {
+    margin: 0 0 4px;
+    padding: 4px;
+    border: 1px dashed var(--accent);
+    border-radius: var(--radius-sm);
+    color: var(--fg-muted);
+    text-align: center;
+  }
+  .pickbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .card-work {
+    padding: 4px 0 0;
   }
   .card-err {
     margin: 2px 2px 0;

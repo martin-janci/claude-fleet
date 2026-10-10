@@ -272,6 +272,8 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('work-board', 'work-board.left', 'Move the card a column left', keys('ArrowLeft')),
   row('work-board', 'work-board.right', 'Move the card a column right', keys('ArrowRight')),
   row('work-board', 'work-board.cancel-drag', 'Cancel the drag', keys('Escape*')),
+  row('work-board', 'work-board.select', 'Select the card (or unselect it)', keys('x')),
+  row('work-board', 'work-board.start', 'Start a new session for the card', keys('s')),
   // SessionRowItem
   row('session-row', 'session-row.yes', 'Confirm the suggested link', view('y')),
   row('session-row', 'session-row.no', 'Reject the suggested link', view('n')),
