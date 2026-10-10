@@ -119,4 +119,7 @@ export const WORK_GROUPS: readonly GroupOption<WorkGroupChoice>[] = [
   { id: 'mission', label: 'Mission', title: 'Organisation → its mission' },
   { id: 'account', label: 'Account', title: 'Organisation → the account its sessions run on' },
   { id: 'repo', label: 'Repo', title: 'Organisation → its repo' },
+  { id: 'sprint', label: 'Sprint', title: 'Organisation → its current sprint' },
+  { id: 'release', label: 'Release', title: 'Organisation → its release (the one still planned first)' },
+  { id: 'epic', label: 'Epic', title: 'Organisation → the epic it is, or is filed under' },
 ];

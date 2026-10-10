@@ -757,6 +757,16 @@ fn work_items_has_due_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// already_applied guard of migration 162.
+fn work_buckets_has_owner(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_buckets') WHERE name = 'owner_person_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// already_applied guard of migration 148.
 fn downloads_has_owner(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1820,10 +1830,22 @@ const MIGRATIONS: &[Migration] = &[
         160,
         include_str!("../../migrations/160_access_requests.sql"),
     ),
+    // Task comments: a new table, idempotent.
+    Migration::plain(
+        161,
+        include_str!("../../migrations/161_work_item_comments.sql"),
+    ),
+    // Personal sprints: `work_buckets.owner_person_id` — an ADD COLUMN, so a
+    // guard.
+    Migration {
+        version: 162,
+        sql: include_str!("../../migrations/162_work_bucket_owner.sql"),
+        already_applied: Some(work_buckets_has_owner),
+    },
     // Search phase 3: the full-text index (`search_docs`, FTS5
     // `search_fts`) and the triggers that keep it in step. `IF NOT EXISTS`
     // and an upsert backfill, then a rebuild: safe to re-run.
-    Migration::plain(161, include_str!("../../migrations/161_search_index.sql")),
+    Migration::plain(163, include_str!("../../migrations/163_search_index.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

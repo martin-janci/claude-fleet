@@ -1,5 +1,5 @@
 //! `search` (search phase 3): one query over the full-text index
-//! (`store/search.rs`, migration 161) — tasks and tickets, sessions,
+//! (`store/search.rs`, migration 163) — tasks and tickets, sessions,
 //! conversations' first prompts, pull requests, the work journal, and the
 //! transcript chunks the transcript pass copies in when
 //! `search.index_transcripts` is on.

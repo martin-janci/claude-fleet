@@ -68,7 +68,8 @@
   }
 
   // What the form started from: only a changed field is written.
-  let initial = { title: '', notes: '', status: 'todo' as WorkItemStatus, assignees: [] as string[], due: '' };
+  let initial = { title: '', notes: '', status: 'todo' as WorkItemStatus, assignees: [] as string[], due: '', epic: false };
+  let epic = $state(false);
 
   async function load() {
     const r = await workTask(untrack(() => taskId));
@@ -88,7 +89,9 @@
       status: statusOf(d.task.status_category),
       assignees: d.task.assignees ?? [],
       due: d.task.due_at ?? '',
+      epic: d.task.epic === true,
     };
+    epic = initial.epic;
     title = initial.title;
     notes = initial.notes;
     status = initial.status;
@@ -105,6 +108,9 @@
   const editable = $derived(task !== null && task.kind === 'local' && task.item_id != null);
   /** A job mirror's notes are its dispatch prompt: shown, never edited. */
   const notesLocked = $derived(task?.origin === 'agent');
+  /** An epic sits at the top (sprints design §3): a filed task or a job
+   *  cannot become one. */
+  const epicOffered = $derived(task !== null && !task.parent_task_id && task.origin !== 'agent');
   const titleError = $derived(title.trim() === '' ? 'A title is required.' : workTitleError(title));
   const blocked = $derived(
     hubActionBlocked('edit_work_item', $hubStatus, $hubConnection) ??
@@ -119,6 +125,7 @@
     const people = parseAssignees(assignees);
     if (!sameList(people, initial.assignees)) edit.assignees = people;
     if (due !== initial.due) edit.due_at = due;
+    if (epicOffered && epic !== initial.epic) edit.epic = epic;
     return { edit, status: status !== initial.status ? status : null };
   });
   const dirty = $derived(Object.keys(changes.edit).length > 0 || changes.status !== null);
@@ -137,6 +144,7 @@
     if (edit.notes !== undefined) back.notes = before.notes;
     if (edit.assignees !== undefined) back.assignees = before.assignees;
     if (edit.due_at !== undefined) back.due_at = before.due;
+    if (edit.epic !== undefined) back.epic = before.epic;
     if (Object.keys(back).length > 0) {
       const r = await editWorkItem(itemId, back);
       if (!r.ok) return void pushError(r.error, 'Undo failed');
@@ -168,6 +176,7 @@
         notes: r.value.notes ?? '',
         assignees: r.value.assignees ?? [],
         due: r.value.due_at ?? '',
+        epic: edit.epic ?? initial.epic,
       };
     }
     if (nextStatus !== null) {
@@ -274,11 +283,18 @@
         <input type="date" bind:value={due} data-testid="edit-task-due" />
       </label>
     </div>
+    {#if epicOffered}
+      <label class="check">
+        <input type="checkbox" bind:checked={epic} data-testid="edit-task-epic" />
+        <span>Epic: other tasks are filed under it, and it shows how many of them are done</span>
+      </label>
+    {/if}
   {/if}
 </DialogSheet>
 
 <style>
   .row { display: flex; gap: var(--space-3); }
+  .check { display: flex; gap: var(--space-2); align-items: baseline; font-size: var(--text-xs); }
   .field.grow { flex: 1; }
   .field textarea:disabled { opacity: 0.6; }
   .field input[aria-invalid='true'] { border-color: var(--danger); }

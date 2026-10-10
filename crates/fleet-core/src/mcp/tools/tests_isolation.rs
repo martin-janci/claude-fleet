@@ -2596,6 +2596,92 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Task comments: `edit`'s fences on the item — host A's own local item
+    // commented by whoever may see it, another host's answering as unknown.
+    let unknown_item_comment = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "comment", "item_id": 999_999, "notes": "n" }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "comment",
+        move |_, _| json!({ "action": "comment", "item_id": local_a, "notes": "a note" }),
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    same_as_unknown(a, &unknown_item_comment, &local_a.to_string(), "999999")
+                }
+                _ => assert!(text(a).contains("\"body\":\"a note\""), "{who:?}: {a:?}"),
+            }
+        },
+    )
+    .await;
+    // A comment nobody has: unknown to every caller, the same answer.
+    m.row(
+        "work_link",
+        "comment_delete",
+        |_, _| json!({ "action": "comment_delete", "comment_id": 999_999 }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            is_code(who, a, "E_NOTFOUND", "no such comment")
+        },
+    )
+    .await;
+    // Epics: `edit`'s fences — host A's own local item filed (here: kept at
+    // the top) by whoever may see it, another host's answering as unknown,
+    // a ticket refused for who sees it.
+    let unknown_item_file = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "set_parent", "item_id": 999_999, "parent": "" }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "set_parent",
+        move |_, _| json!({ "action": "set_parent", "item_id": local_a, "parent": "" }),
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    same_as_unknown(a, &unknown_item_file, &local_a.to_string(), "999999")
+                }
+                _ => assert!(
+                    text(a).contains(&format!("\"id\":{local_a}")),
+                    "{who:?}: {a:?}"
+                ),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "set_parent",
+        |fx, _| json!({ "action": "set_parent", "item_id": fx.item_b, "parent": "" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA | Who::HostNone | Who::BoundA => {
+                    is_code(who, a, "E_NOTFOUND", "another org's ticket")
+                }
+                _ => is_code(who, a, "E_INVALID", "a ticket"),
+            }
+        },
+    )
+    .await;
     // Task editing: `set_status`'s fences — host A's own local item edited
     // by whoever may see it, another host's answering as unknown, a
     // ticket refused for who sees it.
@@ -2728,6 +2814,28 @@ async fn run_matrix(isolate: bool) {
         )
         .await;
     }
+    // A person planning a sprint (owner decision 2026-10-10): never a
+    // session; another org's sprint is unknown to a client bound to A.
+    m.row(
+        "work_link",
+        "bucket_admin",
+        move |_, _| {
+            json!({ "action": "bucket_admin",
+                    "bucket_op": { "action": "bucket_update", "bucket_id": bucket_b, "goal": "g" } })
+        },
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not plan"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's sprint"),
+                Who::Master => is_ok(who, a, "bucket_admin"),
+                _ => {}
+            }
+        },
+    )
+    .await;
     // An A bucket with B's ticket: B's bound client cannot reach the
     // bucket, A's cannot reach the ticket — each as unknown.
     m.row(

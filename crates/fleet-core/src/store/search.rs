@@ -1,4 +1,4 @@
-//! The full-text index (search phase 3, migration 161): `search_docs` and
+//! The full-text index (search phase 3, migration 163): `search_docs` and
 //! its FTS5 `search_fts`. The migration's triggers keep the docs of work
 //! items, sessions, conversations, pull requests and the journal in step
 //! with their rows; transcript chunks are written here by the transcript

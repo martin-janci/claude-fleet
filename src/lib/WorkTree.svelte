@@ -39,6 +39,20 @@
   import { missionOpenRequest } from './missions';
   import WorkPrs from './WorkPrs.svelte';
   import WorkRules from './WorkRules.svelte';
+  import WorkBuckets from './WorkBuckets.svelte';
+  import {
+    bucketIdOfGroup,
+    bucketSummary,
+    fileUnder,
+    openBuckets,
+    workEpics,
+    type EpicChoice,
+    planInto,
+    unplanFrom,
+    workBuckets,
+    type BucketRow,
+    type BulkOutcome,
+  } from './work_buckets';
   import TaskList from './TaskList.svelte';
   import WorkTaskRow from './WorkTaskRow.svelte';
   import { formatCostMicros } from './sessions';
@@ -130,6 +144,102 @@
   let sectionErrors = $state.raw<Map<string, string>>(new Map());
   let reviewTotal = $state<number | null>(null);
   let rulesOpen = $state(false);
+  let bucketsOpen = $state(false);
+  // Sprints and releases (sprints design 2026-09-28 §6a/§6b): the buckets a
+  // section header names and the selection plans into. Read when the view
+  // groups by them or a selection starts, and after every change.
+  let buckets = $state.raw<BucketRow[]>([]);
+  const bucketById = $derived(new Map(buckets.map((b) => [b.id, b])));
+  const groupedByBucket = $derived($workViewFilters.group_by === 'sprint' || $workViewFilters.group_by === 'release');
+  let bucketSeq = 0;
+  async function loadBuckets() {
+    const mine = ++bucketSeq;
+    const r = await workBuckets();
+    if (mine !== bucketSeq) return;
+    if (r.ok && Array.isArray(r.value)) buckets = r.value;
+  }
+  // The epics a selection can be filed under (sprints design §3, §6b).
+  let epics = $state.raw<EpicChoice[]>([]);
+  let epicSeq = 0;
+  async function loadEpics() {
+    const mine = ++epicSeq;
+    const r = await workEpics();
+    if (mine !== epicSeq) return;
+    if (r.ok) epics = r.value;
+  }
+  // Bulk assignment: the tasks picked (by work item; a bare key has none).
+  let selecting = $state(false);
+  let picked = $state.raw<Set<number>>(new Set());
+  let bulkBusy = $state(false);
+  let bulkNotice = $state<string | null>(null);
+  function startSelecting() {
+    selecting = !selecting;
+    picked = new Set();
+    bulkNotice = null;
+    if (selecting) {
+      void loadBuckets();
+      void loadEpics();
+    }
+  }
+  function togglePick(itemId: number) {
+    const next = new Set(picked);
+    if (next.has(itemId)) next.delete(itemId);
+    else next.add(itemId);
+    picked = next;
+  }
+  /** Each picked item's section bucket, when the view groups by one. */
+  function pickedByBucket(): Map<number, number[]> {
+    const out = new Map<number, number[]>();
+    for (const st of states.values())
+      for (const t of st.tasks) {
+        if (t.item_id == null || !picked.has(t.item_id)) continue;
+        const b = bucketIdOfGroup(t.group?.id ?? '');
+        if (b == null) continue;
+        const ids = out.get(b) ?? [];
+        if (!ids.includes(t.item_id)) ids.push(t.item_id);
+        out.set(b, ids);
+      }
+    return out;
+  }
+  function outcomeText(verb: string, b: string, o: BulkOutcome): string {
+    const ok = o.done > 0 ? `${verb} ${o.done} task${o.done === 1 ? '' : 's'} ${b}.` : '';
+    const bad = o.failed.length > 0 ? ` ${o.failed.length} refused: ${readErrorText(o.failed[0].error)}` : '';
+    return (ok + bad).trim();
+  }
+  async function planPicked(bucketId: number) {
+    const b = bucketById.get(bucketId);
+    if (!b || picked.size === 0) return;
+    bulkBusy = true;
+    const o = await planInto(b, [...picked]);
+    bulkBusy = false;
+    bulkNotice = outcomeText('Planned', `into “${b.name}”`, o);
+    // Its bump (`planInto`) re-reads the view and, with it, the buckets.
+    if (o.failed.length === 0) picked = new Set();
+  }
+  async function filePicked(to: number | null) {
+    if (picked.size === 0) return;
+    bulkBusy = true;
+    const o = await fileUnder(to, [...picked]);
+    bulkBusy = false;
+    const name = to == null ? null : epics.find((e) => e.itemId === to)?.label;
+    bulkNotice = outcomeText(to == null ? 'Took' : 'Filed', to == null ? 'out to the top' : `under “${name ?? 'the epic'}”`, o);
+    // Each write bumped `workChanged`, which re-reads the view.
+    if (o.failed.length === 0) picked = new Set();
+  }
+  async function unplanPicked() {
+    bulkBusy = true;
+    const total: BulkOutcome = { done: 0, failed: [] };
+    for (const [bid, ids] of pickedByBucket()) {
+      const b = bucketById.get(bid);
+      if (!b) continue;
+      const o = await unplanFrom(b, ids);
+      total.done += o.done;
+      total.failed.push(...o.failed);
+    }
+    bulkBusy = false;
+    bulkNotice = outcomeText('Took', `out of their ${$workViewFilters.group_by}`, total);
+    if (total.failed.length === 0) picked = new Set();
+  }
   let root = $state<HTMLDivElement | null>(null);
   // The List layout's last read: the filter bar's orgs and trackers, and the
   // sessions it shows.
@@ -314,6 +424,8 @@
       void loadSection(g, false, want);
     }
     loadedOnce = true;
+    if (filters.group_by === 'sprint' || filters.group_by === 'release' || selecting) void loadBuckets();
+    if (selecting) void loadEpics();
     flushReveal();
   }
 
@@ -662,6 +774,25 @@
             onclick={() => pickTab('review')}>{reviewTotal}</button
           >
         {/if}
+      {#if tab === 'tasks' && !listMode}
+        <button
+          class="btn btn--quiet btn--icon"
+          type="button"
+          title="Select tasks to plan into a sprint or release"
+          aria-label="Select tasks"
+          aria-pressed={selecting}
+          data-testid="work-select-toggle"
+          onclick={startSelecting}><Icon name="checklist" size={14} /></button
+        >
+      {/if}
+      <button
+        class="btn btn--quiet btn--icon"
+        type="button"
+        title="Sprints & releases"
+        aria-label="Sprints & releases"
+        data-testid="work-buckets-open"
+        onclick={() => (bucketsOpen = true)}><Icon name="clock" size={14} /></button
+      >
       <button
         class="btn btn--quiet btn--icon"
         type="button"
@@ -777,6 +908,7 @@
       <ul class="groups" aria-label="Work">
         {#each sections as o (o.key)}
           {#each o.groups as g (g.key)}
+            {@const sectionBucket = groupedByBucket ? bucketById.get(bucketIdOfGroup(g.group.id) ?? -1) : undefined}
             <li class="group" data-testid="work-group" data-group-id={g.group.id} data-org-id={o.orgId ?? 'none'}>
               <button
                 class="of-sec group-head"
@@ -789,6 +921,9 @@
                 <span class="caret" class:open={groupOpen(g)} aria-hidden="true">▸</span>
                 {#if o.color}<span class="org-dot" style="background: {o.color}" aria-hidden="true"></span>{/if}
                 <span class="group-name">{sectionTitle(o, g)}</span>
+                {#if sectionBucket}
+                  <span class="bucket-sum" data-testid="work-group-bucket">{bucketSummary(sectionBucket)}</span>
+                {/if}
                 {#if g.cost > 0}<span class="spend" data-testid="work-group-spend" title="Spend of its tasks">{formatCostMicros(g.cost)}</span>{/if}
                 <span class="of-count" data-testid="work-group-count">{g.count}</span>
               </button>
@@ -799,9 +934,22 @@
                       class="task"
                       class:selected={$selectedTaskId === t.task_id}
                       class:lit={(t.sessions ?? []).some((l) => isOccurrenceOf(l, selectedSessionId))}
+                      class:picking={selecting}
                       data-testid="work-task"
                       data-task-id={t.task_id}
                     >
+                      {#if selecting}
+                        <input
+                          class="pick"
+                          type="checkbox"
+                          aria-label="Select {t.key ?? t.title ?? t.task_id}"
+                          data-testid="work-task-pick"
+                          disabled={t.item_id == null}
+                          title={t.item_id == null ? 'A bare key has no task to plan yet: open it to make one' : undefined}
+                          checked={t.item_id != null && picked.has(t.item_id)}
+                          onchange={() => t.item_id != null && togglePick(t.item_id)}
+                        />
+                      {/if}
                       <WorkTaskRow
                         task={t}
                         selected={$selectedTaskId === t.task_id}
@@ -843,7 +991,70 @@
       {/if}
     {/if}
   </div>
+  {#if selecting && tab === 'tasks' && !listMode}
+    {@const sprints = openBuckets(buckets, 'sprint')}
+    {@const releases = openBuckets(buckets, 'release')}
+    <div class="bulk-bar" role="toolbar" aria-label="Plan the selected tasks" data-testid="work-bulk-bar">
+      <span class="bulk-count">{picked.size} selected</span>
+      <select
+        aria-label="Add to sprint"
+        data-testid="work-bulk-sprint"
+        disabled={bulkBusy || picked.size === 0 || sprints.length === 0}
+        title={sprints.length === 0 ? 'No open sprint: create one in Sprints & releases' : 'Moves a task out of the sprint it is in'}
+        onchange={(e) => {
+          const v = Number((e.currentTarget as HTMLSelectElement).value);
+          (e.currentTarget as HTMLSelectElement).value = '';
+          if (v) void planPicked(v);
+        }}
+      >
+        <option value="">Add to sprint…</option>
+        {#each sprints as b (b.id)}<option value={b.id}>{b.name} ({b.state})</option>{/each}
+      </select>
+      <select
+        aria-label="Add to release"
+        data-testid="work-bulk-release"
+        disabled={bulkBusy || picked.size === 0 || releases.length === 0}
+        title={releases.length === 0 ? 'No planned release: create one in Sprints & releases' : undefined}
+        onchange={(e) => {
+          const v = Number((e.currentTarget as HTMLSelectElement).value);
+          (e.currentTarget as HTMLSelectElement).value = '';
+          if (v) void planPicked(v);
+        }}
+      >
+        <option value="">Add to release…</option>
+        {#each releases as b (b.id)}<option value={b.id}>{b.name}</option>{/each}
+      </select>
+      <select
+        aria-label="File under an epic"
+        data-testid="work-bulk-epic"
+        disabled={bulkBusy || picked.size === 0}
+        title={epics.length === 0 ? 'No epic yet: mark a task an epic in its Edit dialog' : 'Files each task one level under the epic'}
+        onchange={(e) => {
+          const v = (e.currentTarget as HTMLSelectElement).value;
+          (e.currentTarget as HTMLSelectElement).value = '';
+          if (v === 'top') void filePicked(null);
+          else if (v) void filePicked(Number(v));
+        }}
+      >
+        <option value="">Under epic…</option>
+        {#each epics as e (e.itemId)}<option value={e.itemId}>{e.label}</option>{/each}
+        <option value="top">Out of its epic (to the top)</option>
+      </select>
+      {#if groupedByBucket}
+        <button class="btn btn--quiet" type="button" data-testid="work-bulk-remove" disabled={bulkBusy || picked.size === 0} onclick={() => void unplanPicked()}
+          >Remove from {$workViewFilters.group_by}</button
+        >
+      {/if}
+      <button class="btn btn--quiet" type="button" data-testid="work-bulk-done" onclick={startSelecting}>Done</button>
+      {#if bulkNotice}<p class="bulk-notice" role="status" data-testid="work-bulk-notice">{bulkNotice}</p>{/if}
+    </div>
+  {/if}
 </div>
+
+{#if bucketsOpen}
+  <!-- Its writes bump `workChanged`, which re-reads the view. -->
+  <WorkBuckets onclose={() => (bucketsOpen = false)} />
+{/if}
 
 {#snippet archivedRow()}
   <!-- Archived tasks (done, or every session archived, and nothing
@@ -1024,6 +1235,50 @@
   }
   .spend + .of-count {
     margin-left: var(--space-1);
+  }
+  .bucket-sum {
+    margin-left: var(--space-1);
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .task.picking {
+    display: flex;
+    align-items: flex-start;
+    gap: 4px;
+  }
+  .task.picking > :global(.work-row) {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .pick {
+    margin: 8px 0 0 8px;
+    flex: none;
+  }
+  .bulk-bar {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-pane);
+  }
+  .bulk-bar select {
+    font: inherit;
+    font-size: var(--text-xs);
+    max-width: 12rem;
+  }
+  .bulk-count {
+    font-weight: 500;
+  }
+  .bulk-notice {
+    flex: 1 0 100%;
+    margin: 0;
+    color: var(--fg-muted);
   }
   .more-btn {
     margin: 2px 0 2px 18px;

@@ -1454,6 +1454,26 @@
       "danger": {
         "level": "none"
       },
+      "default": "false",
+      "help": "Let an organisation's members, not only its admins, create and change its sprints and releases. Viewers never can; anyone can keep personal ones.",
+      "key": "work.members_plan_sprints",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Members plan sprints",
+      "modified": false,
+      "per_org": true,
+      "restart": "none",
+      "scope": "org",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "haiku",
       "help": "The model Summarise runs on for a past session, on that session's own host and account.",
       "key": "work.summary_model",
@@ -3924,6 +3944,10 @@
                 },
                 {
                   "key": "work.classify_nudge",
+                  "type": "field"
+                },
+                {
+                  "key": "work.members_plan_sprints",
                   "type": "field"
                 },
                 {

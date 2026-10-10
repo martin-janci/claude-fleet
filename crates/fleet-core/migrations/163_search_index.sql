@@ -212,4 +212,4 @@ CREATE TABLE IF NOT EXISTS search_transcript_cursors (
 -- The index from search_docs, whatever the triggers above did on a re-run.
 INSERT INTO search_fts (search_fts) VALUES ('rebuild');
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (161);
+INSERT OR IGNORE INTO schema_version (version) VALUES (163);
