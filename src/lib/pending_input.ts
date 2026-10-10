@@ -105,11 +105,17 @@ export function isFreeTextOption(o: { label: string }): boolean {
  * move the `❯` glyph without changing the question — and neither is which
  * box of a multi-select is ticked: toggling one is answering this question,
  * not moving to another.
+ *
+ * The tool call a permission dialog asks about (`detail`) IS part of it:
+ * `Bash(rm -rf build)` and `Bash(rm -rf ~)` both read "Do you want to
+ * proceed?" with the same options, and a press meant for the first must not
+ * approve the second.
  */
 export function answerFingerprint(p: {
   kind: string;
   question: string | null;
   options: { n: number; label: string }[];
+  detail?: string | null;
 }): string {
-  return JSON.stringify([p.kind, p.question, p.options.map((o) => [o.n, o.label])]);
+  return JSON.stringify([p.kind, p.question, p.options.map((o) => [o.n, o.label]), p.detail ?? null]);
 }

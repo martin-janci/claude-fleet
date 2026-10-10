@@ -298,6 +298,16 @@ fn without_description(label: &str) -> &str {
     label.split("  ").next().unwrap_or(label).trim()
 }
 
+/// Codex's approval and question dialogs, read off its footer.
+///
+/// A digit ANSWERS either one; no Enter follows. Checked against Codex's
+/// own TUI (`codex-rs/tui/src/bottom_pane`, 2026-10): in the approval
+/// overlay a digit goes through `ListSelectionView::select_shortcut`, which
+/// accepts at once unless the item sets `require_explicit_confirmation` —
+/// and no approval item does; in a `request_user_input` question a digit
+/// selects, commits and moves to the next question or submits
+/// (`go_next_or_submit`). The footers' "press enter to confirm" / "enter to
+/// submit" describe the cursor path, not the digits.
 fn dialog(lines: &[&str]) -> Option<Dialog> {
     let footer = lines.iter().rposition(|l| !l.trim().is_empty())?;
     let foot = lines[footer].to_lowercase();
@@ -353,7 +363,12 @@ fn dialog(lines: &[&str]) -> Option<Dialog> {
         WaitingFor::Permission => (
             above
                 .iter()
-                .find(|l| l.starts_with("Would you like to") || l.starts_with("Do you want to"))
+                .find(|l| {
+                    l.starts_with("Would you like to")
+                        || l.starts_with("Do you want to")
+                        // An MCP server's elicitation: "<server> needs your approval."
+                        || l.ends_with("needs your approval.")
+                })
                 .map(|l| l.to_string()),
             above
                 .iter()

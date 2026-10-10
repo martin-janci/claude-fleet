@@ -9,7 +9,8 @@ use fleet_proto::{
     base64_len, decode_agent_frame, decode_agent_frame_lenient_within, decode_b64,
     decode_hub_frame, decode_hub_frame_lenient, decode_hub_frame_within, encode_agent_frame,
     encode_agent_frame_within, encode_b64, encode_hub_frame, encode_hub_frame_within, judge_proto,
-    AgentFrame, Decoded, HubFrame, ProtoError, ProtoVerdict, UnknownKindAction, UnknownKinds,
+    result_frames, upload_frames, AgentFrame, Assembly, Decoded, HubFrame, ProtoError,
+    ProtoVerdict, UnknownKindAction, UnknownKinds, CHUNKED_PROTO, CHUNK_BYTES,
     MALFORMED_DETAIL_MAX_LEN, MAX_FRAME_BYTES, MAX_PAYLOAD_BYTES, MIN_SUPPORTED_PROTO,
     PROTO_VERSION, VERSION_REFUSED_CLOSE_CODE,
 };
@@ -36,6 +37,7 @@ fn hub_frames() -> Vec<HubFrame> {
             cap_bytes: Some(4096),
         },
         HubFrame::Upload {
+            chunks: 0,
             id: "01J2".into(),
             path: "/home/dev/.claude/settings.json".into(),
             mode: 0o600,
@@ -59,6 +61,7 @@ fn agent_frames() -> Vec<AgentFrame> {
             proto: PROTO_VERSION,
         },
         AgentFrame::Result {
+            chunks: 0,
             id: "01J0".into(),
             exit_code: 0,
             stdout_b64: encode_b64(b"hi\n"),
@@ -66,6 +69,7 @@ fn agent_frames() -> Vec<AgentFrame> {
             truncated: false,
         },
         AgentFrame::Result {
+            chunks: 0,
             id: "01J1".into(),
             exit_code: -1,
             stdout_b64: encode_b64(b"partial"),
@@ -267,6 +271,7 @@ fn a_payload_past_the_cap_is_rejected_on_decode_not_truncated() {
 #[test]
 fn a_payload_past_the_cap_is_rejected_on_encode_so_a_peer_never_sees_it() {
     let frame = AgentFrame::Result {
+        chunks: 0,
         id: "01J0".into(),
         exit_code: 0,
         stdout_b64: "A".repeat(SMALL_CAP),
@@ -283,6 +288,7 @@ fn a_payload_past_the_cap_is_rejected_on_encode_so_a_peer_never_sees_it() {
 #[test]
 fn a_frame_that_just_fits_the_cap_is_accepted() {
     let skeleton = encode_hub_frame(&HubFrame::Upload {
+        chunks: 0,
         id: "1".into(),
         path: "/tmp/x".into(),
         mode: 0o600,
@@ -290,6 +296,7 @@ fn a_frame_that_just_fits_the_cap_is_accepted() {
     })
     .expect("encodes");
     let frame = HubFrame::Upload {
+        chunks: 0,
         id: "1".into(),
         path: "/tmp/x".into(),
         mode: 0o600,
@@ -345,6 +352,7 @@ fn base64_fields_carry_arbitrary_bytes_through_json() {
     // Not valid UTF-8 — the reason these fields are base64 and not strings.
     let raw: &[u8] = &[0x00, 0x9f, 0x92, 0x96, 0xff, b'h', b'i'];
     let frame = HubFrame::Upload {
+        chunks: 0,
         id: "01J2".into(),
         path: "/tmp/blob".into(),
         mode: 0o644,
@@ -509,6 +517,7 @@ fn worst_result(cap_bytes: Option<u64>) -> AgentFrame {
     let stdout = vec![0xffu8; limits.per_stream];
     let stderr = vec![0xffu8; limits.combined - limits.per_stream];
     AgentFrame::Result {
+        chunks: 0,
         // A uuid, as `AgentTransport` sends.
         id: "0b9e6b7e-5a55-4c1e-9d33-3f7a1c2e8f00".into(),
         exit_code: i32::MIN,
@@ -701,13 +710,118 @@ fn a_hello_with_proto_round_trips_it() {
 }
 
 #[test]
-fn min_supported_proto_is_the_current_version() {
+fn the_window_still_admits_the_previous_version() {
     // See `MIN_SUPPORTED_PROTO`'s doc for why 1, not 0 — the same change
     // that introduced the version field also introduced
     // `HubFrame::Welcome`, which a proto-0 (pre-versioning) agent cannot
     // parse, so admitting proto 0 would not avoid the reconnect loop the
-    // versioning exists to end (#151).
-    assert_eq!(MIN_SUPPORTED_PROTO, PROTO_VERSION);
+    // versioning exists to end (#151). And the rolling-upgrade rule: proto 2
+    // (chunks) keeps proto 1 in the window, so a hub and its agents upgrade
+    // in either order.
+    assert_eq!(MIN_SUPPORTED_PROTO, 1);
+    assert_eq!(PROTO_VERSION, 2);
+    assert_eq!(CHUNKED_PROTO, PROTO_VERSION);
+}
+
+/// Toward a proto-1 peer nothing is split, whatever the size: it would skip
+/// the chunks and take the last piece for the whole payload.
+#[test]
+fn nothing_is_chunked_toward_a_proto_1_peer() {
+    let big = vec![7u8; CHUNK_BYTES * 2 + 5];
+    let ups = upload_frames("u1", "/tmp/x", 0o600, &big, 1);
+    assert_eq!(ups.len(), 1);
+    assert!(matches!(&ups[0], HubFrame::Upload { chunks: 0, .. }));
+    let res = result_frames("r1", 0, &big, b"", false, 1);
+    assert_eq!(res.len(), 1);
+    assert!(matches!(&res[0], AgentFrame::Result { chunks: 0, .. }));
+}
+
+/// Split toward a proto-2 peer and put back together, byte for byte; the
+/// final frame counts its chunks, and a missing one is refused.
+#[test]
+fn chunks_split_and_reassemble_and_a_lost_one_is_refused() {
+    let file: Vec<u8> = (0..(CHUNK_BYTES * 2 + 17))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let frames = upload_frames("u1", "/tmp/x", 0o600, &file, CHUNKED_PROTO);
+    assert_eq!(frames.len(), 3);
+    let mut a = Assembly::default();
+    for f in &frames[..2] {
+        let HubFrame::UploadChunk { id, bytes_b64 } = f else {
+            panic!("{f:?}")
+        };
+        a.push(id, &decode_b64(bytes_b64).unwrap(), &[], MAX_PAYLOAD_BYTES)
+            .unwrap();
+    }
+    let HubFrame::Upload {
+        bytes_b64, chunks, ..
+    } = &frames[2]
+    else {
+        panic!()
+    };
+    assert_eq!(*chunks, 2);
+    let mut whole = a.finish("u1", *chunks).unwrap().expect("pieces").first;
+    whole.extend(decode_b64(bytes_b64).unwrap());
+    assert_eq!(whole, file);
+
+    // A result: stdout first, then stderr, each put back whole.
+    let (out, err) = (vec![1u8; CHUNK_BYTES + 3], vec![2u8; CHUNK_BYTES]);
+    let frames = result_frames("r1", 3, &out, &err, true, CHUNKED_PROTO);
+    let mut a = Assembly::default();
+    for f in &frames[..frames.len() - 1] {
+        let AgentFrame::ResultChunk {
+            id,
+            stdout_b64,
+            stderr_b64,
+        } = f
+        else {
+            panic!("{f:?}")
+        };
+        a.push(
+            id,
+            &decode_b64(stdout_b64).unwrap(),
+            &decode_b64(stderr_b64).unwrap(),
+            MAX_PAYLOAD_BYTES * 2,
+        )
+        .unwrap();
+    }
+    let AgentFrame::Result {
+        stdout_b64,
+        stderr_b64,
+        chunks,
+        exit_code,
+        truncated,
+        ..
+    } = frames.last().unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!((*exit_code, *truncated), (3, true));
+    let mut p = a.finish("r1", *chunks).unwrap().expect("pieces");
+    p.first.extend(decode_b64(stdout_b64).unwrap());
+    p.second.extend(decode_b64(stderr_b64).unwrap());
+    assert_eq!((p.first, p.second), (out, err));
+
+    // One chunk lost (a replaced connection): the count does not match.
+    let mut a = Assembly::default();
+    a.push("u2", b"x", &[], 10).unwrap();
+    assert!(a.finish("u2", 2).is_err());
+    // A final frame with no chunks and none pending is the ordinary case.
+    assert!(a.finish("u3", 0).unwrap().is_none());
+    // Past the id's limit: refused, and its pieces dropped.
+    let mut a = Assembly::default();
+    assert!(a.push("u4", &[0; 8], &[], 4).is_err());
+    assert!(a.finish("u4", 0).unwrap().is_none());
+}
+
+/// An unchunked frame looks exactly as it did in proto 1: no `chunks` key.
+#[test]
+fn a_zero_chunk_count_is_left_off_the_wire() {
+    let text = encode_hub_frame(&upload_frames("u", "/p", 0o600, b"hi", CHUNKED_PROTO)[0]).unwrap();
+    assert!(!text.contains("chunks"), "{text}");
+    let text =
+        encode_agent_frame(&result_frames("r", 0, b"hi", b"", false, CHUNKED_PROTO)[0]).unwrap();
+    assert!(!text.contains("chunks"), "{text}");
 }
 
 #[test]
@@ -874,4 +988,50 @@ fn unknown_kinds_is_usable_from_outside_the_crate() {
         UnknownKindAction::LogOnce("nope".to_string())
     );
     assert_eq!(u.record("nope"), UnknownKindAction::Silent);
+}
+
+/// Proto 2's frames, pinned the same way: `upload_chunk` and `result_chunk`,
+/// and the `chunks` count on the final `upload` / `result`.
+#[test]
+fn chunk_frames_use_the_spec_s_tag_and_field_names() {
+    let up = HubFrame::UploadChunk {
+        id: "01J5".into(),
+        bytes_b64: "aGk=".into(),
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(&encode_hub_frame(&up).unwrap()).unwrap(),
+        json!({ "kind": "upload_chunk", "id": "01J5", "bytes_b64": "aGk=" })
+    );
+    let last = HubFrame::Upload {
+        id: "01J5".into(),
+        path: "/p".into(),
+        mode: 384,
+        bytes_b64: "aGk=".into(),
+        chunks: 3,
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(&encode_hub_frame(&last).unwrap()).unwrap(),
+        json!({ "kind": "upload", "id": "01J5", "path": "/p", "mode": 384, "bytes_b64": "aGk=", "chunks": 3 })
+    );
+    let piece = AgentFrame::ResultChunk {
+        id: "01J6".into(),
+        stdout_b64: "aGk=".into(),
+        stderr_b64: String::new(),
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(&encode_agent_frame(&piece).unwrap()).unwrap(),
+        json!({ "kind": "result_chunk", "id": "01J6", "stdout_b64": "aGk=", "stderr_b64": "" })
+    );
+    let done = AgentFrame::Result {
+        id: "01J6".into(),
+        exit_code: 0,
+        stdout_b64: String::new(),
+        stderr_b64: String::new(),
+        truncated: false,
+        chunks: 2,
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(&encode_agent_frame(&done).unwrap()).unwrap(),
+        json!({ "kind": "result", "id": "01J6", "exit_code": 0, "stdout_b64": "", "stderr_b64": "", "truncated": false, "chunks": 2 })
+    );
 }

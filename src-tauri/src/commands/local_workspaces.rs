@@ -68,6 +68,7 @@ async fn deliver(
             prompt: plan.prompt.clone(),
             submit: true,
             keys: None,
+            expect: None,
         },
         store,
         ssh,

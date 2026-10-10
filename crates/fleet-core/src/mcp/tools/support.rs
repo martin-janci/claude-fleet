@@ -2293,6 +2293,7 @@ impl FleetTools {
                     prompt,
                     submit,
                     keys: None,
+                    expect: None,
                 },
                 &self.store,
                 &self.ssh,
