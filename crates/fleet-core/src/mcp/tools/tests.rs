@@ -1590,6 +1590,47 @@ fn control_skill_quotes_status_vocabulary() {
     }
 }
 
+/// The skill's tool index ("Finding the tools") names every tool a client can
+/// be served and nothing else. A client defers the surface and loads only what
+/// it searches for, so this list is how an agent knows what to load in one
+/// search; by October 2026 it had silently fallen to 65 of 135 tools.
+#[test]
+fn control_skill_tool_index_matches_the_router() {
+    let section = CONTROL_SKILL
+        .split("## Finding the tools")
+        .nth(1)
+        .expect("SKILL.md has a Finding the tools section");
+    let block = section
+        .split("```text")
+        .nth(1)
+        .and_then(|b| b.split("```").next())
+        .expect("the section holds a ```text index");
+    // Each unindented line opens with its job label, the rest are tool names.
+    let listed: std::collections::BTreeSet<&str> = block
+        .lines()
+        .flat_map(|line| {
+            let words = line.split_whitespace();
+            words.skip(usize::from(!line.starts_with(' ')))
+        })
+        .collect();
+    let served: std::collections::BTreeSet<String> = FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .filter(|n| n != crate::mcp::auth::PEER_TOOL)
+        .collect();
+    let missing: Vec<_> = served
+        .iter()
+        .filter(|n| !listed.contains(n.as_str()))
+        .collect();
+    let bogus: Vec<_> = listed.iter().filter(|n| !served.contains(**n)).collect();
+    assert!(
+        missing.is_empty() && bogus.is_empty(),
+        "skills/claude-fleet-control/SKILL.md's tool index is out of date: \
+         add {missing:?} under a job, drop {bogus:?}"
+    );
+}
+
 #[test]
 fn kill_session_description_covers_external_and_inactive_agent_rows() {
     let tools = FleetTools::tool_router_for_doc().list_all();
@@ -4014,6 +4055,74 @@ fn slimming_never_eats_a_property_named_like_a_keyword() {
     assert_eq!(schema["required"], serde_json::json!(["title"]));
 }
 
+/// An optional parameter loses its `null` (omitting it says the same), a
+/// required one keeps it; an unsigned integer loses `"minimum": 0`, any other
+/// minimum stays.
+#[test]
+fn slimming_drops_null_only_from_optional_parameters() {
+    let mut schema: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_value(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "opt": { "type": ["string", "null"] },
+                "req": { "type": ["string", "null"] },
+                "n": { "type": ["integer", "null"], "format": "uint32", "minimum": 0 },
+                "floor": { "type": "integer", "minimum": 1 },
+                "minimum": { "type": "string" },
+                "kind": { "type": ["string", "null"], "enum": ["a", "b", null] },
+                "spec": {
+                    "anyOf": [{ "$ref": "#/$defs/Spec" }, { "type": "null" }],
+                    "description": "d"
+                }
+            },
+            "required": ["req"]
+        }))
+        .unwrap();
+    present::slim_schema(&mut schema);
+    let p = schema["properties"].as_object().unwrap();
+    assert_eq!(p["opt"], serde_json::json!({ "type": "string" }));
+    assert_eq!(p["req"]["type"], serde_json::json!(["string", "null"]));
+    assert_eq!(p["n"], serde_json::json!({ "type": "integer" }));
+    assert_eq!(p["floor"]["minimum"], 1);
+    assert!(p.contains_key("minimum"), "a property named minimum stays");
+    assert_eq!(p["kind"]["enum"], serde_json::json!(["a", "b"]));
+    assert_eq!(
+        p["spec"],
+        serde_json::json!({ "$ref": "#/$defs/Spec", "description": "d" })
+    );
+}
+
+/// No served tool offers `null` as a type on an optional top-level parameter.
+#[test]
+fn served_optional_parameters_carry_no_null() {
+    for tool in FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .map(present::present)
+    {
+        if let Some(serde_json::Value::Object(props)) = tool.input_schema.get("properties") {
+            let required = tool
+                .input_schema
+                .get("required")
+                .cloned()
+                .unwrap_or_default();
+            for (name, prop) in props {
+                if required
+                    .as_array()
+                    .is_some_and(|r| r.iter().any(|n| n == name))
+                {
+                    continue;
+                }
+                assert!(
+                    !prop.get("type").is_some_and(|t| t.is_array()),
+                    "{}.{name} still offers null: {prop}",
+                    tool.name
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn annotations_follow_the_policy_table() {
     for tool in FleetTools::tool_router_for_doc()
@@ -4265,15 +4374,13 @@ fn list_host_worktrees_is_open_to_a_paired_client_in_either_mode() {
 #[test]
 fn the_served_definition_budget_stays_bounded() {
     /// Definition bytes per tool served to the master token (the widest
-    /// surface). Measured at 107,112 bytes for 133 tools (805 a tool) on
-    /// 2026-10-09, when the redesign audit branch (send_prompt's key list,
-    /// new_session's start token, ask's draft) met main's update_admin
-    /// rollout and policy actions; re-measured at 110,093 bytes for 135
-    /// tools (815 a tool) on 2026-10-10, when the org forms and pages (M15
-    /// G2.10, G4.7) added org_admin's project and share parameters. Raise it
-    /// only from a measurement the failure prints, and say in the commit
-    /// message what was measured and when.
-    const BYTES_PER_TOOL: usize = 825;
+    /// surface). Lowered from 815 on 2026-10-10: dropping `null` from
+    /// optional parameters' types and `"minimum": 0` from unsigned ones
+    /// (`present::drop_optional_null`) measured 106,006 bytes for 135 tools
+    /// (785 a tool), down from 110,022. Raise it only from a measurement the
+    /// failure prints, and say in the commit message what was measured and
+    /// when.
+    const BYTES_PER_TOOL: usize = 795;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

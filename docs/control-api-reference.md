@@ -53,7 +53,7 @@ Which agent hosts (transport "agent") have a fleet-agent connected: since (unix 
 
 ### `answer_mcp_confirm`
 
-Approve or deny one waiting call by its nonce; false when it was already answered or expired.
+Approve or deny one waiting call by nonce; false if already answered or expired.
 
 Parameters: `approved`, `nonce`
 
@@ -643,7 +643,7 @@ Parameters: `body`, `client_msg_id`, `deliver`, `from_session_id`, `kind`, `raw`
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a running Claude session's REPL (pasted, then one Enter); the first prompt to an unnamed session also names it. Marked untrusted unless raw=true (master only) or a trusted client. keys presses a key instead. Returns { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } for the reply (run_prompt does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working one queues it. acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable.
+Send and SUBMIT a prompt to a Claude session's REPL (pasted, then one Enter); the first prompt to an unnamed session also names it. Marked untrusted unless raw=true (master only) or a trusted client. Returns { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } for the reply (run_prompt does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working one queues it. acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable.
 
 Parameters: `client_msg_id`, `confirm_nonce`, `expect`, `force`, `host_alias`, `keys`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
