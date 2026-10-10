@@ -14,6 +14,8 @@
   import { onDestroy, onMount } from 'svelte';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { myPersonId } from './access';
+  import { orgs } from './orgs';
   import { projects } from './projects';
   import { readPref, writePref } from './prefs';
   import ReleaseNote from './ReleaseNote.svelte';
@@ -82,6 +84,15 @@
     type HumanError,
     type MissionCard,
     trailNodes,
+    missionGroups,
+    missionsToExplain,
+    missionReason,
+    loopFooter,
+    plannerLine,
+    brakesLine,
+    ownerLine,
+    runsOf,
+    runStateLabel,
     type GraphNode,
     type Mission,
     type MissionDetail,
@@ -101,6 +112,56 @@
 
   let selectedId = $state<number | null>(null);
   let detail = $state.raw<MissionDetail | null>(null);
+
+  // The board's list (gap G3.6): grouped by state, each row with the reason
+  // it is where it is. The reason needs the mission's detail, read for the
+  // missions still going (`missionsToExplain`), as Control does.
+  type Grouping = 'state' | 'none';
+  const isGrouping = (v: unknown): v is Grouping => v === 'state' || v === 'none';
+  let grouping = $state<Grouping>(readPref<Grouping>('work.missions.group', 'state', isGrouping));
+  $effect(() => writePref('work.missions.group', grouping));
+  let finishedOpen = $state(false);
+  let rowDetails = $state.raw<Map<number, MissionDetail>>(new Map());
+  let explainSeq = 0;
+  const groups = $derived(
+    grouping === 'state'
+      ? missionGroups(missions)
+      : [{ key: 'all' as const, label: '', missions: [...missions].sort((a, b) => b.updated_at - a.updated_at || b.id - a.id) }],
+  );
+  const footer = $derived(loopFooter([...rowDetails.values()]));
+
+  async function explainRows() {
+    const mine = ++explainSeq;
+    const want = missionsToExplain(missions);
+    const got = await Promise.all(want.map((m) => getMission(m.id)));
+    if (mine !== explainSeq) return;
+    const next = new Map<number, MissionDetail>();
+    got.forEach((r, i) => {
+      if (r.ok && r.value?.mission) next.set(want[i].id, r.value);
+    });
+    rowDetails = next;
+  }
+
+  // The detail's tabs (the board's Plan / Runs / Log / Repos).
+  type DetailTab = 'plan' | 'runs' | 'log' | 'repos';
+  let detailTab = $state<DetailTab>('plan');
+  const runs = $derived(detail ? runsOf(detail) : []);
+  const owner = $derived(
+    detail
+      ? ownerLine(
+          detail.mission,
+          $myPersonId,
+          (id) => {
+            for (const o of $orgs) {
+              const p = (o.members ?? []).find((x) => x.person_id === id);
+              if (p) return p.display_name || p.name;
+            }
+            return null;
+          },
+          (id) => $orgs.find((o) => o.id === id)?.name ?? null,
+        )
+      : null,
+  );
 
   let creating = $state(false);
   let newName = $state('');
@@ -397,6 +458,7 @@
         selectedId = null;
         detail = null;
       }
+      if (selectedId == null) void explainRows();
     } else {
       error = readErrorText(r.error);
     }
@@ -423,6 +485,7 @@
   async function open(id: number) {
     lastAccepted = [];
     selectedId = id;
+    detailTab = 'plan';
     editing = false;
     confirmDelete = false;
     moreOpen = false;
@@ -443,6 +506,7 @@
     editing = false;
     notice = null;
     plannerFailure = null;
+    void explainRows();
   }
 
   /** Run one write; on success re-read the list and the open mission. */
@@ -721,6 +785,30 @@
         {/if}
       {/if}
 
+      <dl class="kv" data-testid="mission-facts">
+        {#if owner}<dt>Owner</dt><dd data-testid="mission-owner">{owner}</dd>{/if}
+        {#if mission.mode !== 'plan'}
+          <dt>Planner</dt><dd data-testid="mission-planner-runs">{plannerLine(detail)}</dd>
+          <dt>Brakes</dt>
+          <dd data-testid="mission-brakes"
+            >{brakesLine(mission.policy, plan?.autonomy.grant?.revoked_at == null ? plan?.autonomy.grant?.budget_micros : null)}</dd
+          >
+        {/if}
+      </dl>
+
+      <div class="view-switch tabs" role="tablist" aria-label="Mission" use:tablistKeys data-testid="mission-tabs">
+        {#each [['plan', 'Plan', null], ['runs', 'Runs', runs.length], ['log', 'Log', null], ['repos', 'Repos', (mission.repos ?? []).length]] as const as [key, label, count] (key)}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={detailTab === key}
+            data-testid="mission-tab-{key}"
+            onclick={() => (detailTab = key)}>{label}{#if count}<span class="count">{count}</span>{/if}</button
+          >
+        {/each}
+      </div>
+
+      {#if detailTab === 'plan'}
       {#if plan}
         <section class="loop" data-testid="mission-loop">
           <p class="muted small" data-testid="mission-autonomy">
@@ -1075,8 +1163,25 @@
           <button class="btn" type="submit" disabled={busy || !newTask.trim()}>Add</button>
         </form>
       {/if}
-
-      <h4>Repos</h4>
+      {:else if detailTab === 'runs'}
+        {#if runs.length === 0}
+          <p class="muted small" data-testid="mission-runs-empty">No runs yet. Start wave starts the first.</p>
+        {:else}
+          <ul class="runs" aria-label="Runs" data-testid="mission-runs">
+            {#each runs as r (r.task_id)}
+              <li data-testid="mission-run" data-state={r.state}>
+                <span class="node-dot"><StatusDot state={toneOf(r.state)} label={runStateLabel(r.state)} /></span>
+                <span class="main">
+                  <span class="title">{r.item_id != null ? titleOf(r.item_id) : `Task run ${r.task_id}`}</span>
+                  <span class="muted small"
+                    >{r.role}{r.attempt ? ` #${r.attempt}` : ''} · {runStateLabel(r.state)}{#if r.at != null} · {shortAge(r.at)}{/if}{#if r.actor} · by {r.actor === 'loop' ? 'the loop' : r.actor}{/if}</span
+                  >
+                </span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      {:else if detailTab === 'repos'}
       {#if (mission.repos ?? []).length === 0}
         <p class="muted small">No repo allowed yet: a run needs at least one.</p>
       {:else}
@@ -1112,18 +1217,19 @@
         </div>
       {/if}
 
-      {#if detail.may_change && mission.state === 'completed'}
-        <!-- Redesign 9.11: Finish's release note, drafted on demand. -->
-        <h4>Release note</h4>
-        <ReleaseNote missionId={mission.id} />
-      {/if}
-
-      <h4>Log</h4>
+      {:else}
       <ul class="events" data-testid="mission-events">
         {#each detail.events ?? [] as e (e.id)}
           <li><span class="muted small">{shortAge(e.at)}</span> {eventSentence(e)}</li>
         {/each}
       </ul>
+      {/if}
+
+      {#if detail.may_change && mission.state === 'completed'}
+        <!-- Redesign 9.11: Finish's release note, drafted on demand. -->
+        <h4>Release note</h4>
+        <ReleaseNote missionId={mission.id} />
+      {/if}
 
       {#if detail.may_change && (mission.state === 'draft' || isFinal(mission.state))}
         {#if confirmDelete}
@@ -1153,9 +1259,13 @@
         </form>
       {:else}
         <button class="btn btn--primary" type="button" disabled={saveBlocked} data-testid="mission-new" onclick={() => (creating = true)}>New mission</button>
-        {#if missions.some((m) => m.state === 'active')}
-          <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="missions-pause-all" onclick={() => void pauseAll()}
-            >Pause all</button
+        {#if missions.length > 0}
+          <label class="group-pick muted small"
+            >Group
+            <select bind:value={grouping} data-testid="missions-group">
+              <option value="state">State</option>
+              <option value="none">None</option>
+            </select></label
           >
         {/if}
       {/if}
@@ -1172,17 +1282,52 @@
         No missions yet. A mission is a goal with the tasks that reach it; create one to gather the work.
       </p>
     {:else}
-      <ul class="list" aria-label="Missions">
-        {#each missions as m (m.id)}
-          <li>
-            <button class="open" type="button" data-testid="mission-row" onclick={() => void open(m.id)}>
-              <span class="title">{m.name}</span>
-              <span class="badge">{stateLabel(m.state)}</span>
-              {#if progressLabel(m)}<span class="muted small">{progressLabel(m)}</span>{/if}
-            </button>
-          </li>
-        {/each}
-      </ul>
+      {#each groups as g (g.key)}
+        {@const folds = g.key === 'finished'}
+        {#if g.label}
+          {#if folds}
+            <button
+              class="sec sec--fold"
+              type="button"
+              aria-expanded={finishedOpen}
+              data-testid="missions-group-{g.key}"
+              onclick={() => (finishedOpen = !finishedOpen)}
+              >{g.label} <span class="count">{g.missions.length}</span> <span aria-hidden="true">{finishedOpen ? '⌄' : '›'}</span></button
+            >
+          {:else}
+            <h4 class="sec" data-testid="missions-group-{g.key}">{g.label} <span class="count">{g.missions.length}</span></h4>
+          {/if}
+        {/if}
+        {#if !folds || finishedOpen}
+          <ul class="list" aria-label={g.label || 'Missions'}>
+            {#each g.missions as m (m.id)}
+              {@const why = missionReason(m, rowDetails.get(m.id))}
+              <li>
+                <button class="open" type="button" data-testid="mission-row" data-state={m.state} onclick={() => void open(m.id)}>
+                  <span class="main">
+                    <span class="row-head">
+                      <span class="title">{m.name}</span>
+                      {#if grouping === 'none'}<span class="badge">{stateLabel(m.state)}</span>{/if}
+                      {#if progressLabel(m)}<span class="muted small tnum">{progressLabel(m)}</span>{/if}
+                    </span>
+                    {#if why}<span class="muted small reason" data-testid="mission-reason">{why}</span>{/if}
+                  </span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      {/each}
+      {#if footer || missions.some((m) => m.state === 'active')}
+        <div class="row list-foot" data-testid="missions-footer">
+          {#if footer}<span class="muted small" data-testid="missions-loop">{footer}</span>{/if}
+          {#if missions.some((m) => m.state === 'active')}
+            <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="missions-pause-all" onclick={() => void pauseAll()}
+              >Pause all</button
+            >
+          {/if}
+        </div>
+      {/if}
     {/if}
   {/if}
 </div>
@@ -1262,6 +1407,25 @@
   }
   .view-switch button:hover { color: var(--fg); }
   .view-switch button[aria-selected='true'] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 500; }
+  .tabs { margin-top: 0.5rem; }
+  .count {
+    font-size: var(--text-2xs); font-weight: 500; padding: 0 5px; margin-left: 4px; border-radius: var(--radius-sm);
+    background: var(--bg-hover); color: var(--fg-muted);
+  }
+  .sec { display: flex; align-items: center; gap: 4px; margin: 0.5rem 0 0; }
+  .sec--fold {
+    font: inherit; font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted);
+    background: none; border: 0; padding: 0; cursor: pointer;
+  }
+  .row-head { display: flex; gap: 0.5rem; align-items: center; }
+  .reason { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tnum { font-variant-numeric: tabular-nums; }
+  .list-foot { justify-content: space-between; border-top: 1px solid var(--border); padding-top: 0.3rem; }
+  .group-pick { display: inline-flex; gap: 0.3rem; align-items: center; margin-left: auto; }
+  .kv { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: 0.2rem 0.6rem; margin: 0.3rem 0 0; font-size: var(--text-2xs); }
+  .kv dt { color: var(--fg-muted); }
+  .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .runs li { display: flex; gap: 0.4rem; align-items: center; padding: 0.25rem 0; border-bottom: 1px solid var(--border); }
   .wave { display: flex; flex-direction: column; gap: 0.1rem; }
   .wave-head { font-size: var(--text-2xs); color: var(--fg-muted); margin-top: 0.3rem; }
   .vbadge { font-size: var(--text-2xs); align-self: flex-start; padding: 0 0.35rem; border: 1px solid var(--border); border-radius: var(--radius-pill); }
