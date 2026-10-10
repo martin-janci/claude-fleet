@@ -6,6 +6,15 @@
   where the person unticks what they do not want, then creates the tasks or
   a mission, with Undo for ten minutes. The receipts are the backend's
   (`handoffs.ts`); nothing here is inferred from the transcript's text.
+
+  Gap plan G3.11 (board MCTasks): the plan card lists its tasks by wave
+  with what each finishes when, says "May duplicate …" with Merge or Keep
+  both, and opens the parent with Edit in Work; a created task's card
+  takes an owner and a due date while it is new, with Undo while the
+  backend can take it back, and every task card is a status card (its
+  live session, Move to Done, Mark verified, Open in Work). Cut: an agent
+  per task and drag to reorder (a work item has no agent field and no
+  order), the Group picker, and Start review run (no review-run action).
 -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
@@ -17,6 +26,11 @@
   import StatusChip from './kit/StatusChip.svelte';
   import {
     createFromTree,
+    finishesWhen,
+    liveSessionsOf,
+    refreshHandoffs,
+    taskUndoable,
+    treeWaves,
     followHandoffs,
     openProposals,
     recentHandoffs,
@@ -26,7 +40,13 @@
     workState,
     ACCEPT_UNDO_SECS,
     type ControlHandoff,
+    type HandoffItem,
   } from './handoffs';
+  import { displayName } from './attention';
+  import { leave } from './destination';
+  import { editWorkItem, mergeWorkProposal, parseAssignees, setWorkStatus } from './work';
+  import { undoWorkAccept, verifyWorkItem } from './missions';
+  import { workTask, type DuplicateHint } from './work_view';
   import { sessions } from './sessions';
   import { focusSession } from './session_focus';
   import { openMission } from './missions';
@@ -115,6 +135,73 @@
     openMission(h.mission_id);
   }
 
+  // ── G3.11: duplicates on the plan card ──
+
+  /** Jev's "may duplicate" per proposed item, read from the parent's task
+   *  page (`ProposalView.duplicate`), once per parent. */
+  let dups = $state<Record<number, DuplicateHint>>({});
+  /** Items a person said to keep beside the task they may repeat. */
+  let kept = $state<number[]>([]);
+  const dupRead = new Set<number>();
+  $effect(() => {
+    for (const h of $recentHandoffs) {
+      if (h.kind !== 'tree' || !h.item || openProposals(h).length === 0 || dupRead.has(h.item.id)) continue;
+      dupRead.add(h.item.id);
+      void workTask(`item:${h.item.id}`).then((r) => {
+        if (!r.ok) return;
+        const next = { ...dups };
+        for (const p of r.value?.proposals ?? []) if (p.duplicate) next[p.item_id] = p.duplicate;
+        dups = next;
+      });
+    }
+  });
+
+  async function merge(h: ControlHandoff, item: HandoffItem, into: DuplicateHint) {
+    busy = h.id;
+    const r = await mergeWorkProposal(item.id, into.item_id);
+    busy = null;
+    if (!r.ok) errors[h.id] = r.error.message;
+    else await refreshHandoffs();
+  }
+
+  function editInWork(h: ControlHandoff) {
+    if (!h.item) return;
+    showTaskInWorkView(`item:${h.item.id}`);
+    leave('control');
+  }
+
+  // ── G3.11: the created-task and status card ──
+
+  /** A task receipt is new for this long: its card asks owner and due. */
+  const FRESH_SECS = 600;
+  let owner = $state<Record<number, string>>({});
+  let due = $state<Record<number, string>>({});
+  let saved = $state<Record<number, string>>({});
+
+  async function saveDraft(h: ControlHandoff, item: HandoffItem) {
+    const who = parseAssignees(owner[h.id] ?? '');
+    const when = due[h.id] ?? '';
+    busy = h.id;
+    const r = await editWorkItem(item.id, { ...(who.length ? { assignees: who } : {}), ...(when ? { due_at: when } : {}) });
+    busy = null;
+    if (!r.ok) errors[h.id] = r.error.message;
+    else {
+      delete errors[h.id];
+      saved[h.id] = [who.join(', '), when].filter(Boolean).join(' · ');
+    }
+  }
+
+  async function taskAction(h: ControlHandoff, run: () => Promise<{ ok: boolean; error?: { message: string } }>) {
+    busy = h.id;
+    const r = await run();
+    busy = null;
+    if (!r.ok) errors[h.id] = r.error?.message ?? 'Failed';
+    else {
+      delete errors[h.id];
+      await refreshHandoffs();
+    }
+  }
+
   function minutesLeft(h: ControlHandoff): number {
     const at = Math.max(...undoable(h, nowSec).map((i) => i.accepted_at ?? 0));
     return Math.max(1, Math.ceil((at + ACCEPT_UNDO_SECS - nowSec) / 60));
@@ -163,16 +250,64 @@
         </button>
       {:else if h.kind === 'task' && h.item}
         {@const item = h.item}
-        <button
-          type="button"
-          class="handoff task"
-          data-testid="handoff-task"
-          onclick={() => showTaskInWorkView(`item:${item.id}`)}
-        >
-          <span class="what">#TASK</span>
-          <span class="target">{item.title}</span>
-          <StatusChip state={workState(item.status)} />
-        </button>
+        {@const live = liveSessionsOf(item.id, $sessions)}
+        {@const fresh = nowSec - h.at < FRESH_SECS && item.status === 'todo'}
+        {@const when = finishesWhen(item.done_when)}
+        <div class="task-card" data-testid="handoff-task-card">
+          <button type="button" class="handoff task" data-testid="handoff-task" onclick={() => showTaskInWorkView(`item:${item.id}`)}>
+            <span class="what">#TASK</span>
+            <span class="target">{item.title}</span>
+            <StatusChip state={workState(item.status)} />
+          </button>
+          {#if fresh}<p class="sub" data-testid="handoff-task-drafted">Drafted from your message</p>{/if}
+          {#if when}<p class="sub" data-testid="handoff-task-when">{when}</p>{/if}
+          <p class="sub" data-testid="handoff-task-live">
+            {#if live.length > 0}Running in {live.map((x) => `${displayName(x, true)} on ${x.host_alias}`).join(', ')}{:else}No session on it{/if}
+          </p>
+          {#if fresh}
+            <form
+              class="draft"
+              onsubmit={(e) => {
+                e.preventDefault();
+                void saveDraft(h, item);
+              }}
+            >
+              <label>Owner <input bind:value={owner[h.id]} placeholder="You, or a name" data-testid="handoff-task-owner" /></label>
+              <label>Due <input type="date" bind:value={due[h.id]} data-testid="handoff-task-due" /></label>
+              <Button
+                variant="quiet"
+                size="sm"
+                type="submit"
+                disabled={busy === h.id || (!parseAssignees(owner[h.id] ?? '').length && !due[h.id])}
+                testid="handoff-task-save">Save</Button
+              >
+              {#if saved[h.id]}<span class="sub" role="status">Saved {saved[h.id]}</span>{/if}
+            </form>
+          {/if}
+          <div class="actions">
+            {#if taskUndoable(item, nowSec)}
+              <Button variant="quiet" size="sm" disabled={busy === h.id} onclick={() => void taskAction(h, () => undoWorkAccept([item.id]))} testid="handoff-task-undo"
+                >Undo</Button
+              >
+            {/if}
+            {#if item.status !== 'done'}
+              <Button variant="quiet" size="sm" disabled={busy === h.id} onclick={() => void taskAction(h, () => setWorkStatus(item.id, 'done'))} testid="handoff-task-done"
+                >Move to Done</Button
+              >
+            {/if}
+            {#if (item.done_when ?? []).includes('person')}
+              <Button
+                variant="quiet"
+                size="sm"
+                disabled={busy === h.id}
+                onclick={() => void taskAction(h, () => verifyWorkItem(item.id, 'person', true))}
+                testid="handoff-task-verify">Mark verified</Button
+              >
+            {/if}
+            <Button variant="quiet" size="sm" onclick={() => showTaskInWorkView(`item:${item.id}`)} testid="handoff-task-open">Open in Work</Button>
+          </div>
+          {#if errors[h.id]}<p class="error" role="alert">{errors[h.id]}</p>{/if}
+        </div>
       {:else if h.kind === 'tree'}
         {@const open = openProposals(h)}
         {@const back = undoable(h, nowSec)}
@@ -199,21 +334,40 @@
               },
             ]}
           >
-            <ul class="tree">
-              {#each open as item (item.id)}
-                <li>
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={!(unticked[h.id] ?? []).includes(item.id)}
-                      onchange={() => toggle(h, item.id)}
-                      data-testid="handoff-tree-item"
-                    />
-                    {item.title}
-                  </label>
-                </li>
-              {/each}
-            </ul>
+            {@const waves = treeWaves(open)}
+            {#each waves as wave, wi (wi)}
+              {#if waves.length > 1}<p class="wave" data-testid="handoff-tree-wave">Wave {wi + 1}</p>{/if}
+              <ul class="tree">
+                {#each wave as item (item.id)}
+                  {@const dup = kept.includes(item.id) ? undefined : dups[item.id]}
+                  {@const when = finishesWhen(item.done_when)}
+                  <li>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={!(unticked[h.id] ?? []).includes(item.id)}
+                        onchange={() => toggle(h, item.id)}
+                        data-testid="handoff-tree-item"
+                      />
+                      {item.title}
+                    </label>
+                    {#if when}<p class="sub" data-testid="handoff-tree-when">{when}</p>{/if}
+                    {#if dup}
+                      <p class="dup" data-testid="handoff-tree-dup">
+                        May duplicate {dup.key ?? dup.title}
+                        <Button variant="quiet" size="sm" disabled={busy === h.id} onclick={() => void merge(h, item, dup)} testid="handoff-tree-merge"
+                          >Merge</Button
+                        >
+                        <Button variant="quiet" size="sm" onclick={() => (kept = [...kept, item.id])} testid="handoff-tree-keep">Keep both</Button>
+                      </p>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {/each}
+            {#if h.item}
+              <Button variant="quiet" size="sm" onclick={() => editInWork(h)} testid="handoff-tree-edit">Edit in Work</Button>
+            {/if}
             {#if errors[h.id]}<p class="error" role="alert">{errors[h.id]}</p>{/if}
           </QuestionCard>
         {:else if back.length > 0}
@@ -331,6 +485,49 @@
     display: flex;
     gap: var(--space-2);
     align-items: baseline;
+  }
+  .task-card {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-raise);
+  }
+  .task-card > .handoff {
+    border: 0;
+    padding: 0;
+    background: transparent;
+  }
+  .sub,
+  .wave,
+  .dup {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+  }
+  .wave {
+    font-weight: 500;
+    margin-top: var(--space-1);
+  }
+  .dup {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+  }
+  .draft,
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    font-size: var(--text-xs);
+  }
+  .draft input {
+    font: inherit;
+    font-size: var(--text-xs);
   }
   .error {
     margin: 0;

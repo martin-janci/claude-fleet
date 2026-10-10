@@ -63,6 +63,15 @@ pub struct HandoffItem {
     /// counts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_at: Option<i64>,
+    /// The item's done-when lines (`work_items.done_when`: `ci:<check>`,
+    /// `review`, `test:<command>`, `person`): the plan card's "finishes
+    /// when" (gap plan G3.11).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub done_when: Vec<String>,
+    /// The items it waits for (`work_item_deps`): the plan card draws the
+    /// tree's items by wave from them (gap plan G3.11).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<i64>,
 }
 
 /// One receipt with its target's live state, as `control_handoffs` lists it.
@@ -191,22 +200,40 @@ impl Store {
     }
 
     fn handoff_item(&self, id: i64) -> Result<Option<HandoffItem>> {
-        self.conn
+        let item = self
+            .conn
             .prepare_cached(
                 "SELECT id, title, status_category, proposal_state, \
-                        CASE WHEN proposal_state = 'accepted' THEN updated_at END \
+                        CASE WHEN proposal_state = 'accepted' THEN updated_at END, done_when \
                  FROM work_items WHERE id = ?1",
             )?
             .query_row([id], |r| {
+                let done_when: Option<String> = r.get(5)?;
                 Ok(HandoffItem {
                     id: r.get(0)?,
                     title: r.get(1)?,
                     status: r.get(2)?,
                     proposal_state: r.get(3)?,
                     accepted_at: r.get(4)?,
+                    done_when: done_when
+                        .as_deref()
+                        .and_then(|j| serde_json::from_str(j).ok())
+                        .unwrap_or_default(),
+                    depends_on: Vec::new(),
                 })
             })
-            .optional()
+            .optional()?;
+        let Some(mut item) = item else {
+            return Ok(None);
+        };
+        item.depends_on = self
+            .conn
+            .prepare_cached(
+                "SELECT depends_on FROM work_item_deps WHERE item_id = ?1 ORDER BY depends_on",
+            )?
+            .query_map([id], |r| r.get(0))?
+            .collect::<Result<Vec<i64>>>()?;
+        Ok(Some(item))
     }
 }
 
@@ -301,5 +328,54 @@ mod tests {
         assert!(row.items[0].accepted_at.is_some());
         assert_eq!(row.items[1].proposal_state.as_deref(), Some("proposed"));
         assert_eq!(row.items[1].accepted_at, None);
+    }
+
+    /// Gap plan G3.11: the plan card's waves and "finishes when" come from
+    /// each item's edges and done-when lines.
+    #[test]
+    fn a_tree_item_carries_its_edges_and_done_when() {
+        let s = Store::open_in_memory().unwrap();
+        let parent = s.create_local_work_item(None, "Ship G3.11").unwrap();
+        let kids = s
+            .propose_tree(
+                parent.id,
+                &[
+                    crate::store::TreeEntry {
+                        title: "schema".into(),
+                        ..Default::default()
+                    },
+                    crate::store::TreeEntry {
+                        title: "ui".into(),
+                        depends_on: vec![crate::store::TreeRef::Entry(0)],
+                        ..Default::default()
+                    },
+                ],
+                "client:ux-agent",
+            )
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE work_items SET done_when = ?1 WHERE id = ?2",
+                rusqlite::params![r#"["ci:test","review"]"#, kids[1].id],
+            )
+            .unwrap();
+        s.insert_control_handoff(
+            &NewHandoff {
+                kind: "tree",
+                tool: "work_link".into(),
+                item_id: Some(parent.id),
+                item_ids: kids.iter().map(|k| k.id).collect(),
+                ..Default::default()
+            },
+            1_000,
+        )
+        .unwrap();
+        let row = s.list_control_handoffs(10).unwrap().remove(0);
+        assert!(row.items[0].depends_on.is_empty());
+        assert!(row.items[0].done_when.is_empty());
+        assert_eq!(row.items[1].depends_on, vec![kids[0].id]);
+        assert_eq!(row.items[1].done_when, vec!["ci:test", "review"]);
+        let json = serde_json::to_value(&row.items[0]).unwrap();
+        assert!(json.get("depends_on").is_none() && json.get("done_when").is_none());
     }
 }
