@@ -424,8 +424,10 @@ pub async fn release_note(
     let id = mission_id(args)?;
     let (m, host, model, prompt, from) = {
         let s = lock(&deps.store)?;
-        settings::require_writing_help(&s, settings::WORK_DRAFT_RELEASE_NOTES)?;
+        // Scope first: another org's mission is E_NOTFOUND, whatever the
+        // setting says.
         let m = changeable(&s, scope, id)?;
+        settings::require_writing_help(&s, settings::WORK_DRAFT_RELEASE_NOTES)?;
         if m.state != "completed" {
             return Err(IpcError::new(
                 codes::E_INVALID_STATE,

@@ -172,8 +172,10 @@ pub async fn draft_commit_message(
 ) -> Result<CommitDraft, IpcError> {
     let p = {
         let s = lock(store)?;
+        // The session's own refusal (gone, wrong kind) before the setting's.
+        let p = plan(&s, session_id)?;
         settings::require_writing_help(&s, settings::WORK_DRAFT_COMMIT_MESSAGES)?;
-        plan(&s, session_id)?
+        p
     };
     let body = commit_body(&p.model, p.profile.as_deref())
         .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
