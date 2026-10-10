@@ -49,32 +49,56 @@ Every result lands in your context verbatim, and a fleet grows. Measured on a
 ## Finding the tools
 
 The server lists only the tools your token may call — the master token sees
-72, a per-host token 62, a `readonly` token 36 — so a tool you cannot find is
-usually one your token is not allowed to call, not a missing feature. Clients
-also defer the surface (~13k tokens of definitions): Claude Code, and any MCP
-connector with `defer_loading`, loads a definition only when it is searched
-for, so load **every tool you expect to need in one search call**, not one per
-call. The names, by job:
+~135 of those below (not the `device` row, which a person's paired device
+gets), a per-host token ~100, a `readonly` token ~50 — so a tool you
+cannot find is usually one your token is not allowed to call, not a missing
+feature. The full surface is ~28k tokens of definitions, so clients defer it:
+Claude Code, and any MCP connector with `defer_loading`, loads a definition
+only when it is searched for. Load **every tool you expect to need in one
+search call**, not one per call. Every tool, by job (a test keeps this list
+equal to the server's):
 
 ```text
-orient    fleet_health list_hosts list_projects list_sessions whoami
-          peer_status related_sessions usage_report agent_status
-spawn     new_session new_shell_session new_bg_session spawn_review
-steer     send_prompt run_prompt wait_for_session capture_session
-          session_transcript session_conversation(s) broadcast_prompt
-coordinate send_message inbox dispatch_task wait_for_task list_tasks
-          cancel_task set_session_tags session_history register_self
-          work work_link
-recover   restart_session recreate_session repair_session move_session
-          dismiss_ghost_session safe_kill_session kill_session
-review    repo_changes repo_diff repo_file repo_tree repo_log
-          repo_branches repo_commit repo_commit_diff
-devices   debug_devices
-admin     add_host remove_host probe_host hide_host provision_hosts
-          pair_client list_clients revoke_client set_client_trust set_secret
-          refresh_projects
-          delete_worktree get_clipboard set_clipboard rename_session
-          set_friendly_name list_accounts
+orient     fleet_health list_hosts list_projects list_worktrees list_sessions
+           whoami peer_status related_sessions usage_report agent_status
+           account_usage check_account_headroom session_activity
+spawn      new_session new_shell_session new_bg_session spawn_review
+           shell_terminals adopt_session
+steer      send_prompt run_prompt queue_prompt queued_prompts wait_for_session
+           capture_session session_transcript session_conversation
+           session_conversations session_tool_detail session_summary_since
+           rewind_conversation broadcast_prompt touch_session_viewed ask
+coordinate send_message inbox wait_for_reply dispatch_task wait_for_task
+           list_tasks cancel_task set_session_tags session_history
+           register_self work work_link decide_related_session runs routines
+           start_rules prs
+recover    restart_session recreate_session repair_session move_session
+           resolve_move dismiss_ghost_session safe_kill_session kill_session
+           restore_host_sessions discover_lost_sessions place_transcript
+           lost_target
+review     repo_changes repo_diff repo_file repo_tree repo_log repo_blame
+           repo_branches repo_branch_diff repo_range_diff repo_commit
+           repo_commit_diff
+share      session_share session_narrow session_unshare session_access
+           session_presence my_grants
+files      send_file list_downloads remove_download library get_clipboard
+           set_clipboard
+devices    debug_devices
+assets     list_assets scan_assets import_assets plan_sync apply_sync
+           changesets catalog_admin list_layers propose_layers resolve_preview
+           set_host_layers set_host_harnesses
+admin      add_host remove_host probe_host hide_host merge_host discover_hosts
+           provision_hosts install_agent agent_installs add_project
+           forget_project list_github_repos list_host_worktrees
+           refresh_projects delete_worktree pair_client list_clients
+           revoke_client set_client_trust api_tokens set_secret rename_session
+           set_friendly_name list_accounts get_settings set_setting guide
+           quick_replies work_admin ensure_operator operator_status
+           update_status update_admin link_peer unlink_peer list_peer_links
+device     pr_shepherd mcp_confirms answer_mcp_confirm setting_proposals
+           decide_setting_proposals setting_history control_route
+           control_handoffs list_pages project_picks set_project_pick
+           org_admin update_policy session_claim
 ```
 
 ## Status vocabulary
