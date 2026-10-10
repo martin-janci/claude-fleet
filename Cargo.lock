@@ -764,7 +764,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "claude-fleet"
-version = "0.6.1"
+version = "0.6.2-dev.35.desktop.gea45122"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1539,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-agent"
-version = "0.6.1"
+version = "0.6.2-dev.35.desktop.gea45122"
 dependencies = [
  "clap",
  "fleet-proto",
@@ -1617,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-hub"
-version = "0.6.1"
+version = "0.6.2-dev.35.desktop.gea45122"
 dependencies = [
  "async-trait",
  "clap",
@@ -1640,7 +1640,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-proto"
-version = "0.6.1"
+version = "0.6.2-dev.35.desktop.gea45122"
 dependencies = [
  "base64 0.22.1",
  "serde",

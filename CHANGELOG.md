@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.6.2-dev.35.desktop.gea45122] - 2026-10-10
+
+### Added
+- **forms:** form kit behaviour from the FormsAnatomy board
+- **ui:** draw a work handover as a card in the Conversation view
+- **redesign:** 5.11 J8 warns in the agent tab when the rules cannot read the screen
+- **redesign:** 6.8 J6/J7 in Review and bench sets for every closed-choice Jev use case
+- **redesign:** 11.1/11.8/11.12 org overview tabs, Federation graph, Link two hubs wizard
+- **redesign:** 10.12 wizards in chat, 9.12 trails for a long search, 10.10 transfer loaders
+
+### Changed
+- **mcp:** raise BYTES_PER_TOOL to 815 from the merged surface
+- **backend:** start:progress crosses the bridge with its token; install_agent and agent_installs route under a case
+
+### Fixed
+- **ci:** main green again — the handover card's status word, a feature-gated helper
+- **ui:** a blocked handover reads Needs you, not a seventh status word
+- bugs from a sweep of the last two days' PRs
+- **mcp:** trim this branch's tool and parameter docs back under the 800-byte budget
+- **redesign:** 8.1, 4.4, 4.12, 8.7, 12.3, 2.6, 11.5, 6.9 backend audit gaps
+- **redesign:** 14.14 send_prompt presses the arrows, BTab and a closed list of Ctrl keys
+- **redesign:** 5.13 start steps, 5.3 terminals, 0.1 registry keys, 3.6/1.4/4.5/3.2/3.17 tests, 1.5 hierarchy
+- **redesign:** 3.14, 3.15, 0.6 and layout tokens from the audit
+- **redesign:** 4.9 install fleet-agent from the desktop; 6.3 Blocked and $ per task; 4.1/4.2 spend per account; 6.8 J1 in the Details timeline
+- **redesign:** 3.9 push and open in VS Code in the palette; 3.11 the draft's Atom
+- **redesign:** 7.8, 0.9 design-manual conformance: six words, one icon set, the kit
+
+### Documentation
+- **redesign:** snapshot the 9 Forms boards and the canvas gap audit
 ## [0.6.1] - 2026-10-09
 
 ### Added
@@ -3413,6 +3442,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.6.2-dev.35.desktop.gea45122]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.2-dev.35.desktop.gea45122
 [0.6.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.1
 [0.6.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.0
 [0.5.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.4
