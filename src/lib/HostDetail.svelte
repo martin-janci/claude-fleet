@@ -67,6 +67,7 @@
   import { requestAssetsView } from './app_views';
   import { savedWithUndo } from './forms/form_frame';
   import { linkSessionWork } from './work';
+  import { tablistKeys } from './tablist_keys';
 
   let {
     host,
@@ -699,13 +700,14 @@
     {/if}
   </header>
 
-  <div class="tabs" role="tablist" aria-label="{host.alias} sections" data-testid="detail-tabs">
+  <div class="tabs" role="tablist" aria-label="{host.alias} sections" data-testid="detail-tabs" use:tablistKeys>
     {#each [['overview', 'Overview', null], ['sessions', 'Sessions', hostSessions.length], ['lost', 'Lost & found', lostCount], ['provisioning', 'Provisioning', null]] as const as [id, label, count] (id)}
       <button
         type="button"
         role="tab"
         class="tab"
         aria-selected={tab === id}
+        tabindex={tab === id ? 0 : -1}
         data-testid="detail-tab-{id}"
         onclick={() => (tab = id)}>{label}{#if count != null} <span class="muted">{count}</span>{/if}</button
       >
