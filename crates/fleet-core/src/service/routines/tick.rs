@@ -6,8 +6,8 @@
 //! next one is counted from then.
 
 use super::fix::{
-    turn_code, E_NO_SESSION, E_PROMPT_NOT_QUEUED, E_RUN_BUDGET, E_RUN_STALE, E_RUN_TIME_CAP,
-    E_SESSION_LOST, E_SESSION_REMOVED,
+    turn_code, E_NO_SESSION, E_PROMPT_NOT_DELIVERED, E_PROMPT_NOT_QUEUED, E_RUN_BUDGET,
+    E_RUN_STALE, E_RUN_TIME_CAP, E_SESSION_LOST, E_SESSION_REMOVED,
 };
 use super::{record_skip, repo_matches, usd, EVENTS, PR_EVENTS};
 use crate::cancel::CancellationRegistry;
@@ -44,6 +44,17 @@ pub trait Spawn: Send + Sync {
     async fn stop_turn(&self, _host_alias: &str, _tmux_name: &str) -> Result<(), IpcError> {
         Ok(())
     }
+    /// Types a run's prompt into its fresh session once Claude is ready
+    /// (`handover` is the row queued with the same text). `Err` says why it
+    /// was not typed. Nothing in tests.
+    async fn deliver(
+        &self,
+        _row: &SessionRow,
+        _prompt: &str,
+        _handover: i64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// [`Spawn`] through `service::sessions::new_session`.
@@ -72,6 +83,10 @@ impl Spawn for LiveSpawn {
             &self.ssh,
         )
         .await
+    }
+    async fn deliver(&self, row: &SessionRow, prompt: &str, handover: i64) -> Result<(), String> {
+        crate::service::sessions::seed::seed_routine(&self.store, &self.ssh, row, prompt, handover)
+            .await
     }
 }
 
@@ -191,12 +206,17 @@ pub async fn fire_with(
         }
     }
     let s = lock(&deps.store)?;
+    let mut typing = None;
     let (state, reason, code, session_id) = match spawned {
         Ok(row) => {
             let meta = serde_json::json!({ "routine_id": r.id, "source": "routine" }).to_string();
             let prompt = run_prompt(r, context);
             match s.enqueue_handover(row.id, &prompt, Some(&meta)) {
-                Ok(_) => ("running", note, None, Some(row.id)),
+                Ok(handover) => {
+                    let id = row.id;
+                    typing = Some((row, prompt, handover));
+                    ("running", note, None, Some(id))
+                }
                 Err(e) => (
                     "failed",
                     Some(format!("its prompt was not queued: {}", e.message)),
@@ -207,7 +227,7 @@ pub async fn fire_with(
         }
         Err(e) => ("failed", Some(e.message), Some(e.code), None),
     };
-    s.insert_routine_run(&NewRoutineRun {
+    let run = s.insert_routine_run(&NewRoutineRun {
         routine_id: r.id,
         trigger,
         trigger_ref,
@@ -218,7 +238,42 @@ pub async fn fire_with(
         at: now,
         error_code: code.as_deref(),
         host_alias: Some(&host),
-    })
+    })?;
+    // A fresh session takes no turn until something is typed into it: the
+    // queued prompt alone sat there unread. Typed in the background (the
+    // REPL takes seconds, a trust dialog waits for a person); a run whose
+    // prompt could not be typed fails, so it shows and `retry_once` can
+    // take it, rather than staying `running` for six quiet hours.
+    if let Some((row, prompt, handover)) = typing {
+        let store = Arc::clone(&deps.store);
+        let spawn = Arc::clone(&deps.spawn);
+        let run_id = run.id;
+        crate::rt::spawn(async move {
+            if let Err(why) = spawn.deliver(&row, &prompt, handover).await {
+                undelivered(&store, run_id, &why, crate::store::now_unix());
+            }
+        });
+    }
+    Ok(run)
+}
+
+/// Fail run `run_id` whose prompt was not typed, unless it has already
+/// closed.
+pub(super) fn undelivered(store: &Mutex<Store>, run_id: i64, why: &str, now: i64) {
+    let res = lock(store).and_then(|s| match s.get_routine_run(run_id)? {
+        Some(run) if run.state == "running" => fail(
+            &s,
+            run.id,
+            E_PROMPT_NOT_DELIVERED,
+            &format!("its prompt was not delivered: {why}"),
+            run.cost_micros,
+            now,
+        ),
+        _ => Ok(()),
+    });
+    if let Err(e) = res {
+        tracing::warn!(run = run_id, error = %e.message, "[routines] failing an undelivered run failed");
+    }
 }
 
 /// The prompt a run of `r` queues: its own, the autonomy line (G3.8) and
