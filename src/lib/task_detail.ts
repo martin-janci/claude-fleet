@@ -104,3 +104,18 @@ export function startRuleFor<R extends Pick<StartRule, 'pattern' | 'state'>>(key
       .sort((a, b) => spec(b.pattern) - spec(a.pattern))[0] ?? null
   );
 }
+
+/** The subtasks header's "2 / 4" (G7.6, TaskDetail board): how many are
+ *  done of how many. `null` with none. */
+export function subtaskProgress(subtasks: readonly { status?: string | null }[] | null | undefined): string | null {
+  const all = subtasks ?? [];
+  if (all.length === 0) return null;
+  return `${all.filter((s) => s.status === 'done').length} / ${all.length}`;
+}
+
+/** A subtask's mark: ✓ done, ◐ in progress, ○ anything else. */
+export function subtaskMark(status: string | null | undefined): { glyph: string; label: string } {
+  if (status === 'done') return { glyph: '✓', label: 'done' };
+  if (status === 'in_progress') return { glyph: '◐', label: 'in progress' };
+  return { glyph: '○', label: 'to do' };
+}

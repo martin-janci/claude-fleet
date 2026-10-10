@@ -232,6 +232,18 @@ export interface WorkTask {
   /** Active (primary first), suggested, ended newest first. */
   sessions?: WorkTaskLink[];
   sessions_more?: number;
+  /** Its acceptance lines, the Board's "Finishes when …" (G7.6). Absent
+   *  when none, and from an older hub. */
+  done_when?: string[];
+  /** Its mission and wave, on a read that asked (`with_missions`). */
+  mission?: TaskMission | null;
+}
+
+/** `WorkTask.mission`: the mission and the wave the task sits in (W1 first). */
+export interface TaskMission {
+  id: number;
+  name: string;
+  wave?: number | null;
 }
 
 /** A section header: every group of the whole filtered result. */
@@ -672,6 +684,8 @@ export interface WorkTreeQuery {
   sections?: WorkTreeSectionAsk[];
   /** Add `review_total` from the same read. */
   with_review_total?: boolean;
+  /** Name each task's mission and wave (`WorkTask.mission`, the Board). */
+  with_missions?: boolean;
 }
 
 /** `archived` always goes on the wire: the hub hides archived tasks only
@@ -688,6 +702,7 @@ export function workTree(q: WorkTreeQuery = {}): Promise<Result<WorkTreePage>> {
       per_task: q.per_task,
       sections: q.sections && q.sections.length > 0 ? q.sections : undefined,
       with_review_total: q.with_review_total || undefined,
+      with_missions: q.with_missions || undefined,
     }),
   });
 }

@@ -343,6 +343,48 @@ describe('WorkBoard G3.5: add per column, select, start, PR chip', () => {
     expect(calls('preview_start_work').length + calls('start_work').length).toBeGreaterThan(0);
   });
 
+  it('asks the hub for missions, and a card names its mission and wave (G7.6)', async () => {
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd !== 'work_tree') return null;
+      const p = page();
+      p.tasks[0] = { ...p.tasks[0], mission: { id: 3, name: 'Windows release', wave: 2 } };
+      p.tasks[1] = { ...p.tasks[1], mission: { id: 4, name: 'Demo mission' } };
+      return p;
+    });
+    render(WorkBoard);
+    await flush();
+    expect((calls('work_tree')[0][1] as { args: Record<string, unknown> }).args.with_missions).toBe(true);
+    expect(card('Write notes').querySelector('[data-testid="work-board-mission"]')?.textContent).toBe('Windows release · wave 2');
+    expect(card('Login fails').querySelector('[data-testid="work-board-mission"]')?.textContent).toBe('Demo mission');
+  });
+
+  it('a card with no session offers Start new without being opened; one with a session does not (G7.6)', async () => {
+    selectedTaskId.set(null);
+    render(WorkBoard);
+    await flush();
+    const starts = screen.getAllByTestId('work-board-card-start');
+    expect(starts).toHaveLength(1);
+    expect(starts[0].closest('li')?.textContent).toContain('Write notes');
+    expect(starts[0].querySelector('[data-testid="work-button-primary"]')?.textContent).toBe('Start new');
+  });
+
+  it('the open card says when it finishes, from its done-when lines (G7.6)', async () => {
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd !== 'work_tree') return null;
+      const p = page();
+      p.tasks[1] = { ...p.tasks[1], done_when: ['ci', 'review'] };
+      return p;
+    });
+    selectedTaskId.set('item:12');
+    render(WorkBoard);
+    await flush();
+    expect(screen.getByTestId('work-board-finishes').textContent).toBe('Finishes when CI passes and a review approves');
+    selectedTaskId.set('item:1');
+    await flush();
+    expect(screen.queryByTestId('work-board-finishes')).toBeNull();
+    selectedTaskId.set(null);
+  });
+
   it('a card shows its live pull request with failing checks', async () => {
     const { sessions } = await import('./sessions');
     const { session } = await import('./hosts_fixture');

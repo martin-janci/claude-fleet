@@ -2,6 +2,7 @@
 // what it would send and what is in the way — nothing is made. The Work
 // button asks for it first: a clean preview starts at once, anything else
 // opens the start popover with the conflicts and the choices.
+import { writable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
 import { startWork, type StartWorkArgs } from './trackers';
 import type { DecisionProposal } from './proposals';
@@ -140,6 +141,25 @@ export async function draftBrief(args: StartWorkArgs): Promise<Result<{ brief: s
   return { ok: true, value: { brief, draft: brief_draft } };
 }
 
+/** A brief drafted in the task page (G7.6, "Draft brief from the ticket"),
+ *  held per task in this window: every start of that task from here sends
+ *  it until it is cleared. Nothing is written to the task. */
+export interface HeldBrief {
+  brief: string;
+  draft: BriefDraft;
+}
+export const taskBriefDrafts = writable<ReadonlyMap<string, HeldBrief>>(new Map());
+
+/** Hold `held` for `taskId`; `null` lets it go. */
+export function holdTaskBrief(taskId: string, held: HeldBrief | null): void {
+  taskBriefDrafts.update((m) => {
+    const next = new Map(m);
+    if (held && held.brief.trim()) next.set(taskId, held);
+    else next.delete(taskId);
+    return next;
+  });
+}
+
 /** What a draft read: "from the ticket and 3 earlier notes". */
 export function draftSource(d: BriefDraft): string {
   const notes = d.notes === 1 ? '1 earlier note' : `${d.notes} earlier notes`;
@@ -183,6 +203,22 @@ export function baseStartArgs(t: Pick<WorkTask, 'item_id' | 'key' | 'project_id'
   if (t.project_id != null) base.project_id = t.project_id;
   base.with_brief = true;
   return base;
+}
+
+/** "Start with last settings" (G7.6, the Continue menu): the host and
+ *  repository of the task's most recent session, newest link first, that
+ *  named a host. The repository is that session's when the row is still
+ *  known, else the task's own. `null` with no such session. */
+export function lastStartSettings(
+  t: Pick<WorkTask, 'project_id' | 'sessions'>,
+  rows: readonly Pick<SessionRow, 'id' | 'project_id'>[],
+): { host_alias: string; project_id?: number } | null {
+  const links = (t.sessions ?? []).filter((l) => !!l.host && l.state !== 'suggested' && l.state !== 'rejected');
+  if (links.length === 0) return null;
+  const last = links.reduce((a, b) => ((b.created_at ?? 0) > (a.created_at ?? 0) ? b : a));
+  const row = last.session_id != null ? rows.find((r) => r.id === last.session_id) : undefined;
+  const project = row?.project_id ?? t.project_id ?? null;
+  return project != null ? { host_alias: last.host!, project_id: project } : { host_alias: last.host! };
 }
 
 /** The choices the popover holds, over the base arguments. */

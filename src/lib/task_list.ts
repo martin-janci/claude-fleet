@@ -181,3 +181,19 @@ export function boardLiveSession(t: WorkTask): { name: string; host: string | nu
   if (!s) return null;
   return { name: s.name || `#${s.session_id}`, host: s.host ?? null, session_id: s.session_id as number };
 }
+
+/** The Board card's mission chip (G7.6): "Demo mission · wave 2", the wave
+ *  only when the hub named it. `null` outside a mission. */
+export function boardMissionChip(t: Pick<WorkTask, 'mission'>): string | null {
+  const m = t.mission;
+  if (!m?.name) return null;
+  return m.wave != null ? `${m.name} · wave ${m.wave}` : m.name;
+}
+
+/** A card that has never had a session and is not done: it offers Start new
+ *  on the card itself (G7.6), not only once opened. */
+export function boardOffersStart(t: Pick<WorkTask, 'sessions' | 'stage' | 'status_category' | 'item_id' | 'key'>): boolean {
+  if (t.item_id == null && !t.key) return false;
+  if (t.stage === 'done' || t.status_category === 'done') return false;
+  return (t.sessions ?? []).length === 0;
+}

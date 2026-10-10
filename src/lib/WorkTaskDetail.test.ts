@@ -20,6 +20,7 @@ import { session } from './hosts_fixture';
 import { link, task } from './work_view_fixture';
 import { noteWorkChanged, selectedTaskId, workTreeMeta, type OrgImpact, type TaskDetail } from './work_view';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
+import { holdTaskBrief, taskBriefDrafts } from './start_preview';
 
 const trackerTask: TaskDetail = {
   task: task({
@@ -261,6 +262,56 @@ describe('WorkTaskDetail', () => {
     expect(get(selectedSession)?.id).toBe(12);
   });
 
+  it('▾ Start with last settings starts where the last session ran, without asking when clean (G7.6)', async () => {
+    sessions.set([session('mefistos', 'api', { id: 7, project_id: 3 }), session('mefistos', 'web', { id: 9 })]);
+    handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
+    const plan = { key: 'ABC-12', title: 'Login', item_id: 12, project_id: 3, host_alias: 'mefistos', branch: 'abc-12-login-2', name: 'ABC-12 Login' };
+    handlers.preview_start_work = () => ({
+      key: 'ABC-12', title: 'Login', item_id: 12, plan,
+      projects: [{ id: 3, owner: 'acme', repo: 'api' }],
+      hosts: [{ alias: 'mefistos', reachable: true }],
+      conflicts: [], brief: null, checkout: { exists: false },
+    });
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    await fireEvent.click(within(bar()).getByTestId('work-button-menu'));
+    await flush();
+    const item = within(bar()).getByTestId('work-button-start-last');
+    expect(item.textContent).toContain('Start with last settings');
+    expect(item.querySelector('kbd')?.textContent).toBe('s');
+    // s in the open menu runs it.
+    await fireEvent.keyDown(within(bar()).getByTestId('work-button-menu-list'), { key: 's' });
+    await flush();
+    expect(calls('preview_start_work')[0]).toEqual({ item_id: 12, with_brief: true, host_alias: 'mefistos', project_id: 3 });
+    expect(screen.queryByTestId('start-popover')).toBeNull();
+    expect(calls('start_work')[0]).toEqual({ item_id: 12, with_brief: true, project_id: 3, host_alias: 'mefistos' });
+    expect(get(selectedSession)?.id).toBe(12);
+  });
+
+  it('Start with last settings opens the popover on those settings when something is in the way', async () => {
+    handlers.preview_start_work = () => ({
+      key: 'ABC-12', title: 'Login', item_id: 12,
+      plan: { key: 'ABC-12', title: 'Login', item_id: 12, project_id: 3, host_alias: 'mefistos', branch: 'b', name: 'n' },
+      projects: [{ id: 3, owner: 'acme', repo: 'api' }],
+      hosts: [{ alias: 'mefistos', reachable: true }],
+      conflicts: [{ kind: 'done', message: 'This task is done.' }], brief: null, checkout: { exists: false },
+    });
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    await fromMenu('work-button-start-last');
+    expect(screen.getByTestId('start-popover').textContent).toContain('This task is done.');
+    expect(calls('start_work')).toHaveLength(0);
+  });
+
+  it('a task with no session has no Start with last settings', async () => {
+    handlers.work_task = () => ({ ...trackerTask, task: { ...trackerTask.task, sessions: [] } });
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    await fireEvent.click(within(bar()).getByTestId('work-button-menu'));
+    await flush();
+    expect(within(bar()).queryByTestId('work-button-start-last')).toBeNull();
+  });
+
   it('a start preview that answers after another task opened is dropped (review r07)', async () => {
     let release: (v: unknown) => void = () => {};
     handlers.preview_start_work = () => new Promise((r) => (release = r));
@@ -374,6 +425,71 @@ describe('WorkTaskDetail', () => {
     expect(calls('start_work')[0]).toEqual({
       item_id: 12, with_brief: true, project_id: 3, host_alias: 'mefistos', brief: 'Goal: fix the login.',
     });
+  });
+
+  it('drafts the brief inside the task, holds it, and the next start sends it (G7.6)', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.draft_briefs': 'true' });
+    sessions.set([session('mefistos', 'api', { id: 7, project_id: 3 }), session('mefistos', 'web', { id: 9 })]);
+    handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
+    const plan = { key: 'ABC-12', title: 'Login', item_id: 12, project_id: 3, host_alias: 'mefistos', branch: 'abc-12-login', name: 'ABC-12 Login' };
+    let n = 0;
+    handlers.preview_start_work = (a) => ({
+      key: 'ABC-12', title: 'Login', item_id: 12, plan, missing: null,
+      projects: [{ id: 3, owner: 'acme', repo: 'api' }],
+      hosts: [{ alias: 'mefistos', reachable: true }],
+      conflicts: [],
+      brief: a.draft_brief ? `Goal: fix the login (${++n}).` : 'Steps: log in',
+      ...(a.draft_brief ? { brief_draft: { model: 'haiku', host_alias: 'mefistos', notes: 2 } } : {}),
+      checkout: { exists: false },
+    });
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('task-brief-draft-ask'));
+    await flush();
+    expect(calls('preview_start_work').at(-1)).toEqual({ item_id: 12, with_brief: true, brief: undefined, draft_brief: true });
+    const field = () => screen.getByTestId('task-brief-draft-input') as HTMLTextAreaElement;
+    expect(field().value).toBe('Goal: fix the login (1).');
+    expect(screen.getByTestId('task-brief-draft-meta').textContent).toContain('by haiku on mefistos · from the ticket and 2 earlier notes');
+    expect(get(taskBriefDrafts).get('item:12')?.brief).toBe('Goal: fix the login (1).');
+    // Regenerate, then Undo back to the first draft.
+    await fireEvent.click(screen.getByTestId('task-brief-draft-regenerate'));
+    await flush();
+    expect(field().value).toBe('Goal: fix the login (2).');
+    await fireEvent.click(screen.getByTestId('task-brief-draft-undo'));
+    await flush();
+    expect(field().value).toBe('Goal: fix the login (1).');
+    expect(get(taskBriefDrafts).get('item:12')?.brief).toBe('Goal: fix the login (1).');
+    // The next start from here sends it.
+    await fromMenu('work-button-start-last');
+    expect(calls('start_work')[0]).toEqual({
+      item_id: 12, with_brief: true, project_id: 3, host_alias: 'mefistos', brief: 'Goal: fix the login (1).',
+    });
+    // Clear lets it go; Undo brings it back.
+    await fireEvent.click(screen.getByTestId('task-brief-draft-clear'));
+    await flush();
+    expect(get(taskBriefDrafts).has('item:12')).toBe(false);
+    await fireEvent.click(screen.getByTestId('task-brief-draft-undo'));
+    await flush();
+    expect(get(taskBriefDrafts).get('item:12')?.brief).toBe('Goal: fix the login (1).');
+    holdTaskBrief('item:12', null);
+  });
+
+  it('the Brief block offers no draft with Writing help off, and opens a held draft in the popover', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    expect(screen.queryByTestId('task-brief-draft-ask')).toBeNull();
+    holdTaskBrief('item:12', { brief: 'Held brief', draft: { model: 'haiku', host_alias: 'mefistos', notes: 0 } });
+    await flush();
+    handlers.preview_start_work = () => ({
+      key: 'ABC-12', title: 'Login', item_id: 12,
+      plan: { key: 'ABC-12', title: 'Login', item_id: 12, project_id: 3, host_alias: 'mefistos', branch: 'b', name: 'n' },
+      projects: [{ id: 3, owner: 'acme', repo: 'api' }], hosts: [{ alias: 'mefistos', reachable: true }],
+      conflicts: [], brief: 'Steps', checkout: { exists: false },
+    });
+    await fromMenu('work-button-start-new');
+    expect((screen.getByTestId('start-popover-brief-draft-input') as HTMLTextAreaElement).value).toBe('Held brief');
+    holdTaskBrief('item:12', null);
   });
 
   it("pre-selects Jev's proposed repository, resolves it, and still waits for Start", async () => {

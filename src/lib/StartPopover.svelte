@@ -28,6 +28,7 @@
     startBlockedBy,
     suggestedProjectId,
     type BriefDraft,
+    type HeldBrief,
     type StartChoice,
     type StartPreview,
   } from './start_preview';
@@ -39,9 +40,13 @@
     blocked = null,
     onclose,
     onstarted,
+    held = null,
     /** The re-preview debounce, ms; injectable for tests. */
     debounceMs = 250,
   }: {
+    /** A brief drafted in the task page (G7.6): the popover opens with it
+     *  as its draft, so Start sends it. */
+    held?: HeldBrief | null;
     /** The start's arguments before any choice (by item, else by key). */
     base: StartWorkArgs;
     preview: StartPreview;
@@ -155,10 +160,12 @@
   // Redesign 6.10: a brief drafted on the start's host from the ticket and
   // the task's earlier work. It is the person's to edit and goes only with
   // Start; Clear goes back to the task's brief.
-  let draftMeta = $state<BriefDraft | null>(null);
+  // svelte-ignore state_referenced_locally
+  let draftMeta = $state<BriefDraft | null>(held?.draft ?? null);
   /** Writing help's "Draft agent briefs" (G4.6), off by default. */
   const draftsBriefs = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftBriefs));
-  let draftText = $state('');
+  // svelte-ignore state_referenced_locally
+  let draftText = $state(held?.brief ?? '');
   let drafting = $state(false);
   let draftSeq = 0;
   async function draft() {

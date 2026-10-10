@@ -10,8 +10,10 @@
     showFriendlyNames,
     showRowDetails,
     lostReasonLabel,
+    sessions,
     type SessionRow,
   } from './sessions';
+  import { get } from 'svelte/store';
   import { selectedSession } from './selection';
   import { hostByAlias } from './hosts';
   import { hintAnchor } from './hints';
@@ -32,6 +34,7 @@
   import WorkChip from './WorkChip.svelte';
   import AccountPill from './AccountPill.svelte';
   import {
+    branchMates,
     confirmSessionWork,
     describeEvidence,
     linkSessionWork,
@@ -440,7 +443,7 @@
   // `effective_status`, a different field entirely — irrelevant to this
   // local-vs-ticket check.
   let nameDialog = $state<
-    | { mode: 'name'; sessions: { id: number; label: string }[] }
+    | { mode: 'name'; sessions: { id: number; label: string }[]; branchMates?: { id: number; label: string }[] }
     | { mode: 'rename'; itemId: number; title: string; key?: string | null }
     | null
   >(null);
@@ -457,7 +460,11 @@
     e.stopPropagation();
     if (nameBlocked !== null) return;
     workMenuOpen = false;
-    nameDialog = { mode: 'name', sessions: [{ id: sess.id, label: primaryName }] };
+    nameDialog = {
+      mode: 'name',
+      sessions: [{ id: sess.id, label: primaryName }],
+      branchMates: branchMates(sess, get(sessions)).map((s) => ({ id: s.id, label: s.friendly_name || s.tmux_name })),
+    };
   }
 
   function openRenameWork(e: Event) {

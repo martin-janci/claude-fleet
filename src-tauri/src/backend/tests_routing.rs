@@ -1789,6 +1789,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                             limit: Some(50),
                         }]),
                         with_review_total: Some(true),
+                        with_missions: None,
                     },
                     s,
                 ))

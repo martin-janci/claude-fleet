@@ -1051,6 +1051,7 @@ impl FleetTools {
                         per_task: args.per_task,
                         sections: args.sections.clone().unwrap_or_default(),
                         with_review_total: args.with_review_total == Some(true),
+                        with_missions: args.with_missions == Some(true),
                     },
                 )
                 .map_err(to_mcp_err)?,

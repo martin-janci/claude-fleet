@@ -9,7 +9,9 @@
   import { duplicateProposal, openTask, readErrorText, type TaskDetail } from './work_view';
   import ProposedBy from './ProposedBy.svelte';
   import WorkButton from './WorkButton.svelte';
+  import TaskBrief from './TaskBrief.svelte';
   import type { Result } from './result';
+  import { subtaskMark, subtaskProgress } from './task_detail';
 
   let { detail, part = 'all' }: { detail: TaskDetail; part?: 'all' | 'work' | 'steps' } = $props();
 
@@ -50,16 +52,11 @@
   {#if err}<p class="err" role="alert" data-testid="task-sections-error">{err}</p>{/if}
 
   {#if showWork}
-    {#if detail.notes}
-      <section>
-        <h3>Brief</h3>
-        <p class="text" data-testid="task-notes">{detail.notes}</p>
-      </section>
-    {/if}
+    <TaskBrief task={detail.task} notes={detail.notes} />
 
     <section data-testid="task-subtasks">
       <h3>
-        Subtasks <span class="n">{detail.subtasks?.length ?? 0}</span>
+        Subtasks <span class="n" data-testid="task-subtask-progress">{subtaskProgress(detail.subtasks) ?? 0}</span>
         {#if canAddSubtask}
           <button class="btn btn--quiet" type="button" data-testid="task-add-subtask" onclick={() => (adding = true)}>+ Add subtask</button>
         {/if}
@@ -78,8 +75,9 @@
         />
       {/if}
       {#each detail.subtasks ?? [] as s (s.item_id)}
+        {@const mark = subtaskMark(s.status)}
         <div class="row" data-testid="task-subtask">
-          <span class="dot dot--{s.status ?? 'todo'}" aria-hidden="true"></span>
+          <span class="mark mark--{s.status ?? 'todo'}" role="img" aria-label={mark.label} data-testid="task-subtask-mark">{mark.glyph}</span>
           <button class="link" type="button" onclick={() => openTask(s.task_id)}>{s.title}</button>
           {#if s.key}<span class="key">{s.key}</span>{/if}
           {#if s.origin === 'agent'}<span class="chip agent">delegated job</span>{:else if s.origin === 'proposed'}<span class="chip prop"
@@ -351,20 +349,17 @@
   .state--cancelled {
     color: var(--usage-crit);
   }
-  .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    border: 1.5px solid var(--fg-muted);
+  .mark {
     flex: none;
+    width: 1em;
+    text-align: center;
+    color: var(--fg-muted);
   }
-  .dot--in_progress {
-    background: var(--accent);
-    border-color: var(--accent);
+  .mark--in_progress {
+    color: var(--accent);
   }
-  .dot--done {
-    background: var(--usage-ok);
-    border-color: var(--usage-ok);
+  .mark--done {
+    color: var(--usage-ok);
   }
   details {
     border: 1px solid var(--border);

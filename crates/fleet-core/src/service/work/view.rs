@@ -324,6 +324,25 @@ pub struct WorkTask {
     /// and absent on the wire, when nothing proposes anything.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proposals: Vec<crate::store::DecisionProposal>,
+    /// Its acceptance lines (orchestration O3, the Board's "Finishes when
+    /// …", Orbit Fleet G7.6). Absent when it has none, and from an older hub.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub done_when: Vec<String>,
+    /// The mission it belongs to and its wave there (the Board card's chip,
+    /// G7.6): only on a tree read that asked ([`TreeArgs::with_missions`])
+    /// or groups by mission, and only for a mission this caller may read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission: Option<TaskMission>,
+}
+
+/// [`WorkTask::mission`]: a mission's id and name, and the wave of the
+/// mission's dependency graph the task sits in (W1 first).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskMission {
+    pub id: i64,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wave: Option<u32>,
 }
 
 /// A section header while a tree read counts it: the group, how many tasks,
@@ -857,6 +876,9 @@ pub(crate) struct Graph {
     /// this caller may read: filled by [`tree`] only for a group by mission
     /// (redesign step 6.2), so every other read pays nothing for it.
     pub(crate) missions_by_item: HashMap<i64, (i64, String)>,
+    /// Item id → its wave in its mission's dependency graph, for the items
+    /// in [`Self::missions_by_item`] ([`fill_mission_waves`]).
+    pub(crate) mission_waves: HashMap<i64, u32>,
     /// Account uuid → how it is named (nickname, else email), filled by
     /// [`tree`] only for a group by account.
     pub(crate) account_labels: HashMap<String, String>,
@@ -1086,6 +1108,7 @@ impl Graph {
             deps,
             scope: scope.clone(),
             missions_by_item: HashMap::new(),
+            mission_waves: HashMap::new(),
             account_labels: HashMap::new(),
         })
     }
@@ -2134,6 +2157,15 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         cost_micros,
         stage: stage.into(),
         proposals,
+        done_when: item.map(|i| i.item.done_when.clone()).unwrap_or_default(),
+        mission: item.and_then(|i| {
+            let (id, name) = g.missions_by_item.get(&i.item.id)?;
+            Some(TaskMission {
+                id: *id,
+                name: name.clone(),
+                wave: g.mission_waves.get(&i.item.id).copied(),
+            })
+        }),
     };
     TaskSummary {
         task,
@@ -2571,6 +2603,9 @@ pub struct TreeArgs {
     pub sections: Vec<SectionAsk>,
     /// Add `review_total`, from the same read.
     pub with_review_total: bool,
+    /// Name each task's mission and wave ([`WorkTask::mission`], the
+    /// Board, G7.6). Off, a read pays nothing for it.
+    pub with_missions: bool,
 }
 
 /// The most sections one tree read pages.
@@ -2848,6 +2883,43 @@ fn section_pages(
         .collect()
 }
 
+/// [`Graph::mission_waves`]: each mission member's wave, the topological
+/// depth over the `work_item_deps` edges between members of the same
+/// mission, W1 first; the same depth [`super::graph::build`] gives a
+/// mission's page. An edge out of the mission does not count; the store
+/// refuses a cycle, and the depth bound is a second net.
+fn fill_mission_waves(g: &mut Graph) {
+    fn depth(id: i64, g: &Graph, mission: i64, memo: &mut HashMap<i64, u32>, guard: usize) -> u32 {
+        if let Some(w) = memo.get(&id) {
+            return *w;
+        }
+        let w = if guard == 0 {
+            1
+        } else {
+            1 + g
+                .deps
+                .get(&id)
+                .map(|ds| {
+                    ds.iter()
+                        .filter(|d| g.missions_by_item.get(d).map(|m| m.0) == Some(mission))
+                        .map(|d| depth(*d, g, mission, memo, guard - 1))
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0)
+        };
+        memo.insert(id, w);
+        w
+    }
+    let mut memo = HashMap::new();
+    let guard = g.missions_by_item.len() + 1;
+    let ids: Vec<(i64, i64)> = g.missions_by_item.iter().map(|(i, m)| (*i, m.0)).collect();
+    for (item, mission) in ids {
+        depth(item, g, mission, &mut memo, guard);
+    }
+    g.mission_waves = memo;
+}
+
 /// `work { action: tree, filters?, cursor?, limit?, per_task? }`.
 ///
 /// Takes the caller's whole [`ViewScope`] (multi-user M1, T7): the tree names
@@ -2861,37 +2933,37 @@ pub fn tree(
     // A group by mission names only the missions this caller may read
     // (`missions::sees_mission`); read before the graph, which takes the
     // lock itself.
-    let readable_missions: HashMap<i64, String> = match args.filters.group_by.as_deref() {
-        Some("mission") => super::missions::missions(store, view)?
+    let by_mission = args.with_missions || args.filters.group_by.as_deref() == Some("mission");
+    let readable_missions: HashMap<i64, String> = if by_mission {
+        super::missions::missions(store, view)?
             .into_iter()
             .map(|m| (m.id, m.name))
-            .collect(),
-        _ => HashMap::new(),
+            .collect()
+    } else {
+        HashMap::new()
     };
     let g = {
         let s = lock(store)?;
         let mut g = Graph::load_for(&s, view)?;
-        match args.filters.group_by.as_deref() {
-            Some("mission") => {
-                for (item, mission) in s.mission_membership()? {
-                    if let Some(name) = readable_missions.get(&mission) {
-                        g.missions_by_item.insert(item, (mission, name.clone()));
-                    }
+        if by_mission {
+            for (item, mission) in s.mission_membership()? {
+                if let Some(name) = readable_missions.get(&mission) {
+                    g.missions_by_item.insert(item, (mission, name.clone()));
                 }
             }
-            Some("account") => {
-                for a in s.list_accounts()? {
-                    let label = a
-                        .nickname
-                        .clone()
-                        .or(a.email.clone())
-                        .or(a.display_name.clone());
-                    if let Some(label) = label.filter(|l| !l.trim().is_empty()) {
-                        g.account_labels.insert(a.uuid, label);
-                    }
+            fill_mission_waves(&mut g);
+        }
+        if args.filters.group_by.as_deref() == Some("account") {
+            for a in s.list_accounts()? {
+                let label = a
+                    .nickname
+                    .clone()
+                    .or(a.email.clone())
+                    .or(a.display_name.clone());
+                if let Some(label) = label.filter(|l| !l.trim().is_empty()) {
+                    g.account_labels.insert(a.uuid, label);
                 }
             }
-            _ => {}
         }
         g
     };

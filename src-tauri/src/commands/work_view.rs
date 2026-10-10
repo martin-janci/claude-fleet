@@ -41,6 +41,9 @@ pub struct WorkTreeCmdArgs {
     /// Add the review inbox's total from the same read.
     #[serde(default)]
     pub with_review_total: Option<bool>,
+    /// Name each task's mission and wave (the Board, G7.6).
+    #[serde(default)]
+    pub with_missions: Option<bool>,
 }
 
 /// A command that names one task.
@@ -386,6 +389,7 @@ pub(crate) mod routed {
             per_task: args.per_task,
             sections: args.sections.clone(),
             with_review_total: args.with_review_total,
+            with_missions: args.with_missions,
             ..read("tree")
         };
         match backend.hub() {
@@ -400,6 +404,7 @@ pub(crate) mod routed {
                     per_task: args.per_task,
                     sections: args.sections.unwrap_or_default(),
                     with_review_total: args.with_review_total == Some(true),
+                    with_missions: args.with_missions == Some(true),
                 },
             ),
         }
