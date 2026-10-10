@@ -531,5 +531,7 @@ describe('sessionAgent', () => {
     expect(sessionAgent({ kind: 'work' })).toBe('claude');
     expect(sessionAgent({ kind: 'bg' })).toBe('claude');
     expect(sessionAgent({ kind: 'shell' })).toBe('shell');
+    // An older hub's shell row, after the Rust row's serde default.
+    expect(sessionAgent({ agent: 'claude', kind: 'shell' })).toBe('shell');
   });
 });
