@@ -159,6 +159,10 @@ pub struct OverLimit {
     pub host_alias: String,
     pub login: HostLogin,
     pub pause_at_pct: f64,
+    /// Set when it is the account's daily spend limit (an API-key account,
+    /// M15 step G2.9) that is spent, not its usage window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily: Option<DailyLimitHit>,
 }
 
 impl OverLimit {
@@ -168,6 +172,9 @@ impl OverLimit {
             Some(p) => format!("profile {p} on {}", self.host_alias),
             None => format!("{}'s own login", self.host_alias),
         };
+        if let Some(d) = &self.daily {
+            return format!("the account of {who} {}", d.reason());
+        }
         format!(
             "the account of {who} is at {:.0}%, over accounts.pause_at ({:.0}%)",
             self.login.used_pct.unwrap_or_default(),
@@ -187,8 +194,95 @@ pub struct LoginAccount {
     pub login: HostLogin,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
-    /// At or past `accounts.pause_at`: automation leaves it alone.
+    /// At or past `accounts.pause_at`, or past its daily limit: automation
+    /// leaves it alone.
     pub over: bool,
+    /// The daily spend limit it hit, when that is why it is `over`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily: Option<DailyLimitHit>,
+}
+
+/// An API-key account that spent its daily limit today (UTC), M15 step
+/// G2.9 (`service::add_account`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DailyLimitHit {
+    pub limit_usd: f64,
+    pub spent_usd: f64,
+}
+
+impl DailyLimitHit {
+    /// "spent $12.30 today, its daily limit is $10.00".
+    pub fn reason(&self) -> String {
+        format!(
+            "spent ${:.2} today, its daily limit is ${:.2}; it resets at 00:00 UTC",
+            self.spent_usd, self.limit_usd
+        )
+    }
+}
+
+/// Whether `account_uuid` has a daily limit and spent it today (UTC, the
+/// day `usage_daily_account` books under), from the store's LIVE spend.
+pub fn daily_limit_hit(
+    s: &Store,
+    account_uuid: &str,
+    now: i64,
+) -> Result<Option<DailyLimitHit>, IpcError> {
+    let Some(limit) = crate::service::add_account::daily_limit_usd(s, account_uuid) else {
+        return Ok(None);
+    };
+    let today = now.div_euclid(86_400);
+    let micros = s
+        .account_live_cost_by_day(account_uuid, today)?
+        .get(&today)
+        .copied()
+        .unwrap_or(0);
+    let spent = micros as f64 / 1_000_000.0;
+    Ok((spent >= limit).then_some(DailyLimitHit {
+        limit_usd: limit,
+        spent_usd: spent,
+    }))
+}
+
+/// Refuse a start under the login `profile` on `host_alias` whose account
+/// spent its daily limit today (`E_ACCOUNT_LIMIT`). Unlike
+/// [`refuse_over_limit`] a person cannot start anyway: the limit is the
+/// person's own cap, raised or cleared on the Accounts page. A login with
+/// no account or no limit is never refused.
+pub fn refuse_over_daily_limit(
+    s: &Store,
+    host_alias: &str,
+    profile: Option<&str>,
+    now: i64,
+) -> Result<(), IpcError> {
+    let Some(host) = s.get_host_row(host_alias)? else {
+        return Ok(());
+    };
+    let profile = profile.map(str::trim).filter(|p| !p.is_empty());
+    let Some(login) = logins_with(&host, |_| None)
+        .into_iter()
+        .find(|l| l.profile.as_deref() == profile)
+    else {
+        return Ok(());
+    };
+    let Some(hit) = daily_limit_hit(s, &login.account_uuid, now)? else {
+        return Ok(());
+    };
+    let who = match profile {
+        Some(p) => format!("profile {p} on {host_alias}"),
+        None => format!("{host_alias}'s own login"),
+    };
+    Err(IpcError::new(
+        codes::E_ACCOUNT_LIMIT,
+        format!(
+            "the account of {who} {}; raise or clear the limit on the Accounts page",
+            hit.reason()
+        ),
+    )
+    .with_details(serde_json::json!({
+        "account_uuid": login.account_uuid,
+        "daily_limit_usd": hit.limit_usd,
+        "spent_usd": hit.spent_usd,
+    })))
 }
 
 /// [`LoginAccount`] of the login `profile` on `host_alias` (`None` = the
@@ -229,18 +323,22 @@ pub fn login_accounts(
         return Ok(Vec::new());
     }
     let accounts = s.list_accounts()?;
-    Ok(logins
+    logins
         .into_iter()
-        .map(|login| LoginAccount {
-            host_alias: host_alias.to_string(),
-            over: login.used_pct.is_some_and(|u| u >= pause_at),
-            email: accounts
-                .iter()
-                .find(|a| a.uuid == login.account_uuid)
-                .and_then(|a| a.email.clone()),
-            login,
+        .map(|login| {
+            let daily = daily_limit_hit(s, &login.account_uuid, now)?;
+            Ok(LoginAccount {
+                host_alias: host_alias.to_string(),
+                over: login.used_pct.is_some_and(|u| u >= pause_at) || daily.is_some(),
+                email: accounts
+                    .iter()
+                    .find(|a| a.uuid == login.account_uuid)
+                    .and_then(|a| a.email.clone()),
+                daily,
+                login,
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>, IpcError>>()
 }
 
 /// Whether automation (a routine, the mission loop) should leave the login
@@ -260,6 +358,7 @@ pub fn over_limit(
             host_alias: a.host_alias,
             login: a.login,
             pause_at_pct: pause_at_pct(s),
+            daily: a.daily,
         }))
 }
 
@@ -279,6 +378,11 @@ pub fn refuse_over_limit(
     let Some(over) = over_limit(s, host_alias, profile, now)? else {
         return Ok(());
     };
+    if over.daily.is_some() {
+        // A spent daily limit is no question to answer: `over_limit_ok`
+        // does not pass it (`sessions::new_session` refuses it too).
+        return refuse_over_daily_limit(s, host_alias, profile, now);
+    }
     let Some(host) = s.get_host_row(host_alias)? else {
         return Ok(());
     };
@@ -760,6 +864,7 @@ mod tests {
             },
             email: Some("me@x.com".into()),
             over: false,
+            daily: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(

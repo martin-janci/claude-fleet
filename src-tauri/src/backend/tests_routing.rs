@@ -871,6 +871,27 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "add_account",
+            "add_account",
+            json!({ "action": "daily_limit", "host_alias": "trn", "profile": "api", "daily_limit_usd": 5.0 }),
+            r#"{"account_uuid":"apikey-0123456789abcdef","daily_limit_usd":5.0}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::add_account::routed::add_account(
+                    b,
+                    s,
+                    h,
+                    fleet_core::service::add_account::AddAccountArgs {
+                        action: "daily_limit".into(),
+                        host_alias: "trn".into(),
+                        profile: "api".into(),
+                        daily_limit_usd: Some(5.0),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "start_rules",
             "start_rules",
             json!({ "action": "accept", "rule_id": 3 }),
@@ -6682,6 +6703,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/api_tokens.rs",
         include_str!("../commands/api_tokens.rs"),
+    ),
+    (
+        "commands/add_account.rs",
+        include_str!("../commands/add_account.rs"),
     ),
     (
         "commands/presence.rs",

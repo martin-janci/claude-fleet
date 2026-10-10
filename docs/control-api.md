@@ -92,6 +92,17 @@ Devices does; the device you are using has none). A rotation keeps the host's
 created time, records the rotation and starts "used" over; stamping use never
 invalidates the hub's token cache (`auth_epoch`), a rotation does.
 
+### Add account
+
+`add_account` makes a new login profile on a host (M15 step G2.9,
+[accounts.md](accounts.md#add-an-account)): a Claude subscription through a
+login pane fleet opens on the host (`start_login`, `login_status`,
+`login_key`, `login_code`, `end_login`), or an Anthropic API key checked
+with Anthropic and written to the host only (`api_key`, with an optional
+`daily_limit_usd`; `daily_limit` changes it). Served to the master and the
+hub owner's devices; everything but `login_status` needs the master or a
+trusted full device. The key and the code are never logged or returned.
+
 ### Named tokens
 
 Settings → Control API → **+ Token** (or the `api_tokens` tool) creates a

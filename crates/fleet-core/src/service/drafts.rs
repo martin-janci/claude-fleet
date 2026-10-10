@@ -95,8 +95,9 @@ pub fn commit_body(model: &str, profile: Option<&str>) -> Result<String, String>
         Some(p) => {
             crate::validate::claude_profile(p).map_err(|e| e.message)?;
             format!(
-                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; ",
-                quote(p)
+                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; {}",
+                quote(p),
+                crate::tmux::PROFILE_API_KEY
             )
         }
         None => String::new(),
