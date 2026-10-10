@@ -463,6 +463,17 @@ pub async fn new_session(
     normalize_launch(&mut args)?;
     {
         let s = lock(store)?;
+        // M15 step G2.9: a login whose API-key account spent its daily limit
+        // starts nothing today, from any caller (`over_limit_ok` is the
+        // usage window's question, not this).
+        if args.profile.is_some() {
+            crate::service::account_limits::refuse_over_daily_limit(
+                &s,
+                &args.host_alias,
+                args.profile.as_deref(),
+                crate::store::now_unix(),
+            )?;
+        }
         reject_lost_session_name(&s, &args.host_alias, &args.name, args.owner_person_id)?;
         reject_adoptable_session_name(&s, &args.host_alias, &args.name)?;
     }
@@ -2021,6 +2032,15 @@ pub async fn restart_session(
         }
     };
     refuse_unvalidated_agent(&agent)?;
+    if launch.profile.is_some() && agent == crate::store::AGENT_CLAUDE && kind != "shell" {
+        // As `new_session`: no relaunch under a login past its daily limit.
+        crate::service::account_limits::refuse_over_daily_limit(
+            &*lock(store)?,
+            &args.host_alias,
+            launch.profile.as_deref(),
+            crate::store::now_unix(),
+        )?;
+    }
     let pane_cmd: String =
         recreate_pane_command(&kind, &agent, claude_id.as_deref(), &args.name, &launch);
     let tmux = exec_for(&args.host_alias, ssh);

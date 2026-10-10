@@ -64,6 +64,7 @@
     "accept_work_proposal",
     "accept_work_proposals",
     "ack_work_link",
+    "add_account",
     "add_library_items",
     "add_org",
     "add_org_project",

@@ -11,6 +11,12 @@ Auto-generated from the embedded MCP tool router. See [`control-api.md`](control
 
 Each Claude account's latest plan usage: 5-hour and weekly utilization with reset times, status, fetched_at. Never fetches.
 
+### `add_account`
+
+Add a Claude login profile on a host: a subscription login or an API key.
+
+Parameters: `action`, `api_key`, `code`, `daily_limit_usd`, `host_alias`, `key`, `nickname`, `profile`
+
 ### `add_host`
 
 Register a host. transport "ssh" (default) is probed first and persisted only if reachable; "agent" (a host the hub cannot reach; it runs fleet-agent and dials in) is persisted unprobed, unreachable until its agent connects (token: `fleet-hub agent-token <alias>` on the hub). Returns the host row.
@@ -1111,6 +1117,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::prs::list_pull_requests`
 - `commands::start_rules::start_rules`
 - `commands::api_tokens::api_tokens`
+- `commands::add_account::add_account`
 - `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`

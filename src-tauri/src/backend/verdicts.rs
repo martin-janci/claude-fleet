@@ -908,6 +908,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // window is onto, so the hub's. Its tool serves the owner's trusted full
     // device read and act tokens; an admin one stays the hub master's.
     ("api_tokens", Verdict::Routed { tool: "api_tokens" }),
+    // Add account (M15 step G2.9): the profile goes on a host of the fleet
+    // this window is onto, and its account into that fleet's list.
+    (
+        "add_account",
+        Verdict::Routed {
+            tool: "add_account",
+        },
+    ),
     // Start rules (Orbit Fleet 8.11): the hub decides and tallies its own
     // starts, so its rules are the ones that count.
     (

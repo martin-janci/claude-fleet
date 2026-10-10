@@ -665,6 +665,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     // device, and only the master creates an admin token
     // (`tools::api_tokens::token_minter`). Not readonly: create and revoke
     // hand out and take away fleet access.
+    // M15 step G2.9: a new login profile on a host, signed in or holding an
+    // API key. Fleet administration like `add_host`; the writes also need
+    // the master or a trusted full device (`owner_device_admin`).
+    ToolPolicy {
+        name: "add_account",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     ToolPolicy {
         name: "api_tokens",
         access: Access::Person,
@@ -2330,8 +2340,10 @@ const REDACT_KEYS: &[&str] = &[
 /// `set_secret`'s secret value — not even its length may be persisted (a
 /// length still leaks information about a secret). `secret` is `work_admin`'s
 /// tracker credential, for the same reason. `code` is `link_peer`'s one-time
-/// pairing code, still valid when the link fails (review r04 S3).
-const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret", "code"];
+/// pairing code, still valid when the link fails (review r04 S3), and
+/// `add_account`'s sign-in code. `api_key` is `add_account`'s Anthropic key
+/// (M15 G2.9), which fleet never stores.
+const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret", "code", "api_key"];
 /// Argument keys whose value is an object of person-typed answers (`ask`'s
 /// `values` may carry a form's secret fields): only the field count is kept,
 /// as `<N fields>`, never a name or a value. `args` is a nested payload
@@ -2864,6 +2876,22 @@ mod tests {
         ] {
             assert!(!could_pass_for_a_marker_line(line), "{line:?}");
         }
+    }
+
+    #[test]
+    fn redact_args_never_keeps_an_api_key() {
+        let args = serde_json::json!({
+            "action": "api_key",
+            "api_key": "sk-ant-api03-secretsecretsecret",
+            "host_alias": "mercury",
+            "profile": "api",
+        });
+        let out = redact_args(args.as_object());
+        assert!(
+            !out.contains("sk-ant") && !out.contains("api_key="),
+            "{out}"
+        );
+        assert!(out.contains("host_alias=mercury"), "{out}");
     }
 
     #[test]

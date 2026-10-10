@@ -2733,6 +2733,7 @@ fn router_sum_serves_every_tool() {
         include_str!("prs.rs"),
         include_str!("pr_shepherd.rs"),
         include_str!("api_tokens.rs"),
+        include_str!("add_account.rs"),
         include_str!("routines.rs"),
         include_str!("start_rules.rs"),
         include_str!("presence.rs"),
