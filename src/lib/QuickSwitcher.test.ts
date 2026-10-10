@@ -1169,3 +1169,179 @@ describe('QuickSwitcher in the New layout', () => {
     expect(screen.queryByText('openmarket · 3 projects')).toBeNull();
   });
 });
+
+// ---- tasks and the cache-wide ticket search ---------------------------------
+
+describe('QuickSwitcher finds work beyond the three views', () => {
+  const item = (id: number, key: string, title: string, source = 'jira') => ({
+    id,
+    tracker_id: source === 'local' ? null : 1,
+    source,
+    key,
+    title,
+    status_category: 'todo',
+    created_at: 1,
+    updated_at: 1,
+  });
+  let calls: { view?: string; query?: string; include_local?: boolean }[] = [];
+  beforeEach(() => {
+    calls = [];
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd !== 'work_tickets') return null;
+      const a = (args as { args: { view?: string; query?: string; include_local?: boolean } }).args;
+      calls.push(a);
+      if (a.query) return [item(7, 'ABC-7', 'Oprava prihlásenia cez SSO')];
+      // The unfiltered list: a ticket, then the caller's own task.
+      if (a.include_local) return [item(1, 'ABC-1', 'Some ticket'), item(9, 'TASK-9', 'Napísať úlohu', 'local')];
+      return [];
+    });
+  });
+
+  it("lists the person's own tasks with no tracker connected", async () => {
+    __trackers.set([]);
+    render(QuickSwitcher);
+    await openSwitcher();
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-ticket')).toHaveLength(1));
+    expect(screen.getByText('My tasks')).toBeTruthy();
+    // Only the tasks are kept from the unfiltered list.
+    expect(screen.queryByText(/Some ticket/)).toBeNull();
+    expect(calls.every((c) => c.view === undefined)).toBe(true);
+  });
+
+  it('a typed title searches the whole cache, accents ignored', async () => {
+    __trackers.set([
+      { id: 1, provider: 'jira', name: 'acme', site_url: 'https://acme.atlassian.net', state: 'ok', created_at: 1, config: { key_prefixes: ['ABC'] } },
+    ]);
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: '#prihlasenia sso' } });
+    await vi.waitFor(() => expect(calls.some((c) => c.query === 'prihlasenia sso' && c.include_local)).toBe(true));
+    await vi.waitFor(() =>
+      expect(screen.getAllByTestId('switcher-ticket').some((el) => el.textContent?.includes('Oprava prihlásenia'))).toBe(true),
+    );
+    // The words found are marked in the row, accents and all.
+    const marks = Array.from(document.querySelectorAll('[data-testid="switcher-ticket"] mark.hit')).map((m) => m.textContent);
+    expect(marks).toEqual(expect.arrayContaining(['prihlásenia', 'SSO']));
+  });
+
+  it('an empty # search names tasks, not sessions', async () => {
+    __trackers.set([]);
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: '#nothing-like-this' } });
+    await vi.waitFor(() => expect(screen.getByText(/No task matches “nothing-like-this”/)).toBeTruthy());
+  });
+});
+
+describe('QuickSwitcher planning rows and recent searches', () => {
+  beforeEach(() => {
+    __trackers.set([]);
+    vi.mocked(__invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tree') {
+        return {
+          tasks: [], groups: [], orgs: [], trackers: [], total: 0,
+          facets: {
+            iterations: [{ name: 'Sprint 42', active: true, count: 3 }],
+            epics: [{ task_id: 'item:10', key: 'PAY-10', title: 'Checkout', count: 2 }],
+          },
+        };
+      }
+      return cmd === 'work_tickets' ? [] : null;
+    });
+  });
+
+  it('a sprint or an epic opens the Work view filtered to it', async () => {
+    const { knownWorkFacets, workViewFilters, sidebarView } = await import('./work_view');
+    knownWorkFacets.set(null);
+    workViewFilters.set({ query: 'old' });
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'current sprint' } });
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-planning').length).toBeGreaterThan(0));
+    expect(screen.getAllByTestId('switcher-planning')[0].textContent).toContain('Current sprint');
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(workViewFilters)).toEqual({ iteration: 'current' });
+    expect(get(sidebarView)).toBe('work');
+  });
+
+  it('remembers the query a row was picked with and offers it next time', async () => {
+    const { recentQueries } = await import('./quick_switcher');
+    recentQueries.set([]);
+    render(QuickSwitcher);
+    let input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'checkout' } });
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-planning').length).toBeGreaterThan(0));
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(recentQueries)).toEqual(['checkout']);
+    input = await openSwitcher();
+    const chip = screen.getByTestId('switcher-recent-query');
+    expect(chip.textContent).toBe('checkout');
+    await fireEvent.click(chip);
+    await tick();
+    expect(input.value).toBe('checkout');
+  });
+});
+
+describe('QuickSwitcher searches everywhere on the hub', () => {
+  const hit = (over: Record<string, unknown>) => ({ ref: '1', title: '', snippet: '', at: 1, ...over });
+  beforeEach(() => {
+    __trackers.set([]);
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'search') {
+        const q = (args as { args: { query: string } }).args.query;
+        if (q !== 'token refresh') return { hits: [], transcripts_indexed: true };
+        return {
+          transcripts_indexed: true,
+          hits: [
+            hit({ kind: 'transcript', ref: 'c-1:0', snippet: 'the race is in the token refresh', snippet_marks: [[23, 33]], session_id: 1, session_name: 'blue-sirius', host_alias: 'mefistos' }),
+            hit({ kind: 'item', ref: '7', title: 'PAY-7 Token refresh fails', title_marks: [[6, 19]], task_id: 'item:7', key: 'PAY-7' }),
+          ],
+        };
+      }
+      return cmd === 'work_tickets' ? [] : null;
+    });
+  });
+
+  it('lists what was said and the tasks it found, under Everywhere', async () => {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'token refresh' } });
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-found')).toHaveLength(2));
+    expect(screen.getByText('Everywhere')).toBeTruthy();
+    const rows = screen.getAllByTestId('switcher-found').map((el) => el.textContent ?? '');
+    expect(rows[0]).toContain('Said in · blue-sirius · mefistos');
+    expect(Array.from(document.querySelectorAll('[data-testid="switcher-found"] mark.hit')).map((m) => m.textContent)).toContain(
+      'Token refresh',
+    );
+  });
+
+  it('a hit in a conversation opens its session on Find', async () => {
+    const { conversationFindRequest } = await import('./search_api');
+    const { sessionView } = await import('./prefs');
+    conversationFindRequest.set(null);
+    sessionView.set('terminal');
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'token refresh' } });
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-found')).toHaveLength(2));
+    const row = screen.getAllByTestId('switcher-found')[0];
+    await fireEvent.click(row);
+    await tick();
+    expect(get(selectedSession)?.id).toBe(1);
+    expect(get(sessionView)).toBe('conversation');
+    await vi.waitFor(() => expect(get(conversationFindRequest)).toMatchObject({ sessionId: 1, query: 'token refresh' }));
+  });
+
+  it('a task hit opens it in the Work view', async () => {
+    const { sidebarView } = await import('./work_view');
+    sidebarView.set('sessions');
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'token refresh' } });
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-found')).toHaveLength(2));
+    await fireEvent.click(screen.getAllByTestId('switcher-found')[1]);
+    await vi.waitFor(() => expect(get(sidebarView)).toBe('work'));
+  });
+});

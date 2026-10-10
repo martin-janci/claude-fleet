@@ -173,6 +173,23 @@
       ]
     },
     {
+      "title": "Search",
+      "items": [
+        {
+          "type": "field",
+          "key": "search.index_transcripts"
+        },
+        {
+          "type": "field",
+          "key": "search.transcript_days",
+          "when": {
+            "key": "search.index_transcripts",
+            "truthy": true
+          }
+        }
+      ]
+    },
+    {
       "title": "Company budgets",
       "items": [
         {

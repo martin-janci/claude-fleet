@@ -1842,6 +1842,10 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/162_work_bucket_owner.sql"),
         already_applied: Some(work_buckets_has_owner),
     },
+    // Search phase 3: the full-text index (`search_docs`, FTS5
+    // `search_fts`) and the triggers that keep it in step. `IF NOT EXISTS`
+    // and an upsert backfill, then a rebuild: safe to re-run.
+    Migration::plain(163, include_str!("../../migrations/163_search_index.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

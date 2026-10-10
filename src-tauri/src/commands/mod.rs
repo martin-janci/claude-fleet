@@ -33,6 +33,7 @@ pub mod quick_replies;
 pub mod resolve_move;
 pub mod routines;
 pub mod runs;
+pub mod search;
 pub mod sessions;
 pub mod start_rules;
 pub mod tasks;

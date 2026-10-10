@@ -285,6 +285,9 @@ pub fn spawn_reconcile_tick(
                 // Wave 5 G1: per-session token usage, once per usage.interval_secs,
                 // in its own single-flight task so a slow host never stalls the tick.
                 service::usage::spawn_collect(store, ssh);
+                // Search phase 3: conversation text into the search index,
+                // only with `search.index_transcripts` on (off by default).
+                service::search_index::spawn_index(store, ssh);
                 // Wave 3 Track E: fail open tasks whose worker died or that
                 // outlived `tasks.max_age_secs` (also swept by list/wait calls).
                 if let Ok(s) = store.lock() {

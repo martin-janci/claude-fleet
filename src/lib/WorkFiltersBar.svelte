@@ -32,12 +32,16 @@
     normalizeFilters,
     sameFilters,
     saveWorkView,
+    WORK_SORT_LABELS,
+    WORK_SORTS,
     WORK_STAGE_LABELS,
     WORK_STAGES,
     workLayout,
     workViewFilters,
     workViews,
     type ConflictNotice,
+    type WorkSort,
+    type WorkTreeFacets,
     type WorkTreeFilters,
     type WorkTreeOrg,
     type WorkStage,
@@ -46,6 +50,7 @@
   } from './work_view';
   import WorkConflictNotice from './WorkConflictNotice.svelte';
   import { railWorkViewId } from './work_rail_view';
+  import { parseWorkQuery, suggestWorkQuery, type WorkQuerySuggestion } from './work_query';
 
   let {
     orgs,
@@ -59,6 +64,9 @@
      *  what the Assignee picker and the column chips offer. */
     people = [],
     columns = [],
+    /** Every sprint, epic and type among the tasks the caller sees (the
+     *  page's `facets`): the Planning pickers and the search's completions. */
+    facets: pageFacets = {},
   }: {
     orgs: WorkTreeOrg[];
     trackers: WorkTreeTracker[];
@@ -66,6 +74,7 @@
     listLayout?: boolean;
     people?: readonly string[];
     columns?: readonly string[];
+    facets?: WorkTreeFacets;
   } = $props();
 
   // A chip for the value on now, even when no task loaded carries it.
@@ -93,14 +102,59 @@
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   // Typed but not yet applied: the filters' old query must not overwrite it.
   let searchPending = false;
-  function onSearch(v: string) {
-    search = v;
+  // The search box is a small query language (`work_query.ts`): a finished
+  // `sprint:current` becomes a filter at once and leaves the box; the words
+  // left are the query, applied after the debounce.
+  const vocab = $derived({ facets: pageFacets, people: peopleChips });
+  function onSearch(v: string, all = false) {
+    const parsed = parseWorkQuery(v, vocab, all);
+    search = parsed.rest;
+    if (Object.keys(parsed.patch).length > 0) {
+      cancelSearch();
+      set({ ...parsed.patch, query: parsed.query });
+      return;
+    }
     searchPending = true;
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => {
       searchPending = false;
-      set({ query: v });
+      set({ query: parsed.query });
     }, searchDebounceMs);
+  }
+  // Completions for the word being typed: a field, or one of its values.
+  let searchFocused = $state(false);
+  let suggestAt = $state(-1);
+  const suggestions: WorkQuerySuggestion[] = $derived(searchFocused ? suggestWorkQuery(search, vocab) : []);
+  $effect(() => {
+    void suggestions;
+    suggestAt = -1;
+  });
+  let searchInput: HTMLInputElement | undefined = $state();
+  function pickSuggestion(sg: WorkQuerySuggestion) {
+    onSearch(sg.input);
+    searchInput?.focus();
+  }
+  function onSearchKey(e: KeyboardEvent) {
+    if (suggestions.length > 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      const n = suggestions.length;
+      suggestAt = e.key === 'ArrowDown' ? (suggestAt + 1) % n : (suggestAt - 1 + n) % n;
+      return;
+    }
+    if ((e.key === 'Enter' || e.key === 'Tab') && suggestAt >= 0 && suggestions[suggestAt]) {
+      e.preventDefault();
+      pickSuggestion(suggestions[suggestAt]);
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      onSearch(search, true);
+      return;
+    }
+    if (e.key === 'Escape' && suggestions.length > 0) {
+      e.stopPropagation();
+      searchFocused = false;
+    }
   }
   function cancelSearch() {
     clearTimeout(searchTimer);
@@ -111,7 +165,8 @@
   // query, and the debounce applies theirs).
   const offF = workViewFilters.subscribe((v) => {
     if (searchPending) return;
-    if ((v.query ?? '') !== search.trim()) search = v.query ?? '';
+    // What is still being typed (an unfinished `sprint:`) stays in the box.
+    if ((v.query ?? '') !== parseWorkQuery(search, { facets: pageFacets }).query) search = v.query ?? '';
   });
 
   function set(patch: Partial<WorkTreeFilters>) {
@@ -158,6 +213,7 @@
     workFacets(f, {
       orgName: (id) => orgs.find((o) => o.id === id)?.name,
       trackerName: (id) => trackers.find((t) => t.id === id)?.name,
+      epicTitle: (ref) => (pageFacets.epics ?? []).find((e) => e.task_id === ref || e.key?.toLowerCase() === ref.toLowerCase())?.title,
     }),
   );
   // The strip and the badge carry what the panel holds; search and the two
@@ -461,6 +517,63 @@
   </div>
 {/snippet}
 
+{#snippet planning()}
+  {@const iterations = pageFacets.iterations ?? []}
+  {@const epics = pageFacets.epics ?? []}
+  {@const types = withCurrent(pageFacets.item_types ?? [], f.item_type)}
+  {#if iterations.length > 0 || epics.length > 0 || types.length > 0 || f.iteration || f.epic}
+    <section class="group">
+      <h3 class="label">Planning</h3>
+      <div class="pair">
+        {#if iterations.length > 0 || f.iteration}
+          <select
+            class="of-btn pick-select"
+            aria-label="Sprint"
+            data-testid="work-filter-sprint"
+            value={f.iteration ?? ''}
+            onchange={(e) => set({ iteration: (e.currentTarget as HTMLSelectElement).value || undefined })}
+          >
+            <option value="">Any sprint</option>
+            <option value="current" title="The tracker's active sprint or cycle">Current sprint</option>
+            {#each iterations as it (it.name)}<option value={it.name}>{it.name}{it.active ? ' (active)' : ''} · {it.count}</option>{/each}
+            {#if f.iteration && f.iteration !== 'current' && f.iteration !== 'none' && !iterations.some((i) => i.name === f.iteration)}
+              <option value={f.iteration}>{f.iteration}</option>
+            {/if}
+            <option value="none">No sprint</option>
+          </select>
+        {/if}
+        {#if epics.length > 0 || f.epic}
+          <select
+            class="of-btn pick-select"
+            aria-label="Epic"
+            data-testid="work-filter-epic"
+            value={f.epic ?? ''}
+            onchange={(e) => set({ epic: (e.currentTarget as HTMLSelectElement).value || undefined })}
+          >
+            <option value="">Any epic</option>
+            {#each epics as ep (ep.task_id)}
+              <option value={ep.key ?? ep.task_id}>{ep.key ? `${ep.key} ` : ''}{ep.title} · {ep.count}</option>
+            {/each}
+            {#if f.epic && !epics.some((ep) => (ep.key ?? ep.task_id) === f.epic)}<option value={f.epic}>{f.epic}</option>{/if}
+          </select>
+        {/if}
+        {#if types.length > 0}
+          <select
+            class="of-btn pick-select"
+            aria-label="Type"
+            data-testid="work-filter-type"
+            value={f.item_type ?? ''}
+            onchange={(e) => set({ item_type: (e.currentTarget as HTMLSelectElement).value || undefined })}
+          >
+            <option value="">Any type</option>
+            {#each types as ty (ty)}<option value={ty}>{ty}</option>{/each}
+          </select>
+        {/if}
+      </div>
+    </section>
+  {/if}
+{/snippet}
+
 {#snippet panelFoot()}
   <section class="foot">
     <h3 class="sr-only">Sessions</h3>
@@ -538,17 +651,48 @@
        then Filters with its count and the grouping; the panel under them
        holds organisation and status chips (several at once), tracker and
        assignee, and the live-session switch. -->
-  <label class="of-search">
-    <Icon name="search" size={14} />
-    <input
-      type="search"
-      aria-label="Search tasks"
-      placeholder="Search tasks or keys"
-      data-testid="work-search"
-      value={search}
-      oninput={(e) => onSearch((e.currentTarget as HTMLInputElement).value)}
-    />
-  </label>
+  <div class="search-wrap">
+    <label class="of-search">
+      <Icon name="search" size={14} />
+      <input
+        bind:this={searchInput}
+        type="search"
+        aria-label="Search tasks"
+        placeholder="Search tasks or keys · sprint: epic: type: status: is:"
+        title="Words of a key or title, any order. Narrow with sprint:current, epic:ABC-1, type:bug, assignee:me, status:doing, is:review, sort:key"
+        data-testid="work-search"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={suggestions.length > 0}
+        aria-controls="work-search-suggestions"
+        aria-activedescendant={suggestAt >= 0 ? `work-search-suggestion-${suggestAt}` : undefined}
+        value={search}
+        oninput={(e) => onSearch((e.currentTarget as HTMLInputElement).value)}
+        onkeydown={onSearchKey}
+        onfocus={() => (searchFocused = true)}
+        onblur={() => (searchFocused = false)}
+      />
+    </label>
+    {#if suggestions.length > 0}
+      <ul class="suggestions" id="work-search-suggestions" role="listbox" aria-label="Completions" data-testid="work-search-suggestions">
+        {#each suggestions as sg, i (sg.input)}
+          <li
+            id="work-search-suggestion-{i}"
+            role="option"
+            aria-selected={i === suggestAt}
+            class:active={i === suggestAt}
+            data-testid="work-search-suggestion"
+            onmousedown={(e) => {
+              e.preventDefault();
+              pickSuggestion(sg);
+            }}
+          >
+            <span class="sg-label">{sg.label}</span>{#if sg.hint}<span class="sg-hint">{sg.hint}</span>{/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </div>
   <div class="of-filters">
     <button
       bind:this={filtersBtn}
@@ -580,6 +724,21 @@
       </select>
       <span aria-hidden="true">▾</span>
     </label>
+    <label class="of-btn quiet group-by" title="Order inside each section">
+      <span>Sort:</span>
+      <select
+        aria-label="Sort by"
+        data-testid="work-sort-select"
+        value={f.sort ?? 'activity'}
+        onchange={(e) => {
+          const v = (e.currentTarget as HTMLSelectElement).value as WorkSort;
+          set({ sort: v === 'activity' ? undefined : v });
+        }}
+      >
+        {#each WORK_SORTS as o (o)}<option value={o}>{WORK_SORT_LABELS[o].toLowerCase()}</option>{/each}
+      </select>
+      <span aria-hidden="true">▾</span>
+    </label>
   </div>
   {#if panelOpen}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -599,6 +758,7 @@
       {@render orgChips()}
       {@render stageChips()}
       {@render pickers()}
+      {@render planning()}
       {@render panelFoot()}
       {@render moreFilters()}
     </section>
@@ -635,6 +795,44 @@
   }
   .grow {
     flex: 1 1 auto;
+  }
+  .search-wrap {
+    position: relative;
+  }
+  .suggestions {
+    position: absolute;
+    z-index: 5;
+    top: calc(100% + 2px);
+    left: 0;
+    right: 0;
+    margin: 0;
+    padding: 4px;
+    list-style: none;
+    background: var(--bg-raise);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-pop);
+  }
+  .suggestions li {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    padding: 3px 6px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .suggestions li.active,
+  .suggestions li:hover {
+    background: var(--accent-soft);
+  }
+  .sg-label {
+    font-family: var(--font-mono);
+  }
+  .sg-hint {
+    color: var(--fg-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .filters-btn {
     padding: 0 6px;

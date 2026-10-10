@@ -40,6 +40,7 @@ pub mod repo_url;
 pub mod rt;
 #[cfg(test)]
 mod scope_guard_tests;
+pub mod search_text;
 pub mod service;
 pub mod shell;
 pub mod ssh;

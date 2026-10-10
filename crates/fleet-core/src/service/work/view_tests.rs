@@ -2885,3 +2885,188 @@ fn a_stage_is_the_first_of_done_blocked_review_progress() {
     assert_eq!(stage_of(Some("todo"), None, false, false, 1), "in_progress");
     assert_eq!(stage_of(None, None, false, false, 0), "backlog");
 }
+
+// ---- sprints, epics, types and order (search phase 2) ----------------------
+
+/// TK-1 and TK-2 in the active "Sprint 42"; TK-3 in "Sprint 41"; TK-10 an
+/// epic over TK-11 (a story) over TK-12 (a subtask), in no sprint.
+fn planned_world() -> W {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        let write = |ext: &str, key: &str, title: &str, f: &dyn Fn(&mut TrackerItemWrite)| {
+            let mut i = TrackerItemWrite {
+                external_id: ext.into(),
+                key: Some(key.into()),
+                title: title.into(),
+                status_name: "In Progress".into(),
+                status_category: "in_progress".into(),
+                containers: vec!["TP".into()],
+                assignee_id: Some("me".into()),
+                kind: Some("Story".into()),
+                hierarchy_level: Some(0),
+                ..Default::default()
+            };
+            f(&mut i);
+            s.upsert_tracker_item(w.tracker, &i).unwrap();
+        };
+        write("1", "TK-1", "Login fails", &|i| {
+            i.iteration = Some("Sprint 42".into());
+            i.iteration_active = true;
+            i.kind = Some("Bug".into());
+            i.updated_ext = Some(300);
+        });
+        write("2", "TK-2", "Audit log", &|i| {
+            i.iteration = Some("Sprint 42".into());
+            i.iteration_active = true;
+            i.updated_ext = Some(100);
+        });
+        write("3", "TK-3", "Nobody on it yet", &|i| {
+            i.iteration = Some("Sprint 41".into());
+            i.updated_ext = Some(200);
+        });
+        write("10", "TK-10", "Prihlásenie cez SSO", &|i| {
+            i.kind = Some("Epic".into());
+            i.hierarchy_level = Some(1);
+        });
+        write("11", "TK-11", "SSO login page", &|i| {
+            i.parent_external_id = Some("10".into());
+        });
+        write("12", "TK-12", "SSO button", &|i| {
+            i.parent_external_id = Some("11".into());
+            i.hierarchy_level = Some(-1);
+            i.kind = Some("Sub-task".into());
+        });
+    }
+    w
+}
+
+#[test]
+fn the_current_sprint_a_named_one_or_none() {
+    let w = planned_world();
+    let f = |it: &str| WorkTreeFilters {
+        iteration: Some(it.into()),
+        ..Default::default()
+    };
+    let mut current = keys(&page(&w, &OrgScope::All, f("current")));
+    current.sort();
+    assert_eq!(current, ["TK-1", "TK-2"]);
+    assert_eq!(keys(&page(&w, &OrgScope::All, f("sprint 41"))), ["TK-3"]);
+    let mut none = keys(&page(&w, &OrgScope::All, f("none")));
+    none.sort();
+    assert_eq!(none, ["TK-10", "TK-11", "TK-12"]);
+    assert!(task_of(&page(&w, &OrgScope::All, f("current")), "TK-1").iteration_active);
+}
+
+#[test]
+fn an_epic_lists_itself_and_everything_under_it() {
+    let w = planned_world();
+    for name in ["TK-10", "tk-10"] {
+        let p = page(
+            &w,
+            &OrgScope::All,
+            WorkTreeFilters {
+                epic: Some(name.into()),
+                ..Default::default()
+            },
+        );
+        let mut got = keys(&p);
+        got.sort();
+        assert_eq!(got, ["TK-10", "TK-11", "TK-12"], "epic {name}");
+    }
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let sub = task_of(&p, "TK-12");
+    assert_eq!(
+        sub.in_epic.as_ref().and_then(|e| e.key.as_deref()),
+        Some("TK-10")
+    );
+    assert_eq!(sub.hierarchy_level, Some(-1));
+    assert_eq!(task_of(&p, "TK-1").in_epic, None);
+}
+
+#[test]
+fn a_type_matches_in_any_case_and_the_query_any_word_order() {
+    let w = planned_world();
+    let p = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            item_type: Some("bug".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(keys(&p), ["TK-1"]);
+    let p = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            query: Some("sso prihlasenie".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(keys(&p), ["TK-10"], "every word, accents ignored");
+}
+
+#[test]
+fn the_page_offers_every_sprint_epic_and_type_whatever_the_filters() {
+    let w = planned_world();
+    let p = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            item_type: Some("bug".into()),
+            ..Default::default()
+        },
+    );
+    let its: Vec<(&str, bool, u32)> = p
+        .facets
+        .iterations
+        .iter()
+        .map(|i| (i.name.as_str(), i.active, i.count))
+        .collect();
+    assert_eq!(its, [("Sprint 42", true, 2), ("Sprint 41", false, 1)]);
+    let epics: Vec<(Option<&str>, u32)> = p
+        .facets
+        .epics
+        .iter()
+        .map(|e| (e.epic.key.as_deref(), e.count))
+        .collect();
+    assert_eq!(epics, [(Some("TK-10"), 2)]);
+    assert_eq!(p.facets.item_types, ["Bug", "Epic", "Story", "Sub-task"]);
+}
+
+#[test]
+fn sort_by_key_reads_the_number_and_by_updated_newest_first() {
+    let w = planned_world();
+    let sorted = |by: &str| {
+        let p = page(
+            &w,
+            &OrgScope::All,
+            WorkTreeFilters {
+                sort: Some(by.into()),
+                group_by: Some("org".into()),
+                ..Default::default()
+            },
+        );
+        keys(&p)
+    };
+    assert_eq!(
+        sorted("key"),
+        ["TK-1", "TK-2", "TK-3", "TK-10", "TK-11", "TK-12"]
+    );
+    // TK-10..12 have no tracker time: they fall back to the item's own
+    // (now), so they lead; the rest follow the tracker's, newest first.
+    let updated = sorted("updated");
+    let ticketed: Vec<&String> = updated.iter().filter(|k| k.len() == 4).collect();
+    assert_eq!(ticketed, ["TK-1", "TK-3", "TK-2"]);
+}
+
+#[test]
+fn an_unknown_sort_is_refused() {
+    let err = check_filters(&WorkTreeFilters {
+        sort: Some("random".into()),
+        ..Default::default()
+    })
+    .unwrap_err();
+    assert!(err.message.contains("filters.sort"), "{}", err.message);
+}

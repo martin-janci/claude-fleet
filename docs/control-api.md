@@ -55,7 +55,7 @@ the host's detail in the **Hosts** view (⌘I):
   `E_FORBIDDEN`; fleet-wide listings (`list_sessions`, …) still see every
   host.
 - `readonly` — only tools that observe the fleet (`list_*`, `capture_session`,
-  `session_history`, `session_conversations`, `inbox`, `peer_status`,
+  `session_history`, `session_conversations`, `search`, `inbox`, `peer_status`,
   `session_transcript`, `repo_*`,
   `get_clipboard`, `wait_for_session`, `wait_for_reply`, `wait_for_task`, `list_tasks`, …).
   Anything that sends, kills, deletes, provisions, dispatches, writes the
@@ -422,6 +422,18 @@ Index by area (names only; see the reference for details):
   one), `send_message`, `inbox`. Rows with
   `kind: external` are interactive Claude sessions running outside tmux:
   fleet can read them (`session_transcript`) but not control them.
+- **Search** — `search { query, kinds?, limit? }` finds anything the hub
+  indexes, without knowing where to look: tasks and tickets (key, title,
+  brief, description), sessions (name, host, branch, tags, last prompt,
+  notes), a conversation's first prompt, pull requests, the work journal,
+  and — when an owner has turned on `search.index_transcripts` (off by
+  default; `transcripts_indexed` in the answer says) — what was said in
+  every conversation. Every word must match, in any order, case and accents
+  ignored, each as a prefix. Only what the caller may see comes back; a
+  hit names its `session_id` or `task_id`, so the next call reads it
+  (`session_conversation`, `work { action: task }`). The Work view's
+  `filters` (`work { action: tree }`, including `iteration`, `epic`,
+  `item_type` and `sort`) are described in `docs/work-graph.md`.
 - **Lifecycle & recovery** — `restart_session`, `rewind_conversation`
   (truncate a session's Claude transcript into a new conversation: mode
   `fork` starts a new session from that point — in this worktree, or with

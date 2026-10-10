@@ -116,6 +116,13 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `usage.interval_secs` | `300` | seconds, `0` = off | fleet | Seconds between usage passes, one batched read per host. |
 | `usage.prices_json` | `{}` | JSON map: model → USD per million tokens | fleet | Per-model prices for the estimated cost, in USD per million tokens (input, output, cache_write, cache_read). {} uses the built-in prices only. |
 
+## search
+
+| Setting | Default | Range | Scope | What it does |
+|---|---|---|---|---|
+| `search.index_transcripts` | `false` | on / off | fleet | Copy what is said in each session into the hub's search index, so a search finds it in any conversation. Turning it off deletes the copied text. Experimental. Asks to confirm. |
+| `search.transcript_days` | `30` | 1–365 days | fleet | Days of conversation text the search index keeps. |
+
 ## accounts
 
 | Setting | Default | Range | Scope | What it does |

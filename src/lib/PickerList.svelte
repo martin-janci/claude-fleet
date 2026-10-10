@@ -24,6 +24,23 @@
     groupSub?: string;
     /** Render `rowActions` on this row (hover; mouse only). */
     actionable?: boolean;
+    /** `[start, end)` ranges of the label the query matched, highlighted. */
+    marks?: [number, number][];
+  }
+
+  /** The label cut at `marks`: plain and matched pieces, in order. */
+  export function markedPieces(label: string, marks: readonly [number, number][] | undefined): { text: string; hit: boolean }[] {
+    if (!marks || marks.length === 0) return [{ text: label, hit: false }];
+    const out: { text: string; hit: boolean }[] = [];
+    let at = 0;
+    for (const [a, b] of marks) {
+      if (a < at || b > label.length) continue;
+      if (a > at) out.push({ text: label.slice(at, a), hit: false });
+      out.push({ text: label.slice(a, b), hit: true });
+      at = b;
+    }
+    if (at < label.length) out.push({ text: label.slice(at), hit: false });
+    return out;
   }
 
   /** DOM id of the option for `key` in the list `listId` (for aria-activedescendant). */
@@ -148,7 +165,9 @@
         <span class="label"
           >{#if item.badge}<span class="badge" title={item.badge.title} data-testid="picker-badge"
               >{item.badge.icon}</span
-            >{/if}{item.label}</span
+            >{/if}{#each markedPieces(item.label, item.marks) as piece, i (i)}{#if piece.hit}<mark class="hit"
+                >{piece.text}</mark
+              >{:else}{piece.text}{/if}{/each}</span
         >
         {#if item.description}
           <span class="desc">{item.description}</span>
@@ -223,6 +242,14 @@
     flex-direction: column;
     min-width: 0;
     flex: 1 1 auto;
+  }
+  .hit {
+    background: none;
+    color: inherit;
+    font-weight: 600;
+    text-decoration: underline;
+    text-decoration-color: var(--accent);
+    text-underline-offset: 2px;
   }
   .label {
     white-space: nowrap;

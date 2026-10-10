@@ -118,11 +118,16 @@ export type WorkFacetId =
   | 'assignee'
   | 'has'
   | 'review'
+  | 'iteration'
+  | 'epic'
+  | 'item_type'
   | 'query';
 
 export interface WorkFacetNames {
   orgName?: (id: number) => string | undefined;
   trackerName?: (id: number) => string | undefined;
+  /** An epic's title by its key or task id ("TK-10 Login"). */
+  epicTitle?: (ref: string) => string | undefined;
 }
 
 export function workFacets(f: WorkTreeFilters, names: WorkFacetNames = {}): (Facet & { id: WorkFacetId })[] {
@@ -147,6 +152,15 @@ export function workFacets(f: WorkTreeFilters, names: WorkFacetNames = {}): (Fac
   if (n.assignee) out.push({ id: 'assignee', label: `Assignee: ${n.assignee}` });
   if (n.has !== undefined) out.push({ id: 'has', label: `Sessions: ${HAS_FILTER_LABELS[n.has]}` });
   if (n.review) out.push({ id: 'review', label: 'To review' });
+  if (n.iteration) {
+    const it = n.iteration;
+    out.push({ id: 'iteration', label: it === 'current' ? 'Current sprint' : it === 'none' ? 'No sprint' : `Sprint: ${it}` });
+  }
+  if (n.epic) {
+    const title = names.epicTitle?.(n.epic);
+    out.push({ id: 'epic', label: `Epic: ${title ? `${n.epic} ${title}` : n.epic}` });
+  }
+  if (n.item_type) out.push({ id: 'item_type', label: `Type: ${n.item_type}` });
   if (n.query) out.push({ id: 'query', label: `Search: “${n.query}”` });
   return out;
 }

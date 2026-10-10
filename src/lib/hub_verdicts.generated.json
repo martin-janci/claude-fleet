@@ -269,6 +269,7 @@
     "save_work_rule",
     "save_work_view",
     "scan_debug_devices",
+    "search",
     "send_file",
     "send_prompt",
     "session_access",

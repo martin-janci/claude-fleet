@@ -30,6 +30,8 @@ pub struct ViewItem {
     /// `work_items.org_id`: a LOCAL item's own org; never read for a
     /// tracker item (its org is its tracker's).
     pub own_org: Option<i64>,
+    /// `meta.iteration_active`: the item's sprint is the tracker's active one.
+    pub iteration_active: bool,
 }
 
 /// One link as the Work view reads it: the row (its `org_id` still the
@@ -187,7 +189,11 @@ impl Store {
                     CASE WHEN json_valid(w.meta) \
                           AND json_type(w.meta, '$.assignee_id') = 'text' \
                          THEN json_extract(w.meta, '$.assignee_id') END, \
-                    containers, org_id FROM work_items w \
+                    containers, org_id, \
+                    CASE WHEN json_valid(w.meta) \
+                          AND json_extract(w.meta, '$.iteration_active') = 1 \
+                         THEN 1 ELSE 0 END \
+               FROM work_items w \
              WHERE w.tracker_id IS NULL OR w.tracker_id IN (SELECT id FROM trackers) \
                 OR EXISTS (SELECT 1 FROM work_links l WHERE l.item_id = w.id)"
         ))?;
@@ -197,6 +203,7 @@ impl Store {
                 assignee_id: r.get(ITEM_COLUMN_COUNT)?,
                 containers: json_list(r.get(ITEM_COLUMN_COUNT + 1)?),
                 own_org: r.get(ITEM_COLUMN_COUNT + 2)?,
+                iteration_active: r.get::<_, i64>(ITEM_COLUMN_COUNT + 3)? == 1,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
