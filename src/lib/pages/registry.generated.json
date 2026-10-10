@@ -25,6 +25,7 @@
       "label": "Reconcile interval",
       "modified": false,
       "restart": "app",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -48,6 +49,7 @@
       "label": "Stale working timeout",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -71,6 +73,7 @@
       "label": "Stale mark lifts after",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -94,6 +97,7 @@
       "label": "Keep lost sessions",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "1209600",
@@ -115,6 +119,7 @@
       "label": "Concurrent restores",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "count",
       "value": "4"
@@ -135,6 +140,7 @@
       "label": "Delay between restores",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -155,6 +161,7 @@
       "label": "Pause all automation",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -173,6 +180,7 @@
       "label": "Mission loop",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "true"
@@ -193,6 +201,7 @@
       "label": "Highest mission autonomy",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "count",
       "value": "1"
@@ -211,6 +220,7 @@
       "label": "Press Enter when stuck",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -229,6 +239,7 @@
       "label": "Recreate out-of-memory sessions",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -249,6 +260,7 @@
       "label": "Out-of-memory budget",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "count",
       "value": "2",
@@ -269,6 +281,7 @@
       "label": "Garbage-collect idle sessions",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -289,6 +302,7 @@
       "label": "Background agent idle limit",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "86400",
@@ -310,6 +324,7 @@
       "label": "Shell idle limit",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "604800",
@@ -331,6 +346,7 @@
       "label": "Work session idle limit",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "0",
@@ -352,6 +368,7 @@
       "label": "GC sweep interval",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -375,6 +392,7 @@
       "label": "Keep lost outside sessions",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -396,6 +414,7 @@
       "label": "Projects roots",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "{}"
@@ -428,6 +447,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "github"
@@ -448,6 +468,7 @@
       "label": "Task timeout",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "86400",
@@ -467,6 +488,7 @@
       "label": "Re-create vanished worktrees",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -487,6 +509,7 @@
       "label": "Workspace check interval",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -509,6 +532,7 @@
       "label": "Download: file cap",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "mib",
       "value": "100"
@@ -529,6 +553,7 @@
       "label": "Downloads: space",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "mib",
       "value": "2048"
@@ -549,6 +574,7 @@
       "label": "Keep downloads",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "days",
       "value": "604800",
@@ -568,6 +594,7 @@
       "label": "Voice relay",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -588,6 +615,7 @@
       "label": "Voice: longest recording",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "seconds",
       "value": "300",
@@ -609,6 +637,7 @@
       "label": "Voice: microphone idle release",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "seconds",
       "value": "1800",
@@ -630,6 +659,7 @@
       "label": "Move: transcript cap",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -652,6 +682,7 @@
       "label": "Move: git bundle cap",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -674,6 +705,7 @@
       "label": "Move: ignored entry cap",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -696,6 +728,7 @@
       "label": "Move: ignored total cap",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -718,6 +751,7 @@
       "label": "Move: session state cap",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -740,6 +774,7 @@
       "label": "Move: wait timeout",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "minutes",
       "value": "240"
@@ -758,6 +793,7 @@
       "label": "Collect token usage",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "true"
@@ -778,6 +814,7 @@
       "label": "Usage interval",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -801,6 +838,7 @@
       "label": "Ask before starting at",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "percent",
       "value": "90"
@@ -819,6 +857,7 @@
       "label": "Price overrides",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -841,6 +880,7 @@
       "label": "Error reports kept",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -863,6 +903,7 @@
       "label": "Error report age",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -886,6 +927,7 @@
       "label": "Context red threshold",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "percent",
       "value": "85"
@@ -906,6 +948,7 @@
       "label": "Trust a host's Claude version for",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -928,6 +971,7 @@
       "label": "Disk low at",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "percent",
       "value": "90"
@@ -948,6 +992,7 @@
       "label": "Claude behind after",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -970,6 +1015,7 @@
       "label": "Hooks silent after",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -991,6 +1037,7 @@
       "label": "Provision into git-tracked skills",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -1011,6 +1058,7 @@
       "label": "Install the ag launcher",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -1033,6 +1081,7 @@
       "label": "Retention: work journal",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "days",
       "value": "365",
@@ -1054,6 +1103,7 @@
       "label": "Retention: done tickets",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "days",
       "value": "180",
@@ -1075,6 +1125,7 @@
       "label": "Retention: work timeline",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "days",
       "value": "180",
@@ -1096,6 +1147,7 @@
       "label": "Recent work",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "days",
       "value": "14"
@@ -1116,6 +1168,7 @@
       "label": "Tracker sync interval",
       "modified": false,
       "restart": "app",
+      "scope": "fleet",
       "tags": [],
       "unit": "seconds",
       "value": "300",
@@ -1137,6 +1190,7 @@
       "label": "Asset scan check",
       "modified": false,
       "restart": "app",
+      "scope": "fleet",
       "tags": [],
       "unit": "minutes",
       "value": "3600",
@@ -1158,6 +1212,7 @@
       "label": "Asset scan age",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -1178,6 +1233,7 @@
       "label": "Asset cards and safe sync",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "true"
@@ -1196,6 +1252,7 @@
       "label": "Push applied cards",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -1216,6 +1273,7 @@
       "label": "Ticket description cache",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -1237,6 +1295,7 @@
       "label": "Trusted branch projects",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "[]"
@@ -1255,6 +1314,7 @@
       "label": "Keep evidence snippets",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "true"
@@ -1273,6 +1333,7 @@
       "label": "Ticket context at session start",
       "modified": false,
       "restart": "hooks",
+      "scope": "fleet",
       "tags": [
         "experimental"
       ],
@@ -1294,6 +1355,7 @@
       "modified": false,
       "per_org": true,
       "restart": "none",
+      "scope": "org",
       "tags": [
         "experimental",
         "ai"
@@ -1321,6 +1383,7 @@
       "modified": false,
       "per_org": true,
       "restart": "none",
+      "scope": "org",
       "tags": [
         "ai"
       ],
@@ -1343,6 +1406,7 @@
       "label": "Tidy: done for",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "days",
       "value": "2"
@@ -1363,6 +1427,7 @@
       "label": "Tidy: idle for",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "4"
@@ -1384,6 +1449,7 @@
       "modified": false,
       "per_org": true,
       "restart": "none",
+      "scope": "org",
       "tags": [],
       "unit": "days",
       "value": "7"
@@ -1403,6 +1469,7 @@
       "label": "Auto-tidy",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -1440,6 +1507,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "done_idle,pr_merged_idle"
@@ -1464,6 +1532,7 @@
       "label": "Release track",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "stable"
@@ -1487,6 +1556,7 @@
       "label": "Hub updates",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "notify"
@@ -1510,6 +1580,7 @@
       "label": "Agent updates",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "notify"
@@ -1533,6 +1604,7 @@
       "label": "Desktop updates",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "notify"
@@ -1555,6 +1627,7 @@
       "label": "Phone updates",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "notify"
@@ -1575,6 +1648,7 @@
       "label": "Update check interval",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "21600"
@@ -1593,6 +1667,7 @@
       "label": "Maintenance window",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": ""
@@ -1613,6 +1688,7 @@
       "label": "Rollout wave soak",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "3600"
@@ -1631,6 +1707,7 @@
       "label": "Mirror release files",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -1650,6 +1727,7 @@
       "label": "Decisions (Jev)",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "network",
@@ -1691,6 +1769,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -1731,6 +1810,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -1771,6 +1851,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -1811,6 +1892,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -1851,6 +1933,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -1891,6 +1974,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -1931,6 +2015,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -1971,6 +2056,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -2011,6 +2097,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -2051,6 +2138,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -2091,6 +2179,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -2131,6 +2220,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -2171,6 +2261,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -2211,6 +2302,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -2251,6 +2343,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -2291,6 +2384,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -2331,6 +2425,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -2371,6 +2466,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -2411,6 +2507,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -2433,6 +2530,7 @@
       "label": "Jev: send unassigned",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "network"
@@ -2455,6 +2553,7 @@
       "label": "Jev: send unassigned replies",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "network"
@@ -2478,6 +2577,7 @@
       "label": "Jev: timeout",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -2500,6 +2600,7 @@
       "label": "Jev: breaker failures",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -2522,6 +2623,7 @@
       "label": "Jev: breaker pause",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -2544,6 +2646,7 @@
       "label": "Jev: daily token budget",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "tokens",
       "value": "2000000",
@@ -2567,6 +2670,7 @@
       "label": "Jev: model",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -2589,6 +2693,7 @@
       "label": "Jev: keep runs",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "days",
       "value": "90",
@@ -2610,6 +2715,7 @@
       "modified": false,
       "owned_by": "fleet-hub serve --bind",
       "restart": "none",
+      "scope": "process",
       "tags": [
         "network"
       ],
@@ -2632,6 +2738,7 @@
       "modified": false,
       "owned_by": "fleet-hub serve --public-url",
       "restart": "none",
+      "scope": "process",
       "tags": [
         "network"
       ],
@@ -2654,6 +2761,7 @@
       "modified": false,
       "owned_by": "fleet-hub serve --allowed-host",
       "restart": "none",
+      "scope": "process",
       "tags": [
         "network",
         "advanced"
@@ -2676,6 +2784,7 @@
       "modified": false,
       "owned_by": "fleet-hub serve --local-host",
       "restart": "none",
+      "scope": "process",
       "tags": [],
       "unit": "none",
       "value": "true"
@@ -2695,6 +2804,7 @@
       "modified": false,
       "owned_by": "fleet-hub serve --allow-plaintext",
       "restart": "none",
+      "scope": "process",
       "tags": [
         "network"
       ],
@@ -2730,6 +2840,7 @@
       ],
       "owned_by": "fleet-hub serve --tls",
       "restart": "none",
+      "scope": "process",
       "tags": [
         "network"
       ],
@@ -2751,6 +2862,7 @@
       "modified": false,
       "owned_by": "Settings → Control API",
       "restart": "none",
+      "scope": "process",
       "tags": [
         "ai"
       ],
@@ -2774,6 +2886,7 @@
       "modified": false,
       "owned_by": "Settings → Control API",
       "restart": "none",
+      "scope": "process",
       "tags": [],
       "unit": "count",
       "value": "4180"
@@ -2793,6 +2906,7 @@
       "modified": false,
       "owned_by": "Settings → Control API",
       "restart": "none",
+      "scope": "process",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -2814,6 +2928,7 @@
       "modified": false,
       "owned_by": "the settings table only",
       "restart": "none",
+      "scope": "process",
       "tags": [
         "advanced"
       ],
@@ -2837,6 +2952,7 @@
       "modified": false,
       "per_org": true,
       "restart": "none",
+      "scope": "org",
       "tags": [],
       "unit": "usd",
       "value": "0",
@@ -2859,6 +2975,7 @@
       "modified": false,
       "per_org": true,
       "restart": "none",
+      "scope": "org",
       "tags": [],
       "unit": "usd",
       "value": "0",
@@ -2907,6 +3024,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "needs_you,failed,blocked,routine_failed"
@@ -2954,6 +3072,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "needs_you,failed,blocked,routine_failed"
@@ -3001,6 +3120,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "needs_you"
@@ -3019,6 +3139,7 @@
       "label": "Quiet hours",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": ""
@@ -3066,6 +3187,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "failed"

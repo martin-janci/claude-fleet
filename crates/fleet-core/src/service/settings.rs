@@ -176,6 +176,34 @@ pub enum Restart {
     Hooks,
 }
 
+/// Where a setting's value lives, as a settings row's scope pill says it
+/// (Orbit Fleet G1.5). Derived from the spec ([`Spec::scope`]), never set on
+/// its own, so it cannot disagree with [`Spec::per_org`] or
+/// [`Spec::owned_by`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    /// One value for the whole fleet, kept where the fleet lives: on the hub
+    /// when this app is paired with one, else in this app.
+    Fleet,
+    /// A fleet value that an org may override with its own.
+    Org,
+    /// The running process's own value (the hub daemon's serve flags, the
+    /// control API): each app or hub keeps its own, nothing shares it.
+    Process,
+}
+
+impl Scope {
+    /// The scope in words, for the generated docs.
+    pub fn word(self) -> &'static str {
+        match self {
+            Scope::Fleet => "fleet",
+            Scope::Org => "fleet, per org",
+            Scope::Process => "per process",
+        }
+    }
+}
+
 /// What an agent may do with a setting (design D-P4): propose a value for a
 /// person to accept, fill it inside a flow a person started, or nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -187,6 +215,17 @@ pub enum AiPolicy {
 }
 
 impl Spec {
+    /// Where the value lives (see [`Scope`]).
+    pub const fn scope(&self) -> Scope {
+        if self.owned_by.is_some() {
+            Scope::Process
+        } else if self.per_org {
+            Scope::Org
+        } else {
+            Scope::Fleet
+        }
+    }
+
     /// A setting with no unit, tags, danger or restart, that an agent may
     /// only suggest.
     pub const fn new(
@@ -2163,6 +2202,20 @@ pub struct Descriptor {
     /// An org may set its own value.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub per_org: bool,
+    /// Where the value lives: what the row's scope pill says.
+    pub scope: Scope,
+    /// The orgs that set their own value of a per-org setting, by name: the
+    /// pill says they override the fleet's. Only [`describe`] fills it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub org_values: Vec<OrgValue>,
+}
+
+/// One org's own value of a per-org setting, as a fleet page shows it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct OrgValue {
+    pub org_id: i64,
+    pub org: String,
+    pub value: String,
 }
 
 impl Spec {
@@ -2185,6 +2238,8 @@ impl Spec {
             owned_by: self.owned_by,
             option_labels: self.option_labels,
             per_org: self.per_org,
+            scope: self.scope(),
+            org_values: Vec::new(),
         }
     }
 }
@@ -2193,10 +2248,42 @@ impl Spec {
 /// read-only `projects.*` previews of [`read_all`] are not settings and are
 /// left out.
 pub fn describe(s: &Store) -> Vec<Descriptor> {
+    // Org names once, for the per-org settings an org overrides. A store
+    // that cannot list them shows no overrides rather than no settings.
+    let orgs: BTreeMap<i64, String> = s
+        .list_orgs()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|o| (o.id, o.name))
+        .collect();
     SPECS
         .iter()
-        .map(|spec| spec.describe(effective(s, spec)))
+        .map(|spec| {
+            let mut d = spec.describe(effective(s, spec));
+            if spec.per_org && !orgs.is_empty() {
+                d.org_values = overrides(s, spec, &orgs);
+            }
+            d
+        })
         .collect()
+}
+
+/// The orgs that set their own valid value of `spec`, in org name order.
+fn overrides(s: &Store, spec: &Spec, orgs: &BTreeMap<i64, String>) -> Vec<OrgValue> {
+    let mut out: Vec<OrgValue> = org_values(s, spec.key)
+        .into_iter()
+        .filter_map(|(org_id, value)| {
+            let org = orgs.get(&org_id)?.clone();
+            Some(OrgValue { org_id, org, value })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.org
+            .to_lowercase()
+            .cmp(&b.org.to_lowercase())
+            .then(a.org_id.cmp(&b.org_id))
+    });
+    out
 }
 
 /// Who wrote a setting, as the audit trail records it (design §5).
@@ -2809,6 +2896,59 @@ mod tests {
     /// Org administration phase C: a per-org key reads the org's own valid
     /// value, else the fleet's; a key that is not per-org ignores any row;
     /// the write is validated and audited under `<key>@org:<id>`.
+    #[test]
+    fn describe_says_where_each_value_lives_and_which_orgs_override_it() {
+        let s = Store::open_in_memory().unwrap();
+        let zeta = s.add_org("zeta", None, false).unwrap().id;
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        s.add_org("Idle", None, false).unwrap();
+        set_for_org(&s, zeta, WORK_SUMMARY_MODEL, Some("opus"), Actor::Person).unwrap();
+        set_for_org(&s, acme, WORK_SUMMARY_MODEL, Some("sonnet"), Actor::Person).unwrap();
+        // A stored value the gate would refuse is not shown as an override.
+        s.set_org_setting(acme, BUDGET_ORG_DAILY_USD, Some("lots"))
+            .unwrap();
+        let all = describe(&s);
+        let of = |key: &str| all.iter().find(|d| d.key == key).unwrap();
+
+        let summary = of(WORK_SUMMARY_MODEL);
+        assert_eq!(summary.scope, Scope::Org);
+        let names: Vec<(&str, &str)> = summary
+            .org_values
+            .iter()
+            .map(|o| (o.org.as_str(), o.value.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [("Acme", "sonnet"), ("zeta", "opus")],
+            "by name, any case"
+        );
+        assert!(of(BUDGET_ORG_DAILY_USD).org_values.is_empty());
+        assert_eq!(of(GC_ENABLED).scope, Scope::Fleet);
+        assert_eq!(of(crate::mcp::SETTING_PORT).scope, Scope::Process);
+
+        let json = serde_json::to_value(of(GC_ENABLED)).unwrap();
+        assert_eq!(json["scope"], "fleet");
+        assert!(
+            json.get("org_values").is_none(),
+            "absent when no org overrides"
+        );
+        let json = serde_json::to_value(summary).unwrap();
+        assert_eq!(json["scope"], "org");
+        assert_eq!(json["org_values"][0]["org"], "Acme");
+    }
+
+    #[test]
+    fn every_owned_key_is_a_process_s_own() {
+        for sp in SPECS.iter().filter(|sp| sp.owned_by.is_some()) {
+            assert!(
+                sp.key.starts_with("hub.") || sp.key.starts_with("mcp."),
+                "{}: an owned key outside hub.* / mcp.* is not a process's own; give Scope a case for it",
+                sp.key
+            );
+            assert!(!sp.per_org, "{}", sp.key);
+        }
+    }
+
     #[test]
     fn a_per_org_setting_reads_the_orgs_own_value_else_the_fleets() {
         let s = Store::open_in_memory().unwrap();

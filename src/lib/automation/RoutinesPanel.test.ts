@@ -224,3 +224,70 @@ describe('the Inbox block', () => {
     expect(screen.queryByTestId('routine-failures')).toBeNull();
   });
 });
+
+describe('deleting a routine (G1.4, the destructive confirm)', () => {
+  const many: RoutineRunRow[] = Array.from({ length: 6 }, (_, i) => ({ ...ok, id: 10 + i }));
+
+  it('a routine with many runs asks for its name, and Delete routine sends delete only then', async () => {
+    route([sweep], many);
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-delete'));
+    const dialog = await screen.findByTestId('destructive-confirm');
+    expect(dialog.textContent).toContain('Delete routine "Morning PR sweep"?');
+    expect(dialog.textContent).toContain('Its 6 runs go with it. Sessions it started keep running.');
+    const go = screen.getByTestId('routine-delete-confirm') as HTMLButtonElement;
+    expect(go.disabled).toBe(true);
+    await fireEvent.input(screen.getByTestId('destructive-typed-name'), { target: { value: 'Morning PR sweep' } });
+    expect(go.disabled).toBe(false);
+    await fireEvent.click(go);
+    await waitFor(() => expect(argsOf('delete')).toEqual({ action: 'delete', routine_id: 3 }));
+    await waitFor(() => expect(screen.queryByTestId('destructive-confirm')).toBeNull());
+  });
+
+  it('a routine with few runs asks with the red verb alone', async () => {
+    route([sweep], [ok]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-delete'));
+    expect((await screen.findByTestId('destructive-confirm')).textContent).toContain('Its run goes with it.');
+    expect(screen.queryByTestId('destructive-typed-name')).toBeNull();
+    await fireEvent.click(screen.getByTestId('routine-delete-confirm'));
+    await waitFor(() => expect(argsOf('delete')).toEqual({ action: 'delete', routine_id: 3 }));
+  });
+
+  it('offers Pause it instead on the left for a routine that is on, and pauses without deleting', async () => {
+    route([sweep], many);
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-delete'));
+    await fireEvent.click(await screen.findByTestId('routine-delete-pause'));
+    await waitFor(() => expect(argsOf('set_enabled')).toEqual({ action: 'set_enabled', routine_id: 3, enabled: false }));
+    expect(argsOf('delete')).toBeUndefined();
+    expect(screen.queryByTestId('destructive-confirm')).toBeNull();
+  });
+
+  it('offers no Pause for a routine already paused', async () => {
+    route([{ ...sweep, enabled: false }], [ok]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-delete'));
+    await screen.findByTestId('destructive-confirm');
+    expect(screen.queryByTestId('routine-delete-pause')).toBeNull();
+  });
+
+  it('a failed delete stays open with the failure as its banner', async () => {
+    route([sweep], [ok]);
+    const base = inv.getMockImplementation() as (cmd: string, a: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, a: { args: { action: string } }) => {
+      if (cmd === 'routines' && a.args.action === 'delete') throw { code: 'E_FORBIDDEN', message: 'you are a Viewer in 32bit' };
+      return base(cmd, a);
+    });
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-delete'));
+    await fireEvent.click(await screen.findByTestId('routine-delete-confirm'));
+    expect((await screen.findByTestId('destructive-confirm-error')).textContent).toContain('The hub refused this');
+    expect(screen.getByTestId('destructive-confirm')).toBeTruthy();
+  });
+});

@@ -7,6 +7,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
+  routineDeleteLoss,
+  ROUTINE_RUNS_SHOWN,
   cronWords,
   failing,
   fixRoutine,
@@ -152,5 +154,18 @@ describe('the Inbox', () => {
     expect(old).toHaveBeenCalledTimes(1);
     expect(get(failing)).toEqual([]);
     vi.useRealTimers();
+  });
+});
+
+describe('routineDeleteLoss (G1.4)', () => {
+  const run = { id: 1, routine_id: 1, trigger: 'cron', state: 'done', cost_micros: 0, started_at: 1 } as const;
+  it('counts the runs that go with it and says the sessions stay', () => {
+    expect(routineDeleteLoss({ runs: [] })).toEqual({ loss: 0, lead: "It has no runs yet. Sessions it started keep running. This can't be undone." });
+    expect(routineDeleteLoss({ runs: [run] }).lead).toMatch(/^Its run goes with it\./);
+    expect(routineDeleteLoss({ runs: [run, run, run] })).toMatchObject({ loss: 3, lead: expect.stringMatching(/^Its 3 runs go with it\./) });
+  });
+  it('a full page of runs may be more: says "or more"', () => {
+    const page = Array.from({ length: ROUTINE_RUNS_SHOWN }, () => run);
+    expect(routineDeleteLoss({ runs: page }).lead).toMatch(/^Its 20 or more runs go with it\./);
   });
 });

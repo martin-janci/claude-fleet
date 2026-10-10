@@ -8,10 +8,17 @@
   // the screen that opened it decides what the button does (`run`) and closes
   // it on success. `extra` is that screen's own line under the fields (a
   // follow-up the backend asked for, such as the hub's plaintext opt-in).
+  //
+  // The form kit (G1.2): a failure is a banner at the top of the body, and
+  // closing a wizard the person has filled in asks "Discard changes?" once.
   import type { Snippet } from 'svelte';
   import Modal from '../Modal.svelte';
   import Loader from '../Loader.svelte';
   import FormWizard from './FormWizard.svelte';
+  import FormBanner from './FormBanner.svelte';
+  import DiscardAsk from './DiscardAsk.svelte';
+  import { CloseGuard } from './close_guard.svelte';
+  import type { IpcError } from '../result';
   import type { FieldProblem, Values } from './forms';
   import type { Wizard } from './wizards';
 
@@ -29,22 +36,30 @@
     wizard: Wizard;
     initial?: Values;
     busy?: boolean;
-    error?: string | null;
+    error?: string | IpcError | null;
     errorTestid?: string;
     problems?: FieldProblem[];
     run: (values: Values) => void;
     onclose: () => void;
     extra?: Snippet;
   } = $props();
+
+  let form: ReturnType<typeof FormWizard> | undefined = $state();
+  const guard = new CloseGuard(
+    () => form?.isDirty() ?? false,
+    () => onclose(),
+  );
 </script>
 
-<Modal label={wizard.spec.title} onclose={busy ? undefined : onclose} width="480px" testid={`wizard-${wizard.id}`}>
+<Modal label={wizard.spec.title} onclose={busy ? undefined : guard.request} width="480px" testid={`wizard-${wizard.id}`}>
   <div class="sheet">
     <header>
       <h3>{wizard.spec.title}</h3>
       {#if wizard.spec.intro}<p class="lead">{wizard.spec.intro}</p>{/if}
     </header>
+    <FormBanner {error} testid={errorTestid} />
     <FormWizard
+      bind:this={form}
       spec={wizard.spec}
       {busy}
       {initial}
@@ -53,13 +68,13 @@
       ownDefaults
       serverProblems={problems}
       onsubmit={run}
-      oncancel={onclose} />
+      oncancel={guard.request} />
+    {#if guard.asking}<DiscardAsk onkeep={guard.keep} ondiscard={guard.discard} />{/if}
     {#if busy}
       <div class="running" data-testid="wizard-running">
         <Loader name={wizard.loader} size={32} label={wizard.sending} />
       </div>
     {/if}
-    {#if error}<p class="err" role="alert" data-testid={errorTestid}>{error}</p>{/if}
     {#if extra}{@render extra()}{/if}
   </div>
 </Modal>
@@ -70,5 +85,4 @@
   h3 { margin: 0; font-size: var(--text-lg); font-weight: var(--text-lg-weight); }
   .lead { margin: 0; color: var(--fg-muted); font-size: var(--text-sm); line-height: var(--text-sm-lh); }
   .running { display: flex; justify-content: center; }
-  .err { margin: 0; font-size: var(--text-xs); color: var(--danger); }
 </style>

@@ -103,7 +103,7 @@ describe('Trackers (master_detail over the tracker resource)', () => {
     const inv = route([row()]);
     show();
     await fireEvent.click(await screen.findByTestId('record-delete'));
-    expect((await screen.findByTestId('confirm-dialog')).textContent).toContain('cached tickets');
+    expect((await screen.findByTestId('record-remove')).textContent).toContain('cached tickets');
     await fireEvent.click(screen.getByTestId('record-confirm'));
     await waitFor(() => expect(argsOf(inv, 'remove_tracker')).toEqual({ tracker_id: 4 }));
   });

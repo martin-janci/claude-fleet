@@ -92,13 +92,16 @@ fn what_it_does(spec: &Spec) -> String {
 }
 
 fn render_rows<'a>(specs: impl Iterator<Item = &'a Spec>) -> String {
-    let mut out = String::from("| Setting | Default | Range | What it does |\n|---|---|---|---|\n");
+    let mut out = String::from(
+        "| Setting | Default | Range | Scope | What it does |\n|---|---|---|---|---|\n",
+    );
     for spec in specs {
         out.push_str(&format!(
-            "| `{}` | `{}` | {} | {} |\n",
+            "| `{}` | `{}` | {} | {} | {} |\n",
             spec.key,
             spec.default,
             range_text(spec),
+            spec.scope().word(),
             what_it_does(spec)
         ));
     }
@@ -148,7 +151,11 @@ Every operator setting fleet stores, generated from the registry in \
 `crates/fleet-core/src/service/settings.rs`. Change one in Settings on the \
 desktop, or over the control API with the master token (`set_setting`); \
 `get_settings { describe: true }` returns this same metadata with each \
-setting's current value.\n",
+setting's current value.\n\n\
+Scope says where a value lives: *fleet* is one value for the whole fleet, \
+kept on the hub when the desktop is paired with one; *fleet, per org* is \
+the same, and an org may set its own value that its sessions read instead; \
+*per process* is the running app's or hub's own.\n",
     );
     let mut prefixes: Vec<&str> = Vec::new();
     for spec in SPECS {

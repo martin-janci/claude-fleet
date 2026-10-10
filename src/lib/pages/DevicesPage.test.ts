@@ -176,7 +176,7 @@ describe('Settings → Devices: Pair a device is a wizard (10.12)', () => {
     await fireEvent.click(screen.getByTestId('resource-add'));
     await fireEvent.input(screen.getByTestId('form-field-device'), { target: { value: 'x' } });
     await fireEvent.click(screen.getByTestId('form-submit'));
-    expect((await screen.findByTestId('wizard-error')).textContent).toBe('Only the owner pairs devices.');
+    expect((await screen.findByTestId('wizard-error')).textContent?.trim()).toBe('Only the owner pairs devices.');
     expect(screen.getByTestId('wizard-pair_device')).toBeInTheDocument();
     expect(screen.queryByTestId('pairing-result')).toBeNull();
   });

@@ -8,9 +8,22 @@
   // state, gates and calls. `busy` disables both buttons and swaps the verb
   // for `busyVerb`, with the comet loader in the button (step 3.13): a call
   // is running, never a wait on a person.
+  //
+  // The form kit's behaviour (G1.2, FormsAnatomy) lives here too, so every
+  // sheet gets it: a failure is a banner at the top of the body (a hub
+  // refusal keeps the input and asks an admin), a disabled verb says why
+  // under it, Enter submits a one-field sheet and ⌘↵ / Ctrl+Enter any
+  // sheet, and closing a `dirty` sheet asks "Discard changes?" once, in
+  // the footer.
   import type { Snippet } from 'svelte';
   import Loader from './Loader.svelte';
   import Modal from './Modal.svelte';
+  import FormBanner from './forms/FormBanner.svelte';
+  import DiscardAsk from './forms/DiscardAsk.svelte';
+  import { CloseGuard } from './forms/close_guard.svelte';
+  import { fieldCount, submitKey } from './forms/form_frame';
+  import type { IpcError } from './result';
+  import { detectMac } from './terminal_keys';
 
   let {
     title,
@@ -27,7 +40,10 @@
     confirmTestid,
     errorTestid,
     confirmTitle = null,
+    dirty = false,
+    oninvalid,
     secondary,
+    danger = false,
     children,
   }: {
     title: string;
@@ -40,48 +56,83 @@
     onclose: () => void;
     canConfirm?: boolean;
     busy?: boolean;
-    /** Shown above the footer, in the danger color. */
-    error?: string | null;
+    /** A banner at the top of the body. An `IpcError` is read for people;
+     *  `E_FORBIDDEN` reads "The hub refused this", input kept. */
+    error?: string | IpcError | null;
     width?: string;
     testid?: string;
     confirmTestid?: string;
     errorTestid?: string;
-    /** Why the verb is off, as its tooltip (a gate's reason). */
+    /** Why the verb is off (a gate's reason): said under the verb while it
+     *  is off, and as its tooltip. */
     confirmTitle?: string | null;
+    /** The person changed something: closing asks "Discard changes?" once. */
+    dirty?: boolean;
+    /** ⌘↵ / Enter pressed while the verb is off (show every field's problem). */
+    oninvalid?: () => void;
     /** A quiet action at the footer's start (e.g. "Start fresh instead"). */
     secondary?: Snippet;
+    /** A destructive verb (delete, remove): red instead of the accent
+     *  (G1.4; `forms/DestructiveConfirm.svelte` sets it). */
+    danger?: boolean;
     children: Snippet;
   } = $props();
+
+  const guard = new CloseGuard(
+    () => dirty,
+    () => onclose(),
+  );
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  let fieldsEl: HTMLDivElement | undefined = $state();
+  const why = $derived(!canConfirm && !busy ? confirmTitle : null);
+
+  function onkeydown(e: KeyboardEvent) {
+    if (e.defaultPrevented || busy || guard.asking) return;
+    if (!submitKey(e, fieldCount(fieldsEl), isMac)) return;
+    e.preventDefault();
+    if (canConfirm) onconfirm();
+    else oninvalid?.();
+  }
 </script>
 
-<Modal label={title} onclose={busy ? undefined : onclose} {width} {testid}>
-  <div class="sheet">
+<Modal label={title} onclose={busy ? undefined : guard.request} {width} {testid}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="sheet" {onkeydown}>
     <header>
       <h3 class="sheet-title">{title}</h3>
       <p class="sheet-lead">{lead}</p>
     </header>
 
-    <div class="sheet-fields">
+    <FormBanner {error} testid={errorTestid} />
+
+    <div class="sheet-fields" bind:this={fieldsEl}>
       {@render children()}
     </div>
 
-    {#if error}
-      <p class="sheet-error" role="alert" data-testid={errorTestid}>{error}</p>
-    {/if}
-
     <footer>
-      <div class="secondary">{#if secondary}{@render secondary()}{/if}</div>
-      <button type="button" class="btn" onclick={onclose} disabled={busy} data-testid="sheet-cancel">Cancel</button>
-      <button
-        type="button"
-        class="btn btn--primary"
-        data-testid={confirmTestid}
-        title={confirmTitle ?? ''}
-        disabled={!canConfirm || busy}
-        onclick={onconfirm}
-        >{#if busy}<Loader name="comet" size={12} class="btn-loader" />{busyVerb ?? verb}{:else}{verb}{/if}</button
-      >
+      {#if guard.asking}
+        <DiscardAsk onkeep={guard.keep} ondiscard={guard.discard} />
+      {:else}
+        <div class="secondary">{#if secondary}{@render secondary()}{/if}</div>
+        <button type="button" class="btn" onclick={guard.request} disabled={busy} data-testid="sheet-cancel"
+          >Cancel</button
+        >
+        <button
+          type="button"
+          class="btn btn--primary"
+          class:btn--danger={danger}
+          data-testid={confirmTestid}
+          title={confirmTitle ?? ''}
+          aria-describedby={why ? `${testid ?? 'sheet'}-why` : undefined}
+          disabled={!canConfirm || busy}
+          onclick={onconfirm}
+          >{#if busy}<Loader name="comet" size={12} class="btn-loader" />{busyVerb ?? verb}{:else}{verb}{/if}</button
+        >
+      {/if}
     </footer>
+    {#if why && !guard.asking}
+      <p class="sheet-why" id={`${testid ?? 'sheet'}-why`} data-testid="sheet-why">{why}</p>
+    {/if}
   </div>
 </Modal>
 
@@ -146,10 +197,11 @@
     resize: vertical;
     font-family: var(--font-mono);
   }
-  .sheet-error {
-    margin: 0;
-    color: var(--danger);
-    font-size: var(--text-sm);
+  .sheet-why {
+    margin: calc(-1 * var(--space-2)) 0 0;
+    text-align: right;
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
   }
   footer {
     display: flex;

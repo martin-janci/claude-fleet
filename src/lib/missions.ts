@@ -899,3 +899,239 @@ export function autonomyWords(a: MissionAutonomy, now = Date.now() / 1000): Auto
   else hint = `The grant signs L${g.level}. End it and grant again to change that.`;
   return { runs: a.enabled ? `Runs at L${a.effective}` : 'Loop off', limits: parts.join(' · '), hint };
 }
+
+// ── The Missions board (redesign gap G3.6) ──
+//
+// The list grouped by state with a reason line per row, the detail's owner,
+// planner and brakes lines, and its Runs tab. All of it is read from what
+// `work_missions` and `work_mission` already answer; nothing here asks the
+// hub for more.
+
+/** One group of the list. */
+export interface MissionGroup {
+  key: 'active' | 'paused' | 'draft' | 'finished';
+  label: string;
+  missions: Mission[];
+}
+
+const GROUPS: readonly { key: MissionGroup['key']; label: string }[] = [
+  { key: 'active', label: 'Active' },
+  { key: 'paused', label: 'Paused' },
+  { key: 'draft', label: 'Drafts' },
+  { key: 'finished', label: 'Completed' },
+];
+
+function groupOf(state: string): MissionGroup['key'] {
+  if (state === 'active' || state === 'paused' || state === 'draft') return state;
+  return 'finished';
+}
+
+/** The list by state: Active, Paused, Drafts, then Completed (every mission
+ *  that ended), each newest change first. Empty groups are left out. */
+export function missionGroups(missions: readonly Mission[]): MissionGroup[] {
+  const sorted = [...missions].sort((a, b) => b.updated_at - a.updated_at || b.id - a.id);
+  return GROUPS.map((g) => ({ ...g, missions: sorted.filter((m) => groupOf(m.state) === g.key) })).filter(
+    (g) => g.missions.length > 0,
+  );
+}
+
+/** The missions whose row reads its detail for a reason line: the ones
+ *  still going, newest change first, at most `cap`. */
+export function missionsToExplain(missions: readonly Mission[], cap = 12): Mission[] {
+  return missions
+    .filter((m) => !isFinal(m.state))
+    .sort((a, b) => b.updated_at - a.updated_at || b.id - a.id)
+    .slice(0, cap);
+}
+
+/** A span in words: "45 min", "2 h", "1 h 30 min". */
+export function durationWords(secs: number): string {
+  const mins = Math.max(1, Math.round(secs / 60));
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
+/** The first wave that still has work in it, or `null` when none does. */
+export function currentWave(detail: MissionDetail): number | null {
+  for (const w of wavesOf(detail)) {
+    if (w.nodes.some((n) => n.state !== 'done' && n.state !== 'rejected')) return w.wave;
+  }
+  return null;
+}
+
+/** `no_progress_secs`' default (`MissionPolicy::default`). */
+export const POLICY_DEFAULT_NO_PROGRESS_SECS = 3600;
+/** `max_planner_runs_per_hour`'s default. */
+export const POLICY_DEFAULT_PLANNER_RUNS = 6;
+
+/** The brake that paused it, when the loop's brake is the latest word on
+ *  its state: "no progress in 2 h", "budget spent". */
+export function brakeReason(detail: MissionDetail): string | null {
+  const last = (detail.events ?? []).find((e) => e.kind === 'state' || e.kind === 'budget' || e.kind === 'no_progress');
+  if (!last || last.kind === 'state') return null;
+  if (last.kind === 'budget') return 'budget spent';
+  const secs = detail.mission.policy?.no_progress_secs ?? POLICY_DEFAULT_NO_PROGRESS_SECS;
+  return `no progress in ${durationWords(secs)}`;
+}
+
+/** Tasks the planner proposed that no one has accepted yet: proposals among
+ *  the members, else the tasks its open create cards would add. */
+export function proposedCount(detail: MissionDetail): number {
+  const items = openProposals(detail).length;
+  if (items > 0) return items;
+  return (detail.plan?.cards ?? [])
+    .filter((c) => c.state === 'open' && c.kind === 'create')
+    .reduce((n, c) => n + (Array.isArray(c.payload?.tree) ? (c.payload.tree as unknown[]).length : 0), 0);
+}
+
+const PHASE_WORD: Record<string, string> = {
+  running: 'Working',
+  waiting: 'Idle · waiting',
+  blocked: 'Failed · blocked',
+};
+
+/** A list row's second line: why the mission is where it is.
+ *  "Needs you · 2 cards · wave 3", "Brake: no progress in 2 h",
+ *  "Planner proposed 6 tasks · not accepted", "Working · wave 2 · continuous".
+ *  `null` when there is nothing to add to the group's name. */
+export function missionReason(m: Mission, detail?: MissionDetail | null): string | null {
+  if (isFinal(m.state)) return m.state === 'completed' ? null : stateLabel(m.state);
+  if (!detail) return null;
+  const wave = currentWave(detail);
+  const waveText = wave != null ? ` · wave ${wave}` : '';
+  if (m.state === 'paused') {
+    const brake = brakeReason(detail);
+    if (brake) return `Brake: ${brake}`;
+  }
+  const proposed = proposedCount(detail);
+  if (m.state === 'draft') return proposed > 0 ? `Planner proposed ${proposed} task${proposed === 1 ? '' : 's'} · not accepted` : null;
+  if (waitsOnPerson(detail)) {
+    const cards = (detail.plan?.cards ?? []).filter((c) => c.state === 'open').length;
+    const what = cards > 0 ? `${cards} card${cards === 1 ? '' : 's'}` : 'an answer';
+    return `Needs you · ${what}${waveText}`;
+  }
+  if (proposed > 0) return `Planner proposed ${proposed} task${proposed === 1 ? '' : 's'} · not accepted`;
+  if (m.state !== 'active') return null;
+  const phase = detail.phase ? (PHASE_WORD[detail.phase] ?? detail.phase) : null;
+  if (!phase) return null;
+  return `${phase}${waveText}${m.mode === 'continuous' ? ' · continuous' : ''}`;
+}
+
+/** The list footer: the loop's switch and the fleet's ceiling, read from any
+ *  open mission's plan (both are fleet-wide). `null` without one. */
+export function loopFooter(details: readonly (MissionDetail | null | undefined)[]): string | null {
+  const a = details.find((d) => d?.plan?.autonomy)?.plan?.autonomy;
+  if (!a) return null;
+  return `Mission loop ${a.enabled ? 'on' : 'off'} · ceiling L${a.ceiling}`;
+}
+
+/** Planner runs in the hour before `now` (the planner's own limit counts
+ *  `planned` events the same way). The events are the newest page, so the
+ *  count is exact unless that page ends inside the hour. */
+export function plannerRunsThisHour(events: readonly MissionEvent[], now: number): number {
+  return events.filter((e) => e.kind === 'planned' && e.at >= now - 3600).length;
+}
+
+/** The Planner line's value: "2 of 6 runs this hour". */
+export function plannerLine(detail: MissionDetail, now = Math.floor(Date.now() / 1000)): string {
+  const max = detail.mission.policy?.max_planner_runs_per_hour ?? POLICY_DEFAULT_PLANNER_RUNS;
+  return `${plannerRunsThisHour(detail.events ?? [], now)} of ${max} runs this hour`;
+}
+
+/** "Pause on spent budget or 2 h without progress"; without a budget on
+ *  the grant, only the time. */
+export function brakesLine(policy: MissionPolicy | undefined, budgetMicros?: number | null): string {
+  const time = `${durationWords(policy?.no_progress_secs ?? POLICY_DEFAULT_NO_PROGRESS_SECS)} without progress`;
+  return budgetMicros ? `Pause on spent budget (${dollars(budgetMicros)}) or ${time}` : `Pause after ${time}`;
+}
+
+/** "You · 32bit", "Ana · 32bit", "person 7"; `null` when the mission has
+ *  neither an owner nor an org. */
+export function ownerLine(
+  m: Pick<Mission, 'owner_person_id' | 'org_id'>,
+  me: number | null,
+  nameOf: (personId: number) => string | null,
+  orgName: (orgId: number) => string | null,
+): string | null {
+  const id = m.owner_person_id;
+  const who = id == null ? null : id === me ? 'You' : (nameOf(id) ?? `person ${id}`);
+  const org = m.org_id != null ? orgName(m.org_id) : null;
+  const parts = [who, org].filter((p): p is string => !!p);
+  return parts.length ? parts.join(' · ') : null;
+}
+
+/** One run of a mission: a worker the loop or a person started on a task. */
+export interface MissionRun {
+  task_id: number;
+  item_id: number | null;
+  /** implement, review, test, … or the step kind. */
+  role: string;
+  attempt: number | null;
+  /** The attempt's state when it is a task's latest; `started` when only
+   *  the log knows it (an earlier attempt). */
+  state: string;
+  /** When it was started, when the log still holds that. */
+  at: number | null;
+  /** Who started it: `loop`, `person:3`. */
+  actor: string | null;
+}
+
+/** The runs the mission's log and graph know of, newest first: every step
+ *  that started a task, with each task's latest attempt for its state. */
+export function runsOf(detail: MissionDetail): MissionRun[] {
+  const by = new Map<number, MissionRun>();
+  for (const e of detail.events ?? []) {
+    if (e.kind !== 'step') continue;
+    const p = (e.payload ?? {}) as Record<string, unknown>;
+    const id = typeof p.task_id === 'number' ? p.task_id : null;
+    if (id == null || by.has(id)) continue;
+    by.set(id, {
+      task_id: id,
+      item_id: e.work_item_id ?? null,
+      role: String(p.role ?? p.step ?? 'run'),
+      attempt: null,
+      state: 'started',
+      at: e.at,
+      actor: e.actor,
+    });
+  }
+  for (const n of detail.graph?.nodes ?? []) {
+    const a = n.attempt;
+    if (!a) continue;
+    const seen = by.get(a.task_id);
+    by.set(a.task_id, {
+      task_id: a.task_id,
+      item_id: n.item_id,
+      role: a.role ?? seen?.role ?? 'run',
+      attempt: a.attempt ?? null,
+      state: a.state,
+      at: seen?.at ?? null,
+      actor: seen?.actor ?? null,
+    });
+  }
+  return [...by.values()].sort((a, b) => b.task_id - a.task_id);
+}
+
+/** A run's state as one of the six words, with the raw state after " · "
+ *  when the word alone hides it. */
+export function runStateLabel(state: string): string {
+  switch (state) {
+    case 'running':
+      return 'Working';
+    case 'queued':
+      return 'Working · queued';
+    case 'started':
+      // Only the log knows it: an earlier attempt, since retried.
+      return 'Idle · earlier run';
+    case 'done':
+      return 'Done';
+    case 'failed':
+      return 'Failed';
+    case 'cancelled':
+      return 'Idle · cancelled';
+    default:
+      return `Idle · ${state}`;
+  }
+}

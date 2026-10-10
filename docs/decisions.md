@@ -984,36 +984,36 @@ redesign's transition plan.
 
 <!-- BEGIN GENERATED: settings decide. -->
 <!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current -->
-| Setting | Default | Range | What it does |
-|---|---|---|---|
-| `decide.jev.enabled` | `false` | on / off | The kill switch for TypeSafe's decision model. Off, nothing is ever sent. On, data goes only for organisations that opted in, redacted. Experimental. Asks to confirm. |
-| `decide.jev.status_map` | `off` | `off` / `shadow` / `assist` | Proposing a status category for an Asana section. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.work_link` | `off` | `off` / `shadow` / `assist` | Choosing a ticket for a session no rule could link. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.start_project` | `off` | `off` / `shadow` / `assist` | Pre-selecting the repository of a task's first start. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.sibling_repos` | `off` | `off` / `shadow` / `assist` | Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.host_placement` | `off` | `off` / `shadow` / `assist` | Pre-selecting the host of a new session when no rule, limit or offline host decides. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.quick_answer` | `off` | `off` / `shadow` / `assist` | Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.adopt_target` | `off` | `off` / `shadow` / `assist` | Prefilling the project when you adopt a pane fleet did not start. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.restore_target` | `off` | `off` / `shadow` / `assist` | Prefilling the project when you restore a conversation found on a host. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.duplicate` | `off` | `off` / `shadow` / `assist` | Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.work_placement` | `off` | `off` / `shadow` / `assist` | Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.related_session` | `off` | `off` / `shadow` / `assist` | Noticing another of your sessions working on the same thing. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.control_route` | `off` | `off` / `shadow` / `assist` | Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.summary_check` | `off` | `off` / `shadow` / `assist` | Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support. Experimental. |
-| `decide.jev.turn_outcome` | `off` | `off` / `shadow` / `assist` | Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it. Experimental. |
-| `decide.jev.mission_triage` | `off` | `off` / `shadow` / `assist` | Proposing a stuck mission's outcome and next step. Never completes a mission or sets Verified. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.routine_run_outcome` | `off` | `off` / `shadow` / `assist` | Reading whether a routine run did work, found nothing to do or needs you, from the end of its screen. Shadow only records; assist sets the outcome, so a run with nothing to do stays out of the Inbox. A failed exit or a rule wins. Sends reply text only for organisations that allow it. Experimental. |
-| `decide.jev.pr_triage` | `off` | `off` / `shadow` / `assist` | Guessing what a stuck pull request needs (a fix, a regenerate, a base merge, a re-run, or a person) when the PR shepherd finds it conflicting or red. Sends the PR's check names and states, no code. Shadow only records; assist is recorded the same way for now. Experimental. |
-| `decide.jev.main_ticket` | `off` | `off` / `shadow` / `assist` | Proposing the main ticket in Review when a session's first prompt names several. A branch naming one decides without Jev. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.tracker_duplicate` | `off` | `off` / `shadow` / `assist` | Flagging in Review a new local task that may be the same work as an open tracker ticket. Shadow only records; assist suggests. Experimental. |
-| `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
-| `decide.jev.unassigned_reply` | `false` | on / off | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
-| `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
-| `decide.jev.breaker_failures` | `5` | 1–100 | Failed calls in a row that open the circuit breaker. |
-| `decide.jev.breaker_open_secs` | `300` | 10–86400 seconds | How long an open breaker refuses calls. |
-| `decide.jev.daily_token_budget` | `2000000` | 0–1000000000 tokens, `0` = none | Input tokens the decision model may be sent per UTC day. At $0.042 per million, the default is under $0.09 a day. |
-| `decide.jev.model` | `jev-1.13.0` | `jev-1.13.0` / `jev-latest` | The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe. |
-| `decide.retention_days` | `90` | 0–3650 days, `0` = forever | Days a decision record (ids and numbers, never text) is kept. |
+| Setting | Default | Range | Scope | What it does |
+|---|---|---|---|---|
+| `decide.jev.enabled` | `false` | on / off | fleet | The kill switch for TypeSafe's decision model. Off, nothing is ever sent. On, data goes only for organisations that opted in, redacted. Experimental. Asks to confirm. |
+| `decide.jev.status_map` | `off` | `off` / `shadow` / `assist` | fleet | Proposing a status category for an Asana section. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.work_link` | `off` | `off` / `shadow` / `assist` | fleet | Choosing a ticket for a session no rule could link. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.start_project` | `off` | `off` / `shadow` / `assist` | fleet | Pre-selecting the repository of a task's first start. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.sibling_repos` | `off` | `off` / `shadow` / `assist` | fleet | Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.host_placement` | `off` | `off` / `shadow` / `assist` | fleet | Pre-selecting the host of a new session when no rule, limit or offline host decides. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.quick_answer` | `off` | `off` / `shadow` / `assist` | fleet | Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.adopt_target` | `off` | `off` / `shadow` / `assist` | fleet | Prefilling the project when you adopt a pane fleet did not start. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.restore_target` | `off` | `off` / `shadow` / `assist` | fleet | Prefilling the project when you restore a conversation found on a host. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.duplicate` | `off` | `off` / `shadow` / `assist` | fleet | Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.work_placement` | `off` | `off` / `shadow` / `assist` | fleet | Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.related_session` | `off` | `off` / `shadow` / `assist` | fleet | Noticing another of your sessions working on the same thing. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.control_route` | `off` | `off` / `shadow` / `assist` | fleet | Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.summary_check` | `off` | `off` / `shadow` / `assist` | fleet | Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support. Experimental. |
+| `decide.jev.turn_outcome` | `off` | `off` / `shadow` / `assist` | fleet | Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it. Experimental. |
+| `decide.jev.mission_triage` | `off` | `off` / `shadow` / `assist` | fleet | Proposing a stuck mission's outcome and next step. Never completes a mission or sets Verified. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.routine_run_outcome` | `off` | `off` / `shadow` / `assist` | fleet | Reading whether a routine run did work, found nothing to do or needs you, from the end of its screen. Shadow only records; assist sets the outcome, so a run with nothing to do stays out of the Inbox. A failed exit or a rule wins. Sends reply text only for organisations that allow it. Experimental. |
+| `decide.jev.pr_triage` | `off` | `off` / `shadow` / `assist` | fleet | Guessing what a stuck pull request needs (a fix, a regenerate, a base merge, a re-run, or a person) when the PR shepherd finds it conflicting or red. Sends the PR's check names and states, no code. Shadow only records; assist is recorded the same way for now. Experimental. |
+| `decide.jev.main_ticket` | `off` | `off` / `shadow` / `assist` | fleet | Proposing the main ticket in Review when a session's first prompt names several. A branch naming one decides without Jev. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.tracker_duplicate` | `off` | `off` / `shadow` / `assist` | fleet | Flagging in Review a new local task that may be the same work as an open tracker ticket. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.unassigned` | `false` | on / off | fleet | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
+| `decide.jev.unassigned_reply` | `false` | on / off | fleet | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
+| `decide.jev.timeout_ms` | `1500` | 100–30000 ms | fleet | How long one call may take. A call is never retried. |
+| `decide.jev.breaker_failures` | `5` | 1–100 | fleet | Failed calls in a row that open the circuit breaker. |
+| `decide.jev.breaker_open_secs` | `300` | 10–86400 seconds | fleet | How long an open breaker refuses calls. |
+| `decide.jev.daily_token_budget` | `2000000` | 0–1000000000 tokens, `0` = none | fleet | Input tokens the decision model may be sent per UTC day. At $0.042 per million, the default is under $0.09 a day. |
+| `decide.jev.model` | `jev-1.13.0` | `jev-1.13.0` / `jev-latest` | fleet | The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe. |
+| `decide.retention_days` | `90` | 0–3650 days, `0` = forever | fleet | Days a decision record (ids and numbers, never text) is kept. |
 <!-- END GENERATED: settings decide. -->
 
 On a standalone desktop they are in Settings → *Decisions (Jev)*. On a hub

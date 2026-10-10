@@ -62,7 +62,21 @@
   import { accessOf } from './access';
   import { shareSheetFor, sessionBlocked } from './share';
   import { hubConnection } from './hub_connection';
-  import { sessionActionRequest, takeSessionAction, type SessionActionId } from './session_actions';
+  import {
+    archiveOneSession,
+    copySessionTranscript,
+    noOtherLogin,
+    sendModelChange,
+    sessionActionRequest,
+    takeSessionAction,
+    type SessionActionId,
+  } from './session_actions';
+  import ForkSheet from './ForkSheet.svelte';
+  import RewindSheet from './RewindSheet.svelte';
+  import { suggestedForkName } from './reply_actions';
+  import { MODEL_OPTIONS, modelShortLabel } from './conversation';
+  import { switchTarget } from './account_limits';
+  import { archiveBlocked } from './kill_check';
   import Meter from './kit/Meter.svelte';
   import { accountUsage } from './account_usage_store';
   import { leftPct } from './account_usage';
@@ -153,6 +167,61 @@
       $sessionBlocked(session, 'session_share'),
   );
 
+  // The session's own Fork…, Rewind…, Switch account…, Change model…,
+  // Copy transcript and Archive (gap plan G1.11): each the backend command
+  // its per-turn or bulk twin already runs, gated the same way.
+  /** Fork and Rewind are `rewind_conversation`: `own`, a copy of the
+   *  transcript (`share.ts`). */
+  const rewindBlocked = $derived(
+    hubActionBlocked('rewind_conversation', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'rewind_conversation'),
+  );
+  /** A read: a watcher may copy what they may read. */
+  const copyTranscriptBlocked = $derived($sessionBlocked(session, 'session_conversation'));
+  const archiveActionBlocked = $derived(
+    archiveBlocked([session]) ?? $sessionBlocked(session, 'tidy_apply'),
+  );
+  const hasPaneConversation = $derived(
+    !hasNoPane(session) && session.kind !== 'shell' && session.claude_session_id != null,
+  );
+  const canArchive = $derived(session.work != null && session.work.archived_at == null);
+  let forkOpen = $state(false);
+  let rewindOpen = $state(false);
+  let modelOpen = $state(false);
+  let modelPick = $state('');
+  let copyingTranscript = $state(false);
+  let archiving = $state(false);
+  // Each opener is reached only through a gate (the button's `disabled`,
+  // `rowActions`' `blocked()`), and each sheet re-reads the gate itself.
+  function openFork() {
+    forkOpen = true;
+  }
+  function openRewind() {
+    rewindOpen = true;
+  }
+  function openModel() {
+    if (sendPromptBlocked !== null) return;
+    modelPick = '';
+    modelOpen = true;
+  }
+  function onChangeModel() {
+    modelOpen = false;
+    if (sendPromptBlocked !== null || !modelPick) return;
+    if (sendModelChange(session, modelPick)) push({ kind: 'info', message: `Sent /model ${modelPick}` });
+  }
+  async function onCopyTranscript() {
+    if (copyingTranscript || copyTranscriptBlocked !== null) return;
+    copyingTranscript = true;
+    await copySessionTranscript(session);
+    copyingTranscript = false;
+  }
+  async function onArchive() {
+    if (archiving || archiveActionBlocked !== null) return;
+    archiving = true;
+    await archiveOneSession(session);
+    archiving = false;
+  }
+
   // Look up the parent project (if any) for context.
   const parentProject = $derived(
     session.project_id === null
@@ -203,6 +272,20 @@
   let loginPick = $state<string | null>(null);
   const loginTarget = $derived(loginPick ?? session.claude_profile ?? '');
   let confirmingSwitch = $state(false);
+  /** Switch account…: the same switch as the Login row, from a dialog that
+   *  proposes the login on this host with the most headroom. */
+  let switchOpen = $state(false);
+  const switchAccountBlocked = $derived(restartBlocked ?? noOtherLogin(session, hostRow));
+  async function openSwitchAccount() {
+    if (switchAccountBlocked !== null) return;
+    loginPick = null;
+    switchOpen = true;
+    const id = session.id;
+    const t = await switchTarget(session);
+    // Only a proposal: a pick the person already made, or another session
+    // selected meanwhile, keeps what it has.
+    if (t && switchOpen && loginPick === null && session.id === id) loginPick = t.profile ?? '';
+  }
   // The pane is not keyed by session: a login picked (or a switch being
   // confirmed) on one session must not carry over to the next one selected,
   // where Switch would restart it under that pick (review r07).
@@ -214,10 +297,15 @@
       pickFor = id;
       loginPick = null;
       confirmingSwitch = false;
+      switchOpen = false;
+      forkOpen = false;
+      rewindOpen = false;
+      modelOpen = false;
     });
   });
   async function onSwitchLogin() {
     confirmingSwitch = false;
+    switchOpen = false;
     if (restartBlocked !== null) return;
     const target = loginTarget;
     const r = await restartSession(session.host_alias, session.tmux_name, target);
@@ -632,6 +720,12 @@
     repair: { blocked: () => (repairing ? 'Repairing…' : repairBlocked), run: askRepair },
     send_prompt: { blocked: () => sendPromptBlocked, run: openComposer },
     review: { blocked: () => reviewBlocked, run: () => (reviewOpen = true) },
+    fork: { blocked: () => rewindBlocked, run: openFork },
+    rewind: { blocked: () => rewindBlocked, run: openRewind },
+    switch_account: { blocked: () => switchAccountBlocked, run: () => void openSwitchAccount() },
+    change_model: { blocked: () => sendPromptBlocked, run: openModel },
+    copy_transcript: { blocked: () => copyTranscriptBlocked, run: () => void onCopyTranscript() },
+    archive: { blocked: () => archiveActionBlocked, run: () => void onArchive() },
     recreate: { blocked: () => recreateBlocked, run: askRecreate },
     move: { blocked: () => moveBlocked, run: openMove },
     share: { blocked: () => shareBlocked, run: openShare },
@@ -813,11 +907,17 @@
             {@render act('move-from-details', 'Move to host…', openMove, moveBlocked, 'Continue this conversation on another host: same branch, same Claude session')}
           {/if}
           {@render act('open-review', 'Review…', () => (reviewOpen = true), reviewBlocked)}
+          {#if hasPaneConversation}
+            {@render act('fork-from-details', 'Fork…', openFork, rewindBlocked, 'A new session from this conversation; this one keeps running')}
+          {/if}
+          {#if canSwitchLogin}
+            {@render act('switch-account-from-details', 'Switch account…', openSwitchAccount, switchAccountBlocked, 'Resume this conversation under another login on this host')}
+          {/if}
           {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked)}
           {@render moveSteps()}
         </div>
         <p class="more-hint">
-          Rename, login, recreate and more:
+          Rename, rewind, model, recreate and more:
           <button type="button" class="hint-link" data-testid="inspector-open-details" onclick={() => goTo('details')}>Details</button>
         </p>
       </section>
@@ -826,6 +926,9 @@
     <footer class="insp-foot">
       {@render act('share-from-details', 'Share…', openShare, shareBlocked, 'Share this session with one person — watch or drive, revocable, and never a terminal')}
       <span class="grow"></span>
+      {#if canArchive}
+        {@render act('archive-from-details', 'Archive', onArchive, archiving ? 'Archiving…' : archiveActionBlocked, 'Put this session in its work’s Done; it keeps running, with Undo')}
+      {/if}
       {#if isInactiveAgent(session)}
         {@render act('remove-from-list-details', 'Remove from list', onRemoveFromList, dismissAgentBlocked, 'Hide this inactive agent until it becomes active again')}
       {:else if session.kind !== 'external'}
@@ -1016,6 +1119,14 @@
               {@render act('send-prompt-from-details', 'Send prompt…', openComposer, sendPromptBlocked, '', 'btn btn--primary')}
             {/if}
             {@render act('open-review', 'Review…', () => (reviewOpen = true), reviewBlocked)}
+            {#if hasPaneConversation}
+              {@render act('fork-from-details', 'Fork…', openFork, rewindBlocked, 'A new session from this conversation; this one keeps running')}
+              {@render act('rewind-from-details', 'Rewind…', openRewind, rewindBlocked, 'Take the conversation back to before a turn; files stay as they are')}
+            {/if}
+            {#if canSwitchLogin}
+              {@render act('switch-account-from-details', 'Switch account…', openSwitchAccount, switchAccountBlocked, 'Resume this conversation under another login on this host')}
+              {@render act('change-model-from-details', 'Change model…', openModel, sendPromptBlocked, 'Send /model to this session')}
+            {/if}
             {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked)}
           </div>
         </div>
@@ -1038,6 +1149,9 @@
           <h4>Share</h4>
           <div class="btn-row">
             {@render act('share-from-details', 'Share…', openShare, shareBlocked, 'Share this session with one person — watch or drive, revocable, and never a terminal')}
+            {#if session.kind !== 'shell' && session.claude_session_id != null}
+              {@render act('copy-transcript-from-details', 'Copy transcript', onCopyTranscript, copyingTranscript ? 'Copying…' : copyTranscriptBlocked, 'Copy this conversation as Markdown')}
+            {/if}
             {#if !hasNoPane(session) && detailsOwned}
               <button class="btn btn--quiet is-bounded" onclick={onCopy} data-testid="copy-attach" title="Copy the command that attaches this session in another terminal">
                 {copied ? '✓ Copied' : 'Copy tmux attach'}
@@ -1053,6 +1167,9 @@
       {/if}
       {#if session.kind !== 'external'}
         <div class="danger-row">
+          {#if canArchive}
+            {@render act('archive-from-details', 'Archive', onArchive, archiving ? 'Archiving…' : archiveActionBlocked, 'Put this session in its work’s Done; it keeps running, with Undo')}
+          {/if}
           {#if isInactiveAgent(session)}
             {@render act('remove-from-list-details', 'Remove from list', onRemoveFromList, dismissAgentBlocked, 'Hide this inactive agent until it becomes active again')}
           {:else}
@@ -1089,6 +1206,69 @@
     This stops the claude process in <code>{session.tmux_name}</code> on
     <code>{session.host_alias}</code> and starts a fresh one. Anything it is working
     on right now is lost; the tmux session and the worktree are kept. Continue?
+  </ConfirmDialog>
+{/if}
+
+{#if forkOpen}
+  <ForkSheet sessionId={session.id} anchor={null} suggestedName={suggestedForkName(session)} onclose={() => (forkOpen = false)} />
+{/if}
+
+{#if rewindOpen}
+  <RewindSheet {session} onclose={() => (rewindOpen = false)} />
+{/if}
+
+{#if switchOpen}
+  <ConfirmDialog
+    title="Switch account?"
+    confirmLabel="Switch"
+    danger
+    confirmDisabled={loginTarget === (session.claude_profile ?? '') || switchAccountBlocked !== null}
+    onconfirm={onSwitchLogin}
+    oncancel={() => {
+      switchOpen = false;
+      loginPick = null;
+    }}
+    confirmTestId="confirm-account-switch"
+  >
+    <label class="dialog-field">
+      <span>Resume under</span>
+      <select
+        aria-label="Claude login"
+        data-testid="switch-account-pick"
+        value={loginTarget}
+        onchange={(e) => (loginPick = (e.currentTarget as HTMLSelectElement).value)}
+      >
+        <option value="">Host login</option>
+        {#each loginChoices as p (p.name)}
+          <option value={p.name}>{p.name}{p.email ? ` (${p.email})` : p.account_uuid ? '' : ' (not logged in)'}</option>
+        {/each}
+      </select>
+    </label>
+    This restarts claude in <code>{session.tmux_name}</code> and resumes the same
+    conversation under that login. Anything it is working on right now is lost.
+  </ConfirmDialog>
+{/if}
+
+{#if modelOpen}
+  <ConfirmDialog
+    title="Change model?"
+    confirmLabel="Change"
+    confirmDisabled={modelPick === '' || sendPromptBlocked !== null}
+    onconfirm={onChangeModel}
+    oncancel={() => (modelOpen = false)}
+    confirmTestId="confirm-model-change"
+  >
+    <label class="dialog-field">
+      <span>Model{#if session.model} · now {modelShortLabel(session.model)}{/if}</span>
+      <select aria-label="Model" data-testid="change-model-pick" bind:value={modelPick}>
+        <option value="" disabled>Pick a model</option>
+        {#each MODEL_OPTIONS as o (o.value)}
+          <option value={o.value}>{o.label}</option>
+        {/each}
+      </select>
+    </label>
+    Sends <code>/model</code> to the session, as the composer's model picker does. It
+    applies from the next turn.
   </ConfirmDialog>
 {/if}
 
@@ -1297,6 +1477,8 @@
   .btn-row { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
   .grow { flex: 1 1 auto; }
   .more-hint { margin: var(--space-2) 0 0; font-size: var(--text-xs); color: var(--fg-muted); }
+  .dialog-field { display: flex; flex-direction: column; gap: var(--space-1); margin-bottom: var(--space-3); font-size: var(--text-sm); }
+  .dialog-field span { color: var(--fg-muted); }
   .hint-link {
     padding: 0;
     border: 0;

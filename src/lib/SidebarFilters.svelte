@@ -62,6 +62,7 @@
     type WorkFilters,
   } from './work_filters';
   import { clearWorkFilterPatch, sessionFacets, type SessionFacetId } from './filter_facets';
+  import { AGENT_FILTERS, agentFilter, agentFilterLabel } from './session_scope';
 
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
   const workViewChord = workViewChordLabel(isMac);
@@ -165,6 +166,7 @@
           scope: $scopeSelectorShown ? $effectiveScope : 'all',
           scopeLabel,
           host: $effectiveHostFilter,
+          agent: $agentFilter === 'any' ? undefined : agentFilterLabel($agentFilter),
           recency,
           search,
           needsYou: needsYouOnly,
@@ -199,6 +201,8 @@
         return scopeFilter.set('all');
       case 'host':
         return hostFilter.set('all');
+      case 'agent':
+        return agentFilter.set('any');
       case 'recency':
         recency = 'all';
         return;
@@ -304,6 +308,14 @@
               onchange={(id) => hostFilter.set(id)}
             />
           </nav>
+          <!-- The Sessions board's "Agent: any": which agent the rows run. -->
+          <FilterChipGroup
+            label="Agent"
+            value={$agentFilter}
+            options={AGENT_FILTERS.map((a) => ({ id: a, label: agentFilterLabel(a) }))}
+            testidFor={(id) => `filter-agent-${id}`}
+            onchange={(id) => agentFilter.set(id)}
+          />
         </section>
         <section use:hintAnchor={{ id: 'recency-filter', when: $sessions.length > 0 }}>
           <h3>Time</h3>
