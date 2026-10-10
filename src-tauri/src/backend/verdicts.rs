@@ -624,6 +624,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     ("my_grants", Verdict::Routed { tool: "my_grants" }),
+    // Gap plan G4.2: a recipient's ask for a wider level, and the owner's
+    // list and answer. Both route; the hub gates each per request.
+    (
+        "session_ask_access",
+        Verdict::Routed {
+            tool: "session_ask_access",
+        },
+    ),
+    (
+        "access_requests",
+        Verdict::Routed {
+            tool: "access_requests",
+        },
+    ),
     (
         "restart_session",
         Verdict::Routed {

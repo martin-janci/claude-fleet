@@ -126,7 +126,7 @@ pub const GRANT_LEVELS: [&str; 3] = [GRANT_WATCH, GRANT_ANSWER, GRANT_DRIVE];
 
 /// A level's place in [`GRANT_LEVELS`] (wider is larger); `None` for a
 /// string that is not a level.
-fn grant_rank(level: &str) -> Option<usize> {
+pub(super) fn grant_rank(level: &str) -> Option<usize> {
     GRANT_LEVELS.iter().position(|l| *l == level)
 }
 
@@ -190,6 +190,18 @@ pub struct SessionGrantRow {
     /// it back" has to remain answerable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<i64>,
+}
+
+/// The grant behind a person's access to one session, for the recipient's
+/// header ([`Store::grant_details_for_person`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantDetail {
+    pub level: String,
+    /// The person who granted it: the owner at the time.
+    pub granted_by: i64,
+    pub granted_at: i64,
+    /// Set when the level comes through an org grant.
+    pub org_id: Option<i64>,
 }
 
 const GRANT_COLS: &str =
@@ -367,7 +379,7 @@ impl Store {
     }
 
     /// A person recipient: not the granter, known, and not disabled.
-    fn check_person_recipient(
+    pub(super) fn check_person_recipient(
         &self,
         session_id: i64,
         person: i64,
@@ -442,6 +454,7 @@ impl Store {
                 session_id,
                 person_id,
                 level: level.map(str::to_string),
+                request: None,
             })
             .collect())
     }
@@ -798,6 +811,53 @@ impl Store {
         Ok(out)
     }
 
+    /// Every live grant **to** `person`, as session id → the grant that gives
+    /// the widest level: the level, who granted it, when, and the org it came
+    /// through (gap plan G4.2: the recipient's header, "Shared by Martin ·
+    /// Read · since 13:20", and "via 32bit"). The same two halves as
+    /// [`Store::grants_for_person`], which stays the hot read; this one runs
+    /// only when a client asks `my_grants`. Where a person grant and an org
+    /// grant give the same level, the person grant wins (it names them).
+    pub fn grant_details_for_person(
+        &self,
+        person: i64,
+    ) -> Result<BTreeMap<i64, GrantDetail>, IpcError> {
+        let mut st = self.conn.prepare(
+            "SELECT session_id, level, granted_by, granted_at, NULL FROM session_grants \
+              WHERE person_id = ?1 AND revoked_at IS NULL \
+             UNION ALL \
+             SELECT g.session_id, g.level, g.granted_by, g.granted_at, g.org_id \
+               FROM session_grants g \
+               JOIN org_members m ON m.org_id = g.org_id AND m.person_id = ?1 \
+              WHERE g.org_id IS NOT NULL AND g.revoked_at IS NULL \
+                AND m.removed_at IS NULL AND m.role IN ('admin', 'member') \
+                AND m.shares_since IS NOT NULL AND m.shares_since <= g.granted_at",
+        )?;
+        let rows = st.query_map(rusqlite::params![person], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                GrantDetail {
+                    level: r.get(1)?,
+                    granted_by: r.get(2)?,
+                    granted_at: r.get(3)?,
+                    org_id: r.get(4)?,
+                },
+            ))
+        })?;
+        let mut out: BTreeMap<i64, GrantDetail> = BTreeMap::new();
+        for row in rows {
+            let (session, detail) = row?;
+            let better = out.get(&session).is_none_or(|have| {
+                let (new, old) = (grant_rank(&detail.level), grant_rank(&have.level));
+                new > old || (new == old && have.org_id.is_some() && detail.org_id.is_none())
+            });
+            if better {
+                out.insert(session, detail);
+            }
+        }
+        Ok(out)
+    }
+
     /// How many live grants TO `person` stand on sessions of `org`, as
     /// `(watch, answer, drive)` — what an org admin sees of a member's grants (org
     /// administration phase D, owner's answer 2). Counts only: a list would
@@ -862,6 +922,7 @@ impl Store {
                     session_id,
                     person_id: person,
                     level: None,
+                    request: None,
                 })
                 .collect();
             self.announce_grant_change(&changes)?;
@@ -894,6 +955,7 @@ impl Store {
                     session_id,
                     person_id: person,
                     level: Some(GRANT_WATCH.to_string()),
+                    request: None,
                 })
                 .collect();
             self.announce_grant_change(&changes)?;
@@ -1031,7 +1093,11 @@ impl Store {
     ///
     /// It is never the authority — each write carries the same comparison in
     /// its own `WHERE` — only the way a refused write picks its error.
-    fn session_is_owned_by(&self, session_id: i64, person: i64) -> Result<bool, IpcError> {
+    pub(super) fn session_is_owned_by(
+        &self,
+        session_id: i64,
+        person: i64,
+    ) -> Result<bool, IpcError> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1 AND owner_person_id = ?2)",
             rusqlite::params![session_id, person],
@@ -1140,6 +1206,7 @@ mod tests {
                 session_id: session,
                 person_id: b,
                 level: None,
+                request: None,
             })
             .payload()["level"],
             serde_json::Value::Null
@@ -1437,12 +1504,17 @@ mod tests {
                 // moves a counter, touches no row (crate-wide so a membership
                 // write and an org's removal re-scope streams too)
                 "bump_grant_generation",
+                // a level's rank, for comparing two (access_requests.rs)
+                "grant_rank",
                 "validate_grant_level",
                 // the disablement sweep: revokes, never grants
                 "revoke_live_grants_to_person",
                 // the three writes: create, narrow, revoke — no widen. Each
                 // of the two after it has a person-recipient wrapper first.
                 "grant_session",
+                // the checks a grant to a person passes, also run before an
+                // ask is granted (access_requests.rs): a read
+                "check_person_recipient",
                 "narrow_session_grant",
                 "narrow_session_grant_to",
                 "revoke_session_grant",
@@ -1464,6 +1536,8 @@ mod tests {
                 // reads
                 "grants_for_session",
                 "grants_for_person",
+                // the same, with who granted it and through which org (G4.2)
+                "grant_details_for_person",
                 // an org admin's authority over a member's grants (phase D,
                 // owner's answer 2): a count, and two sweeps that only revoke
                 // or narrow, name no new recipient and have no inverse
@@ -1475,6 +1549,8 @@ mod tests {
                 // narrows to watch — no level from the caller, no recipient
                 "live_grants_in_org",
                 "org_admin_change_grant",
+                // a read: does this person own that session
+                "session_is_owned_by",
             ],
             "the public surface of session_grants changed: a new function must \
              be unable to raise a grant's level or change its recipient, and \

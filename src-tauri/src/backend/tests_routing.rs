@@ -4717,8 +4717,48 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Gap plan G4.2: a recipient's ask, and the owner's answer to it.
+        (
+            "session_ask_access",
+            "session_ask_access",
+            json!({ "session_id": 42, "level": "answer" }),
+            ACCESS_REQUEST_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_ask_access(
+                    b,
+                    commands::sessions::SessionAskAccessArgs {
+                        session_id: 42,
+                        level: "answer".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "access_requests",
+            "access_requests",
+            json!({ "action": "grant", "id": 3 }),
+            ACCESS_REQUEST_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::access_requests(
+                    b,
+                    commands::sessions::AccessRequestsArgs {
+                        action: Some("grant".into()),
+                        session_id: None,
+                        id: Some(3),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
     ]
 }
+
+/// An `AccessRequestView` as the hub answers `session_ask_access` and an
+/// `access_requests` grant or decline.
+const ACCESS_REQUEST_PAYLOAD: &str = r#"{"id":3,"session_id":42,"person_id":2,"person_name":"bob","level":"answer","requested_at":1700000000}"#;
 
 /// A complete `MovePreview` (every field required — no `#[serde(default)]`,
 /// per the wire rule), wrapped as a `MoveOutcome::Preview` the way a hub

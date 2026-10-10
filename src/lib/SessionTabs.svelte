@@ -24,6 +24,11 @@
   import { editorBlockedReason, openSessionInEditor } from './editor';
   import PresenceStrip from './PresenceStrip.svelte';
   import VisibilityBadge from './VisibilityBadge.svelte';
+  import SharedWithYou from './SharedWithYou.svelte';
+  import { myGrantInfo } from './access';
+  import { orgs as orgList } from './orgs';
+  import { isSharedAccess } from './session_scope';
+  import { recipientStateLabel, sharedByMeta, sharerName } from './shared_view';
   import { sessionBlocked, shareSheetFor } from './share';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
@@ -80,6 +85,17 @@
       : (session.account_uuid ?? $hostByAlias.get(session.host_alias)?.account_uuid ?? null);
     return uuid ? ($accountByUuid.get(uuid)?.email ?? null) : null;
   });
+  // Gap plan G4.2: someone the session is shared with reads who shared it,
+  // at what level and since when, and "Waiting for Martin" for its state.
+  const sharedLevel = $derived.by(() => {
+    const a = session ? $accessOf(session) : null;
+    return isSharedAccess(a) ? a : null;
+  });
+  const shareInfo = $derived(session ? $myGrantInfo.get(session.id) : undefined);
+  const sharer = $derived(session && sharedLevel ? sharerName(session, shareInfo, $orgList) : null);
+  const stateLabel = $derived(
+    state ? ((sharedLevel ? recipientStateLabel(state, sharer) : null) ?? STATE_LABELS[state]) : '',
+  );
   const ctxPct = $derived(session?.context_pct ?? null);
   const ctxLevel = $derived(contextLevel(ctxPct));
 
@@ -109,8 +125,9 @@
   {#if session && state}
     <div class="title-row">
       <span class="name" data-testid="session-head-name">{name}</span>
-      <span class="state state-{state}" data-testid="session-head-state">{STATE_LABELS[state]}</span>
+      <span class="state state-{state}" data-testid="session-head-state">{stateLabel}</span>
       <VisibilityBadge {session} />
+      <SharedWithYou {session} />
       <span class="grow"></span>
       {#if ctxPct !== null && ctxLevel !== null}
         <span class="ctx" data-testid="session-head-context" data-level={ctxLevel} title="Context window used">
@@ -168,6 +185,8 @@
       </button>
     </div>
     <div class="meta" data-testid="session-head-meta">
+      {#if sharedLevel}<span data-testid="session-head-shared-by">{sharedByMeta(sharedLevel, shareInfo, sharer)}</span
+        ><span class="sep" aria-hidden="true">·</span>{/if}
       <span>{session.host_alias}</span>
       {#if accountEmail}<span class="sep" aria-hidden="true">·</span><span data-testid="session-head-account">{accountEmail}</span>{/if}
       {#if session.worktree_key}<span class="sep" aria-hidden="true">·</span><span class="mono" data-testid="session-head-worktree">{session.worktree_key}</span>{/if}

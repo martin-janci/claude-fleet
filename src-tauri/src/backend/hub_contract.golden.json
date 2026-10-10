@@ -1,6 +1,17 @@
 {
   "revision": 16,
   "types": {
+    "AccessRequestView": [
+      "id",
+      "level",
+      "person_display_name",
+      "person_id",
+      "person_name",
+      "requested_at",
+      "resolution",
+      "session_id",
+      "session_name"
+    ],
     "AccountRow": [
       "display_name",
       "email",
@@ -519,10 +530,21 @@
     ],
     "MyGrants": [
       "grants",
-      "person_id"
+      "person_id",
+      "requests"
     ],
     "MyGrants.grants": [
+      "granted_at",
       "level",
+      "session_id",
+      "shared_by",
+      "shared_by_name",
+      "via_org"
+    ],
+    "MyGrants.requests": [
+      "id",
+      "level",
+      "requested_at",
       "session_id"
     ],
     "PeerLinkSummary": [

@@ -7,6 +7,12 @@ Auto-generated from the embedded MCP tool router. See [`control-api.md`](control
 
 ## MCP tools
 
+### `access_requests`
+
+Asks for a wider level on sessions you OWN. list (default; session_id narrows it), grant {id} (re-shares at the asked level) or decline {id}. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_INVALID_STATE (the asker's share is gone).
+
+Parameters: `action`, `id`, `session_id`
+
 ### `account_usage`
 
 Each Claude account's latest plan usage: 5-hour and weekly utilization with reset times, status, fetched_at. Never fetches.
@@ -653,6 +659,12 @@ What the session's pane shows now: claude_status, stuck_kind, current_activity, 
 
 Parameters: `session_id`
 
+### `session_ask_access`
+
+Ask the owner of a session shared with you for a wider level (answer or drive). Confers nothing until they grant it; one open ask per session. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS, E_INVALID_STATE (declined within the hour).
+
+Parameters: `level`, `session_id`
+
 ### `session_claim`
 
 Claim the unclaimed session THIS pane is in for a person: it becomes theirs and private. Only the session whose active pane this request's X-Fleet-Pane header names — being on the same host is not enough. Errors: E_NOTFOUND, E_INVALID_STATE (no pane of it proven), E_FORBIDDEN (another session's pane), E_EXISTS (owned).
@@ -1052,6 +1064,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_narrow`
 - `commands::sessions::session_access`
 - `commands::sessions::my_grants`
+- `commands::sessions::session_ask_access`
+- `commands::sessions::access_requests`
 - `commands::sessions::restart_session`
 - `commands::sessions::rewind_conversation`
 - `commands::sessions::send_prompt`

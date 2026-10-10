@@ -1814,6 +1814,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/159_routine_guards.sql"),
         already_applied: Some(routine_runs_has_host),
     },
+    // M15 step G4.2: `access_requests`, a recipient's ask for a wider share
+    // level. `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        160,
+        include_str!("../../migrations/160_access_requests.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

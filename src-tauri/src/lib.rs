@@ -550,6 +550,8 @@ pub fn run() {
             commands::sessions::session_narrow,
             commands::sessions::session_access,
             commands::sessions::my_grants,
+            commands::sessions::session_ask_access,
+            commands::sessions::access_requests,
             commands::sessions::restart_session,
             commands::sessions::rewind_conversation,
             commands::sessions::send_prompt,

@@ -58,7 +58,8 @@
   import { mergeInventoryRow, clearInventoryFor, loadAssets, primeCatalog, syncProgress, repoStatus } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
   import { startVoiceEvents } from './lib/voice';
-  import { accessOf, applyGrantChanges, loadMyGrants } from './lib/access';
+  import { accessOf, loadMyGrants } from './lib/access';
+  import { loadAccessRequests, onGrantFrames } from './lib/access_requests';
   import TransferSheet from './lib/TransferSheet.svelte';
   import ShareSheet from './lib/ShareSheet.svelte';
   import { applyMoveProgress, recheckWaitingRuns } from './lib/moves';
@@ -334,7 +335,7 @@
       // changed. It patches `access.ts`, and everything derived from it — the
       // terminal gate included — re-evaluates without a re-list. A revoke
       // closing an attached PTY depends on this frame arriving.
-      onGrantChanged: applyGrantChanges,
+      onGrantChanged: onGrantFrames,
     });
     markStartup('backend');
     const [pr, sr, hr, ar] = await Promise.all([
@@ -361,6 +362,9 @@
       // into a startup error would report a problem that changes nothing.
       loadMyGrants(),
     ]);
+    // Gap plan G4.2: the open asks on this person's sessions. Best-effort,
+    // like `loadMyGrants`: a hub older than the feature has none to give.
+    void loadAccessRequests();
     // The picker's pins and groups. Outside the `Promise.all` on purpose: a
     // hub older than the feature has no answer, and that is not a startup
     // failure (the picker then runs on its rules alone).
@@ -419,6 +423,7 @@
       // has vanished from reach (or, worse, a revoked one still reachable).
       // Re-read it rather than trusting the patched copy.
       void loadMyGrants();
+      void loadAccessRequests();
     });
     // The composer's chip row. Fleet state since it moved off `localStorage`
     // (so the phone and this window share one list), and never on the

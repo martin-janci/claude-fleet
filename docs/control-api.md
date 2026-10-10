@@ -377,8 +377,13 @@ Index by area (names only; see the reference for details):
   `session_access` (who holds a live grant on your session), `my_grants`
   (who *you* are on this fleet and every live grant to you, which is what a
   client derives access from together with each row's `owner_person_id` and
-  `visibility`), and `session_claim` (give an `unclaimed` session to a
-  person). The first five are a person's device and the master; a per-host
+  `visibility`), `session_ask_access` (someone a session is shared with
+  asks its owner for `answer` or `drive`; it confers nothing, one open ask
+  each, and a decline holds a repeat back an hour), `access_requests` (the
+  owner's open asks: `list`, then `grant`, which revokes the asker's share
+  and shares again at the asked level, or `decline`), and `session_claim`
+  (give an `unclaimed` session to a person). All but the last are a
+  person's device and the master; a per-host
   token is refused all of them, because it proves no person. `session_claim`
   is the mirror image: a **per-host token only**, and only for the session
   whose active pane its `X-Fleet-Pane` header names — the operator's own

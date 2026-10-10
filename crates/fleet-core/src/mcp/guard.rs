@@ -1530,6 +1530,24 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Gap plan G4.2: a recipient's ask for a wider level, and the owner's
+    // list and answer. Person-only like the rest of this block. Neither is
+    // readonly (`access_requests` grants and declines) nor confirm-gated:
+    // an ask confers nothing, and granting is the owner's own share.
+    ToolPolicy {
+        name: "session_ask_access",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "access_requests",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // The claim path (spec §4.4, clause 1 + the pane proof). The ONE
     // `Access::HostToken` row: see that variant's doc for why no existing one
     // expresses it. Not readonly — it writes the owner and flips the row to
@@ -1678,6 +1696,8 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "session_narrow",
     "session_access",
     "my_grants",
+    "session_ask_access",
+    "access_requests",
     "session_presence",
     // The Automation screen's Runs list is a person's: a host's Claude has
     // `list_tasks` for the tasks it dispatched, and proves no person, so

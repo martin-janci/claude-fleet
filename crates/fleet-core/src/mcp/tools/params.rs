@@ -1445,6 +1445,29 @@ pub struct SessionAccessParams {
     pub session_id: i64,
 }
 
+/// `session_ask_access` (gap plan G4.2).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionAskAccessParams {
+    /// The session shared with you, by fleet row id.
+    pub session_id: i64,
+    /// The level to ask for: answer or drive.
+    pub level: String,
+}
+
+/// `access_requests` (gap plan G4.2).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AccessRequestsParams {
+    /// list (default), grant or decline.
+    #[serde(default)]
+    pub action: Option<String>,
+    /// list: only this session's asks.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// grant / decline: the ask's id.
+    #[serde(default)]
+    pub id: Option<i64>,
+}
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SessionClaimParams {
     /// The session to claim, by fleet row id (`fleet-hub session unclaimed`

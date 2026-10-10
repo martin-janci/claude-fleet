@@ -3774,14 +3774,14 @@ describe('the Sessions board: tabs, agent, organisation, the running cap', () =>
     expect(names()).toHaveLength(2);
   });
 
-  it('a shared row says who shared it and at what level; an unknown sharer reads "Shared with you"', async () => {
+  it('a shared row says who shared it and at what level (Watch board); an unknown sharer reads "Shared with you"', async () => {
     fleet();
     orgs.set([{ id: 1, name: 'Acme', members: [{ person_id: 9, name: 'petra', display_name: 'Petra', role: 'member' }] }] as never);
     render(Sidebar);
     await tick(); await tick();
     const group = await screen.findByTestId('shared-with-me');
     const lines = within(group).getAllByTestId('shared-by').map((e) => e.textContent);
-    expect(lines.sort()).toEqual(['Shared by Petra · can watch', 'Shared with you · can steer']);
+    expect(lines.sort()).toEqual(['Petra · Read', 'Shared with you · Steer']);
     // Only shared rows carry the line.
     expect(screen.getAllByTestId('shared-by')).toHaveLength(2);
   });
@@ -3795,7 +3795,7 @@ describe('the Sessions board: tabs, agent, organisation, the running cap', () =>
     render(Sidebar);
     await tick(); await tick();
     const group = await screen.findByTestId('shared-with-me');
-    expect(within(group).getByTestId('shared-by').textContent).toBe('Shared with you · can answer');
+    expect(within(group).getByTestId('shared-by').textContent).toBe('Shared with you · Answer');
     expect(screen.queryAllByTestId('proj-row')).toHaveLength(0);
   });
 
