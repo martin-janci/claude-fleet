@@ -3250,8 +3250,9 @@
   .prompt-text {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    font-size: var(--text-xs);
-    line-height: 1.5;
+    /* The prompt is read like the reply, so it takes the same step. */
+    font-size: var(--text-md);
+    line-height: 1.55;
     color: var(--fg);
   }
   /* Outgoing: the prompt block while it is on its way, and its receipt. */
@@ -3325,13 +3326,19 @@
     cursor: pointer;
   }
   .reply {
-    font-size: var(--text-xs);
+    /* The manual's step for the conversation and long prose (text-md,
+       tokens.json): the agent's words are what the pane is read for, so
+       they sit a step above the tool rows, receipts and footers around
+       them, which stay at text-2xs/xs. 1.6 rather than the token's 1.5:
+       a reply runs to many lines, and the extra lead keeps the eye on the
+       right one at 80ch (WCAG 1.4.12 asks for at least 1.5). */
+    font-size: var(--text-md);
     line-height: 1.6;
     color: var(--fg);
     overflow-wrap: break-word;
   }
   .text {
-    margin: 0.35rem 0 0.6rem;
+    margin: 0.4rem 0 0.75rem;
   }
   .reply-footer {
     display: flex;
