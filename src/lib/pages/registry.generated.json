@@ -1737,7 +1737,7 @@
       "danger": {
         "level": "none"
       },
-      "default": "notify",
+      "default": "automatic",
       "help": "The same choice for fleet-agent on hosts the hub cannot reach.",
       "key": "update.agent.mode",
       "kind": {
@@ -1754,7 +1754,7 @@
       "scope": "fleet",
       "tags": [],
       "unit": "none",
-      "value": "notify"
+      "value": "automatic"
     },
     {
       "ai": "suggest",

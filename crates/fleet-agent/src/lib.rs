@@ -16,6 +16,7 @@ pub mod conn;
 pub mod exec;
 pub mod install;
 pub mod report;
+pub mod self_update;
 pub mod update;
 
 /// Helpers the unit tests share.

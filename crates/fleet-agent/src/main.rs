@@ -100,6 +100,10 @@ fn run(args: cli::RunArgs) -> ExitCode {
         Ok(c) => c,
         Err(why) => return fail(&why),
     };
+    // Settled before the runtime's threads exist: it may set
+    // `RUNTIME_DIRECTORY`, which the hub's `update_now` line reads to know
+    // where to drop `update-now`.
+    let self_update = self_update_plan();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -107,10 +111,40 @@ fn run(args: cli::RunArgs) -> ExitCode {
         Ok(rt) => rt,
         Err(e) => return fail(&format!("could not start the runtime: {e}")),
     };
-    match runtime.block_on(fleet_agent::conn::run(config)) {
+    match runtime.block_on(fleet_agent::conn::run(config, self_update)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => fail(&why),
     }
+}
+
+/// The in-process updater, where no `fleet-agent-update.timer` runs one.
+fn self_update_plan() -> Option<fleet_agent::self_update::SelfUpdate> {
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let plan = fleet_agent::self_update::plan(
+        &argv,
+        home().as_deref(),
+        config_home().as_deref(),
+        is_root(),
+        std::env::var(fleet_agent::self_update::ENV_SWITCH)
+            .ok()
+            .as_deref(),
+        |p| p.exists(),
+        std::env::var_os("PATH"),
+        std::env::current_dir().ok(),
+    )?;
+    // Under systemd `RuntimeDirectory=` names where the poke lands already;
+    // elsewhere it lands in the updater's own directory. `run` watches
+    // whichever it is.
+    let mut plan = plan;
+    match std::env::var_os("RUNTIME_DIRECTORY").filter(|d| !d.is_empty()) {
+        Some(d) => plan.poke_dir = PathBuf::from(d),
+        None => {
+            if std::fs::create_dir_all(&plan.poke_dir).is_ok() {
+                std::env::set_var("RUNTIME_DIRECTORY", &plan.poke_dir);
+            }
+        }
+    }
+    Some(plan)
 }
 
 fn install_cmd(args: cli::InstallArgs) -> Result<(), String> {

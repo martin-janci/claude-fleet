@@ -313,7 +313,7 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'decide.retention_days': '90',
   'update.track': 'stable',
   'update.hub.mode': 'notify',
-  'update.agent.mode': 'notify',
+  'update.agent.mode': 'automatic',
   'update.desktop.mode': 'notify',
   'update.mobile.mode': 'notify',
   'update.check_interval_secs': '21600',

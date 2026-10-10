@@ -188,7 +188,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 |---|---|---|---|---|
 | `update.track` | `stable` | `stable` / `beta` / `nightly` / `dev` | fleet | Which releases the hub follows for its fleet: stable, beta (release candidates too), nightly (main, at most every two hours) or dev (every green push to main). |
 | `update.hub.mode` | `notify` | `manual` / `notify` / `automatic` | fleet | manual: only a pinned version; notify: offer the update; automatic: install it at the next quiet point. |
-| `update.agent.mode` | `notify` | `manual` / `notify` / `automatic` | fleet | The same choice for fleet-agent on hosts the hub cannot reach. |
+| `update.agent.mode` | `automatic` | `manual` / `notify` / `automatic` | fleet | The same choice for fleet-agent on hosts the hub cannot reach. |
 | `update.desktop.mode` | `notify` | `manual` / `notify` / `automatic` | fleet | The same choice for the desktop app. |
 | `update.mobile.mode` | `notify` | `manual` / `notify` | fleet | manual or notify: a phone never installs an update silently. |
 | `update.check_interval_secs` | `21600` | ≥ 900 seconds | fleet | How often the hub re-reads the release channel, and clients check again. |

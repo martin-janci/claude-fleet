@@ -1414,7 +1414,7 @@ pub const SPECS: &[Spec] = &[
     ),
     Spec::new(
         UPDATE_AGENT_MODE,
-        "notify",
+        "automatic",
         Kind::Choice(UPDATE_MODES),
         "Agent updates",
         "The same choice for fleet-agent on hosts the hub cannot reach.",
