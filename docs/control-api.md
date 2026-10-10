@@ -92,6 +92,42 @@ Devices does; the device you are using has none). A rotation keeps the host's
 created time, records the rotation and starts "used" over; stamping use never
 invalidates the hub's token cache (`auth_epoch`), a rotation does.
 
+### Named tokens
+
+Settings → Control API → **+ Token** (or the `api_tokens` tool) creates a
+token for a script or another agent, under a name, with a scope, an expiry
+and an optional host limit:
+
+- **Read** — the tools that observe the fleet, as a `readonly` token.
+- **Act** — start, send to and stop sessions: every tool but the fleet-admin
+  and settings ones, and it cannot create tokens.
+- **Admin** — what the master token can do. The master token is the fleet's
+  first Admin token; only the master (or another admin token) creates one.
+
+**Expires** is a number of days (1–3650) or never; an expired token is
+refused from that second on, with no write. **Hosts** limits a Read or Act
+token to some hosts: sessions elsewhere are invisible to it and host-addressed
+calls on another host answer `E_FORBIDDEN`. A limited token reaches only the
+tools whose every host goes through that check (`guard::HOST_LIMITED_TOOLS`:
+listing, reading, starting, prompting and stopping sessions); routines,
+clipboard, probes and the fleet-wide reads are refused to it. An Admin token
+is never limited.
+
+A named token is for the tool surface: it authenticates `/mcp` and
+`/mcp/json` and is refused (`403`) on every other route, `/hook` and the
+`/events` stream included, so no open connection outlives its revoke or
+expiry.
+
+A named token speaks for the hub's owner, like the master token: the sessions
+it starts are the owner's, and what it sends is delivered with the
+untrusted-content marker naming the token. The token (`flt_live_…`) is shown
+once, with **Copy token** and **Copy as env line** (`FLEET_MCP_TOKEN=…`); the
+store keeps only its SHA-256, and nothing logs it. The table lists each with
+its scope, hosts, expiry and when it was last used (to the minute);
+**Revoke** ends it on its next request. On a desktop paired with a hub the
+same panel creates the hub's tokens, from the owner's trusted full device,
+Read or Act only.
+
 ## Connecting a client
 
 The Settings panel has a collapsible **MCP client config** disclosure — expand

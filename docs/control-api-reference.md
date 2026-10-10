@@ -45,6 +45,12 @@ Approve or deny one waiting call by its nonce; false when it was already answere
 
 Parameters: `approved`, `nonce`
 
+### `api_tokens`
+
+Named Control API tokens. list; create {name, scope: read | act | admin, expires_in_days?, hosts?} answers the token ONCE, with env_line; revoke {name}. A device creates read or act only, and needs trust.
+
+Parameters: `action`, `expires_in_days`, `hosts`, `name`, `scope`
+
 ### `apply_sync`
 
 Apply a plan_sync plan: writes files with compare-and-swap, backs up overwritten files, merges config (files end up mode 0600), installs plugins, writes the managed manifest, then re-scans. Master token only; requires confirmation. restart_required marks hosts whose Claude must be restarted.
@@ -1098,6 +1104,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::debug_device_screenshot`
 - `commands::prs::list_pull_requests`
 - `commands::start_rules::start_rules`
+- `commands::api_tokens::api_tokens`
 - `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`

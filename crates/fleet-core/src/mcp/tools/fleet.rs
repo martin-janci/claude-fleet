@@ -1249,7 +1249,8 @@ pub(super) fn owner_for(caller: &Caller, s: &Store) -> Option<i64> {
         some @ Some(_) => some,
         // Not `is_master()` alone: a per-host token also carries no person,
         // and it must stay `None` rather than inherit the hub's owner.
-        None if caller.is_master() => s.personal_owner_id().ok().flatten(),
+        // A named token (G2.8) is the owner's too, whatever its scope.
+        None if caller.speaks_for_owner() => s.personal_owner_id().ok().flatten(),
         None => None,
     }
 }

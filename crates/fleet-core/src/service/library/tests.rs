@@ -13,6 +13,7 @@ fn file(path: &str) -> LibraryFile {
 /// A person's own device, through the one constructor.
 fn device(s: &Store, person: i64) -> ViewScope {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(ClientRef {
             id: 1,

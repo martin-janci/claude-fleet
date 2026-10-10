@@ -13,6 +13,7 @@ fn store() -> Mutex<Store> {
 
 fn person(store: &Mutex<Store>, id: i64) -> ViewScope {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(ClientRef {
             id: 7,
@@ -219,6 +220,7 @@ fn another_person_cannot_draw_on_a_mission_they_cannot_see() {
 fn a_scoped_caller_never_accepts() {
     let (st, _, _, [a, ..]) = fixture();
     let host = Caller {
+        api: None,
         host_alias: Some("h".into()),
         client: None,
         mode: TokenMode::Full,

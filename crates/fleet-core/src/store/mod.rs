@@ -16,6 +16,7 @@ mod catalog;
 mod changesets;
 mod clients;
 mod control_handoffs;
+mod control_tokens;
 mod conversations;
 mod debug_devices;
 mod decisions;
@@ -99,6 +100,7 @@ pub use clients::{
 pub use control_handoffs::{
     handoff_preview, ControlHandoffRow, HandoffItem, NewHandoff, HANDOFFS_KEEP, HANDOFF_PREVIEW_MAX,
 };
+pub use control_tokens::{ApiScope, ControlTokenRow, NewControlToken};
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, SeenDevice};
 pub use decisions::{

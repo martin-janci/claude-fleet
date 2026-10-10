@@ -1793,6 +1793,7 @@ mod tests {
                 .unwrap();
         }
         let host_a = Caller {
+            api: None,
             host_alias: Some("hosta".into()),
             client: None,
             mode: crate::mcp::TokenMode::Full,
@@ -1814,6 +1815,7 @@ mod tests {
         }
         // The session's own host token (and the master token) may.
         let host_b = Caller {
+            api: None,
             host_alias: Some("hostb".into()),
             client: None,
             mode: crate::mcp::TokenMode::Readonly,
@@ -2120,6 +2122,7 @@ mod tests {
             id
         };
         let host_a = Caller {
+            api: None,
             host_alias: Some("hosta".into()),
             client: None,
             mode: crate::mcp::TokenMode::Full,
@@ -2141,6 +2144,7 @@ mod tests {
             assert!(row.idle_since.is_some());
         }
         let host_b = Caller {
+            api: None,
             host_alias: Some("hostb".into()),
             client: None,
             mode: crate::mcp::TokenMode::Readonly,
@@ -2373,6 +2377,7 @@ mod tests {
 
     fn host_caller(host: &str) -> Caller {
         Caller {
+            api: None,
             host_alias: Some(host.into()),
             client: None,
             mode: crate::mcp::TokenMode::Full,
@@ -3190,6 +3195,7 @@ mod tests {
         let store = make_store();
         hooked(&store);
         let other = Caller {
+            api: None,
             host_alias: Some("hostb".into()),
             client: None,
             mode: crate::mcp::TokenMode::Full,

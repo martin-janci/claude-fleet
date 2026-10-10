@@ -13,6 +13,7 @@ fn store() -> Mutex<Store> {
 /// A person's device, bound to `org` or to none, scoped the way a request is.
 fn person(store: &Mutex<Store>, org: Option<i64>, id: i64) -> ViewScope {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(ClientRef {
             id: 7,
@@ -199,6 +200,7 @@ fn a_bound_caller_roots_its_mission_at_a_task_it_can_see() {
 fn a_caller_without_a_person_owns_no_mission() {
     let st = store();
     let host = Caller {
+        api: None,
         host_alias: Some("h".into()),
         client: None,
         mode: TokenMode::Full,

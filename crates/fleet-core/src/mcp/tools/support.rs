@@ -191,7 +191,22 @@ pub(super) fn require_host(
             format!("{what} is on host {session_host}; this token is bound to {h}"),
             None,
         )),
-        _ => Ok(()),
+        // A named token limited to some hosts (G2.8).
+        _ => match caller.api_hosts() {
+            Some(hosts) if !hosts.iter().any(|h| h == session_host) => Err(mcp_err(
+                "E_FORBIDDEN",
+                format!(
+                    "{what} is on host {session_host}; this token reaches only {}",
+                    if hosts.is_empty() {
+                        "no host".to_string()
+                    } else {
+                        hosts.join(", ")
+                    }
+                ),
+                None,
+            )),
+            _ => Ok(()),
+        },
     }
 }
 
@@ -1120,7 +1135,10 @@ pub(super) fn marker_origin(caller: &Caller) -> String {
     let origin = match (&caller.host_alias, &caller.client) {
         (Some(h), _) => format!("an agent on host {h}"),
         (None, Some(c)) => format!("the paired client {}", c.name),
-        (None, None) => "the fleet controller".to_string(),
+        (None, None) => match &caller.api {
+            Some(a) => format!("the Control API token {}", a.name),
+            None => "the fleet controller".to_string(),
+        },
     };
     origin
         .chars()
