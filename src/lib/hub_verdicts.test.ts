@@ -174,6 +174,10 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
     // it stays a command for work_admin's status on a standalone desktop.
     'work_retention_status',
     'work_retention_sweep',
+    // G4.6: Repair now and Restore lost sessions are page actions, which a
+    // read-only (paired) page does not show.
+    'repair_workspaces_now',
+    'restore_all_lost_sessions',
   ],
   // (`pty_open` and `upload_to_session` used to be listed here, gated by
   // TerminalView's `ownsTheFleet` check. They are `same_in_both` now: both

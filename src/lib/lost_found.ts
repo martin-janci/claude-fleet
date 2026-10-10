@@ -165,3 +165,38 @@ export function setConversationIgnored(host: string, claudeSessionId: string, ig
   else delete next[host];
   writePref(IGNORED_PREF, next);
 }
+
+// Gap plan G4.5: a pane fleet did not start (Lost and found's "outside
+// fleet" rows) is ignored the same way, by its tmux name: left out of the
+// list on this device, the pane itself untouched.
+
+const IGNORED_PANES_PREF = 'lost.ignored-panes';
+
+/** The outside-fleet panes ignored on `host`, by tmux name. */
+export function ignoredPanes(host: string): ReadonlySet<string> {
+  return new Set(readPref(IGNORED_PANES_PREF, {}, isIgnoredMap)[host] ?? []);
+}
+
+/** Ignore (`ignored`) or bring back one outside-fleet pane on `host`. */
+export function setPaneIgnored(host: string, tmuxName: string, ignored: boolean): void {
+  const all = readPref(IGNORED_PANES_PREF, {}, isIgnoredMap);
+  const names = new Set(all[host] ?? []);
+  if (ignored) names.add(tmuxName);
+  else names.delete(tmuxName);
+  const next = { ...all };
+  if (names.size > 0) next[host] = [...names];
+  else delete next[host];
+  writePref(IGNORED_PANES_PREF, next);
+}
+
+/** "Find another…" (G4.5): the found conversations a lost session could
+ *  resume instead of its own, the ones from its own project first. */
+export function otherConversations(
+  list: readonly LostCandidate[],
+  lost: { claude_session_id: string | null; project_id: number | null },
+): LostCandidate[] {
+  const others = list.filter((c) => c.claude_session_id !== lost.claude_session_id);
+  if (lost.project_id === null) return others;
+  const mine = (c: LostCandidate) => c.project_id === lost.project_id;
+  return [...others.filter(mine), ...others.filter((c) => !mine(c))];
+}

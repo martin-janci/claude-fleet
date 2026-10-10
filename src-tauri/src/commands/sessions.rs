@@ -725,6 +725,55 @@ pub async fn my_grants(
     routed::my_grants(&backend, &store).await
 }
 
+/// `session_ask_access`'s arguments — `SessionAskAccessParams` field for
+/// field.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SessionAskAccessArgs {
+    pub session_id: i64,
+    /// `answer` or `drive`; the store is the one validator.
+    pub level: String,
+}
+
+/// `access_requests`' arguments — `AccessRequestsParams` field for field.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct AccessRequestsArgs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+}
+
+/// What `access_requests` answers: the list, or the one ask it resolved.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum AccessRequestsAnswer {
+    List(Vec<sessions::AccessRequestView>),
+    One(sessions::AccessRequestView),
+}
+
+/// Ask the owner of a session shared with you for a wider level (gap plan
+/// G4.2). Confers nothing until they grant it.
+#[tauri::command]
+pub async fn session_ask_access(
+    args: SessionAskAccessArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<sessions::AccessRequestView, IpcError> {
+    routed::session_ask_access(&backend, args, &store).await
+}
+
+/// The open asks on your sessions, or grant / decline one (gap plan G4.2).
+#[tauri::command]
+pub async fn access_requests(
+    args: AccessRequestsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<AccessRequestsAnswer, IpcError> {
+    routed::access_requests(&backend, args, &store).await
+}
+
 /// A session's shell terminals (step 5.3): list, open or close one. The
 /// terminal pane then attaches to the `tmux_name` it answers with, through
 /// `pty_open`, like the agent's.
@@ -1382,6 +1431,55 @@ pub(crate) mod routed {
         }
     }
 
+    pub async fn session_ask_access(
+        backend: &FleetBackend,
+        args: SessionAskAccessArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<sessions::AccessRequestView, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("session_ask_access", &args).await,
+            None => {
+                // Standalone, the caller is the fleet's owner, who owns every
+                // row it holds: the store refuses the ask ("there is nobody to
+                // ask"), as it should.
+                let who = sessions::hub_personal_owner(store);
+                let s = lock(store)?;
+                sessions::ask_access(&s, args.session_id, &args.level, who)
+            }
+        }
+    }
+
+    pub async fn access_requests(
+        backend: &FleetBackend,
+        args: AccessRequestsArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<AccessRequestsAnswer, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("access_requests", &args).await,
+            None => {
+                let owner = sessions::hub_personal_owner(store);
+                let s = lock(store)?;
+                match args.action.as_deref().unwrap_or("list") {
+                    "list" => sessions::access_requests(&s, owner, args.session_id)
+                        .map(AccessRequestsAnswer::List),
+                    action @ ("grant" | "decline") => {
+                        let id = args.id.ok_or_else(|| {
+                            IpcError::new(codes::E_VALIDATE, format!("{action} needs the ask's id"))
+                        })?;
+                        sessions::resolve_access_request(&s, id, action == "grant", owner)
+                            .map(AccessRequestsAnswer::One)
+                    }
+                    other => Err(IpcError::new(
+                        codes::E_VALIDATE,
+                        format!(
+                            "access_requests action must be list, grant or decline, not {other:?}"
+                        ),
+                    )),
+                }
+            }
+        }
+    }
+
     pub async fn shell_terminals(
         backend: &FleetBackend,
         args: sessions::ShellTerminalsArgs,
@@ -1429,4 +1527,29 @@ mod history_tests {
         assert_eq!(a.session_id, 7);
         assert!(a.limit.is_none());
     }
+}
+
+/// Settings › Repair workspace › Repair now (gap plan G4.6): one run of the
+/// tick's automatic, create-only workspace repair across the fleet, even
+/// with `repair.auto_on_tick` off.
+#[tauri::command]
+pub async fn repair_workspaces_now(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<fleet_core::service::repair_tick::RepairNow, IpcError> {
+    backend.refuse_local_only("repair_workspaces_now")?;
+    fleet_core::service::repair_tick::run_now(&store, &ssh).await
+}
+
+/// Settings › Restore lost sessions › Restore (gap plan G4.6): every host's
+/// lost sessions, host after host, each as Restore on its Hosts page would.
+#[tauri::command]
+pub async fn restore_all_lost_sessions(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<fleet_core::service::sessions::RestoreAll, IpcError> {
+    backend.refuse_local_only("restore_all_lost_sessions")?;
+    fleet_core::service::sessions::restore_all_lost(&store, &ssh).await
 }

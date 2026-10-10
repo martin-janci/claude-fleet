@@ -100,12 +100,125 @@ pub struct MyGrants {
     /// grant.
     pub person_id: Option<i64>,
     pub grants: Vec<MyGrant>,
+    /// Gap plan G4.2: the caller's own open asks for a wider level, so the
+    /// recipient's header says "Asked for Answer · waiting for Martin".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<MyAccessRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MyGrant {
     pub session_id: i64,
     pub level: String,
+    /// Gap plan G4.2, the recipient's header ("Shared by Martin · Read ·
+    /// since 13:20", "via 32bit"): who granted the share in force, by id and
+    /// by current name, when, and the org it came through. Optional, so an
+    /// older hub's answer still parses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_by: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_by_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via_org: Option<String>,
+}
+
+/// One of the caller's own open asks (`my_grants`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MyAccessRequest {
+    pub id: i64,
+    pub session_id: i64,
+    /// The level asked for.
+    pub level: String,
+    pub requested_at: i64,
+}
+
+/// One open ask, as the owner's Share sheet draws it (gap plan G4.2).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AccessRequestView {
+    pub id: i64,
+    pub session_id: i64,
+    /// The session's caption, for a list across sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
+    pub person_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_display_name: Option<String>,
+    /// The level asked for.
+    pub level: String,
+    pub requested_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+}
+
+impl AccessRequestView {
+    fn of(r: crate::store::AccessRequestRow, s: &Store) -> Result<Self, IpcError> {
+        let person = s.get_person(r.person_id)?;
+        let session_name = s
+            .get_session_by_id(r.session_id)?
+            .map(|row| row.friendly_name.unwrap_or(row.tmux_name));
+        Ok(AccessRequestView {
+            id: r.id,
+            session_id: r.session_id,
+            session_name,
+            person_id: r.person_id,
+            person_name: person.as_ref().map(|p| p.name.clone()),
+            person_display_name: person.and_then(|p| p.display_name),
+            level: r.level,
+            requested_at: r.requested_at,
+            resolution: r.resolution,
+        })
+    }
+}
+
+/// The caller asks the owner of `session_id` for `level` (gap plan G4.2).
+/// The store holds the rules; a caller that proves no person cannot ask.
+pub fn ask_access(
+    s: &Store,
+    session_id: i64,
+    level: &str,
+    asker: Option<i64>,
+) -> Result<AccessRequestView, IpcError> {
+    let asker = asker.ok_or_else(|| {
+        IpcError::new(
+            codes::E_FORBIDDEN,
+            "only a person a session is shared with can ask for more, and this caller \
+             proves no person",
+        )
+    })?;
+    let row = s.request_access(session_id, asker, level)?;
+    AccessRequestView::of(row, s)
+}
+
+/// The open asks on the owner's sessions (`session_id` only, when given).
+/// A caller that proves no person owns nothing, so it gets an empty list.
+pub fn access_requests(
+    s: &Store,
+    owner: Option<i64>,
+    session_id: Option<i64>,
+) -> Result<Vec<AccessRequestView>, IpcError> {
+    let Some(owner) = owner else {
+        return Ok(Vec::new());
+    };
+    s.open_access_requests_for_owner(owner, session_id)?
+        .into_iter()
+        .map(|r| AccessRequestView::of(r, s))
+        .collect()
+}
+
+/// The owner grants or declines ask `id`.
+pub fn resolve_access_request(
+    s: &Store,
+    id: i64,
+    grant: bool,
+    owner: Option<i64>,
+) -> Result<AccessRequestView, IpcError> {
+    let owner = require_granter(owner, "answer an ask on")?;
+    let row = s.resolve_access_request(id, owner, grant)?;
+    AccessRequestView::of(row, s)
 }
 
 /// The live person holding `name`, for a grant or a claim to be addressed to.
@@ -292,13 +405,41 @@ pub fn my_grants(s: &Store, person: Option<i64>) -> Result<MyGrants, IpcError> {
     let Some(person) = person else {
         return Ok(MyGrants::default());
     };
+    let details = s.grant_details_for_person(person)?;
+    let mut grants = Vec::new();
+    for (session_id, level) in s.grants_for_person(person)? {
+        let d = details.get(&session_id).filter(|d| d.level == level);
+        let by = match d {
+            Some(d) => s.get_person(d.granted_by)?,
+            None => None,
+        };
+        let via_org = match d.and_then(|d| d.org_id) {
+            Some(o) => s.get_org(o)?.map(|o| o.name),
+            None => None,
+        };
+        grants.push(MyGrant {
+            session_id,
+            level,
+            shared_by: d.map(|d| d.granted_by),
+            shared_by_name: by.map(|p| p.display_name.unwrap_or(p.name)),
+            granted_at: d.map(|d| d.granted_at),
+            via_org,
+        });
+    }
+    let requests = s
+        .open_access_requests_by(person)?
+        .into_iter()
+        .map(|r| MyAccessRequest {
+            id: r.id,
+            session_id: r.session_id,
+            level: r.level,
+            requested_at: r.requested_at,
+        })
+        .collect();
     Ok(MyGrants {
         person_id: Some(person),
-        grants: s
-            .grants_for_person(person)?
-            .into_iter()
-            .map(|(session_id, level)| MyGrant { session_id, level })
-            .collect(),
+        grants,
+        requests,
     })
 }
 

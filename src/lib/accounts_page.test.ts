@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   accountSummaries,
+  countLine,
+  fallbackRoutinesOn,
   historyPoints,
   HISTORY_SPAN_SECS,
   loginsFor,
@@ -118,5 +120,21 @@ describe('accounts page helpers', () => {
         { at: 2, used: 91.6 },
       ]),
     ).toBe(92);
+  });
+});
+
+describe('fallback role (G4.5)', () => {
+  it('counts the switched-on routines that fall back to an account', () => {
+    const hosts = [host('mercury', { account_uuid: WORK.uuid }), host('venus', { account_uuid: GMAIL.uuid })];
+    const routines = [
+      { host_alias: 'mercury', fallback_host: 'venus', profile: null, enabled: true },
+      { host_alias: 'mercury', fallback_host: 'venus', profile: null, enabled: false },
+      { host_alias: 'venus', fallback_host: 'venus', profile: null, enabled: true },
+      { host_alias: 'mercury', profile: null, enabled: true },
+    ];
+    expect(fallbackRoutinesOn(GMAIL.uuid, routines, hosts)).toBe(1);
+    expect(fallbackRoutinesOn(WORK.uuid, routines, hosts)).toBe(0);
+    expect(countLine(2, 1, null, 1)).toBe('2 sessions · 1 routine · fallback for 1 routine');
+    expect(countLine(2, 0, '$1.00', 0)).toBe('2 sessions · $1.00 today');
   });
 });

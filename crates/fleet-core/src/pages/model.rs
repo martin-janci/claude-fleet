@@ -49,6 +49,11 @@ pub struct Page {
     /// hubs). The list stays the text alternative and the keyboard path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<GraphView>,
+    /// A `master_detail` page's records also shown as one table (M15 step
+    /// G4.7: People & devices), with filters and a grouping. A row opens
+    /// its record; the list stays the keyboard path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<TableView>,
     /// An `embed` page's place in a hand-built screen (`Slot`). Only an
     /// embed page names one, and each slot has at most one page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,6 +89,23 @@ pub struct GraphView {
     /// (text, count or time), never a list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub facts: Vec<String>,
+}
+
+/// How a `master_detail` page shows its records as a table (`Page::table`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+pub struct TableView {
+    /// The view's name, e.g. "People & devices".
+    pub title: String,
+    /// The resource's plain fields, one column each, at most six.
+    pub columns: Vec<String>,
+    /// Columns that get a filter: a select over the values the records hold.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<String>,
+    /// A column the rows can be grouped by, offered as a switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<String>,
 }
 
 /// One control in a `data_page`'s filter bar, bound by name to a source

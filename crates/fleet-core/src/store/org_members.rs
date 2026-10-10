@@ -282,6 +282,18 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The former members of `org`, most recently removed first (M15 step
+    /// G4.7: "removed 3 d ago · Grants…" on the Members tab).
+    pub fn removed_org_members(&self, org: i64) -> Result<Vec<OrgMemberRow>, IpcError> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {MEMBER_COLUMNS} FROM org_members \
+              WHERE org_id = ?1 AND removed_at IS NOT NULL \
+              ORDER BY removed_at DESC, person_id"
+        ))?;
+        let rows = st.query_map([org], map_member)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Every membership row of `person`, live and former.
     pub fn memberships_of(&self, person: i64) -> Result<Vec<OrgMemberRow>, IpcError> {
         let mut st = self.conn.prepare(&format!(
@@ -371,7 +383,7 @@ impl Store {
             };
             let d = effective_device(Some(p), r.org_id, owner, mine);
             r.org_id = d.org_id;
-            if d.readonly && r.mode == "full" {
+            if d.readonly && matches!(r.mode.as_str(), "full" | "answer") {
                 r.mode = "readonly".into();
             }
         }

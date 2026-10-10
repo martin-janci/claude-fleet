@@ -4952,13 +4952,27 @@ describe('ConversationPanel composer access (multi-user M1)', () => {
     ],
   };
 
-  it('a watch grantee gets no answer card for a blocked dialog', async () => {
+  // Gap plan G4.2 (Watch board): a Read grantee sees the question, read
+  // only, with a line saying whose it is to answer.
+  it('a watch grantee sees the answer card read-only, with whose question it is', async () => {
     await renderShared('watch', { claude_status: 'blocked', pending_input: DIALOG });
-    expect(screen.queryByTestId('answer-card')).toBeNull();
-    expect(screen.queryAllByTestId('answer-option')).toHaveLength(0);
-    // Still TOLD that the session is waiting — the card is the answer buttons,
-    // not the status.
-    expect(screen.getByTestId('conv-blocked').textContent).toContain('waiting for you');
+    expect(screen.getByTestId('answer-card')).toBeTruthy();
+    const options = screen.getAllByTestId('answer-option') as HTMLButtonElement[];
+    expect(options).toHaveLength(2);
+    for (const o of options) expect(o.disabled).toBe(true);
+    expect(screen.getByTestId('answer-readonly').textContent).toContain(
+      'You can read this session. The question above is',
+    );
+    expect(screen.getByTestId('answer-readonly').textContent).toContain('with Answer you could reply here');
+    expect(screen.queryByTestId('answer-open-terminal')).toBeNull();
+  });
+
+  it('an answer grantee can press the choices, and gets no read-only line', async () => {
+    await renderShared('answer', { claude_status: 'blocked', pending_input: DIALOG });
+    const options = screen.getAllByTestId('answer-option') as HTMLButtonElement[];
+    expect(options).toHaveLength(2);
+    for (const o of options) expect(o.disabled).toBe(false);
+    expect(screen.queryByTestId('answer-readonly')).toBeNull();
   });
 
   it('the owner keeps the answer card on the same row', async () => {

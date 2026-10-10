@@ -131,6 +131,10 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
+  import { accessOf, myGrantInfo } from './access';
+  import { orgs as orgList } from './orgs';
+  import { isSharedAccess } from './session_scope';
+  import { readOnlyAnswerLine, sharerName } from './shared_view';
   import { inboxQueue, nextInInbox } from './inbox';
   import { push as pushToast } from './toasts';
   import { projectSkills } from './project_skills';
@@ -1221,6 +1225,12 @@
   // `share.ts::SESSION_TIER`, so a `drive` grantee keeps the whole composer
   // and a `watch` grantee loses it.
   const shareBlocked = $derived($sessionBlocked(session, 'send_prompt'));
+  /** The grant level this person holds on someone else's session, or null
+   *  for their own (gap plan G4.2: the answer card shows to a recipient). */
+  const recipientLevel = $derived.by(() => {
+    const a = $accessOf(session);
+    return isSharedAccess(a) ? a : null;
+  });
   const writeBlocked = $derived(
     hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ?? shareBlocked,
   );
@@ -2340,7 +2350,7 @@
             formId={pendingForm.form_id}
             sessionName={session.friendly_name ?? session.tmux_name}
             blocked={formBlocked} />
-        {:else if answerView && writeBlocked === null}
+        {:else if answerView && (writeBlocked === null || recipientLevel !== null)}
           <!-- Hidden rather than disabled when this client may not write to
                the session (multi-user M1), the same shape `SessionRowItem`
                uses for the same card: it is a set of answer BUTTONS, each one
@@ -2348,12 +2358,17 @@
                E_FORBIDDEN. The two surfaces rendered the same card with
                different gating until this; the `blocked` notice below (and the
                row's status chip) still says the session is waiting. -->
+          <!-- Gap plan G4.2: someone the session is shared with sees the
+               question too. At Answer its choices work (the card's own gate
+               is `answer_dialog`); at Read they are disabled and a line says
+               whose question it is. Typing an answer stays drive. -->
           <AnswerPrompt
             {session}
             view={answerView}
-            {onOpenTerminal}
+            onOpenTerminal={writeBlocked === null ? onOpenTerminal : undefined}
             onAnswered={afterAnswer}
-            onOwnWords={showComposer ? () => void tick().then(() => box?.focus()) : undefined}
+            onOwnWords={showComposer && writeBlocked === null ? () => void tick().then(() => box?.focus()) : undefined}
+            readOnlyNote={recipientLevel === 'watch' ? readOnlyAnswerLine(sharerName(session, $myGrantInfo.get(session.id), $orgList)) : undefined}
           />
         {:else if indicator?.kind === 'blocked'}
           <div class="blocked" data-testid="conv-blocked" role="status">

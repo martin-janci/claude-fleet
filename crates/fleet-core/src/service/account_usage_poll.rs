@@ -38,7 +38,8 @@ fn lock_cache(cache: &Mutex<UsageCache>) -> std::sync::MutexGuard<'_, UsageCache
 
 /// Distinct non-null `account_uuid`s across `hosts`, first-seen order (the
 /// poller's account list — see the module doc on why this differs from
-/// [`list_account_usage`]'s source).
+/// [`list_account_usage`]'s source). An API-key account (M15 step G2.9)
+/// is left out: it has no usage windows to fetch, only spend.
 pub(crate) fn distinct_account_uuids(hosts: &[HostRow]) -> Vec<String> {
     let mut seen = HashSet::new();
     // A host's own login first, then its login profiles' (docs/accounts.md).
@@ -51,6 +52,7 @@ pub(crate) fn distinct_account_uuids(hosts: &[HostRow]) -> Vec<String> {
                 .flat_map(|h| h.claude_profiles.iter().flatten())
                 .filter_map(|p| p.account_uuid.clone()),
         )
+        .filter(|u| !crate::service::add_account::is_api_key_account(u))
         .filter(|u| seen.insert(u.clone()))
         .collect()
 }

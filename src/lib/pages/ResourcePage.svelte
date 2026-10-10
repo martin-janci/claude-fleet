@@ -8,13 +8,14 @@
   import { get } from 'svelte/store';
   import RecordEditor from './RecordEditor.svelte';
   import ResourceGraph from './ResourceGraph.svelte';
+  import ResourceTable from './ResourceTable.svelte';
   import ActionForm from './ActionForm.svelte';
   import FlowView from './FlowView.svelte';
   import OrgSuggestions from '../OrgSuggestions.svelte';
   import PairingResult from './PairingResult.svelte';
   import ActionResult, { type Shown } from './ActionResult.svelte';
   import { catalogStatuses } from '../assets_workspace';
-  import { devices, type Pairing } from '../devices';
+  import { devices, people, type Pairing } from '../devices';
   import { hosts } from '../hosts';
   import { orgs } from '../orgs';
   import { trackers } from '../trackers';
@@ -23,7 +24,8 @@
   import type { Values } from '../forms/forms';
   import { pairDevice, pairDeviceWizard } from '../forms/pair_device_wizard';
   import { WIZARDS } from '../forms/wizards';
-  import type { Page } from './pages';
+  import type { Page, PageAction } from './pages';
+  import PageActionButton from './PageActionButton.svelte';
   import {
     afterChange,
     badgesOf,
@@ -46,6 +48,7 @@
     resource,
     readonly = false,
     reason = null,
+    actions = [],
   }: {
     page: Page;
     resource: ResourceType;
@@ -53,6 +56,8 @@
     readonly?: boolean;
     /** Why it is read-only, and where to change it instead. */
     reason?: string | null;
+    /** The page actions an `action` list item names (`pages/actions.rs`). */
+    actions?: PageAction[];
   } = $props();
 
   let records = $state<ResourceRecord[]>([]);
@@ -195,6 +200,10 @@
     if (source === 'orgs') return get(orgs).map((o) => ({ value: o.name, label: o.name }));
     if (source === 'devices') return get(devices).map((d) => ({ value: d.name, label: d.name }));
     if (source === 'catalogs') return (get(catalogStatuses) ?? []).map((c) => ({ value: c.name, label: c.name }));
+    if (source === 'people')
+      return get(people)
+        .filter((p) => p.disabled_at === undefined || p.disabled_at === null)
+        .map((p) => ({ value: p.name, label: p.display_name && p.display_name !== p.name ? `${p.display_name} (${p.name})` : p.name }));
     return get(trackers).map((t) => ({ value: String(t.id), label: t.name }));
   }
 
@@ -203,6 +212,8 @@
   function options(field: FieldSpec, param: string): { value: string; label: string }[] {
     const action = field.type === 'items' ? field.add.find((a) => a.params.some((p) => p.name === param)) : undefined;
     const spec = action?.params.find((p) => p.name === param);
+    // A suggestion leaves nothing out: picking a member again changes their role.
+    if (spec?.type === 'suggest') return sourceOptions(spec.source);
     if (!spec || spec.type !== 'options' || !current) return [];
     const have = new Set(itemsOf(field, current).map(itemValue));
     return sourceOptions(spec.source).filter((o) => !have.has(o.value));
@@ -212,7 +223,7 @@
    *  nothing to leave out. */
   function actionOptions(action: ActionSpec | undefined, param: string): { value: string; label: string }[] {
     const spec = action?.params.find((p) => p.name === param);
-    return spec?.type === 'options' ? sourceOptions(spec.source) : [];
+    return spec?.type === 'options' || spec?.type === 'suggest' ? sourceOptions(spec.source) : [];
   }
   const createOptions = (param: string) => actionOptions(resource.create, param);
 </script>
@@ -226,12 +237,20 @@
         <p class={`notice ${item.tone}`}>{item.text}</p>
       {:else if item.type === 'custom' && item.component === 'org_suggestions'}
         <OrgSuggestions onchanged={() => void reload()} />
+      {:else if item.type === 'action'}
+        <!-- A page action over the whole list (G4.5: Scan all hosts). -->
+        {@const action = actions.find((a) => a.id === item.action)}
+        {#if action}<PageActionButton {action} onran={() => void reload()} />{/if}
       {/if}
     {/each}
   {/if}
 
   {#if page.graph}
     <ResourceGraph graph={page.graph} {resource} {records} {selected} />
+  {/if}
+
+  {#if page.table && records.length}
+    <ResourceTable {resource} table={page.table} {records} {selected} onselect={(id) => (selected = id)} />
   {/if}
 
   <div class="md">

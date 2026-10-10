@@ -25,7 +25,7 @@ export function pairDeviceArgs(v: Values): Record<string, unknown> {
   const person = String(v.person ?? '').trim();
   return {
     device: String(v.device ?? '').trim(),
-    mode: v.mode === 'readonly' ? 'readonly' : 'full',
+    mode: v.mode === 'readonly' || v.mode === 'answer' ? v.mode : 'full',
     org_id: org,
     person: person || null,
   };

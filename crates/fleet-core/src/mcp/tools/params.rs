@@ -1358,7 +1358,7 @@ pub struct UpdateAdminParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RoutinesParams {
-    /// list | get | runs | failing | save | preview | delete | set_enabled | skip_next | run_now.
+    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now.
     pub action: String,
     /// Every action but list, and save or preview of a change.
     #[serde(default)]
@@ -1447,6 +1447,29 @@ pub struct SessionGrantParams {
 pub struct SessionAccessParams {
     /// The session, by fleet row id.
     pub session_id: i64,
+}
+
+/// `session_ask_access` (gap plan G4.2).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionAskAccessParams {
+    /// The session shared with you, by fleet row id.
+    pub session_id: i64,
+    /// The level to ask for: answer or drive.
+    pub level: String,
+}
+
+/// `access_requests` (gap plan G4.2).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AccessRequestsParams {
+    /// list (default), grant or decline.
+    #[serde(default)]
+    pub action: Option<String>,
+    /// list: only this session's asks.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// grant / decline: the ask's id.
+    #[serde(default)]
+    pub id: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

@@ -9,9 +9,13 @@
   import { draftedBy } from './ai_proposal';
   import DraftedLabel from './DraftedLabel.svelte';
   import type { SessionRow } from './sessions';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
   import { checkLabel, clock, defaultSince, sessionSummarySince, turnsLabel, type WatchSummary } from './watch_summary';
 
   let { session }: { session: Pick<SessionRow, 'id' | 'last_viewed_at'> } = $props();
+
+  /** Writing help's "Catch-up summaries" (G4.6), off by default. */
+  const on = $derived(settingBool($fleetSettings, SETTING_KEYS.workCatchUpSummaries));
 
   let summary = $state<WatchSummary | null>(null);
   let busy = $state(false);
@@ -56,6 +60,7 @@
   );
 </script>
 
+{#if on}
 <section class="since" data-testid="watch-summary" aria-label="Summary since {clock(since)}">
   <div class="head">
     <h3>Since {clock(since)}</h3>
@@ -96,6 +101,7 @@
     <p class="error" role="alert" data-testid="watch-summary-error">{error}</p>
   {/if}
 </section>
+{/if}
 
 <style>
   .since {

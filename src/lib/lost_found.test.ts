@@ -3,7 +3,10 @@ import {
   UNSURE_NOTE,
   confirmTitle,
   ignoredConversations,
+  ignoredPanes,
+  otherConversations,
   setConversationIgnored,
+  setPaneIgnored,
   isOutsideFleet,
   needsRestoreInto,
   pickableProjects,
@@ -120,5 +123,33 @@ describe('Ignore a found conversation (G2.7)', () => {
     expect([...ignoredConversations('mercury')]).toEqual(['c-2']);
     expect([...ignoredConversations('venus')]).toEqual(['c-1']);
     localStorage.clear();
+  });
+});
+
+describe('Ignore an outside pane and Find another (G4.5)', () => {
+  it('keeps ignored panes per host on this device', () => {
+    localStorage.clear();
+    setPaneIgnored('mercury', 'scratch', true);
+    setPaneIgnored('venus', 'scratch', true);
+    expect([...ignoredPanes('mercury')]).toEqual(['scratch']);
+    setPaneIgnored('mercury', 'scratch', false);
+    expect(ignoredPanes('mercury').size).toBe(0);
+    expect([...ignoredPanes('venus')]).toEqual(['scratch']);
+    localStorage.clear();
+  });
+
+  it('offers the other conversations, its own project first', () => {
+    const list = [
+      candidate({ claude_session_id: 'own', project_id: 1 }),
+      candidate({ claude_session_id: 'elsewhere', project_id: 2 }),
+      candidate({ claude_session_id: 'same', project_id: 1 }),
+    ];
+    const ids = (l: LostCandidate[]) => l.map((c) => c.claude_session_id);
+    expect(ids(otherConversations(list, { claude_session_id: 'own', project_id: 1 }))).toEqual(['same', 'elsewhere']);
+    expect(ids(otherConversations(list, { claude_session_id: null, project_id: null }))).toEqual([
+      'own',
+      'elsewhere',
+      'same',
+    ]);
   });
 });

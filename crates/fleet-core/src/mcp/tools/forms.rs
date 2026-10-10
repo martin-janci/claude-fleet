@@ -48,6 +48,17 @@ impl FleetTools {
                 None,
             ));
         }
+        // An answer-only device (M15 step G2.10) reads and answers forms; it
+        // never opens, drafts, waits on or cancels one.
+        if caller.mode == TokenMode::Answer
+            && (p.form.is_some() || p.draft.is_some() || p.wait.is_some() || p.cancel.is_some())
+        {
+            return Err(mcp_err(
+                codes::E_FORBIDDEN,
+                "an answer-only device answers or declines a form; it never opens one",
+                None,
+            ));
+        }
         if let Some(spec) = &p.form {
             audit("ask", "action=form");
             let session_id = self.asking_session(&caller)?;

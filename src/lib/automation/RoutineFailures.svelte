@@ -1,7 +1,9 @@
 <script lang="ts">
   // The Inbox's failed routine runs (Orbit Fleet redesign 8.6): each routine
   // whose newest run failed, under the sessions that need you, with Fix
-  // (open its session, or its definition when it never started one), Retry
+  // (its named fix when the hub names one, G3.8: open the host, the
+  // accounts, its session or its editor; else open its session, or its
+  // definition when it never started one), Retry
   // (run it now) and Pause. Either Retry or Pause takes it out; its count is
   // part of the Needs you badge (`failingCount`). A routine's name opens it
   // in Automation's Routines tab (8.4).
@@ -9,6 +11,7 @@
   import { push, pushError } from '../toasts';
   import {
     failing,
+    fixLabel,
     fixRoutine,
     openRoutines,
     pauseRoutine,
@@ -52,7 +55,7 @@
           {#if f.routine.paused_reason}<span class="line">{f.routine.paused_reason}</span>{/if}
           {#if f.may_change}
             <span class="actions">
-              <button type="button" class="btn btn--chip" data-testid="routine-failure-fix" onclick={() => fixRoutine(f)}>Fix</button>
+              <button type="button" class="btn btn--chip" data-testid="routine-failure-fix" title={f.fix ? `${f.fix.code}${f.fix.host ? ` on ${f.fix.host}` : ''}` : undefined} onclick={() => fixRoutine(f)}>{fixLabel(f.fix)}</button>
               <button type="button" class="btn btn--chip" data-testid="routine-failure-retry" disabled={busy === f.routine.id} onclick={() => retry(f)}
                 >Retry</button
               >

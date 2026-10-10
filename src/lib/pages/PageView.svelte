@@ -213,7 +213,7 @@
   {#if page.layout === 'master_detail'}
     {@const res = resources.find((r) => r.id === page.resource)}
     {#if res}
-      <ResourcePage {page} resource={res} {readonly} {reason} />
+      <ResourcePage {page} resource={res} {readonly} {reason} {actions} />
     {/if}
   {:else if tabs.length > 0}
     <Tabs tabs={tabs.map((t) => t.title)} bind:selected={tab} label={page.title} testidPrefix={`page-${page.id}-tab`} />

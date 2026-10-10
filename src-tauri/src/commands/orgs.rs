@@ -59,6 +59,9 @@ pub struct UpdateOrgArgs {
     /// Phase D: its admins see the unclaimed count on its hosts.
     #[serde(default)]
     pub admins_see_unclaimed: Option<bool>,
+    /// M15 step G2.10: members see only their own sessions (default on).
+    #[serde(default)]
+    pub members_own_sessions_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,6 +80,76 @@ pub struct AddOrgRuleArgs {
     pub path_prefix: Option<String>,
     #[serde(default)]
     pub host_alias: Option<String>,
+    /// M15 step G2.10, the org form's one rule form: what `value` is —
+    /// `repository` (owner/name), `path`, `host` or `owner`. Turned into
+    /// the fields above here, so a hub of any age takes the rule.
+    #[serde(default)]
+    pub match_by: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+impl AddOrgRuleArgs {
+    /// `org_admin`'s arguments for `action`: the rule's fields, from
+    /// `match_by` + `value` when given.
+    fn admin_args(&self, action: &str) -> Result<OrgAdminArgs, IpcError> {
+        let rule = match self.match_by.as_deref() {
+            Some(by) => fleet_core::service::orgs::rule_from_match(
+                self.org_id,
+                by,
+                self.value.as_deref().unwrap_or(""),
+            )?,
+            None => OrgRuleRow {
+                id: 0,
+                org_id: self.org_id,
+                owner: self.owner.clone(),
+                repo: self.repo.clone(),
+                path_prefix: self.path_prefix.clone(),
+                host_alias: self.host_alias.clone(),
+            },
+        };
+        Ok(OrgAdminArgs {
+            org_id: Some(self.org_id),
+            owner: rule.owner,
+            repo: rule.repo,
+            path_prefix: rule.path_prefix,
+            host_alias: rule.host_alias,
+            ..OrgAdminArgs::new(action)
+        })
+    }
+}
+
+/// M15 step G2.10: an entry of the org's project catalog.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AddOrgProjectArgs {
+    pub org_id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub remote: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Host aliases, comma-separated; empty = every host of the org.
+    #[serde(default)]
+    pub hosts: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectIdArgs {
+    pub project_id: i64,
+}
+
+/// One share on one of an org's sessions (M15 step G4.7).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OrgShareArgs {
+    pub org_id: i64,
+    pub grant_id: i64,
+}
+
+/// One person of an org, current or former (M15 step G4.7).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OrgPersonArgs {
+    pub org_id: i64,
+    pub person_id: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -153,6 +226,7 @@ pub async fn update_org(
                 bound_sees_unassigned: args.bound_sees_unassigned,
                 owns_hub: args.owns_hub,
                 admins_see_unclaimed: args.admins_see_unclaimed,
+                members_own_sessions_only: args.members_own_sessions_only,
                 ..OrgAdminArgs::new("update_org")
             },
         )
@@ -184,21 +258,115 @@ pub async fn add_org_rule(
     args: AddOrgRuleArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<OrgRuleRow, IpcError> {
-    decode(
-        routed::add_org_rule(
-            &backend,
-            &store,
-            OrgAdminArgs {
-                org_id: Some(args.org_id),
-                owner: args.owner,
-                repo: args.repo,
-                path_prefix: args.path_prefix,
-                host_alias: args.host_alias,
-                ..OrgAdminArgs::new("add_rule")
-            },
-        )
-        .await?,
+    decode(routed::add_org_rule(&backend, &store, args.admin_args("add_rule")?).await?)
+}
+
+/// M15 step G2.10: what a rule would match and move now, before it is
+/// added (the rule form's live impact). Writes nothing.
+#[tauri::command]
+pub async fn org_rule_preview(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: AddOrgRuleArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::org_rule_preview(&backend, &store, args.admin_args("rule_preview")?).await
+}
+
+/// M15 step G2.10: add an entry to the org's project catalog.
+#[tauri::command]
+pub async fn add_org_project(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: AddOrgProjectArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::add_org_project(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            org_id: Some(args.org_id),
+            name: Some(args.name),
+            remote: args.remote,
+            path: args.path,
+            hosts: args.hosts,
+            ..OrgAdminArgs::new("add_project")
+        },
     )
+    .await
+}
+
+#[tauri::command]
+pub async fn remove_org_project(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: ProjectIdArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::remove_org_project(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            project_id: Some(args.project_id),
+            ..OrgAdminArgs::new("remove_project")
+        },
+    )
+    .await
+}
+
+/// M15 step G4.7: take back one share on the org's sessions (Sharing tab).
+#[tauri::command]
+pub async fn revoke_org_share(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: OrgShareArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::revoke_org_share(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            org_id: Some(args.org_id),
+            grant_id: Some(args.grant_id),
+            ..OrgAdminArgs::new("revoke_share")
+        },
+    )
+    .await
+}
+
+/// M15 step G4.7: narrow one share on the org's sessions to watch.
+#[tauri::command]
+pub async fn narrow_org_share(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: OrgShareArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::narrow_org_share(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            org_id: Some(args.org_id),
+            grant_id: Some(args.grant_id),
+            ..OrgAdminArgs::new("narrow_share")
+        },
+    )
+    .await
+}
+
+/// M15 step G4.7: take back every share a member, current or former, holds on
+/// the org's sessions ("removed 3 d ago · Take back their shares").
+#[tauri::command]
+pub async fn revoke_org_member_grants(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: OrgPersonArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::revoke_org_member_grants(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            org_id: Some(args.org_id),
+            person_id: Some(args.person_id),
+            ..OrgAdminArgs::new("revoke_member_grants")
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -560,6 +728,72 @@ pub(crate) mod routed {
     ) -> Result<serde_json::Value, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("add_org_rule", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn org_rule_preview(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("org_rule_preview", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn add_org_project(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("add_org_project", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn remove_org_project(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("remove_org_project", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn revoke_org_share(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("revoke_org_share", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn narrow_org_share(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("narrow_org_share", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn revoke_org_member_grants(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("revoke_org_member_grants", &args).await,
             None => local(&args, store),
         }
     }

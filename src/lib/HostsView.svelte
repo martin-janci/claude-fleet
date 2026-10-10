@@ -40,7 +40,9 @@
   import HostsList from './HostsList.svelte';
   import HostDetail from './HostDetail.svelte';
   import HostsTable from './HostsTable.svelte';
-  import { tableOrder } from './hosts_table';
+  import { hostTidyHint, tableOrder } from './hosts_table';
+  import { refreshTidy, requestTidy, tidyReport } from './tidy';
+  import { requestCloseHosts } from './app_views';
   import { attentionIdleMinutes } from './notify';
   import { hubStatus, hubBlock, hubActionBlocked, ownsTheFleet } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
@@ -116,6 +118,8 @@
   /** The fleet's version (the hub's when paired): what an agent should match. */
   let hubVersion = $state<string | null>(null);
   onMount(async () => {
+    // The Tidy hint (G4.5) reads the last tidy report; read it fresh here.
+    void refreshTidy();
     const r = await healthCheck();
     if (r.ok && r.value?.version) hubVersion = r.value.version;
   });
@@ -565,6 +569,11 @@
             onreprobe={() => void reprobe(selectedHost.alias)}
             onrefreshusage={() => void refreshUsage(selectedHost.alias)}
             onnewsession={() => onNewSession(selectedHost.alias)}
+            tidyHint={hostTidyHint($tidyReport.candidates, selectedHost.alias)}
+            onreviewtidy={(ids: number[]) => {
+              requestTidy(ids);
+              requestCloseHosts();
+            }}
             {hubVersion}
           />
         {/key}

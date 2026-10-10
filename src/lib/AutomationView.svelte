@@ -40,6 +40,7 @@
     type AutomationTab,
   } from './automation';
   import { windowHidden } from './window_hidden';
+  import { routineBudget, type FleetBudget } from './routines';
 
   let auto = $state<AutomationState | null>(null);
   /** The automation read failed (review r13: said as a failure, with Retry). */
@@ -55,7 +56,12 @@
   let busy = $state(false);
   let nowSec = $state(Math.floor(Date.now() / 1000));
 
+  /** The routines' spend today against `automation.daily_budget` (G3.8);
+   *  null from an older hub, which has no `budget` action. */
+  let fleetBudget = $state<FleetBudget | null>(null);
+
   async function load() {
+    void routineBudget().then((b) => (fleetBudget = b.ok ? b.value : null));
     const r = await loadAutomation();
     if (r.ok) {
       auto = r.value;
@@ -175,6 +181,15 @@
   <footer class="side-foot">
     {#if spend !== null}
       <span class="today" data-testid="automation-today">Today {money(spend)}{#if running > 0}{' '}· {running} running{/if}</span>
+    {/if}
+    {#if fleetBudget?.budget_micros}
+      <span
+        class="today"
+        class:over={fleetBudget.spent_micros >= fleetBudget.budget_micros}
+        data-testid="automation-budget"
+        title="Every routine's runs in this UTC day, against the routines daily budget (automation.daily_budget). Once spent, no routine starts a run until tomorrow."
+        >Routines {money(fleetBudget.spent_micros)} of {money(fleetBudget.budget_micros)} budget</span
+      >
     {/if}
     <span class="grow"></span>
     <Button variant={paused ? 'default' : 'danger'} testid="automation-pause" disabled={busy || !auto} onclick={togglePause}>
@@ -298,6 +313,7 @@
   h1 { margin: 0; font-size: var(--text-lg); line-height: 22px; font-weight: 600; }
   .grow { flex: 1; }
   .today { font-size: var(--text-xs); color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+  .today.over { color: var(--status-failed); }
   .banner { margin: 0; padding: var(--space-2) var(--space-4); font-size: var(--text-sm); background: color-mix(in srgb, var(--status-waiting) 14%, transparent); }
   .err { margin: 0; padding: var(--space-2) var(--space-4); font-size: var(--text-sm); color: var(--status-failed); }
   .loading { display: flex; justify-content: center; padding: var(--space-6); }

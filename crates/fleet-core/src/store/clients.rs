@@ -25,9 +25,10 @@ pub struct ClientBinding {
 /// insert: `TokenMode::parse_client` reads an unknown string as `readonly`,
 /// so a typo would silently downgrade a client rather than fail. `peer`
 /// identifies a linked hub (federation) rather than an operator's own
-/// device — see `TokenMode::Peer` and `set_client_trust`. `updater` is
+/// device — see `TokenMode::Peer` and `set_client_trust`. `answer` is a
+/// person's answer-only device (`TokenMode::Answer`, M15 step G2.10). `updater` is
 /// `fleet-updater` acting for this hub, `/update/*` only (`TokenMode::Updater`).
-pub const CLIENT_MODES: &[&str] = &["full", "readonly", "peer", "updater"];
+pub const CLIENT_MODES: &[&str] = &["full", "readonly", "answer", "peer", "updater"];
 
 /// The three line separators [`char::is_control`] does NOT cover. A renderer,
 /// a terminal, a JSON log viewer or an LLM reading a transcript may all treat
@@ -81,7 +82,7 @@ pub fn validate_client_name(name: &str) -> Result<String, crate::ipc_error::IpcE
     Ok(trimmed.to_string())
 }
 
-/// Check a client mode: exactly `full` or `readonly`.
+/// Check a client mode: one of [`CLIENT_MODES`].
 pub fn validate_client_mode(mode: &str) -> Result<(), crate::ipc_error::IpcError> {
     if CLIENT_MODES.contains(&mode) {
         return Ok(());
@@ -340,7 +341,7 @@ impl Store {
         if super::machine_token_kind(mode).is_some() {
             return Err(crate::ipc_error::IpcError::new(
                 codes::E_VALIDATE,
-                format!("a device's mode is full or readonly, not {mode:?}"),
+                format!("a device's mode is full, answer or readonly, not {mode:?}"),
             ));
         }
         validate_client_mode(mode)?;
