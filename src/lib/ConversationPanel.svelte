@@ -181,6 +181,7 @@
     // (AgentPanel's removable context chip). Only shown when there IS a
     // composer to sit above.
     composerAbove,
+    composerTools,
     // The working indicator in another voice (redesign step
     // 9.13): Control's chat reads the running turn itself and answers the
     // loader and the line to show instead of the Atom's "Thinking · …".
@@ -203,6 +204,9 @@
     promptPrefix?: string | null;
     blockWhileBusy?: boolean;
     composerAbove?: Snippet;
+    /** Extra chips that join the quick-prompt row (Control's operator
+     *  commands), so one row of chips sits above the box, not two. */
+    composerTools?: Snippet;
     thinkingAs?: (conv: Conversation | null) => { loader: LoaderName; label: string } | null;
     runCommand?: (text: string) => boolean;
     composerHint?: string;
@@ -2547,18 +2551,22 @@
             >
           {/if}
         {/each}
+        {#if chipsExpanded || chipsHidden > 0}
+          <!-- Redesign 5.9: three chips, the rest under ⋯. -->
+          <button
+            type="button"
+            class="btn btn--chip chips-more"
+            data-testid="conv-chips-more"
+            aria-expanded={chipsExpanded}
+            aria-label={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
+            title={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
+            onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : '⋯'}</button>
+        {/if}
+        {#if composerTools}
+          <span class="chips-sep" aria-hidden="true"></span>
+          {@render composerTools()}
+        {/if}
       </div>
-      {#if chipsExpanded || chipsHidden > 0}
-        <!-- Redesign 5.9: three chips, the rest under ⋯. -->
-        <button
-          type="button"
-          class="btn btn--chip chips-more"
-          data-testid="conv-chips-more"
-          aria-expanded={chipsExpanded}
-          aria-label={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
-          title={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
-          onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : '⋯'}</button>
-      {/if}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="composer-shell"
@@ -2826,9 +2834,18 @@
   }
   .chips {
     display: flex;
+    align-items: center;
     gap: var(--control-gap);
     margin: 0 0 6px;
     flex-wrap: wrap;
+  }
+  /* Between the quick prompts and the chips a host adds (Control's
+     operator commands). */
+  .chips-sep {
+    align-self: stretch;
+    width: 1px;
+    margin: 2px var(--space-1);
+    background: var(--border);
   }
   /* Marks an auto-send chip: a click sends rather than fills. */
   .chip-send {

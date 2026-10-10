@@ -367,6 +367,10 @@ describe('operator commands', () => {
     const cmd = screen
       .getAllByTestId('agent-command')
       .find((b) => b.textContent === 'Tidy up done tickets')!;
+    // One row of chips above the box: the operator commands share it with
+    // the quick prompts, inside the composer form, so they must not submit.
+    expect(cmd.closest('[data-testid="conv-chips"]')).not.toBeNull();
+    expect(cmd.getAttribute('type')).toBe('button');
     await fireEvent.click(cmd);
     await tick();
     await tick();
