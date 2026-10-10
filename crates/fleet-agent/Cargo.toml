@@ -1,6 +1,6 @@
 [package]
 name = "fleet-agent"
-version = "0.6.1"
+version = "0.6.2-dev.120.desktop.g6c0853e"
 description = "claude-fleet agent: dials its hub over one outbound WebSocket and runs what the hub asks"
 authors = ["martin-janci"]
 edition = "2021"
