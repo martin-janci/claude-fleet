@@ -23,6 +23,7 @@ import { get } from 'svelte/store';
 import ConfirmCards from './ConfirmCards.svelte';
 import McpConfirmDialog from './McpConfirmDialog.svelte';
 import { confirmQueue, resetConfirmsForTests } from './confirms';
+import { clearToasts, toasts } from './toasts';
 import { expectAccessible } from './a11y_check';
 
 // Redesign step 9.2: the operator's confirms are cards in Control's
@@ -31,6 +32,7 @@ import { expectAccessible } from './a11y_check';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 let confirmOk = true;
+let confirmAnswered = true;
 
 const KILL = {
   nonce: 'n-op',
@@ -45,12 +47,14 @@ const OTHER = { nonce: 'n-host', tool: 'set_clipboard', summary: '', caller: 'ho
 beforeEach(() => {
   resetConfirmsForTests();
   confirmOk = true;
+  confirmAnswered = true;
+  clearToasts();
   inv.mockReset();
   inv.mockImplementation(async (cmd: string) => {
     if (cmd === 'mcp_pending_confirms') return [];
     if (cmd === 'mcp_confirm') {
       if (!confirmOk) throw { code: 'E_HUB', message: 'hub unreachable' };
-      return true;
+      return confirmAnswered;
     }
     return null;
   });
@@ -114,6 +118,17 @@ describe('confirms as transcript cards', () => {
     expect(inv).toHaveBeenCalledWith('mcp_confirm', { nonce: 'n-op', approved: false });
     expect(get(confirmQueue).map((r) => r.nonce)).toEqual(['n-op']);
     expect(screen.getByTestId('confirm-card')).toBeTruthy();
+  });
+
+  it('an answer the backend refused (expired, or answered elsewhere first) is said, not shown as done', async () => {
+    confirmAnswered = false;
+    await mountBoth();
+    await emit('mcp:confirm-required', KILL);
+    await tick();
+    await fireEvent.click(screen.getByTestId('confirm-card-approve'));
+    await tick();
+    expect(get(confirmQueue)).toEqual([]);
+    expect(get(toasts).map((t) => t.message).join('\n')).toContain('already been answered or had expired');
   });
 
   it('requests raised before the window mounted are listed again, operator flag and all', async () => {

@@ -519,9 +519,24 @@ describe('AnswerPrompt quick answer (redesign step 10.9)', () => {
   });
 });
 
+describe('AnswerPrompt: the command being approved', () => {
+  it('a press is refused when the pane now asks about a different command', async () => {
+    // Same question, same options; only the tool call differs. The press
+    // meant for `rm -rf build` must not approve `rm -rf ~`.
+    const v = view({ ...DIALOG, detail: 'Bash(rm -rf build)' });
+    mockedAct.mockResolvedValue({ ok: true, value: probe({ ...DIALOG, detail: 'Bash(rm -rf ~)' }) });
+    render(AnswerPrompt, { session: session(), view: v });
+    await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+});
+
 describe('AnswerPrompt in the New layout (redesign 5.9)', () => {
   it('the New layout draws the kit card, with the command, on a row as in the Conversation', async () => {
     const v = { ...view({ ...DIALOG, detail: 'Bash(git push)' }) };
+    // The pane still shows the same command: the stale check compares it.
+    mockedAct.mockResolvedValue({ ok: true, value: probe({ ...DIALOG, detail: 'Bash(git push)' }) });
     const onAnswered = vi.fn();
     render(AnswerPrompt, { session: session(), view: v, compact: true, onAnswered });
     const card = screen.getByTestId('answer-card');

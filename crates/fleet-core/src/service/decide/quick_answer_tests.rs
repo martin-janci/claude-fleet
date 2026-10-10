@@ -142,6 +142,7 @@ fn a_push_a_permission_or_a_step_hard_to_undo_is_never_proposed() {
         "git reset --hard",
         "Deploy to production",
         "Yes, and don't ask again for this command",
+        "Yes, and don’t ask again for: ls *",
         "Always allow edits",
         "Merge the PR",
     ] {

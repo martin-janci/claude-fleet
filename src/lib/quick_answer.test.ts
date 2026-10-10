@@ -22,7 +22,7 @@ describe('quick answer', () => {
       expect(r.proposed).toBeNull();
       expect(r.shown.map((o) => o.n)).toEqual([1, 2, 3]);
     }
-    for (const l of ['Push to main', 'Force-push', 'rm -rf build', 'Deploy to prod', 'Always allow']) expect(risky(l), l).toBe(true);
+    for (const l of ['Push to main', 'Force-push', 'rm -rf build', 'Deploy to prod', 'Always allow', 'Yes, and don’t ask again for: ls *']) expect(risky(l), l).toBe(true);
     expect(risky('Pushover')).toBe(false);
   });
 

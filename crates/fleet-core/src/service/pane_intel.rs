@@ -789,11 +789,43 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
         return None;
     }
 
-    let question_idx = lines[..=dialog_end]
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(i, l)| l.ends_with('?') && !is_choice(*i))
+    // The trailing run of choice lines ending at the last one, tolerating a
+    // non-choice line in between only when it is blank/decoration-only or
+    // was indented in the raw capture (a description line) — an unindented,
+    // non-empty line ends the run, so an unrelated list higher up the
+    // scrollback is excluded.
+    let block_start = choices.last().map(|(last_idx, ..)| {
+        let mut start = *last_idx;
+        while start > 0 {
+            let prev = start - 1;
+            if is_choice(prev) {
+                start = prev;
+                continue;
+            }
+            let gap_allowed = lines[prev].chars().all(is_decoration)
+                || raw_lines[prev].starts_with(|c: char| c.is_whitespace());
+            if !gap_allowed {
+                break;
+            }
+            start = prev;
+        }
+        start
+    });
+    // The question sits ABOVE the choices. An option's own description line
+    // may end in "?" too ("Is that enough?"); taking that as the question
+    // drew the wrong question and dropped every option above it — the
+    // selected one included. Only when nothing above the block reads as a
+    // question is a line inside it (or the footer) considered.
+    let is_question = |(i, l): &(usize, &&str)| l.ends_with('?') && !is_choice(*i);
+    let question_idx = block_start
+        .and_then(|b| lines[..b].iter().enumerate().rev().find(is_question))
+        .or_else(|| {
+            lines[..=dialog_end]
+                .iter()
+                .enumerate()
+                .rev()
+                .find(is_question)
+        })
         .map(|(i, _)| i);
     let question = question_idx.map(|i| lines[i].to_string());
     let selected = choices
@@ -819,10 +851,7 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
     //
     // Without such a line (a bare `tell_claude` match with no "do you
     // want"/"?" line above its choices), fall back to the trailing run of
-    // choice lines ending at the last one, tolerating a non-choice line in
-    // between only when it is blank/decoration-only or was indented in the
-    // raw capture (a description line) — an unindented, non-empty line ends
-    // the run, so an unrelated list higher up the scrollback is excluded.
+    // choice lines (`block_start`).
     let bound_after = ask.into_iter().chain(question_idx).max();
     let options: Vec<ParsedOption> = match bound_after {
         Some(after) => choices
@@ -830,28 +859,12 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
             .filter(|(i, ..)| *i > after)
             .map(|(_, n, label, selected)| choice_option(*n, label, *selected))
             .collect(),
-        None => match choices.last() {
-            Some((last_idx, ..)) => {
-                let mut start = *last_idx;
-                while start > 0 {
-                    let prev = start - 1;
-                    if is_choice(prev) {
-                        start = prev;
-                        continue;
-                    }
-                    let gap_allowed = lines[prev].chars().all(is_decoration)
-                        || raw_lines[prev].starts_with(|c: char| c.is_whitespace());
-                    if !gap_allowed {
-                        break;
-                    }
-                    start = prev;
-                }
-                choices
-                    .iter()
-                    .filter(|(i, ..)| *i >= start)
-                    .map(|(_, n, label, selected)| choice_option(*n, label, *selected))
-                    .collect()
-            }
+        None => match block_start {
+            Some(start) => choices
+                .iter()
+                .filter(|(i, ..)| *i >= start)
+                .map(|(_, n, label, selected)| choice_option(*n, label, *selected))
+                .collect(),
             None => Vec::new(),
         },
     };
@@ -1470,6 +1483,27 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// An option's description may itself end in "?". It is not the
+    /// question: taking it as one drew the wrong question and dropped every
+    /// option above it — here the selected option 1.
+    #[test]
+    fn a_description_ending_in_a_question_mark_is_not_the_question() {
+        let text = include_str!("testdata/pane_intel/question_ask_user.txt").replace(
+            "Long enough to recreate them after a tmux server restart.",
+            "Is a day long enough to recreate them?",
+        );
+        let p = analyze(&text).pending_input.expect("dialog");
+        assert_eq!(
+            p.question.as_deref(),
+            Some("Keep ghosted sessions for how long before deleting them?")
+        );
+        assert_eq!(
+            p.options.iter().map(|o| o.n).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert!(p.options[0].selected);
     }
 
     /// RECONSTRUCTED from Claude Code 2.1's multi-select renderer (not a

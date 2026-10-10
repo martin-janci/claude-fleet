@@ -1917,19 +1917,29 @@ impl PendingConfirms {
         }
     }
 
-    /// Record the user's answer. `false` when the nonce is unknown / expired.
+    /// Record the user's answer. `false` when the nonce is unknown, expired
+    /// or ALREADY ANSWERED: the first answer wins. The desktop dialog and
+    /// the phone both show the same request, and without this a deny from a
+    /// dialog closed after the phone approved (or a stale card's approve
+    /// after a deny) silently replaced the answer the person meant.
+    ///
+    /// An answer restarts the TTL, so the agent's retry has the full window
+    /// to spend it: an approval given at 9:59 of a 10-minute ask is not lost
+    /// to a retry at 10:01.
     pub fn resolve(&self, nonce: &str, approved: bool) -> bool {
         let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        prune(&mut entries, Instant::now());
+        let now = Instant::now();
+        prune(&mut entries, now);
         match entries.get_mut(nonce) {
-            Some(p) => {
+            Some(p) if p.approved.is_none() => {
                 p.approved = Some(approved);
+                p.created = now;
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
@@ -2640,6 +2650,23 @@ mod tests {
         );
         assert!(!pc.resolve("never-issued", true));
 
+        // The first answer wins: a second one (the other client, a stale
+        // card) is refused and changes nothing, either way round.
+        let first_yes = pc.request("set_clipboard", "", "master");
+        assert!(pc.resolve(&first_yes.nonce, true));
+        assert!(!pc.resolve(&first_yes.nonce, false));
+        assert_eq!(
+            pc.consume(&first_yes.nonce, "set_clipboard", ""),
+            ConfirmState::Approved
+        );
+        let first_no = pc.request("set_clipboard", "", "master");
+        assert!(pc.resolve(&first_no.nonce, false));
+        assert!(!pc.resolve(&first_no.nonce, true));
+        assert_eq!(
+            pc.consume(&first_no.nonce, "set_clipboard", ""),
+            ConfirmState::Denied
+        );
+
         let denied = pc.request("set_clipboard", "", "master");
         assert!(pc.resolve(&denied.nonce, false));
         assert_eq!(
@@ -2739,6 +2766,28 @@ mod tests {
         );
         prune(&mut entries, now + CONFIRM_TTL);
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn an_answer_restarts_the_confirm_ttl() {
+        // Asked nearly a TTL ago, answered just now: the agent's retry must
+        // still find the approval, not an expired nonce and a second ask.
+        let pc = PendingConfirms::new();
+        let req = pc.request("kill_session", "name=x", "master");
+        let Some(long_ago) = Instant::now().checked_sub(CONFIRM_TTL - Duration::from_secs(1))
+        else {
+            return; // a clock this young cannot express the case
+        };
+        pc.entries
+            .lock()
+            .unwrap()
+            .get_mut(&req.nonce)
+            .unwrap()
+            .created = long_ago;
+        assert!(pc.resolve(&req.nonce, true));
+        let mut entries = pc.entries.lock().unwrap();
+        prune(&mut entries, Instant::now() + Duration::from_secs(2));
+        assert!(entries.contains_key(&req.nonce), "the answer kept it alive");
     }
 
     #[test]
