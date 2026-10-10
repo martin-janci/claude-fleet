@@ -104,10 +104,10 @@ afterEach(() => {
 describe('the filter schema', () => {
   it('has a control for every facet either list can name', () => {
     const all = sessionFacets({
-      scope: 'org:1', host: 'h1', recency: '1d', search: 'x', needsYou: true, showBgAgents: false,
+      scope: 'org:1', host: 'h1', agent: 'Codex', recency: '1d', search: 'x', needsYou: true, showBgAgents: false,
       work: { ...DEFAULT_WORK_FILTERS, tracker: 1, status: 'todo', assignee: 'mine', hasSession: 'yes' },
     });
-    expect(all.length).toBe(10);
+    expect(all.length).toBe(11);
     for (const f of all) expect(SESSION_FILTER_SCHEMA[f.id], f.id).toBeTruthy();
     const work = workFacets({
       org: 1, orgs: [1, 'none'], tracker: 1, status: 'open', stages: ['blocked'], status_name: 'QA Review', mine: true,

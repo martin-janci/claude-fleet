@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { groupRows, isFlatGroupBy, STATE_LABELS } from './row_groups';
+import { capRows, groupRows, isFlatGroupBy, moreRunningText, RUNNING_CAP, STATE_LABELS } from './row_groups';
 import { ATTENTION_STATES } from './attention';
 import { session } from './hosts_fixture';
 import type { SessionRow } from './sessions';
@@ -59,7 +59,7 @@ describe('groupRows (redesign step 3.6)', () => {
   });
 
   it('knows its modes', () => {
-    expect(['state', 'host', 'agent'].every(isFlatGroupBy)).toBe(true);
+    expect(['state', 'host', 'agent', 'org'].every(isFlatGroupBy)).toBe(true);
     expect(isFlatGroupBy('project')).toBe(false);
     expect(isFlatGroupBy('work')).toBe(false);
   });
@@ -74,5 +74,54 @@ describe('a session ⌘N just started (step 5.14)', () => {
     expect(ids(groups[0])).toEqual(['a', 'new']);
     groups = groupRows([working, fresh], 'state', opts, new Set());
     expect(groups.map((g) => g.label)).toEqual(['Working', 'Idle']);
+  });
+});
+
+describe('group by organisation (Sessions board)', () => {
+  const scopeOf = (s: SessionRow) => (s.org_id != null ? `org:${s.org_id}` : s.project_id === 2 ? 'owner:beta' : 'unassigned');
+  const scopes = [
+    { id: 'org:1', label: 'Acme', color: null },
+    { id: 'owner:beta', label: 'beta', color: null },
+  ];
+
+  it("follows the selector's order, names each org, and puts Unassigned last", () => {
+    const loose = session('mac', 'l', { project_id: null });
+    const acme = session('mac', 'a', { org_id: 1 });
+    const beta = session('nas', 'b', { project_id: 2 });
+    const groups = groupRows([loose, beta, acme], 'org', opts, new Set(), { scopeOf, scopes });
+    expect(groups.map((g) => g.label)).toEqual(['Acme', 'beta', 'Unassigned']);
+    expect(groups.map((g) => g.key)).toEqual(['org:org:1', 'org:owner:beta', 'org:unassigned']);
+  });
+
+  it('a scope the selector does not list yet still gets a group, by its name', () => {
+    const other = session('mac', 'o', { org_id: 9 });
+    const groups = groupRows([other], 'org', opts, new Set(), { scopeOf, scopes });
+    expect(groups.map((g) => g.label)).toEqual(['9']);
+  });
+});
+
+describe('the running cap (Sessions board: "4 more running ›")', () => {
+  const runs = Array.from({ length: 6 }, (_, i) => session('mac', `r${i}`, { claude_status: 'working', last_activity_at: NOW - 60 }));
+  const working = () => groupRows(runs, 'state', opts, new Set())[0];
+
+  it('shows the first rows of Working and counts the rest', () => {
+    const c = capRows(working(), new Set());
+    expect(c.shown.map((s) => s.tmux_name)).toEqual(['r0', 'r1']);
+    expect(c.hidden).toBe(6 - RUNNING_CAP);
+    expect(moreRunningText(c.hidden)).toBe('4 more running');
+  });
+
+  it('opened, it shows every row; the selected row always shows', () => {
+    expect(capRows(working(), new Set(['state:working'])).hidden).toBe(0);
+    const c = capRows(working(), new Set(), new Set([runs[4].id]));
+    expect(c.shown.map((s) => s.tmux_name)).toEqual(['r0', 'r1', 'r4']);
+    expect(c.hidden).toBe(3);
+  });
+
+  it('never hides a single row, and leaves every other group whole', () => {
+    const three = groupRows(runs.slice(0, 3), 'state', opts, new Set())[0];
+    expect(capRows(three, new Set()).hidden).toBe(0);
+    const byHost = groupRows(runs, 'host', opts)[0];
+    expect(capRows(byHost, new Set()).hidden).toBe(0);
   });
 });

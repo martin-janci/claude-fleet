@@ -81,6 +81,8 @@ import { addProjectRequest } from './app_views';
 import { newSessionRequest, clearNewSessionRequest } from './new_session_request';
 import { expectAccessible } from './a11y_check';
 import { bootstrapError } from './bootstrap_state';
+import { agentFilter, scopeTab } from './session_scope';
+import { orgs } from './orgs';
 
 /** Open the sidebar's Filters panel (hosts, recency, work filters, include). */
 async function openFilters() {
@@ -3154,13 +3156,13 @@ describe('Group by state, host or agent (redesign step 3.6)', () => {
     ];
   }
 
-  it('the Group select offers State, Host and Agent after Project and Work', async () => {
+  it('the Group select offers State, Host, Agent and Organisation after Project and Work', async () => {
     mockBackend(fakeProjects, fleet());
     render(Sidebar);
     await tick(); await tick();
     const select = screen.getByTestId('group-select') as HTMLSelectElement;
     expect(Array.from(select.options).map((o) => o.textContent?.trim())).toEqual([
-      'Project', 'Work', 'State', 'Host', 'Agent',
+      'Project', 'Work', 'State', 'Host', 'Agent', 'Organisation',
     ]);
     await groupBy('host');
     expect(get(sidebarGroupBy)).toBe('host');
@@ -3615,5 +3617,153 @@ describe('Sidebar empty states (review r13)', () => {
     expect(empty.dataset.kind).toBe('first');
     expect(screen.getByTestId('sidebar-empty-add-host')).toBeTruthy();
     expect(screen.getByTestId('sidebar-empty-pair')).toBeTruthy();
+  });
+});
+
+describe('the Sessions board: tabs, agent, organisation, the running cap', () => {
+  const REMOTE: HubStatus = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    configured_url: 'https://fleet.example.com',
+  };
+  beforeEach(() => {
+    scopeTab.set('all');
+    agentFilter.set('any');
+    orgs.set([]);
+    sidebarGroupBy.set('project');
+  });
+  afterEach(() => {
+    scopeTab.set('all');
+    agentFilter.set('any');
+    orgs.set([]);
+    sidebarGroupBy.set('project');
+  });
+
+  function fleet() {
+    const mine = { ...sessionFor(1, 'dev-mine'), owner_person_id: 7 };
+    const watched = { ...sessionFor(2, 'dev-watched'), owner_person_id: 9 };
+    const steered = { ...sessionFor(null, 'dev-steered'), owner_person_id: 11 };
+    mockBackend(fakeProjects, [mine, watched, steered]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(7, [
+      { session_id: watched.id, level: 'watch' },
+      { session_id: steered.id, level: 'drive' },
+    ]);
+  }
+  const names = () => screen.queryAllByTestId('sess-row').map((r) => r.textContent ?? '');
+
+  it('All / Mine / Shared with me: counts on All and Shared, each tab narrows the list', async () => {
+    fleet();
+    render(Sidebar);
+    await tick(); await tick();
+    const tabs = await screen.findByTestId('scope-tabs');
+    expect(within(tabs).getByTestId('scope-tab-all').textContent).toBe('All3');
+    expect(within(tabs).getByTestId('scope-tab-mine').textContent).toBe('Mine');
+    expect(within(tabs).getByTestId('scope-tab-shared').textContent).toBe('Shared with me2');
+    expect(within(tabs).getByTestId('scope-tab-all').getAttribute('aria-selected')).toBe('true');
+    expect(names()).toHaveLength(3);
+
+    await fireEvent.click(within(tabs).getByTestId('scope-tab-mine'));
+    await tick();
+    expect(names().map((t) => t.includes('dev-mine'))).toEqual([true]);
+    expect(screen.queryByTestId('shared-with-me')).toBeNull();
+    expect(JSON.parse(localStorage.getItem('cf:pref:sessions.scope-tab')!)).toBe('mine');
+
+    await fireEvent.click(within(tabs).getByTestId('scope-tab-shared'));
+    await tick();
+    const shown = names();
+    expect(shown).toHaveLength(2);
+    expect(shown.some((t) => t.includes('dev-mine'))).toBe(false);
+    expect(screen.getByTestId('shared-with-me')).toBeTruthy();
+    // The arrows move between the tabs (wrapping), as every tablist does.
+    await fireEvent.keyDown(within(tabs).getByTestId('scope-tab-shared'), { key: 'ArrowRight' });
+    await tick();
+    expect(get(scopeTab)).toBe('all');
+  });
+
+  it('a standalone desktop owns every row, so it shows no tabs and the whole list', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a'), sessionFor(2, 'dev-b')]);
+    scopeTab.set('shared');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('scope-tabs')).toBeNull();
+    expect(names()).toHaveLength(2);
+  });
+
+  it('a shared row says who shared it and at what level; an unknown sharer reads "Shared with you"', async () => {
+    fleet();
+    orgs.set([{ id: 1, name: 'Acme', members: [{ person_id: 9, name: 'petra', display_name: 'Petra', role: 'member' }] }] as never);
+    render(Sidebar);
+    await tick(); await tick();
+    const group = await screen.findByTestId('shared-with-me');
+    const lines = within(group).getAllByTestId('shared-by').map((e) => e.textContent);
+    expect(lines.sort()).toEqual(['Shared by Petra · can watch', 'Shared with you · can steer']);
+    // Only shared rows carry the line.
+    expect(screen.getAllByTestId('shared-by')).toHaveLength(2);
+  });
+
+  it('a share at the answer level is shared too, not left in the tree', async () => {
+    const theirs = { ...sessionFor(1, 'dev-answer'), owner_person_id: 9 };
+    mockBackend(fakeProjects, [theirs]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(7, [{ session_id: theirs.id, level: 'answer' }]);
+    render(Sidebar);
+    await tick(); await tick();
+    const group = await screen.findByTestId('shared-with-me');
+    expect(within(group).getByTestId('shared-by').textContent).toBe('Shared with you · can answer');
+    expect(screen.queryAllByTestId('proj-row')).toHaveLength(0);
+  });
+
+  it('Agent: the facet narrows the list to one agent and shows as a chip that clears', async () => {
+    const codex = { ...sessionFor(1, 'dev-codex'), agent: 'codex' as const };
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-claude'), codex]);
+    render(Sidebar);
+    await tick(); await tick();
+    await openFilters();
+    await fireEvent.click(screen.getByTestId('filter-agent-codex'));
+    await tick();
+    expect(names().map((t) => t.includes('dev-codex'))).toEqual([true]);
+    expect(get(agentFilter)).toBe('codex');
+    const chip = screen.getAllByText('Agent: Codex');
+    expect(chip.length).toBeGreaterThan(0);
+    await fireEvent.click(screen.getByTestId('filter-agent-any'));
+    await tick();
+    expect(names()).toHaveLength(2);
+  });
+
+  it('Group by Organisation: one group per org, owner scopes next, Unassigned last', async () => {
+    const acme = { ...sessionFor(1, 'dev-acme'), org_id: 3 };
+    const owned = sessionFor(2, 'dev-owned');
+    const loose = sessionFor(null, 'dev-loose');
+    mockBackend(fakeProjects, [loose, owned, acme]);
+    orgs.set([{ id: 3, name: 'Acme', color: null }] as never);
+    render(Sidebar);
+    await tick(); await tick();
+    await groupBy('org');
+    const groups = screen.getAllByTestId('flat-group');
+    expect(groups.map((g) => g.querySelector('.label')?.textContent)).toEqual(['Acme', fakeProjects[1].project.owner, 'Unassigned']);
+    expect(screen.getByTestId('flat-groups').dataset.groupBy).toBe('org');
+  });
+
+  it('grouped by state, Working shows two rows and "4 more running ›" opens the rest', async () => {
+    const rows = Array.from({ length: 6 }, (_, i) => ({
+      ...sessionFor(1, `dev-run-${i}`),
+      claude_status: 'working' as const,
+      last_activity_at: Math.floor(Date.now() / 1000),
+    }));
+    mockBackend(fakeProjects, rows);
+    render(Sidebar);
+    await tick(); await tick();
+    await groupBy('state');
+    expect(names()).toHaveLength(2);
+    const more = screen.getByTestId('group-more');
+    expect(more.textContent).toBe('4 more running ›');
+    await fireEvent.click(more);
+    await tick();
+    expect(names()).toHaveLength(6);
+    expect(screen.queryByTestId('group-more')).toBeNull();
   });
 });
