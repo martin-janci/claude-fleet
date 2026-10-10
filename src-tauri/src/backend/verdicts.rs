@@ -958,6 +958,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "start_rules",
         },
     ),
+    // A wizard left half-way (G7.2) is kept on the hub, so it resumes on
+    // the person's other devices.
+    (
+        "wizard_state",
+        Verdict::Routed {
+            tool: "wizard_state",
+        },
+    ),
     (
         "session_presence",
         Verdict::Routed {

@@ -1,5 +1,5 @@
-//! The add-host wizard's saved drafts and the fleet-agent install jobs
-//! (migration 135, Orbit Fleet 4.9). The rules (which checks run, how an
+//! The add-host wizard's saved drafts (rows of `wizard_state`, migration
+//! 162) and the fleet-agent install jobs (migration 135, Orbit Fleet 4.9). The rules (which checks run, how an
 //! install proceeds) are in `service::host_setup` and
 //! `service::agent_install`; this is the rows.
 
@@ -52,24 +52,25 @@ pub struct AgentInstallRow {
     pub finished_at: Option<i64>,
 }
 
-const SETUP_COLS: &str = "ssh_alias, alias, step, checks, answers, created_at, updated_at";
 const INSTALL_COLS: &str = "id, host_alias, version, state, step, detail, started_at, finished_at";
 
-fn setup_row(r: &rusqlite::Row<'_>) -> Result<HostSetupRow> {
-    let checks: String = r.get(3)?;
-    let answers: String = r.get(4)?;
-    Ok(HostSetupRow {
-        ssh_alias: r.get(0)?,
-        alias: r.get(1)?,
-        step: r.get(2)?,
+/// The add-host wizard's drafts are the `add_host` rows of `wizard_state`
+/// (migration 162), fleet's own (no person): the desktop wizard runs over
+/// this app's own SSH.
+const ADD_HOST: &str = "add_host";
+
+fn setup_row(w: super::WizardStateRow) -> HostSetupRow {
+    HostSetupRow {
+        alias: w.label.clone().unwrap_or_else(|| w.key.clone()),
+        ssh_alias: w.key,
+        step: w.step,
         // A row this build cannot read loses its checks, not the draft: the
         // wizard runs them again.
-        checks: serde_json::from_str(&checks).unwrap_or_default(),
-        answers: serde_json::from_str(&answers)
-            .unwrap_or_else(|_| serde_json::Value::Object(Default::default())),
-        created_at: r.get(5)?,
-        updated_at: r.get(6)?,
-    })
+        checks: serde_json::from_value(w.checks).unwrap_or_default(),
+        answers: w.answers,
+        created_at: w.created_at,
+        updated_at: w.updated_at,
+    }
 }
 
 fn install_row(r: &rusqlite::Row<'_>) -> Result<AgentInstallRow> {
@@ -96,55 +97,43 @@ impl Store {
         checks: &[SetupCheck],
         answers: &serde_json::Value,
     ) -> Result<HostSetupRow> {
-        let at = now_unix();
-        let checks = serde_json::to_string(checks).unwrap_or_else(|_| "[]".into());
-        let answers = serde_json::to_string(answers).unwrap_or_else(|_| "{}".into());
-        self.conn.execute(
-            "INSERT INTO host_setups (ssh_alias, alias, step, checks, answers, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
-             ON CONFLICT(ssh_alias) DO UPDATE SET
-               alias = excluded.alias, step = excluded.step, checks = excluded.checks,
-               answers = excluded.answers, updated_at = excluded.updated_at",
-            rusqlite::params![ssh_alias, alias, step, checks, answers, at],
-        )?;
-        Ok(self.host_setup(ssh_alias)?.expect("the row just written"))
+        let checks = serde_json::to_value(checks).unwrap_or_default();
+        let w = self.save_wizard_state(&super::WizardStateWrite {
+            kind: ADD_HOST,
+            key: ssh_alias,
+            person_id: None,
+            label: Some(alias),
+            step,
+            answers: Some(answers),
+            checks: Some(&checks),
+            device: None,
+        })?;
+        Ok(setup_row(w))
     }
 
     /// Replace only the checks of a draft; `false` when there is none.
     pub fn set_host_setup_checks(&self, ssh_alias: &str, checks: &[SetupCheck]) -> Result<bool> {
-        let checks = serde_json::to_string(checks).unwrap_or_else(|_| "[]".into());
-        let n = self.conn.execute(
-            "UPDATE host_setups SET checks = ?2, updated_at = ?3 WHERE ssh_alias = ?1",
-            rusqlite::params![ssh_alias, checks, now_unix()],
-        )?;
-        Ok(n > 0)
+        let checks = serde_json::to_value(checks).unwrap_or_default();
+        self.set_wizard_checks(ADD_HOST, ssh_alias, None, &checks)
     }
 
     pub fn host_setup(&self, ssh_alias: &str) -> Result<Option<HostSetupRow>> {
-        self.conn
-            .query_row(
-                &format!("SELECT {SETUP_COLS} FROM host_setups WHERE ssh_alias = ?1"),
-                [ssh_alias],
-                setup_row,
-            )
-            .optional()
+        Ok(self.wizard_state(ADD_HOST, ssh_alias, None)?.map(setup_row))
     }
 
     /// Every draft, the most recently touched first.
     pub fn host_setups(&self) -> Result<Vec<HostSetupRow>> {
-        let mut st = self.conn.prepare(&format!(
-            "SELECT {SETUP_COLS} FROM host_setups ORDER BY updated_at DESC, ssh_alias"
-        ))?;
-        let rows = st.query_map([], setup_row)?;
-        rows.collect()
+        Ok(self
+            .wizard_states(Some(ADD_HOST))?
+            .into_iter()
+            .filter(|w| w.person_id.is_none())
+            .map(setup_row)
+            .collect())
     }
 
     /// `true` when a draft was there.
     pub fn delete_host_setup(&self, ssh_alias: &str) -> Result<bool> {
-        Ok(self
-            .conn
-            .execute("DELETE FROM host_setups WHERE ssh_alias = ?1", [ssh_alias])?
-            > 0)
+        self.delete_wizard_state(ADD_HOST, ssh_alias, None)
     }
 
     /// A new install job, `running` at step `target`.

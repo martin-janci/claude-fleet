@@ -458,6 +458,12 @@ pub async fn sweep_with(
     report.swept_decision_runs = crate::service::decide::sweep_runs(store, now);
     // File downloads past `downloads.keep_secs`, and bytes no row owns.
     report.swept_downloads = crate::service::downloads::sweep(store, now);
+    // Wizard drafts nobody resumed within `wizard_state::KEEP_SECS` (G7.2).
+    match crate::service::wizard_state::purge(store, now) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(n, "[gc] dropped stale wizard drafts"),
+        Err(e) => tracing::warn!(error = %e, "[gc] wizard draft purge failed"),
+    }
     report
 }
 

@@ -41,6 +41,7 @@ pub mod updates;
 pub mod upload;
 pub mod voice;
 pub mod windows;
+pub mod wizard_state;
 pub mod work;
 pub mod work_view;
 pub mod worktrees;

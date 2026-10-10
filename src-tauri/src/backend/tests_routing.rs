@@ -1018,6 +1018,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "wizard_state",
+            "wizard_state",
+            json!({ "action": "get", "kind": "add_project" }),
+            r#"{"kind":"add_project","key":"","step":2,"answers":{},"checks":[],"created_at":1,"updated_at":2}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::wizard_state::routed::wizard_state(
+                    b,
+                    s,
+                    fleet_core::service::wizard_state::WizardStateArgs {
+                        action: "get".into(),
+                        kind: Some("add_project".into()),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "control_handoffs",
             "control_handoffs",
             json!({ "limit": 5 }),
@@ -6903,6 +6921,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/start_rules.rs",
         include_str!("../commands/start_rules.rs"),
+    ),
+    (
+        "commands/wizard_state.rs",
+        include_str!("../commands/wizard_state.rs"),
     ),
     (
         "commands/api_tokens.rs",

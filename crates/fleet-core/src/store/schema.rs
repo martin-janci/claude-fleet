@@ -358,6 +358,17 @@ fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 162: `wizard_state` exists (and
+/// `host_setups`, which it replaced, is gone). See [`Migration`].
+fn has_wizard_state(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wizard_state'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 161: `start_rules` already has its
 /// `agent` column. See [`Migration`].
 fn start_rules_has_agent(conn: &Connection) -> rusqlite::Result<bool> {
@@ -1837,6 +1848,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 161,
         sql: include_str!("../../migrations/161_rule_start_targets.sql"),
         already_applied: Some(start_rules_has_agent),
+    },
+    // M15 step G7.2: `wizard_state`, the add-host wizard's drafts
+    // generalised so any wizard resumes on another device. It moves the
+    // `host_setups` rows and drops that table, so a guard.
+    Migration {
+        version: 162,
+        sql: include_str!("../../migrations/162_wizard_state.sql"),
+        already_applied: Some(has_wizard_state),
     },
 ];
 
@@ -6218,6 +6237,27 @@ mod tests {
         s.migrate().unwrap();
         assert_eq!(row(wid).name, "feat-imports", "a re-run changes nothing");
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// 162 (gap plan G7.2): the add-host wizard's drafts move from
+    /// `host_setups` into `wizard_state` as `add_host` rows, and the old
+    /// table goes; the store still reads them as drafts.
+    #[test]
+    fn migration_162_moves_the_add_host_drafts_into_wizard_state() {
+        let s = store_at_version(161);
+        s.conn
+            .execute_batch(
+                "INSERT INTO host_setups (ssh_alias, alias, step, checks, answers, created_at, updated_at)
+                 VALUES ('mercury', 'merc', 3, '[{\"key\":\"ssh\",\"state\":\"ok\",\"label\":\"SSH\",\"detail\":\"18 ms\"}]',
+                         '{\"install_agent\":true}', 5, 6);",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        assert!(!s.has_table("host_setups").unwrap());
+        let d = s.host_setup("mercury").unwrap().expect("the draft moved");
+        assert_eq!((d.alias.as_str(), d.step, d.created_at), ("merc", 3, 5));
+        assert_eq!(d.checks[0].detail, "18 ms");
+        assert_eq!(d.answers["install_agent"], true);
     }
 
     /// The hub-ops-accounting branch numbered its `usage_daily` rebuild

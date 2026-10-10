@@ -621,6 +621,7 @@ pub fn run() {
             commands::debug_devices::debug_device_screenshot,
             commands::prs::list_pull_requests,
             commands::start_rules::start_rules,
+            commands::wizard_state::wizard_state,
             commands::api_tokens::api_tokens,
             commands::add_account::add_account,
             commands::presence::session_presence,

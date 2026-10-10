@@ -879,6 +879,12 @@ Find your own fleet row from your tmux session name (`tmux display-message -p '#
 
 Parameters: `tmux_name`
 
+### `wizard_state`
+
+A wizard left half-way, kept so it resumes on another of your devices. kind: add_host | add_project | add_account | new_session | link_peer | form; key: which one of the kind (absent = your one wizard of it). list {kind?}: yours, newest first; get {kind, key?}: the row or null; save {kind, key?, step, answers, label?}: where you are (answers never hold a secret); clear {kind, key?}: finished or discarded. Each row names the device that saved it last. E_INVALID.
+
+Parameters: `action`, `answers`, `key`, `kind`, `label`, `step`
+
 ### `work`
 
 Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; describe {key} (the tracker's whole description, cached); tidy; reopened. Work view: tree {filters, cursor} (archived: false hides archived tasks); task {task_id}; session_tasks; review; rules; rule_preview {rule}; views; org_impact. buckets {kind?}: sprints, releases; bucket {bucket_id}. missions; mission {mission_id, before_event?}.
@@ -1141,6 +1147,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::debug_device_screenshot`
 - `commands::prs::list_pull_requests`
 - `commands::start_rules::start_rules`
+- `commands::wizard_state::wizard_state`
 - `commands::api_tokens::api_tokens`
 - `commands::add_account::add_account`
 - `commands::presence::session_presence`

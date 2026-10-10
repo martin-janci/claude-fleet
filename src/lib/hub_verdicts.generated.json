@@ -323,6 +323,7 @@
     "update_device",
     "update_org",
     "verify_work_item",
+    "wizard_state",
     "work_lookup",
     "work_mission",
     "work_missions",

@@ -99,7 +99,7 @@ device     pr_shepherd mcp_confirms answer_mcp_confirm setting_proposals
            decide_setting_proposals setting_history control_route
            resume_or_new control_handoffs list_pages project_picks
            set_project_pick
-           org_admin update_policy session_claim
+           org_admin update_policy session_claim wizard_state
 ```
 
 ## Status vocabulary
