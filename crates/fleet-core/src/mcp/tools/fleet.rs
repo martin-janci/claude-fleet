@@ -859,8 +859,8 @@ impl FleetTools {
         ok_json_compact(&self.guards.confirms.pending())
     }
 
-    #[tool(description = "Approve or deny one waiting call by its nonce; \
-        false when it was already answered or expired.")]
+    #[tool(description = "Approve or deny one waiting call by nonce; \
+        false if already answered or expired.")]
     pub(super) async fn answer_mcp_confirm(
         &self,
         Extension(caller): Extension<Caller>,

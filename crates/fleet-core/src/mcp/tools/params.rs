@@ -409,12 +409,16 @@ pub struct SendPromptParams {
     #[serde(default)]
     pub client_msg_id: Option<String>,
     /// Press a key instead; `1`-`9` picks that `pending_input` option
-    /// (toggles it when `multi`). Not recorded; `prompt` must be empty.
+    /// (toggles if `multi`). `prompt` must be empty.
     #[serde(default)]
     #[schemars(extend("enum" = crate::tmux::NamedKey::all_names()))]
     pub keys: Option<String>,
-    /// With `keys`: press only if the pane still shows this dialog.
+    /// With `keys`: its `pending_input`; E_CONFLICT if it moved.
+    // Advertised as a bare object: the nested `ExpectDialog` schema cost
+    // every client ~500 bytes of tool definitions on every connect
+    // (`the_served_definition_budget_stays_bounded`). Still parsed strictly.
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub expect: Option<crate::service::sessions::ExpectDialog>,
     /// Operator only: the nonce a person approved.
     #[serde(default)]

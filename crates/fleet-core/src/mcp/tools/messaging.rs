@@ -5,11 +5,10 @@ use crate::ipc_error::lock;
 
 #[tool_router(router = messaging_router, vis = "pub(super)")]
 impl FleetTools {
-    #[tool(description = "Send and SUBMIT a prompt to a running Claude \
+    #[tool(description = "Send and SUBMIT a prompt to a Claude \
         session's REPL (pasted, then one Enter); the first prompt to an \
         unnamed session also names it. Marked untrusted unless raw=true \
-        (master only) or a trusted client. keys presses a key instead. \
-        Returns { delivered, session_id, turn_seq_before, queued, acked }: \
+        (master only) or a trusted client. Returns { delivered, session_id, turn_seq_before, queued, acked }: \
         pass turn_seq_before to wait_for_session { until: \"turn_gt\" } or \
         session_transcript { since_turn } for the reply (run_prompt does all \
         three). Refuses a blocked or stuck session (E_INVALID_STATE) unless \
