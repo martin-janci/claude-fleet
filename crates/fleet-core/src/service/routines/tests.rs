@@ -36,6 +36,10 @@ struct FakeSpawn {
     fail_on: Mutex<Option<String>>,
     /// The turns a time cap stopped: `(host, tmux name)`.
     stopped: Mutex<Vec<(String, String)>>,
+    /// The prompts typed into a run's session: `(session id, prompt)`.
+    typed: Mutex<Vec<(i64, String)>>,
+    /// Typing a prompt fails, saying this.
+    untypable: Mutex<Option<String>>,
 }
 
 #[async_trait::async_trait]
@@ -82,6 +86,16 @@ impl tick::Spawn for FakeSpawn {
             .push((host_alias.to_string(), tmux_name.to_string()));
         Ok(())
     }
+    async fn deliver(&self, row: &SessionRow, prompt: &str, _handover: i64) -> Result<(), String> {
+        if let Some(why) = self.untypable.lock().unwrap().clone() {
+            return Err(why);
+        }
+        self.typed
+            .lock()
+            .unwrap()
+            .push((row.id, prompt.to_string()));
+        Ok(())
+    }
 }
 
 struct Fx {
@@ -112,6 +126,8 @@ fn fx() -> Fx {
         fail: AtomicBool::new(false),
         fail_on: Mutex::new(None),
         stopped: Mutex::new(Vec::new()),
+        typed: Mutex::new(Vec::new()),
+        untypable: Mutex::new(None),
     });
     let deps = Deps {
         store: Arc::clone(&store),
@@ -255,6 +271,73 @@ async fn a_due_cron_routine_starts_its_session_and_queues_its_prompt() {
         s.get_routine(r.id).unwrap().unwrap().next_run_at,
         Some(nine + 24 * H)
     );
+}
+
+/// Let the background typing of the runs just fired finish.
+async fn typing_done() {
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// The run's prompt is typed into its session: queued alone, it sat in a
+/// fresh session that took no turn, and the run stayed `running` with
+/// nothing done.
+#[tokio::test]
+async fn a_run_types_its_prompt_into_its_session() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let run = tick::fire(&f.deps, &r, "run_now", None, None, OCT8)
+        .await
+        .unwrap();
+    typing_done().await;
+    let sid = run.session_id.unwrap();
+    let typed = f.fake.typed.lock().unwrap().clone();
+    assert_eq!(typed, vec![(sid, queued_prompt(&f, sid))]);
+    assert!(typed[0].1.starts_with("Review my open PRs"));
+    assert_eq!(runs_of(&f, r.id)[0].state, "running");
+}
+
+/// A prompt that could not be typed fails the run with a fix that opens
+/// its session (where the dialog or the dead REPL is), so it shows and
+/// `retry_once` can take it.
+#[tokio::test]
+async fn a_run_whose_prompt_was_not_typed_fails() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    *f.fake.untypable.lock().unwrap() = Some("a dialog is up in its session (trust_prompt)".into());
+    tick::fire(&f.deps, &r, "run_now", None, None, OCT8)
+        .await
+        .unwrap();
+    typing_done().await;
+    let run = runs_of(&f, r.id).pop().unwrap();
+    assert_eq!(run.state, "failed");
+    assert_eq!(run.error_code.as_deref(), Some(fix::E_PROMPT_NOT_DELIVERED));
+    assert_eq!(
+        run.reason.as_deref(),
+        Some("its prompt was not delivered: a dialog is up in its session (trust_prompt)")
+    );
+    let named = fix::fix(&routine(&f, r.id), &run).unwrap();
+    assert_eq!(
+        (named.label.as_str(), named.action.as_str()),
+        ("Open its session", "session")
+    );
+}
+
+/// A run that closed before its typing gave up keeps how it closed.
+#[tokio::test]
+async fn a_late_typing_failure_leaves_a_closed_run_alone() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let run = tick::fire(&f.deps, &r, "run_now", None, None, OCT8)
+        .await
+        .unwrap();
+    event(&f, run.session_id.unwrap(), "turn_done");
+    tick::settle(&lock(&f.store).unwrap(), OCT8 + 60).unwrap();
+    tick::undelivered(&f.store, run.id, "too late", OCT8 + 120);
+    let run = runs_of(&f, r.id).pop().unwrap();
+    assert_eq!(run.state, "done");
+    assert_eq!(run.error_code, None);
 }
 
 #[tokio::test]

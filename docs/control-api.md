@@ -943,7 +943,9 @@ Index by area (names only; see the reference for details):
   picker; `delete`; `set_enabled
   { enabled }`; `skip_next { skip? }`; `run_now`. Each run's session has
   origin `routine` and is the routine's owner's; the prompt is its
-  handover. A run is `done` when its session's first turn finishes,
+  handover, typed into the session once Claude's REPL is ready (a run
+  whose prompt could not be typed fails with `E_PROMPT_NOT_DELIVERED`,
+  fix: open its session). A run is `done` when its session's first turn finishes,
   `failed` on an error, a lost or removed session, six quiet hours, or a
   session past the run budget (which also turns the routine off with
   `paused_reason`), and `skipped` when the last run is still going under

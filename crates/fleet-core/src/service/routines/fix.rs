@@ -32,6 +32,9 @@ pub const E_SESSION_REMOVED: &str = "E_SESSION_REMOVED";
 pub const E_NO_SESSION: &str = "E_NO_SESSION";
 /// The session started but its prompt was not queued.
 pub const E_PROMPT_NOT_QUEUED: &str = "E_PROMPT_NOT_QUEUED";
+/// The session started but its prompt could not be typed into it (its
+/// REPL did not come up, a dialog was not answered, the send failed).
+pub const E_PROMPT_NOT_DELIVERED: &str = "E_PROMPT_NOT_DELIVERED";
 
 /// What a [`RunFix`] does, as the desktop and the phone act on it.
 pub const FIX_ACTIONS: [&str; 5] = ["edit", "host", "accounts", "session", "retry"];
@@ -96,7 +99,9 @@ pub fn fix(r: &RoutineRow, run: &RoutineRunRow) -> Option<RunFix> {
         | codes::E_REPAIR_REQUIRED => (format!("Repair the project on {host}"), "host"),
         E_RUN_BUDGET => ("Raise its run budget".to_string(), "edit"),
         E_RUN_TIME_CAP => ("Raise its time cap".to_string(), "edit"),
-        E_RUN_STALE | E_TURN_FAILED => ("Open its session".to_string(), "session"),
+        E_RUN_STALE | E_TURN_FAILED | E_PROMPT_NOT_DELIVERED => {
+            ("Open its session".to_string(), "session")
+        }
         E_SESSION_LOST => ("Restore its session".to_string(), "session"),
         E_SESSION_REMOVED | E_PROMPT_NOT_QUEUED => ("Run it again".to_string(), "retry"),
         _ => ("Check the routine".to_string(), "edit"),
