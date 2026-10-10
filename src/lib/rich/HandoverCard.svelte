@@ -60,7 +60,7 @@
     </div>
     <div class="title-row">
       <strong class="title" data-testid="rich-handover-title">{handover.title ?? 'Hand-off for the next session'}</strong>
-      {#if blocked}<Badge label="Blocked" tone="crit" glyph="■" testid="rich-handover-blocked" />{/if}
+      {#if blocked}<Badge label="Needs you" tone="crit" glyph="■" testid="rich-handover-blocked" />{/if}
     </div>
   </header>
 
