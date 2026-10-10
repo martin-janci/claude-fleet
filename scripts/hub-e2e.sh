@@ -1024,42 +1024,49 @@ echo "== Agent install (install_agent over SSH, then the host on its agent)"
 # the agent starts, the host moves onto it and the agent dials in. The "SSH"
 # is scripts/e2e-fake-ssh.sh: the remote commands run on this machine with
 # HOME=$IHOME, and FLEET_AGENT_NO_SYSTEMD keeps it to `fleet-agent run`.
-IHOME="$ROOT/ihome"; mkdir -p "$IHOME" "$ROOT/itmux"; chmod 700 "$ROOT/itmux"
-case "$(uname -m)" in aarch64|arm64) IT=aarch64-unknown-linux-gnu ;; *) IT=x86_64-unknown-linux-gnu ;; esac
-IV=$("$ABIN" --version | awk '{print $2}')
-mkdir -p "$ROOT/dist/fleet-agent-$IV-$IT"
-cp "$ABIN" "$ROOT/dist/fleet-agent-$IV-$IT/fleet-agent"
-( cd "$ROOT/dist" && tar czf "fleet-agent-$IV-$IT.tar.gz" "fleet-agent-$IV-$IT" \
-    && sha256sum "fleet-agent-$IV-$IT.tar.gz" >SHA256SUMS )
-PI=$(free_port)
-TOKI=$("$BIN" init --data-dir "$ROOT/i" --public-url "https://$PUB" --port "$PI" 2>&1 | grep -E '^[0-9a-f]{64}$')
-CLAUDE_FLEET_SSH="$(cd "$(dirname "$0")" && pwd)/e2e-fake-ssh.sh" E2E_SSH_HOME="$IHOME" E2E_SSH_TMUX="$ROOT/itmux" \
-  FLEET_AGENT_DIST="file://$ROOT/dist" start_hub i "$PI" --public-url "https://$PUB" || bad "hub I starts" "$(tail -5 "$ROOT/i.log")"
-# A field of a tool's JSON answer, however many times its quotes are escaped.
-jfield() { echo "$1" | grep -qE "$2[^a-z0-9]{1,12}$3"; }
-ib=$(tool "$PI" "$PUB" "$TOKI" add_host '{"alias":"e2ebox","ssh_alias":"e2ebox"}')
-check "add_host reaches e2ebox over the stand-in SSH" 'jfield "$ib" reachable true' "${ib:0:400}"
-ij=$(tool "$PI" "$PUB" "$TOKI" install_agent "{\"alias\":\"e2ebox\",\"hub_url\":\"http://127.0.0.1:$PI\",\"version\":\"$IV\"}")
-check "install_agent starts a job" 'jfield "$ij" state running' "${ij:0:400}"
-until_ok 750 'il=$(tool "$PI" "$PUB" "$TOKI" agent_installs "{}"); jfield "$il" state "(done|failed)"'
-[ -f "$IHOME/.config/fleet-agent/agent.pid" ] && cp "$IHOME/.config/fleet-agent/agent.pid" "$ROOT/iagent.pid"
-check "the install job ends done: downloaded, checked, started, connected" 'jfield "$il" state done' "${il:0:600} / $(tail -5 "$IHOME/.config/fleet-agent/agent.log" 2>/dev/null)"
-check "the agent runs from the release the host fetched" '[ -x "$IHOME/.local/bin/fleet-agent" ]' "$(ls -la "$IHOME/.local/bin" 2>&1)"
-check "the token file on the host is private" '[ "$(stat -c %a "$IHOME/.config/fleet-agent/token" 2>/dev/null)" = 600 ]' "$(stat -c %a "$IHOME/.config/fleet-agent/token" 2>&1)"
-ist=$(tool "$PI" "$PUB" "$TOKI" agent_status '{}')
-check "e2ebox is an agent host with its agent connected" 'jfield "$ist" alias e2ebox && jfield "$ist" connected true' "${ist:0:400}"
-ij2=$(tool "$PI" "$PUB" "$TOKI" install_agent '{"alias":"e2ebox","hub_url":"http://127.0.0.1:1"}')
-check "installing again on an agent host is refused" 'echo "$ij2" | grep -q "already an agent host"' "${ij2:0:400}"
-# Not this shell's child (nohup started it on the "host"): no `wait`.
-ipid=$(cat "$ROOT/iagent.pid" 2>/dev/null || true)
-if [ -n "$ipid" ]; then
-  kill -TERM "$ipid" 2>/dev/null
-  until_ok 75 '! kill -0 "$ipid" 2>/dev/null' || kill -KILL "$ipid" 2>/dev/null
-  rm -f "$ROOT/iagent.pid"
+# The hub serves fleet-agent releases for Linux only (x86_64, aarch64), and
+# this leg packs $ABIN as one, so off Linux (a macOS dev box) it cannot pass:
+# it is skipped there. CI runs it on every PR (hub-headless, ubuntu).
+if [ "$(uname -s)" != Linux ]; then
+  echo "SKIP  the agent install scenarios: fleet-agent releases are Linux-only ($(uname -s) here)"
+else
+  IHOME="$ROOT/ihome"; mkdir -p "$IHOME" "$ROOT/itmux"; chmod 700 "$ROOT/itmux"
+  case "$(uname -m)" in aarch64|arm64) IT=aarch64-unknown-linux-gnu ;; *) IT=x86_64-unknown-linux-gnu ;; esac
+  IV=$("$ABIN" --version | awk '{print $2}')
+  mkdir -p "$ROOT/dist/fleet-agent-$IV-$IT"
+  cp "$ABIN" "$ROOT/dist/fleet-agent-$IV-$IT/fleet-agent"
+  ( cd "$ROOT/dist" && tar czf "fleet-agent-$IV-$IT.tar.gz" "fleet-agent-$IV-$IT" \
+      && sha256sum "fleet-agent-$IV-$IT.tar.gz" >SHA256SUMS )
+  PI=$(free_port)
+  TOKI=$("$BIN" init --data-dir "$ROOT/i" --public-url "https://$PUB" --port "$PI" 2>&1 | grep -E '^[0-9a-f]{64}$')
+  CLAUDE_FLEET_SSH="$(cd "$(dirname "$0")" && pwd)/e2e-fake-ssh.sh" E2E_SSH_HOME="$IHOME" E2E_SSH_TMUX="$ROOT/itmux" \
+    FLEET_AGENT_DIST="file://$ROOT/dist" start_hub i "$PI" --public-url "https://$PUB" || bad "hub I starts" "$(tail -5 "$ROOT/i.log")"
+  # A field of a tool's JSON answer, however many times its quotes are escaped.
+  jfield() { echo "$1" | grep -qE "$2[^a-z0-9]{1,12}$3"; }
+  ib=$(tool "$PI" "$PUB" "$TOKI" add_host '{"alias":"e2ebox","ssh_alias":"e2ebox"}')
+  check "add_host reaches e2ebox over the stand-in SSH" 'jfield "$ib" reachable true' "${ib:0:400}"
+  ij=$(tool "$PI" "$PUB" "$TOKI" install_agent "{\"alias\":\"e2ebox\",\"hub_url\":\"http://127.0.0.1:$PI\",\"version\":\"$IV\"}")
+  check "install_agent starts a job" 'jfield "$ij" state running' "${ij:0:400}"
+  until_ok 750 'il=$(tool "$PI" "$PUB" "$TOKI" agent_installs "{}"); jfield "$il" state "(done|failed)"'
+  [ -f "$IHOME/.config/fleet-agent/agent.pid" ] && cp "$IHOME/.config/fleet-agent/agent.pid" "$ROOT/iagent.pid"
+  check "the install job ends done: downloaded, checked, started, connected" 'jfield "$il" state done' "${il:0:600} / $(tail -5 "$IHOME/.config/fleet-agent/agent.log" 2>/dev/null)"
+  check "the agent runs from the release the host fetched" '[ -x "$IHOME/.local/bin/fleet-agent" ]' "$(ls -la "$IHOME/.local/bin" 2>&1)"
+  check "the token file on the host is private" '[ "$(filemode "$IHOME/.config/fleet-agent/token")" = 600 ]' "$(filemode "$IHOME/.config/fleet-agent/token")"
+  ist=$(tool "$PI" "$PUB" "$TOKI" agent_status '{}')
+  check "e2ebox is an agent host with its agent connected" 'jfield "$ist" alias e2ebox && jfield "$ist" connected true' "${ist:0:400}"
+  ij2=$(tool "$PI" "$PUB" "$TOKI" install_agent '{"alias":"e2ebox","hub_url":"http://127.0.0.1:1"}')
+  check "installing again on an agent host is refused" 'echo "$ij2" | grep -q "already an agent host"' "${ij2:0:400}"
+  # Not this shell's child (nohup started it on the "host"): no `wait`.
+  ipid=$(cat "$ROOT/iagent.pid" 2>/dev/null || true)
+  if [ -n "$ipid" ]; then
+    kill -TERM "$ipid" 2>/dev/null
+    until_ok 75 '! kill -0 "$ipid" 2>/dev/null' || kill -KILL "$ipid" 2>/dev/null
+    rm -f "$ROOT/iagent.pid"
+  fi
+  stop_hub i
+  check "hub I SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
+  env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$ROOT/itmux" tmux kill-server 2>/dev/null
 fi
-stop_hub i
-check "hub I SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
-env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$ROOT/itmux" tmux kill-server 2>/dev/null
 
 echo "== Two hubs linked (federation)"
 # Hub D dials, hub E listens. Both manage this machine's real (non-isolated)
