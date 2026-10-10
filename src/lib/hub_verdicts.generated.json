@@ -72,6 +72,7 @@
     "add_org",
     "add_org_project",
     "add_org_rule",
+    "add_person",
     "add_project",
     "adopt_session",
     "agent_installs",

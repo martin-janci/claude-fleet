@@ -76,6 +76,22 @@ impl Fake {
         )
     }
 
+    /// `(tool, arguments)` of every call it was given, in order.
+    fn calls(&self) -> Vec<(String, Value)> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| {
+                let v: Value = serde_json::from_str(b).expect("a JSON-RPC body");
+                (
+                    v["params"]["name"].as_str().expect("a tool").to_string(),
+                    v["params"]["arguments"].clone(),
+                )
+            })
+            .collect()
+    }
+
     fn was_not_called(&self) {
         let seen = self.seen.lock().unwrap();
         assert!(
@@ -295,6 +311,98 @@ const ROUTED_WITHOUT_A_CASE: &[(&str, &str)] = &[
      a seeded local store to prove the answer is not the local one",
     ),
 ];
+
+/// M15 step G7.14: the device edit form picks the org and the person, and
+/// Apply sends each as its own `org_admin` action, the org before the
+/// person; "" unbinds.
+#[test]
+fn a_device_edit_binds_its_org_then_hands_it_over() {
+    let fake = Fake::answering(r#"{"name":"phone","mode":"full","trusted":false,"created_at":1}"#);
+    let (_dir, st) = store();
+    block_on(commands::org_devices::routed::update_device(
+        &remote_backend(&fake),
+        &st,
+        commands::org_devices::UpdateDeviceArgs {
+            device: "phone".into(),
+            org: Some("Acme".into()),
+            person: Some("ada".into()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        fake.calls(),
+        vec![
+            (
+                "org_admin".to_string(),
+                json!({ "action": "bind_device", "device": "phone", "org": "Acme" })
+            ),
+            (
+                "org_admin".to_string(),
+                json!({ "action": "set_device_person", "device": "phone", "person": "ada" })
+            ),
+        ]
+    );
+    let fake = Fake::answering(r#"{"name":"phone","mode":"full","trusted":false,"created_at":1}"#);
+    block_on(commands::org_devices::routed::update_device(
+        &remote_backend(&fake),
+        &st,
+        commands::org_devices::UpdateDeviceArgs {
+            device: "phone".into(),
+            org: Some(String::new()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        fake.calls(),
+        vec![(
+            "org_admin".to_string(),
+            json!({ "action": "bind_device", "device": "phone" })
+        )],
+        "an empty org unbinds"
+    );
+}
+
+/// M15 step G7.14: "Claim it while installing" claims the device first,
+/// with its note, then installs; both on the hub's `debug_devices`.
+#[test]
+fn installing_with_a_claim_claims_the_device_first() {
+    // One answer that reads as both a device (the claim) and a run (the
+    // install): the fake answers every call alike.
+    let both = format!(
+        "{},\"exit_code\":0,\"output\":\"Success\",\"truncated\":false}}",
+        DEBUG_DEVICE_JSON.trim_end_matches('}')
+    );
+    let fake = Fake::answering(&both);
+    let (_dir, st) = store();
+    block_on(commands::debug_devices::routed::install_debug_device(
+        &remote_backend(&fake),
+        &st,
+        &ssh(),
+        commands::debug_devices::InstallDebugDeviceArgs {
+            id: 3,
+            path: "~/app.apk".into(),
+            host: None,
+            claim: Some(true),
+            note: Some("login flow".into()),
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        fake.calls(),
+        vec![
+            (
+                "debug_devices".to_string(),
+                json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null })
+            ),
+            (
+                "debug_devices".to_string(),
+                json!({ "action": "install", "device": "3", "path": "~/app.apk", "host": null })
+            ),
+        ]
+    );
+}
 
 /// The other half of the tool check in [`check`]: a wrong tool must not be
 /// able to hide by having no case at all.
@@ -2459,6 +2567,24 @@ fn org_admin_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "add_person",
+            "org_admin",
+            json!({ "action": "add_person", "name": "ada", "display_name": "Ada" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::add_person(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        name: Some("ada".into()),
+                        display_name: Some("Ada".into()),
+                        ..OrgAdminArgs::new("add_person")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "rename_person",
             "org_admin",
             json!({ "action": "rename_person", "person_id": 2, "name": "ada" }),
@@ -2710,6 +2836,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         path: "~/app.apk".into(),
                         // An empty host means the device's own: sent as absent.
                         host: Some(" ".into()),
+                        ..Default::default()
                     },
                 ))
                 .map(|_| ())

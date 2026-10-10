@@ -762,6 +762,13 @@
             "null"
           ]
         },
+        "subtitle": {
+          "description": "A plain field shown in a smaller line under the record's title in its\ncolumn (M15 step G7.14: a device's \"phone · fleet-mobile 0.5.4\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "title": {
           "description": "The view's name, e.g. \"People & devices\".",
           "type": "string"
@@ -774,11 +781,20 @@
       ]
     },
     "Tone": {
-      "type": "string",
-      "enum": [
-        "info",
-        "warn",
-        "danger"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "info",
+            "warn",
+            "danger"
+          ]
+        },
+        {
+          "description": "Something the page will offer and does not yet, shown greyed with\n\"Not built yet\" (M15 step G7.14: a debug device's live screen).",
+          "type": "string",
+          "const": "later"
+        }
       ]
     },
     "UsageView": {

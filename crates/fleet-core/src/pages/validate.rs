@@ -853,11 +853,12 @@ fn check_table(cx: &mut Ctx, page: &Page) {
     if t.columns.is_empty() || t.columns.len() > MAX_TABLE_COLUMNS {
         cx.bad("table", format!("1 to {MAX_TABLE_COLUMNS} columns"));
     }
-    for c in &t.columns {
+    for c in t.columns.iter().chain(t.subtitle.iter()) {
         match res.field(c).map(|f| f.kind) {
             Some(
                 FieldKind::Text { .. }
                 | FieldKind::Choice { .. }
+                | FieldKind::Pick { .. }
                 | FieldKind::Bool { .. }
                 | FieldKind::Count
                 | FieldKind::Time,
@@ -865,6 +866,12 @@ fn check_table(cx: &mut Ctx, page: &Page) {
             Some(_) => cx.bad("table", format!("`{c}` is not a plain field of {}", res.id)),
             None => cx.bad("table", format!("{} has no field `{c}`", res.id)),
         }
+    }
+    if t.subtitle.is_some() && !t.columns.iter().any(|c| *c == res.title_field) {
+        cx.bad(
+            "table",
+            "a subtitle goes under the title's column, which is not shown",
+        );
     }
     for f in t.filters.iter().chain(t.group_by.iter()) {
         if !t.columns.contains(f) {

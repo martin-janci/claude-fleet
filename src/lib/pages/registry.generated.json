@@ -4458,6 +4458,10 @@
                 {
                   "key": "color",
                   "type": "field"
+                },
+                {
+                  "key": "my_role",
+                  "type": "field"
                 }
               ],
               "title": "Organisation"
@@ -4478,6 +4482,10 @@
                 },
                 {
                   "key": "session_count",
+                  "type": "field"
+                },
+                {
+                  "key": "member_count",
                   "type": "field"
                 }
               ],
@@ -4762,6 +4770,14 @@
               "type": "field"
             },
             {
+              "key": "kind",
+              "type": "field"
+            },
+            {
+              "key": "app",
+              "type": "field"
+            },
+            {
               "key": "last_seen_at",
               "type": "field"
             },
@@ -4809,13 +4825,14 @@
           "person"
         ],
         "group_by": "person",
+        "subtitle": "app",
         "title": "People & devices"
       },
       "title": "Devices"
     },
     {
       "id": "settings.people",
-      "intro": "The people this hub knows. A person is added when a device is paired to them or handed to them. Disabling someone revokes their devices and the shares made to them.",
+      "intro": "The people this hub knows. Add one with + Person, or they are added when a device is paired or handed to them. Disabling someone revokes their devices and the shares made to them.",
       "layout": "master_detail",
       "parent": "settings",
       "resource": "person",
@@ -4896,6 +4913,10 @@
             },
             {
               "key": "last_error",
+              "type": "field"
+            },
+            {
+              "key": "retry",
               "type": "field"
             }
           ],
@@ -5344,6 +5365,21 @@
             }
           ],
           "title": "Hardware"
+        },
+        {
+          "items": [
+            {
+              "text": "Live screen and input: watch the device and tap on it from here. Screenshot and Logs are what there is today.",
+              "tone": "later",
+              "type": "notice"
+            },
+            {
+              "text": "A device on another host: reach a phone plugged into one host from a session on another. Share it with its org, and sessions on its own host use it.",
+              "tone": "later",
+              "type": "notice"
+            }
+          ],
+          "title": "Not built yet"
         }
       ],
       "spec": "fleet.page/1",
@@ -5456,6 +5492,16 @@
           "help": "Of those, the ones waiting on a person: a question, a permission, a stop.",
           "id": "needs_you",
           "label": "Need you",
+          "type": "count"
+        },
+        {
+          "help": "Who is in it, by role. Shown to its own people and the fleet's administrator.",
+          "id": "member_count",
+          "label": "Members",
+          "sub": {
+            "field": "members",
+            "type": "roles"
+          },
           "type": "count"
         },
         {
@@ -6183,7 +6229,7 @@
         },
         {
           "badge": {
-            "text": "owns the hub",
+            "text": "owns the hub {hub}",
             "when": "true"
           },
           "confirm": "This org's admins will administer every host on the hub.",
@@ -6194,6 +6240,29 @@
           "label": "Owns this hub",
           "on_off": false,
           "type": "bool"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "What you may do in it: an admin administers it, a member works in it, a viewer reads.",
+          "id": "my_role",
+          "label": "Your role",
+          "options": [
+            [
+              "admin",
+              "you are an admin"
+            ],
+            [
+              "member",
+              "you are a member"
+            ],
+            [
+              "viewer",
+              "you are a viewer"
+            ]
+          ],
+          "type": "choice"
         },
         {
           "default": false,
@@ -6820,94 +6889,6 @@
       "title_field": "name"
     },
     {
-      "actions": [
-        {
-          "bind": [
-            [
-              "device",
-              {
-                "from": "record",
-                "name": "name"
-              }
-            ],
-            [
-              "org",
-              {
-                "from": "param",
-                "name": "org"
-              }
-            ]
-          ],
-          "command": "bind_device_org",
-          "confirm": "From its next request it sees only that org's work and sessions.",
-          "envelope": "args",
-          "id": "device.bind",
-          "label": "Bind to an org",
-          "params": [
-            {
-              "label": "Org",
-              "name": "org",
-              "required": true,
-              "source": "orgs",
-              "type": "options"
-            }
-          ],
-          "report": false
-        },
-        {
-          "bind": [
-            [
-              "device",
-              {
-                "from": "record",
-                "name": "name"
-              }
-            ]
-          ],
-          "command": "bind_device_org",
-          "confirm": "From its next request it sees every org again.",
-          "envelope": "args",
-          "id": "device.unbind",
-          "label": "Unbind from its org",
-          "params": [],
-          "report": false
-        },
-        {
-          "bind": [
-            [
-              "device",
-              {
-                "from": "record",
-                "name": "name"
-              }
-            ],
-            [
-              "person",
-              {
-                "from": "param",
-                "name": "person"
-              }
-            ]
-          ],
-          "command": "set_device_person",
-          "confirm": "From its next request it sees that person's sessions and the ones shared with them, and no others.",
-          "envelope": "args",
-          "id": "device.hand_over",
-          "label": "Hand to a person",
-          "params": [
-            {
-              "label": "Person",
-              "max": 64,
-              "name": "person",
-              "placeholder": "jane",
-              "required": true,
-              "source": "people",
-              "type": "suggest"
-            }
-          ],
-          "report": false
-        }
-      ],
       "create": {
         "bind": [
           [
@@ -7071,17 +7052,45 @@
           "type": "bool"
         },
         {
+          "confirm": "From its next request it sees only the org picked here (every org, with none).",
+          "edit": "org",
           "help": "The org it is bound to; none sees every org.",
           "id": "org",
           "label": "Org",
-          "max": 80,
-          "type": "text"
+          "none": "No org — every org",
+          "source": "orgs",
+          "type": "pick"
         },
         {
+          "confirm": "From its next request it sees that person's sessions and the ones shared with them, and no others.",
+          "edit": "person",
           "help": "Whose device it is: it sees their sessions and the ones shared with them.",
           "id": "person",
           "label": "Belongs to",
-          "max": 64,
+          "source": "people",
+          "type": "pick"
+        },
+        {
+          "help": "A desktop or a phone, as its app last said.",
+          "id": "kind",
+          "label": "Kind",
+          "options": [
+            [
+              "desktop",
+              "Desktop"
+            ],
+            [
+              "phone",
+              "Phone"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "What it runs, as its app last said; nothing until it has called the hub.",
+          "id": "app",
+          "label": "App",
+          "max": 80,
           "type": "text"
         },
         {
@@ -7201,6 +7210,47 @@
       }
     },
     {
+      "create": {
+        "bind": [
+          [
+            "name",
+            {
+              "from": "param",
+              "name": "name"
+            }
+          ],
+          [
+            "display_name",
+            {
+              "from": "param",
+              "name": "display_name"
+            }
+          ]
+        ],
+        "command": "add_person",
+        "envelope": "args",
+        "id": "person.add",
+        "label": "+ Person",
+        "params": [
+          {
+            "label": "Name",
+            "max": 64,
+            "name": "name",
+            "placeholder": "jana",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Shown as (optional)",
+            "max": 80,
+            "name": "display_name",
+            "placeholder": "Jana Nováková",
+            "required": false,
+            "type": "text"
+          }
+        ],
+        "report": false
+      },
       "delete": {
         "bind": [
           [
@@ -7219,7 +7269,7 @@
         "params": [],
         "report": false
       },
-      "empty": "Nobody yet. A person is added when a device is paired to them.",
+      "empty": "Nobody yet. Add a person, or pair a device to them.",
       "fields": [
         {
           "edit": "name",
@@ -7371,6 +7421,20 @@
                 "from": "param",
                 "name": "host"
               }
+            ],
+            [
+              "claim",
+              {
+                "from": "param",
+                "name": "claim"
+              }
+            ],
+            [
+              "note",
+              {
+                "from": "param",
+                "name": "note"
+              }
             ]
           ],
           "command": "install_debug_device",
@@ -7392,6 +7456,21 @@
               "required": false,
               "source": "hosts",
               "type": "options"
+            },
+            {
+              "default": true,
+              "label": "Claim it while installing (others see it in use)",
+              "name": "claim",
+              "required": false,
+              "type": "toggle"
+            },
+            {
+              "label": "For (optional)",
+              "max": 200,
+              "name": "note",
+              "placeholder": "testing the login flow",
+              "required": false,
+              "type": "text"
             }
           ],
           "report": false,
@@ -7864,6 +7943,13 @@
           "id": "last_error",
           "label": "Last error",
           "max": 512,
+          "type": "text"
+        },
+        {
+          "help": "How often this hub tries the link again while it is down (it backs off to once a minute).",
+          "id": "retry",
+          "label": "Retrying",
+          "max": 32,
           "type": "text"
         }
       ],

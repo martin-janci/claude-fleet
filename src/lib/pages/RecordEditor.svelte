@@ -20,9 +20,12 @@
   import type { OrgSettingRow } from '../orgs';
   import type { TrackerRow } from '../trackers';
   import { evalCondition, type Section, type Tab } from './pages';
+  import { hubStatus } from '../hub';
   import {
     ago,
     applies,
+    badgesOf,
+    hubHost,
     budgetMeter,
     dollars,
     labelOf,
@@ -92,6 +95,9 @@
     now?: () => number;
   } = $props();
 
+  /** What the record is, in a line over its title: "Organisation · owns
+   *  the hub fleet.example · you are an admin" (M15 G7.14). */
+  const kicker = $derived(badgesOf(resource, record, hubHost($hubStatus.url)));
   const recordActions = $derived((resource.actions ?? []).filter((a) => applies(resource, a, record)));
   /** The record action whose form is open. */
   let openAction = $state<string | null>(null);
@@ -222,7 +228,10 @@
     {#if resource.color_field}
       <span class="swatch" style:background={String(record[resource.color_field] ?? '') || 'transparent'}></span>
     {/if}
-    <h5>{titleOf(resource, record)}</h5>
+    <div class="titles">
+      {#if kicker.length}<span class="kicker" data-testid="record-kicker">{[resource.label, ...kicker].join(' · ')}</span>{/if}
+      <h5>{titleOf(resource, record)}</h5>
+    </div>
     {#if !readonly}
       {#each recordActions as a (a.id)}
         <button
@@ -278,7 +287,9 @@
         <div class="tiles">
           {#each section.items as item, i (i)}
             {@const f = item.type === 'field' ? fieldOf(item.key) : undefined}
-            {#if f && !(f.type === 'money' && record[f.id] === undefined)}
+            <!-- A number the caller may not see (spend, the member count)
+                 is left out, as on a row. -->
+            {#if f && !((f.type === 'money' || f.sub?.type === 'roles') && record[f.id] === undefined)}
               {@const sub = subLine(f.sub, record[f.id], record)}
               {@const meter = budgetMeter(f.sub, record[f.id], record)}
               <div class="tile" data-testid={`tile-${f.id}`} title={f.help}>
@@ -293,7 +304,9 @@
       {:else}
       {#each section.items as item, i (i)}
         {#if item.type === 'notice'}
-          <p class={`notice ${item.tone}`}>{item.text}</p>
+          <p class={`notice ${item.tone}`} data-testid={item.tone === 'later' ? 'notice-later' : undefined}>
+            {#if item.tone === 'later'}<span class="later-tag">Not built yet</span>{/if}{item.text}
+          </p>
         {:else if item.type === 'custom' && !readonly && item.component === 'tracker_extras'}
           <TrackerExtras tracker={record as unknown as TrackerRow} onchanged={reload} />
         {:else if item.type === 'field' && evalCondition(item.when, values)}
@@ -393,6 +406,7 @@
                       busy = false;
                       return ok;
                     }}
+                    onchanged={reload}
                     {now} />
                 {:else if f.type === 'items' && f.item_label.type === 'org_share'}
                   <OrgShares
@@ -492,6 +506,21 @@
                     disabled={busy}
                     value={String(draft[f.id])}
                     oninput={(e) => set(f.id, (e.currentTarget as HTMLInputElement).value)} />
+                {:else if f.type === 'pick'}
+                  <!-- G7.14: a device's org and person, picked here and
+                       written with the rest by Apply. -->
+                  {@const opts = options(f, f.id)}
+                  {@const cur = String(draft[f.id])}
+                  <select
+                    aria-labelledby={`rf-${f.id}`}
+                    data-testid={`edit-${f.id}`}
+                    disabled={busy}
+                    value={cur}
+                    onchange={(e) => set(f.id, (e.currentTarget as HTMLSelectElement).value)}>
+                    {#if f.none !== undefined || cur === ''}<option value="">{f.none ?? '—'}</option>{/if}
+                    {#if cur !== '' && !opts.some((o) => o.value === cur)}<option value={cur}>{cur}</option>{/if}
+                    {#each opts as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
+                  </select>
                 {:else if f.type === 'color'}
                   <input
                     type="color"
@@ -602,6 +631,14 @@
   }
   .record header .btn {
     margin-left: auto;
+  }
+  .titles {
+    display: flex;
+    flex-direction: column;
+  }
+  .kicker {
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
   }
   h5 {
     margin: 0;
@@ -801,6 +838,15 @@
   }
   .notice.warn {
     border-left-color: var(--usage-warn);
+  }
+  /* M15 G7.14: what the page will offer and does not yet, greyed. */
+  .notice.later {
+    opacity: 0.55;
+    border-left-style: dashed;
+  }
+  .later-tag {
+    font-weight: 600;
+    margin-right: 0.4rem;
   }
   .action-panel {
     margin-top: 0.5rem;

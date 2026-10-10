@@ -31,6 +31,13 @@
     return f ? cellText(f, r, now()) : '';
   };
 
+  /** The line under a row's title (`table.subtitle`), or nothing. */
+  const sub = (r: ResourceRecord) => {
+    const f = table.subtitle ? resource.fields.find((x) => x.id === table.subtitle) : undefined;
+    const v = f ? cellText(f, r, now()) : '';
+    return v === '—' ? '' : v;
+  };
+
   let picked = $state<Record<string, string>>({});
   let grouped = $state(false);
 
@@ -92,7 +99,13 @@
             class:sel={selected === idOf(resource, r)}
             data-testid="table-row"
             onclick={() => onselect(idOf(resource, r))}>
-            {#each cols as f (f.id)}<td>{cell(f.id, r)}</td>{/each}
+            {#each cols as f (f.id)}
+              <td
+                >{cell(f.id, r)}{#if table.subtitle && f.id === resource.title_field && sub(r)}<span
+                    class="sub"
+                    data-testid="table-subtitle">{sub(r)}</span
+                  >{/if}</td>
+            {/each}
           </tr>
         {/each}
       </tbody>
@@ -135,6 +148,11 @@
     font-size: var(--text-2xs);
     padding: 0.25rem 0.4rem;
     border-bottom: 1px solid var(--border);
+  }
+  .sub {
+    display: block;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
   }
   td {
     padding: 0.3rem 0.4rem;

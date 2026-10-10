@@ -1050,6 +1050,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::org_devices::set_device_person`
 - `commands::org_devices::grant_device_catalog`
 - `commands::org_devices::list_people`
+- `commands::org_devices::add_person`
 - `commands::org_devices::rename_person`
 - `commands::org_devices::disable_person`
 - `commands::sessions::session_history`

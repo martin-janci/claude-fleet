@@ -57,6 +57,13 @@ pub struct InstallDebugDeviceArgs {
     /// Where `path` is; the device's own host when absent or empty.
     #[serde(default)]
     pub host: Option<String>,
+    /// M15 step G7.14: claim the device first (with `note`), so others see
+    /// it in use while the app goes on. Absent: install only.
+    #[serde(default)]
+    pub claim: Option<bool>,
+    /// What the claim is for.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -381,6 +388,19 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
         args: InstallDebugDeviceArgs,
     ) -> Result<RunOutput, IpcError> {
+        if args.claim == Some(true) {
+            let note = args.note.clone().filter(|n| !n.trim().is_empty());
+            claim_debug_device(
+                backend,
+                store,
+                ClaimDebugDeviceArgs {
+                    id: args.id,
+                    note,
+                    claim_s: None,
+                },
+            )
+            .await?;
+        }
         let host = args.host.filter(|h| !h.trim().is_empty());
         match backend.hub() {
             Some(hub) => {

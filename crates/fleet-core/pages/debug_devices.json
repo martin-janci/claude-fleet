@@ -36,6 +36,21 @@
         { "type": "field", "key": "serial" },
         { "type": "field", "key": "last_seen_at" }
       ]
+    },
+    {
+      "title": "Not built yet",
+      "items": [
+        {
+          "type": "notice",
+          "tone": "later",
+          "text": "Live screen and input: watch the device and tap on it from here. Screenshot and Logs are what there is today."
+        },
+        {
+          "type": "notice",
+          "tone": "later",
+          "text": "A device on another host: reach a phone plugged into one host from a session on another. Share it with its org, and sessions on its own host use it."
+        }
+      ]
     }
   ]
 }

@@ -332,7 +332,9 @@
             {readonly} />
         {/if}
       {:else if item.type === 'notice'}
-        <p class={`notice ${item.tone}`} role={item.tone === 'info' ? undefined : 'note'}>{item.text}</p>
+        <p class={`notice ${item.tone}`} role={item.tone === 'info' ? undefined : 'note'}>
+          {#if item.tone === 'later'}<span class="later-tag">Not built yet</span>{/if}{item.text}
+        </p>
       {:else if item.type === 'link'}
         <button type="button" class="link" data-testid={`page-link-${item.page}`} onclick={() => onnavigate(item.page)}
           >{item.label ?? titleOf(item.page)} →</button
@@ -461,6 +463,15 @@
   }
   .notice.danger {
     border-left-color: var(--usage-crit);
+  }
+  /* M15 G7.14: what the page will offer and does not yet, greyed. */
+  .notice.later {
+    opacity: 0.55;
+    border-left-style: dashed;
+  }
+  .later-tag {
+    font-weight: 600;
+    margin-right: 0.4rem;
   }
   /* A link on its own line, not in a sentence: it keeps the 24 px target. */
   .link {

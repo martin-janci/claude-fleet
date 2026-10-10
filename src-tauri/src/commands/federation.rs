@@ -39,6 +39,9 @@ pub struct FederationLink {
     /// idle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync: Option<LinkSync>,
+    /// M15 step G7.14: "every 30 s" while the link is retrying.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<String>,
 }
 
 /// How far a connected link is through what it has to carry: today's
@@ -90,11 +93,16 @@ impl FederationLink {
             .unwrap_or_else(|| format!("Link {}", link.id));
         let latency = link.latency_ms.map(|ms| format!("{ms} ms"));
         let sync = LinkSync::of(&link, now);
+        let retry = (link.state == "retrying")
+            .then_some(link.retry_every_s)
+            .flatten()
+            .map(|s| format!("every {s} s"));
         FederationLink {
             link,
             title,
             latency,
             sync,
+            retry,
         }
     }
 }
@@ -207,6 +215,7 @@ mod tests {
             latency_ms,
             messages_today: 0,
             messages_total: 0,
+            retry_every_s: None,
         }
     }
 
@@ -263,9 +272,21 @@ mod tests {
         link.pending = 5;
         link.state = "retrying".into();
         assert_eq!(
-            FederationLink::at(link, 1_000).sync,
+            FederationLink::at(link.clone(), 1_000).sync,
             None,
             "not while it is down"
+        );
+        // M15 step G7.14: a link that is down says how often it is tried.
+        link.retry_every_s = Some(30);
+        assert_eq!(
+            FederationLink::at(link.clone(), 1_000).retry.as_deref(),
+            Some("every 30 s")
+        );
+        link.state = "connected".into();
+        assert_eq!(
+            FederationLink::at(link, 1_000).retry,
+            None,
+            "only while retrying"
         );
     }
 }

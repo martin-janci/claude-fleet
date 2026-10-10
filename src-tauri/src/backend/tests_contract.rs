@@ -869,6 +869,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             latency_ms: Some(5),
             messages_today: 1,
             messages_total: 2,
+            retry_every_s: Some(30),
         }),
     );
     put(

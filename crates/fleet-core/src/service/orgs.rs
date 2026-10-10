@@ -1011,6 +1011,10 @@ pub struct OrgDetail {
     /// administrator and for the org's own people. Absent for anyone else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub members: Option<Vec<OrgMember>>,
+    /// M15 step G7.14, with `members`: how many there are, for the
+    /// overview's Members tile (its line says them by role).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_count: Option<usize>,
     /// Phase D: the caller's own role in it (`admin` / `member` / `viewer`),
     /// so a page offers what the caller may do. Absent when they have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1119,6 +1123,11 @@ pub struct OrgMember {
     /// by name. Absent for anyone else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devices: Option<Vec<String>>,
+    /// M15 step G7.14, with `devices`: the ones not trusted yet, so the
+    /// member row says "not trusted" and offers Trust device. Absent with
+    /// `devices`, and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untrusted_devices: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1704,6 +1713,7 @@ fn org_details_locked(
             needs_admin,
             spend_series: None,
             spend_by_person: None,
+            member_count: members.as_ref().map(Vec::len),
             members,
             my_role,
             catalogs: catalogs
@@ -1942,11 +1952,19 @@ fn org_member_list(
             .get_person(m.person_id)?
             .filter(|p| p.disabled_at.is_none())
         {
+            let theirs: Option<Vec<&crate::store::ClientTokenRow>> = devices.map(|cs| {
+                cs.iter()
+                    .filter(|c| c.person_id == Some(p.id) && c.revoked_at.is_none())
+                    .filter(|c| crate::store::machine_token_kind(&c.mode).is_none())
+                    .collect()
+            });
             out.push(OrgMember {
-                devices: devices.map(|cs| {
+                devices: theirs
+                    .as_ref()
+                    .map(|cs| cs.iter().map(|c| c.name.clone()).collect()),
+                untrusted_devices: theirs.as_ref().map(|cs| {
                     cs.iter()
-                        .filter(|c| c.person_id == Some(p.id) && c.revoked_at.is_none())
-                        .filter(|c| crate::store::machine_token_kind(&c.mode).is_none())
+                        .filter(|c| c.trusted_at.is_none())
                         .map(|c| c.name.clone())
                         .collect()
                 }),

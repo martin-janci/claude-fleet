@@ -34,10 +34,13 @@
   let proposals = $state<TrackerProposals | null>(null);
   let deciding = $state<number | null>(null);
   let sectionEdits = $state<Record<string, string>>({});
+  /** The confirmed map, opened again from "Column map" (M15 G7.14). */
+  let editingMap = $state(false);
 
   const pass = $derived(describeSyncMetrics(metrics));
   const rows = $derived(sectionMapRows(tracker));
   const pending = $derived(pendingProposals(proposals));
+  const mapped = $derived(rows.filter((r) => r.confirmed).length);
   const agreement = $derived(shadowAgreement(proposals));
 
   /** Quiet when this process cannot say (an older build has no such command). */
@@ -70,6 +73,7 @@
       return;
     }
     sectionEdits = {};
+    editingMap = false;
     await loadTrackers();
     onchanged();
     push({ kind: 'success', message: `${tracker.name}: statuses follow your section map from the next sync.` });
@@ -107,7 +111,16 @@
     <p class="hint">No sync pass since this app started.</p>
   {/if}
 
-  {#if tracker.provider === 'asana' && rows.length > 0 && !tracker.settings?.section_map_confirmed}
+  {#if tracker.provider === 'asana' && rows.length > 0 && tracker.settings?.section_map_confirmed && !editingMap}
+    <p class="hint" data-testid="tracker-column-map">
+      {mapped}
+      {mapped === 1 ? 'column' : 'columns'} mapped ·
+      <button type="button" class="btn btn--quiet" data-testid="tracker-column-map-open" onclick={() => (editingMap = true)}
+        >Column map</button>
+    </p>
+  {/if}
+
+  {#if tracker.provider === 'asana' && rows.length > 0 && (!tracker.settings?.section_map_confirmed || editingMap)}
     <div class="sections" data-testid="asana-sections">
       <span class="hint">Which Asana sections mean <em>in progress</em>? A completed task is always done.</span>
       {#each rows as r (r.section)}
