@@ -15,7 +15,18 @@ import { sessions } from './sessions';
 import { session } from './hosts_fixture';
 import { toasts } from './toasts';
 import type { Mission, MissionDetail } from './missions';
-import { afterArchiveLine, archiveLabel, checkWords, finishChecks, finishSummary, spanWords, waveSummary } from './mission_finish';
+import {
+  afterArchiveLine,
+  alsoMergedLabel,
+  archiveLabel,
+  checkWords,
+  finishChecks,
+  finishPrBlock,
+  finishSummary,
+  prFactsLine,
+  spanWords,
+  waveSummary,
+} from './mission_finish';
 import { dollars } from './missions';
 
 const flush = async () => {
@@ -92,6 +103,16 @@ function detail(m: Mission): MissionDetail {
           first_seen_at: 1,
           updated_at: 2,
         },
+        {
+          id: 2,
+          url: 'https://github.com/o/fleet-mobile/pull/88',
+          repo: 'o/fleet-mobile',
+          number: 88,
+          title: 'phone pair flow',
+          state: 'MERGED',
+          first_seen_at: 1,
+          updated_at: 1,
+        },
       ],
     },
   };
@@ -152,6 +173,26 @@ describe('a finished mission', () => {
     await flush();
   }
 
+  it('leads with the merged PR, its checks, approval and merge time, and puts the other merged ones on one line (G7.7)', async () => {
+    const at = Math.floor(new Date(2026, 9, 10, 14, 31).getTime() / 1000);
+    const pr = (id: number, repo: string, n: number, state: string, title: string) => ({
+      id, url: `https://github.com/${repo}/pull/${n}`, repo, number: n, title, state,
+      ci_status: 'passing', review_decision: 'APPROVED', merged_at: state === 'MERGED' ? at : null, first_seen_at: 1, updated_at: 2,
+    });
+    const block = finishPrBlock([
+      pr(1, 'o/claude-fleet', 480, 'OPEN', 'follow-up'),
+      pr(2, 'o/claude-fleet', 476, 'MERGED', 'fix flake'),
+      pr(3, 'o/fleet-mobile', 88, 'MERGED', 'phone pair flow'),
+    ]);
+    expect(block.lead?.number).toBe(476);
+    expect(block.rest.map((p) => p.number)).toEqual([480]);
+    expect(block.alsoMerged.map(alsoMergedLabel)).toEqual(['fleet-mobile #88 phone pair flow']);
+    const today = new Date(2026, 9, 10, 18, 0);
+    expect(prFactsLine(block.lead!, today)).toMatch(/^CI passing · approved · merged \d{1,2}.31/);
+    expect(prFactsLine(block.lead!, new Date(2026, 9, 12))).toMatch(/^CI passing · approved · merged Oct 10$/);
+    expect(prFactsLine(block.rest[0], today)).toBe('CI passing · approved');
+  });
+
   it('shows the summary, the finish checks, the PR and the sessions with their worktree state', async () => {
     await openIt();
     expect(screen.getByTestId('mission-finish-summary').textContent).toContain('All 3 tasks verified in 2 waves over 3 d 4 h.');
@@ -160,6 +201,7 @@ describe('a finished mission', () => {
     expect(pr).toContain('Merged');
     expect(pr).toContain('o/claude-fleet#476');
     expect(pr).toContain('CI passing · approved');
+    expect(screen.getByTestId('mission-finish-also-merged').textContent?.replace(/\s+/g, ' ')).toContain('Also merged: fleet-mobile #88 phone pair flow');
     const states = screen.getAllByTestId('mission-finish-session-state').map((e) => e.textContent);
     expect(states).toEqual(['clean · pushed', 'clean · pushed', '1 uncommitted file · pushed']);
     expect(screen.getByTestId('mission-finish-after').textContent).toBe(

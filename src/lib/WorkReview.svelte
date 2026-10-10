@@ -53,6 +53,8 @@
   import WorkConflictNotice from './WorkConflictNotice.svelte';
   import ProposedBy from './ProposedBy.svelte';
   import { aiChangeLine, confidenceWord, preselect, wordConfidenceIn } from './ai_proposal';
+  import { readPref, writePref } from './prefs';
+  import { addTally, andList, isReviewTally, reviewUnsure, tallyLine, type ReviewTally } from './review_tally';
   import type { IpcError, Result } from './result';
 
   let {
@@ -112,7 +114,19 @@
   // a conflict carries the current value and Reload.
   let failures = $state<Map<number, string | ConflictNotice>>(new Map());
   let summary = $state<string | null>(null);
-  let undo = $state<{ label: string; decisions: BatchDecision[] } | null>(null);
+  /** The last decision, undoable; `tally` is what it added to today's. */
+  let undo = $state<{ label: string; decisions: BatchDecision[]; tally?: { confirmed: number; rejected: number } } | null>(
+    null,
+  );
+  // "Done today: 4 confirmed · 1 rejected" (G7.7): this person's decisions
+  // in this tab today, on this device.
+  const TALLY_KEY = 'work.review.today';
+  let tally = $state<ReviewTally | null>(readPref<ReviewTally | null>(TALLY_KEY, null, (v): v is ReviewTally | null => v === null || isReviewTally(v)));
+  const today = $derived(tallyLine(tally));
+  function count(d: { confirmed?: number; rejected?: number }) {
+    tally = addTally(tally, d);
+    writePref(TALLY_KEY, tally);
+  }
   let focusIdx = $state(0);
   let changing = $state<string | null>(null);
 
@@ -182,6 +196,8 @@
       return;
     }
     cleared(it.link_id);
+    const added = undoable === 'confirm' ? { confirmed: 1, rejected: 0 } : undoable === 'reject' ? { confirmed: 0, rejected: 1 } : null;
+    if (added) count(added);
     // A confirmed suggestion of the decision model is an AI-caused change
     // (G4.9): it reads as the AI patterns board's line, with its Undo.
     const by = undoable === 'confirm' && it.kind === 'suggestion' ? reviewProposal(it) : null;
@@ -198,7 +214,8 @@
       const answered = (r.value as { link_version?: unknown } | null)?.link_version;
       const version = typeof answered === 'number' ? answered : await versionAfter(it, undoable);
       const d = undoOf({ session_id: it.session_id, link_id: it.link_id, decision: undoable }, version);
-      if (d?.expected_version != null) undo = { label: `${what} ${taskLabel(it.task)} for ${sessionName(it)}`, decisions: [d] };
+      if (d?.expected_version != null)
+        undo = { label: `${what} ${taskLabel(it.task)} for ${sessionName(it)}`, decisions: [d], tally: added ?? undefined };
     }
     await reload();
   }
@@ -381,7 +398,17 @@
     }
     const verb = decision === 'confirm' ? 'confirmed' : decision === 'reject' ? 'rejected' : 'kept';
     summary = `${ok} ${verb}${failed > 0 ? ` · ${failed} failed` : ''}`;
-    undo = undos.length > 0 ? { label: `${undos.length} ${verb}`, decisions: undos } : null;
+    const added = { confirmed: decision === 'confirm' ? ok : 0, rejected: decision === 'reject' ? ok : 0 };
+    if (added.confirmed + added.rejected > 0) count(added);
+    // Undo takes back what it can: the tally loses those it undoes.
+    undo =
+      undos.length > 0
+        ? {
+            label: `${undos.length} ${verb}`,
+            decisions: undos,
+            tally: { confirmed: added.confirmed > 0 ? undos.length : 0, rejected: added.rejected > 0 ? undos.length : 0 },
+          }
+        : null;
     // What failed stays ticked, with its reason.
     const failedLinks = new Set(decisions.filter((d) => !byLink.get(d.link_id)?.ok).map((d) => d.link_id));
     picked = new Set(list.filter((x) => failedLinks.has(x.link_id)).map((x) => x.review_id));
@@ -411,6 +438,7 @@
       undo = null;
       if (r.ok) {
         summary = `Undone: ${u.label} — back to suggestions`;
+        if (u.tally) count({ confirmed: -u.tally.confirmed, rejected: -u.tally.rejected });
       } else {
         summary = `Undo failed: ${readErrorText(r.error)}`;
         fail(d.link_id, r.error);
@@ -428,6 +456,8 @@
     }
     // Each undo is checked on its own, like the batch it undoes.
     const { ok, failed } = countBatch(mine, r.value);
+    // A batch is one kind of decision: each undo that went through takes one off.
+    if (u.tally && ok > 0) count({ confirmed: u.tally.confirmed > 0 ? -ok : 0, rejected: u.tally.rejected > 0 ? -ok : 0 });
     summary =
       failed === 0
         ? `Undone: ${u.label} — back to suggestions`
@@ -478,7 +508,9 @@
         focusIdx = Math.max(0, focusIdx - 1);
         break;
       case 'work-review.yes':
-        if (it?.kind === 'suggestion') void confirm(it);
+        // Jev's unsure case pre-selects nothing: y opens the pick instead.
+        if (it?.kind === 'suggestion' && reviewUnsure(it)) openChange(it);
+        else if (it?.kind === 'suggestion') void confirm(it);
         else if (it && it.kind !== 'no_primary') void keep(it);
         else if (it) void makePrimary(it);
         break;
@@ -507,6 +539,16 @@
         <button class="btn btn--quiet" type="button" data-testid="work-review-undo" disabled={busy} onclick={() => void runUndo()}
           >Undo</button
         >
+      {/if}
+    </div>
+  {/if}
+
+  {#if today}
+    <div class="today" role="status" data-testid="work-review-today">
+      <span>{today}</span>
+      {#if undo}
+        <span aria-hidden="true">·</span>
+        <button class="link" type="button" data-testid="work-review-undo-last" disabled={busy} onclick={() => void runUndo()}>Undo last</button>
       {/if}
     </div>
   {/if}
@@ -553,6 +595,7 @@
     <ul class="items" tabindex="0" aria-label="Review items (j/k move, y confirm, n reject, x tick)" onkeydown={onKey}>
       {#each items as it, i (it.review_id)}
         {@const mine = itemBlocked(it)}
+        {@const unsure = reviewUnsure(it)}
         <li class="item" class:focused={i === focusIdx} data-testid="work-review-item" data-kind={it.kind} data-link-id={it.link_id}>
           <div class="head">
             <input
@@ -565,9 +608,19 @@
               onchange={() => togglePick(it)}
             />
             <span class="kind kind--{it.kind}" data-testid="work-review-kind">{reviewKindLabel(it.kind)}</span>
-            <button class="link" type="button" title="Open the task" onclick={() => openTask(it.task.task_id, [{ session_id: it.session_id }])}>{taskLabel(it.task)}</button>
+            {#if unsure}
+              <strong data-testid="work-review-which">Which ticket?</strong>
+            {:else}
+              <button class="link" type="button" title="Open the task" onclick={() => openTask(it.task.task_id, [{ session_id: it.session_id }])}>{taskLabel(it.task)}</button>
+            {/if}
           </div>
-          {#if it.kind === 'suggestion' && it.proposed_by}
+          {#if unsure}
+            <!-- G7.7: Jev could not tell the tasks apart. Nothing is
+                 pre-selected (rule 7); the person picks one, or none. -->
+            <p class="unsure" data-testid="work-review-unsure">
+              Jev is unsure: {andList(unsure.candidates)} {unsure.candidates.length === 2 ? 'both fit' : 'all fit'} · nothing pre-selected
+            </p>
+          {:else if it.kind === 'suggestion' && it.proposed_by}
             <!-- Redesign 6.8: the decision model's suggestion (J1) says so,
                  with its reason; Change opens the same panel as Change…. -->
             <ProposedBy
@@ -622,7 +675,10 @@
             {#if mine}
               <p class="muted" data-testid="work-review-item-not-mine">{mine}</p>
             {/if}
-            {#if it.kind === 'suggestion'}
+            {#if unsure}
+              <button class="btn" type="button" data-testid="work-review-pick-ticket" aria-expanded={changing === it.review_id} disabled={busy || mine !== null} title={mine ?? ''} onclick={() => openChange(it)}>Pick a ticket…</button>
+              <button class="btn btn--quiet" type="button" data-testid="work-review-no-ticket" disabled={busy || mine !== null} title={mine ?? 'Link no ticket to this session'} onclick={() => void reject(it)}>No ticket</button>
+            {:else if it.kind === 'suggestion'}
               <button class="btn btn--primary" type="button" data-testid="work-review-confirm" disabled={busy || mine !== null} title={mine ?? ''} onclick={() => void confirm(it)}>Confirm</button>
               <button class="btn" type="button" data-testid="work-review-reject" disabled={busy || mine !== null} title={mine ?? ''} onclick={() => void reject(it)}>Reject</button>
               <button class="btn btn--quiet" type="button" data-testid="work-review-change" aria-expanded={changing === it.review_id} disabled={busy || mine !== null} title={mine ?? ''} onclick={() => openChange(it)}>Change…</button>
@@ -635,8 +691,11 @@
           </div>
           {#if changing === it.review_id}
             <div class="change" data-testid="work-review-change-panel">
+              {#if unsure}
+                <button class="btn btn--quiet" type="button" data-testid="work-review-pick-own" onclick={() => void confirm(it)}>{taskLabel(it.task)}</button>
+              {/if}
               {#if (it.alternatives ?? []).length > 0}
-                <p class="muted">Also suggested:</p>
+                <p class="muted">{unsure ? 'Or:' : 'Also suggested:'}</p>
                 {#each it.alternatives ?? [] as alt (alt.task_id)}
                   <button class="btn btn--quiet" type="button" data-testid="work-review-alt" onclick={() => void changeTo(it, { link_id: alt.link_id, key: alt.key ?? undefined })}
                     >{taskLabel(alt)}</button
@@ -675,6 +734,16 @@
 </section>
 
 <style>
+  .today {
+    display: flex;
+    gap: 0.3rem;
+    align-items: baseline;
+    color: var(--fg-muted);
+  }
+  .unsure {
+    margin: 0.15rem 0;
+    color: var(--fg-muted);
+  }
   .work-review {
     display: flex;
     flex-direction: column;
