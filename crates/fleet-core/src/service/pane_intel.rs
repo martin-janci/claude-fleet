@@ -736,6 +736,10 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
         .collect();
     let is_choice = |i: usize| choices.iter().any(|(j, ..)| *j == i);
     let last = |pred: &dyn Fn(&str) -> bool| lower.iter().rposition(|l| pred(l));
+    // A label too long for the pane wraps onto the lines below it; without
+    // these the card showed "Yes, and don't ask again for: git push:* in" and
+    // nothing of what followed.
+    let full_labels = wrapped_labels(&raw_lines, &choices, &is_choice);
 
     // A multi-select question whose cursor sits on its Submit/Next row has no
     // `❯` on any choice, yet it is the same dialog, still waiting.
@@ -853,17 +857,23 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
     // want"/"?" line above its choices), fall back to the trailing run of
     // choice lines (`block_start`).
     let bound_after = ask.into_iter().chain(question_idx).max();
+    let label_of = |i: &usize, label: &str| -> String {
+        full_labels
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| label.to_string())
+    };
     let options: Vec<ParsedOption> = match bound_after {
         Some(after) => choices
             .iter()
             .filter(|(i, ..)| *i > after)
-            .map(|(_, n, label, selected)| choice_option(*n, label, *selected))
+            .map(|(i, n, label, selected)| choice_option(*n, &label_of(i, label), *selected))
             .collect(),
         None => match block_start {
             Some(start) => choices
                 .iter()
                 .filter(|(i, ..)| *i >= start)
-                .map(|(_, n, label, selected)| choice_option(*n, label, *selected))
+                .map(|(i, n, label, selected)| choice_option(*n, &label_of(i, label), *selected))
                 .collect(),
             None => Vec::new(),
         },
@@ -893,6 +903,68 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
         multi,
         detail,
     })
+}
+
+/// How close to the pane's width a label line must reach for the next line
+/// to be its wrapped continuation (see [`wrapped_labels`]): the dialog's own
+/// right padding, plus one column of slack.
+const WRAP_SLACK: usize = 3;
+
+/// The full text of each choice whose label wrapped, by line index.
+///
+/// Claude Code (Ink) wraps a long label at a word boundary and continues it
+/// on the next line, indented to where the label starts — exactly where an
+/// AskUserQuestion option's DESCRIPTION goes too. Indentation cannot tell
+/// them apart; width can: a line is a continuation only if its first word
+/// would not have fitted at the end of the line above. A short label
+/// followed by its description never qualifies. The pane's width is its
+/// widest line (the dialog's full-width separator). Boxed dialogs (`│ … │`)
+/// pad every line to the box, so they are left as they were.
+fn wrapped_labels(
+    raw_lines: &[&str],
+    choices: &[(usize, u8, &str, bool)],
+    is_choice: &dyn Fn(usize) -> bool,
+) -> std::collections::HashMap<usize, String> {
+    let width_of = |l: &str| l.trim_end().chars().count();
+    let width = raw_lines.iter().map(|l| width_of(l)).max().unwrap_or(0);
+    let mut out = std::collections::HashMap::new();
+    for (i, _, label, _) in choices {
+        let line = raw_lines[*i].trim_end();
+        if line.contains(['│', '║']) || label.is_empty() {
+            continue;
+        }
+        let Some(at) = line.find(*label) else {
+            continue;
+        };
+        let label_col = line[..at].chars().count();
+        let mut text = label.to_string();
+        let mut reached = width_of(line);
+        for (j, next) in raw_lines.iter().enumerate().skip(i + 1) {
+            if is_choice(j) {
+                break;
+            }
+            let body = next.trim();
+            let indent = next.chars().take_while(|c| c.is_whitespace()).count();
+            let Some(first) = body.split_whitespace().next() else {
+                break;
+            };
+            if indent < label_col || next.contains(['│', '║']) {
+                break;
+            }
+            // It would have fitted up there: the line above ended by choice,
+            // not by running out of room.
+            if reached + 1 + first.chars().count() + WRAP_SLACK <= width {
+                break;
+            }
+            text.push(' ');
+            text.push_str(body);
+            reached = width_of(next);
+        }
+        if text.len() != label.len() {
+            out.insert(*i, text);
+        }
+    }
+    out
 }
 
 /// A dialog choice as parsed, before the dialog as a whole decides whether it
@@ -1483,6 +1555,40 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// A label too long for the pane wraps onto the next line, indented to
+    /// the label: the card gets the whole label, not the first line of it.
+    #[test]
+    fn a_wrapped_option_label_is_read_whole() {
+        let sep = "─".repeat(48);
+        let text = format!(
+            "{sep}\n Bash command\n\n   git push origin main\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don’t ask again for: git push:* in\n      /home/user/claude-fleet\n   3. No\n\n Esc to cancel · Tab to amend\n"
+        );
+        let p = analyze(&text).pending_input.expect("dialog");
+        assert_eq!(
+            p.options
+                .iter()
+                .map(|o| o.label.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Yes",
+                "Yes, and don’t ask again for: git push:* in /home/user/claude-fleet",
+                "No"
+            ]
+        );
+    }
+
+    /// A short label followed by its description at the same indentation
+    /// (AskUserQuestion) is not a wrap: the description's first word would
+    /// have fitted on the label's line.
+    #[test]
+    fn a_description_under_a_short_label_is_not_a_wrap() {
+        let p = analyze(include_str!("testdata/pane_intel/question_ask_user.txt"))
+            .pending_input
+            .expect("dialog");
+        assert_eq!(p.options[0].label, "24 hours (Recommended)");
+        assert_eq!(p.options[1].label, "1 hour");
     }
 
     /// An option's description may itself end in "?". It is not the
