@@ -187,6 +187,34 @@ export interface RoutinePreview {
   logins: RoutineAccount[];
 }
 
+/** A saved routine as `save` takes it back, unchanged: what the editor
+ *  opens on, and what Undo writes after an edit (G7.4). */
+export function routineInputOf(r: RoutineRow): RoutineInput {
+  return {
+    name: r.name,
+    enabled: r.enabled,
+    trigger: (r.trigger as RoutineTrigger) ?? 'cron',
+    cron: r.cron,
+    utc_offset_min: r.utc_offset_min,
+    event: r.event,
+    host_alias: r.host_alias,
+    project_id: r.project_id,
+    profile: r.profile,
+    prompt: r.prompt,
+    budget_run_micros: r.budget_run_micros,
+    budget_day_micros: r.budget_day_micros,
+    overlap: r.overlap === 'parallel' ? 'parallel' : 'skip',
+    event_repo: r.event_repo,
+    event_author: r.event_author === 'anyone' ? 'anyone' : undefined,
+    event_rate_secs: r.event_rate_secs,
+    time_zone: r.time_zone,
+    run_max_secs: r.run_max_secs,
+    fallback_host: r.fallback_host,
+    retry_once: r.retry_once,
+    autonomy: r.autonomy,
+  };
+}
+
 type Args = { action: string; routine_id?: number; routine?: RoutineInput; enabled?: boolean; skip?: boolean; limit?: number };
 
 function call<T>(args: Args): Promise<Result<T>> {
@@ -783,6 +811,29 @@ export function zoneOffsetMin(sec: number, timeZone?: string): number {
   const m = /GMT([+-])(\d{2}):?(\d{2})?/.exec(name ?? '');
   if (!m) return 0;
   return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] ?? 0));
+}
+
+/** Zones a routine's Time zone select offers: every zone this runtime
+ *  knows (`Intl.supportedValuesOf`), else a short list of common ones,
+ *  always with UTC, the device's zone and `keep` (the routine's own, so
+ *  editing never drops it). Sorted, each once. */
+export function zoneChoices(keep?: string | null): string[] {
+  let all: string[] = [];
+  try {
+    const sv = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf;
+    all = sv ? sv('timeZone') : [];
+  } catch {
+    all = [];
+  }
+  if (all.length === 0) {
+    all = ['Europe/London', 'Europe/Berlin', 'Europe/Bratislava', 'Europe/Prague', 'America/New_York', 'America/Chicago', 'America/Los_Angeles', 'Asia/Tokyo', 'Australia/Sydney'];
+  }
+  const set = new Set(all);
+  set.add('UTC');
+  const device = deviceZone();
+  if (device) set.add(device);
+  if (keep) set.add(keep);
+  return [...set].sort((a, b) => a.localeCompare(b));
 }
 
 /** "UTC+02:00" from minutes east. */

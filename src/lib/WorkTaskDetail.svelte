@@ -663,6 +663,10 @@
       void loadRules();
       void load(taskId);
     }}
+    onundone={() => {
+      void loadRules();
+      void load(taskId);
+    }}
   />
 {/if}
 

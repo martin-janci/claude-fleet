@@ -3,6 +3,7 @@
   import Modal from './Modal.svelte';
   import { listSecrets, setSecret, deleteSecret, type SecretRow } from './assets';
   import { hosts } from './hosts';
+  import { savedWithUndo } from './forms/form_frame';
 
   // `names` is the union of names collected from the last computed sync
   // plan's actions (`secrets` + `missing_secrets`) — stored names come from
@@ -59,19 +60,45 @@
     newName = '';
   }
 
+  /** Whether `name` already has a value at `host` (absent: every host). */
+  function isSet(name: string, host: string | undefined): boolean {
+    return rows.some((r) => r.name === name && r.host_alias === (host ?? null));
+  }
+
+  /** "Saved", with Undo for the places that had no value before: those can
+   *  be put back by deleting it again. A value that replaced another has no
+   *  Undo, since the old one was never read and cannot be written back. */
+  function savedToast(name: string, fresh: (string | undefined)[], replaced: (string | undefined)[]) {
+    const where = (t: string | undefined) => t ?? 'every host';
+    const undo =
+      fresh.length > 0 && replaced.length === 0
+        ? async () => {
+            for (const t of fresh) {
+              const r = await deleteSecret(name, t);
+              if (!r.ok) error = `Undo: ${name} is still on ${where(t)}: ${r.error.message}`;
+            }
+            await reload();
+          }
+        : undefined;
+    savedWithUndo(`${name} set for ${[...fresh, ...replaced].map(where).join(', ')}.`, undo);
+  }
+
   async function set(name: string) {
     const value = draftValue(name);
     if (value === '') return;
     const hostAlias = draftHost(name);
+    const target = hostAlias === '' ? undefined : hostAlias;
+    const fresh = !isSet(name, target);
     busy = name;
     error = null;
-    const r = await setSecret(name, value, hostAlias === '' ? undefined : hostAlias);
+    const r = await setSecret(name, value, target);
     busy = null;
     if (!r.ok) {
       error = r.error.message;
       return;
     }
     valueDrafts = { ...valueDrafts, [name]: '' };
+    savedToast(name, fresh ? [target] : [], fresh ? [] : [target]);
     await reload();
   }
 
@@ -96,14 +123,20 @@
     const value = addValue;
     const targets: (string | undefined)[] = [...(addGlobal ? [undefined] : []), ...writeHosts];
     const failed: string[] = [];
+    const fresh: (string | undefined)[] = [];
+    const replaced: (string | undefined)[] = [];
     for (const t of targets) {
+      const was = isSet(name, t);
       const r = await setSecret(name, value, t);
       if (!r.ok) failed.push(`${t ?? 'every host'}: ${r.error.message}`);
+      else if (was) replaced.push(t);
+      else fresh.push(t);
     }
     adding = false;
     addValue = '';
     if (failed.length > 0) error = `${name} was not written to ${failed.join('; ')}`;
     else secretName = '';
+    if (fresh.length + replaced.length > 0) savedToast(name, fresh, replaced);
     if (!visibleNames.includes(name)) extraNames = [...extraNames, name];
     await reload();
   }

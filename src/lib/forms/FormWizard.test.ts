@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import FormWizard from './FormWizard.svelte';
 import type { FormSpec } from './forms';
 import { loadSaved } from './saved_answers';
+import { hosts } from '../hosts';
 
 const spec: FormSpec = {
   spec: 'fleet.form/1',
@@ -120,4 +121,49 @@ describe('FormWizard, the newer keys', () => {
     expect(screen.getByTestId('form-field-host-venus')).toHaveAttribute('aria-checked', 'true');
     expect(screen.getByTestId('form-field-summary')).toHaveValue('Kept');
   });
+
+  it('says why a conditional field is shown, and the submit key beside the verb (G7.4)', async () => {
+    const cond: FormSpec = {
+      spec: 'fleet.form/1',
+      title: 'Project',
+      submit: 'Create',
+      steps: [
+        {
+          title: 'Basics',
+          fields: [
+            { name: 'db', type: 'bool', label: 'Needs a database' },
+            { name: 'size', type: 'text', label: 'Size', when: { field: 'db', truthy: true } },
+          ],
+        },
+      ] as FormSpec['steps'],
+    };
+    render(FormWizard, { props: { spec: cond, onsubmit: vi.fn() } });
+    expect(screen.queryByTestId('form-because-size')).toBeNull();
+    await fireEvent.click(screen.getByTestId('form-field-db'));
+    expect(screen.getByTestId('form-because-size')).toHaveTextContent('Shown because ‘Needs a database’ is on');
+    expect(screen.queryByTestId('form-because-db')).toBeNull();
+    const submit = screen.getByTestId('form-submit');
+    // The verb's name stays the verb; the chord is drawn beside it.
+    expect(submit).toHaveTextContent(/^Create$/);
+    expect(submit.dataset.shortcut).toMatch(/^(⌘↵|Ctrl\+Enter)$/);
+    expect(submit.getAttribute('aria-keyshortcuts')).toMatch(/^(Meta|Control)\+Enter$/);
+  });
+
+  it('warns above the last button when the picked host falls short, and still sends (G7.4)', async () => {
+    hosts.set([{ alias: 'mercury', hidden: false, disk_home_free_kb: 1.4 * 1024 * 1024 } as never]);
+    const onsubmit = vi.fn();
+    const withCheck: FormSpec = {
+      spec: 'fleet.form/1',
+      title: 'DB',
+      steps: [{ title: 'A', fields: [{ name: 'host', type: 'select', label: 'Host', options: [['mercury', 'mercury'], ['venus', 'venus']] }] }] as FormSpec['steps'],
+      checks: [{ label: 'Postgres', needs: 'disk_free_gb', at_least: 2, host_field: 'host' }],
+    };
+    render(FormWizard, { props: { spec: withCheck, onsubmit } });
+    expect(screen.queryByTestId('form-host-warning')).toBeNull();
+    await fireEvent.click(screen.getByTestId('form-field-host-mercury'));
+    expect(screen.getByTestId('form-host-warning')).toHaveTextContent('Postgres needs 2 GB free, mercury has 1.4 GB.');
+    await fireEvent.click(screen.getByTestId('form-submit'));
+    expect(onsubmit).toHaveBeenCalledWith({ host: 'mercury' });
+  });
 });
+

@@ -21,7 +21,7 @@
   import FormBanner from './forms/FormBanner.svelte';
   import DiscardAsk from './forms/DiscardAsk.svelte';
   import { CloseGuard } from './forms/close_guard.svelte';
-  import { fieldCount, submitKey } from './forms/form_frame';
+  import { fieldCount, submitHint, submitKey } from './forms/form_frame';
   import type { IpcError } from './result';
   import { detectMac } from './terminal_keys';
 
@@ -83,6 +83,7 @@
     () => onclose(),
   );
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  const hint = submitHint(isMac);
   let fieldsEl: HTMLDivElement | undefined = $state();
   const why = $derived(!canConfirm && !busy ? confirmTitle : null);
 
@@ -124,6 +125,8 @@
           data-testid={confirmTestid}
           title={confirmTitle ?? ''}
           aria-describedby={why ? `${testid ?? 'sheet'}-why` : undefined}
+          data-shortcut={busy ? undefined : hint.label}
+          aria-keyshortcuts={hint.aria}
           disabled={!canConfirm || busy}
           onclick={onconfirm}
           >{#if busy}<Loader name="comet" size={12} class="btn-loader" />{busyVerb ?? verb}{:else}{verb}{/if}</button
@@ -137,6 +140,7 @@
 </Modal>
 
 <style>
+  footer [data-shortcut]::after { content: ' ' attr(data-shortcut); opacity: 0.7; font-size: 0.9em; }
   footer :global(.btn-loader) {
     margin-right: 0.35em;
     vertical-align: -1px;

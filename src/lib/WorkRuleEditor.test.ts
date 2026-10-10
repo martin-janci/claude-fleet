@@ -15,6 +15,8 @@ import { ruleWire, workTreeMeta, type WorkRule, type WorkRuleDraft } from './wor
 import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
 import { hosts } from './hosts';
+import { clearToasts, toasts } from './toasts';
+import { get } from 'svelte/store';
 
 const fresh: WorkRuleDraft = {
   name: 'Payments',
@@ -308,5 +310,45 @@ describe('WorkRuleEditor', () => {
     await flush();
     await preview();
     expect((calls('work_rule_preview')[0].rule as WorkRuleDraft).conditions.tracker_id).toBe(1);
+  });
+
+  describe('the saved toast offers Undo (G7.4)', () => {
+    beforeEach(() => clearToasts());
+
+    async function saveAndUndo(initial: WorkRuleDraft, onundone: Mock<() => void>) {
+      render(WorkRuleEditor, { initial, onclose, onsaved, onundone, previewDebounceMs: 0 });
+      await preview();
+      await fireEvent.click(btn('rule-save'));
+      await flush();
+      const t = get(toasts).at(-1);
+      expect(t?.action?.label).toBe('Undo');
+      t!.action!.run();
+      await flush();
+    }
+
+    it('Undo on a new rule deletes it at the version just saved', async () => {
+      handlers.delete_work_rule = () => ({ deleted: true });
+      const onundone = vi.fn();
+      await saveAndUndo(fresh, onundone);
+      expect(get(toasts).some((t) => t.message === 'Rule “Payments” added.')).toBe(true);
+      expect(calls('delete_work_rule')).toEqual([{ rule_id: 9, expected_version: 4 }]);
+      expect(onundone).toHaveBeenCalledTimes(1);
+    });
+
+    it('Undo on an edit saves what the rule held, over the version just saved', async () => {
+      handlers.save_work_rule = () => saved({ group: 'Billing' });
+      const onundone = vi.fn();
+      render(WorkRuleEditor, { initial: existing, onclose, onsaved, onundone, previewDebounceMs: 0 });
+      await type('rule-group', 'Billing');
+      await preview();
+      await fireEvent.click(btn('rule-save'));
+      await flush();
+      get(toasts).at(-1)!.action!.run();
+      await flush();
+      const undo = calls('save_work_rule')[1].rule as WorkRuleDraft;
+      expect(undo).toMatchObject({ id: 9, group: 'Payments', expected_version: 4 });
+      expect(undo.conditions).toMatchObject({ tracker_id: 1, container: 'PAY' });
+      expect(onundone).toHaveBeenCalledTimes(1);
+    });
   });
 });

@@ -117,7 +117,7 @@ describe('Automation guards (G3.8)', () => {
     expect((await screen.findByTestId('routine-run-fix')).textContent).toBe('Fix');
   });
 
-  it('the editor writes the guards back whole, with the device zone', async () => {
+  it('the editor writes the guards back whole, in the zone the routine was saved in', async () => {
     render(RoutinesPanel);
     await screen.findByTestId('routine-title');
     await fireEvent.click(screen.getByTestId('routine-edit'));
@@ -125,6 +125,8 @@ describe('Automation guards (G3.8)', () => {
     expect((screen.getByTestId('routine-fallback') as HTMLSelectElement).value).toBe('nas');
     expect((screen.getByTestId('routine-retry-once') as HTMLInputElement).checked).toBe(true);
     expect((screen.getByTestId('routine-autonomy') as HTMLSelectElement).value).toBe('1');
+    // The Time zone select (G7.4) opens on the routine's own zone.
+    expect((screen.getByTestId('routine-zone-select') as HTMLSelectElement).value).toBe('Europe/Bratislava');
     await fireEvent.input(screen.getByTestId('routine-cap'), { target: { value: '45' } });
     await fireEvent.change(screen.getByTestId('routine-autonomy'), { target: { value: '0' } });
     await fireEvent.click(screen.getByTestId('routine-retry-once'));
@@ -132,8 +134,7 @@ describe('Automation guards (G3.8)', () => {
     await waitFor(() => expect(argsOf('save')).toBeDefined());
     const saved = argsOf('save').routine;
     expect(saved).toMatchObject({ run_max_secs: 2700, fallback_host: 'nas', retry_once: false, autonomy: 0 });
-    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (zone) expect(saved.time_zone).toBe(zone);
+    expect(saved.time_zone).toBe('Europe/Bratislava');
   });
 
   it('push and open PRs (L2) and no cap are saved as nothing', async () => {

@@ -162,8 +162,9 @@ and each list holds at most 20 entries of at most 500 chars.
 | `done` | no | Whole number ≥ 0 |
 | `total` | no | Whole number ≥ 1, at least `done`; leave it out while the size is unknown |
 | `unit` | no | ≤ 20 chars, after the count: `3 of 7 hosts` |
-| `steps` | no | 1–20 of `{ title, state? }`; a step's `state` is `pending` (default), `running`, `done`, `failed` or `skipped` |
+| `steps` | no | 1–20 of `{ title, state?, detail? }`; a step's `state` is `pending` (default), `running`, `done`, `failed` or `skipped`; `detail` (≤ 120) is one line under it: `attempt 2 of 10` |
 | `note` | no | Markdown, ≤ 2000 |
+| `started_at` | no | When the job started, unix seconds (whole number ≥ 0): while it is `running` or `waiting` the card counts the time since (`4 min 12 s`) |
 
 Write the block again with the same `id` each time the job moves on. In one
 conversation the **first** card of an id shows the newest block, with
@@ -211,9 +212,21 @@ A stat or a numeric cell without one is an `int`.
 | `title` | yes | ≤ 120 chars, what failed in plain words |
 | `body` | no | Markdown, ≤ 4000 |
 | `detail` | no | A log excerpt, ≤ 8000, drawn as code under *Details* |
-| `next` | no | 1–4 of `{ label, prompt, hint? }`, as `choices` |
+| `next` | no | 1–4 of `{ label, prompt, hint?, action?, host? }`, as `choices` |
 
 A next step fills the composer, as a choice does; the person presses Enter.
+One with an `action` is run by the app instead, on a click: `login` opens
+the login for an account on `host`, `open_host` opens that host's page, and
+`open_accounts` the Accounts page. `login` and `open_host` need `host`, a
+host alias; a host this app does not know turns the step off with the
+reason. The block names only which action and the host: the app never sends
+anything the block wrote.
+
+```json
+{ "spec": "fleet.ui/1", "kind": "error", "code": "E_TURN_AUTH", "title": "The login on mac expired",
+  "next": [ { "label": "Re-login on mac", "prompt": "Log in again on mac", "action": "login", "host": "mac" },
+            { "label": "Retry", "prompt": "Try the deploy again" } ] }
+```
 
 ### `setting`: a settings change to apply
 
@@ -242,6 +255,7 @@ change settings shows the change with no Apply.
 |---|---|---|
 | `wizard` | yes | `add_host`, `add_project`, `get_started`, `new_session` or `pair_device` |
 | `why` | no | ≤ 500 chars, why you open it, in one sentence |
+| `values` | no | Up to 20 answers read from the person's own message, by field name: text (≤ 500), a number or true/false |
 
 `{"spec": "fleet.ui/1", "kind": "wizard", "wizard": "add_project", "why":
 "You asked for the receipts repo on mercury."}` opens the app's own Add
@@ -256,6 +270,14 @@ unsent: `Done in the "Add project" form: acme/pos on mercury`, or the
 person's note when they declined. On an earlier conversation, or a row with
 no composer on screen, the card is a line saying it opens in the live
 conversation.
+
+`values` drafts the form from what the person wrote ("Set up a new project
+for acme/pos on mercury" → `{"repo": "acme/pos", "host": "mercury"}`): each
+answer lands on the field of that name as its default, with the Drafted
+label (*by the agent · from your message*), and the person checks it before
+the last button. A name the wizard does not have, a secret field, or a value
+its field refuses (a host it does not offer) is dropped, and that field
+starts empty.
 
 ## Checking a block
 

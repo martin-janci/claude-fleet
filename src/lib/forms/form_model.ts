@@ -1,7 +1,7 @@
 // The TS twin of crates/fleet-core/src/pages/forms.rs `check_answers`:
 // which steps and fields are asked, and what is wrong with an answer. Both
 // run docs/form-examples/answers.json, so the words must match exactly.
-import { optionsOfField, type FieldCondition, type FieldProblem, type FormField, type FormSpec, type FormStep, type Values } from './forms';
+import { optionsOfField, type FieldCondition, type HostCheck, type FieldProblem, type FormField, type FormSpec, type FormStep, type Values } from './forms';
 import { risky } from '../quick_answer';
 export type { FormSpec, FormStep, FormField, FieldProblem, Values } from './forms';
 
@@ -175,4 +175,120 @@ function agentDefault(f: FormField, v: unknown): unknown {
     default:
       return v;
   }
+}
+
+/**
+ * Why a conditional step or field is on screen, in words (the Components
+ * board's "Shown because ‘Needs a database’ is on"): its `when` read back
+ * with the labels of the fields it names. Null for an unconditional one,
+ * or a condition too tangled to say plainly (a `not` of a group).
+ */
+export function shownBecause(c: FieldCondition | undefined, spec: FormSpec): string | null {
+  const words = conditionWords(c, spec);
+  return words ? `Shown because ${words}` : null;
+}
+
+function fieldNamed(spec: FormSpec, name: string): FormField | undefined {
+  for (const s of spec.steps) for (const f of s.fields ?? []) if (f.name === name) return f;
+  return undefined;
+}
+
+function conditionWords(c: FieldCondition | undefined, spec: FormSpec, negate = false): string | null {
+  if (!c) return null;
+  if (c.all || c.any) {
+    const parts = (c.all ?? c.any ?? []).map((x) => conditionWords(x, spec, negate));
+    if (parts.length === 0 || parts.some((p) => p === null)) return null;
+    // "not (a and b)" is not "not a and not b": leave a negated group unsaid.
+    if (negate) return null;
+    return parts.join(c.all ? ' and ' : ' or ');
+  }
+  if (c.not) return negate ? conditionWords(c.not, spec) : conditionWords(c.not, spec, true);
+  if (c.field === undefined) return null;
+  const f = fieldNamed(spec, c.field);
+  const name = `‘${f?.label ?? c.field}’`;
+  const said = (v: unknown) => {
+    const o = f ? optionsOfField(f).find((x) => x.value === v) : undefined;
+    return o ? `‘${o.label}’` : typeof v === 'string' ? `‘${v}’` : String(v);
+  };
+  const many = f?.type === 'multiselect';
+  const is = many ? (negate ? 'does not include' : 'includes') : negate ? 'is not' : 'is';
+  if (c.truthy !== undefined) return `${name} is ${c.truthy !== negate ? 'on' : 'off'}`;
+  if (c.eq !== undefined) {
+    if (typeof c.eq === 'boolean') return `${name} is ${c.eq !== negate ? 'on' : 'off'}`;
+    return `${name} ${is} ${said(c.eq)}`;
+  }
+  if (c.in !== undefined) {
+    const vs = c.in.map(said);
+    if (vs.length === 0) return null;
+    if (vs.length === 1) return `${name} ${is} ${vs[0]}`;
+    if (negate) return `${name} ${many ? 'includes' : 'is'} none of ${vs.join(', ')}`;
+    return `${name} ${is} ${vs.slice(0, -1).join(', ')} or ${vs[vs.length - 1]}`;
+  }
+  return null;
+}
+
+/** The host facts a check reads (a `HostRow`'s last health probe). */
+export interface HostFacts {
+  disk_home_free_kb?: number | null;
+  mem_avail_kb?: number | null;
+}
+
+const KB_PER_GB = 1024 * 1024;
+
+function gbWords(gb: number): string {
+  return `${gb >= 10 ? Math.round(gb) : Math.round(gb * 10) / 10} GB`;
+}
+
+/**
+ * The spec's host checks that the answers fall short of (the Components
+ * board's "Postgres needs 2 GB free, mercury has 1.4 GB"): each check whose
+ * `when` holds, on the host its `host_field` names (else `defaultHost`),
+ * whose last probe says less than it needs. A host never probed, or a fact
+ * it did not report, is no warning: the check says only what it knows.
+ */
+export function hostCheckWarnings(
+  spec: FormSpec,
+  values: Values,
+  defaultHost: string | null | undefined,
+  factsOf: (alias: string) => HostFacts | undefined,
+): string[] {
+  const shown = walk(spec, values).answers;
+  const out: string[] = [];
+  for (const c of spec.checks ?? ([] as HostCheck[])) {
+    if (!holds(c.when, shown)) continue;
+    const picked = c.host_field !== undefined ? own(values, c.host_field) : undefined;
+    const host = typeof picked === 'string' && picked !== '' ? picked : (defaultHost ?? null);
+    if (!host) continue;
+    const facts = factsOf(host);
+    const kb = c.needs === 'disk_free_gb' ? facts?.disk_home_free_kb : facts?.mem_avail_kb;
+    if (kb === undefined || kb === null) continue;
+    const has = kb / KB_PER_GB;
+    if (has >= c.at_least) continue;
+    const what = c.needs === 'disk_free_gb' ? 'free' : 'of memory free';
+    out.push(`${c.label} needs ${gbWords(c.at_least)} ${what}, ${host} has ${gbWords(has)}.`);
+  }
+  return out;
+}
+
+/**
+ * `spec` with `values` written in as drafted defaults (G7.4: Control drafts
+ * a form from a free-text message): each value lands on the field of its
+ * name as its `value`, marked Drafted by `by` from `from`, when the field
+ * takes it as an answer. A secret, a disabled field, an unknown name or a
+ * value the field would refuse (an option it does not offer) is dropped,
+ * so the person fills that one in.
+ */
+export function withDrafted(spec: FormSpec, values: Values, by: string, from: string): FormSpec {
+  return {
+    ...spec,
+    steps: spec.steps.map((st) => ({
+      ...st,
+      fields: (st.fields ?? []).map((f) => {
+        const v = own(values, f.name);
+        if (v === undefined || f.type === 'secret' || f.disabled_reason !== undefined || isBlank(v)) return f;
+        const r = checkValue(f, v);
+        return r.ok ? { ...f, value: r.value, drafted: { by, from } } : f;
+      }),
+    })),
+  };
 }

@@ -14,6 +14,7 @@
   import { hubConnection } from './hub_connection';
   import { hosts } from './hosts';
   import { accountChoices } from './start_rules';
+  import { savedWithUndo } from './forms/form_frame';
   import {
     conflictOf,
     deleteWorkRule,
@@ -33,6 +34,7 @@
     onclose,
     onsaved,
     ondeleted,
+    onundone,
     previewDebounceMs = 400,
   }: {
     /** The rule to edit (with its `version` as `expected_version`), or a
@@ -42,6 +44,8 @@
     onsaved?: (r: WorkRule) => void;
     /** "Delete rule" inside the editor (gap plan G7.1): the rule's name. */
     ondeleted?: (name: string) => void;
+    /** The saved toast's Undo put the rule back (or deleted a new one). */
+    onundone?: () => void;
     /** How long the draft must be still before it is previewed, ms;
      *  injectable for tests. */
     previewDebounceMs?: number;
@@ -180,6 +184,21 @@
     }
     onsaved?.(r.value);
     onclose();
+    offerUndo(r.value);
+  }
+
+  // "Saved": the toast puts the rule back as it was. A new rule is deleted;
+  // an edited one is saved again with what it held when the editor opened,
+  // over exactly the version this save made (a later edit elsewhere wins).
+  function offerUndo(saved: WorkRule) {
+    const was = start;
+    savedWithUndo(start.id != null ? `Rule “${saved.name}” saved.` : `Rule “${saved.name}” added.`, async () => {
+      const r =
+        was.id != null
+          ? await saveWorkRule({ ...was, id: saved.id, expected_version: saved.version })
+          : await deleteWorkRule(saved.id, saved.version);
+      if (r.ok) onundone?.();
+    });
   }
 
   async function remove() {

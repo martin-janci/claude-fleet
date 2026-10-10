@@ -33,7 +33,8 @@
   import { accountByUuid } from '../accounts';
   import { projects } from '../projects';
   import { errorText } from '../error_copy';
-  import { push, pushError } from '../toasts';
+  import { pushError } from '../toasts';
+  import { savedWithUndo } from '../forms/form_frame';
   import {
     averageRun,
     AUTONOMY_CHOICES,
@@ -51,6 +52,9 @@
     dryRunLine,
     nextRunLabel,
     offsetWords,
+    routineInputOf,
+    zoneChoices,
+    zoneOffsetMin,
     previewRoutine,
     SCHEDULE_DAYS,
     scheduleCron,
@@ -59,7 +63,6 @@
     type RoutinePreview,
     type ScheduleDays,
     deleteRoutine,
-    deviceOffsetMin,
     dollars,
     eventFilterInput,
     eventFilterOf,
@@ -134,6 +137,8 @@
     fallback_host: string;
     retry_once: boolean;
     autonomy: number;
+    /** The schedule's zone (G7.4's Time zone select); '' = this device's. */
+    zone: string;
   }
 
   const pickable = $derived($projects.filter((p) => !p.project.system));
@@ -246,6 +251,7 @@
       fallback_host: i.fallback_host ?? '',
       retry_once: i.retry_once ?? false,
       autonomy: i.autonomy ?? 2,
+      zone: i.time_zone ?? '',
     };
   }
 
@@ -268,29 +274,7 @@
   }
 
   function edit(r: RoutineRow, copy = false) {
-    open(fromInput(
-      {
-        name: copy ? `${r.name} copy` : r.name,
-        trigger: (r.trigger as RoutineTrigger) ?? 'cron',
-        cron: r.cron,
-        event: r.event,
-        host_alias: r.host_alias,
-        project_id: r.project_id,
-        profile: r.profile,
-        prompt: r.prompt,
-        budget_run_micros: r.budget_run_micros,
-        budget_day_micros: r.budget_day_micros,
-        overlap: r.overlap === 'parallel' ? 'parallel' : 'skip',
-        event_repo: r.event_repo,
-        event_author: r.event_author === 'anyone' ? 'anyone' : undefined,
-        event_rate_secs: r.event_rate_secs,
-        run_max_secs: r.run_max_secs,
-        fallback_host: r.fallback_host,
-        retry_once: r.retry_once,
-        autonomy: r.autonomy,
-      },
-      copy ? undefined : r.id,
-    ));
+    open(fromInput({ ...routineInputOf(r), name: copy ? `${r.name} copy` : r.name }, copy ? undefined : r.id));
   }
 
   /** The cron line the draft means: the picker's, or the text of Custom. */
@@ -313,7 +297,7 @@
       enabled: was ? was.enabled : true,
       trigger: d.trigger,
       cron: d.trigger === 'cron' ? cronOf(d) : undefined,
-      utc_offset_min: deviceOffsetMin(),
+      utc_offset_min: zoneOffsetMin(Date.now() / 1000, zoneOf(d)),
       event: d.trigger === 'event' ? d.event : undefined,
       host_alias: d.host_alias,
       project_id: Number(d.project_id),
@@ -323,7 +307,7 @@
       budget_day_micros: microsOf(d.budget_day),
       overlap: d.overlap,
       ...eventFilterInput(d.trigger, d.event, d.filter),
-      ...(zone ? { time_zone: zone } : {}),
+      ...(zoneOf(d) ? { time_zone: zoneOf(d) } : {}),
       run_max_secs: capSecsOf(d.cap_min),
       fallback_host: d.fallback_host || undefined,
       retry_once: d.retry_once,
@@ -332,7 +316,7 @@
   }
 
   /** Save the draft; answers the saved routine, or null on a refusal. */
-  async function saveDraft(): Promise<RoutineRow | null> {
+  async function saveDraft(undoable = true): Promise<RoutineRow | null> {
     if (!draft || !draftReady) return null;
     const d = draft;
     busy = true;
@@ -344,7 +328,16 @@
     }
     draft = null;
     selected = r.value.id;
-    push({ kind: 'success', message: `${r.value.name} saved` });
+    const was = d.id !== undefined ? list.find((x) => x.id === d.id) : undefined;
+    const saved = r.value;
+    // Undo: an edit is saved back as it was; a new routine is deleted. Not
+    // offered when Run once now saved it: a run is starting from it.
+    const undo = async () => {
+      const back = was ? await saveRoutine(routineInputOf(was), was.id) : await deleteRoutine(saved.id);
+      if (!back.ok) pushError(back.error, 'Undo failed');
+      await reload();
+    };
+    savedWithUndo(`${saved.name} saved`, undoable ? undo : undefined);
     await reload();
     return r.value;
   }
@@ -358,6 +351,8 @@
   let preview = $state<RoutinePreview | null>(null);
   let previewSeq = 0;
   const zone = deviceZone();
+  /** The zone the draft's schedule is read in: its own, else the device's. */
+  const zoneOf = (d: Draft) => d.zone || zone || undefined;
 
   $effect(() => {
     if (!draft) return;
@@ -379,7 +374,7 @@
   const accountName = (l: RoutineAccount) => routineAccountLabel({ ...l, profile: null }, $accountByUuid.get(l.account_uuid));
   const loginLabel = (l: RoutineAccount) => `${accountName(l)} · ${l.profile ? `profile ${l.profile}` : "the host's own login"}`;
 
-  const moved = $derived(preview && draft?.trigger === 'cron' ? clockChange(preview.next_runs, preview.utc_offset_min) : null);
+  const moved = $derived(preview && draft?.trigger === 'cron' ? clockChange(preview.next_runs, preview.utc_offset_min, zoneOf(draft)) : null);
 
   /** Run once now: the saved routine as it is; a new or changed one is
    *  saved first, since a run is a saved routine's. */
@@ -387,7 +382,7 @@
     if (!draft) return;
     let id = draft.id;
     if (id === undefined || dirty) {
-      const saved = await saveDraft();
+      const saved = await saveDraft(false);
       if (!saved) return;
       id = saved.id;
     } else {
@@ -682,17 +677,24 @@
             {/if}
           </div>
           <p class="hint" data-testid="routine-next-run">
-            {triggerWords({ trigger: 'cron', cron: cronOf(draft) })}{#if preview?.next_runs.length}{' · next run '}{nextRunLabel(preview.next_runs[0])}{:else if preview && cronOf(draft)}{' · never runs'}{/if}{#if draft.days === 'custom'}{' · minute hour day month weekday'}{/if}
+            {triggerWords({ trigger: 'cron', cron: cronOf(draft) })}{#if preview?.next_runs.length}{' · next run '}{nextRunLabel(preview.next_runs[0], zoneOf(draft))}{:else if preview && cronOf(draft)}{' · never runs'}{/if}{#if draft.days === 'custom'}{' · minute hour day month weekday'}{/if}
           </p>
           {#if moved}
             <p class="hint warn" data-testid="routine-clock-change">
-              From {nextRunLabel(moved.at)} it runs {Math.abs(moved.shiftMin) === 60 ? 'an hour' : `${Math.abs(moved.shiftMin)} minutes`}
+              From {nextRunLabel(moved.at, zoneOf(draft))} it runs {Math.abs(moved.shiftMin) === 60 ? 'an hour' : `${Math.abs(moved.shiftMin)} minutes`}
               {moved.shiftMin > 0 ? 'later' : 'earlier'} on your clock: the clocks change and a routine keeps the UTC offset it was saved at. Save it
               again after the change.
             </p>
           {/if}
+          <label
+            >Time zone
+            <select data-testid="routine-zone-select" bind:value={draft.zone}>
+              <option value="">{zone ? `${zone} (this device)` : 'This device'}</option>
+              {#each zoneChoices(draft.zone) as z (z)}{#if z !== zone || draft.zone === z}<option value={z}>{z}</option>{/if}{/each}
+            </select>
+          </label>
           <p class="hint" data-testid="routine-zone">
-            Time zone: {zone ?? 'this device'}{zone ? ' (this device)' : ''} · saved as {offsetWords(deviceOffsetMin())}
+            Time zone: {zoneOf(draft) ?? 'this device'}{!draft.zone && zone ? ' (this device)' : ''} · saved as {offsetWords(zoneOffsetMin(Date.now() / 1000, zoneOf(draft)))}
           </p>
         {:else if draft.trigger === 'event'}
           <RoutineEventTrigger bind:event={draft.event} bind:filter={draft.filter} repos={pickable.map((p) => `${p.project.owner}/${p.project.repo}`)} />

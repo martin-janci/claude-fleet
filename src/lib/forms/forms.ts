@@ -82,6 +82,20 @@ export interface FormSpec {
   /** Offer "Save and finish later". */
   save_later?: boolean;
   steps: FormStep[];
+  /** What the answers need from a host, warned about before sending (G7.4). */
+  checks?: HostCheck[];
+}
+
+/** One thing the answers need from a host (forms.rs `HostCheck`). */
+export interface HostCheck {
+  /** What needs it, in words: "Postgres". */
+  label: string;
+  needs: 'disk_free_gb' | 'mem_free_gb';
+  /** The least it needs, in GB. */
+  at_least: number;
+  /** The select field whose answer is the host; absent: the session's. */
+  host_field?: string;
+  when?: FieldCondition;
 }
 
 export type FormState = 'pending' | 'answered' | 'declined' | 'cancelled' | 'expired';

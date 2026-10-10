@@ -204,6 +204,10 @@
       notice = `Deleted “${name}”.`;
       void load();
     }}
+    onundone={() => {
+      notice = null;
+      void load();
+    }}
   />
 {/if}
 

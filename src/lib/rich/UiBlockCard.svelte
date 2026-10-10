@@ -158,7 +158,7 @@
   <!-- Step 10.12: one of the app's wizards as a form; its last button runs
        the wizard, and how it went fills the composer for the agent. -->
   {#if sessionId !== null}
-    <WizardChatCard id={block.wizard} from="the agent" why={block.why ?? null} stateKey={key} report={fill} />
+    <WizardChatCard id={block.wizard} from="the agent" why={block.why ?? null} drafted={block.values ?? null} stateKey={key} report={fill} />
   {:else}
     <p class="card muted" data-testid="rich-wizard-off">{WIZARDS[block.wizard].spec.title}: opens in the live conversation.</p>
   {/if}

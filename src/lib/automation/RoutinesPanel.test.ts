@@ -11,7 +11,8 @@ import { projects } from '../projects';
 import { get } from 'svelte/store';
 import { destination } from '../destination';
 import { automationTab } from '../automation';
-import { deviceOffsetMin, failing, nextRunLabel, type RoutineRow, type RoutineRunRow } from '../routines';
+import { clearToasts, toasts } from '../toasts';
+import { deviceOffsetMin, failing, nextRunLabel, zoneChoices, zoneOffsetMin, type RoutineRow, type RoutineRunRow } from '../routines';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -402,5 +403,56 @@ describe('the routine editor (G2.3: schedule picker, next run, account, dry run,
     await fireEvent.click(again);
     await waitFor(() => expect(argsOf('run_now')).toEqual({ action: 'run_now', routine_id: 8 }));
     expect(argsOf('save')).toMatchObject({ routine_id: 3, routine: { prompt: 'Only CI.' } });
+  });
+});
+
+describe('the routine editor (G7.4: time zone select, Undo on save)', () => {
+  it('a zone picked in the select is saved with its own offset', async () => {
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-edit'));
+    const select = screen.getByTestId('routine-zone-select') as HTMLSelectElement;
+    // A routine saved before zones were stored opens on this device's.
+    expect(select.value).toBe('');
+    await fireEvent.change(select, { target: { value: 'Asia/Tokyo' } });
+    expect(screen.getByTestId('routine-zone').textContent).toContain('Asia/Tokyo · saved as UTC+09:00');
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    await waitFor(() => expect(argsOf('save')).toBeDefined());
+    expect(argsOf('save').routine).toMatchObject({ time_zone: 'Asia/Tokyo', utc_offset_min: zoneOffsetMin(Date.now() / 1000, 'Asia/Tokyo') });
+  });
+
+  it('zoneChoices always holds UTC, the device zone and the one to keep', () => {
+    const z = zoneChoices('Mars/Olympus');
+    expect(z).toContain('UTC');
+    expect(z).toContain('Mars/Olympus');
+    expect(z).toEqual([...z].sort((a, b) => a.localeCompare(b)));
+  });
+
+  it('Undo after an edit saves the routine back as it was', async () => {
+    clearToasts();
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-edit'));
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Evening sweep' } });
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    await waitFor(() => expect(get(toasts).some((t) => t.action?.label === 'Undo')).toBe(true));
+    get(toasts).find((t) => t.action?.label === 'Undo')!.action!.run();
+    await waitFor(() => expect(argsOf('save').routine.name).toBe('Morning PR sweep'));
+    expect(argsOf('save')).toMatchObject({ routine_id: 3, routine: { cron: '30 7 * * 1-5', utc_offset_min: 120 } });
+  });
+
+  it('Undo after creating one deletes it', async () => {
+    clearToasts();
+    route([]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routines-empty');
+    await fireEvent.click(screen.getByTestId('routine-new'));
+    await fireEvent.click(screen.getByTestId('routine-template-blank'));
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Tidy up.' } });
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    await waitFor(() => expect(get(toasts).some((t) => t.action?.label === 'Undo')).toBe(true));
+    get(toasts).find((t) => t.action?.label === 'Undo')!.action!.run();
+    await waitFor(() => expect(argsOf('delete')).toMatchObject({ routine_id: 8 }));
   });
 });

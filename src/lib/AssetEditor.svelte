@@ -9,6 +9,7 @@
     type EditableAsset, type LintReport, type WriteResult,
   } from './assets';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import { savedWithUndo } from './forms/form_frame';
 
   // Header/body/kind-field edits are staged locally and only committed by
   // Save (`updateAsset`). Resource add/remove are separate backend
@@ -288,7 +289,16 @@
       saveError = r.error.message;
       return;
     }
+    // Undo writes back the header, body and fields the editor opened with.
+    // Resources are not part of it: each add or remove already committed on
+    // its own, so they are sent as they are now.
+    const before = clone(initial);
+    const now = draft.resources ?? [];
     onsaved(r.value);
+    savedWithUndo(`Saved ${draft.name}.`, async () => {
+      const back = await updateAsset({ ...before, resources: now });
+      if (back.ok) onsaved(back.value);
+    });
   }
 </script>
 
