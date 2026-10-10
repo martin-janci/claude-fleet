@@ -526,6 +526,10 @@ pub const WORK_CLASSIFY_NUDGE: &str = "work.classify_nudge";
 pub const WORK_SUMMARY_MODEL: &str = "work.summary_model";
 /// The aliases [`WORK_SUMMARY_MODEL`] accepts.
 pub const SUMMARY_MODELS: &[&str] = &["haiku", "sonnet", "opus"];
+/// The model context help runs on (`service::context_help`): a person's
+/// question at a shell or composer prompt line, answered on the session's
+/// own host and account. One of [`SUMMARY_MODELS`]; Haiku by default.
+pub const WORK_HELP_MODEL: &str = "work.help_model";
 
 /// Tidy-up (work graph M7): a session whose linked item has been done at
 /// least this many days (and that is idle, below) is suggested for tidying.
@@ -1272,6 +1276,14 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Ai])
     .per_org(),
+    Spec::new(
+        WORK_HELP_MODEL,
+        "haiku",
+        Kind::Choice(SUMMARY_MODELS),
+        "Context help model",
+        "The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account.",
+    )
+    .tags(&[Tag::Ai]),
     Spec::new(
         WORK_TIDY_DONE_DAYS,
         "2",

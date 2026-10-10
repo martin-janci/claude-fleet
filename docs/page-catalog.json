@@ -3287,6 +3287,24 @@
       ]
     },
     {
+      "default_widget": "select",
+      "key": "work.help_model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Context help model",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "number",
       "key": "work.tidy_done_days",
       "kind": {

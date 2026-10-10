@@ -49,11 +49,15 @@
           ]
         },
         {
-          "title": "Summaries",
+          "title": "Summaries and help",
           "items": [
             {
               "type": "field",
               "key": "work.summary_model"
+            },
+            {
+              "type": "field",
+              "key": "work.help_model"
             }
           ]
         }

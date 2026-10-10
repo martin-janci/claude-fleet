@@ -2,6 +2,7 @@ pub mod account_usage;
 pub mod api_tokens;
 pub mod assets;
 pub mod cancel;
+pub mod context_help;
 pub mod debug_devices;
 pub mod diagnostics;
 pub mod downloads;

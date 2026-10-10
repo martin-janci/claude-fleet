@@ -474,6 +474,21 @@ bullet for the area you are about to change.
   by `tmux::VOICE_PATH_PREFIX`; desktop `src-tauri/src/voice/` (cpal, macOS /
   Windows only) and the 🎤 `MicToggle`. `voice.enabled` off by default. Audio is
   never stored.
+- **Context help** (`service/context_help/`, `commands/context_help.rs`,
+  `src/lib/context_help.ts`, `ContextHelp.svelte`): *Ask Haiku* on a shell
+  terminal's strip and the composer's `?` (Control's included). One request
+  shape for both surfaces — the question, the line being typed, history and
+  the commands the line accepts — and one reply: a few lines plus at most
+  one proposal, which the desktop puts on the prompt line (a shell gets
+  Ctrl+U and the text, never Enter; nothing is inserted while a program
+  runs there). A shell's history is its own tmux scrollback, read on the
+  host (`shell_history`); the composer's is its ↑ recall list. The model is
+  a `HelpModel` trait: `ClaudeOnHost` is one isolated `claude -p --model
+  <work.help_model>` (Haiku by default) on the session's host under its
+  profile, the context on stdin; another backend implements the trait and
+  nothing else moves. The command is `SameInBoth`, like `pty_open`: this
+  machine's own ssh, offered only on a session this client owns; a
+  standalone desktop books the run as `context_help` in `aux_usage`.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. PTYs live in an id-keyed map (`PtyState` in `pty.rs`,

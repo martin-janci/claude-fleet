@@ -20,6 +20,7 @@ export type RunKind =
   | 'brief'
   | 'watch_summary'
   | 'triage'
+  | 'context_help'
   | 'routine';
 
 /** How it ended, in plain words (`RUN_OUTCOMES`). */

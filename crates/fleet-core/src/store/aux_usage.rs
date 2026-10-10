@@ -26,6 +26,9 @@ pub const AUX_ORIGIN_WATCH_SUMMARY: &str = "watch_summary";
 /// [`NewAuxUsage::origin`] of a stuck mission's triage card (redesign
 /// 9.10).
 pub const AUX_ORIGIN_TRIAGE: &str = "triage";
+/// [`NewAuxUsage::origin`] of a person's context help at a shell or
+/// composer prompt line (`service::context_help`).
+pub const AUX_ORIGIN_CONTEXT_HELP: &str = "context_help";
 
 /// Every origin above: each is also a run kind (`RUN_KINDS`).
 pub const AUX_ORIGINS: &[&str] = &[
@@ -37,6 +40,7 @@ pub const AUX_ORIGINS: &[&str] = &[
     AUX_ORIGIN_BRIEF,
     AUX_ORIGIN_WATCH_SUMMARY,
     AUX_ORIGIN_TRIAGE,
+    AUX_ORIGIN_CONTEXT_HELP,
 ];
 
 /// One run to book.

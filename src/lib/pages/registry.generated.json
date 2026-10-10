@@ -1395,6 +1395,32 @@
       "danger": {
         "level": "none"
       },
+      "default": "haiku",
+      "help": "The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account.",
+      "key": "work.help_model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Context help model",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "haiku"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "2",
       "help": "Days a linked ticket must be done before Tidy up suggests its session.",
       "key": "work.tidy_done_days",
@@ -3735,9 +3761,13 @@
                 {
                   "key": "work.summary_model",
                   "type": "field"
+                },
+                {
+                  "key": "work.help_model",
+                  "type": "field"
                 }
               ],
-              "title": "Summaries"
+              "title": "Summaries and help"
             }
           ],
           "title": "Detection"

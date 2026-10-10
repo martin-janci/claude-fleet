@@ -6523,6 +6523,10 @@ const SOURCES: &[(&str, &str)] = &[
     ("commands/assets.rs", include_str!("../commands/assets.rs")),
     ("commands/cancel.rs", include_str!("../commands/cancel.rs")),
     (
+        "commands/context_help.rs",
+        include_str!("../commands/context_help.rs"),
+    ),
+    (
         "commands/diagnostics.rs",
         include_str!("../commands/diagnostics.rs"),
     ),
