@@ -48,7 +48,7 @@
   import ProposedBy from './ProposedBy.svelte';
   import { failingCount, loadFailing } from './routines';
   import { loadWaitingMissions, waitingMissionCount } from './mission_waits';
-  import { sessionMatchesSearch } from './search';
+  import { matchesAllWords, sessionMatchesSearch } from './search';
   import { sessionFocus } from './session_focus';
   import { type ProjectRow } from './projects';
   import { selectedSession, selectSession, selectSessionExplicitly, revealSeq } from './selection';
@@ -87,7 +87,6 @@
   } from './app_views';
   import { hintAnchor } from './hints';
   import { openNewSessionPicker } from './switcher_request';
-  import { fold, foldedIncludes } from './text_fold';
   import { requestNewSession } from './new_session_request';
   import { foldedIds, lostFolds } from './lost_fold';
   import LostFoldRow from './LostFoldRow.svelte';
@@ -319,9 +318,7 @@
   }
   /** A past-only group matches a search by its key or a link's name. */
   function pastGroupMatchesSearch(key: string, links: WorkLink[], q: string): boolean {
-    if (!q) return true;
-    const needle = fold(q);
-    return foldedIncludes(key, needle) || links.some((l) => foldedIncludes(l.snap_name, needle));
+    return matchesAllWords([key, ...links.map((l) => l.snap_name)], q);
   }
   /** The triage predicate (needs-you, recency, then `work` — the work
    *  filters), with no focus: the list's own, and the archived count's with
@@ -363,9 +360,9 @@
   // (a window onto a hub) or once something is shared, since a standalone
   // desktop owns every row and the tabs would only repeat All.
   const tabCounts = $derived.by(() => {
-    const q = fold(viewSearch);
+    const q = viewSearch;
     const pool = $sessions.filter(
-      (s) => s.kind !== 'external' && sessionVisible(s, viewHost, viewBg, rowBase, viewScope) && sessionMatchesSearch(s, q),
+      (s) => s.kind !== 'external' && sessionVisible(s, viewHost, viewBg, rowBase, viewScope) && sessionMatchesSearch(s, q, projectLabelOf(s.project_id)),
     );
     return scopeTabCounts(pool, $accessOf);
   });
@@ -752,14 +749,18 @@
     }
   }
 
+  // A session's project as `owner/repo`, so one query can name both.
+  const projectLabels = $derived(new Map($projects.map((p) => [p.project.id, `${p.project.owner}/${p.project.repo}`])));
+  function projectLabelOf(id: number | null): string | null {
+    return id == null ? null : (projectLabels.get(id) ?? null);
+  }
   /** A project matches a search by owner / repo, or through one of `rows`
    *  (its sessions in the list). */
   function matchesSearch(p: ProjectTreeRow, q: string, rows: SessionRow[]): boolean {
     if (!q) return true;
-    const needle = fold(q);
-    if (foldedIncludes(p.project.owner, needle)) return true;
-    if (foldedIncludes(p.project.repo, needle)) return true;
-    return rows.some((s) => sessionMatchesSearch(s, needle));
+    const label = `${p.project.owner}/${p.project.repo}`;
+    if (matchesAllWords([label], q)) return true;
+    return rows.some((s) => sessionMatchesSearch(s, q, label));
   }
 
   // Sessions under the host / bg filters only (no triage predicate): the
@@ -835,9 +836,8 @@
   const workKeyed = $derived(workIndex?.keyed ?? null);
   function workGroupMatchesSearch(g: WorkGroup, q: string): boolean {
     if (!q) return true;
-    const needle = fold(q);
-    if (foldedIncludes(g.key, needle)) return true;
-    return g.sessions.some((s) => sessionMatchesSearch(s, needle));
+    if (matchesAllWords([g.key], q)) return true;
+    return g.sessions.some((s) => sessionMatchesSearch(s, q, projectLabelOf(s.project_id)));
   }
   const workGroups = $derived(
     workIndex
@@ -965,26 +965,26 @@
   // `external` rows never land here — they have their own read-only
   // "Outside fleet" section below.
   function orphansOf(pred: SessionPredicate): SessionRow[] {
-    const q = fold(viewSearch);
+    const q = viewSearch;
     return $sessions.filter(
       (s) =>
         s.project_id === null &&
         s.kind !== 'external' &&
         sessionVisible(s, viewHost, viewBg, pred, viewScope) &&
-        sessionMatchesSearch(s, q),
+        sessionMatchesSearch(s, q, projectLabelOf(s.project_id)),
     );
   }
   const orphanSessions = $derived(orphansOf(treePredicate));
   const sharedWithMe = $derived.by((): SessionRow[] => {
     if (!splitShared || tab === 'mine') return [];
-    const q = fold(viewSearch);
+    const q = viewSearch;
     const base = rowBase;
     return $sessions.filter(
       (s) =>
         s.kind !== 'external' &&
         isSharedWithMe(s) &&
         sessionVisible(s, viewHost, viewBg, base, viewScope) &&
-        sessionMatchesSearch(s, q),
+        sessionMatchesSearch(s, q, projectLabelOf(s.project_id)),
     );
   });
   let sharedOpen = $state(true);
@@ -1067,7 +1067,7 @@
     focus
       ? []
       : buildOutsideFleet($sessions, $effectiveHostFilter, scopeSel).filter(
-          (s) => (!rowPredicate || rowPredicate(s)) && sessionMatchesSearch(s, fold(viewSearch)),
+          (s) => (!rowPredicate || rowPredicate(s)) && sessionMatchesSearch(s, viewSearch, projectLabelOf(s.project_id)),
         ),
   );
 

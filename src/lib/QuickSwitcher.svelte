@@ -62,7 +62,18 @@
     TICKET_SEARCH_MIN,
     TICKET_SEARCH_DEBOUNCE_MS,
     switcherEmptyText,
+    planningEntries,
+    recentQueries,
+    noteQuery,
   } from './quick_switcher';
+  import { matchRanges } from './fuzzy';
+  import {
+    activeWorkViewId,
+    knownWorkFacets,
+    sidebarView,
+    workTree,
+    workViewFilters,
+  } from './work_view';
   import { effectiveScope, scopeOf } from './orgs';
   import {
     workTickets,
@@ -189,6 +200,15 @@
     }, TICKET_SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(t);
   });
+  // Sprints and epics for the Planning rows: what the Work view last read,
+  // else one small tree read the first time ⌘K opens.
+  let facetsAsked = false;
+  async function loadWorkFacets() {
+    if (facetsAsked || $knownWorkFacets) return;
+    facetsAsked = true;
+    const r = await workTree({ limit: 1, per_task: 0 });
+    if (r.ok && r.value?.facets && !$knownWorkFacets) knownWorkFacets.set(r.value.facets);
+  }
   // Work graph M6: a provider badge per ticket, once trackers of two or
   // more providers exist.
   const ticketBadges = $derived(
@@ -256,6 +276,7 @@
         ...commandRows(paletteCommands({ selected: $selectedSession, sessionView: $sessionView }), isMac),
         ...(settingChange ? [settingChange] : []),
         ...ticketRows,
+        ...planningEntries($knownWorkFacets),
         ...(lookupRow ? [lookupRow] : []),
       ],
       $effectiveScope,
@@ -290,6 +311,7 @@
     ranked.map((e) => ({
       key: e.key,
       label: e.label,
+      marks: prefix.rest.trim() ? matchRanges(prefix.rest, e.label) : undefined,
       description: e.description,
       meta: e.meta,
       badge: e.badge,
@@ -308,7 +330,9 @@
                     ? (e.section ?? 'Commands')
                     : e.kind === 'setting'
                       ? 'Settings'
-                      : 'Projects',
+                      : e.kind === 'planning'
+                        ? 'Planning'
+                        : 'Projects',
       testid: `switcher-${e.kind}`,
     })),
   );
@@ -459,6 +483,7 @@
     seq++;
     searchSince = searchNow = Date.now();
     void loadTickets();
+    void loadWorkFacets();
     // Fresh picks for the NEXT open: this one's view is frozen.
     if (next === 'new') void loadProjectPicks();
   }
@@ -698,6 +723,16 @@
     }
     const e = ranked.find((x) => x.key === key);
     if (!e) return;
+    noteQuery(prefix.rest);
+    if (e.kind === 'planning' && e.planning) {
+      // The Work view on that sprint or epic, from no other filter.
+      const filters = e.planning;
+      hide();
+      activeWorkViewId.set(null);
+      workViewFilters.set({ ...filters });
+      sidebarView.set('work');
+      return;
+    }
     if (e.kind === 'session' && e.session) {
       if (e.session.status === 'ghost') {
         push({ kind: 'info', message: 'That session is lost. Recreate it from the sidebar.' });
@@ -971,6 +1006,20 @@
         spellcheck="false"
       />
     </div>
+    {#if mode === 'switch' && !query && $recentQueries.length > 0}
+      <div class="recent-queries" data-testid="switcher-recent-queries">
+        <span class="rq-label">Recent searches</span>
+        {#each $recentQueries as rq (rq)}
+          <button
+            type="button"
+            class="rq"
+            data-testid="switcher-recent-query"
+            onmousedown={(e) => e.preventDefault()}
+            onclick={() => (query = rq)}>{rq}</button
+          >
+        {/each}
+      </div>
+    {/if}
     <div class="listwrap" bind:this={listWrap}>
       <PickerList
         items={mode === 'new' ? newItems : items}
@@ -1180,5 +1229,29 @@
     gap: 0.8rem;
     font-size: var(--text-2xs);
     color: var(--fg-muted);
+  }
+  .recent-queries {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    padding: 4px 10px 6px;
+    font-size: var(--text-xs);
+  }
+  .rq-label {
+    color: var(--fg-muted);
+    margin-right: 2px;
+  }
+  .rq {
+    border: 1px solid var(--border);
+    background: var(--chip-bg);
+    color: var(--fg-2);
+    border-radius: var(--radius-md);
+    padding: 1px 8px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .rq:hover {
+    background: var(--accent-soft);
   }
 </style>

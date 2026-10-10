@@ -25,3 +25,18 @@ describe('fold', () => {
     expect(fuzzyScore('uloha', 'TASK-7 Úloha na zajtra')).not.toBeNull();
   });
 });
+
+describe('matchRanges', () => {
+  it('marks each word where it matched, on the shown text', async () => {
+    const { matchRanges } = await import('./fuzzy');
+    expect(matchRanges('prihlasenia sso', 'Oprava prihlásenia cez SSO')).toEqual([
+      [7, 18],
+      [23, 26],
+    ]);
+    expect(matchRanges('bs', 'blue-sirius')).toEqual([
+      [0, 1],
+      [5, 6],
+    ]);
+    expect(matchRanges('zzz', 'blue')).toEqual([]);
+  });
+});

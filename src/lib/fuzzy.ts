@@ -74,3 +74,39 @@ export function fuzzyMatchFields(query: string, fields: readonly string[]): numb
   }
   return total;
 }
+
+/**
+ * Where each token of `query` matches `text`, as `[start, end)` ranges to
+ * highlight: a token's exact substring when it has one, else the letters
+ * of its subsequence match. Empty when the fold changes the text's length
+ * (the offsets would not land on the shown text) or nothing matches.
+ */
+export function matchRanges(query: string, text: string): [number, number][] {
+  const t = fold(text);
+  if (t.length !== text.length) return [];
+  const hits = new Set<number>();
+  for (const tok of fold(query).split(/\s+/).filter(Boolean)) {
+    const idx = t.indexOf(tok);
+    if (idx !== -1) {
+      for (let i = idx; i < idx + tok.length; i++) hits.add(i);
+      continue;
+    }
+    let ti = 0;
+    const at: number[] = [];
+    for (const ch of tok) {
+      const k = t.indexOf(ch, ti);
+      if (k === -1) break;
+      at.push(k);
+      ti = k + 1;
+    }
+    if (at.length === tok.length) for (const k of at) hits.add(k);
+  }
+  const sorted = [...hits].sort((a, b) => a - b);
+  const out: [number, number][] = [];
+  for (const i of sorted) {
+    const last = out[out.length - 1];
+    if (last && last[1] === i) last[1] = i + 1;
+    else out.push([i, i + 1]);
+  }
+  return out;
+}

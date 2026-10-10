@@ -14,6 +14,7 @@
 import { matchShortcut, shortcutLabel, type KeyEventLike } from './shortcuts';
 import { get, writable } from 'svelte/store';
 import { fuzzyMatchFields } from './fuzzy';
+import { sessionSearchFields } from './search';
 import type { PrefixMode } from './commands';
 import type { ProjectTreeRow } from './projects';
 import { readPref, writePref } from './prefs';
@@ -21,6 +22,7 @@ import type { SessionRow } from './sessions';
 import type { HostRow } from './hosts';
 import { catalogOf, type AssetListing } from './assets';
 import { displayKey, keyFamily, type TicketRow } from './trackers';
+import type { WorkTreeFacets, WorkTreeFilters } from './work_view';
 import { rowMatches, sessionFilterRow, type FilterRow } from './sidebar_index';
 
 /** A cached tracker ticket or own task and the section it is listed under. */
@@ -42,7 +44,7 @@ export const TICKET_SEARCH_DEBOUNCE_MS = 200;
 export interface SwitcherEntry {
   /** `ticket`: a cached tracker ticket (work graph M3); `lookup`: resolve
    *  the pasted URL / typed key through the tracker. */
-  kind: 'session' | 'project' | 'host' | 'ticket' | 'lookup' | 'asset' | 'command' | 'setting';
+  kind: 'session' | 'project' | 'host' | 'ticket' | 'lookup' | 'asset' | 'command' | 'setting' | 'planning';
   /** `session:<id>`, `project:<id>`, `host:<alias>`, `ticket:<KEY>`,
    *  `lookup:<query>`, `asset:<catalog>:<kind>/<name>` (the Assets
    *  workspace's own selection key) or `command:<rescan|sync|propose>`. */
@@ -70,7 +72,55 @@ export interface SwitcherEntry {
   lookup?: string;
   /** Tickets: the tracker's provider badge (work graph M6). */
   badge?: { icon: string; title: string };
+  /** Planning: the Work view's filters Enter opens it with (a sprint, an
+   *  epic). */
+  planning?: WorkTreeFilters;
 }
+
+/** Rows that open the Work view on a sprint or an epic (search phase 2):
+ *  the current sprint, each sprint, each epic, from the tree's `facets`.
+ *  Shown only for a query that matches them. */
+export function planningEntries(facets: WorkTreeFacets | null | undefined): SwitcherEntry[] {
+  const out: SwitcherEntry[] = [];
+  const iterations = facets?.iterations ?? [];
+  const active = iterations.filter((i) => i.active);
+  if (iterations.length > 0) {
+    out.push({
+      kind: 'planning',
+      key: 'planning:sprint:current',
+      label: 'Current sprint',
+      description: active.length > 0 ? `${active.map((i) => i.name).join(', ')} · ${active.reduce((n, i) => n + i.count, 0)} tasks` : 'the active sprint',
+      meta: 'Work',
+      fields: ['current sprint', 'sprint', 'iteration', 'cycle', ...active.map((i) => i.name)],
+      planning: { iteration: 'current' },
+    });
+  }
+  for (const it of iterations) {
+    out.push({
+      kind: 'planning',
+      key: `planning:sprint:${it.name}`,
+      label: `Sprint: ${it.name}`,
+      description: `${it.active ? 'active · ' : ''}${it.count} task${it.count === 1 ? '' : 's'}`,
+      meta: 'Work',
+      fields: [it.name, 'sprint'],
+      planning: { iteration: it.name },
+    });
+  }
+  for (const e of facets?.epics ?? []) {
+    const ref = e.key ?? e.task_id;
+    out.push({
+      kind: 'planning',
+      key: `planning:epic:${ref}`,
+      label: `Epic: ${e.key ? `${displayKey(e.key)} ` : ''}${e.title}`,
+      description: `${e.count} task${e.count === 1 ? '' : 's'} under it`,
+      meta: 'Work',
+      fields: [e.key ?? '', e.title, 'epic'].filter(Boolean),
+      planning: { epic: ref },
+    });
+  }
+  return out;
+}
+
 
 /** What a command row asks the Assets panel to run (`app_views.ts`). */
 export type AssetsCommand = 'rescan' | 'sync' | 'propose';
@@ -181,6 +231,21 @@ const isStringArray = (v: unknown): v is string[] =>
 export const recentSessions = writable<string[]>(readPref(RECENT_PREF, [], isStringArray));
 recentSessions.subscribe((v) => writePref(RECENT_PREF, v));
 
+const RECENT_QUERIES_PREF = 'switcher.recent_queries';
+const RECENT_QUERIES_MAX = 5;
+/** The last few queries a row was picked with, newest first. */
+export const recentQueries = writable<string[]>(readPref(RECENT_QUERIES_PREF, [], isStringArray));
+recentQueries.subscribe((v) => writePref(RECENT_QUERIES_PREF, v));
+
+/** Remember `q` (two letters or more) at the head of the recent queries. */
+export function noteQuery(q: string): void {
+  const v = q.trim();
+  if (v.length < 2) return;
+  const cur = get(recentQueries);
+  if (cur[0] === v) return;
+  recentQueries.set([v, ...cur.filter((x) => x !== v)].slice(0, RECENT_QUERIES_MAX));
+}
+
 /** Move `s` to the head of the MRU list (no-op when already there). */
 export function noteRecent(s: { host_alias: string; tmux_name: string }): void {
   const key = sessionMruKey(s);
@@ -219,12 +284,12 @@ export function buildEntries(
       label,
       description: parts.join(' · '),
       meta: statusLabel(s),
+      // The Sessions list's fields (`search.ts`), plus what only ⌘K
+      // ranks by: the repo alone, the branch, the status and the kind.
       fields: [
         label,
-        s.tmux_name,
-        projectName ?? '',
+        ...sessionSearchFields(s, projectName),
         p?.project.repo ?? '',
-        s.host_alias,
         branch ?? '',
         statusLabel(s),
         s.kind,
@@ -279,7 +344,8 @@ export function rankEntries(
   // a settings change typed in plain words is what the query asked for, so
   // it leads, and a command on the open session that the query matches
   // comes next.
-  const isTail = (e: SwitcherEntry) => e.kind === 'asset' || e.kind === 'command' || e.kind === 'setting';
+  const isTail = (e: SwitcherEntry) =>
+    e.kind === 'asset' || e.kind === 'command' || e.kind === 'setting' || e.kind === 'planning';
   const head = rankHead(
     entries.filter((e) => !isTail(e)),
     query,
@@ -296,7 +362,9 @@ export function rankEntries(
   const settings = entries.filter((e) => e.kind === 'setting');
   const commands = tailRows('command');
   const lead = q0 ? commands.filter((e) => e.section === 'This session') : [];
-  const tail = [...tailRows('asset'), ...commands.filter((e) => !lead.includes(e))];
+  // Planning rows (a sprint, an epic) only answer a query.
+  const planning = q0 ? tailRows('planning') : [];
+  const tail = [...planning, ...tailRows('asset'), ...commands.filter((e) => !lead.includes(e))];
   return [...settings, ...lead, ...head, ...tail];
 }
 

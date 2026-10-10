@@ -127,7 +127,29 @@ pub struct WorkTreeFilters {
     /// `status` when both are set. An older hub ignores it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stages: Vec<String>,
+    /// The sprint (iteration, cycle): `current` (the tracker's active
+    /// one), `none` (in no sprint) or a sprint's name, any case. An older
+    /// hub ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<String>,
+    /// Under one epic (or any ancestor): its task id (`item:<id>`) or key.
+    /// The epic itself is listed too. An older hub ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic: Option<String>,
+    /// The tracker's type name (Story, Bug …), any case. An older hub
+    /// ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_type: Option<String>,
+    /// The order inside each section, one of [`SORT_VALUES`]: `activity`
+    /// (the default: needing you first, then the latest activity),
+    /// `updated` (the tracker's last change), `key`, `title` or `due`. An
+    /// older hub ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
 }
+
+/// [`WorkTreeFilters::sort`]'s values.
+pub const SORT_VALUES: [&str; 5] = ["activity", "updated", "key", "title", "due"];
 
 /// [`WorkTask::stage`]'s values, in board order.
 pub const STAGE_VALUES: [&str; 5] = ["backlog", "in_progress", "in_review", "blocked", "done"];
@@ -324,6 +346,82 @@ pub struct WorkTask {
     /// and absent on the wire, when nothing proposes anything.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proposals: Vec<crate::store::DecisionProposal>,
+    /// The tracker's type name (Story, Bug, Epic …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_type: Option<String>,
+    /// 1 an epic, 0 a standard item, -1 a subtask (the tracker's level).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hierarchy_level: Option<i64>,
+    /// The sprint (iteration, cycle) the item is in, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<String>,
+    /// That sprint is the tracker's active one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub iteration_active: bool,
+    /// The epic it sits under: its nearest ancestor at epic level, else
+    /// its top-most ancestor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic: Option<TaskRef>,
+    /// The tracker's own last change (else the item's), unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+    /// Every ancestor, nearest first: what `filters.epic` matches. Not on
+    /// the wire.
+    #[serde(skip)]
+    pub ancestors: Vec<TaskRef>,
+}
+
+/// Another task named from this one (its epic, an ancestor).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRef {
+    /// `item:<id>`.
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub title: String,
+}
+
+impl TaskRef {
+    /// Named by `v`: its task id, or its key in any case.
+    fn named(&self, v: &str) -> bool {
+        self.task_id == v
+            || self
+                .key
+                .as_deref()
+                .is_some_and(|k| k.eq_ignore_ascii_case(v))
+    }
+}
+
+/// How deep [`ancestors_of`] climbs: epic → story → subtask is three.
+const ANCESTOR_DEPTH: usize = 6;
+
+/// `item`'s ancestors, nearest first, through `parent_id` (a cycle or a
+/// parent the graph does not hold ends the climb).
+fn ancestors_of(g: &Graph, item: &ViewItem) -> Vec<(TaskRef, Option<i64>)> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::from([item.item.id]);
+    let mut next = item.item.parent_id;
+    while let Some(id) = next {
+        if out.len() >= ANCESTOR_DEPTH || !seen.insert(id) {
+            break;
+        }
+        let Some(p) = g.items.get(&id) else { break };
+        let title = if g.mirror_text_hidden(&p.item) {
+            JOB_TITLE_WITHHELD.to_string()
+        } else {
+            p.item.title.clone()
+        };
+        out.push((
+            TaskRef {
+                task_id: format!("item:{id}"),
+                key: p.item.key.clone(),
+                title,
+            },
+            p.item.hierarchy_level,
+        ));
+        next = p.item.parent_id;
+    }
+    out
 }
 
 /// A section header while a tree read counts it: the group, how many tasks,
@@ -517,6 +615,116 @@ pub struct TreePage {
     /// [`TreeArgs::with_review_total`] asked (absent from an older hub).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_total: Option<u32>,
+    /// What the sprint, epic and type pickers offer: every value among the
+    /// tasks the caller sees, whatever the filters (so a picker is not
+    /// limited to the loaded page). Empty on a section's read
+    /// (`filters.group`) and from an older hub.
+    #[serde(default, skip_serializing_if = "Facets::is_empty")]
+    pub facets: Facets,
+}
+
+/// [`TreePage::facets`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Facets {
+    /// Sprints, the active ones first, then by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iterations: Vec<IterationFacet>,
+    /// Epics (and other parents at the top of a chain), by key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub epics: Vec<EpicFacet>,
+    /// The trackers' type names, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub item_types: Vec<String>,
+}
+
+impl Facets {
+    fn is_empty(&self) -> bool {
+        self.iterations.is_empty() && self.epics.is_empty() && self.item_types.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IterationFacet {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub active: bool,
+    /// Tasks in it.
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpicFacet {
+    #[serde(flatten)]
+    pub epic: TaskRef,
+    /// Tasks under it.
+    pub count: u32,
+}
+
+/// At most this many values per facet: a picker, not a report.
+const FACET_MAX: usize = 200;
+
+fn facets_of(tasks: &[&WorkTask]) -> Facets {
+    let mut iterations: BTreeMap<String, (bool, u32)> = BTreeMap::new();
+    let mut epics: BTreeMap<String, (TaskRef, u32)> = BTreeMap::new();
+    let mut types: BTreeMap<String, String> = BTreeMap::new();
+    for t in tasks {
+        if let Some(i) = t
+            .iteration
+            .as_deref()
+            .map(str::trim)
+            .filter(|i| !i.is_empty())
+        {
+            let e = iterations.entry(i.to_string()).or_default();
+            e.0 |= t.iteration_active;
+            e.1 += 1;
+        }
+        if let Some(e) = &t.epic {
+            epics
+                .entry(e.task_id.clone())
+                .or_insert_with(|| (e.clone(), 0))
+                .1 += 1;
+        }
+        if let Some(ty) = t
+            .item_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            types
+                .entry(crate::search_text::fold(ty))
+                .or_insert_with(|| ty.to_string());
+        }
+    }
+    let mut iterations: Vec<IterationFacet> = iterations
+        .into_iter()
+        .map(|(name, (active, count))| IterationFacet {
+            name,
+            active,
+            count,
+        })
+        .collect();
+    iterations.sort_by(|a, b| b.active.cmp(&a.active).then_with(|| a.name.cmp(&b.name)));
+    iterations.truncate(FACET_MAX);
+    let mut epics: Vec<EpicFacet> = epics
+        .into_values()
+        .map(|(epic, count)| EpicFacet { epic, count })
+        .collect();
+    epics.sort_by(|a, b| {
+        let ka = a.epic.key.as_deref().map(key_parts);
+        let kb = b.epic.key.as_deref().map(key_parts);
+        ka.is_none()
+            .cmp(&kb.is_none())
+            .then_with(|| ka.cmp(&kb))
+            .then_with(|| a.epic.title.cmp(&b.epic.title))
+    });
+    epics.truncate(FACET_MAX);
+    let mut item_types: Vec<String> = types.into_values().collect();
+    item_types.truncate(FACET_MAX);
+    Facets {
+        iterations,
+        epics,
+        item_types,
+    }
 }
 
 /// One section a tree read pages besides its first page: exactly what a
@@ -2089,6 +2297,12 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         Some((l, _, _)) if title.trim().is_empty() => (link_name(g.row_of(l), l), true),
         _ => (title, false),
     };
+    let ancestors = item.map(|i| ancestors_of(g, i)).unwrap_or_default();
+    let epic = ancestors
+        .iter()
+        .find(|(_, level)| level.is_some_and(|l| l >= 1))
+        .or(ancestors.last())
+        .map(|(r, _)| r.clone());
     let task = WorkTask {
         task_id: b.task_id.clone(),
         item_id: item.map(|i| i.item.id),
@@ -2134,6 +2348,13 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         cost_micros,
         stage: stage.into(),
         proposals,
+        item_type: item.and_then(|i| i.item.kind.clone()),
+        hierarchy_level: item.and_then(|i| i.item.hierarchy_level),
+        iteration: item.and_then(|i| i.item.iteration.clone()),
+        iteration_active: item.is_some_and(|i| i.iteration_active),
+        epic,
+        updated_at: item.map(|i| i.item.updated_ext.unwrap_or(i.item.updated_at)),
+        ancestors: ancestors.into_iter().map(|(r, _)| r).collect(),
     };
     TaskSummary {
         task,
@@ -2318,6 +2539,22 @@ pub fn check_filters(f: &WorkTreeFilters) -> Result<(), IpcError> {
     {
         return Err(bad("filters.status_name is longer than 200 characters"));
     }
+    for (name, v) in [
+        ("iteration", &f.iteration),
+        ("epic", &f.epic),
+        ("item_type", &f.item_type),
+    ] {
+        if v.as_deref().is_some_and(|q| q.chars().count() > 200) {
+            return Err(bad(format!("filters.{name} is longer than 200 characters")));
+        }
+    }
+    if let Some(sort) = f.sort.as_deref() {
+        if !SORT_VALUES.contains(&sort) {
+            return Err(bad(format!(
+                "filters.sort is activity, updated, key, title or due, not {sort:?}"
+            )));
+        }
+    }
     if let Some(by) = f.group_by.as_deref() {
         if !GROUP_BY_VALUES.contains(&by) {
             return Err(bad(format!(
@@ -2404,6 +2641,43 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
     }
     if f.review == Some(true) && !t.review {
         return false;
+    }
+    if let Some(it) = f
+        .iteration
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let ok = match it {
+            "current" => t.iteration_active && t.iteration.is_some(),
+            "none" => t.iteration.is_none(),
+            name => t.iteration.as_deref().is_some_and(|i| {
+                crate::search_text::fold(i.trim()) == crate::search_text::fold(name)
+            }),
+        };
+        if !ok {
+            return false;
+        }
+    }
+    if let Some(e) = f.epic.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        let itself = t.task_id == e || t.key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(e));
+        if !itself && !t.ancestors.iter().any(|a| a.named(e)) {
+            return false;
+        }
+    }
+    if let Some(ty) = f
+        .item_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        if !t
+            .item_type
+            .as_deref()
+            .is_some_and(|k| crate::search_text::fold(k.trim()) == crate::search_text::fold(ty))
+        {
+            return false;
+        }
     }
     if let Some(q) = f.query.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
         let hay = crate::search_text::fold(&format!(
@@ -2503,20 +2777,58 @@ fn regroup(g: &Graph, s: &TaskSummary<'_>, by: &str) -> Option<GroupRef> {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 struct SortKey(u8, String, u8, String, u8, i64, String);
 
-fn sort_key(t: &WorkTask, org_names: &HashMap<i64, String>) -> SortKey {
+fn sort_key(t: &WorkTask, org_names: &HashMap<i64, String>, sort: Option<&str>) -> SortKey {
     let (org_rank, org_name) = match t.org_id.and_then(|o| org_names.get(&o)) {
         Some(n) => (0, n.to_lowercase()),
         None => (1, String::new()),
+    };
+    // The last three fields order the tasks inside a section; the task id
+    // ends every one of them, so the order is total and a cursor exact.
+    let (rank, number, tail) = match sort {
+        Some("updated") => (0, -t.updated_at.unwrap_or(0), t.task_id.clone()),
+        Some("key") => match t.key.as_deref() {
+            Some(k) => {
+                let (prefix, n) = key_parts(k);
+                (0, n, format!("{prefix}\u{0}{}", t.task_id))
+            }
+            None => (1, 0, t.task_id.clone()),
+        },
+        Some("title") => (
+            0,
+            0,
+            format!("{}\u{0}{}", crate::search_text::fold(&t.title), t.task_id),
+        ),
+        // `YYYY-MM-DD` sorts as text; no date last.
+        Some("due") => match t.due_at.as_deref() {
+            Some(d) => (0, 0, format!("{d}\u{0}{}", t.task_id)),
+            None => (1, 0, t.task_id.clone()),
+        },
+        _ => (
+            u8::from(!t.needs_you),
+            -t.last_activity_at.unwrap_or(0),
+            t.task_id.clone(),
+        ),
     };
     SortKey(
         org_rank,
         org_name,
         u8::from(t.group.source == "none"),
         t.group.label.to_lowercase(),
-        u8::from(!t.needs_you),
-        -t.last_activity_at.unwrap_or(0),
-        t.task_id.clone(),
+        rank,
+        number,
+        tail,
     )
+}
+
+/// `ABC-12` → (`abc`, 12), so ABC-9 sorts before ABC-10; a key with no
+/// number after its last `-` (`owner/repo#12` is read the same way) sorts
+/// by its text, at 0.
+fn key_parts(key: &str) -> (String, i64) {
+    let cut = key.rfind(['-', '#']).map_or(key.len(), |i| i + 1);
+    match key[cut..].parse::<i64>() {
+        Ok(n) => (key[..cut].to_lowercase(), n),
+        Err(_) => (key.to_lowercase(), 0),
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2695,7 +3007,7 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
             }
             continue;
         }
-        let key = sort_key(t, &org_names);
+        let key = sort_key(t, &org_names, args.filters.sort.as_deref());
         let e = groups
             .entry((t.org_id, t.group.id.clone()))
             .or_insert_with(|| (t.group.clone(), 0, key.clone(), 0));
@@ -2762,6 +3074,11 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
         .collect();
     group_list.sort_by(|a, b| a.0.cmp(&b.0));
     let trackers = visible_trackers(g, scope, &tasks);
+    let facets = if args.filters.group.is_none() {
+        facets_of(&summaries.iter().map(|s| &s.task).collect::<Vec<_>>())
+    } else {
+        Facets::default()
+    };
     Ok(TreePage {
         tasks,
         groups: group_list.into_iter().map(|(_, g)| g).collect(),
@@ -2774,6 +3091,7 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
         generated_at: g.now,
         sections,
         review_total,
+        facets,
     })
 }
 
@@ -2815,7 +3133,7 @@ fn section_pages(
             buckets
                 .entry((t.org_id, t.group.id.as_str()))
                 .or_default()
-                .push((sort_key(t, org_names), i));
+                .push((sort_key(t, org_names, args.filters.sort.as_deref()), i));
         }
     }
     for bucket in buckets.values_mut() {

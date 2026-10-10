@@ -12,7 +12,7 @@
 // Automation.
 import { derived, writable } from 'svelte/store';
 import { inboxQueue, inboxRows } from './inbox';
-import { attentionState, displayName, type AttentionOptions } from './attention';
+import { attentionState, type AttentionOptions } from './attention';
 import { attentionFacts } from './attention_facts';
 import { effectiveHostFilter } from './hosts';
 import { attentionIdleMinutes } from './notify';
@@ -25,7 +25,7 @@ import type { WorkTask } from './work_view';
 import { readPref, writePref } from './prefs';
 import { goTo, leave } from './destination';
 import { sidebarView } from './work_view';
-import { fold, foldedIncludes } from './text_fold';
+import { sessionMatchesSearch } from './search';
 
 export type ControlViewId = 'needs-you' | 'session' | 'tasks' | 'routines' | 'prs' | 'library' | 'today';
 
@@ -170,12 +170,11 @@ export const visibleFleet = derived(
   },
 );
 
-/** Does a row match the panel's search: its name, tmux name, host or last
- *  prompt, case and accents ignored. An empty query matches everything. */
+/** Does a row match the panel's search: the Sessions list's rule
+ *  (`search.ts`), every word in its names, host, branch, tags, last prompt
+ *  or task. An empty query matches everything. */
 export function matchesQuery(s: SessionRow, query: string): boolean {
-  const q = fold(query.trim());
-  if (!q) return true;
-  return [displayName(s, true), s.tmux_name, s.host_alias, s.last_prompt].some((f) => foldedIncludes(f, q));
+  return sessionMatchesSearch(s, query);
 }
 
 export interface FleetFolds {
