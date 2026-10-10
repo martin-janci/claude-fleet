@@ -893,6 +893,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     ("list_pull_requests", Verdict::Routed { tool: "prs" }),
+    // Named Control API tokens (M15 step G2.8): a token for the fleet this
+    // window is onto, so the hub's. Its tool serves the owner's trusted full
+    // device read and act tokens; an admin one stays the hub master's.
+    ("api_tokens", Verdict::Routed { tool: "api_tokens" }),
     // Start rules (Orbit Fleet 8.11): the hub decides and tallies its own
     // starts, so its rules are the ones that count.
     (

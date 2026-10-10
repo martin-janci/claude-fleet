@@ -27,7 +27,7 @@
   import { get } from 'svelte/store';
   import { sessions } from './sessions';
   import { selectedSession, selectSessionExplicitly } from './selection';
-  import { workBoardOpen, workViewChordLabel } from './app_views';
+  import { openSettingsAt, workBoardOpen, workViewChordLabel } from './app_views';
   import { detectMac } from './terminal_keys';
   import { isNewTaskChord, ownNewTaskChord } from './new_task';
   import { shortcutLabel } from './shortcuts';
@@ -78,6 +78,7 @@
     type WorkTreeSection,
     type WorkTreeSectionAsk,
   } from './work_view';
+  import { loadTabCounts, taskTabCount } from './work_tab_counts';
   import type { IpcError } from './result';
 
   let {
@@ -101,7 +102,6 @@
   });
   let page = $state.raw<WorkTreePage | null>(null);
   const archivedHidden = $derived(page?.archived_hidden ?? 0);
-  const hiddenByFilters = $derived(page?.hidden_by_filters ?? 0);
   /** "Hidden by filters · Show": every filter off but the archived switch
    *  and the grouping (the saved view is left). */
   function showHidden() {
@@ -133,7 +133,20 @@
   // The List layout's last read: the filter bar's orgs and trackers, and the
   // sessions it shows.
   let listPage = $state.raw<WorkTreePage | null>(null);
+  // The List layout reads its own page: its hidden count is that page's.
+  const hiddenByFilters = $derived(($workLayout === 'list' ? listPage : page)?.hidden_by_filters ?? 0);
   const listMode = $derived($workLayout === 'list');
+  // G3.3: the counts after the tabs. Tasks comes from the page shown;
+  // Missions and Pull requests are read on their own, on mount and when
+  // work changes.
+  const tasksCount = $derived(taskTabCount(listMode ? listPage : page, listMode));
+  let otherCounts = $state<{ missions: number | null; prs: number | null }>({ missions: null, prs: null });
+  let countsSeq = 0;
+  async function loadCounts() {
+    const mine = ++countsSeq;
+    const c = await loadTabCounts();
+    if (mine === countsSeq) otherCounts = c;
+  }
   function onListPage(p: WorkTreePage) {
     listPage = p;
     workTreeMeta.set({ orgs: p.orgs, trackers: p.trackers, groups: p.groups });
@@ -426,6 +439,7 @@
         return;
       }
       void load({ full, review: true });
+      void loadCounts();
     },
     () => debounceMs,
     () => maxWaitMs,
@@ -471,6 +485,7 @@
 
   onMount(() => {
     void load({ review: true });
+    void loadCounts();
     // Capture phase, as the switcher's: beat the terminal to the chord.
     window.addEventListener('keydown', onNewTaskChord, true);
   });
@@ -601,7 +616,8 @@
             aria-selected={shownTab === 'tasks'}
             class:is-active={shownTab === 'tasks'}
             data-testid="work-tab-tasks"
-            onclick={() => pickTab('tasks')}>Tasks</button
+            onclick={() => pickTab('tasks')}
+            >Tasks{#if tasksCount != null}<span class="tab-count" data-testid="work-tab-tasks-count">{tasksCount}</span>{/if}</button
           >
           <button
             class="seg-tab"
@@ -609,7 +625,8 @@
             aria-selected={shownTab === 'missions'}
             class:is-active={shownTab === 'missions'}
             data-testid="work-tab-missions"
-            onclick={() => pickTab('missions')}>Missions</button
+            onclick={() => pickTab('missions')}
+            >Missions{#if otherCounts.missions != null}<span class="tab-count" data-testid="work-tab-missions-count">{otherCounts.missions}</span>{/if}</button
           >
           <button
             class="seg-tab"
@@ -626,7 +643,8 @@
             aria-selected={shownTab === 'prs'}
             class:is-active={shownTab === 'prs'}
             data-testid="work-tab-prs"
-            onclick={() => pickTab('prs')}>Pull requests</button
+            onclick={() => pickTab('prs')}
+            >Pull requests{#if otherCounts.prs != null}<span class="tab-count" data-testid="work-tab-prs-count">{otherCounts.prs}</span>{/if}</button
           >
         </div>
         {#if reviewTotal}
@@ -694,6 +712,11 @@
       <WorkPrs />
     {:else if listMode}
       <TaskList {debounceMs} {maxWaitMs} onpage={onListPage} />
+      {#if hiddenByFilters > 0}
+        <button class="of-btn quiet hidden-row" type="button" data-testid="work-hidden-by-filters" onclick={showHidden}
+          ><span>Hidden by filters <span class="of-count">{hiddenByFilters}</span></span><span>Show</span></button
+        >
+      {/if}
     {:else if error}
       <div class="state error" role="alert" data-testid="work-tree-error">
         <p>{readErrorText(error)}</p>
@@ -718,8 +741,20 @@
               workViewFilters.set({});
             }}>Clear filters</button
           >
+        {:else if archivedHidden === 0 && page.trackers.length === 0}
+          <!-- Gap plan G3.13 (board Finish, "Work · no tracker connected"). -->
+          <div data-testid="work-tree-no-tracker">
+            <p><strong>No tracker connected.</strong> Fleet tracks its own tasks, or reads tickets from Jira, GitHub, Linear or Asana.</p>
+            <div class="empty-actions">
+              <button class="btn is-bounded" type="button" data-testid="work-empty-create" onclick={() => (newTaskOpen = true)}>Create a task…</button>
+              <button class="btn btn--quiet is-bounded" type="button" data-testid="work-empty-connect" onclick={() => openSettingsAt('trackers')}
+                >Connect a tracker…</button
+              >
+            </div>
+          </div>
         {:else if archivedHidden === 0}
           <p>No work yet. Tasks appear here once a session is linked to a ticket, or you name its work. Back to Sessions: {chord}.</p>
+          <button class="btn btn--quiet is-bounded" type="button" data-testid="work-empty-create" onclick={() => (newTaskOpen = true)}>Create a task…</button>
         {/if}
         {#if archivedHidden > 0}
           {@render archivedRow()}
@@ -826,6 +861,11 @@
 {/if}
 
 <style>
+  .empty-actions {
+    display: flex;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
   .review-count {
     min-width: 18px;
     height: 16px;
@@ -898,6 +938,11 @@
     font-size: var(--text-xs);
     white-space: nowrap;
     cursor: pointer;
+  }
+  .tab-count {
+    margin-left: 4px;
+    color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
   }
   .seg-tab:hover {
     color: var(--fg);

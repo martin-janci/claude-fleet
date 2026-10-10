@@ -58,6 +58,7 @@ fn ok_json_compact_is_compact_and_strips_nulls() {
 
 fn host_caller(alias: &str, mode: TokenMode) -> Caller {
     Caller {
+        api: None,
         host_alias: Some(alias.into()),
         client: None,
         mode,
@@ -78,6 +79,7 @@ const OWNER_PERSON: i64 = 1;
 /// let through. [`another_person`] makes the colleague's.
 fn client_caller(name: &str, mode: TokenMode) -> Caller {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 7,
@@ -1045,6 +1047,7 @@ fn a_client_name_cannot_forge_a_second_audit_line() {
         id
     };
     let sneaky = Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 7,
@@ -1577,7 +1580,7 @@ fn the_control_api_guide_names_every_attention_reason_and_status() {
 /// into the store: a test run alone saw a `local` row of whatever Claude was
 /// running on the box, and passed in the full suite only because another
 /// test had taken the gate first.
-fn test_tools(store: Store) -> FleetTools {
+pub(super) fn test_tools(store: Store) -> FleetTools {
     if store
         .get_setting(crate::service::hub::SETTING_LOCAL_HOST)
         .unwrap()
@@ -2636,6 +2639,7 @@ fn router_sum_serves_every_tool() {
         include_str!("devices.rs"),
         include_str!("prs.rs"),
         include_str!("pr_shepherd.rs"),
+        include_str!("api_tokens.rs"),
         include_str!("routines.rs"),
         include_str!("start_rules.rs"),
         include_str!("presence.rs"),
@@ -2972,7 +2976,7 @@ fn pair_params(name: &str) -> PairClientParams {
 }
 
 /// The JSON a tool result carries.
-fn result_json(r: &CallToolResult) -> serde_json::Value {
+pub(super) fn result_json(r: &CallToolResult) -> serde_json::Value {
     serde_json::from_str(text_of(&r.content[0])).expect("tool result is JSON")
 }
 
@@ -3489,6 +3493,7 @@ fn a_trusted_client_delivers_unmarked_and_an_ordinary_one_does_not() {
     assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
 
     let host = Caller {
+        api: None,
         host_alias: Some("mefistos".into()),
         client: None,
         mode: TokenMode::Full,
@@ -3590,6 +3595,7 @@ async fn set_client_trust_grants_and_withdraws_and_list_clients_shows_it() {
 #[test]
 fn marker_origin_can_never_be_split_by_a_client_name() {
     let c = Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 1,
@@ -3612,6 +3618,7 @@ fn marker_origin_can_never_be_split_by_a_client_name() {
     // `U+2028`, `U+2029` and `U+0085` are not `char::is_control`, but a
     // renderer or an LLM may still read them as a line break — so they go too.
     let sneaky = Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 1,
@@ -9921,6 +9928,7 @@ async fn add_project_and_list_github_repos_are_fenced_to_the_callers_host_and_or
     s.set_host_org("hostb", Some(org_b)).unwrap();
     let t = tools_over_fake_ssh(s, dir.path());
     let bound_a = Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 7,
@@ -10393,6 +10401,7 @@ async fn add_project_never_binds_an_mcp_callers_call_id() {
 /// A paired device belonging to `person`, bound to no org.
 fn device_of(person: i64, owner: i64) -> Caller {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 11,
@@ -12571,6 +12580,7 @@ fn gate_fixture() -> Gate {
 /// provisioned MCP entry would send.
 fn pane_caller(pane: Option<&str>) -> Caller {
     Caller {
+        api: None,
         host_alias: Some("h".into()),
         client: None,
         mode: TokenMode::Full,
@@ -15712,6 +15722,7 @@ async fn fleet_health_for_an_org_bound_client_counts_only_its_own_sessions() {
             .unwrap();
     }
     let bound = Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 12,

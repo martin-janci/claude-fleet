@@ -109,7 +109,7 @@ describe('WorkReview', () => {
     render(WorkReview);
     await flush();
     const rows = screen.getAllByTestId('work-review-item');
-    expect(rows.map((r) => within(r).getByTestId('work-review-confidence').textContent)).toEqual(['90%', '35%', '95%']);
+    expect(rows.map((r) => within(r).getByTestId('work-review-confidence').textContent)).toEqual(['almost sure', 'unsure', 'almost sure']);
     // Strength and rule stay beside the number: nothing is lost.
     expect(rows[1].textContent).toContain('weak');
     // Only a suggestion counts: the cross-org item at 95% is a conflict, not a guess.
@@ -147,7 +147,9 @@ describe('WorkReview', () => {
     const pill = within(rows[0]).getByTestId('work-review-proposed-by');
     expect(pill.textContent).toContain('Proposed by Jev');
     expect(pill.textContent).toContain('from the first prompt');
-    expect(pill.textContent).toContain('82%');
+    expect(pill.textContent).toContain('likely');
+    // The evidence note's confidence is a word too (G4.9).
+    expect(within(rows[0]).getByTestId('work-review-why').textContent).toBe('Jev proposed ABC-12 (likely) · R12');
     // A rule's own reading says nothing about Jev.
     expect(within(rows[1]).queryByTestId('work-review-proposed-by')).toBeNull();
     // Jev's 60 never joins the one-click high-confidence confirm.
@@ -155,6 +157,20 @@ describe('WorkReview', () => {
     await fireEvent.click(within(rows[0]).getByTestId('work-review-proposed-by-change'));
     await flush();
     expect(within(rows[0]).getByTestId('work-review-change-panel')).toBeTruthy();
+  });
+
+  it("confirming Jev's suggestion reads as an AI change with Undo (G4.9)", async () => {
+    pending = [
+      item({ rule: 'R12', proposed_by: { source: 'jev', reason: 'from the first prompt', confidence_pct: 82 } }),
+    ];
+    sessionLinks[7] = [sl(42, 'active', 2, 'ABC-12')];
+    render(WorkReview);
+    await flush();
+    await fireEvent.click(within(screen.getAllByTestId('work-review-item')[0]).getByTestId('work-review-confirm'));
+    await flush();
+    const line = screen.getByTestId('work-review-summary').textContent ?? '';
+    expect(line).toMatch(/^✓ Linked .+ to .+ · Proposed by Jev · you confirmed/);
+    expect(screen.getByTestId('work-review-undo')).toBeTruthy();
   });
 
   it('marks the main ticket among several keys as Proposed by Jev (J6, 6.8)', async () => {
@@ -188,7 +204,7 @@ describe('WorkReview', () => {
     const rows = screen.getAllByTestId('work-review-item');
     const dup = within(rows[0]).getByTestId('work-review-duplicate');
     expect(dup.textContent).toContain('May duplicate PAY-31');
-    expect(within(dup).getByTestId('work-review-duplicate-proposed-by').textContent).toContain('77%');
+    expect(within(dup).getByTestId('work-review-duplicate-proposed-by').textContent).toContain('likely');
     // Under the floor nothing shows at all.
     expect(within(rows[1]).queryByTestId('work-review-duplicate')).toBeNull();
     expect(calls('link_session_work')).toHaveLength(0);

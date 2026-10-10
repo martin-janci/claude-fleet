@@ -809,6 +809,8 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         project_id: Some(1),
         first_seen_at: 1,
         updated_at: 2,
+        additions: None,
+        deletions: None,
     };
     put("PullRequestRow", wire_keys(&pr));
     put(
@@ -952,6 +954,8 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         status: "todo".into(),
         proposal_state: Some("accepted".into()),
         accepted_at: Some(1),
+        done_when: Vec::new(),
+        depends_on: Vec::new(),
     };
     put("HandoffItem", wire_keys(&item));
     put(

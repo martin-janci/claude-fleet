@@ -43,6 +43,7 @@ fn pool(path: &std::path::Path) -> Option<Arc<ReadPool>> {
 
 fn host_caller() -> Caller {
     Caller {
+        api: None,
         host_alias: Some("hosta".to_string()),
         client: None,
         mode: TokenMode::Full,

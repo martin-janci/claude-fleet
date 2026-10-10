@@ -165,6 +165,7 @@ const EVERYONE: &[Who] = &[
 impl Who {
     fn caller(self, fx: &Fx) -> Caller {
         let device = |person: Option<i64>| Caller {
+            api: None,
             host_alias: None,
             client: Some(crate::mcp::auth::ClientRef {
                 id: 21,
@@ -181,6 +182,7 @@ impl Who {
             is_personal_owner: person == Some(fx.admin),
         };
         let host = |alias: &str, pane: Option<&str>| Caller {
+            api: None,
             host_alias: Some(alias.into()),
             client: None,
             mode: TokenMode::Full,
@@ -2148,6 +2150,7 @@ fn own_tier_args(fx: &Fx, tool: &str) -> Value {
 async fn claiming_needs_the_pane_of_the_row_not_merely_its_host() {
     let fx = fixture();
     let in_pane = Caller {
+        api: None,
         host_alias: Some(HOST.into()),
         client: None,
         mode: TokenMode::Full,

@@ -71,6 +71,7 @@
     "adopt_session",
     "agent_installs",
     "answer_form",
+    "api_tokens",
     "assets_inventory",
     "assets_scan_hosts",
     "assign_host_org",

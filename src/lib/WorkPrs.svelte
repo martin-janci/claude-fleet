@@ -14,7 +14,7 @@
   import { openExternal } from './open_external';
   import { readErrorText } from './work_view';
   import type { IpcError } from './result';
-  import { listPullRequests, prChecksLabel, prRef, prStateLabel, type PrFilter, type PullRequestRow } from './prs';
+  import { listPullRequests, prChecksLabel, prDiffstat, prRef, prStateLabel, type PrFilter, type PullRequestRow } from './prs';
 
   const FILTERS: { id: PrFilter; label: string }[] = [
     { id: 'open', label: 'Open' },
@@ -112,6 +112,7 @@
       {#each items as pr (pr.id)}
         {@const checks = prChecksLabel(pr)}
         {@const live = sessionRow(pr)}
+        {@const stat = prDiffstat(pr)}
         <li class="item" data-testid="work-pr" data-state={pr.state}>
           <div class="head">
             <span class="state state--{pr.draft && pr.state === 'OPEN' ? 'draft' : pr.state.toLowerCase()}" data-testid="work-pr-state"
@@ -124,6 +125,9 @@
           <div class="sub muted">
             <span data-testid="work-pr-ref">{prRef(pr)}</span>
             {#if pr.head_ref}<span>· {pr.head_ref}</span>{/if}
+            {#if stat}<span class="diffstat" data-testid="work-pr-diffstat" aria-label="{pr.additions ?? 0} lines added, {pr.deletions ?? 0} removed"
+                >· <span class="add">+{pr.additions ?? 0}</span> <span class="del">−{pr.deletions ?? 0}</span></span
+              >{/if}
             {#if checks}<span class="checks checks--{pr.ci_status ?? 'none'}" data-testid="work-pr-checks">· {checks}</span>{/if}
             {#if pr.state === 'MERGED' && pr.merged_at}<span data-testid="work-pr-merged">· merged {timeAgo(pr.merged_at)}</span>{/if}
           </div>
@@ -149,6 +153,12 @@
 </section>
 
 <style>
+  .diffstat .add {
+    color: var(--status-done);
+  }
+  .diffstat .del {
+    color: var(--status-failed);
+  }
   .work-prs {
     display: flex;
     flex-direction: column;

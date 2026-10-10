@@ -629,9 +629,16 @@
         {/each}
       </ul>
       {#if loaded && list.length === 0 && !error}
-        <p class="empty" data-testid="routines-empty">
-          No routines yet. A routine is a saved prompt that starts a session on a schedule. Start with Morning PR sweep from + New.
-        </p>
+        <div class="empty" data-testid="routines-empty">
+          <p>No routines yet. A routine is a saved prompt that starts a session on a schedule.</p>
+          <!-- Gap plan G3.13 (board Finish, "Automation · no routines"). -->
+          <div class="empty-actions">
+            <Button size="sm" testid="routines-empty-new" onclick={() => newFrom(null)}>+ New routine</Button>
+            <Button variant="quiet" size="sm" testid="routines-empty-template" onclick={() => newFrom('morning-pr-sweep')}
+              >Use a template: Morning PR sweep</Button
+            >
+          </div>
+        </div>
       {:else if loaded && filters.length > 0 && sections.length === 0}
         <p class="empty">Nothing matches these filters.</p>
       {/if}
@@ -1009,6 +1016,8 @@
 </div>
 
 <style>
+  .empty-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-2); }
+  .empty p { margin: 0; }
   .routines { display: grid; grid-template-columns: minmax(220px, 300px) minmax(0, 1fr); min-height: 360px; }
   .routines.fill { grid-template-columns: var(--list-w) minmax(0, 1fr); height: 100%; min-height: 0; }
   .list { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); background: var(--bg-pane); }

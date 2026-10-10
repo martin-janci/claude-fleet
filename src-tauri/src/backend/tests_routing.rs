@@ -851,6 +851,26 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "api_tokens",
+            "api_tokens",
+            json!({ "action": "create", "name": "ci", "scope": "act", "expires_in_days": 90 }),
+            r#"{"id":1,"name":"ci","scope":"act","hosts":null,"expires_at":9,"created_at":1,"last_used_at":null,"revoked_at":null,"token":"flt_live_x","env_line":"FLEET_MCP_TOKEN=flt_live_x"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::api_tokens::routed::api_tokens(
+                    b,
+                    s,
+                    fleet_core::service::control_tokens::ApiTokensArgs {
+                        action: "create".into(),
+                        name: Some("ci".into()),
+                        scope: Some("act".into()),
+                        expires_in_days: Some(90),
+                        hosts: None,
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "start_rules",
             "start_rules",
             json!({ "action": "accept", "rule_id": 3 }),
@@ -4195,6 +4215,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                             lane: Some("A".into()),
                             needs: vec!["0.9".into()],
                             status: None,
+                            project_id: None,
                         }],
                     },
                     s,
@@ -6548,6 +6569,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/start_rules.rs",
         include_str!("../commands/start_rules.rs"),
+    ),
+    (
+        "commands/api_tokens.rs",
+        include_str!("../commands/api_tokens.rs"),
     ),
     (
         "commands/presence.rs",

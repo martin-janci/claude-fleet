@@ -5,7 +5,7 @@
   proposal appears when ready or not at all.
 -->
 <script lang="ts">
-  import { neverDecides, preselect, proposedByLabel, type ProposalLike } from './ai_proposal';
+  import { confidenceWord, neverDecides, preselect, proposedByLabel, type ProposalLike } from './ai_proposal';
 
   let {
     proposal,
@@ -36,13 +36,15 @@
   const shown = $derived(
     proposal && (stated ? !neverDecides(field) && !!proposal.value : preselect(field, proposal, floor) != null) ? proposal : null,
   );
+  // A word, never a percentage (G4.9): "likely", "almost sure".
+  const word = $derived(shown ? confidenceWord(shown.confidence_pct) : null);
 </script>
 
 {#if shown}
   <div class="why" data-testid={testid} data-source={shown.source}>
     <span class="pill">{proposedByLabel(shown.source)}</span>
-    {#if shown.reason}<span class="reason">{shown.reason}</span>{/if}
-    {#if shown.confidence_pct != null}<span class="pct" title="Confidence">{shown.confidence_pct}%</span>{/if}
+    {#if word}<span class="word" data-testid="{testid}-confidence">{word}</span>{/if}
+    {#if shown.reason}{#if word}<span aria-hidden="true">·</span>{/if}<span class="reason">{shown.reason}</span>{/if}
     {#if onchange}
       <span aria-hidden="true">·</span>
       <button type="button" class="link" data-testid="{testid}-change" onclick={() => onchange?.()}
@@ -79,8 +81,8 @@
     content: '\2726';
     font-size: var(--text-2xs);
   }
-  .pct {
-    font-variant-numeric: tabular-nums;
+  .word {
+    color: var(--fg-2);
   }
   .link {
     font: inherit;

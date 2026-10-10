@@ -26,6 +26,11 @@ export interface HandoffItem {
   proposal_state?: string | null;
   /** An accepted item's last change, unix seconds: Undo's clock. */
   accepted_at?: number | null;
+  /** Its done-when lines (`ci:<check>`, `review`, `test:<cmd>`, `person`);
+   *  absent when none (or from an older hub). G3.11. */
+  done_when?: string[];
+  /** The items it waits for: the plan card's waves. G3.11. */
+  depends_on?: number[];
 }
 
 /** One receipt (`store::ControlHandoffRow`). */
@@ -212,6 +217,75 @@ export async function undoTree(h: ControlHandoff, nowSec: number): Promise<strin
   if (!r.ok) return r.error.message;
   await refreshHandoffs();
   return null;
+}
+
+// ── tasks in chat (gap plan G3.11, board MCTasks) ──
+
+/** The plan card's waves: an item with nothing to wait for inside the
+ *  tree is wave 1, one waiting on wave n items is wave n+1. An edge to an
+ *  item outside the tree does not hold it back here. Each wave keeps the
+ *  tree's order. */
+export function treeWaves(items: readonly HandoffItem[]): HandoffItem[][] {
+  const ids = new Set(items.map((i) => i.id));
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const memo = new Map<number, number>();
+  const wave = (i: HandoffItem, seen: Set<number>): number => {
+    const known = memo.get(i.id);
+    if (known !== undefined) return known;
+    if (seen.has(i.id)) return 1; // a cycle the store refuses; never loop
+    seen.add(i.id);
+    let w = 1;
+    for (const d of i.depends_on ?? []) {
+      const dep = ids.has(d) ? byId.get(d) : undefined;
+      if (dep) w = Math.max(w, wave(dep, seen) + 1);
+    }
+    memo.set(i.id, w);
+    return w;
+  };
+  const out: HandoffItem[][] = [];
+  for (const i of items) {
+    const w = wave(i, new Set());
+    (out[w - 1] ??= []).push(i);
+  }
+  return out.filter((w) => w && w.length > 0);
+}
+
+/** One done-when line in words: "CI test passes", "a review approves",
+ *  "`pnpm test` passes", "a person checks it". */
+export function doneWhenWords(line: string): string {
+  const [kind, ...rest] = line.split(':');
+  const arg = rest.join(':').trim();
+  switch (kind.trim()) {
+    case 'ci':
+      return arg ? `CI ${arg} passes` : 'CI passes';
+    case 'review':
+      return 'a review approves';
+    case 'test':
+      return arg ? `\`${arg}\` passes` : 'the tests pass';
+    case 'person':
+      return 'a person checks it';
+    default:
+      return line;
+  }
+}
+
+/** "finishes when CI test passes and a review approves", or '' with no lines. */
+export function finishesWhen(lines: readonly string[] | undefined): string {
+  const w = (lines ?? []).map(doneWhenWords);
+  if (w.length === 0) return '';
+  const head = w.length > 1 ? `${w.slice(0, -1).join(', ')} and ${w[w.length - 1]}` : w[0];
+  return `finishes when ${head}`;
+}
+
+/** The live sessions working on a task, the status card's session line. */
+export function liveSessionsOf(itemId: number, rows: readonly SessionRow[]): SessionRow[] {
+  return rows.filter((s) => s.work?.item_id === itemId && s.status !== 'ghost');
+}
+
+/** A created task's Undo: the backend takes back an accept within
+ *  `ACCEPT_UNDO_SECS`; a task written directly has no undo (Move to Done). */
+export function taskUndoable(item: HandoffItem, nowSec: number): boolean {
+  return item.proposal_state === 'accepted' && item.status === 'todo' && item.accepted_at != null && nowSec - item.accepted_at < ACCEPT_UNDO_SECS;
 }
 
 /** Test seam. */

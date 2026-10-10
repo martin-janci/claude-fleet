@@ -113,6 +113,16 @@ pub fn template(kind: Kind, name: &str) -> Asset {
             body: String::new(),
             resources: Vec::new(),
         },
+        Kind::Command => Asset {
+            header: header("Describe what this command does."),
+            spec: AssetSpec::Command {
+                allowed_tools: Vec::new(),
+                argument_hint: None,
+                model: None,
+            },
+            body: "Do this with $ARGUMENTS.\n".to_string(),
+            resources: Vec::new(),
+        },
     }
 }
 

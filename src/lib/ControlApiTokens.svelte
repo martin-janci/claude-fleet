@@ -5,7 +5,24 @@
   // A host's token is rotated here (`rotate_host_token`, which re-provisions
   // the host); a device's is revoked (`revoke_device`, as Settings → Devices
   // does). The master token stays in the section above.
+  //
+  // M15 step G2.8: + Token creates a named token (read, act or admin, an
+  // expiry, a host limit) through the New Control API token form; it is
+  // shown once (ApiTokenCreated) and listed here by name after, with Revoke.
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import WizardDialog from './forms/WizardDialog.svelte';
+  import ApiTokenCreated from './ApiTokenCreated.svelte';
+  import { WIZARDS, withChoices } from './forms/wizards';
+  import {
+    apiTokens,
+    loadApiTokens,
+    createApiToken,
+    revokeApiToken,
+    expiryLabel,
+    type ApiTokenCreated as Created,
+  } from './api_tokens';
+  import { hosts } from './hosts';
+  import type { IpcError } from './result';
   import { hostTokens, loadHostTokens, rotateToken } from './host_actions';
   import { rotateTokenMessage } from './hosts_view';
   import { devices, loadDevices, type DeviceSummary } from './devices';
@@ -25,9 +42,22 @@
 
   type Row =
     | { kind: 'host'; key: string; name: string; mode: string; used?: number; created: number; rotated?: number }
-    | { kind: 'device'; key: string; name: string; mode: string; used?: number; created: number; self: boolean };
+    | { kind: 'device'; key: string; name: string; mode: string; used?: number; created: number; self: boolean }
+    | { kind: 'named'; key: string; name: string; mode: string; used?: number; created: number; hosts: string[] | null; expires: number | null };
 
   const rows = $derived<Row[]>([
+    ...$apiTokens.map(
+      (t): Row => ({
+        kind: 'named',
+        key: `named:${t.name}`,
+        name: t.name,
+        mode: t.scope,
+        used: t.last_used_at ?? undefined,
+        created: t.created_at,
+        hosts: t.hosts,
+        expires: t.expires_at,
+      }),
+    ),
     ...[...$hostTokens.values()].map(
       (t): Row => ({
         kind: 'host',
@@ -55,18 +85,45 @@
   let asking = $state<Row | null>(null);
   let busy = $state(false);
 
+  let creating = $state(false);
+  let createBusy = $state(false);
+  let createError = $state<IpcError | null>(null);
+  let created = $state<Created | null>(null);
+  const tokenWizard = $derived({
+    ...WIZARDS.new_token,
+    spec: withChoices(WIZARDS.new_token.spec, {
+      hosts: $hosts.filter((h) => !h.hidden).map((h): [string, string] => [h.alias, h.alias]),
+    }),
+  });
+
+  async function create(v: import('./forms/forms').Values) {
+    createBusy = true;
+    createError = null;
+    const r = await createApiToken(v);
+    createBusy = false;
+    if (r.ok) {
+      creating = false;
+      created = r.value;
+    } else createError = r.error;
+  }
+
   let loaded = false;
   $effect(() => {
     if (active && !loaded) {
       loaded = true;
       void loadHostTokens();
       void loadDevices();
+      void loadApiTokens();
     }
   });
 
   async function go(row: Row) {
     busy = true;
-    if (row.kind === 'host') {
+    if (row.kind === 'named') {
+      const r = await revokeApiToken(row.name);
+      if (r.ok) push({ kind: 'success', message: `${row.name} can no longer reach the fleet.` });
+      else pushError(r.error, `Revoke ${row.name} failed`);
+    } else if (row.kind === 'host') {
       const r = await rotateToken(row.name);
       if (r.ok) {
         push({ kind: 'success', message: `${row.name} has a new control-API token.` });
@@ -84,9 +141,20 @@
 </script>
 
 <section class="block" data-testid="control-api-tokens">
-  <div class="section-header"><h4>Control API tokens</h4></div>
+  <div class="section-header">
+    <h4>Control API tokens</h4>
+    <button
+      type="button"
+      class="hook-btn"
+      data-testid="token-new"
+      onclick={() => {
+        createError = null;
+        creating = true;
+      }}>+ Token</button
+    >
+  </div>
   {#if rows.length === 0}
-    <p class="hook-desc" data-testid="tokens-empty">No host or device has a token yet. Provision a host or pair a device.</p>
+    <p class="hook-desc" data-testid="tokens-empty">No token yet. Provision a host, pair a device, or create one with + Token.</p>
   {:else}
     <table class="tokens">
       <thead>
@@ -97,7 +165,12 @@
           <tr data-testid={`token-row-${row.key}`}>
             <td class="name">
               {row.name}
-              <span class="kind">· {row.kind === 'host' ? 'per-host' : 'device'}</span>
+              <span class="kind">· {row.kind === 'host' ? 'per-host' : row.kind === 'device' ? 'device' : 'named'}</span>
+              {#if row.kind === 'named' && (row.hosts || row.expires !== null)}
+                <span class="rotated" data-testid={`token-limits-${row.key}`}
+                  >{[row.hosts ? `only ${row.hosts.join(', ')}` : '', expiryLabel(row.expires, now())].filter(Boolean).join(' · ')}</span
+                >
+              {/if}
             </td>
             <td>{row.mode === 'readonly' ? 'read-only' : row.mode}</td>
             <td data-testid={`token-used-${row.key}`}>{ago(row.used, now())}</td>
@@ -112,6 +185,10 @@
                 <button type="button" class="hook-btn" disabled={busy} data-testid={`token-rotate-${row.name}`} onclick={() => (asking = row)}
                   >Rotate…</button
                 >
+              {:else if row.kind === 'named'}
+                <button type="button" class="hook-btn" disabled={busy} data-testid={`token-revoke-named-${row.name}`} onclick={() => (asking = row)}
+                  >Revoke…</button
+                >
               {:else if !row.self}
                 <button type="button" class="hook-btn" disabled={busy} data-testid={`token-revoke-${row.name}`} onclick={() => (asking = row)}
                   >Revoke…</button
@@ -123,20 +200,36 @@
       </tbody>
     </table>
     <p class="hook-desc">
-      A host's token lives in its ~/.claude.json and is replaced by Rotate; a device's was shown once at pairing and is
-      ended by Revoke. Used is the last request the token made, to the minute.
+      A host's token lives in its ~/.claude.json and is replaced by Rotate; a device's was shown once at pairing, and a
+      named one at + Token, and both are ended by Revoke. Used is the last request the token made, to the minute.
     </p>
   {/if}
 </section>
+
+{#if creating}
+  <WizardDialog
+    wizard={tokenWizard}
+    busy={createBusy}
+    error={createError}
+    errorTestid="token-new-error"
+    run={(v) => void create(v)}
+    onclose={() => (creating = false)} />
+{/if}
+
+{#if created}
+  <ApiTokenCreated {created} onclose={() => (created = null)} />
+{/if}
 
 {#if asking}
   <ConfirmDialog
     title={asking.kind === 'host' ? `Rotate the token for ${asking.name}` : `Revoke ${asking.name}`}
     message={asking.kind === 'host'
       ? rotateTokenMessage(asking.name)
-      : `${asking.name} can no longer reach the fleet. Pair it again to bring it back.`}
+      : asking.kind === 'named'
+        ? `Anything using ${asking.name} is refused from its next request. Create a new token to bring it back.`
+        : `${asking.name} can no longer reach the fleet. Pair it again to bring it back.`}
     confirmLabel={asking.kind === 'host' ? 'Rotate' : 'Revoke'}
-    danger={asking.kind === 'device'}
+    danger={asking.kind !== 'host'}
     {busy}
     confirmTestId="token-confirm"
     onconfirm={() => asking && void go(asking)}

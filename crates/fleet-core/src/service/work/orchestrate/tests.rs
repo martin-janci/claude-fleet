@@ -16,6 +16,7 @@ struct Fx {
 
 fn person(store: &Mutex<Store>, id: i64) -> ViewScope {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(ClientRef {
             id: 7,
@@ -34,6 +35,7 @@ fn person(store: &Mutex<Store>, id: i64) -> ViewScope {
 
 fn host(store: &Mutex<Store>) -> ViewScope {
     Caller {
+        api: None,
         host_alias: Some("h".into()),
         client: None,
         mode: TokenMode::Full,

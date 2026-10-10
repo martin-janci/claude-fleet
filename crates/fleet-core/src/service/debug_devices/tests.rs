@@ -42,6 +42,7 @@ fn asker_for(store: &Mutex<Store>, caller: Caller, holder: &str) -> Asker {
 
 fn host(store: &Mutex<Store>, alias: &str) -> Asker {
     let caller = Caller {
+        api: None,
         host_alias: Some(alias.into()),
         client: None,
         mode: TokenMode::Full,
@@ -98,6 +99,7 @@ fn a_bound_client_never_sees_another_orgs_devices() {
         s.set_host_org("b", Some(beta.id)).unwrap();
     }
     let caller = Caller {
+        api: None,
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
             id: 7,

@@ -250,25 +250,28 @@ async fn authorize(
     // pass as the rows, here as in the cache: it decides
     // `Caller::is_personal_owner`, and a failed read yields `None`, which is
     // the fail-closed answer (T1) rather than a guess.
-    let (host_tokens, client_tokens, personal_owner) = match cached {
+    let rows = match cached {
         Some(rows) => rows,
         None => {
             let s = state
                 .store
                 .lock()
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            (
-                Arc::new(s.list_host_tokens().unwrap_or_default()),
-                Arc::new(s.auth_client_tokens().unwrap_or_default()),
-                s.personal_owner_id().unwrap_or_default(),
-            )
+            token_cache::AuthRows {
+                hosts: Arc::new(s.list_host_tokens().unwrap_or_default()),
+                clients: Arc::new(s.auth_client_tokens().unwrap_or_default()),
+                controls: Arc::new(s.auth_control_tokens().unwrap_or_default()),
+                personal_owner: s.personal_owner_id().unwrap_or_default(),
+            }
         }
     };
+    let personal_owner = rows.personal_owner;
     let mut caller = match auth::check_request(
         request.headers(),
         &state.master,
-        &host_tokens,
-        &client_tokens,
+        &rows.hosts,
+        &rows.clients,
+        &rows.controls,
         &state.allowed_hosts,
         personal_owner,
     ) {
@@ -382,6 +385,38 @@ async fn authorize(
                     match state.store.try_lock() {
                         Ok(s) => stamp(&s),
                         Err(_) => cache.host_untouch(alias),
+                    }
+                }
+            }
+            None => {
+                if let Ok(s) = state.store.lock() {
+                    stamp(&s);
+                }
+            }
+        }
+    }
+    // A named token (G2.8) is for a script on the tool surface: `/mcp` and
+    // `/mcp/json` only. `/hook` is Claude Code's own callback, and a stream
+    // (`/events`, the voice relay) outlives the per-request expiry and revoke
+    // checks, so every other route refuses it.
+    if caller.api.is_some() && !matches!(request.uri().path(), "/mcp" | "/mcp/json") {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // A named token's "last used" (G2.8): the same once-a-minute,
+    // never-wait stamp, which moves no auth epoch (migration 157).
+    if let Some(api) = caller.api.as_ref() {
+        let now = crate::store::now_unix();
+        let stamp = |s: &crate::store::Store| {
+            if let Err(e) = s.touch_control_token(api.id, now) {
+                tracing::debug!(error = %e.message, "[mcp] could not touch a named token");
+            }
+        };
+        match state.tokens.as_ref() {
+            Some(cache) => {
+                if cache.control_touch_due(api.id, now) {
+                    match state.store.try_lock() {
+                        Ok(s) => stamp(&s),
+                        Err(_) => cache.control_untouch(api.id),
                     }
                 }
             }
@@ -1073,6 +1108,15 @@ mod tests {
                 .unwrap();
             s.insert_client_token("old", &auth::sha256_hex("revoked-tok"), "full")
                 .unwrap();
+            // A named Control API token (G2.8): /mcp only.
+            s.insert_control_token(&crate::store::NewControlToken {
+                name: "script",
+                token_sha256: &auth::sha256_hex("flt_live_script"),
+                scope: crate::store::ApiScope::Act,
+                hosts: None,
+                expires_at: None,
+            })
+            .unwrap();
             s.revoke_client_token("old").unwrap();
         }
         let hook_state = hooks::HookState {
@@ -1542,6 +1586,30 @@ mod tests {
         assert!(
             mcp_q.contains("401"),
             "query token must not authorize /mcp:\n{mcp_q}"
+        );
+        // A named token reaches /mcp, and no other route: not /hook, whose
+        // stop path hands out a session's queued messages, nor a stream that
+        // would outlive its revoke.
+        auth_bucket_refilled().await;
+        let named = round_trip(addr, &post("/mcp", Some("flt_live_script"), None, "{}")).await;
+        assert!(
+            !named.contains("401") && !named.contains("403"),
+            "a named token must authorize /mcp:\n{named}"
+        );
+        let named_hook =
+            round_trip(addr, &post("/hook", Some("flt_live_script"), None, stop)).await;
+        assert!(
+            named_hook.contains("403"),
+            "a named token must not report hook events:\n{named_hook}"
+        );
+        let named_events = round_trip(
+            addr,
+            "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer flt_live_script\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            named_events.contains("403"),
+            "a named token must not open the event stream:\n{named_events}"
         );
         // Origin/Host check applies to /hook (DNS-rebinding defense).
         let hook_rebind = round_trip(

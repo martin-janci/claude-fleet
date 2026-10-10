@@ -38,7 +38,7 @@
 //! closed meanwhile (T1).
 
 use crate::ipc_error::{codes, lock, IpcError};
-use crate::store::{ClientTokenRow, HostTokenRow, ReadPool};
+use crate::store::{ClientTokenRow, ControlTokenRow, HostTokenRow, ReadPool};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -47,6 +47,18 @@ struct Snapshot {
     epoch: i64,
     hosts: Arc<Vec<HostTokenRow>>,
     clients: Arc<Vec<ClientTokenRow>>,
+    controls: Arc<Vec<ControlTokenRow>>,
+}
+
+/// Everything `authorize` matches a bearer token against, as of one auth
+/// epoch, and the hub's personal owner.
+pub struct AuthRows {
+    pub hosts: Arc<Vec<HostTokenRow>>,
+    pub clients: Arc<Vec<ClientTokenRow>>,
+    /// Named Control API tokens (migration 157), live ones; expired ones are
+    /// refused by time in `auth::resolve_token_at`.
+    pub controls: Arc<Vec<ControlTokenRow>>,
+    pub personal_owner: Option<i64>,
 }
 
 /// How often, at most, `authorize` stamps one client's `last_seen_at` — the
@@ -63,6 +75,8 @@ pub struct TokenCache {
     /// Per host alias, when `authorize` last stamped its token's
     /// `last_used_at` (Orbit Fleet 11.4).
     touched_hosts: Mutex<HashMap<String, i64>>,
+    /// Per named token id, when `authorize` last stamped its `last_used_at`.
+    touched_controls: Mutex<HashMap<i64, i64>>,
     /// The hub's personal owner (multi-user M1), once it has been read.
     /// `None` means "not known yet, ask again" — never "this hub has none",
     /// which is why the module docs above forbid caching a `None`.
@@ -79,17 +93,19 @@ impl TokenCache {
             snapshot: Mutex::new(snapshot),
             touched: Mutex::new(HashMap::new()),
             touched_hosts: Mutex::new(HashMap::new()),
+            touched_controls: Mutex::new(HashMap::new()),
             owner: Mutex::new(None),
         })
     }
 
     fn load(pool: &ReadPool) -> Result<Snapshot, IpcError> {
         let conn = pool.get().ok_or_else(no_connection)?;
-        let (epoch, hosts, clients) = lock(conn)?.auth_snapshot()?;
+        let (epoch, hosts, clients, controls) = lock(conn)?.auth_snapshot()?;
         Ok(Snapshot {
             epoch,
             hosts: Arc::new(hosts),
             clients: Arc::new(clients),
+            controls: Arc::new(controls),
         })
     }
 
@@ -101,17 +117,7 @@ impl TokenCache {
     /// connection poisoned, a SQLite error): the caller then reads the
     /// tables through the writer, as `authorize` did before the cache —
     /// failing over to the authoritative path, never to a stale snapshot.
-    #[allow(clippy::type_complexity)]
-    pub fn tokens(
-        &self,
-    ) -> Result<
-        (
-            Arc<Vec<HostTokenRow>>,
-            Arc<Vec<ClientTokenRow>>,
-            Option<i64>,
-        ),
-        IpcError,
-    > {
+    pub fn tokens(&self) -> Result<AuthRows, IpcError> {
         let conn = self.pool.get().ok_or_else(no_connection)?;
         let current = lock(conn)?.auth_epoch()?;
         let owner = self.personal_owner(conn)?;
@@ -120,14 +126,20 @@ impl TokenCache {
             // Epoch and rows in one read transaction: the rows are the ones
             // at the epoch recorded with them (possibly newer than
             // `current`, never older).
-            let (epoch, hosts, clients) = lock(conn)?.auth_snapshot()?;
+            let (epoch, hosts, clients, controls) = lock(conn)?.auth_snapshot()?;
             *snap = Snapshot {
                 epoch,
                 hosts: Arc::new(hosts),
                 clients: Arc::new(clients),
+                controls: Arc::new(controls),
             };
         }
-        Ok((Arc::clone(&snap.hosts), Arc::clone(&snap.clients), owner))
+        Ok(AuthRows {
+            hosts: Arc::clone(&snap.hosts),
+            clients: Arc::clone(&snap.clients),
+            controls: Arc::clone(&snap.controls),
+            personal_owner: owner,
+        })
     }
 
     /// The hub's personal owner, read through `conn` the first time and
@@ -185,6 +197,29 @@ impl TokenCache {
                 true
             }
         }
+    }
+
+    /// [`Self::touch_due`] for a named token, by id.
+    pub fn control_touch_due(&self, id: i64, now: i64) -> bool {
+        let mut t = self
+            .touched_controls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        match t.get(&id) {
+            Some(&at) if now - at < TOUCH_INTERVAL_SECS => false,
+            _ => {
+                t.insert(id, now);
+                true
+            }
+        }
+    }
+
+    /// [`Self::untouch`] for a named token.
+    pub fn control_untouch(&self, id: i64) {
+        self.touched_controls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
     }
 
     /// [`Self::untouch`] for a host token, by alias.

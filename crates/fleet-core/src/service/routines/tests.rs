@@ -130,6 +130,7 @@ fn fx() -> Fx {
 /// A person's device, bound to `org` or to none, scoped the way a request is.
 fn person(store: &Mutex<Store>, org: Option<i64>, id: i64) -> ViewScope {
     Caller {
+        api: None,
         host_alias: None,
         client: Some(ClientRef {
             id: 7,
@@ -906,6 +907,7 @@ fn the_org_boundary_comes_before_the_owner() {
 fn a_caller_without_a_person_owns_no_routine() {
     let f = fx();
     let host = Caller {
+        api: None,
         host_alias: Some("mac".into()),
         client: None,
         mode: TokenMode::Full,

@@ -57,6 +57,9 @@ export interface TodayShipped {
   pr_url?: string | null;
   at: number;
   org_id?: number | null;
+  /** Where it came from (G3.2): a routine's name, or `mission <name>`;
+   *  absent when a person started it, or from an older hub. */
+  from?: string | null;
 }
 
 /** A mission waiting on a person (G1.6, `today.rs` `TodayMission`). */
@@ -236,3 +239,45 @@ export function missionLine(m: TodayMission): string {
 export function isEmptyView(v: TodayView): boolean {
   return v.waiting.length + v.inProgress.length + v.shipped.length + v.stale.length + (v.missions?.length ?? 0) === 0;
 }
+
+// ── KPI tiles, date line, truncation (gap plan G3.2, board Today) ──
+
+export interface TodayKpis {
+  needsYou: number;
+  inProgress: number;
+  shipped: number;
+  stale: number;
+}
+
+const sessionsIn = (gs: readonly TodayGroup[]) => gs.reduce((n, g) => n + g.sessions.length, 0);
+
+/** The four tiles: sessions (and missions) that need you, sessions in
+ *  progress, what shipped today, stale sessions. */
+export function todayKpis(v: TodayView): TodayKpis {
+  return {
+    needsYou: sessionsIn(v.waiting) + (v.missions?.length ?? 0),
+    inProgress: sessionsIn(v.inProgress),
+    shipped: v.shipped.length,
+    stale: sessionsIn(v.stale),
+  };
+}
+
+/** "Thursday 8 October · 3 hosts · 2 accounts active": the day, the hosts
+ *  shown, and the accounts a session used since `since`. */
+export function todayLine(
+  nowMs: number,
+  hostAliases: readonly string[],
+  rows: readonly Pick<SessionRow, 'account_uuid' | 'last_activity_at' | 'status'>[],
+  since: number,
+): string {
+  const day = new Date(nowMs).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }).replace(',', '');
+  const accounts = new Set(
+    rows.filter((r) => r.status !== 'ghost' && r.account_uuid && (r.last_activity_at ?? 0) >= since).map((r) => r.account_uuid),
+  ).size;
+  const parts = [day, `${hostAliases.length} ${hostAliases.length === 1 ? 'host' : 'hosts'}`];
+  if (accounts > 0) parts.push(`${accounts} ${accounts === 1 ? 'account' : 'accounts'} active`);
+  return parts.join(' · ');
+}
+
+/** In progress shows this many groups before "N more ›". */
+export const IN_PROGRESS_SHOWN = 4;

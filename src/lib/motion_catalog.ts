@@ -153,3 +153,53 @@ export function wash(node: HTMLElement, state: AttentionState) {
     },
   };
 }
+
+/**
+ * Svelte action (G4.9, the Motion board's "A question arrives"): a question
+ * card fades up 8 px as it enters, and focus moves to its first answer so a
+ * key press answers it. The chat does not jump: only the card moves. Focus
+ * stays where it is while the person is typing somewhere. Reduced is an
+ * 80 ms fade; Off neither moves nor fades, but focus still moves.
+ */
+export function questionEnter(node: HTMLElement) {
+  const motion = level();
+  if (motion !== 'off' && typeof node.animate === 'function') {
+    node.animate(
+      motion === 'full'
+        ? [
+            { opacity: 0, transform: 'translateY(8px)' },
+            { opacity: 1, transform: 'none' },
+          ]
+        : [{ opacity: 0 }, { opacity: 1 }],
+      { duration: catalogMs(motion === 'full' ? 'base' : 'fast', motion), easing: 'cubic-bezier(0, 0, 0, 1)' },
+    );
+  }
+  const active = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
+  const typing = !!active?.closest?.('input, textarea, select, [contenteditable="true"]');
+  if (!typing) node.querySelector<HTMLElement>('button:not([disabled])')?.focus({ preventScroll: true });
+}
+
+/**
+ * Svelte action (G4.9, the Motion board's "The Inbox count changes"): when
+ * the number changes, it rolls in over 80 ms (`--dur-instant`); the badge
+ * never pulses or shakes. Reduced and Off swap the number with no roll.
+ */
+export function countRoll(node: HTMLElement, n: number | undefined) {
+  let current = n;
+  return {
+    update(next: number | undefined) {
+      if (next === current) return;
+      const up = (next ?? 0) > (current ?? 0);
+      current = next;
+      const motion = level();
+      if (motion !== 'full' || typeof node.animate !== 'function') return;
+      node.animate(
+        [
+          { transform: `translateY(${up ? '60%' : '-60%'})`, opacity: 0 },
+          { transform: 'none', opacity: 1 },
+        ],
+        { duration: catalogMs('fast', motion), easing: 'cubic-bezier(0.2, 0, 0, 1)' },
+      );
+    },
+  };
+}

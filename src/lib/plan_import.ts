@@ -4,7 +4,8 @@
 // It reads every pipe table in the text. A table with a step column (`#`,
 // `Id`, `Step id`) and a title column (`Step`, `Title`, `Task`) gives steps;
 // its `Needs` / `Depends on` column gives the step ids each waits for, and
-// its `Lane` / `Status` columns, when there, the lane and the status. A
+// its `Lane` / `Status` columns, when there, the lane and the status, and
+// its `Repo` column the repository each step's task works in (G2.5). A
 // table with `Lane` and `Steps in order` (the transition plan's Lanes table)
 // gives each listed step its lane. Text a person wrote is passed on as
 // text; the backend checks the rows again.
@@ -19,6 +20,13 @@ export interface PlanRow {
   lane?: string;
   needs?: string[];
   status?: string;
+  /** The repository a new step's task works in. */
+  project_id?: number;
+}
+
+/** A parsed row: the wire row, with its `Repo` cell as written. */
+export interface ParsedRow extends PlanRow {
+  repo?: string;
 }
 
 /** What an import did (`plan_import::PlanImport`). */
@@ -90,7 +98,9 @@ const STATUS_WORDS: Record<string, string> = {
 
 /** What `parsePlan` found. */
 export interface ParsedPlan {
-  rows: PlanRow[];
+  rows: ParsedRow[];
+  /** A step table had a Repo column: every row then needs a repository. */
+  hasRepos: boolean;
   /** Lines worth telling the person: a step listed twice, a lane for a
    *  step no table names. */
   notes: string[];
@@ -99,8 +109,9 @@ export interface ParsedPlan {
 /** Every step row in `text`, in order, with lanes from a Lanes table. */
 export function parsePlan(text: string): ParsedPlan {
   const lines = text.split(/\r?\n/);
-  const rows: PlanRow[] = [];
-  const at = new Map<string, PlanRow>();
+  const rows: ParsedRow[] = [];
+  const at = new Map<string, ParsedRow>();
+  let hasRepos = false;
   const laneOf = new Map<string, string>();
   const notes: string[] = [];
   for (let i = 0; i < lines.length; i++) {
@@ -112,6 +123,7 @@ export function parsePlan(text: string): ParsedPlan {
     const needs = col(head, 'needs', 'depends on', 'after', 'dependencies');
     const lane = col(head, 'lane', 'owner');
     const status = col(head, 'status', 'state');
+    const repo = col(head, 'repo', 'repository');
     const laneSteps = col(head, 'steps in order', 'steps');
     let j = i + 2;
     for (; j < lines.length; j++) {
@@ -124,7 +136,12 @@ export function parsePlan(text: string): ParsedPlan {
           notes.push(`Step ${id} is listed twice; the first one is kept.`);
           continue;
         }
-        const r: PlanRow = { step: id, title: shortTitle(cs[title] ?? '') || id };
+        const r: ParsedRow = { step: id, title: shortTitle(cs[title] ?? '') || id };
+        if (repo >= 0) {
+          hasRepos = true;
+          const named = plain(cs[repo] ?? '');
+          if (named && !/^[-—–]$/.test(named)) r.repo = named;
+        }
         const ns = needs >= 0 ? [...new Set(plain(cs[needs] ?? '').match(STEP_REF) ?? [])].filter((n) => n !== id) : [];
         if (ns.length) r.needs = ns;
         if (lane >= 0 && plain(cs[lane] ?? '')) r.lane = plain(cs[lane]).split(/\s+·\s+|\s+-\s+/)[0];
@@ -148,7 +165,45 @@ export function parsePlan(text: string): ParsedPlan {
     const r = at.get(s);
     if (r) r.lane ??= l;
   }
-  return { rows, notes };
+  return { rows, notes, hasRepos };
+}
+
+/** A project as the picker reads it. */
+export interface RepoChoice {
+  id: number;
+  owner: string;
+  repo: string;
+}
+
+/** The project a Repo cell names: `owner/repo` exactly, else a repository
+ *  name only one project has (case ignored). `null` when none or several. */
+export function matchRepo(text: string | undefined, projects: readonly RepoChoice[]): number | null {
+  const t = (text ?? '').trim().toLowerCase().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
+  if (!t) return null;
+  const full = projects.find((p) => `${p.owner}/${p.repo}`.toLowerCase() === t);
+  if (full) return full.id;
+  const byName = projects.filter((p) => p.repo.toLowerCase() === t);
+  return byName.length === 1 ? byName[0].id : null;
+}
+
+/** Each step's repository, as its cell names it (`null`: pick one). */
+export function initialRepoPicks(rows: readonly ParsedRow[], projects: readonly RepoChoice[]): Record<string, number | null> {
+  return Object.fromEntries(rows.map((r) => [r.step, matchRepo(r.repo, projects)]));
+}
+
+/** "Row 3 has no repo: pick one" for each row without a repository, when
+ *  the table has a Repo column (rows numbered from 1). */
+export function missingRepoLines(plan: ParsedPlan, picks: Readonly<Record<string, number | null>>): string[] {
+  if (!plan.hasRepos) return [];
+  return plan.rows.flatMap((r, i) => (picks[r.step] == null ? [`Row ${i + 1} has no repo: pick one`] : []));
+}
+
+/** The rows as the backend takes them, each with its picked repository. */
+export function wireRows(rows: readonly ParsedRow[], picks: Readonly<Record<string, number | null>>): PlanRow[] {
+  return rows.map(({ repo: _repo, ...r }) => {
+    const pid = picks[r.step];
+    return pid != null ? { ...r, project_id: pid } : r;
+  });
 }
 
 /** What an import did, in words. */

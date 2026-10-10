@@ -452,3 +452,40 @@ describe("Control's own slash commands", () => {
     expect(item?.querySelector('[data-testid="conv-slash-usage"]')?.textContent).toBe('#KEY @session');
   });
 });
+
+// Gap plan G3.13 (board Finish, "Control · first run").
+describe('Control on its first run', () => {
+  async function settle() {
+    for (let i = 0; i < 6; i++) {
+      await tick();
+      await Promise.resolve();
+    }
+  }
+
+  it('an agent nobody wrote to opens on three first steps; they fill the box or open New session', async () => {
+    const { newSessionHostRequest } = await import('./app_views');
+    const { get } = await import('svelte/store');
+    render(AgentPanel);
+    await settle();
+    expect(screen.getByTestId('control-first-run').textContent).toContain('Ask Control about your fleet');
+    await fireEvent.click(screen.getByTestId('control-first-needs'));
+    await settle();
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
+    expect(box.value).toContain('What needs me?');
+    expect(mockedSend).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByTestId('control-first-start'));
+    expect(get(newSessionHostRequest)).toBe('local');
+    newSessionHostRequest.set(null);
+    await fireEvent.click(screen.getByTestId('control-first-close'));
+    await settle();
+    expect(screen.queryByTestId('control-first-run')).toBeNull();
+  });
+
+  it('is gone once the agent has been asked something', async () => {
+    operatorSession.set(row({ last_prompt: 'What needs me?' }));
+    sessions.set([row({ last_prompt: 'What needs me?' })]);
+    render(AgentPanel);
+    await settle();
+    expect(screen.queryByTestId('control-first-run')).toBeNull();
+  });
+});

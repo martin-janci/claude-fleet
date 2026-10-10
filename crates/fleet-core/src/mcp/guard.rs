@@ -122,7 +122,32 @@ pub enum Access {
 /// served list, so a lookup here would be a lock per request. Everything it
 /// needs about WHO the caller is was resolved once, where the token was
 /// resolved: [`crate::mcp::Caller::is_personal_owner`].
+/// The tools a host-limited named token may call (M15 step G2.8): each
+/// reaches a session through `resolve_row_and_gate` (which runs
+/// `require_host`) or lists through `ViewScope::sees_session_row` (which
+/// applies the limit), and `new_session` checks its host with
+/// `require_host`. A tool joins only after its every host path is checked.
+pub const HOST_LIMITED_TOOLS: &[&str] = &[
+    "list_sessions",
+    "capture_session",
+    "session_transcript",
+    "session_history",
+    "send_prompt",
+    "kill_session",
+    "wait_for_session",
+    "wait_for_reply",
+    "new_session",
+    "whoami",
+];
+
 pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
+    // A named token limited to some hosts (G2.8) reaches only the tools
+    // whose every host goes through the session gate (`resolve_*_gate`,
+    // `ViewScope`) or `require_host`; anything that names a host another
+    // way (routines, clipboard, probes, fleet_health) could leave the limit.
+    if caller.api_hosts().is_some() && !HOST_LIMITED_TOOLS.contains(&tool) {
+        return false;
+    }
     match policy(tool).map(|p| p.access) {
         Some(Access::Client) => true,
         // Multi-user M1 (T2a): the hub's OWNER, not any person. Without the
@@ -631,6 +656,18 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     ToolPolicy {
         name: "pr_shepherd",
         access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Named Control API tokens (M15 step G2.8): the master and the owner's
+    // own device. Creating or revoking needs the master or a trusted full
+    // device, and only the master creates an admin token
+    // (`tools::api_tokens::token_minter`). Not readonly: create and revoke
+    // hand out and take away fleet access.
+    ToolPolicy {
+        name: "api_tokens",
+        access: Access::Person,
         readonly: false,
         confirm: false,
         deadline: Deadline::Quick,

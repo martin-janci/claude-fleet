@@ -389,6 +389,9 @@ const FROZEN_054: Record<string, Frozen> = {
     if (e.key === 'e' || e.key === 'E') return 'work-board.edit';
     if (e.key === 'ArrowLeft') return 'work-board.left';
     if (e.key === 'ArrowRight') return 'work-board.right';
+    // G3.5 (gap plan): x selects, s starts new.
+    if (e.key === 'x' || e.key === 'X') return 'work-board.select';
+    if (e.key === 's' || e.key === 'S') return 'work-board.start';
     return null;
   },
   'session-row': (e) => {

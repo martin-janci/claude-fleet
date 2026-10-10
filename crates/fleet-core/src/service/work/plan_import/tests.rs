@@ -39,6 +39,7 @@ fn row(step: &str, title: &str, lane: &str, needs: &[&str]) -> PlanRow {
         lane: Some(lane.into()),
         needs: needs.iter().map(|n| n.to_string()).collect(),
         status: None,
+        project_id: None,
     }
 }
 
@@ -221,4 +222,43 @@ fn a_step_id_leads_the_title() {
     assert_eq!(step_of("M14.2 Phone rows"), Some("M14.2"));
     assert_eq!(step_of("Payments v2"), None);
     assert_eq!(step_of("3.1"), None);
+}
+
+#[test]
+fn a_row_names_the_repository_its_new_task_works_in() {
+    let st = store();
+    let m = mission(&st, "plan");
+    let pid = st
+        .lock()
+        .unwrap()
+        .upsert_project("acme", "api", "/src/api")
+        .unwrap();
+    let plan = vec![
+        PlanRow {
+            project_id: Some(pid),
+            ..row("1.1", "Schema", "A", &[])
+        },
+        row("1.2", "Docs", "A", &["1.1"]),
+    ];
+    import_rows(&st, m.id, plan).unwrap();
+    let got = members(&st, m.id);
+    assert_eq!(got["1.1"].project_id, Some(pid));
+    assert_eq!(got["1.2"].project_id, None);
+}
+
+#[test]
+fn a_repository_that_is_not_there_refuses_the_whole_table() {
+    let st = store();
+    let m = mission(&st, "plan");
+    let plan = vec![
+        row("1.1", "Schema", "A", &[]),
+        PlanRow {
+            project_id: Some(9999),
+            ..row("1.2", "Docs", "A", &[])
+        },
+    ];
+    let err = import_rows(&st, m.id, plan).unwrap_err();
+    assert_eq!(err.code, codes::E_NOTFOUND);
+    assert!(err.message.contains("step 1.2"), "{}", err.message);
+    assert!(members(&st, m.id).is_empty(), "nothing was written");
 }

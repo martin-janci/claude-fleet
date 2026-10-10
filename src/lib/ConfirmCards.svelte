@@ -5,6 +5,9 @@
   QuestionCard, instead of a dialog over the whole window. Mounted inside an
   agent transcript; while one is mounted the dialog
   leaves the operator's requests to it (`confirms.ts`).
+  G4.9 (the fleet agent board): two or more waiting at once are one plan,
+  one card listing each step with "Confirm N · Cancel". Confirm answers each
+  step in the order it was asked; one that fails to answer stays listed.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -43,9 +46,40 @@
   function detail(r: ConfirmRequest): string {
     return r.summary ? `${r.tool} ${r.summary}` : r.tool;
   }
+
+  const plan = $derived($cardConfirms.length > 1 ? $cardConfirms : null);
+  const planBusy = $derived(plan ? plan.some((r) => $answering.has(r.nonce)) : false);
+
+  /** One answer for every step, oldest first: a step is never approved
+   *  ahead of one asked before it. */
+  async function answerPlan(approved: boolean) {
+    for (const r of plan ?? []) await answerConfirm(r.nonce, approved);
+  }
 </script>
 
-{#if $cardConfirms.length > 0}
+{#if plan}
+  <div class="confirm-cards" data-testid="confirm-cards">
+    <QuestionCard
+      question={`${plan.length} steps need your OK`}
+      age={plan[0].asked_at > 0 ? `asked ${shortAge(plan[0].asked_at, nowSec)} ago` : undefined}
+      label="The agent's plan needs your OK"
+      testid="confirm-plan"
+      enter
+      {mac}
+      answers={[
+        { label: `Confirm ${plan.length}`, onselect: () => void answerPlan(true), disabled: planBusy, testid: 'confirm-plan-approve' },
+        { label: 'Cancel', onselect: () => void answerPlan(false), disabled: planBusy, testid: 'confirm-plan-cancel' },
+      ]}
+    >
+      <ol class="steps" data-testid="confirm-plan-steps">
+        {#each plan as r (r.nonce)}
+          <li data-testid="confirm-plan-step"><span>{question(r).replace(/\?$/, '')}</span> <span class="mono">{detail(r)}</span></li>
+        {/each}
+      </ol>
+      <p class="why">They start, move or kill sessions, so each waits for you. Nothing runs until you confirm.</p>
+    </QuestionCard>
+  </div>
+{:else if $cardConfirms.length > 0}
   <div class="confirm-cards" data-testid="confirm-cards">
     {#each $cardConfirms as r (r.nonce)}
       {@const busy = $answering.has(r.nonce)}
@@ -55,6 +89,7 @@
         detail={detail(r)}
         label="The agent needs your OK"
         testid="confirm-card"
+        enter
         {mac}
         answers={[
           { label: 'Approve', onselect: () => void answerConfirm(r.nonce, true), disabled: busy, testid: 'confirm-card-approve' },
@@ -73,6 +108,18 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+  }
+  .steps {
+    margin: 0;
+    padding-left: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: var(--text-xs);
+  }
+  .steps .mono {
+    color: var(--fg-muted);
+    overflow-wrap: anywhere;
   }
   .why {
     margin: 0;

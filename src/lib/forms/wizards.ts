@@ -13,6 +13,7 @@ import pairDevice from './wizards/pair_device.json';
 import newSession from './wizards/new_session.json';
 import getStarted from './wizards/get_started.json';
 import linkPeer from './wizards/link_peer.json';
+import newToken from './wizards/new_token.json';
 
 export type WizardId =
   | 'link_hub'
@@ -21,7 +22,8 @@ export type WizardId =
   | 'pair_device'
   | 'new_session'
   | 'get_started'
-  | 'link_peer';
+  | 'link_peer'
+  | 'new_token';
 
 export interface Wizard {
   id: WizardId;
@@ -55,6 +57,9 @@ export const WIZARDS: Record<WizardId, Wizard> = {
   // redeems the code). Nothing waits on a person once it runs: the other
   // side's operator minted the code before, so no step says "waiting for".
   link_peer: { id: 'link_peer', spec: linkPeer as FormSpec, sending: 'Linking…', loader: 'counter-orbit' },
+  // Settings › Control API's + Token (M15 G2.8): the token is shown once
+  // after, by ApiTokenCreated.
+  new_token: { id: 'new_token', spec: newToken as FormSpec, sending: 'Creating…', loader: 'halo' },
 };
 
 /** `spec` with the choices only known when it opens (the fleet's hosts, a

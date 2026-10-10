@@ -3,11 +3,51 @@ import { writable } from 'svelte/store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 import type { SessionRow } from './sessions';
 
-export type AssetKind = 'skill' | 'agent' | 'hook' | 'mcp_server' | 'plugin_ref';
-export const KIND_ORDER: AssetKind[] = ['skill', 'agent', 'hook', 'mcp_server', 'plugin_ref'];
+export type AssetKind = 'skill' | 'agent' | 'command' | 'hook' | 'mcp_server' | 'plugin_ref';
+export const KIND_ORDER: AssetKind[] = ['skill', 'agent', 'command', 'hook', 'mcp_server', 'plugin_ref'];
 export const KIND_LABEL: Record<AssetKind, string> = {
-  skill: 'Skills', agent: 'Agents', hook: 'Hooks', mcp_server: 'MCP servers', plugin_ref: 'Plugins',
+  skill: 'Skills', agent: 'Agents', command: 'Commands', hook: 'Hooks', mcp_server: 'MCP servers', plugin_ref: 'Plugins',
 };
+/** One of a kind, for a form's Kind select ("Skill", "MCP server"). */
+export const KIND_ONE: Record<AssetKind, string> = {
+  skill: 'Skill', agent: 'Agent', command: 'Command', hook: 'Hook', mcp_server: 'MCP server', plugin_ref: 'Plugin',
+};
+
+/** The harnesses an asset can target (`service/catalog/harness`), as the
+ *  editor's Harness boxes name them (G2.6). A kind a harness cannot render
+ *  is not offered for it. */
+export const HARNESSES: { id: string; label: string; kinds: AssetKind[] }[] = [
+  { id: 'claude', label: 'Claude Code', kinds: ['skill', 'agent', 'command', 'hook', 'mcp_server', 'plugin_ref'] },
+  { id: 'codex', label: 'Codex', kinds: ['skill', 'agent', 'mcp_server'] },
+];
+
+type TargetsMap = Record<string, Record<string, unknown>>;
+
+/** Whether `harness` receives the asset: its `targets.<harness>.enabled`,
+ *  true when absent (`TargetOverride`'s default). */
+export function harnessOn(a: Pick<EditableAsset, 'targets'>, harness: string): boolean {
+  const t = (a.targets as TargetsMap | undefined)?.[harness];
+  return t?.enabled !== false;
+}
+
+/** `targets` with `harness` turned on or off. A target left holding only
+ *  `enabled: true` is dropped, so the YAML stays as it was. */
+export function withHarness(targets: unknown, harness: string, on: boolean): TargetsMap | undefined {
+  const next: TargetsMap = { ...((targets as TargetsMap | undefined) ?? {}) };
+  const t = { ...(next[harness] ?? {}) };
+  if (on) delete t.enabled;
+  else t.enabled = false;
+  const emptyExtra = (k: string, v: unknown) => k === 'extra' && !!v && typeof v === 'object' && Object.keys(v).length === 0;
+  if (Object.entries(t).every(([k, v]) => emptyExtra(k, v))) delete next[harness];
+  else next[harness] = t;
+  return Object.keys(next).length === 0 ? undefined : next;
+}
+
+/** The Import form's What boxes (G2.6): every kind the importer reads, as
+ *  `only` entries (`<kind>:*`). All ticked imports everything (`[]`). */
+export function importOnlyFor(kinds: readonly AssetKind[]): string[] {
+  return kinds.length === KIND_ORDER.length ? [] : kinds.map((k) => `${k}:*`);
+}
 export interface CatalogConfigRow {
   repo_path: string;
   remote_url: string | null;
@@ -119,6 +159,9 @@ export interface EditableAsset {
    *  `updateAsset` like any other field this UI has no dedicated control
    *  for — declared explicitly here only for the type. */
   scope?: AssetScope;
+  /** Per-harness overrides (`targets.<harness>`); the Harness boxes (G2.6)
+   *  write `enabled`, everything else round-trips untouched. */
+  targets?: Record<string, Record<string, unknown>>;
   body: string;
   resources?: ResourceRef[];
   [key: string]: unknown;
@@ -414,7 +457,23 @@ export interface Finding { field: string; message: string }
 export interface LintReport { errors: Finding[]; warnings: Finding[] }
 export interface AssetLint { kind: string; name: string; report: LintReport }
 export interface LintAll { assets: AssetLint[]; problems: Problem[]; errors: number; warnings: number }
-export interface RepoStatus { head: string; dirty: number; ahead: number | null; behind: number | null; has_upstream: boolean }
+/** One uncommitted change, per asset (`repo::RepoChange`, G2.6). */
+export interface RepoChange { path: string; status: 'A' | 'M' | 'D' | string }
+export interface RepoStatus {
+  head: string; dirty: number; ahead: number | null; behind: number | null; has_upstream: boolean;
+  /** Absent from an older hub. */
+  changes?: RepoChange[];
+}
+
+/** The commit message the Commit form starts from, by rule from the
+ *  changes (mirrors `repo::commit_message_for`). */
+export function commitMessageFor(changes: readonly RepoChange[]): string {
+  if (changes.length === 0) return 'catalog: commit pending changes';
+  const verb = changes.every((c) => c.status === 'A') ? 'add' : changes.every((c) => c.status === 'D') ? 'remove' : 'update';
+  const named = changes.slice(0, 3).map((c) => c.path);
+  const more = changes.length - named.length;
+  return `catalog: ${verb} ${named.join(', ')}${more > 0 ? ` (+${more})` : ''}`;
+}
 export interface WriteResult { commit: string; lint: LintReport }
 
 /** The neutral tool vocabulary (`service/catalog/model.rs::TOOLS`). An
@@ -436,6 +495,7 @@ export const KIND_FIELDS: Record<AssetKind, string[]> = {
   hook: ['event', 'action'],
   mcp_server: ['transport', 'url', 'command', 'args', 'env'],
   plugin_ref: ['harness', 'marketplace', 'plugin'],
+  command: ['allowed_tools', 'argument_hint', 'model'],
 };
 
 /** The most recently loaded repo status (dirty/ahead/behind/head), refreshed
@@ -502,11 +562,18 @@ export function assetTemplate(kind: string, name: string): Promise<Result<Editab
  *  omitted) to a freshly spawned interactive session in the catalog repo.
  *  Abortable like `applySync` — the wrapper injects a `call_id`. */
 export function spawnAuthorSession(
-  f: { kind?: string; name?: string; instructions: string },
+  f: { kind?: string; name?: string; instructions: string; host?: string },
   signal?: AbortSignal,
 ): Promise<Result<SessionRow>> {
   return invokeCmdAbortable<SessionRow>('catalog_spawn_author_session', {
-    args: { kind: f.kind ?? null, name: f.name ?? null, instructions: f.instructions },
+    args: {
+      kind: f.kind ?? null,
+      name: f.name ?? null,
+      instructions: f.instructions,
+      // G2.6: the Host picker; `local` (the catalog's own checkout) is the
+      // default and is not sent, so an older backend reads the same args.
+      ...(f.host && f.host !== 'local' ? { host_alias: f.host } : {}),
+    },
   }, signal);
 }
 

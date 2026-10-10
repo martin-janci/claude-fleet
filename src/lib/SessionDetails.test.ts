@@ -217,7 +217,7 @@ describe('SessionDetails', () => {
       expect(screen.getByTestId('related-sessions').textContent).toMatch(/Related sessions\s*1/);
       expect(screen.getByTestId('related-proposed-row').textContent).toContain('dev-twin');
       expect(screen.getByTestId('related-proposed-row').textContent).toContain('same work?');
-      expect(screen.getByTestId('related-proposed-by').textContent).toContain('81%');
+      expect(screen.getByTestId('related-proposed-by').textContent).toContain('likely');
     });
 
     it('Link and Not related answer it (gap plan G4.3)', async () => {

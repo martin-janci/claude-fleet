@@ -210,6 +210,11 @@ pub struct ViewScope {
     /// 3). Private for the reason `sole_person` is: a fact read at
     /// construction, never asserted by a call site.
     unclaimed: UnclaimedReach,
+    /// The hosts a named Control API token is limited to (M15 step G2.8),
+    /// `None` for every host. Checked before every other clause: a session
+    /// on another host is invisible whoever owns it. Private: set only by
+    /// [`Self::with_hosts`], which can only narrow.
+    hosts: Option<Vec<String>>,
     /// This is the hub's own reader, not a caller.
     ///
     /// Private, and the reason the struct has no public literal form: "the
@@ -236,6 +241,7 @@ impl ViewScope {
             proven_session: None,
             sole_person: false,
             unclaimed: UnclaimedReach::None,
+            hosts: None,
             internal: true,
         }
     }
@@ -262,8 +268,30 @@ impl ViewScope {
             proven_session,
             sole_person,
             unclaimed,
+            hosts: None,
             internal: false,
         }
+    }
+
+    /// The same scope limited to `hosts` (a named token's host limit,
+    /// G2.8); `None` leaves it as it is. Only ever narrows: a second limit
+    /// keeps the hosts both name.
+    pub fn with_hosts(mut self, hosts: Option<Vec<String>>) -> Self {
+        if let Some(new) = hosts {
+            self.hosts = Some(match self.hosts.take() {
+                Some(old) => new.into_iter().filter(|h| old.contains(h)).collect(),
+                None => new,
+            });
+        }
+        self
+    }
+
+    /// Whether this scope may reach `host` at all: false only for a host a
+    /// named token's limit leaves out.
+    pub fn reaches_host(&self, host: &str) -> bool {
+        self.hosts
+            .as_ref()
+            .is_none_or(|h| h.iter().any(|x| x == host))
     }
 
     /// The same scope with its ORG half replaced — the one narrowing a
@@ -442,6 +470,11 @@ impl ViewScope {
         // narrowed by `with_org` and then ignored the narrowing because it was
         // also internal.
         if !self.org.sees_session_org_only(f.host_alias, f.org_id) {
+            return Visibility::None;
+        }
+        // A named token's host limit (G2.8): above the internal clause too,
+        // though only a caller's scope ever carries one.
+        if !self.reaches_host(f.host_alias) {
             return Visibility::None;
         }
         if self.internal {

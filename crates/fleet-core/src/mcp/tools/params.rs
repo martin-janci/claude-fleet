@@ -971,7 +971,7 @@ pub struct PlanSyncParams {
     /// Only this host; omit for every reachable one.
     #[serde(default)]
     pub host_alias: Option<String>,
-    /// Only this kind: skill | agent | hook | mcp_server | plugin_ref.
+    /// Only this kind: skill | agent | hook | mcp_server | plugin_ref | command.
     #[serde(default)]
     pub kind: Option<String>,
     /// Only this asset.

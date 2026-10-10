@@ -76,7 +76,7 @@ describe('Control routing receipts', () => {
     expect(inv).toHaveBeenCalledWith('control_route_propose', { text: 'How far did the federation handshake get?' });
     expect(screen.getByTestId('control-route-target').textContent).toBe('About Hub federation v2');
     expect(screen.getByTestId('control-route-proposed').textContent).toContain('Proposed by Jev');
-    expect(screen.getByTestId('control-route-proposed').textContent).toContain('86%');
+    expect(screen.getByTestId('control-route-proposed').textContent).toContain('likely');
   });
 
   it('only messages sent while Control shows are routed, each once', async () => {

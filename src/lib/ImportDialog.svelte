@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { importHost, type ImportReport } from './assets';
+  import { importHost, importOnlyFor, KIND_LABEL, KIND_ORDER, type AssetKind, type ImportReport } from './assets';
   import { hosts } from './hosts';
   import Modal from './Modal.svelte';
   import TransferMark from './TransferMark.svelte';
@@ -19,10 +19,19 @@
   let report = $state<ImportReport | null>(null);
   let error = $state<string | null>(null);
   let busy = $state(false);
+  // G2.6: What to import, one box per kind. A caller's own `only` (one
+  // asset's Import button) wins and the boxes are not shown.
+  let what = $state<AssetKind[]>([...KIND_ORDER]);
+  const asked = $derived(only.length > 0 ? only : importOnlyFor(what));
+  function toggle(k: AssetKind, on: boolean) {
+    what = on ? KIND_ORDER.filter((x) => x === k || what.includes(x)) : what.filter((x) => x !== k);
+    report = null;
+  }
 
   async function run(dryRun: boolean) {
+    if (asked.length === 0 && what.length === 0) return;
     busy = true; error = null;
-    const r = await importHost(hostAlias, dryRun, only);
+    const r = await importHost(hostAlias, dryRun, asked);
     busy = false;
     if (!r.ok) { error = r.error.message; return; }
     report = r.value;
@@ -40,7 +49,15 @@
         {/each}
       </select>
     </label>
-    {#if only.length > 0}<p class="muted" data-testid="import-only">Only: {only.join(', ')}</p>{/if}
+    {#if only.length > 0}<p class="muted" data-testid="import-only">Only: {only.join(', ')}</p>
+    {:else}
+      <fieldset class="what" data-testid="import-what">
+        <legend>What</legend>
+        {#each KIND_ORDER as k (k)}
+          <label><input type="checkbox" checked={what.includes(k)} onchange={(e) => toggle(k, (e.currentTarget as HTMLInputElement).checked)} data-testid="import-what-{k}" />{KIND_LABEL[k]}</label>
+        {/each}
+      </fieldset>
+    {/if}
     {#if busy}
       <!-- Step 10.10: an import cannot say its size, so Data rain. -->
       <p class="running" data-testid="import-running"><TransferMark fraction={null} label="Reading the host's config" testid="import-transfer" /> Reading the host's config…</p>
@@ -55,7 +72,7 @@
     {/if}
     <div class="actions">
       <button onclick={onclose}>Close</button>
-      <button onclick={() => run(true)} disabled={busy} data-testid="import-dry-run">Dry run</button>
+      <button onclick={() => run(true)} disabled={busy || (only.length === 0 && what.length === 0)} data-testid="import-dry-run">Dry run</button>
       <button class="btn btn--primary" onclick={() => run(false)} disabled={busy || !report?.dry_run} data-testid="import-confirm" title={report?.dry_run ? '' : 'Run a dry run first'}>Import</button>
     </div>
   </div>
@@ -63,6 +80,9 @@
 
 <style>
   .dialog { max-height: 70vh; overflow: auto; }
+  .what { display: flex; flex-wrap: wrap; gap: 4px 12px; border: 0; padding: 0; margin: 8px 0; font-size: var(--text-xs); }
+  .what legend { color: var(--fg-muted); padding: 0; margin-bottom: 4px; }
+  .what label { display: inline-flex; align-items: center; gap: 4px; }
   .running { display: flex; align-items: center; gap: var(--space-2, 8px); color: var(--fg-muted); font-size: var(--text-xs); }
   h4 { margin: 10px 0 4px; font-size: var(--text-xs); }
   .muted { color: var(--fg-muted); font-size: var(--text-xs); } .error { color: var(--usage-crit); }
