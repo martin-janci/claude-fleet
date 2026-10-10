@@ -25,6 +25,7 @@ mod discover;
 mod lifecycle;
 mod lost_found;
 mod paths;
+#[cfg(feature = "nl-detect")]
 pub(crate) use paths::project_for_local_path;
 mod prompt;
 mod reconcile;

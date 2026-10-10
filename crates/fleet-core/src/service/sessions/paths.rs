@@ -239,6 +239,7 @@ pub(super) fn worktree_key_for_host(path: &str, paths: &HostPaths) -> Option<Str
 /// rows: the project whose base contains `cwd` (the longest wins). The Lost
 /// and found rule as the decide benches replay it (`decide::bench::choice`),
 /// with no store at hand.
+#[cfg(feature = "nl-detect")]
 pub(crate) fn project_for_local_path(projects: &[ProjectRow], cwd: &str) -> Option<i64> {
     let paths = HostPaths {
         root: String::new(),
