@@ -1,6 +1,6 @@
 [package]
 name = "claude-fleet"
-version = "0.6.1"
+version = "0.6.2-dev.51.desktop.gaabbfa3"
 description = "Desktop app for managing Claude Code sessions across hosts"
 authors = ["martin-janci"]
 edition = "2021"
