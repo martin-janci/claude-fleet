@@ -2696,19 +2696,34 @@ fn a_task_serves_its_comments_and_withholds_their_author_from_a_scoped_caller() 
 /// person of a one-person hub.
 #[test]
 fn a_person_sees_their_own_device_names_and_no_one_elses() {
-    use crate::service::view_scope::{GrantSet, UnclaimedReach, ViewScope};
-    let w = world();
-    let (ana, bo) = {
-        let s = w.st.lock().unwrap();
-        let ana = s.create_person("ana", None).unwrap().id;
-        let bo = s.create_person("bo", None).unwrap().id;
-        s.add_comment(w.t1, "client:ana-phone", Some(ana), "mine")
-            .unwrap();
-        s.add_comment(w.t1, "client:bo-laptop", Some(bo), "theirs")
-            .unwrap();
-        (ana, bo)
+    use crate::mcp::auth::{Caller, ClientRef, TokenMode};
+    use crate::service::view_scope::ViewScope;
+    // A person's paired device, scoped the way a request is.
+    let device = |w: &W, p: i64| -> ViewScope {
+        Caller {
+            api: None,
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 7,
+                name: "phone".into(),
+                trusted: false,
+                org_id: None,
+                person_id: Some(p),
+            }),
+            mode: TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
+        }
+        .view_scope(&w.st.lock().unwrap())
+        .unwrap()
     };
+    let w = world();
+    let ana = w.st.lock().unwrap().create_person("ana", None).unwrap().id;
     let id = format!("item:{}", w.t1);
+    w.st.lock()
+        .unwrap()
+        .add_comment(w.t1, "client:ana-phone", Some(ana), "mine")
+        .unwrap();
     structure::place(
         &w.st,
         &vs(&OrgScope::All),
@@ -2719,17 +2734,6 @@ fn a_person_sees_their_own_device_names_and_no_one_elses() {
         "client:bo-laptop",
     )
     .unwrap();
-    let as_person = |p: i64, sole: bool| {
-        ViewScope::for_caller(
-            OrgScope::All,
-            Some(p),
-            GrantSet::default(),
-            None,
-            None,
-            sole,
-            UnclaimedReach::None,
-        )
-    };
     let authors = |v: &ViewScope| -> Vec<String> {
         task(&w.st, v, &id)
             .unwrap()
@@ -2738,21 +2742,24 @@ fn a_person_sees_their_own_device_names_and_no_one_elses() {
             .map(|c| c.author)
             .collect()
     };
-    assert_eq!(authors(&as_person(ana, false)), ["client:ana-phone", ""]);
-    assert_eq!(authors(&as_person(bo, false)), ["", "client:bo-laptop"]);
     let placed_by = |v: &ViewScope| task(&w.st, v, &id).unwrap().placement.unwrap().updated_by;
-    assert_eq!(placed_by(&as_person(bo, false)), None);
-    assert_eq!(
-        placed_by(&as_person(bo, true)).as_deref(),
-        Some("client:bo-laptop")
-    );
+    // The hub itself sees every device.
     assert_eq!(
         placed_by(&vs(&OrgScope::All)).as_deref(),
         Some("client:bo-laptop")
     );
-    // The one person of a one-person hub owns every device.
+    // Each person sees their own device names and no one else's.
+    let bo = w.st.lock().unwrap().create_person("bo", None).unwrap().id;
+    w.st.lock()
+        .unwrap()
+        .add_comment(w.t1, "client:bo-laptop", Some(bo), "theirs")
+        .unwrap();
+    assert_eq!(authors(&device(&w, ana)), ["client:ana-phone", ""]);
+    assert_eq!(authors(&device(&w, bo)), ["", "client:bo-laptop"]);
+    assert_eq!(placed_by(&device(&w, ana)), None);
+    assert_eq!(placed_by(&device(&w, bo)), None);
     assert_eq!(
-        authors(&as_person(ana, true)),
+        authors(&vs(&OrgScope::All)),
         ["client:ana-phone", "client:bo-laptop"]
     );
 }
