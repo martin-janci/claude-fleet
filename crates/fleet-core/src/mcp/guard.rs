@@ -1974,6 +1974,20 @@ impl PendingConfirms {
         }
     }
 
+    /// Drop expired requests now and say how many unanswered ones went: a
+    /// request that expires announces nothing by itself, so a hub's tick
+    /// calls this and emits `confirm:changed` when it is not zero — or every
+    /// card and dialog for one stays up until something else moves the queue.
+    pub fn prune_expired(&self) -> usize {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = entries.values().filter(|p| p.approved.is_none()).count();
+        prune(&mut entries, Instant::now());
+        before - entries.values().filter(|p| p.approved.is_none()).count()
+    }
+
     /// Outstanding (unanswered) requests in full, oldest first: what the
     /// confirm cards and the dialog show after a reload, and what a hub
     /// lists to its owner's desktop (`confirms { action: list }`).
@@ -2766,6 +2780,32 @@ mod tests {
         );
         prune(&mut entries, now + CONFIRM_TTL);
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn prune_expired_counts_the_unanswered_requests_that_went() {
+        let pc = PendingConfirms::new();
+        let old = pc.request("kill_session", "name=x", "master");
+        let answered = pc.request("kill_session", "name=y", "master");
+        let fresh = pc.request("kill_session", "name=z", "master");
+        assert!(pc.resolve(&answered.nonce, true));
+        let Some(long_ago) = Instant::now().checked_sub(CONFIRM_TTL + Duration::from_secs(1))
+        else {
+            return;
+        };
+        {
+            let mut e = pc.entries.lock().unwrap();
+            e.get_mut(&old.nonce).unwrap().created = long_ago;
+        }
+        assert_eq!(pc.prune_expired(), 1);
+        assert_eq!(pc.prune_expired(), 0, "nothing left to expire");
+        assert_eq!(
+            pc.pending()
+                .iter()
+                .map(|r| r.nonce.clone())
+                .collect::<Vec<_>>(),
+            vec![fresh.nonce]
+        );
     }
 
     #[test]

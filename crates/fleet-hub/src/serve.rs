@@ -981,6 +981,14 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             None
         }
     };
+    // A request that expires announces nothing by itself: without this, its
+    // card on the phone and the desktop stayed up (answering it only said
+    // "expired") until something else moved the queue.
+    tokio::spawn(announce_expired_confirms(
+        Arc::clone(&guards.confirms),
+        Arc::clone(&bus),
+        CONFIRM_EXPIRY_CHECK,
+    ));
     let (shutdown, serve_task) = mcp::start_with_listener(
         Arc::clone(&store),
         Arc::clone(&ssh),
@@ -1273,6 +1281,26 @@ fn warn_if_confirm_destructive(store: &Mutex<Store>) {
             "mcp.confirm_destructive is on: every destructive tool waits for the owner's paired \
              device to approve it; turn the setting off if no device answers"
         );
+    }
+}
+
+/// How often the hub looks for confirmation requests that expired.
+const CONFIRM_EXPIRY_CHECK: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Every `every`, drop expired confirmation requests and, when any went,
+/// emit `confirm:changed` so every device re-reads the queue.
+async fn announce_expired_confirms(
+    confirms: Arc<fleet_core::mcp::guard::PendingConfirms>,
+    bus: Arc<BroadcastEventBus>,
+    every: std::time::Duration,
+) {
+    let mut tick = tokio::time::interval(every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        if confirms.prune_expired() > 0 {
+            bus.confirm_changed();
+        }
     }
 }
 
