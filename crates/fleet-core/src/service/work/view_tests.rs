@@ -2642,6 +2642,23 @@ fn a_tree_query_groups_by_epic_and_rolls_its_children_up() {
     assert_eq!(d.group.id, format!("epic:{}", epic.id));
     assert_eq!(d.parent_task_id, Some(format!("item:{}", epic.id)));
     assert_eq!(group_of(&p, &key(epic.id + 3)).label, "No epic");
+
+    // A subtask of an epic's task sits in the epic's section too, two
+    // levels down (owner decision 2026-10-10: three levels).
+    let sub = {
+        let s = w.st.lock().unwrap();
+        s.create_native_item(&crate::store::NativeItem {
+            title: "Edge case",
+            parent_id: Some(done_one.id),
+            project_id: None,
+            notes: None,
+        })
+        .unwrap()
+    };
+    let p = page(&w, &OrgScope::All, by("epic"));
+    let st = task_of(&p, &key(sub.id));
+    assert_eq!(st.group.id, format!("epic:{}", epic.id));
+    assert_eq!((st.level, task_of(&p, &key(epic.id)).level), (3, 1));
     assert_eq!(group_of(&p, "TK-1").id, "none");
 }
 
