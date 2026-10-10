@@ -397,7 +397,7 @@
   .path {
     flex: 1 1 auto;
     min-width: 0;
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: var(--mono);
     font-size: var(--text-2xs);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -510,7 +510,7 @@
     min-height: 0;
   }
   .file {
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: var(--mono);
     font-size: var(--text-2xs);
     line-height: 1.5;
     white-space: pre;

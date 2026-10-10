@@ -9,6 +9,7 @@
   // agent text renders as text.
   import { onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
+  import { viewKey } from './shortcuts';
   import { createWorkTask, onWorkChangedDebounced } from './work';
   import {
     openTask,
@@ -42,6 +43,9 @@
   }: { debounceMs?: number; maxWaitMs?: number; onpage?: (p: WorkTreePage) => void } = $props();
 
   let tasks = $state.raw<WorkTask[]>([]);
+  // A blocked task names what it waits for by key when that task is loaded.
+  const byId = $derived(new Map(tasks.map((t) => [t.task_id, t])));
+  const taskById = (id: string) => byId.get(id);
   let loaded = $state(false);
   let error = $state<IpcError | null>(null);
   let doneOpen = $state(false);
@@ -137,22 +141,24 @@
    *  selection, `s` runs the selected task's Work button, ⇧S opens its
    *  start popover. Never inside a field, a menu or a dialog. */
   function onkey(e: KeyboardEvent) {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // The keys are the registry's `task-list` rows (step 0.1).
+    const act = viewKey('task-list', e);
+    if (!act) return;
     const t = e.target as HTMLElement | null;
     if (t?.closest('input, textarea, select, [role="dialog"], [role="menu"]')) return;
     const at = visibleRows.indexOf(get(selectedTaskId) ?? '');
-    if (e.key === 'j' || e.key === 'k') {
+    if (act === 'task-list.down' || act === 'task-list.up') {
       if (visibleRows.length === 0) return;
       e.preventDefault();
-      const next = e.key === 'j' ? Math.min(at + 1, visibleRows.length - 1) : Math.max(at - 1, 0);
+      const next = act === 'task-list.down' ? Math.min(at + 1, visibleRows.length - 1) : Math.max(at - 1, 0);
       const id = visibleRows[at < 0 ? 0 : next];
       openTask(id, nodeOf(id)?.task.sessions);
       document.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(id)}"] .main`)?.focus();
-    } else if ((e.key === 's' || e.key === 'S') && at >= 0) {
+    } else if (at >= 0) {
       const b = workButtonFor(visibleRows[at]);
       if (!b) return;
       e.preventDefault();
-      if (e.shiftKey) b.ask();
+      if (act === 'task-list.work-ask') b.ask();
       else b.primary();
     }
   }
@@ -252,6 +258,7 @@
                 task={t}
                 selected={$selectedTaskId === t.task_id}
                 currentSessionId={$selectedSession?.id ?? null}
+                lookup={taskById}
                 title={displayTitle(t)}
                 onselect={() => openTask(t.task_id, t.sessions)}
                 onopen={(l) => openLink(t, l)}
@@ -307,7 +314,7 @@
     flex: 1;
     min-width: 0;
     height: 26px;
-    padding: 0 8px;
+    padding: 0 var(--space-2);
     border: 1px dashed var(--control-border);
     border-radius: var(--radius-md);
     background: var(--bg);
@@ -395,9 +402,9 @@
     color: var(--fg-2);
   }
   .children {
-    margin: 0 0 4px 24px;
+    margin: 0 0 var(--space-1) var(--space-6);
     border-left: 1px solid var(--border);
-    padding-left: 8px;
+    padding-left: var(--space-2);
   }
   .child {
     display: grid;
@@ -436,7 +443,7 @@
   }
   .err {
     color: var(--usage-crit);
-    padding: 4px;
+    padding: var(--space-1);
     margin: 0;
   }
 </style>

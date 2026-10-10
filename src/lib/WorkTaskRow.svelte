@@ -20,6 +20,7 @@
     onopen,
     title,
     trailing,
+    lookup,
   }: {
     task: WorkTask;
     selected?: boolean;
@@ -32,11 +33,14 @@
     title?: string;
     /** Actions after the body (the List layout's edit and start). */
     trailing?: Snippet;
+    /** The task a dependency id names, when the view has it loaded: a
+     *  blocked task's line names it by key (step 6.3). */
+    lookup?: (id: string) => Pick<WorkTask, 'key' | 'title'> | null | undefined;
   } = $props();
 
   const rows = $derived(new Map($sessions.map((s) => [s.id, s])));
   const tone = $derived(taskTone(t));
-  const line = $derived(taskLine(t));
+  const line = $derived(taskLine(t, lookup));
   const live = $derived(liveLinks(t));
   const pr = $derived(prChip(t, rows));
   const cost = $derived(costChip(t));

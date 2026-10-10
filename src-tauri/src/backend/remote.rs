@@ -1266,26 +1266,34 @@ impl HubBackend {
         &self,
         args: &sessions::NewSessionArgs,
     ) -> Result<SessionRow, IpcError> {
-        self.route(
-            "new_session",
-            &json!({
-                "host_alias": args.host_alias,
-                "project_id": args.project_id,
-                "worktree_id": args.worktree_id,
-                "name": args.name,
-                "new_worktree": args.new_worktree,
-                "base_branch": args.base_branch,
-                "kind": args.kind,
-                "start_command": args.start_command,
-                "friendly_name": args.friendly_name,
-                "resume_claude_session_id": args.resume_claude_session_id,
-                "model": args.model,
-                "effort": args.effort,
-                "profile": args.profile,
-                "agent": args.agent,
-            }),
-        )
-        .await
+        let mut body = json!({
+            "host_alias": args.host_alias,
+            "project_id": args.project_id,
+            "worktree_id": args.worktree_id,
+            "name": args.name,
+            "new_worktree": args.new_worktree,
+            "base_branch": args.base_branch,
+            "kind": args.kind,
+            "start_command": args.start_command,
+            "friendly_name": args.friendly_name,
+            "resume_claude_session_id": args.resume_claude_session_id,
+            "model": args.model,
+            "effort": args.effort,
+            "profile": args.profile,
+            "agent": args.agent,
+            // Unlike `call_id`, the start token has a hub counterpart:
+            // the hub reports the start's steps under it as
+            // `start:progress`, and this desktop's `/events` stream
+            // carries them to the dialog that minted it (step 5.13).
+            "start_token": args.start_token,
+        });
+        // Step 4.4: the person was asked about `accounts.pause_at` and chose
+        // to start anyway. Sent only then, so an older hub sees the same
+        // arguments it always did.
+        if args.over_limit_ok {
+            body["over_limit_ok"] = json!(true);
+        }
+        self.route("new_session", &body).await
     }
 
     /// `commands::sessions::repair_session` with `explicit: true` only — the

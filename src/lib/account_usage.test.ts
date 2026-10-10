@@ -395,9 +395,9 @@ describe('statusMessage', () => {
 
   it('stale ok shows its age and the next try', () => {
     expect(texts(msg(snap({ fetched_at: NOW - 14 * MIN, next_try_at: NOW + 8 * MIN })))).toEqual([
-      '◷ 14 min old. Next try 14:40.',
+      'clock 14 min old. Next try 14:40.',
     ]);
-    expect(texts(msg(snap({ fetched_at: NOW - 14 * MIN, next_try_at: 0 })))).toEqual(['◷ 14 min old.']);
+    expect(texts(msg(snap({ fetched_at: NOW - 14 * MIN, next_try_at: 0 })))).toEqual(['clock 14 min old.']);
   });
 
   it('expired past reset names the reset and the last known value', () => {
@@ -410,8 +410,8 @@ describe('statusMessage', () => {
   it('rate-limited', () => {
     const m = msg(snap({ status: 'rate_limited', fetched_at: NOW - 14 * MIN, next_try_at: NOW + 20 * MIN, detail: 'rate limited by the usage endpoint (Retry-After: 900s)' }));
     expect(texts(m)).toEqual([
-      '◷ 14 min old — last check failed: rate-limited.',
-      '⏸ Anthropic is rate-limiting usage checks. Next try 14:52.',
+      'clock 14 min old — last check failed: rate-limited.',
+      'pause Anthropic is rate-limiting usage checks. Next try 14:52.',
     ]);
     expect(m.copyDetail).toBe('rate limited by the usage endpoint (Retry-After: 900s)');
   });
@@ -420,8 +420,8 @@ describe('statusMessage', () => {
     const detail = 'HTTP 404: {"error":"not_found"}';
     const m = msg(snap({ status: 'unavailable', detail, fetched_at: NOW - 14 * MIN, next_try_at: NOW + 8 * MIN }));
     expect(texts(m)).toEqual([
-      '◷ 14 min old — last check failed: usage endpoint unavailable (HTTP 404).',
-      "⚠ Usage unavailable. Anthropic's usage endpoint returned an unexpected response (HTTP 404). It's undocumented and may have changed. Sessions are unaffected. Next try 14:40.",
+      'clock 14 min old — last check failed: usage endpoint unavailable (HTTP 404).',
+      "warning Usage unavailable. Anthropic's usage endpoint returned an unexpected response (HTTP 404). It's undocumented and may have changed. Sessions are unaffected. Next try 14:40.",
     ]);
     expect(texts(m).join(' ')).not.toContain('not_found');
     expect(m.copyDetail).toBe(detail);
@@ -430,7 +430,7 @@ describe('statusMessage', () => {
   it('access token expired is benign: no login instruction', () => {
     const m = msg(snap({ status: 'access_token_expired', usage: null, fetched_at: null, detail: 'mefistos: access token expired' }));
     expect(texts(m)).toEqual([
-      '🔑 Usage checks are paused until Claude Code refreshes its token on mefistos; it does so the next time it runs there.',
+      'key Usage checks are paused until Claude Code refreshes its token on mefistos; it does so the next time it runs there.',
     ]);
     expect(texts(m).join(' ')).not.toContain('/login');
     expect(m.lines[0].tone).toBe('muted');
@@ -439,50 +439,50 @@ describe('statusMessage', () => {
   it('login expired asks for claude /login on that host', () => {
     const m = msg(snap({ status: 'login_expired', usage: null, fetched_at: null, source_host: null, detail: 'oci: login expired' }));
     expect(texts(m)).toEqual([
-      "🔑 Claude login expired on oci — usage can't be checked from it. Run claude /login there.",
+      "key Claude login expired on oci — usage can't be checked from it. Run claude /login there.",
     ]);
     expect(m.lines[0].tone).toBe('alarm');
   });
 
   it('login expired while stale carries the reason and next try on the age line', () => {
     const m = msg(snap({ status: 'login_expired', fetched_at: NOW - 14 * MIN, detail: 'mefistos: login expired', next_try_at: NOW + 8 * MIN }));
-    expect(texts(m)[0]).toBe('◷ 14 min old — last check failed: Claude login expired on mefistos. Next try 14:40.');
+    expect(texts(m)[0]).toBe('clock 14 min old — last check failed: Claude login expired on mefistos. Next try 14:40.');
   });
 
   it('token rejected', () => {
     const m = msg(snap({ status: 'token_rejected', usage: null, fetched_at: null, detail: 'mefistos: token rejected' }));
-    expect(texts(m)).toEqual(["🔑 Anthropic rejected the Claude token on mefistos — usage can't be checked from it."]);
+    expect(texts(m)).toEqual(["key Anthropic rejected the Claude token on mefistos — usage can't be checked from it."]);
     expect(texts(m).join(' ')).not.toContain('/login');
   });
 
   it('host unsupported names what is missing', () => {
     const m = msg(snap({ status: 'host_unsupported', usage: null, fetched_at: null, detail: 'oci: missing python3_or_jq' }));
-    expect(texts(m)).toEqual(["⚠ python3 or jq needed on oci — usage can't be checked from it."]);
+    expect(texts(m)).toEqual(["warning python3 or jq needed on oci — usage can't be checked from it."]);
   });
 
   it('no credentials on the local mac: read through another host', () => {
     const m = msg(snap({ status: 'no_credentials', usage: null, fetched_at: null, source_host: null, detail: 'local: no credentials file' }));
-    expect(texts(m)).toEqual(['○ Usage is read through another host on this account. No other host is logged in to it.']);
+    expect(texts(m)).toEqual(['circle Usage is read through another host on this account. No other host is logged in to it.']);
     const shared = msg(snap({ status: 'no_credentials', usage: null, fetched_at: null, source_host: null, detail: 'local: no credentials file' }), ['trn']);
-    expect(texts(shared)).toEqual(['○ Usage is read through another host on this account. None of trn could be asked.']);
+    expect(texts(shared)).toEqual(['circle Usage is read through another host on this account. None of trn could be asked.']);
   });
 
   it('no credentials on a remote host', () => {
     const m = msg(snap({ status: 'no_credentials', usage: null, fetched_at: null, detail: 'htz: no credentials file' }));
-    expect(texts(m)).toEqual(["🔑 No Claude credentials on htz — usage can't be checked from it."]);
+    expect(texts(m)).toEqual(["key No Claude credentials on htz — usage can't be checked from it."]);
   });
 
   it('no online host keeps last-known values under the rules', () => {
     const m = msg(snap({ status: 'no_online_host', fetched_at: NOW - 14 * MIN, next_try_at: 0, detail: 'no reachable host is logged in to this account' }));
     expect(texts(m)).toEqual([
-      '◷ 14 min old — last check failed: no online host.',
-      '○ No online host is logged in to this account (mefistos offline).',
+      'clock 14 min old — last check failed: no online host.',
+      'circle No online host is logged in to this account (mefistos offline).',
     ]);
   });
 
   it('unreachable hosts after a transport failure', () => {
     const m = msg(snap({ status: 'no_online_host', usage: null, fetched_at: null, source_host: null, detail: 'htz: exit 255: ssh: connect to host htz port 22: Operation timed out' }));
-    expect(texts(m)).toEqual(["○ Couldn't reach htz to check usage."]);
+    expect(texts(m)).toEqual(["circle Couldn't reach htz to check usage."]);
   });
 
   it('a host problem while another host answered is a muted note', () => {

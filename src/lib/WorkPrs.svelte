@@ -184,7 +184,7 @@
     color: var(--fg-muted);
   }
   .state--open {
-    color: var(--status-working, var(--accent));
+    color: var(--status-working);
     border-color: currentColor;
   }
   .state--merged {

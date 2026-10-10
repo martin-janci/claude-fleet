@@ -21,6 +21,7 @@ import {
   type StartupFacts,
 } from './startup';
 import { host } from './hosts_fixture';
+import { destination, goTo, lastDestination, rereadLastDestination } from './destination';
 
 const F = (over: Partial<StartupFacts> = {}): StartupFacts => ({
   backend: false,
@@ -91,6 +92,38 @@ describe('warm start', () => {
     const stop = trackActivity(() => NOW);
     expect(get(warmStart)).toBe(false);
     stop();
+  });
+
+  // The board's warm start: the last screen at once, no splash.
+  it('a warm start puts back the screen the last run left', () => {
+    goTo('hosts');
+    expect(localStorage.getItem('cf:pref:nav.destination')).toBe(JSON.stringify('hosts'));
+    // A new run: the stored value is read before App sets the Session tab.
+    rereadLastDestination();
+    destination.set('session');
+    expect(lastDestination()).toBe('hosts');
+    localStorage.setItem('cf:startup:last-active', String(NOW - 60_000));
+    const stop = trackActivity(() => NOW);
+    expect(get(warmStart)).toBe(true);
+    expect(get(destination)).toBe('hosts');
+    stop();
+  });
+
+  it('a cold start opens on the Session tab, whatever the last run left', () => {
+    goTo('assets');
+    rereadLastDestination();
+    destination.set('session');
+    localStorage.setItem('cf:startup:last-active', String(NOW - WARM_START_MS - 1));
+    const stop = trackActivity(() => NOW);
+    expect(get(warmStart)).toBe(false);
+    expect(get(destination)).toBe('session');
+    stop();
+  });
+
+  it('a stored value that is no destination is ignored', () => {
+    localStorage.setItem('cf:pref:nav.destination', JSON.stringify('nowhere'));
+    rereadLastDestination();
+    expect(lastDestination()).toBe('session');
   });
 });
 

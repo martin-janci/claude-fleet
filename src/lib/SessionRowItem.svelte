@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { viewKey } from './shortcuts';
   import Icon from './kit/Icon.svelte';
   import { tick, type Snippet } from 'svelte';
   import {
@@ -52,7 +53,7 @@
   import SessionRowDetails from './SessionRowDetails.svelte';
   import SessionRowMeta from './SessionRowMeta.svelte';
   import LimitActions from './LimitActions.svelte';
-  import { COMPACT_ROW_PX, uiDensity } from './prefs';
+  import { uiDensity } from './prefs';
   import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
   import { projectById } from './projects';
   import SessionRowMenu from './SessionRowMenu.svelte';
@@ -145,13 +146,6 @@
     startPulse.steps
       .map((s) => (s.state === 'done' ? `${s.label} ✓` : s.state === 'active' ? `${s.label} starting` : s.label))
       .join(' · '),
-  );
-  // Selection is a bar as well as a tint, so it does not rest on colour
-  // alone; with an org colour the bar sits just inside the org stripe.
-  const rowShadow = $derived(
-    [orgColor && `inset 3px 0 0 ${orgColor}`, sessSelected && `inset ${orgColor ? 5 : 2}px 0 0 var(--accent)`]
-      .filter(Boolean)
-      .join(', ') || undefined,
   );
   // The row's triage bucket (P13). Published as data-bucket because component
   // CSS never reaches jsdom, so this is how tests assert a row's triage state.
@@ -569,18 +563,20 @@
       rowMenu = { x: r.left + 24, y: r.bottom };
       return;
     }
-    if (e.target === e.currentTarget && !e.metaKey && !e.ctrlKey && !e.altKey && workBlocked === null) {
-      if (e.key === 'y' && suggestion) {
+    // The keys are the registry's `session-row` rows (step 0.1).
+    const act = e.target === e.currentTarget && workBlocked === null ? viewKey('session-row', e) : null;
+    if (act) {
+      if (act === 'session-row.yes' && suggestion) {
         e.preventDefault();
         confirmLink(suggestion.link_id);
         return;
       }
-      if (e.key === 'n' && suggestion) {
+      if (act === 'session-row.no' && suggestion) {
         e.preventDefault();
         rejectLink(suggestion.link_id);
         return;
       }
-      if (e.key === 'l') {
+      if (act === 'session-row.link') {
         e.preventDefault();
         openWorkMenu();
         void tick().then(() => workInput?.focus());
@@ -631,8 +627,7 @@
   data-density={$uiDensity}
   data-session-id={sess.id}
   data-org-color={orgColor ?? undefined}
-  style:box-shadow={rowShadow}
-  style:min-height={compact ? `${COMPACT_ROW_PX}px` : undefined}
+  style:--org-color={orgColor ?? undefined}
   aria-current={sessSelected ? 'true' : undefined}
   data-stuck={sess.stuck_kind ?? undefined}
   data-bucket={triage.bucket}
@@ -723,16 +718,16 @@
               role="img"
               title="{relatedCount} related session(s)"
               aria-label="{relatedCount} related sessions"
-            >🔗{relatedCount}</span>
+            ><Icon name="link" size={12} />{relatedCount}</span>
           {/if}
           {#if sess.kind === 'review'}
-            <span class="review-badge" role="img" title="review session" aria-label="review session">🔍</span>
+            <span class="review-badge" role="img" title="review session" aria-label="review session"><Icon name="search" size={12} /></span>
           {/if}
           {#if sess.kind === 'shell'}
-            <span class="shell-badge" title="shell session">▶</span>
+            <span class="shell-badge" role="img" title="shell session" aria-label="shell session"><Icon name="terminal" size={12} /></span>
           {/if}
           {#if sess.kind === 'bg'}
-            <span class="bg-badge" role="img" title="background agent" aria-label="background agent">🤖</span>
+            <span class="bg-badge" role="img" title="background agent" aria-label="background agent"><Icon name="agent" size={12} /></span>
           {/if}
           <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
           <!-- The chip strip. A Compact row hides it until hover or focus
@@ -1099,17 +1094,20 @@
   }
 
   .related-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
     font-size: var(--text-2xs);
     color: var(--fg-muted);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    padding: 0.05rem 0.3rem;
+    background: var(--accent-soft);
+    padding: 0 var(--space-1);
     border-radius: var(--radius-xs);
     flex-shrink: 0;
   }
 
-  .review-badge { font-size: var(--text-2xs); margin-left: 0.2rem; }
-  .shell-badge { font-size: var(--text-2xs); margin-left: 0.2rem; color: var(--fg-muted); }
-  .bg-badge { font-size: var(--text-2xs); margin-left: 0.2rem; }
+  .review-badge,
+  .shell-badge,
+  .bg-badge { display: inline-flex; margin-left: var(--space-1); color: var(--fg-muted); }
 
   .err { color: var(--danger); font-size: var(--text-2xs); padding: 0.2rem 0; margin: 0; }
   .inline-err { padding-left: 1.6rem; font-size: var(--text-2xs); }
@@ -1128,8 +1126,13 @@
     cursor: pointer;
     user-select: none;
   }
-  .sess-row:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-  .sess-row.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  .sess-row:hover { background: var(--bg-hover); }
+  /* Selection is a bar as well as a tint (manual: SessionRow, accent-soft
+     and the 2 px accent bar), so it does not rest on colour alone; with an
+     org colour the bar sits just inside the 3 px org stripe. */
+  .sess-row.selected { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+  .sess-row[data-org-color] { box-shadow: inset 3px 0 0 var(--org-color); }
+  .sess-row.selected[data-org-color] { box-shadow: inset 3px 0 0 var(--org-color), inset 5px 0 0 var(--accent); }
   .sess-row.renaming { background: var(--bg-pane); }
   /* The row is the app's primary navigation surface and is a tabbable
      treeitem. Without this a keyboard user tabbing the session list
@@ -1173,17 +1176,17 @@
   }
   .sess-row:focus-within .sess-line1 .row-actions,
   .sess-row:hover .sess-line1 .row-actions {
-    background: color-mix(in srgb, var(--accent) 10%, var(--bg-pane));
+    background: var(--bg-hover);
   }
   .sess-row:focus-within .sess-line1 .row-actions::before,
   .sess-row:hover .sess-line1 .row-actions::before {
-    background: linear-gradient(to right, transparent, color-mix(in srgb, var(--accent) 10%, var(--bg-pane)));
+    background: linear-gradient(to right, transparent, var(--bg-hover));
   }
   .sess-row.selected .sess-line1 .row-actions {
-    background: color-mix(in srgb, var(--accent) 22%, var(--bg-pane));
+    background: var(--accent-soft);
   }
   .sess-row.selected .sess-line1 .row-actions::before {
-    background: linear-gradient(to right, transparent, color-mix(in srgb, var(--accent) 22%, var(--bg-pane)));
+    background: linear-gradient(to right, transparent, var(--accent-soft));
   }
 
   .status-dot {
@@ -1261,7 +1264,7 @@
     align-items: baseline;
   }
   .why-key {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
   }
   .why-what,
   .why-ev {
@@ -1333,7 +1336,10 @@
 
   /* Redesign step 3.6: the chip strip and the Compact row. */
   .chips { display: contents; }
-  .sess-row.compact { box-sizing: border-box; }
+  /* A 13px name line, a 2xs meta line and the row's padding: 40px
+     (COMPACT_ROW_PX), so 20 rows fit a 1080p window
+     (SessionRowDensity.test.ts measures it). */
+  .sess-row.compact { box-sizing: border-box; min-height: calc(var(--text-sm-lh) + var(--text-2xs-lh) + var(--space-2)); }
   .acct { display: contents; }
   .sess-row.compact .chips,
   .sess-row.compact .acct { display: none; }

@@ -13,6 +13,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { openExternal } from './open_external';
 import WorkTaskDetail from './WorkTaskDetail.svelte';
 import { expectAccessible } from './a11y_check';
+import { expectOnePrimary } from './action_hierarchy_check';
 import { sessions } from './sessions';
 import { selectedSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
@@ -208,7 +209,7 @@ describe('WorkTaskDetail', () => {
     await flush();
     const chips = screen.getAllByTestId('work-task-link-result');
     expect(chips).toHaveLength(1);
-    expect(chips[0]).toHaveTextContent('Blocked');
+    expect(chips[0]).toHaveTextContent('Failed · cannot merge');
     expect(chips[0]).toHaveAttribute('data-verdict', 'blocked');
   });
 
@@ -778,6 +779,15 @@ describe('WorkTaskDetail', () => {
       await flush();
       expect(screen.queryByTestId('work-task-group-proposal')).toBeNull();
     });
+  });
+
+  // Redesign 1.5: one primary per view. A task has nothing destructive to
+  // put last: its edits (Place, Assign org, Make a rule) each preview first.
+  it('has one primary: the Work button', async () => {
+    render(WorkTaskDetail, { props: { taskId: 'ABC-12' } });
+    await flush();
+    const primary = expectOnePrimary(screen.getByTestId('work-task-detail'));
+    expect(primary.closest('[data-testid="work-button"]')).not.toBeNull();
   });
 
   it('is accessible', async () => {

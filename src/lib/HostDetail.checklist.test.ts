@@ -137,6 +137,71 @@ describe('HostDetail: health checklist', () => {
 
 });
 
+describe('HostDetail: fleet-agent install (4.9)', () => {
+  let jobs: Record<string, unknown>[];
+  beforeEach(() => {
+    jobs = [];
+    const real = inv.getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, payload?: { args?: { alias?: string; version?: string } }) => {
+      if (cmd === 'install_agent') {
+        const j = { id: 3, host_alias: payload?.args?.alias, version: payload?.args?.version, state: 'running', step: 'target', started_at: NOW };
+        jobs = [j];
+        return j;
+      }
+      if (cmd === 'agent_installs') return jobs;
+      return real(cmd, payload);
+    });
+  });
+
+  it('standalone: an SSH host needs no agent, and nothing offers one', () => {
+    mount({ hubVersion: '0.5.4' });
+    expect(checkRow('agent').dataset.state).toBe('na');
+    expect(screen.queryByTestId('detail-agent-install')).toBeNull();
+  });
+
+  it('paired: "not installed · Install 0.5.4"; the click starts the job and its steps show beside the Hex field', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
+      const props = mount({ hubVersion: '0.5.4' });
+      expect(checkRow('agent').dataset.state).toBe('warn');
+      expect(within(checkRow('agent')).getByText(/not installed/)).toBeTruthy();
+      const btn = screen.getByTestId('detail-agent-install');
+      expect(btn.textContent?.trim()).toBe('Install 0.5.4');
+      expect(inv.mock.calls.some((c) => c[0] === 'install_agent')).toBe(false);
+      await fireEvent.click(btn);
+      expect(inv.mock.calls.find((c) => c[0] === 'install_agent')?.[1]).toEqual({
+        args: { alias: 'mercury', version: '0.5.4' },
+      });
+      await waitFor(() => expect(screen.getByTestId('detail-agent-install-step').textContent).toContain('Reading which build fits'));
+      jobs = [{ ...jobs[0], step: 'download' }];
+      await vi.advanceTimersByTimeAsync(2100);
+      await waitFor(() => expect(screen.getByTestId('detail-agent-install-step').textContent).toContain('SHA256SUMS'));
+      // The Hex field, past its 400 ms delay.
+      expect(screen.getByTestId('detail-agent-install-loader').dataset.loader).toBe('hex-field');
+      jobs = [{ ...jobs[0], state: 'done', step: 'done', finished_at: NOW }];
+      await vi.advanceTimersByTimeAsync(2100);
+      await waitFor(() => expect(props.onreprobe).toHaveBeenCalledTimes(1));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('paired: a failed job says why and offers the button again', async () => {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
+    jobs = [{ id: 2, host_alias: 'mercury', version: '0.5.4', state: 'failed', step: 'download', detail: 'curl is not installed', started_at: NOW }];
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'install_agent') return jobs[0];
+      if (cmd === 'agent_installs') return jobs;
+      return null;
+    });
+    mount({ hubVersion: '0.5.4' });
+    await fireEvent.click(screen.getByTestId('detail-agent-install'));
+    expect((await screen.findByTestId('detail-agent-install-failed')).textContent).toBe('Failed · curl is not installed');
+    expect(screen.getByTestId('detail-agent-install')).toBeTruthy();
+  });
+});
+
 describe('HostDetail: accessibility', () => {
   it('the host detail, checked, is accessible in New', async () => {
     mount();

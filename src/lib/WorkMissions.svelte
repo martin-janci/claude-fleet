@@ -1,6 +1,7 @@
 <script lang="ts">
   import Skeleton from './states/Skeleton.svelte';
   import Icon from './kit/Icon.svelte';
+  import StatusDot from './kit/StatusDot.svelte';
   import { tablistKeys } from './tablist_keys';
   // Missions (orchestration O1, design 2026-10-07 §9): the Work view's third
   // tab. A mission is a goal over a root task: its member tasks, the repos
@@ -20,7 +21,7 @@
   import type { NextStep } from './mission_triage';
   import MissionGraph from './MissionGraph.svelte';
   import Loader from './Loader.svelte';
-  import { defaultLaneBy, type LaneBy } from './mission_graph';
+  import { defaultLaneBy, toneOf, type LaneBy } from './mission_graph';
   import { PLAN_IMPORT_MAX_ROWS, importLine, importMissionPlan, parsePlan } from './plan_import';
   import { hosts } from './hosts';
   import { shortAge, timeAgo } from './session_status';
@@ -45,7 +46,6 @@
     stateLabel,
     updateMission,
     acceptWorkProposals,
-    nodeGlyph,
     nodeLabel,
     openProposals,
     setWorkDep,
@@ -647,7 +647,7 @@
         {#if wakeBad}<p class="muted small" role="alert" data-testid="mission-edit-wake-bad">A continuous mission wakes at most every {minWakeMins} minutes.</p>{/if}
         {#if parallelBad}<p class="muted small" role="alert">Parallel runs is 1 to {POLICY_MAX_PARALLEL}.</p>{/if}
         <div class="row">
-          <button class="btn" type="button" disabled={busy || saveBlocked || wakeBad || parallelBad} data-testid="mission-edit-save" onclick={() => void saveEdit()}
+          <button class="btn btn--primary" type="button" disabled={busy || saveBlocked || wakeBad || parallelBad} data-testid="mission-edit-save" onclick={() => void saveEdit()}
             >Save</button
           >
           <button class="btn btn--quiet" type="button" onclick={() => (editing = false)}>Cancel</button>
@@ -731,7 +731,9 @@
           {#if mayChange}
             <div class="row">
               {#if mission.state === 'active' && pressable.length > 0}
-                <button class="btn" type="button" disabled={busy || changeBlocked} data-testid="mission-start-wave" onclick={() => void startWave()}
+                <!-- Redesign 1.5: the mission's one primary (the edit form's
+                     Save takes over while it is open). -->
+                <button class="btn" class:btn--primary={!editing} type="button" disabled={busy || changeBlocked} data-testid="mission-start-wave" onclick={() => void startWave()}
                   >Start wave ({pressable.length})</button
                 >
               {/if}
@@ -928,7 +930,7 @@
               {@const it = itemById.get(n.item_id)}
               {#if it}
                 <li data-testid="mission-node" data-state={n.state}>
-                  <span class="glyph s-{n.state}" title={nodeLabel(n.state)} aria-label={nodeLabel(n.state)}>{nodeGlyph(n.state)}</span>
+                  <span class="node-dot" title={nodeLabel(n.state)}><StatusDot state={toneOf(n.state)} label={nodeLabel(n.state)} /></span>
                   {#if trails.has(n.item_id)}
                     <Loader name="comet-trails" size={20} label="Working on it" testid="mission-trails" />
                   {/if}
@@ -1044,7 +1046,7 @@
                         title={it.held_at ? 'Release' : 'Hold: never start this on its own'}
                         disabled={busy}
                         data-testid="mission-hold"
-                        onclick={() => void setHold(it.id, !it.held_at)}>{it.held_at ? '▶' : '⏸'}</button
+                        onclick={() => void setHold(it.id, !it.held_at)}><Icon name={it.held_at ? 'play' : 'pause'} size={14} /></button
                       >
                     {/if}
                     <button
@@ -1145,12 +1147,12 @@
           <textarea rows="3" placeholder="Goal: what is true when it is done" bind:value={newGoal} data-testid="mission-new-goal"
           ></textarea>
           <div class="row">
-            <button class="btn" type="submit" disabled={busy || saveBlocked} data-testid="mission-create">Create</button>
+            <button class="btn btn--primary" type="submit" disabled={busy || saveBlocked} data-testid="mission-create">Create</button>
             <button class="btn btn--quiet" type="button" onclick={() => (creating = false)}>Cancel</button>
           </div>
         </form>
       {:else}
-        <button class="btn" type="button" disabled={saveBlocked} data-testid="mission-new" onclick={() => (creating = true)}>New mission</button>
+        <button class="btn btn--primary" type="button" disabled={saveBlocked} data-testid="mission-new" onclick={() => (creating = true)}>New mission</button>
         {#if missions.some((m) => m.state === 'active')}
           <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="missions-pause-all" onclick={() => void pauseAll()}
             >Pause all</button
@@ -1199,10 +1201,11 @@
   }
   .mi {
     text-align: left; border: none; background: transparent; color: var(--fg); cursor: pointer;
-    font: inherit; font-size: var(--text-xs); padding: 0.35rem 0.5rem; border-radius: var(--radius-sm, var(--radius-sm));
+    font: inherit; font-size: var(--text-xs); padding: 0.35rem 0.5rem; border-radius: var(--radius-sm);
   }
   .mi:hover, .mi:focus-visible { background: var(--bg-hover); }
   .mi.danger { color: var(--danger); }
+  .btn--chip.danger { color: var(--danger); }
   .confirm-move { margin-top: 0.3rem; font-size: var(--text-xs); }
   .bar, .row { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
   .create { display: flex; flex-direction: column; gap: 0.4rem; width: 100%; }
@@ -1244,9 +1247,7 @@
   .done-when li { padding: 0.1rem 0; }
   .events li { padding: 0.1rem 0; }
   .glyph { width: 1.1rem; text-align: center; flex: 0 0 auto; color: var(--fg-muted); }
-  .glyph.s-done, .glyph.s-ready { color: var(--status-done); }
-  .glyph.s-running, .glyph.s-doing { color: var(--status-waiting); }
-  .glyph.s-failed, .glyph.s-blocked { color: var(--danger); }
+  .node-dot { display: inline-flex; align-items: center; height: 1lh; flex: 0 0 auto; }
   .main { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
   .deps { display: flex; flex-wrap: wrap; gap: 0.2rem; margin-top: 0.15rem; }
   .dep { font-size: var(--text-2xs); }
@@ -1267,7 +1268,7 @@
   .vbadge.v-verified { color: var(--status-done); border-color: var(--status-done); }
   .vbadge.v-failed { color: var(--danger); border-color: var(--danger); }
   .checks li { display: flex; gap: 0.3rem; align-items: baseline; border: none; padding: 0; font-size: var(--text-2xs); }
-  .checks .line { font-family: var(--font-mono, monospace); }
+  .checks .line { font-family: var(--font-mono); }
   .checks .c-pass .glyph { color: var(--status-done); }
   .checks .c-fail .glyph { color: var(--danger); }
   .conds { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.2rem; }

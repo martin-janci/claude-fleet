@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   import { tick } from 'svelte';
   import type { RepoStatus } from './assets';
 
@@ -119,7 +120,7 @@
         </p>
       {/if}
       {#if load === 'problem'}
-        <p class="status">⚠ Could not load: {problem ?? 'unknown error'}</p>
+        <p class="status"><Icon name="warning" size={12} /> Could not load: {problem ?? 'unknown error'}</p>
       {:else if load === 'not_loaded'}
         <p class="status muted">not loaded</p>
       {:else if !repo}

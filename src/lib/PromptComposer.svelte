@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
   import { get } from 'svelte/store';
@@ -163,7 +164,7 @@
                 <span class="account">{accountEmailTier(accountForRow(t))}</span>
                 <span class="sess-name">{t.tmux_name}</span>
                 {#if t.status !== 'running'}
-                  <span class="warn" title="session may not be in claude REPL">⚠</span>
+                  <span class="warn" title="session may not be in claude REPL"><Icon name="warning" size={12} label="Session may not be in the Claude REPL" /></span>
                 {/if}
                 {#if why}
                   <span class="muted" data-testid="target-not-mine-{t.id}" title={why}>not yours</span>

@@ -746,6 +746,20 @@ describe('an offline host (states kit, step 10.6)', () => {
     expect(onreprobe).toHaveBeenCalledOnce();
   });
 
+  // Step 3.14: its sessions wait as Paused, and Show sessions goes to them.
+  it('names its sessions as Paused, and Show sessions focuses the list', async () => {
+    mount('mefistos', { host: host('mefistos', { reachable: false, health_at: NOW - 360 }) });
+    const rows = screen.getAllByTestId('detail-session');
+    expect(rows.length).toBeGreaterThan(0);
+    const paused = screen.getByTestId('host-offline-paused').textContent ?? '';
+    expect(paused).toContain('Paused');
+    expect(paused).toContain(rows[0].querySelector('.s-name')?.textContent ?? '?');
+    // Nothing can wake a host yet, so no Wake host.
+    expect(screen.queryByTestId('host-offline-wake')).toBeNull();
+    await fireEvent.click(screen.getByTestId('host-offline-show'));
+    expect(document.activeElement).toBe(rows[0]);
+  });
+
   it('says why the last probe failed and when the host last answered', () => {
     mount('mercury', {
       host: host('mercury', {

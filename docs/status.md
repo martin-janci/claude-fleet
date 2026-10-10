@@ -30,14 +30,33 @@ add-host wizard's state (135). The hub contract is revision 14
 revisions 11 to 14 add tools a revision-10 hub does not serve, so the
 desktop and its hub are upgraded together.
 
+A session start reports its three real steps (worktree, tmux, agent) as
+`start:progress` frames (redesign 5.13, `service/sessions/start_progress.rs`):
+`new_session` takes an optional `start_token` the client mints, and the frames
+carry that token and nothing else (event kind `start`, content-free on a
+person's `/events` stream), so the New session dialog's Pulse sequence and its
+Hex field move on the backend's events, and a desktop paired with a hub gets
+them over the hub's stream. Shell terminals (5.3) can open in the home folder
+as well as the worktree (`shell_terminals { at: "home" }`, the strip's "New
+terminal opens on" picker), and a terminal's ⋯ menu has Kill terminal…, which
+asks first. 13 of the 16 shortcut scopes match keys through the registry
+(`shortcuts.ts` `MATCHED_SCOPES`, `viewKey`); the Quick switcher's two and
+the New session dialog still read `e.key`, since they take some keys under any
+mix of ⌘ and Ctrl.
+
 Sessions can run OpenAI's Codex CLI as well as Claude Code (redesign 12.2,
 `agent_adapter::CodexCli`, `sessions.agent` from migration 121):
 `new_session { agent: "codex" }` refuses a login profile, restart,
 recreate and repair resume the row as Codex, and its rollout feeds the
 Conversation tab. The New session dialog offers Codex only on a host that
 has it on its PATH (12.4b, migration 134). `move_session` refuses a
-non-Claude row, because only Claude's state is carried, and `agy` stays
-refused.
+non-Claude row, because only Claude's state is carried. Agy (12.3) is not
+startable: its adapter (`agent_adapter::agy`) is provisional, with no
+captured pane fixtures and its SQLite transcripts unread, so the picker
+shows it as coming and `new_session { agent: "agy" }`, restart, recreate and
+repair refuse it with `E_UNSUPPORTED`
+(`sessions::refuse_unvalidated_agent`); `move_session` refuses it too. The
+adapter code stays, for when real captures validate it.
 
 Iterations 1–4a are landed (multi-host, accounts, cross-host sessions, prompt
 transfer, async/events rework), plus the MCP control API, background sessions,
@@ -64,14 +83,24 @@ Multi-account (docs/accounts.md): Hosts shows each host's `/login` from
 another login (migration 113; desktop: session details → Login). Each
 pass reads a host's profiles and their logins (migration 114), attributes a
 profile session to its profile's account and polls that account's usage
-through the profile. Not built: a hub vault for setup-tokens and API keys,
+through the profile. The Accounts page (redesign 4.1/4.2) shows each
+account's sessions, switched-on routines and spend today from the
+`usage_daily_account` roll-up (`account_spend`, local only, so a paired
+desktop shows no $), and an account at its limit says how many sessions it
+paused, with Show and *Switch to <account>* (step 4.4's bulk move, one
+click). Not built: a hub vault for setup-tokens and API keys,
 and automatic switching when an account hits its limit.
 
 The headless `fleet-hub` daemon, `fleet-agent` for hosts the hub cannot reach
 over SSH, paired-client access for phones/browsers, and hub-client mode
 (pairing the desktop itself to a hub) are landed; see `docs/hub.md`. Their
 live acceptance (#156) is recorded in `docs/hub-acceptance.md`: the desktop
-half is partly observed, the TLS, phone and agent-host steps wait on the owner. Since contract revision 5 a hub client adds
+half is partly observed, the TLS, phone and agent-host steps wait on the owner.
+The hub's fleet-agent install job (redesign 4.9, `service/agent_install.rs`)
+starts from a paired desktop's Host detail (*Install <version>* on the
+fleet-agent row, the job's steps beside the Hex field) and from the add-host
+wizard's fleet-agent row where the checks say a hub could use one; a
+standalone desktop reaches its hosts over SSH and offers none. Since contract revision 5 a hub client adds
 projects through the hub (`add_project` / `list_github_repos` tools), per
 `docs/superpowers/specs/2026-09-27-hub-add-project-design.md`. Host
 reboot handling is landed in both halves, per
@@ -210,6 +239,11 @@ M14.4 as one PR, fleet-mobile#54; M14.5's docs are on `main`, so only the
 owner's Part R run is open, and *Assign org…* / *Make a rule…* stay
 desktop-only (owner, 2026-09-28; M14's D31–D36 and Jev's D31–D47 share
 numbers, so write "M14-D3x" / "Jev-D3x").
+Redesign 6.3 in the Work UI: a task with an open dependency shows as *Needs
+you* with its reason line ("Blocked on TASK-212", the plan's status-word
+decision), and its spend (`cost_micros`, its sessions each once) shows on
+the List rows, the Board's cards and Task details (which links what it
+waits for); the grouped tree's org and group rows carry their tasks' spend.
 
 Sprints and releases (design
 `docs/superpowers/specs/2026-09-28-sprints-releases-epics-design.md`): the
@@ -260,8 +294,11 @@ split, calibration, the test map's acceptance lines, D39 `--export-unlinked`
 `service/decide/haiku.rs`: a named host of the SAME org only, prompt on
 stdin). J1's live adapter is built, off (`decide.jev.work_link`,
 `service/decide/work_link.rs`, redesign 6.8): in assist it pre-selects a
-suggestion shown as "Proposed by Jev" (rule R12), and moving it past shadow
-waits on its acceptance lines.
+suggestion shown as "Proposed by Jev" (rule R12) on the session row, in
+Review and at the head of Session Details' timeline (Link / Not this, and
+who proposed a link after it is confirmed); shadow writes no link, so none
+of them shows anything, and moving it past shadow waits on its acceptance
+lines.
 Their diagnostics are built too (evidence, never an acceptance line):
 `--perturb` (dataset C, `bench/perturb.rs`; J3 in `status_map_robust.rs`,
 J1 in `work_link_robust.rs`), J3's paired languages (dataset B, `pair` ids,
@@ -291,10 +328,25 @@ use cases OFF (`decide.jev.*`, each `off` by
 default, guide `docs/decisions.md`): `sibling_repos`, `host_placement`,
 `quick_answer`, `adopt_target` / `restore_target`, `turn_outcome`,
 `duplicate`, `related_session`, `work_placement`, `routine_run_outcome`,
-`control_route`, `mission_triage`, `summary_check` and the PR shepherd's
-`pr_triage`. The ones that send
+`control_route`, `mission_triage`, `summary_check`, the PR shepherd's
+`pr_triage`, and Review's J6 `main_ticket` and J7 `tracker_duplicate`
+(6.8). Each closed-choice use case has a benchmark set, `fleet-hub decide
+bench <use case>` (`bench/choice.rs`, docs/decisions.md *Benchmarking the
+closed-choice use cases*), and J2's `turn-outcome` set holds 51 `asked`
+tails; every built-in set is SYNTHETIC (no recorded data yet), so nothing
+is judged and every use case stays `off` / shadow. J8 shows a warning in
+the agent tab when the pane rules could not read a turn's end. J4's context
+order for a drafted brief is a word-overlap rule, not a Jev use case. The ones that send
 Claude's reply text (`turn_outcome`, `routine_run_outcome`) also need the
-org's reply-text consent (D48), off by default. The notifications matrix and quiet hours (`notify.*`, 11.9) are
+org's reply-text consent (D48), off by default.
+**Waits on the owner (11.11):** the plan says Jev checks the "Since 13:20"
+summary against the transcript (J9) *before* it shows. With
+`decide.jev.summary_check` off — the default, like every Jev use case — the
+summary still shows, unchecked, labelled "Drafted · Not checked" beside the
+text (`WatchSummary.svelte`); a failed check (or one that could not run)
+hides it. Whether an unchecked summary should show at all, or the use case
+should default to `shadow`/`assist`, is the owner's decision: it trades a
+summary every watcher can read for Jev budget and the org's consent. The notifications matrix and quiet hours (`notify.*`, 11.9) are
 on: the phone and the desktop (while its window is in the background, and
 only with OS notifications on for the desktop column) follow them.
 
@@ -473,7 +525,7 @@ resolve on a conflict, and an overview of every link with Clean up stale.
 Symlinks sync as links (their target, never followed; not on a Windows
 desktop). Not yet: a filesystem watcher, a three-way merge editor.
 
-Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. The app's own wizards (New session, Add host, Pair a device, Add project, Link to a hub) are fleet.form/1 specs too, shown as a dialog or in the chat (redesign 10.12, `src/lib/forms/wizards/`, `docs/forms.md` → *Wizards are forms too*). Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
+Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. The app's own wizards (New session, Add host, Pair a device, Add project, Link to a hub, Get started) are fleet.form/1 specs too (redesign 10.12, `src/lib/forms/wizards/`, `docs/forms.md` → *Wizards are forms too*). As dialogs: Link to a hub (Settings › Hub), Pair a device (Settings › Devices) and Get started's first session (`get_started`). In the chat (`ChatForm` at the end of the Conversation panel and of Control's chat): an agent's `wizard` block (`docs/chat-blocks.md`) opens Add host, Add project, Get started, New session or Pair a device, and Control's *Add project* chip opens Add project; nothing runs until the last button. An agent may stream a long form while it writes it, `ask { draft }` (migration 153, the row's `form_draft`), which the chat draws in as skeleton fields until `ask { form }` opens it. The phone's form sheet (14.7) is fleet-mobile's. Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
 
 PR shepherd, steps 1 to 4 of 5 (step 2 without its Inbox card), are built and do nothing until a person
 grants a rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
@@ -526,7 +578,11 @@ first read booked as `backfill` apart from the day's live cost (migration
 
 Org administration (spec
 `docs/superpowers/specs/2026-10-06-org-administration-design.md`) is landed
-in four phases: A, the org overview in Settings → Organisations; B, the hub
+in four phases: A, the org overview in Settings → Organisations (since
+the OrgOverview / OrgSpend boards, the page's tabs Overview, Members,
+Devices, Spend and Settings: budget tiles with Meters, "Needs an admin"
+lines that open the tab to act on, and the 14-day spend chart with the daily
+budget drawn across it); B, the hub
 tool `org_admin` (`service/org_admin.rs`) for devices and people; C,
 per-org settings (`Spec::per_org`, migration 106 `org_settings`) and spend
 and budgets (`usage_daily_org`, `service/org_spend.rs`,
@@ -596,7 +652,13 @@ and `fleet_health.peer_links_down` reports a link in trouble, per
 `docs/superpowers/specs/2026-09-24-hub-federation-design.md`. Since
 contract revision 12 the desktop links and unlinks a peer through the
 hub's `link_peer` / `unlink_peer` tools (redesign 11.5), and each link's
-traffic is recorded for the Federation page (migration 132).
+traffic is recorded for the Federation page (migration 132). The page
+draws the links as a graph above the list (the spec's `graph`: solid line
+up, dashed down), and Link a hub is the two-step
+`link_peer` wizard (address, then the code) with a Counter-orbit while the
+hubs trade keys (11.12). The link protocol has no step that waits on the
+other side's approval — its operator mints the code first, and redeeming it
+completes the link — so the wizard never says "waiting for … to sign".
 
 Application updates: design
 `docs/superpowers/specs/2026-09-28-update-channel-design.md` (with

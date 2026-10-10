@@ -688,6 +688,46 @@ pub struct ReviewItem {
     /// every other item, and from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_by: Option<ReviewProposer>,
+    /// The tracker ticket the decision model proposes this suggestion's
+    /// LOCAL task duplicates (J7 `tracker_duplicate`, redesign 6.8): a live
+    /// assist answer only. Absent otherwise, and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<ReviewDuplicate>,
+}
+
+/// [`ReviewItem::duplicate_of`]: "May duplicate PAY-88 · Proposed by Jev ·
+/// 74%".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewDuplicate {
+    /// The ticket, `item:<id>`.
+    pub task_id: String,
+    pub item_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub title: String,
+    /// `jev`.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_pct: Option<u8>,
+}
+
+/// PURE: the J6 proposer of suggestion `link_id` of a session whose row
+/// carries `proposals`: the live `main_ticket` proposal naming it, among
+/// `keys` suggestions. `None` for any other link.
+pub fn main_ticket_proposer(
+    proposals: &[crate::store::DecisionProposal],
+    link_id: i64,
+    keys: usize,
+) -> Option<ReviewProposer> {
+    use crate::service::decide::{main_ticket, Feature};
+    let p = proposals
+        .iter()
+        .find(|p| p.feature == Feature::MainTicket.as_str())?;
+    (main_ticket::link_of(&p.value) == Some(link_id)).then(|| ReviewProposer {
+        source: p.source.clone(),
+        reason: main_ticket::reason(keys),
+        confidence_pct: p.confidence_pct,
+    })
 }
 
 /// [`ReviewItem::proposed_by`]: "Proposed by Jev · from the first prompt ·
@@ -3533,6 +3573,28 @@ fn review_rank(kind: &str) -> u8 {
     }
 }
 
+/// The J7 ticket a local item `item_id` may duplicate: its live
+/// `tracker_duplicate` proposal, when it names a ticket the graph holds.
+fn tracker_duplicate_of(g: &Graph, item_id: Option<i64>) -> Option<ReviewDuplicate> {
+    use crate::service::decide::{tracker_duplicate, Feature};
+    let id = item_id?;
+    let p = g
+        .item_proposals
+        .get(&id)?
+        .iter()
+        .find(|p| p.feature == Feature::TrackerDuplicate.as_str())?;
+    let ticket = tracker_duplicate::item_of(&p.value)?;
+    let t = g.items.get(&ticket)?;
+    Some(ReviewDuplicate {
+        task_id: format!("item:{ticket}"),
+        item_id: ticket,
+        key: t.item.key.clone(),
+        title: t.item.title.clone(),
+        source: p.source.clone(),
+        confidence_pct: p.confidence_pct,
+    })
+}
+
 /// [`review`] over a loaded graph.
 pub(crate) fn review_of(
     g: &Graph,
@@ -3612,6 +3674,9 @@ pub(crate) fn review_of(
             proposed_by: (kind == "suggestion")
                 .then(|| proposer_of(l.link.rule.as_deref(), &l.link.evidence))
                 .flatten(),
+            duplicate_of: (kind == "suggestion")
+                .then(|| tracker_duplicate_of(g, l.link.item_id))
+                .flatten(),
         }
     };
     for (sid, links) in &by_session {
@@ -3681,7 +3746,11 @@ pub(crate) fn review_of(
                     _ => why_line(&l.link.source, &[]),
                 });
             }
-            let it = make(kind, l, row, w, alts);
+            let mut it = make(kind, l, row, w, alts);
+            // J6 (redesign 6.8): the main ticket among several suggestions.
+            if kind == "suggestion" && it.proposed_by.is_none() && suggestions.len() > 1 {
+                it.proposed_by = main_ticket_proposer(&row.proposals, l.link.id, suggestions.len());
+            }
             items.push((
                 ReviewKey(review_rank(kind), -it.created_at, it.review_id.clone()),
                 it,

@@ -937,6 +937,12 @@ pub fn decide_as(
         ) {
             tracing::warn!("[decide] work_link follow-up not recorded: {}", e.message);
         }
+        // J6 (redesign 6.8): the same answer labels the main-ticket proposal.
+        if let Err(e) = crate::service::decide::main_ticket::record_decision(
+            s, session_id, link_id, confirm, now,
+        ) {
+            tracing::warn!("[decide] main_ticket follow-up not recorded: {}", e.message);
+        }
     }
     let mut trusted_now = false;
     if confirm && decider == Decider::Person && matches!(link.rule.as_deref(), Some("R3b" | "R4")) {

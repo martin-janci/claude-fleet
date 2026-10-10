@@ -10,3 +10,13 @@ export function transferLoader(fraction: number | null): TransferLoader {
   if (fraction === null || !Number.isFinite(fraction)) return { name: 'data-rain' };
   return { name: 'progress-ring', value: Math.min(1, Math.max(0, fraction)) };
 }
+
+/** A page table row's transfer in flight (`transfer: { column, percent }`,
+ *  an update's row in Settings › Updates): the fraction for the loader beside
+ *  `column`'s cell, null for an unknown size; undefined when that cell has
+ *  none. */
+export function rowTransfer(row: Record<string, unknown>, column: string): { fraction: number | null } | undefined {
+  const t = row.transfer as { column?: unknown; percent?: unknown } | null | undefined;
+  if (!t || typeof t !== 'object' || t.column !== column) return undefined;
+  return { fraction: typeof t.percent === 'number' && Number.isFinite(t.percent) ? t.percent / 100 : null };
+}

@@ -5,6 +5,7 @@
   import { unarchiveSession } from './tidy';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
+  import PaneUnreadableNotice from './PaneUnreadableNotice.svelte';
   import { hostByAlias } from './hosts';
   import { Screen, rowToRuns, runsKey, runStyleCss, type Run, type RowShift } from './ansi';
   import { pointInRect, dropPoint } from './geometry';
@@ -36,6 +37,7 @@
     nextTerminalTab,
     terminalPane,
     terminalRequest,
+    terminalOpensOn,
     type ShellTerminalsResult,
   } from './terminals';
   import TerminalStrip from './TerminalStrip.svelte';
@@ -206,7 +208,7 @@
     if (id == null || stripBusy || stripBlocked !== null) return;
     stripBusy = true;
     try {
-      const r = await shellTerminals(id, 'open');
+      const r = await shellTerminals(id, 'open', undefined, get(terminalOpensOn));
       if (!r.ok) {
         pushError(r.error, 'New terminal failed');
         return;
@@ -1162,12 +1164,12 @@
       return;
     }
     if (e.key === 'Escape' && ctxMenu) { ctxMenu = null; return; }
-    const k = e.key.toLowerCase();
-    const cmdChord = e.metaKey && !e.altKey && !e.ctrlKey;
-    const ctrlShiftChord = !isMac && e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
+    // The chords are the registry's `terminal` rows (step 0.1): ⌘ on every
+    // platform, Ctrl+Shift off the Mac.
+    const chord = matchShortcut('terminal', e, isMac);
     // Paste from the native clipboard (bracketed-paste framing in sendPaste).
     // Plain Ctrl+V is intentionally NOT intercepted so ^V reaches the app.
-    if ((cmdChord || ctrlShiftChord) && k === 'v') {
+    if (chord === 'terminal.paste') {
       e.preventDefault();
       void paste();
       return;
@@ -1175,17 +1177,17 @@
     // Copy the selection. Cmd+C with no selection falls through to the
     // browser; Ctrl+Shift+C with no selection is swallowed (it is the copy
     // chord, not SIGINT — plain Ctrl+C still sends ^C via keyToBytes).
-    if ((cmdChord || ctrlShiftChord) && k === 'c') {
+    if (chord === 'terminal.copy') {
       if (selAnchor && selFocus) {
         e.preventDefault();
         void copySelection();
-      } else if (ctrlShiftChord) {
+      } else if (e.ctrlKey) {
         e.preventDefault();
       }
       return;
     }
     // Cmd+A (Ctrl+Shift+A elsewhere) → select the whole viewport.
-    if ((cmdChord || ctrlShiftChord) && k === 'a') {
+    if (chord === 'terminal.select-all') {
       e.preventDefault();
       selAnchor = { row: 0, col: 0 };
       selFocus = { row: lastRows - 1, col: lastCols - 1 };
@@ -1474,6 +1476,9 @@
       onsplit={() => (split = !split)}
       onclear={clearTerminal}
       onpopout={() => void popOutTerminal()}
+      host={$selectedSession.host_alias}
+      opensOn={$terminalOpensOn}
+      onopenson={(at) => terminalOpensOn.set(at)}
     />
   {/if}
   <div class="term-panes">
@@ -1487,6 +1492,10 @@
         Connection lost.
         <button onclick={reconnect}>Reconnect</button>
       </div>
+    {/if}
+    {#if myShell == null}
+      <!-- J8 (5.11): the rules could not read the agent's screen. -->
+      <PaneUnreadableNotice session={$selectedSession} />
     {/if}
     <div class="header" data-testid="terminal-header" use:hintAnchor={{ id: 'terminal-header' }}>
       <!-- One name policy: the header names the session the same way the
@@ -1838,8 +1847,8 @@
     min-width: 0;
     user-select: none;
     -webkit-user-select: none;
-    background: #0a0a0a;
-    color: #e8e8e8;
+    background: var(--term-bg);
+    color: var(--term-fg);
     overflow: hidden;
     padding: 4px;
     box-sizing: border-box;
@@ -1909,7 +1918,7 @@
   }
   .selection {
     position: absolute;
-    background: rgba(120, 170, 255, 0.35);
+    background: color-mix(in srgb, var(--accent) 35%, transparent);
     pointer-events: none;
     z-index: 1;
   }
@@ -1921,7 +1930,7 @@
      fill for a hollow outline, the standard "input is elsewhere" cue. */
   .cursor {
     position: absolute;
-    background: #e8e8e8;
+    background: var(--term-fg);
     opacity: 0.55;
     pointer-events: none;
     z-index: 1;
@@ -1929,21 +1938,21 @@
   }
   .cursor.underline {
     background: none;
-    border-bottom: 2px solid #e8e8e8;
+    border-bottom: 2px solid var(--term-fg);
     opacity: 0.9;
   }
   .cursor.bar {
     background: none;
-    border-left: 2px solid #e8e8e8;
+    border-left: 2px solid var(--term-fg);
     opacity: 0.9;
   }
   .cursor.unfocused {
     background: none;
-    border: 1px solid #e8e8e8;
+    border: 1px solid var(--term-fg);
     opacity: 0.6;
   }
   .cursor.blink {
-    animation: cf-cursor-blink 1.1s steps(1, end) infinite;
+    animation: cf-cursor-blink var(--loop-fast) steps(1, end) infinite;
   }
   @keyframes cf-cursor-blink {
     50% { opacity: 0; }
@@ -1961,9 +1970,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(20, 30, 50, 0.55);
-    border: 2px dashed var(--accent, #4f8fff);
-    color: #e8e8e8;
+    background: color-mix(in srgb, var(--term-bg) 55%, transparent);
+    border: 2px dashed var(--accent);
+    color: var(--term-fg);
     font-size: var(--text-sm);
     pointer-events: none;
   }

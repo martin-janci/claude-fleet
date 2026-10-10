@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { viewKey } from './shortcuts';
   // Work graph M7.3: Tidy up and Reopened, in the attention strip.
   //
   // - "n to tidy", a segment of the sidebar's attention line (redesign 1.2),
@@ -267,14 +268,16 @@
   }
 
   function onSheetKey(e: KeyboardEvent) {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // The keys are the registry's `tidy-review` rows (step 0.1).
+    const act = viewKey('tidy-review', e);
+    if (!act) return;
     // The chords act only from the sheet itself or a row. A keydown that
     // bubbles up from a focused control (Cancel, Resume, the PR link, a
     // checkbox, the choice select) keeps that control's own meaning: Enter
     // activates it and Space toggles the checkbox under the caret, never the
     // cursor row's — and never applies the tidy.
     // Escape closes the sheet from anywhere inside it; it is never destructive.
-    if (e.key === 'Escape') {
+    if (act === 'tidy-review.close') {
       closeSheet();
       e.preventDefault();
       e.stopPropagation();
@@ -286,28 +289,23 @@
       // (Enter, Space, y/n/Backspace) but j/k and the arrows have no meaning
       // on a checkbox, link or button, so they still move the cursor.
       if (target?.tagName === 'SELECT') return;
-      if (!['j', 'k', 'ArrowDown', 'ArrowUp'].includes(e.key)) return;
+      if (act !== 'tidy-review.down' && act !== 'tidy-review.up') return;
     }
     const n = ordered.length;
-    switch (e.key) {
-      case 'j':
-      case 'ArrowDown':
+    switch (act) {
+      case 'tidy-review.down':
         cursor = Math.min(n - 1, cursor + 1);
         break;
-      case 'k':
-      case 'ArrowUp':
+      case 'tidy-review.up':
         cursor = Math.max(0, cursor - 1);
         break;
-      case ' ': {
+      case 'tidy-review.toggle': {
         const c = ordered[cursor];
         if (c) toggle(c.session_id);
         break;
       }
-      case 'Enter':
+      case 'tidy-review.apply':
         void apply();
-        break;
-      case 'Escape':
-        closeSheet();
         break;
       default:
         return;
@@ -666,7 +664,7 @@
     background: var(--bg-hover);
   }
   .key {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
   }
   .meta {
     color: var(--fg-muted);

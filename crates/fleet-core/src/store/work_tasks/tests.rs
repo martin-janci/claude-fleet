@@ -426,3 +426,85 @@ fn a_due_date_that_is_not_a_calendar_day_is_refused_and_writes_nothing() {
     assert_eq!(parse_due_date("2028-02-29"), Some((2028, 2, 29)));
     assert_eq!(parse_due_date("2100-02-29"), None);
 }
+
+/// Redesign 6.9: Merge moves what hangs on a duplicate proposal onto the
+/// task it duplicates, then closes the proposal; a second decision is
+/// refused, and so is a merge into the proposal itself.
+#[test]
+fn merging_a_duplicate_proposal_moves_its_links_and_subtasks_then_closes_it() {
+    let s = Store::open_in_memory().unwrap();
+    let ticket = s.create_local_work_item(Some("OM-110"), "Qomora").unwrap();
+    let existing = s.create_native_item(&native("Receipt totals")).unwrap();
+    let p = s
+        .propose_subtask(&proposal(ticket.id, "Fix receipt totals"))
+        .unwrap();
+    assert_eq!(
+        s.merge_proposal_into(p.id, p.id).unwrap_err().code,
+        codes::E_INVALID
+    );
+    // Two sessions on the proposal, one of them already live on the task.
+    s.upsert_host("h").unwrap();
+    let a = s
+        .upsert_session("a", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let b = s
+        .upsert_session("b", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.link_session_work(a, crate::store::WorkTarget::Item(p.id), "manual")
+        .unwrap();
+    s.link_session_work_as(
+        b,
+        crate::store::WorkTarget::Item(existing.id),
+        "manual",
+        true,
+        None,
+    )
+    .unwrap();
+    s.link_session_work_as(
+        b,
+        crate::store::WorkTarget::Item(p.id),
+        "manual",
+        false,
+        None,
+    )
+    .unwrap();
+    // A subtask hung on the proposal (written directly: the API proposes
+    // under tickets only).
+    let child = s.create_native_item(&native("Totals: tests")).unwrap();
+    s.conn_for_test()
+        .execute(
+            "UPDATE work_items SET parent_id = ?1 WHERE id = ?2",
+            rusqlite::params![p.id, child.id],
+        )
+        .unwrap();
+
+    let (into, moved) = s.merge_proposal_into(p.id, existing.id).unwrap();
+    assert_eq!(into.id, existing.id);
+    assert_eq!(moved.subtasks, 1);
+    assert_eq!(moved.ended_links, 1, "b was already live on the task");
+    assert_eq!(
+        s.get_work_item(child.id).unwrap().unwrap().parent_id,
+        Some(existing.id)
+    );
+    let live_on = |sid: i64| -> Vec<Option<i64>> {
+        s.session_work_links(sid)
+            .unwrap()
+            .into_iter()
+            .filter(|l| l.ended_at.is_none())
+            .map(|l| l.item_id)
+            .collect()
+    };
+    assert_eq!(live_on(a), vec![Some(existing.id)]);
+    assert_eq!(live_on(b), vec![Some(existing.id)], "no doubled link");
+    let closed = s.get_work_item(p.id).unwrap().unwrap();
+    assert_eq!(closed.proposal_state.as_deref(), Some("rejected"));
+    assert_eq!(
+        s.merge_proposal_into(p.id, existing.id).unwrap_err().code,
+        codes::E_INVALID,
+        "decided once"
+    );
+    assert_eq!(
+        s.decide_proposal(p.id, true).unwrap_err().code,
+        codes::E_INVALID
+    );
+}

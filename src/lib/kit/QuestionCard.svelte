@@ -95,8 +95,8 @@
 
 <style>
   .compact {
-    padding: 8px 10px;
-    gap: 6px;
+    padding: var(--space-2) var(--space-3);
+    gap: var(--control-gap);
   }
   .box {
     display: inline-block;

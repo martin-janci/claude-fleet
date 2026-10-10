@@ -1,7 +1,7 @@
 // Orbit Fleet 4.9: the add-host wizard against a mocked backend whose
 // drafts outlive the component, the way the database outlives the app.
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
@@ -9,6 +9,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AddHostWizard from './AddHostWizard.svelte';
 import type { HostSetup, SetupCheck } from './add_host_wizard';
 import { expectAccessible } from './a11y_check';
+import { appVersion } from './app_version';
 
 const inv = mockedInvoke as unknown as ReturnType<typeof vi.fn>;
 /** The backend's `host_setups` table. */
@@ -224,5 +225,70 @@ describe('AddHostWizard: accessibility', () => {
     await waitFor(() => expect(checksRun).toHaveLength(6));
     await waitFor(() => expect((screen.getByTestId('wizard-next') as HTMLButtonElement).disabled).toBe(false));
     await expectAccessible(container);
+  });
+
+  describe('fleet-agent install (4.9)', () => {
+    let installs: { alias: string; version?: string }[];
+    beforeEach(() => {
+      installs = [];
+      appVersion.set('0.5.4');
+      ANSWERS.agent = {
+        key: 'agent',
+        state: 'warn',
+        label: 'fleet-agent not installed',
+        detail: 'once the host is added, the hub can install fleet-agent 0.5.4 on it (install_agent)',
+      };
+      const base = inv.getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
+      inv.mockImplementation(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+        if (cmd === 'install_agent') {
+          installs.push(payload!.args as { alias: string; version?: string });
+          return { id: 7, host_alias: 'mercury', version: '0.5.4', state: 'running', step: 'download', started_at: 1 };
+        }
+        if (cmd === 'agent_installs') {
+          return installs.length
+            ? [{ id: 7, host_alias: 'mercury', version: '0.5.4', state: 'running', step: 'download', started_at: 1 }]
+            : [];
+        }
+        return base(cmd, payload);
+      });
+    });
+    afterEach(() => {
+      ANSWERS.agent = { key: 'agent', state: 'na', label: 'fleet-agent not needed', detail: 'this app reaches the host over SSH' };
+      appVersion.set(null);
+    });
+
+    it('says nothing is installed without asking, and offers Install on the row', async () => {
+      await toCheckStep();
+      expect(screen.getByText('Fleet connects over SSH and checks what sessions need. Nothing is installed without asking.')).toBeTruthy();
+      const btn = await screen.findByTestId('wizard-agent-install');
+      expect(btn.textContent?.trim()).toBe('Install 0.5.4');
+      // The checks alone install nothing.
+      expect(installs).toEqual([]);
+    });
+
+    it('a "not needed" row offers nothing', async () => {
+      ANSWERS.agent = { key: 'agent', state: 'na', label: 'fleet-agent not needed', detail: 'this app reaches the host over SSH' };
+      await toCheckStep();
+      await waitFor(() => expect(screen.getAllByTestId('wizard-check')).toHaveLength(6));
+      expect(screen.queryByTestId('wizard-agent-install')).toBeNull();
+    });
+
+    it('the click is recorded on the draft and the job starts once the host is added, with its progress', async () => {
+      await toCheckStep();
+      await fireEvent.click(await screen.findByTestId('wizard-agent-install'));
+      await screen.findByTestId('wizard-agent-install-chosen');
+      expect(db.get('mercury')?.answers).toMatchObject({ install_agent: true });
+      expect(installs).toEqual([]);
+      await fireEvent.click(screen.getByTestId('wizard-next')); // → Agents
+      await fireEvent.click(screen.getByTestId('wizard-next')); // → Accounts
+      await screen.findByTestId('wizard-account');
+      await fireEvent.click(screen.getByTestId('wizard-next')); // → Done
+      expect(screen.getByTestId('wizard-summary-agent').textContent).toBe('installs once added');
+      await fireEvent.click(screen.getByTestId('wizard-next')); // Add mercury
+      await screen.findByTestId('wizard-added');
+      expect(installs).toEqual([{ alias: 'mercury', version: '0.5.4' }]);
+      const step = await screen.findByTestId('wizard-agent-install-job-step');
+      expect(step.textContent).toContain('Installing fleet-agent 0.5.4 on mercury: Downloading');
+    });
   });
 });

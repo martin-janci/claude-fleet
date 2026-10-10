@@ -25,7 +25,7 @@
   import { diskMeter } from './hosts_view';
   import { hosts, hostFilter, effectiveHostFilter } from './hosts';
   import { hintAnchor } from './hints';
-  import { accountByUuid } from './accounts';
+  import { accountByUuid, accounts, accountLabel as accountName } from './accounts';
   import { attentionIdleMinutes } from './notify';
   import Attention from './Attention.svelte';
   import ScopeAttention from './ScopeAttention.svelte';
@@ -114,15 +114,26 @@
     onBulkCleanUp?: () => void;
     /** Archive into the work's Done, with Undo (step 1.7). */
     onBulkArchive?: () => void;
-    /** Move each selected session past the line to the login on its host
+    /** Move each selected session to the login on its host on the account
+     *  the person picked, or (`null`) each one past the line to the login
      *  with the most headroom (step 4.4). */
-    onBulkMoveAccount?: () => void;
+    onBulkMoveAccount?: (accountUuid: string | null) => void;
     bulkMoveAccountBlocked?: string | null;
     bulkArchiveBlocked?: string | null;
     bulkCleanUpBlocked?: string | null;
     clearSelected: () => void;
   } = $props();
   const sessionsList = $derived(listView !== 'work');
+  // Step 4.4's bulk Switch account: the person picks the account first.
+  let movePicking = $state(false);
+  let moveTarget = $state('');
+  $effect(() => {
+    if (selectedCount === 0) movePicking = false;
+  });
+  function confirmMove() {
+    movePicking = false;
+    onBulkMoveAccount?.(moveTarget === '' ? null : moveTarget);
+  }
   // ── Work filters (work graph M10.4) ──
   // Their group in the panel shows once there is work to filter (a tracker,
   // a linked session), in group-by-work, or while one is on.
@@ -567,13 +578,35 @@
         >Archive</button>
       {/if}
       {#if onBulkMoveAccount}
-        <button
-          class="btn btn--chip"
-          data-testid="bulk-move-account"
-          disabled={bulkMoveAccountBlocked !== null}
-          title={bulkMoveAccountBlocked ?? 'Resume each session past its account’s limit under the login on its host with the most headroom'}
-          onclick={() => onBulkMoveAccount()}
-        >Switch account</button>
+        {#if movePicking}
+          <select
+            class="bulk-move-target"
+            aria-label="Switch to account"
+            data-testid="bulk-move-account-target"
+            bind:value={moveTarget}
+          >
+            <option value="">Most headroom on each host</option>
+            {#each $accounts as a (a.uuid)}
+              <option value={a.uuid}>{accountName(a)}</option>
+            {/each}
+          </select>
+          <button class="btn btn--chip" data-testid="bulk-move-account-go" onclick={confirmMove}>Switch</button>
+          <button class="btn btn--quiet" data-testid="bulk-move-account-cancel" onclick={() => (movePicking = false)}
+            >Cancel</button
+          >
+        {:else}
+          <button
+            class="btn btn--chip"
+            data-testid="bulk-move-account"
+            disabled={bulkMoveAccountBlocked !== null}
+            title={bulkMoveAccountBlocked ??
+              'Resume the selected sessions under another account: one you pick, or the login on each host with the most headroom'}
+            onclick={() => {
+              moveTarget = '';
+              movePicking = true;
+            }}
+          >Switch account</button>
+        {/if}
       {/if}
       {#if onBulkCleanUp}
         <button
@@ -605,13 +638,13 @@
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
-    padding: 0 0.5rem;
+    padding: 0 var(--space-2);
   }
   /* "a · b · c": a dot before every segment after the first. The segments
      belong to LinkReview and TidyReview, hence :global. */
   .attention-line :global(.al-seg ~ .al-seg)::before {
     content: '·';
-    margin-right: 0.3rem;
+    margin-right: var(--space-1);
     color: var(--fg-muted);
     text-decoration: none;
     display: inline-block;
@@ -621,13 +654,13 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    padding: 8px 8px 6px;
+    padding: var(--space-2) var(--space-2) 6px;
     border-bottom: 1px solid var(--border);
     background: var(--bg-pane);
   }
   .row {
     display: flex;
-    gap: 4px;
+    gap: var(--space-1);
     align-items: center;
     min-width: 0;
   }
@@ -645,10 +678,10 @@
     white-space: nowrap;
   }
   .tab-badge {
-    margin-left: 4px;
+    margin-left: var(--space-1);
     min-width: 16px;
     height: 16px;
-    padding: 0 4px;
+    padding: 0 var(--space-1);
     border-radius: var(--radius-pill);
     font-size: var(--control-font-sm);
     line-height: 16px;
@@ -678,8 +711,8 @@
     min-width: 200px;
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 8px;
+    gap: var(--space-1);
+    padding: var(--space-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg);
@@ -694,19 +727,19 @@
   .fgroup {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-1);
   }
   .chips {
     display: flex;
     flex-wrap: wrap;
-    gap: 4px;
+    gap: var(--space-1);
   }
 
   .bulk-bar {
     display: flex;
-    gap: 4px;
+    gap: var(--space-1);
     align-items: center;
-    padding: 4px 6px;
+    padding: var(--space-1) 6px;
     border: 1px solid var(--accent);
     border-radius: var(--radius-sm);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -718,7 +751,7 @@
   }
   .focus-bar {
     display: flex;
-    gap: 4px;
+    gap: var(--space-1);
     align-items: center;
     padding: 2px 6px;
     border: 1px solid var(--accent);

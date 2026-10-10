@@ -552,8 +552,27 @@ pub fn decide(
     let id = args
         .item_id
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "accept / reject needs item_id"))?;
+    // Redesign 6.9: a reject naming `task_id: item:<id>` is Merge — what
+    // hangs on the proposal moves to that task before the proposal closes.
+    // A person's act like every decision here (the fence above), and only
+    // ever on their click: nothing merges by itself.
+    let merge_into = match (accept, args.task_id.as_deref()) {
+        (false, Some(raw)) => Some(
+            raw.strip_prefix("item:")
+                .and_then(|n| n.parse::<i64>().ok())
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "merge into item:<id>"))?,
+        ),
+        _ => None,
+    };
     let s = lock(store)?;
-    let row = s.decide_proposal(id, accept)?;
+    let row = match merge_into {
+        Some(into) => {
+            s.merge_proposal_into(id, into)?;
+            s.get_work_item(id)?
+                .ok_or_else(|| orgs::not_found("work item", id))?
+        }
+        None => s.decide_proposal(id, accept)?,
+    };
     // K4's follow-up: Merge (reject) confirms Jev's "may duplicate", Keep
     // both (accept) rejects it. Never fails the decision.
     if let Err(e) = crate::service::decide::duplicate::record_decision(

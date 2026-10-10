@@ -9,6 +9,7 @@ import { invokeCmd, type Result } from './result';
 import { acceptCommandRow, sessions, type SessionRow } from './sessions';
 import type { WorkItemRow } from './trackers';
 import { timeAgo } from './session_status';
+import type { ProposalLike } from './ai_proposal';
 
 /** One session ↔ work link (`store::WorkLinkRow`). The snapshot fields are
  *  set once the session has ended. */
@@ -309,6 +310,29 @@ export async function setWorkProjectTrust(projectId: number, on: boolean): Promi
 /** The rule a decision-model suggestion carries (J1 `work_link`, redesign
  *  6.8): it keeps it after a person decides, when its source becomes theirs. */
 export const JEV_RULE = 'R12';
+
+/** Who proposed a link, when the decision model did (J1, rule R12): the
+ *  desktop's mirror of `service::work::view::proposer_of`, with the
+ *  confidence its last `jev` evidence note holds (`82%`). Null for a
+ *  rule's own reading. A J1 answer only becomes a link in assist mode;
+ *  shadow records it and writes nothing, so nothing here shows it. */
+export function linkProposal(
+  l: Pick<WorkLink, 'rule' | 'evidence' | 'ref_key' | 'item_id'>,
+): ProposalLike | null {
+  if (l.rule !== JEV_RULE) return null;
+  let confidence: number | null = null;
+  for (const e of l.evidence ?? []) {
+    if (e.signal !== 'jev' || !e.note) continue;
+    const n = Number.parseInt(e.note.replace(/%$/, ''), 10);
+    if (Number.isFinite(n)) confidence = n;
+  }
+  return {
+    value: l.ref_key ?? (l.item_id != null ? `item ${l.item_id}` : 'work'),
+    source: 'jev',
+    reason: 'from the first prompt',
+    confidence_pct: confidence,
+  };
+}
 
 /** Link sources detection writes; a confirmed link with one is "auto". */
 export const AUTO_SOURCES: readonly string[] = ['branch', 'pr', 'trailer', 'url', 'prompt', 'agent_inferred', 'jev'];
@@ -628,6 +652,17 @@ export function parseAssignees(raw: string): string[] {
 export async function decideWorkProposal(itemId: number, accept: boolean): Promise<Result<WorkItemRow>> {
   const r = await invokeCmd<WorkItemRow>(accept ? 'accept_work_proposal' : 'reject_work_proposal', {
     args: { item_id: itemId },
+  });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
+/** Redesign 6.9: Merge a proposal into the task it duplicates. What hangs
+ *  on the proposal (its session links, its subtasks) moves to `intoItemId`,
+ *  then the proposal closes as rejected. Only ever a person's click. */
+export async function mergeWorkProposal(itemId: number, intoItemId: number): Promise<Result<WorkItemRow>> {
+  const r = await invokeCmd<WorkItemRow>('reject_work_proposal', {
+    args: { item_id: itemId, merge_into: intoItemId },
   });
   if (r.ok) bumpWorkChanged();
   return r;

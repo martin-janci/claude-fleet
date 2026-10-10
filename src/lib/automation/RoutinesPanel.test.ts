@@ -152,7 +152,7 @@ describe('the Automation board (list, detail, inspector)', () => {
     await fireEvent.click(builtIn[1]);
     const d = await screen.findByTestId('automation-loop-detail');
     expect(d.textContent).toContain('Reconcile');
-    expect(d.textContent).toContain('only observes');
+    expect(d.textContent).toContain('keeps running on Pause all');
     expect(screen.getByTestId('automation-loop-error').textContent).toBe('ssh: refused');
   });
 

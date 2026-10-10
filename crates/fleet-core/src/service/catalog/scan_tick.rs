@@ -115,7 +115,7 @@ pub fn spawn_catalog_scan_tick(
     ssh: Arc<SshClient>,
     token: CancellationToken,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    use crate::service::settings::{CATALOG_SCAN_CHECK_SECS, CATALOG_SCAN_MAX_AGE_SECS};
+    use crate::service::settings::CATALOG_SCAN_CHECK_SECS;
     let check = setting_secs(&store, CATALOG_SCAN_CHECK_SECS);
     if check <= 0 {
         tracing::info!("catalog scan tick disabled (catalog.scan_check_secs=0)");
@@ -137,100 +137,127 @@ pub fn spawn_catalog_scan_tick(
                 _ = token.cancelled() => break,
                 _ = ticker.tick() => {}
             }
-            // Pause all (redesign 8.1): nothing scanned, nothing synced.
-            if !crate::service::loops::gate("catalog_scan", &store, Some(period)) {
-                continue;
-            }
-            // Assets M3: every loaded catalog's HEAD, not just personal's — an
-            // org catalog that moves must rescan too. Nothing loaded (no
-            // personal), or the lock poisoned: nothing to compare yet.
-            let head = match super::registry::with_catalogs(|m| {
-                if !m.values().any(|c| c.org_id.is_none()) {
-                    return Err(crate::ipc_error::IpcError::new(
-                        super::E_CATALOG_NOT_CONFIGURED,
-                        "catalog not loaded",
-                    ));
-                }
-                Ok(super::registry::heads_key(m))
-            }) {
-                Ok(head) => head,
-                Err(_) => continue,
-            };
-            // All store reads in one scoped guard, dropped before any await.
-            let (hosts, last_sync) = {
-                let Ok(s) = store.lock() else { continue };
-                let Ok(list) = s.list_hosts() else { continue };
-                let last = s.inventory_last_scans().unwrap_or_default();
-                let sync = sync_key(&s);
-                let hosts: Vec<HostDue> = list
-                    .into_iter()
-                    .map(|h| HostDue {
-                        last_scan: last.get(&h.alias).copied(),
-                        alias: h.alias,
-                        reachable: h.reachable,
-                        hidden: h.hidden,
-                    })
-                    .collect();
-                (hosts, sync)
-            };
-            let now_key = (head, last_sync);
-            let changed = seen.as_ref() != Some(&now_key);
-            let due = hosts_due(
-                super::now_secs(),
-                &hosts,
-                setting_secs(&store, CATALOG_SCAN_MAX_AGE_SECS),
-                changed,
-            );
-            owed.extend(take_requested());
-            let due = with_owed(due, &owed, &hosts);
-            for alias in due {
-                match super::inventory::scan_hosts(&store, &ssh, Some(&alias)).await {
-                    Ok(results) => match results.iter().find(|r| r.host == alias) {
-                        Some(r) if r.status == "scanned" => {
-                            owed.remove(&alias);
-                        }
-                        Some(r) => {
-                            owed.insert(alias.clone());
-                            tracing::warn!(
-                                host = %alias,
-                                status = %r.status,
-                                detail = ?r.detail,
-                                "catalog scan tick: host not fully scanned; retrying next pass"
-                            );
-                        }
-                        None => {
-                            owed.insert(alias.clone());
-                        }
-                    },
-                    Err(e) => {
-                        owed.insert(alias.clone());
-                        tracing::warn!(host = %alias, "catalog scan tick: {}", e.message);
-                    }
-                }
-            }
-            // Assets M4 (R19): the reconcile pass — cards, automatic hides —
-            // after every pass that got this far (a personal catalog is
-            // loaded), then SB6's additive sync as a detached task (R17). It
-            // never waits: an apply in flight skips both, and it never
-            // touches `owed` or `seen`. A panic in it is logged and stops
-            // only this pass's reconcile (or that one SB6 run), never the
-            // tick loop.
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                super::changesets::reconcile::after_scan_pass(&store, &ssh)
-            }))
-            .is_err()
-            {
-                tracing::error!("catalog scan tick: the changeset reconcile pass panicked");
-            }
-            seen = Some(now_key);
-            let outcome = if owed.is_empty() {
-                Ok(())
-            } else {
-                Err(format!("{} host(s) owe a rescan", owed.len()))
-            };
-            crate::service::loops::report("catalog_scan", outcome, Some(period));
+            pass(&store, &ssh, period, &mut seen, &mut owed).await;
         }
     }))
+}
+
+/// What one [`pass`] did.
+#[derive(Debug, PartialEq, Eq)]
+enum Pass {
+    /// Pause all (redesign 8.1) is on: nothing scanned, nothing synced.
+    Paused,
+    /// No catalog loaded, or the store unreadable: nothing to compare yet.
+    Skipped,
+    Ran,
+}
+
+/// One pass of the tick: rescan the due and owed hosts, then reconcile.
+async fn pass(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    period: Duration,
+    seen: &mut Option<(String, Option<i64>)>,
+    owed: &mut BTreeSet<String>,
+) -> Pass {
+    use crate::service::settings::CATALOG_SCAN_MAX_AGE_SECS;
+    // Pause all (redesign 8.1): nothing scanned, nothing synced.
+    if !crate::service::loops::gate("catalog_scan", store, Some(period)) {
+        return Pass::Paused;
+    }
+    // Assets M3: every loaded catalog's HEAD, not just personal's — an
+    // org catalog that moves must rescan too. Nothing loaded (no
+    // personal), or the lock poisoned: nothing to compare yet.
+    let head = match super::registry::with_catalogs(|m| {
+        if !m.values().any(|c| c.org_id.is_none()) {
+            return Err(crate::ipc_error::IpcError::new(
+                super::E_CATALOG_NOT_CONFIGURED,
+                "catalog not loaded",
+            ));
+        }
+        Ok(super::registry::heads_key(m))
+    }) {
+        Ok(head) => head,
+        Err(_) => return Pass::Skipped,
+    };
+    // All store reads in one scoped guard, dropped before any await.
+    let (hosts, last_sync) = {
+        let Ok(s) = store.lock() else {
+            return Pass::Skipped;
+        };
+        let Ok(list) = s.list_hosts() else {
+            return Pass::Skipped;
+        };
+        let last = s.inventory_last_scans().unwrap_or_default();
+        let sync = sync_key(&s);
+        let hosts: Vec<HostDue> = list
+            .into_iter()
+            .map(|h| HostDue {
+                last_scan: last.get(&h.alias).copied(),
+                alias: h.alias,
+                reachable: h.reachable,
+                hidden: h.hidden,
+            })
+            .collect();
+        (hosts, sync)
+    };
+    let now_key = (head, last_sync);
+    let changed = seen.as_ref() != Some(&now_key);
+    let due = hosts_due(
+        super::now_secs(),
+        &hosts,
+        setting_secs(store, CATALOG_SCAN_MAX_AGE_SECS),
+        changed,
+    );
+    owed.extend(take_requested());
+    let due = with_owed(due, owed, &hosts);
+    for alias in due {
+        match super::inventory::scan_hosts(store, ssh, Some(&alias)).await {
+            Ok(results) => match results.iter().find(|r| r.host == alias) {
+                Some(r) if r.status == "scanned" => {
+                    owed.remove(&alias);
+                }
+                Some(r) => {
+                    owed.insert(alias.clone());
+                    tracing::warn!(
+                        host = %alias,
+                        status = %r.status,
+                        detail = ?r.detail,
+                        "catalog scan tick: host not fully scanned; retrying next pass"
+                    );
+                }
+                None => {
+                    owed.insert(alias.clone());
+                }
+            },
+            Err(e) => {
+                owed.insert(alias.clone());
+                tracing::warn!(host = %alias, "catalog scan tick: {}", e.message);
+            }
+        }
+    }
+    // Assets M4 (R19): the reconcile pass — cards, automatic hides —
+    // after every pass that got this far (a personal catalog is
+    // loaded), then SB6's additive sync as a detached task (R17). It
+    // never waits: an apply in flight skips both, and it never
+    // touches `owed` or `seen`. A panic in it is logged and stops
+    // only this pass's reconcile (or that one SB6 run), never the
+    // tick loop.
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        super::changesets::reconcile::after_scan_pass(store, ssh)
+    }))
+    .is_err()
+    {
+        tracing::error!("catalog scan tick: the changeset reconcile pass panicked");
+    }
+    *seen = Some(now_key);
+    let outcome = if owed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{} host(s) owe a rescan", owed.len()))
+    };
+    crate::service::loops::report("catalog_scan", outcome, Some(period));
+    Pass::Ran
 }
 
 #[cfg(test)]
@@ -254,6 +281,30 @@ mod tests {
         assert!(!rescan_requested(&alias));
         owe_rescan(&alias);
         assert!(rescan_requested(&alias));
+    }
+
+    /// Redesign 8.1: with Pause all on, a pass scans nothing and leaves a
+    /// requested rescan where it was.
+    #[tokio::test]
+    async fn pause_all_stops_the_pass_before_it_scans() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        crate::service::settings::set(
+            &store.lock().unwrap(),
+            crate::service::settings::AUTOMATION_PAUSED,
+            "true",
+        )
+        .unwrap();
+        let alias = format!("paused-{}", uuid::Uuid::new_v4());
+        owe_rescan(&alias);
+        let (mut seen, mut owed) = (None, BTreeSet::new());
+        let ssh = Arc::new(SshClient::new());
+        let got = pass(&store, &ssh, Duration::from_secs(300), &mut seen, &mut owed).await;
+        assert_eq!(got, Pass::Paused);
+        assert!(
+            rescan_requested(&alias),
+            "the request waits for an unpaused pass"
+        );
+        assert!(seen.is_none() && owed.is_empty());
     }
 
     #[test]

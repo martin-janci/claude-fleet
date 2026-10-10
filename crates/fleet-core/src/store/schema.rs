@@ -1731,7 +1731,10 @@ const MIGRATIONS: &[Migration] = &[
         152,
         include_str!("../../migrations/152_update_org_policy.sql"),
     ),
-    // Orbit Fleet M15 (G1.7): a task's due date. 153 is another branch's.
+    // Redesign 10.12: a chat form while its agent is still writing it
+    // (`ask { draft }`). `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(153, include_str!("../../migrations/153_form_drafts.sql")),
+    // Orbit Fleet M15 (G1.7): a task's due date.
     Migration {
         version: 154,
         sql: include_str!("../../migrations/154_work_item_due.sql"),

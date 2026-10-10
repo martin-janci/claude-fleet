@@ -230,6 +230,10 @@ pub struct CreateWorkTaskArgs {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkProposalArgs {
     pub item_id: i64,
+    /// Reject only: Merge (redesign 6.9) — the task the proposal duplicates;
+    /// what hangs on the proposal moves there before it closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_into: Option<i64>,
 }
 
 #[tauri::command]
@@ -735,6 +739,10 @@ pub(crate) mod routed {
         let args = WorkLinkArgs {
             action: if accept { "accept" } else { "reject" }.into(),
             item_id: Some(args.item_id),
+            task_id: args
+                .merge_into
+                .filter(|_| !accept)
+                .map(|id| format!("item:{id}")),
             ..Default::default()
         };
         match backend.hub() {

@@ -61,7 +61,8 @@ pub struct NewSessionArgs {
     /// `"claude"` (the default), `"codex"` (OpenAI's Codex CLI), `"agy"`
     /// (Google's Antigravity CLI) or `"shell"`, which is the same as
     /// `kind: "shell"`. `None` / empty = Claude Code, or a shell for
-    /// `kind: "shell"`.
+    /// `kind: "shell"`. `"agy"` is refused (`E_UNSUPPORTED`) until its
+    /// adapter is validated.
     #[serde(default)]
     pub agent: Option<String>,
     /// Who or what is starting the session (migration 124): set by the
@@ -71,6 +72,13 @@ pub struct NewSessionArgs {
     /// [`SessionOrigin::person`] with `owner_person_id`.
     #[serde(skip_deserializing)]
     pub origin: Option<crate::store::SessionOrigin>,
+    /// The person was asked about `accounts.pause_at` (redesign step 4.4)
+    /// and chose to start on that login anyway. The MCP / hub `new_session`
+    /// refuses a login at or past the line without it
+    /// (`E_CONFIRM_REQUIRED`, naming the login with headroom); the
+    /// desktop's own dialog asks first and sets it.
+    #[serde(default)]
+    pub over_limit_ok: bool,
     /// Whose session this is to be (multi-user M1, T5): the `people` row the
     /// new row is owned by, and therefore `private` to. `None` leaves it
     /// `unclaimed` — the safe holding state (spec §4.3), never "everybody's".
@@ -91,6 +99,14 @@ pub struct NewSessionArgs {
     /// `store::reconcile` for why that shape cannot be made sound.
     #[serde(skip_deserializing)]
     pub owner_person_id: Option<i64>,
+    /// An opaque id the caller minted (redesign step 5.13): when set, the
+    /// start reports its worktree, tmux and agent steps as `start:progress`
+    /// frames carrying this token and nothing else, so the client that
+    /// started the session can drive its Pulse sequence from them. Unlike
+    /// `call_id` it crosses to a hub: the frames reach a paired desktop on
+    /// the hub's `/events` stream. 1–64 of `[A-Za-z0-9_-]`.
+    #[serde(default)]
+    pub start_token: Option<String>,
 }
 
 /// An existing worktree to make sure is present on a remote host, ahead of
@@ -454,6 +470,9 @@ pub async fn new_session(
     if let Some(name) = args.new_worktree.as_deref() {
         validate_new_worktree_name(name)?;
     }
+    if let Some(t) = args.start_token.as_deref() {
+        validate_start_token(t)?;
+    }
 
     // Mint / bind a cancellation token for the duration of this command.
     // If a call_id was provided by the frontend, bind under that id so the
@@ -471,7 +490,15 @@ pub async fn new_session(
     // panic inside new_session_inner, which a manual unregister would miss.
     let _guard = CancelGuard::new(Arc::clone(reg), cancel_id);
 
-    new_session_inner(args, store, ssh, token).await
+    // The steps are reported from inside; the outcome closes the last one
+    // (or marks the one in flight failed) here, on every exit path.
+    let progress = StartReporter::new(store, args.start_token.clone());
+    let out = new_session_inner(args, store, ssh, token, &progress).await;
+    match &out {
+        Ok(_) => progress.finish(),
+        Err(_) => progress.fail(),
+    }
+    out
 }
 
 /// Refuse a name that belongs to a lost session with a resumable
@@ -749,13 +776,32 @@ fn normalize_agent(args: &mut NewSessionArgs) -> Result<(), IpcError> {
                 "a shell session runs no agent; drop agent or kind",
             ))
         }
-        Some(AGENT_CLAUDE | AGENT_CODEX | AGENT_AGY) => {}
+        Some(AGENT_AGY) => refuse_unvalidated_agent(AGENT_AGY)?,
+        Some(AGENT_CLAUDE | AGENT_CODEX) => {}
         Some(_) => {
             return Err(IpcError::new(
                 codes::E_INVALID,
                 format!("agent must be one of {}", AGENTS.join(", ")),
             ))
         }
+    }
+    Ok(())
+}
+
+/// Refuse to launch an agent whose adapter is not validated yet (redesign
+/// 12.3): agy's adapter (`agent_adapter::agy`) is provisional — no captured
+/// pane fixtures, its SQLite transcripts unread — so the New session picker
+/// shows it as coming, and `new_session`, restart, recreate and repair
+/// refuse it with `E_UNSUPPORTED` rather than start a pane fleet cannot
+/// read. The adapter code stays; lifting this is one line once it is
+/// validated against real captures.
+pub(crate) fn refuse_unvalidated_agent(agent: &str) -> Result<(), IpcError> {
+    if agent == crate::store::AGENT_AGY {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            "agy sessions are not supported yet: fleet cannot read agy's state or \
+             transcripts until its adapter is validated; use claude or codex",
+        ));
     }
     Ok(())
 }
@@ -917,7 +963,10 @@ pub(super) async fn new_session_inner(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
     token: CancellationToken,
+    progress: &StartReporter<'_>,
 ) -> Result<SessionRow, IpcError> {
+    use crate::events::StartStep;
+    progress.advance(StartStep::Worktree);
     // Resolve the cwd that tmux will spawn the pane in. For LOCAL the path
     // comes straight from the DB (it was discovered by scanning ~/projects).
     // For REMOTE we can't use the local path — it doesn't exist on the other
@@ -1089,6 +1138,7 @@ pub(super) async fn new_session_inner(
         (path, None)
     };
 
+    progress.advance(StartStep::Tmux);
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.new_session(&args.name, &path, &pane_cmd).await?;
 
@@ -1103,6 +1153,7 @@ pub(super) async fn new_session_inner(
     record_tmux_created(store, &args.host_alias, &args.name);
 
     reconcile_one_host(store, ssh, &args.host_alias).await?;
+    progress.advance(StartStep::Agent);
     if let Some(rep) = &repaired {
         // Same detail as every other workspace_repaired event (branch_source
         // included), attached now that reconcile created the row.
@@ -1911,6 +1962,7 @@ pub async fn restart_session(
             ),
         }
     };
+    refuse_unvalidated_agent(&agent)?;
     let pane_cmd: String =
         recreate_pane_command(&kind, &agent, claude_id.as_deref(), &args.name, &launch);
     let tmux = exec_for(&args.host_alias, ssh);
@@ -2233,6 +2285,7 @@ pub async fn recreate_session(
             &sess.tmux_name,
             "recreate_session",
         )?;
+        refuse_unvalidated_agent(&sess.agent)?;
         let host = s
             .get_host_row(&sess.host_alias)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "host not found"))?;

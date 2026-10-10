@@ -126,6 +126,52 @@ pub fn hub_retry_now(status: State<'_, Arc<crate::backend::connection::HubConnec
     status.retry_now();
 }
 
+/// Open offline (redesign step 3.15): the tmux sessions on THIS machine, for
+/// a paired desktop whose hub cannot be reached. Read from this machine's own
+/// tmux server and nothing else: no `state.db`, no SSH, no host the hub
+/// manages, and nothing is written, so it cannot make this process a second
+/// brain for the hub's fleet. The window lists them under this computer and
+/// attaches through `pty_open`, which is this machine's too. An empty list
+/// when no tmux server runs; `E_TMUX` when tmux is not installed.
+#[tauri::command]
+pub async fn offline_local_sessions() -> Result<Vec<OfflineSession>, IpcError> {
+    Ok(fleet_core::tmux::list_local_sessions()
+        .await?
+        .into_iter()
+        .map(OfflineSession::from)
+        .collect())
+}
+
+/// One tmux session on this machine, as Open offline lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OfflineSession {
+    pub name: String,
+    /// Unix seconds.
+    pub created: i64,
+    pub last_activity: i64,
+    pub attached: bool,
+    /// The command that attaches it from a terminal on this machine, quoted
+    /// with the one shell quote (`fleet_core::shell::quote`) and exact (`=`),
+    /// so `api` never lands on `api-review`.
+    pub attach: String,
+}
+
+impl From<fleet_core::tmux::TmuxSession> for OfflineSession {
+    fn from(s: fleet_core::tmux::TmuxSession) -> Self {
+        let attach = format!(
+            "tmux attach -t {}",
+            fleet_core::shell::quote(&fleet_core::tmux::exact_session(&s.name))
+        );
+        Self {
+            name: s.name,
+            created: s.created,
+            last_activity: s.last_activity,
+            attached: s.attached,
+            attach,
+        }
+    }
+}
+
 /// Whether a client token is sitting on this machine with **no hub
 /// configured** — a credential nothing reads and, until this existed, nothing
 /// offered to clear.

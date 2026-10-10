@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { viewKey } from './shortcuts';
   import Skeleton from './states/Skeleton.svelte';
   import Icon from './kit/Icon.svelte';
   // The task board (sprints design 2026-09-28 §6c): every task the Work
@@ -37,6 +38,7 @@
   import { providerInfo } from './trackers';
   import { hintAnchor } from './hints';
   import EditTaskDialog from './EditTaskDialog.svelte';
+  import TaskBlockedSpend from './TaskBlockedSpend.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import {
@@ -61,6 +63,8 @@
   }: { onclose?: () => void; debounceMs?: number; maxWaitMs?: number } = $props();
 
   let tasks = $state.raw<WorkTask[]>([]);
+  const byId = $derived(new Map(tasks.map((t) => [t.task_id, t])));
+  const taskById = (id: string) => byId.get(id);
   let more = $state(false);
   let loaded = $state(false);
   let error = $state<IpcError | null>(null);
@@ -215,14 +219,15 @@
   }
 
   function oncardkey(e: KeyboardEvent, t: WorkTask, lane: BoardLane) {
-    if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
-    if ((e.key === 'e' || e.key === 'E') && !boardMoveRefusal(t) && !editBlocked) {
+    // The keys are the registry's `work-board` rows (step 0.1).
+    const act = viewKey('work-board', e);
+    if (act === 'work-board.edit' && !boardMoveRefusal(t) && !editBlocked) {
       e.preventDefault();
       editing = t.task_id;
       return;
     }
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-    const to = boardStep(columns.lanes, lane, e.key === 'ArrowRight' ? 1 : -1);
+    if (act !== 'work-board.left' && act !== 'work-board.right') return;
+    const to = boardStep(columns.lanes, lane, act === 'work-board.right' ? 1 : -1);
     if (!to) return;
     e.preventDefault();
     void move(t, to).then(() => {
@@ -231,7 +236,7 @@
   }
 
   function onwindowkey(e: KeyboardEvent) {
-    if (e.key === 'Escape' && dragging) {
+    if (dragging && viewKey('work-board', e) === 'work-board.cancel-drag') {
       e.preventDefault();
       e.stopPropagation();
       endDrag();
@@ -358,7 +363,7 @@
       <span class="top">
         <span class="tb" title={t.tracker_name ?? t.kind}>{badge(t)}</span>
         {#if t.key}<span class="key">{t.key}</span>{/if}
-        {#if refusal}<span class="lock" aria-label="status set elsewhere">🔒</span>{/if}
+        {#if refusal}<span class="lock" role="img" aria-label="status set elsewhere"><Icon name="lock" size={12} /></span>{/if}
         {#if t.needs_you}<span class="needs" title="A session needs you" aria-label="needs you">●</span>{/if}
       </span>
       <span class="title" class:derived={t.title_derived}>{displayTitle(t)}</span>
@@ -367,6 +372,7 @@
         {#if t.project_label}<span>{t.project_label}</span>{/if}
         {#if n.children.length > 0}<span>{n.children.length} subtask{n.children.length === 1 ? '' : 's'}</span>{/if}
         {#if (t.open_proposals ?? 0) > 0}<span class="prop">{t.open_proposals} to review</span>{/if}
+        <TaskBlockedSpend task={t} lookup={taskById} testid="work-board-card" />
       </span>
       {#if owner}
         <span
@@ -397,7 +403,7 @@
 
 <style>
   .board-note {
-    margin: 8px 0 0;
+    margin: var(--space-2) 0 0;
     font-size: var(--text-2xs);
   }
   .board {
@@ -413,7 +419,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border);
   }
   h2 {
@@ -435,11 +441,11 @@
     color: var(--fg-muted);
   }
   .pad {
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     margin: 0;
   }
   .err {
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     color: var(--usage-crit);
   }
   .columns {
@@ -448,7 +454,7 @@
     display: grid;
     grid-template-columns: repeat(3, minmax(200px, 1fr));
     gap: 10px;
-    padding: 10px 12px;
+    padding: 10px var(--space-3);
     overflow: auto;
   }
   .column {
@@ -469,7 +475,7 @@
     gap: 6px;
     align-items: center;
     margin: 0;
-    padding: 8px 10px 4px;
+    padding: var(--space-2) 10px var(--space-1);
     font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -488,7 +494,7 @@
   ul {
     list-style: none;
     margin: 0;
-    padding: 4px 8px 8px;
+    padding: var(--space-1) var(--space-2) var(--space-2);
     display: grid;
     gap: 6px;
   }
@@ -501,7 +507,7 @@
     width: 100%;
     display: grid;
     gap: 3px;
-    padding: 6px 8px;
+    padding: 6px var(--space-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg);
@@ -594,7 +600,7 @@
   .meta {
     display: flex;
     flex-wrap: wrap;
-    gap: 0 8px;
+    gap: 0 var(--space-2);
     color: var(--fg-muted);
     font-size: var(--text-2xs);
   }
@@ -634,7 +640,7 @@
     z-index: 1000;
     pointer-events: none;
     max-width: 240px;
-    padding: 4px 8px;
+    padding: var(--space-1) var(--space-2);
     border: 1px solid var(--accent);
     border-radius: var(--radius-md);
     background: var(--bg);
