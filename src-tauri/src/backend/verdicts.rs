@@ -276,6 +276,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "set_session_tags",
         },
     ),
+    // Link / Not related on a related-session proposal (M15 G4.3): the
+    // hub's own `decide_related_session`, `own`.
+    (
+        "decide_related_session",
+        Verdict::Routed {
+            tool: "decide_related_session",
+        },
+    ),
     (
         "touch_session_viewed",
         Verdict::Routed {

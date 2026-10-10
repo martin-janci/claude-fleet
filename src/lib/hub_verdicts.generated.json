@@ -141,6 +141,7 @@
     "debug_device_screenshot",
     "decide_guide",
     "decide_mission_card",
+    "decide_related_session",
     "decide_setting_proposals",
     "decide_work_batch",
     "decline_form",

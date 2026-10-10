@@ -2812,6 +2812,24 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "decide_related_session",
+            "decide_related_session",
+            json!({ "session_id": 7, "run_id": 3, "linked": true }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::decide_related_session(
+                    b,
+                    fleet_core::service::decide::related_session::DecideRelatedSessionArgs {
+                        session_id: 7,
+                        run_id: 3,
+                        linked: true,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "touch_session_viewed",
             "touch_session_viewed",
             json!({ "session_id": 7 }),

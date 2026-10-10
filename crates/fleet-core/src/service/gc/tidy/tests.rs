@@ -986,6 +986,7 @@ fn same_work(mut s: TidySession, other: i64) -> TidySession {
         confidence_pct: Some(80),
         run_id: Some(1),
         at: Some(NOW - DAY),
+        linked: None,
     }];
     s
 }

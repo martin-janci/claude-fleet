@@ -156,6 +156,16 @@ pub async fn set_session_tags(
     routed::set_session_tags(&backend, args, &store).await
 }
 
+/// Link or Not related on a session's related-session proposal (M15 G4.3).
+#[tauri::command]
+pub async fn decide_related_session(
+    args: fleet_core::service::decide::related_session::DecideRelatedSessionArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::decide_related_session(&backend, args, &store).await
+}
+
 /// The session on screen (redesign 2.3): its finished turns read as seen.
 #[tauri::command]
 pub async fn touch_session_viewed(
@@ -809,6 +819,19 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("set_session_tags", &args).await,
             None => sessions::set_session_tags(args, store),
+        }
+    }
+
+    pub async fn decide_related_session(
+        backend: &FleetBackend,
+        args: fleet_core::service::decide::related_session::DecideRelatedSessionArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("decide_related_session", &args).await,
+            None => {
+                fleet_core::service::decide::related_session::decide_related_session(args, store)
+            }
         }
     }
 

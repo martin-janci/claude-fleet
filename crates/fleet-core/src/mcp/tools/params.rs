@@ -848,6 +848,16 @@ pub struct SetSessionTagsParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DecideRelatedSessionParams {
+    /// The session whose `related_session` proposal this answers.
+    pub session_id: i64,
+    /// The proposal's `run_id`.
+    pub run_id: i64,
+    /// true: Link (same work, stays listed); false: Not related.
+    pub linked: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RepoLogParams {
     /// Fleet session id.
     pub session_id: i64,

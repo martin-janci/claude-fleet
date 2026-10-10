@@ -573,6 +573,17 @@ export async function setSessionTags(sessionId: number, tags: readonly string[])
   return r;
 }
 
+/** Link or Not related on the session's `related_session` proposal (M15
+ *  G4.3): Link keeps the other session listed as linked, Not related
+ *  withdraws it. Answers the session's row. */
+export async function decideRelatedSession(sessionId: number, runId: number, linked: boolean): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('decide_related_session', {
+    args: { session_id: sessionId, run_id: runId, linked },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
 /** Mark the session viewed now (redesign 2.3): its finished turns read as
  *  seen and it leaves the `done_unread` bucket. A watcher's call is refused
  *  by the hub (the stamp is one per row); that is not an error to show. */

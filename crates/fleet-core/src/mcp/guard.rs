@@ -1028,6 +1028,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     ToolPolicy {
+        name: "decide_related_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
         name: "set_session_tags",
         access: Access::Client,
         readonly: false,
@@ -2440,6 +2447,7 @@ mod tests {
             "dispatch_task",
             "cancel_task",
             "set_session_tags",
+            "decide_related_session",
         ] {
             assert!(!is_readonly_tool(t), "{t} must be mutating");
         }

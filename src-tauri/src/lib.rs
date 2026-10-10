@@ -421,6 +421,7 @@ pub fn run() {
             commands::sessions::rename_session,
             commands::sessions::set_session_friendly_name,
             commands::sessions::set_session_tags,
+            commands::sessions::decide_related_session,
             commands::sessions::touch_session_viewed,
             commands::work::session_work_links,
             commands::work::link_session_work,

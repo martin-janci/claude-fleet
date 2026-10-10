@@ -131,6 +131,7 @@ fn readonly_token_is_refused_mutating_tools_and_allowed_reads() {
         "dispatch_task",
         "cancel_task",
         "set_session_tags",
+        "decide_related_session",
         "work_link",
     ] {
         let err = enforce_mode(&ro, t).expect_err(t);
@@ -10744,6 +10745,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("wait_for_reply", &["Read"]),
     // orchestration.rs
     ("cancel_task", &["Drive"]),
+    ("decide_related_session", &["Own"]),
     // Both ends are `Drive`. Naming a session as the REQUESTER writes to it
     // three ways — a `tasks` row, a `task_done` timeline row and, on the
     // worker's Stop, an inbox message whose body the caller's prompt produced

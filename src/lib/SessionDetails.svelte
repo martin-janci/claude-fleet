@@ -8,7 +8,7 @@
     type SessionRow,
     type SafeKillInspection,
   } from './sessions';
-  import { formatCostMicros, formatTokens, sessionUsageTokens } from './sessions';
+  import { formatCostMicros, formatTokens, sessionUsageTokens, decideRelatedSession } from './sessions';
   import {
     killSession,
     restartSession,
@@ -30,6 +30,8 @@
   import PromptComposer from './PromptComposer.svelte';
   import WatchSummary from './WatchSummary.svelte';
   import ReviewDialog from './ReviewDialog.svelte';
+  import { reviewerOf } from './review_scope';
+  import { reviewDecisionWords } from './prs';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import DialogSheet from './DialogSheet.svelte';
@@ -365,13 +367,31 @@
   // the same thing, when it is not listed above already. Nothing is
   // stopped or merged.
   const relatedProposal = $derived(proposalFor(session, 'related_session'));
-  const proposedRelated = $derived.by(() => {
+  const relatedPartner = $derived.by(() => {
     const m = /^s(\d+)$/.exec(relatedProposal?.value ?? '');
     if (!m) return null;
     const id = Number(m[1]);
     if (related.some((r) => r.id === id)) return null;
     return $sessions.find((s) => s.id === id && s.id !== session.id) ?? null;
   });
+  // Link / Not related (M15 G4.3): a linked partner is listed like a
+  // sibling; a proposed one carries the two answers until someone decides.
+  const relatedLinked = $derived(relatedProposal?.linked === true);
+  const proposedRelated = $derived(relatedLinked ? null : relatedPartner);
+  const linkedRelated = $derived(relatedLinked ? relatedPartner : null);
+  const relatedDecideBlocked = $derived(
+    hubActionBlocked('decide_related_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'decide_related_session'),
+  );
+  let relatedDeciding = $state(false);
+  async function decideRelated(linked: boolean): Promise<void> {
+    const runId = relatedProposal?.run_id;
+    if (runId == null || relatedDeciding || $sessionBlocked(session, 'decide_related_session') !== null) return;
+    relatedDeciding = true;
+    const r = await decideRelatedSession(session.id, runId, linked);
+    relatedDeciding = false;
+    if (!r.ok) pushError(r.error, linked ? 'Linking the session failed' : 'Saving “Not related” failed');
+  }
 
   // Local-only for v0.2 (Phase 4 will branch on host_alias for remote attach).
   const attachCommand = $derived(`tmux attach -t ${session.tmux_name}`);
@@ -546,6 +566,9 @@
   const reviewsOfThis = $derived(
     $sessions.filter((s) => s.kind === 'review' && s.reviews_session_id === session.id),
   );
+  /** GitHub's review decision on this session's PR, in words. */
+  const prReview = $derived(session.pr_url ? reviewDecisionWords(session.pr_evidence?.review_decision) : null);
+  const reviewsShown = $derived(session.kind !== 'external' || reviewsOfThis.length > 0 || prReview !== null);
 
   let confirmingKill = $state(false);
   let confirmingSafeKill = $state(false);
@@ -950,7 +973,7 @@
           {#if canMove}
             {@render act('move-from-details', 'Move to host…', openMove, moveBlocked, 'Continue this conversation on another host: same branch, same Claude session')}
           {/if}
-          {@render act('open-review', 'Review…', () => (reviewOpen = true), reviewBlocked)}
+          {@render act('open-review', 'Start a review run…', () => (reviewOpen = true), reviewBlocked)}
           {#if hasPaneConversation}
             {@render act('fork-from-details', 'Fork…', openFork, rewindBlocked, 'A new session from this conversation; this one keeps running')}
           {/if}
@@ -1118,32 +1141,75 @@
       {#snippet head()}<TimelineWorkProposal {session} />{/snippet}
     </Timeline>
 
-    {#if related.length > 0 || proposedRelated}
+    {#if related.length > 0 || relatedPartner}
       <section class="block related" data-testid="related-sessions">
-        <h3>Related sessions <span class="count">{related.length + (proposedRelated ? 1 : 0)}</span></h3>
+        <h3>Related sessions <span class="count">{related.length + (relatedPartner ? 1 : 0)}</span></h3>
         <ul class="related-list">
           {#each related as r (r.id)}
             <li>{@render relatedRow(r, 'related-row', accountEmailTier(accountForRow(r)))}</li>
           {/each}
+          {#if linkedRelated}
+            <li data-testid="related-linked">{@render relatedRow(linkedRelated, 'related-linked-row', 'linked · same work')}</li>
+          {/if}
           {#if proposedRelated}
             {@const r = proposedRelated}
             <li class="proposed" data-testid="related-proposed">
               {@render relatedRow(r, 'related-proposed-row', 'same work?')}
               <ProposedBy proposal={relatedProposal} field="related_session" testid="related-proposed-by" />
+              {#if relatedProposal?.run_id != null}
+                <div class="btn-row related-decide">
+                  <button
+                    type="button"
+                    class="btn is-bounded"
+                    data-testid="related-link"
+                    disabled={relatedDeciding || relatedDecideBlocked !== null}
+                    title={relatedDecideBlocked ?? 'Same work: keep it listed here'}
+                    onclick={() => void decideRelated(true)}>Link</button
+                  >
+                  <button
+                    type="button"
+                    class="btn btn--quiet is-bounded"
+                    data-testid="related-not-related"
+                    disabled={relatedDeciding || relatedDecideBlocked !== null}
+                    title={relatedDecideBlocked ?? 'Not the same work: stop suggesting it'}
+                    onclick={() => void decideRelated(false)}>Not related</button
+                  >
+                </div>
+              {/if}
             </li>
           {/if}
         </ul>
       </section>
     {/if}
 
-    {#if reviewsOfThis.length > 0}
-      <section class="block related" data-testid="reviews-panel">
-        <h3>Reviews <span class="count">{reviewsOfThis.length}</span></h3>
-        <ul class="related-list">
-          {#each reviewsOfThis as r (r.id)}
-            <li>{@render relatedRow(r, 'reviews-row', accountEmailTier(accountForRow(r)))}</li>
-          {/each}
-        </ul>
+    <!-- Reviews (SessionDetails board): the PR's review decision GitHub
+         reports, each review run of this session with who ran it, and Start
+         a review run. Only what is recorded: a run's verdict is its
+         session's state, never a findings count nobody measured. -->
+    {#if reviewsShown}
+      <section class="block related reviews" data-testid="reviews-panel">
+        <h3>Reviews{#if reviewsOfThis.length > 0} <span class="count">{reviewsOfThis.length}</span>{/if}</h3>
+        {#if prReview}
+          <p class="pr-review" data-testid="reviews-pr-decision" data-decision={session.pr_evidence?.review_decision}>
+            {prNumber ? `PR #${prNumber}` : 'Pull request'} · {prReview}
+          </p>
+        {/if}
+        {#if reviewsOfThis.length > 0}
+          <ul class="related-list">
+            {#each reviewsOfThis as r (r.id)}
+              <li>
+                {@render relatedRow(r, 'reviews-row', reviewerOf(r))}
+              </li>
+            {/each}
+          </ul>
+        {:else if !prReview}
+          <p class="muted" data-testid="reviews-empty">No review run yet.</p>
+        {/if}
+        {#if session.kind !== 'external'}
+          <div class="btn-row">
+            {@render act('open-review', 'Start a review run…', () => (reviewOpen = true), reviewBlocked, 'A read-only Claude Code session reviews this one: pick a skill and what it reads')}
+          </div>
+        {/if}
       </section>
     {/if}
 
@@ -1165,7 +1231,6 @@
             {#if session.kind !== 'shell'}
               {@render act('send-prompt-from-details', 'Send prompt…', openComposer, sendPromptBlocked, '', 'btn btn--primary')}
             {/if}
-            {@render act('open-review', 'Review…', () => (reviewOpen = true), reviewBlocked)}
             {#if hasPaneConversation}
               {@render act('fork-from-details', 'Fork…', openFork, rewindBlocked, 'A new session from this conversation; this one keeps running')}
               {@render act('rewind-from-details', 'Rewind…', openRewind, rewindBlocked, 'Take the conversation back to before a turn; files stay as they are')}
@@ -1174,7 +1239,6 @@
               {@render act('switch-account-from-details', 'Switch account…', openSwitchAccount, switchAccountBlocked, 'Resume this conversation under another login on this host')}
               {@render act('change-model-from-details', 'Change model…', openModel, sendPromptBlocked, 'Send /model to this session')}
             {/if}
-            {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked)}
           </div>
         </div>
         <div class="group" data-testid="actions-place">
@@ -1184,6 +1248,7 @@
               {@render act('move-from-details', 'Move to host…', openMove, moveBlocked, 'Continue this conversation on another host: same branch, same Claude session')}
             {/if}
             {@render moveSteps()}
+            {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked)}
             {@render act('recreate-from-details', 'Recreate…', askRecreate, recreateBlocked)}
             {#if !hasNoPane(session) && session.project_id !== null}
               {@render act('repair-from-details', 'Repair workspace…', askRepair, repairing ? 'Repairing…' : repairBlocked, 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it')}
@@ -1843,6 +1908,13 @@
   }
   .confirm-actions button.danger:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
 
+  .reviews .pr-review,
+  .reviews .muted {
+    margin: 0 0 0.4rem 0;
+    font-size: var(--text-xs);
+  }
+  .reviews .btn-row { margin-top: 0.4rem; }
+  .related-decide { display: flex; gap: 0.4rem; margin-top: 0.3rem; }
   .related {
     border-top: 1px solid var(--border);
     padding-top: 0.6rem;

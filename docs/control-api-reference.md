@@ -111,6 +111,12 @@ Phones, emulators and simulators on any fleet host, used from any session that m
 
 Parameters: `action`, `args`, `claim_s`, `contains`, `device`, `downgrade`, `filter`, `host`, `label`, `lines`, `name`, `note`, `path`, `refresh`, `shared`, `since_s`, `timeout_s`
 
+### `decide_related_session`
+
+Answer a session's related_session proposal {session_id, run_id, linked}: linked=true (Link) keeps the other session listed as linked, false (Not related) withdraws it. Nothing is stopped or merged. Returns the session's row.
+
+Parameters: `linked`, `run_id`, `session_id`
+
 ### `decide_setting_proposals`
 
 Apply or reject settings proposals by id, each on its own; a trusted device only.
@@ -905,6 +911,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::rename_session`
 - `commands::sessions::set_session_friendly_name`
 - `commands::sessions::set_session_tags`
+- `commands::sessions::decide_related_session`
 - `commands::sessions::touch_session_viewed`
 - `commands::work::session_work_links`
 - `commands::work::link_session_work`

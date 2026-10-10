@@ -493,7 +493,9 @@ Index by area (names only; see the reference for details):
 - **Orchestration** — `wait_for_session`, `session_transcript`,
   `session_conversation`, `session_tool_detail`, `session_summary_since`, `run_prompt`,
   `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
-  `set_session_tags`.
+  `set_session_tags`, `decide_related_session` (Link or Not related on a
+  session's `related_session` proposal; a linked partner stays on the row
+  with `linked: true`).
 - **Work** — `work` (read: `{session_id}` → that session's live work links,
   primary first; `{key}` → ended links to the key, each with the snapshot of
   the session that did it), `work_link` (`{session_id, action}`: `link` a key

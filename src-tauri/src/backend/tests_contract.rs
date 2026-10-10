@@ -113,6 +113,7 @@ pub(crate) fn sample_session() -> SessionRow {
             confidence_pct: Some(82),
             run_id: Some(41),
             at: Some(1_700_000_200),
+            linked: None,
         }],
         pending_form: Some(fleet_core::store::PendingForm {
             form_id: "f_x".into(),

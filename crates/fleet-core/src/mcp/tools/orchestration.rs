@@ -840,6 +840,43 @@ impl FleetTools {
         ok_json(&updated)
     }
 
+    #[tool(description = "Answer a session's related_session proposal \
+        {session_id, run_id, linked}: linked=true (Link) keeps the other \
+        session listed as linked, false (Not related) withdraws it. Nothing \
+        is stopped or merged. Returns the session's row.")]
+    pub(super) async fn decide_related_session(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<DecideRelatedSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "decide_related_session",
+            &format!(
+                "session_id={} run_id={} linked={}",
+                p.session_id, p.run_id, p.linked
+            ),
+        );
+        // `own`: the proposal is about this person's own sessions (N1 never
+        // proposes another person's), so answering it is the owner's call.
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Own,
+            "the session the proposal is about",
+        )?;
+        let args = crate::service::decide::related_session::DecideRelatedSessionArgs {
+            session_id: row.id,
+            run_id: p.run_id,
+            linked: p.linked,
+        };
+        let updated =
+            crate::service::decide::related_session::decide_related_session(args, &self.store)
+                .map_err(to_mcp_err)?;
+        ok_json(&updated)
+    }
+
     #[tool(description = "Work links: {session_id} → its live links; \
         {key} → ended (past) links; neither → recently ended. action \
         context|resume_plan {key}; purge_impact; tickets (cached); lookup \
