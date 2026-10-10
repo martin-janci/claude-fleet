@@ -17,7 +17,7 @@
   import { conversationFindRequest } from './search_api';
   import { untrack, tick, setContext, type Snippet } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
-  import { sendPrompt, hasNoPane, sessions, sessionAgent, type SessionRow } from './sessions';
+  import { sendPrompt, hasNoPane, sessions, sessionAgent, restartSession, type SessionRow } from './sessions';
   import AnswerPrompt from './AnswerPrompt.svelte';
   import FormCard from './forms/FormCard.svelte';
   import ChatWizards from './forms/ChatWizards.svelte';
@@ -87,8 +87,9 @@
     completeSlashCommand,
     newDividerAnchor,
     turnAnchor,
-    MODEL_OPTIONS,
-    EFFORT_OPTIONS,
+    agentModelProfile,
+    slashCommandsFor,
+    presetForAgent,
     pickerCommand,
     modelShortLabel,
     sessionActivity,
@@ -141,6 +142,7 @@
   import { readOnlyAnswerLine, sharerName } from './shared_view';
   import { inboxQueue, nextInInbox } from './inbox';
   import { push as pushToast } from './toasts';
+  import ConfirmDialog from './ConfirmDialog.svelte';
   import { projectSkills } from './project_skills';
   import { overflowMark } from './overflow_mark';
 
@@ -1283,23 +1285,71 @@
     if (!chipHold) chipHeld = false;
   });
 
-  // Model / effort pickers: each sends `/model <v>` or `/effort <v>` through
-  // the same outbox as a typed slash command. The model shows from the row
-  // (the transcript's); effort is in no transcript, so the picker remembers
-  // what it last sent to each session and otherwise shows the row's, if any.
+  // Model / effort pickers, per agent (`agentModelProfile`). Claude Code's
+  // send `/model <v>` or `/effort <v>` through the same outbox as a typed
+  // slash command. Codex's `/model` takes no argument, so its pickers list
+  // Codex's own models and relaunch it on the same conversation under the
+  // pick, after a confirm (a turn in progress is lost). The model shows from
+  // the row (the transcript's); effort is in no Claude transcript, so the
+  // picker remembers what it last sent to each session and otherwise shows
+  // the row's, if any — a relaunch stores it on the row.
+  const modelProfile = $derived(agentModelProfile(agent));
+  /** A relaunch pick waiting on its confirm. */
+  let relaunchPick = $state<{ cmd: 'model' | 'effort'; value: string; label: string } | null>(null);
+  let relaunching = $state(false);
   let effortSent = $state<Record<number, string>>({});
   const currentModel = $derived(modelShortLabel(session.model));
-  const currentEffort = $derived(effortSent[session.id] ?? session.effort_level ?? '');
-  // Each picker sends `/model` or `/effort` through the outbox, so it is a
-  // write like any other.
-  const pickersDisabled = $derived(viewing !== null || busyBlocked || writeBlocked !== null);
+  const currentEffort = $derived(
+    (modelProfile.mode === 'command' ? effortSent[session.id] : undefined) ?? session.effort_level ?? '',
+  );
+  // Each picker sends `/model` or `/effort` through the outbox, or restarts
+  // the pane, so it is a write like any other.
+  const pickersDisabled = $derived(viewing !== null || busyBlocked || writeBlocked !== null || relaunching);
+  const pickVerb = $derived(
+    modelProfile.mode === 'relaunch' ? `relaunch ${agentName} on it` : null,
+  );
   function pickSetting(cmd: 'model' | 'effort', e: Event) {
     const el = e.currentTarget as HTMLSelectElement;
-    const line = pickerCommand(cmd, el.value);
+    const value = el.value;
+    if (modelProfile.mode === 'relaunch') {
+      // The select snaps back to what the session runs; the confirm decides.
+      el.value = cmd === 'model' ? '' : currentEffort;
+      const opts = cmd === 'model' ? modelProfile.models : modelProfile.efforts;
+      const label = opts.find((o) => o.value === value)?.label ?? value;
+      if (value.trim()) relaunchPick = { cmd, value, label };
+      return;
+    }
+    const line = pickerCommand(cmd, value);
     if (cmd === 'model') el.value = '';
     if (!line) return;
-    if (cmd === 'effort') effortSent = { ...effortSent, [session.id]: el.value };
+    if (cmd === 'effort') effortSent = { ...effortSent, [session.id]: value };
     void sendText(line);
+  }
+  async function confirmRelaunch() {
+    const pick = relaunchPick;
+    relaunchPick = null;
+    if (!pick || relaunching) return;
+    // A relaunch is `restart_session` (the `own` tier), not the
+    // `send_prompt` a `/model` line is, so it has its own gate.
+    const blocked =
+      hubActionBlocked('restart_session', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'restart_session');
+    if (blocked !== null) {
+      pushToast({ kind: 'error', message: blocked });
+      return;
+    }
+    relaunching = true;
+    const r = await restartSession(session.host_alias, session.tmux_name, undefined, { [pick.cmd]: pick.value });
+    relaunching = false;
+    if (!r.ok) {
+      pushToast({ kind: 'error', message: `Could not relaunch ${agentName}: ${r.error.message}` });
+      return;
+    }
+    {
+      pushToast({
+        kind: 'info',
+        message: `${agentName} relaunched on ${pick.cmd === 'model' ? pick.label : `${pick.label.toLowerCase()} effort`}`,
+      });
+    }
   }
   const statusNote = $derived(
     // First: a composer that cannot send at all owes that sentence before any
@@ -1320,7 +1370,13 @@
   // The composer shows three quick prompts and puts the rest under ⋯
   // (redesign 5.9); a suggested Compact stays out in front.
   const CHIPS_SHOWN = 3;
-  const validPresets = $derived($composerPresets.filter((p) => p.label.trim() && p.text.trim()));
+  // Each chip as this agent takes it: a Codex session drops a chip for a
+  // Claude-only command and spells `/clear` as `/new` (`presetForAgent`).
+  const validPresets = $derived(
+    $composerPresets
+      .map((p) => presetForAgent(p, agent))
+      .filter((p): p is ComposerPreset => p !== null && !!p.label.trim() && !!p.text.trim()),
+  );
   const chipList = $derived(
     !chipsExpanded
       ? validPresets.filter((p, i) => i < CHIPS_SHOWN || (suggestCompact && isCompactPreset(p)))
@@ -1331,15 +1387,18 @@
   // layout (redesign 5.9), read once the draft starts a slash command.
   let projectCmds = $state<SlashCommand[]>([]);
   const slashDraft = $derived(draft.startsWith('/') && !/\s/.test(draft));
+  // A Codex session reads no `.claude/` commands, and runs a skill as
+  // `$name`, not `/name`, so only its built-ins are offered.
+  const builtinCmds = $derived(slashCommandsFor(agent));
   $effect(() => {
-    if (!slashDraft) return;
+    if (!slashDraft || agent === 'codex') return;
     const id = session.id;
     void projectSkills(id).then((list) => {
       if (session.id === id) projectCmds = list;
     });
   });
   const slashMatches = $derived(
-    slashDismissedFor === draft ? [] : matchSlashCommands(draft, projectCmds),
+    slashDismissedFor === draft ? [] : matchSlashCommands(draft, agent === 'codex' ? [] : projectCmds, builtinCmds),
   );
   // Ids for the combobox wiring, per panel instance so two panels never hand
   // the same id to assistive tech.
@@ -2698,12 +2757,14 @@
             class="composer-pick"
             data-testid="conv-model-pick"
             aria-label="Model"
-            title={currentModel ? `Model: ${currentModel}. Pick one to send /model.` : 'Pick a model to send /model.'}
+            title={currentModel
+              ? `Model: ${currentModel}. Pick one to ${pickVerb ?? 'send /model'}.`
+              : `Pick a model to ${pickVerb ?? 'send /model'}.`}
             value=""
             disabled={pickersDisabled}
             onchange={(e) => pickSetting('model', e)}>
             <option value="" disabled>{currentModel ?? 'Model'}</option>
-            {#each MODEL_OPTIONS as o (o.value)}
+            {#each modelProfile.models as o (o.value)}
               <option value={o.value}>{o.label}</option>
             {/each}
           </select>
@@ -2711,14 +2772,16 @@
             class="composer-pick"
             data-testid="conv-effort-pick"
             aria-label="Effort"
-            title={currentEffort ? `Effort: ${currentEffort}. Pick one to send /effort.` : 'Pick an effort level to send /effort.'}
+            title={currentEffort
+              ? `Effort: ${currentEffort}. Pick one to ${pickVerb ?? 'send /effort'}.`
+              : `Pick an effort level to ${pickVerb ?? 'send /effort'}.`}
             value={currentEffort}
             disabled={pickersDisabled}
             onchange={(e) => pickSetting('effort', e)}>
-            {#if !EFFORT_OPTIONS.some((o) => o.value === currentEffort)}
+            {#if !modelProfile.efforts.some((o) => o.value === currentEffort)}
               <option value={currentEffort} disabled>{currentEffort || 'Effort'}</option>
             {/if}
-            {#each EFFORT_OPTIONS as o (o.value)}
+            {#each modelProfile.efforts as o (o.value)}
               <option value={o.value}>{o.label}</option>
             {/each}
           </select>
@@ -2780,6 +2843,21 @@
       box?.focus();
     }}
   />
+{/if}
+
+{#if relaunchPick}
+  {@const pick = relaunchPick}
+  <ConfirmDialog
+    title={pick.cmd === 'model' ? `Switch ${agentName} to ${pick.label}?` : `Set ${agentName}'s effort to ${pick.label}?`}
+    confirmLabel="Relaunch"
+    onconfirm={confirmRelaunch}
+    oncancel={() => (relaunchPick = null)}
+    confirmTestId="conv-relaunch-confirm"
+  >
+    {agentName} picks its {pick.cmd === 'model' ? 'model' : 'reasoning effort'} when it starts, so this
+    relaunches <code>{session.tmux_name}</code> on the same conversation with
+    {pick.cmd === 'model' ? 'the new model' : 'the new effort'}. A turn in progress is lost.
+  </ConfirmDialog>
 {/if}
 
 {#if forkOpen}

@@ -597,15 +597,21 @@ export async function touchSessionViewed(sessionId: number): Promise<Result<Sess
 
 /** Restart the session in place. With `profile`, resume its conversation
  *  under that credential profile instead (`''` = the host's own login): a
- *  running `claude` cannot change its login, so a switch is a restart. */
+ *  running `claude` cannot change its login, so a switch is a restart.
+ *  `launch.model` / `launch.effort` do the same for the model and reasoning
+ *  effort (`''` = the host's default) — how a Codex session, whose `/model`
+ *  takes no argument, changes model. */
 export async function restartSession(
   hostAlias: string,
   name: string,
   profile?: string,
+  launch: { model?: string; effort?: string } = {},
 ): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>('restart_session', {
-    args: profile === undefined ? { host_alias: hostAlias, name } : { host_alias: hostAlias, name, profile },
-  });
+  const args: Record<string, unknown> = { host_alias: hostAlias, name };
+  if (profile !== undefined) args.profile = profile;
+  if (launch.model !== undefined) args.model = launch.model;
+  if (launch.effort !== undefined) args.effort = launch.effort;
+  const r = await invokeCmd<SessionRow>('restart_session', { args });
   if (r.ok) acceptCommandRow(r.value);
   return r;
 }

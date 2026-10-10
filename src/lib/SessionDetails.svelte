@@ -8,7 +8,7 @@
     type SessionRow,
     type SafeKillInspection,
   } from './sessions';
-  import { formatCostMicros, formatTokens, sessionUsageTokens, decideRelatedSession } from './sessions';
+  import { formatCostMicros, formatTokens, sessionUsageTokens, decideRelatedSession, sessionAgent } from './sessions';
   import {
     killSession,
     restartSession,
@@ -78,7 +78,7 @@
   import ForkSheet from './ForkSheet.svelte';
   import RewindSheet from './RewindSheet.svelte';
   import { suggestedForkName } from './reply_actions';
-  import { MODEL_OPTIONS, modelShortLabel } from './conversation';
+  import { agentModelProfile, agentLabel, modelShortLabel } from './conversation';
   import { switchTarget } from './account_limits';
   import { archiveBlocked } from './kill_check';
   import Meter from './kit/Meter.svelte';
@@ -193,6 +193,9 @@
   let rewindOpen = $state(false);
   let modelOpen = $state(false);
   let modelPick = $state('');
+  // Claude Code switches with `/model`; Codex is relaunched on the model
+  // (`agentModelProfile`), as the composer's picker does.
+  const modelSwitch = $derived(agentModelProfile(sessionAgent(session)));
   let copyingTranscript = $state(false);
   let archiving = $state(false);
   // Each opener is reached only through a gate (the button's `disabled`,
@@ -204,13 +207,25 @@
     rewindOpen = true;
   }
   function openModel() {
-    if (sendPromptBlocked !== null) return;
+    if ((modelSwitch.mode === 'relaunch' ? restartBlocked : sendPromptBlocked) !== null) return;
     modelPick = '';
     modelOpen = true;
   }
   function onChangeModel() {
     modelOpen = false;
-    if (sendPromptBlocked !== null || !modelPick) return;
+    if (!modelPick) return;
+    if (modelSwitch.mode === 'relaunch') {
+      // A relaunch is `restart_session`, gated as Restart is.
+      if (restartBlocked !== null) return;
+      const pick = modelPick;
+      const label = agentLabel(sessionAgent(session));
+      void restartSession(session.host_alias, session.tmux_name, undefined, { model: pick }).then((r) => {
+        if (r.ok) push({ kind: 'info', message: `${label} relaunched on ${pick}` });
+        else pushError(r.error, `Could not relaunch ${label}`);
+      });
+      return;
+    }
+    if (sendPromptBlocked !== null) return;
     if (sendModelChange(session, modelPick)) push({ kind: 'info', message: `Sent /model ${modelPick}` });
   }
   async function onCopyTranscript() {
@@ -1381,7 +1396,7 @@
   <ConfirmDialog
     title="Change model?"
     confirmLabel="Change"
-    confirmDisabled={modelPick === '' || sendPromptBlocked !== null}
+    confirmDisabled={modelPick === '' || (modelSwitch.mode === 'relaunch' ? restartBlocked : sendPromptBlocked) !== null}
     onconfirm={onChangeModel}
     oncancel={() => (modelOpen = false)}
     confirmTestId="confirm-model-change"
@@ -1390,13 +1405,19 @@
       <span>Model{#if session.model} · now {modelShortLabel(session.model)}{/if}</span>
       <select aria-label="Model" data-testid="change-model-pick" bind:value={modelPick}>
         <option value="" disabled>Pick a model</option>
-        {#each MODEL_OPTIONS as o (o.value)}
+        {#each modelSwitch.models as o (o.value)}
           <option value={o.value}>{o.label}</option>
         {/each}
       </select>
     </label>
-    Sends <code>/model</code> to the session, as the composer's model picker does. It
-    applies from the next turn.
+    {#if modelSwitch.mode === 'relaunch'}
+      {agentLabel(sessionAgent(session))} picks its model when it starts, so this relaunches the
+      session on the same conversation under the new model, as the composer's model picker does.
+      A turn in progress is lost.
+    {:else}
+      Sends <code>/model</code> to the session, as the composer's model picker does. It
+      applies from the next turn.
+    {/if}
   </ConfirmDialog>
 {/if}
 

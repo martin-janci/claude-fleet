@@ -9,7 +9,7 @@
   import { newBgSession, newSessionAbortable, sessions, type SessionRow } from './sessions';
   import { defaultHost, hosts, isPickableHost } from './hosts';
   import { readPref, writePref } from './prefs';
-  import { MODEL_OPTIONS, LAUNCH_EFFORT_OPTIONS } from './conversation';
+  import { MODEL_OPTIONS, LAUNCH_EFFORT_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_EFFORT_OPTIONS } from './conversation';
   import { slugifyBranch, finalizeBranchSlug } from './branch-slug';
   import { generateName, nameWords, tmuxNameSuffix } from './names';
   import Modal from './Modal.svelte';
@@ -249,6 +249,19 @@
   $effect(() => {
     writePref('newsession.model', chosenModel);
     writePref('newsession.effort', chosenEffort);
+  });
+  /** The session runs Codex: `codex -m` / `model_reasoning_effort` take
+   *  Codex's own lists, remembered apart from Claude's. */
+  const runsCodex = $derived(chosenKind === 'work' && chosenAgent === 'codex');
+  const isCodexModel = (v: unknown): v is string =>
+    typeof v === 'string' && (v === '' || CODEX_MODEL_OPTIONS.some((o) => o.value === v));
+  const isCodexEffort = (v: unknown): v is string =>
+    typeof v === 'string' && (v === '' || CODEX_EFFORT_OPTIONS.some((o) => o.value === v));
+  let codexModel = $state<string>(readPref('newsession.codex.model', '', isCodexModel));
+  let codexEffort = $state<string>(readPref('newsession.codex.effort', '', isCodexEffort));
+  $effect(() => {
+    writePref('newsession.codex.model', codexModel);
+    writePref('newsession.codex.effort', codexEffort);
   });
   // Credential profile (`~/.claude-profiles/<name>` on the host, its own
   // `/login`; docs/accounts.md); '' = the host's login. Deliberately not
@@ -1190,8 +1203,8 @@
         start_command:
           chosenKind === 'shell' ? startCommand.trim() || null : null,
         friendly_name: friendlyName.trim() || null,
-        model: runsClaude && chosenModel ? chosenModel : null,
-        effort: runsClaude && chosenEffort ? chosenEffort : null,
+        model: runsClaude && chosenModel ? chosenModel : runsCodex && codexModel ? codexModel : null,
+        effort: runsClaude && chosenEffort ? chosenEffort : runsCodex && codexEffort ? codexEffort : null,
         profile: runsClaude && chosenProfile.trim() ? chosenProfile.trim() : null,
         agent: chosenKind === 'work' && chosenAgent !== 'claude' ? chosenAgent : null,
         // Step 4.4: asked and confirmed here, so a hub does not refuse it.
@@ -1454,7 +1467,28 @@
         {/each}
       </div>
 
-    {#if runsClaude && !ticket && !asBackground}
+    {#if runsCodex}
+      <div class="launch-row">
+        <div class="launch-field">
+          <label for="launch-model">Model</label>
+          <select id="launch-model" data-testid="launch-model" bind:value={codexModel}>
+            <option value="">Codex default</option>
+            {#each CODEX_MODEL_OPTIONS as o (o.value)}
+              <option value={o.value}>{o.label}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="launch-field">
+          <label for="launch-effort">Effort</label>
+          <select id="launch-effort" data-testid="launch-effort" bind:value={codexEffort}>
+            <option value="">Codex default</option>
+            {#each CODEX_EFFORT_OPTIONS as o (o.value)}
+              <option value={o.value}>{o.label}</option>
+            {/each}
+          </select>
+        </div>
+      </div>
+    {:else if runsClaude && !ticket && !asBackground}
       <div class="launch-row">
         <div class="launch-field">
           <label for="launch-model">Model</label>
