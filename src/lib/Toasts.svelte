@@ -32,8 +32,8 @@
       out:toastOut
       onmouseenter={() => holdToast(t.id)}
       onmouseleave={() => releaseToast(t.id)}
-      onfocusin={() => holdToast(t.id)}
-      onfocusout={() => releaseToast(t.id)}
+      onfocusin={() => holdToast(t.id, 'focus')}
+      onfocusout={() => releaseToast(t.id, 'focus')}
       role="group"
     >
       {#if t.progress !== undefined}

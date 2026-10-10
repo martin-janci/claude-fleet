@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Organisation forms</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;background:#0f0f0f}
+a{color:var(--accent,#60a5fa);text-decoration:none}a:hover{color:#93c5fd}
+.app{--bg:#0f0f0f;--pane:#161616;--raise:#1c1c1c;--hover:#232323;--fg:#ededed;--fg2:#b4b4b4;--muted:#8f8f8f;--line:#2a2a2a;--line2:#3a3a3a;--accent:#60a5fa;--accent-soft:#1c2735;--working:#7fa3ff;--waiting:#d29b4a;--failed:#ef5350;--done:#5dd17a;--idle:#a09fa8;--waiting-soft:color-mix(in srgb,var(--waiting) 13%,transparent);--waiting-faint:color-mix(in srgb,var(--waiting) 7%,transparent);--waiting-line:color-mix(in srgb,var(--waiting) 45%,transparent);--failed-soft:color-mix(in srgb,var(--failed) 12%,transparent);--failed-line:color-mix(in srgb,var(--failed) 35%,transparent);--done-soft:color-mix(in srgb,var(--done) 12%,transparent);--danger-fill:#c62828;--on-danger:#ffffff;--on-waiting:#1a1205;--on-accent:#0b1220;--code:#56b6c2;--syn-str:#98c379;--syn-kw:#c678dd;--chip-bg:#232323;--count-bg:#262626;--track:#2a2a2a;--sunk:#202020;--org-1:#60a5fa;--org-2:#5dd17a;--org-3:#c084fc;--org-4:#a09fa8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:var(--fg);background:var(--bg);font-size:13px;line-height:18px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.meta{font-size:12px;line-height:16px;color:var(--muted)}
+.tnum{font-variant-numeric:tabular-nums}
+.btn{height:24px;padding:0 8px;border-radius:4px;border:1px solid var(--line2);background:var(--raise);color:var(--fg);font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.btn.quiet{background:transparent;border-color:transparent;color:var(--fg2)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:500}
+.btn.danger{background:transparent;border-color:transparent;color:var(--failed)}
+.kbd{font-size:11px;line-height:14px;padding:0 4px;border-radius:3px;border:1px solid var(--line2);color:var(--muted)}
+.chip{height:20px;padding:0 6px;border-radius:4px;font-size:11px;font-weight:500;display:inline-flex;align-items:center;gap:4px;background:var(--chip-bg);color:var(--fg2)}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.sec{font-size:11px;font-weight:500;color:var(--muted);display:flex;align-items:center;gap:6px;padding:12px 12px 4px}
+.count{font-size:11px;font-weight:500;padding:0 5px;border-radius:4px;background:var(--count-bg);color:var(--fg2);line-height:16px}
+.row{display:flex;gap:10px;padding:7px 12px;border-radius:6px;margin:0 6px;align-items:flex-start}
+.row:hover{background:var(--hover)}
+.rtitle{font-size:13px;line-height:18px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rline{font-size:12px;line-height:16px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail a{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 0;border-radius:6px;color:var(--muted);font-size:11px;line-height:14px;position:relative}
+.rail a:hover{background:var(--hover);color:var(--fg)}
+.tab{font-size:13px;color:var(--muted);padding:10px 0;border-bottom:2px solid transparent}
+.tab.on{color:var(--fg);border-bottom-color:var(--accent);font-weight:500}
+.kv{display:grid;grid-template-columns:84px minmax(0,1fr);gap:6px 10px;font-size:12px;line-height:16px}
+.kv dt{color:var(--muted)}.kv dd{margin:0;color:var(--fg);min-width:0}
+.bar{height:4px;border-radius:2px;background:var(--track);overflow:hidden}
+.bar span{display:block;height:100%;border-radius:2px}
+
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+.btn.sm{height:22px;padding:0 6px}.btn.lg{height:28px;padding:0 10px}
+.btn.danger-fill{background:var(--danger-fill);border-color:var(--danger-fill);color:var(--on-danger);font-weight:500}
+.chip.waiting{background:var(--waiting-soft);color:var(--waiting)}.chip.done{background:var(--done-soft);color:var(--done)}
+.chip.failed{background:var(--failed-soft);color:var(--failed)}.chip.accent{background:var(--accent-soft);color:var(--fg)}
+.banner{border:1px solid var(--line);border-radius:6px;padding:10px 12px;display:flex;gap:10px;align-items:center}
+.banner.failed{background:var(--failed-soft);border-color:var(--failed-line)}.banner.waiting{background:var(--waiting-faint);border-color:var(--waiting-line)}
+.row[aria-selected="true"]{box-shadow:inset 2px 0 0 var(--accent)}
+.swatch{width:8px;height:8px;border-radius:50%;flex:none;display:inline-block}
+.st{display:inline-flex;width:8px;height:8px;flex:none}
+.ai{display:inline-flex;align-items:center;gap:4px;font-size:11px;line-height:16px;font-weight:500;color:var(--accent);padding:0 6px;border-radius:4px;background:var(--accent-soft);white-space:nowrap}
+.ai::before{content:"✦";font-size:10px}
+.ai.draft{color:var(--fg2);background:var(--chip-bg)}.ai.draft::before{content:"✎"}
+.why{font-size:12px;line-height:16px;color:var(--muted);display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.why a{color:var(--accent)}
+.ai-pre{box-shadow:inset 0 0 0 1px var(--accent);border-radius:4px}
+
+.fx .dlg{background:var(--raise);border:1px solid var(--line2);border-radius:10px;box-shadow:0 16px 50px rgba(0,0,0,.55);overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.fx .dlg.inl{box-shadow:none;background:var(--pane);border-color:var(--line)}
+.fx .dh{padding:12px 14px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:4px}
+.fx .dh strong{font-size:13px;font-weight:600}
+.fx .db{padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.fx .df{display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--line);align-items:center;flex-wrap:wrap}
+.fx .df .sp{flex:1 1 auto}
+.fx .cell{display:flex;flex-direction:column;gap:6px;min-width:0}
+.fx .caph{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.fx .caph b{font-size:13px;font-weight:600}
+.fx .where{font-size:11px;line-height:16px;padding:0 6px;border-radius:4px;background:var(--chip-bg);color:var(--fg2);white-space:nowrap}
+.fx .where.new{background:var(--accent-soft);color:var(--accent)}
+.fx .capn{font-size:12px;line-height:16px;color:var(--muted)}
+.fx label.f,.fx .f{display:flex;flex-direction:column;gap:4px;font-size:12px;line-height:16px;color:var(--fg2);min-width:0}
+.fx .f .fl{display:flex;align-items:baseline;gap:6px}
+.fx .f .opt-l{color:var(--muted);font-size:11px}
+.fx .inp{height:28px;border:1px solid var(--line2);border-radius:4px;background:var(--pane);color:var(--fg);font:inherit;font-size:13px;padding:0 8px;width:100%;box-sizing:border-box;display:flex;align-items:center;gap:6px}
+.fx textarea.inp{height:auto;padding:6px 8px;resize:none;line-height:18px;display:block}
+.fx .inp.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.fx .inp.ph{color:var(--muted)}
+.fx .inp.err{border-color:var(--failed)}
+.fx .inp.focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.fx .inp[disabled]{opacity:.55}
+.fx .help{font-size:12px;line-height:16px;color:var(--muted)}
+.fx .errt{font-size:12px;line-height:16px;color:var(--failed)}
+.fx .okt{font-size:12px;line-height:16px;color:var(--done)}
+.fx .sel{width:100%;justify-content:space-between;height:28px;font-size:13px;background:var(--pane)}
+.fx .seg{display:flex;gap:6px;flex-wrap:wrap}
+.fx .opt{height:24px;padding:0 8px;border-radius:4px;border:1px solid var(--line2);font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:6px;color:var(--fg2);background:transparent;cursor:pointer}
+.fx .opt.on{border-color:var(--accent);background:var(--accent-soft);color:var(--fg)}
+.fx .tgr{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--fg)}
+.fx .tgr .tl{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+.fx .tg{width:28px;height:16px;border-radius:8px;background:var(--accent);position:relative;flex:none;border:0;padding:0;cursor:pointer}
+.fx .tg::after{content:"";position:absolute;right:2px;top:2px;width:12px;height:12px;border-radius:50%;background:var(--on-accent)}
+.fx .tg.off{background:var(--track)}.fx .tg.off::after{right:auto;left:2px;background:var(--muted)}
+.fx .ck{display:flex;align-items:flex-start;gap:8px;font-size:13px;color:var(--fg);line-height:18px}
+.fx .ck input{accent-color:var(--accent);margin:2px 0 0;flex:none}
+.fx .ck .meta{display:block}
+.fx .two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.fx .three{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.fx .stp{display:flex;gap:4px}.fx .stp i{height:3px;flex:1 1 0;border-radius:2px;background:var(--track)}.fx .stp i.on{background:var(--accent)}.fx .stp i.ok{background:var(--done)}
+.fx .note{font-size:12px;line-height:16px;color:var(--fg2);background:var(--sunk);border-radius:6px;padding:8px 10px}
+.fx .bnr{border-radius:6px;padding:8px 10px;font-size:12px;line-height:16px;display:flex;gap:8px;align-items:flex-start}
+.fx .bnr.f{background:var(--failed-soft);border:1px solid var(--failed-line);color:var(--fg)}
+.fx .bnr.w{background:var(--waiting-faint);border:1px solid var(--waiting-line);color:var(--fg)}
+.fx .bnr.ok{background:var(--done-soft);border:1px solid color-mix(in srgb,var(--done) 35%,transparent);color:var(--fg)}
+.fx .bnr.i{background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);color:var(--fg)}
+.fx .lst{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.fx .lst>div{display:flex;gap:8px;align-items:center;padding:6px 8px;font-size:12px;border-top:1px solid var(--line)}
+.fx .lst>div:first-child{border-top:0}
+.fx .lst>div.on{background:var(--accent-soft)}
+.fx .cm{display:inline-block;width:12px;height:12px;border-radius:50%;background:conic-gradient(from 0deg,transparent 0deg,transparent 40deg,currentColor 300deg);-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1px));mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1px));animation:fxspin .9s linear infinite;flex:none}
+@keyframes fxspin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){.fx .cm{animation-duration:2.4s}}
+.fx .grid4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px 16px;align-items:start}
+.fx .span2{grid-column:span 2}
+.fx .pill{font-size:11px;line-height:16px;padding:0 6px;border-radius:8px;background:var(--chip-bg);color:var(--fg2)}
+.fx kbd{font:inherit;font-size:11px;line-height:14px;padding:0 4px;border-radius:3px;border:1px solid currentColor;opacity:.75}
+</style>
+</helmet>
+<div class="app fx" style="width: 100%; min-height: 1300px; display: flex; flex-direction: column; background: var(--bg);">
+<div style="padding: 20px 28px 10px; display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;"><svg width="28" height="28" viewBox="0 0 108 108" aria-hidden="true"><rect width="108" height="108" rx="24" fill="#1B2430"/><circle cx="54" cy="54" r="24" fill="none" stroke="#F2F4F7" stroke-opacity="0.5" stroke-width="5"/><circle cx="54" cy="54" r="10" fill="#F2F4F7"/><circle cx="54" cy="30" r="7.5" fill="#F2F4F7"/><circle cx="74.78" cy="66" r="7.5" fill="#D29B4A"/><circle cx="33.22" cy="66" r="7.5" fill="#F2F4F7"/></svg><h1 style="margin: 0; font-size: 18px; line-height: 24px; font-weight: 600;">Forms · Organisations, people and devices</h1><span class="meta">the resource pages&#x27; create, edit and action forms, drawn as dialogs</span></div>
+<div class="grid4" style="padding: 6px 28px 28px; "><div class="cell"><div class="caph"><b>New organisation</b><span class="where">Settings › Organisations</span></div><span class="capn">org resource · create</span><div class="dlg"><div class="dh"><strong>New organisation</strong><div class="meta">Sessions, hosts and spend can be grouped by organisation.</div></div><div class="db"><div class="f"><span class="fl">Name</span><input class="inp" type="text" value="Papaya" placeholder="" aria-label="Name"></div><div class="f"><span class="fl">Colour</span><div class="seg" role="radiogroup" aria-label="Colour"><button class="opt" aria-label="Colour 1" style="width: 28px; justify-content: center;"><span class="swatch" style="background: var(--org-1);"></span></button><button class="opt" aria-label="Colour 2" style="width: 28px; justify-content: center;"><span class="swatch" style="background: var(--org-2);"></span></button><button class="opt on" aria-label="Colour 3" style="width: 28px; justify-content: center;"><span class="swatch" style="background: var(--org-3);"></span></button><button class="opt" aria-label="Colour 4" style="width: 28px; justify-content: center;"><span class="swatch" style="background: var(--org-4);"></span></button></div></div><label class="ck"><input type="checkbox" checked><span>Its sessions are visible only to its members</span></label></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Create</button></div></div></div><div class="cell"><div class="caph"><b>Organisation settings</b><span class="where">organisation › Settings</span></div><span class="capn">org resource · edit (7 switches)</span><div class="dlg"><div class="dh"><strong>32bit · settings</strong><div class="meta">Admins only. Members see these as read-only.</div></div><div class="db"><div class="tgr"><span class="tl"><span>Members see only their own sessions</span></span><button class="tg" role="switch" aria-checked="true" aria-label="Members see only their own sessions"></button></div><div class="tgr"><span class="tl"><span>Bound devices see unassigned sessions</span></span><button class="tg off" role="switch" aria-checked="false" aria-label="Bound devices see unassigned sessions"></button></div><div class="tgr"><span class="tl"><span>Admins see unclaimed sessions</span></span><button class="tg" role="switch" aria-checked="true" aria-label="Admins see unclaimed sessions"></button></div><div class="tgr"><span class="tl"><span>This organisation owns the hub</span><span class="meta">Hub settings follow 32bit</span></span><button class="tg off" role="switch" aria-checked="false" aria-label="This organisation owns the hub"></button></div><div class="tgr"><span class="tl"><span>Tidy up automatically</span></span><button class="tg" role="switch" aria-checked="true" aria-label="Tidy up automatically"></button></div><div class="tgr"><span class="tl"><span>Jev may decide here</span></span><button class="tg" role="switch" aria-checked="true" aria-label="Jev may decide here"></button></div><div class="tgr"><span class="tl"><span>Jev may read Claude&#x27;s replies</span><span class="meta">Off by default; needed for summaries</span></span><button class="tg off" role="switch" aria-checked="false" aria-label="Jev may read Claude&#x27;s replies"></button></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Discard</button><button class="btn primary">Save</button></div></div></div><div class="cell"><div class="caph"><b>Add a rule</b><span class="where">organisation › Rules</span></div><span class="capn">Repository, path prefix or host</span><div class="dlg"><div class="dh"><strong>Add a rule to 32bit</strong><div class="meta">Sessions that match land in 32bit.</div></div><div class="db"><div class="f"><span class="fl">Match by</span><div class="seg" role="group" aria-label="Match by"><button class="opt on" aria-pressed="true">Repository</button><button class="opt">Path</button><button class="opt">Host</button></div></div><div class="two"><div class="f"><span class="fl">Owner</span><input class="inp mono" type="text" value="32bit" placeholder="" aria-label="Owner"></div><div class="f"><span class="fl">Repository</span><input class="inp mono" type="text" value="*" placeholder="" aria-label="Repository"><span class="help">* for every repo of the owner</span></div></div><div class="bnr i"><span>Matches 14 sessions now; 3 of them are in Personal and would move.</span></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Add rule</button></div></div></div><div class="cell"><div class="caph"><b>Add a member</b><span class="where">organisation › Members</span></div><span class="capn">person and role</span><div class="dlg"><div class="dh"><strong>Add a member to 32bit</strong><div class="meta">They pair a device with the code they get.</div></div><div class="db"><div class="f"><span class="fl">Person</span><input class="inp" type="text" value="Ondrej" placeholder="" aria-label="Person"><span class="help">A new person, or pick someone already on the hub.</span></div><div class="f"><span class="fl">Role</span><div class="seg" role="group" aria-label="Role"><button class="opt">Admin</button><button class="opt on" aria-pressed="true">Member</button><button class="opt">Viewer</button></div></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Add member</button></div></div></div><div class="cell"><div class="caph"><b>Remove a member</b><span class="where">organisation › Members</span></div><span class="capn">OrgMembers: what happens to her shares</span><div class="dlg"><div class="dh"><strong>Remove Jana from 32bit?</strong></div><div class="db"><div style="color: var(--fg2);">Jana has 2 devices and shares 3 sessions in 32bit.</div><div class="f"><span class="fl">Her shares</span><label class="ck"><input type="radio" name="shares" checked><span>Revoke them<span class="meta"> · the sessions stay, only access ends</span></span></label><label class="ck"><input type="radio" name="shares"><span>Narrow to read-only</span></label><label class="ck"><input type="radio" name="shares"><span>Keep them<span class="meta"> · she keeps access to those 3 only</span></span></label></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn danger-fill">Remove Jana</button></div></div></div><div class="cell"><div class="caph"><b>Edit a device</b><span class="where">People &amp; devices</span></div><span class="capn">device resource · edit, bind, hand over</span><div class="dlg"><div class="dh"><strong>Peter&#x27;s iPhone</strong><div class="meta">Paired 3 Oct · last seen 12 min ago</div></div><div class="db"><div class="f"><span class="fl">Name</span><input class="inp" type="text" value="Peter&#x27;s iPhone" placeholder="" aria-label="Name"></div><div class="f"><span class="fl">Mode</span><div class="seg" role="group" aria-label="Mode"><button class="opt">Full</button><button class="opt on" aria-pressed="true">Answer only</button><button class="opt">Watch only</button></div></div><div class="tgr"><span class="tl"><span>Trusted device</span><span class="meta">Trusted devices may add hosts and install agents</span></span><button class="tg off" role="switch" aria-checked="false" aria-label="Trusted device"></button></div><div class="two"><div class="f"><span class="fl">Organisation</span><button class="btn sel" aria-label="32bit"><span>32bit</span><span aria-hidden="true">▾</span></button></div><div class="f"><span class="fl">Person</span><button class="btn sel" aria-label="Peter"><span>Peter</span><span aria-hidden="true">▾</span></button></div></div></div><div class="df"><button class="btn danger">Revoke…</button><span class="sp"></span><button class="btn quiet">Discard</button><button class="btn primary">Save</button></div></div></div><div class="cell"><div class="caph"><b>Install on a debug device</b><span class="where">Debug devices</span></div><span class="capn">debug_device · claim and install</span><div class="dlg"><div class="dh"><strong>Install an app on Pixel 8</strong><div class="meta">Runs adb install on the host the phone is plugged into.</div></div><div class="db"><div class="f"><span class="fl">APK on the host</span><input class="inp mono" type="text" value="~/builds/fleet-mobile/app-debug.apk" placeholder="" aria-label="APK path"></div><div class="f"><span class="fl">Host</span><button class="btn sel" aria-label="mercury · Pixel 8 on USB"><span>mercury · Pixel 8 on USB</span><span aria-hidden="true">▾</span></button></div><label class="ck"><input type="checkbox" checked><span>Claim the phone while installing<span class="meta"> · others see "in use by Martin"</span></span></label><div class="f"><span class="fl">Note<span class="opt-l">optional</span></span><input class="inp" type="text" value="testing push" placeholder="" aria-label="Claim note"></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Install</button></div></div></div><div class="cell"><div class="caph"><b>Project catalog entry</b><span class="where">Settings › Catalogs</span></div><span class="capn">catalog · create and grant hosts</span><div class="dlg"><div class="dh"><strong>New project catalog entry</strong><div class="meta">A project the whole organisation can start sessions in.</div></div><div class="db"><div class="f"><span class="fl">Name</span><input class="inp" type="text" value="papaya-pos" placeholder="" aria-label="Name"></div><div class="f"><span class="fl">Remote</span><input class="inp mono" type="text" value="git@github.com:32bit/papaya-pos.git" placeholder="" aria-label="Remote"></div><div class="two"><div class="f"><span class="fl">Path on hosts</span><input class="inp mono" type="text" value="~/projects/papaya-pos" placeholder="" aria-label="Path"></div><div class="f"><span class="fl">Organisation</span><button class="btn sel" aria-label="Papaya"><span>Papaya</span><span aria-hidden="true">▾</span></button></div></div><div class="f"><span class="fl">Hosts allowed</span><div class="seg" role="group" aria-label="Hosts"><button class="opt on" aria-pressed="true">✓ mercury</button><button class="opt on" aria-pressed="true">✓ claude-fleet-trn</button><button class="opt">mac</button></div></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Add</button></div></div></div><div class="cell"><div class="caph"><b>Set a value</b><span class="where">organisation › Advanced</span></div><span class="capn">org setting set: key and value</span><div class="dlg"><div class="dh"><strong>Set an organisation value</strong><div class="meta">For a setting the pages above do not show.</div></div><div class="db"><div class="f"><span class="fl">Key</span><input class="inp mono" type="text" value="budget.org_daily_usd" placeholder="" aria-label="Key"><span class="help"><a href="#">Settings reference</a></span></div><div class="f"><span class="fl">Value</span><input class="inp mono" type="text" value="40" placeholder="" aria-label="Value"><span class="help">Hub default: 25</span></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Set</button></div></div></div></div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1300}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

@@ -127,5 +127,32 @@ if [[ $code == 0 ]]; then ok "multi-line entries: exits 0"; else bad "multi-line
 if [[ "$(grep -c '^    ),$' "$T/r/$SCHEMA")" == 2 ]]; then ok "each multi-line entry keeps its closing line"; else bad "closing lines" "$(cat "$T/r/$SCHEMA")"; fi
 has "multi-line branch entry renumbered" '003_tasks.sql' "$SCHEMA"
 
+# The branch adds two (002, 003) and main takes 002: each doc comment moves
+# once, 002 -> 003 and 003 -> 004, never 002 -> 003 -> 004.
+rm -rf "$T/r"; mkdir -p "$T/r/$D" "$T/r/$(dirname "$SCHEMA")"
+g init -q -b work
+sql 1 init > "$T/r/$D/001_init.sql"
+schema > "$T/r/$SCHEMA"
+g add -A && g commit -qm main
+g update-ref refs/remotes/origin/main HEAD
+sql 2 tasks > "$T/r/$D/002_tasks.sql"
+sql 3 notes > "$T/r/$D/003_notes.sql"
+schema '    Migration::plain(2, include_str!("../../migrations/002_tasks.sql")),
+    Migration::plain(3, include_str!("../../migrations/003_notes.sql")),' > "$T/r/$SCHEMA"
+printf '//! `tasks` (migration 2).\n//! `notes` (migration 3).\n' > "$T/r/crates/fleet-core/src/store/two.rs"
+g add -A && g commit -qm "branch: 002_tasks, 003_notes"
+g checkout -q --detach origin/main
+sql 2 assets > "$T/r/$D/002_assets.sql"
+schema '    Migration::plain(2, include_str!("../../migrations/002_assets.sql")),' > "$T/r/$SCHEMA"
+g add -A && g commit -qm "main: 002_assets"
+g update-ref refs/remotes/origin/main HEAD
+g checkout -q work
+g merge -q --no-edit origin/main >/dev/null 2>&1
+out="$(cd "$T/r" && bash "$S" 2>&1)"; code=$?
+if [[ $code == 0 ]]; then ok "two moves: exits 0"; else bad "two moves: exit $code" "$out"; fi
+has "two moves: the first comment moves once" '`tasks` (migration 3)' crates/fleet-core/src/store/two.rs
+has "two moves: the second comment moves once" '`notes` (migration 4)' crates/fleet-core/src/store/two.rs
+lacks "two moves: no placeholder left" '{{renum:' crates/fleet-core/src/store/two.rs
+
 echo "renumber-migrations-test: $PASS passed, $FAIL failed"
 [[ $FAIL == 0 ]]

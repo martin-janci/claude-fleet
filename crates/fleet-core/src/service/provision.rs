@@ -454,6 +454,9 @@ fn mark_provisioned(store: &Mutex<Store>, host: &str, warning: Option<&str>, owe
     }
 }
 
+/// How often a reprovision started under Pause all looks again.
+const PAUSED_RECHECK: Duration = Duration::from_secs(60);
+
 /// Refresh every reachable, non-hidden host whose stored fingerprint is
 /// not this build's, `delay` after start (the first reconcile pass has
 /// refreshed `reachable` by then). Content only: unattended and secret-free.
@@ -465,6 +468,11 @@ pub fn spawn_reprovision_stale(
 ) -> tokio::task::JoinHandle<()> {
     crate::rt::spawn(async move {
         tokio::time::sleep(delay).await;
+        // A one-shot: started under Pause all, it waits for the resume
+        // rather than giving up until the next restart.
+        while !crate::service::loops::gate("reprovision", &store, Some(PAUSED_RECHECK)) {
+            tokio::time::sleep(PAUSED_RECHECK).await;
+        }
         reprovision_stale_pass(&store, &*ssh, &base).await;
     })
 }
