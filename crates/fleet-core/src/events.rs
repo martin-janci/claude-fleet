@@ -198,6 +198,12 @@ pub struct GrantChanged {
     /// than omitted — `strip_nulls` takes it off the wire either way, and
     /// the client reads absent and null the same.
     pub level: Option<String>,
+    /// Gap plan G4.2: the level `person_id` has an open request for, on a
+    /// frame announcing that a request opened. Absent on every other frame
+    /// (a grant change, or a request answered), so an older client, which
+    /// reads `level` alone, sees an unchanged level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
 }
 
 /// The payload of `work:changed`.
@@ -1270,10 +1276,14 @@ impl EventBus for RecordingEventBus {
             ),
             RowChange::SettingsChanged(key) => key.clone(),
             RowChange::GrantChanged(g) => format!(
-                "{}:{}:{}",
+                "{}:{}:{}{}",
                 g.session_id,
                 g.person_id,
-                g.level.as_deref().unwrap_or("revoked")
+                g.level.as_deref().unwrap_or("revoked"),
+                g.request
+                    .as_deref()
+                    .map(|r| format!(":asks:{r}"))
+                    .unwrap_or_default()
             ),
             RowChange::UpdateChanged(u) => {
                 format!("{}:{}", u.what, u.target.as_deref().unwrap_or_default())
@@ -1558,6 +1568,7 @@ mod tests {
                 session_id: 7,
                 person_id: 2,
                 level: Some("watch".into()),
+                request: None,
             })
             .payload(),
             serde_json::json!({ "session_id": 7, "person_id": 2, "level": "watch" })
@@ -1568,6 +1579,7 @@ mod tests {
                 session_id: 7,
                 person_id: 2,
                 level: None,
+                request: None,
             })
             .payload(),
             serde_json::json!({ "session_id": 7, "person_id": 2, "level": null })

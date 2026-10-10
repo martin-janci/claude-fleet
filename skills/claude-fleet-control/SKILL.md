@@ -80,7 +80,7 @@ review     repo_changes repo_diff repo_file repo_tree repo_log repo_blame
            repo_branches repo_branch_diff repo_range_diff repo_commit
            repo_commit_diff
 share      session_share session_narrow session_unshare session_access
-           session_presence my_grants
+           session_presence my_grants session_ask_access access_requests
 files      send_file list_downloads remove_download library get_clipboard
            set_clipboard
 devices    debug_devices
@@ -92,7 +92,7 @@ admin      add_host remove_host probe_host hide_host merge_host discover_hosts
            forget_project list_github_repos list_host_worktrees
            refresh_projects delete_worktree pair_client list_clients
            revoke_client set_client_trust api_tokens set_secret rename_session
-           set_friendly_name list_accounts get_settings set_setting guide
+           set_friendly_name list_accounts add_account get_settings set_setting guide
            quick_replies work_admin ensure_operator operator_status
            update_status update_admin link_peer unlink_peer list_peer_links
 device     pr_shepherd mcp_confirms answer_mcp_confirm setting_proposals

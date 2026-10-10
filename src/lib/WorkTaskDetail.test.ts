@@ -19,6 +19,7 @@ import { selectedSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
 import { link, task } from './work_view_fixture';
 import { noteWorkChanged, selectedTaskId, workTreeMeta, type OrgImpact, type TaskDetail } from './work_view';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 
 const trackerTask: TaskDetail = {
   task: task({
@@ -337,6 +338,7 @@ describe('WorkTaskDetail', () => {
   });
 
   it('the start popover drafts the brief on the planned host and Start sends the draft (redesign 6.10)', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.draft_briefs': 'true' });
     handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
     const plan = { key: 'ABC-12', title: 'Login', item_id: 12, project_id: 3, host_alias: 'mefistos', branch: 'abc-12-login', name: 'ABC-12 Login' };
     handlers.preview_start_work = (a) => ({

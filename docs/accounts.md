@@ -66,6 +66,52 @@ A profile that does not exist yet is created on first use, and the session
 asks for `/login` in its pane. Log in there once; later sessions under the
 same name on that host reuse it.
 
+### Add an account
+
+Accounts → **+ Add account** (M15 step G2.9; MCP: `add_account`) makes a
+new profile on a host, signed in one of two ways. Bedrock and Vertex are
+not offered yet.
+
+**Claude subscription.** Fleet opens a login pane on the host: a tmux
+session of its own, `fleet-login--<name>`, running `claude /login` with
+`CLAUDE_CONFIG_DIR` at the new profile (its `.claude.json` marks onboarding
+done, so the pane opens on the login choice). Sessions lists never show
+it. The dialog shows the pane's last lines, the sign-in link it printed
+(**Open sign-in page**, **Copy link**), its numbered choices and Enter / ↑ /
+↓ as buttons, and a field for the code the sign-in page hands out, which
+is pasted into the pane from stdin. It reads the host's profiles every two
+seconds and turns **Done** on once the host reports the profile logged in;
+Done and Cancel close the pane. **Run it there instead** gives the command
+for a terminal on the host,
+`CLAUDE_CONFIG_DIR=~/.claude-profiles/<name> claude /login`, which works
+whatever the CLI's own flow becomes. MCP: `start_login`, `login_status`
+(`logged_in`, `pane`, `sign_in_url`, `command`), `login_key { key }` (1–9,
+Enter, Up, Down, Escape, Tab), `login_code { code }`, `end_login`.
+
+**API key.** Fleet asks Anthropic whether the key works (`GET /v1/models`
+from this machine, to `api.anthropic.com` only); a refusal shows the
+provider's own 401 or 403 on the key field. The key then goes to the host
+on stdin, never in an argv, into `~/.claude-profiles/<name>/.fleet-api-key`
+(mode 600). Beside it, `.fleet-account.json` names the account the profile
+is listed as: `apikey-` and 16 hex of the key's SHA-256, so the same key on
+two hosts is one account. Fleet keeps no copy of the key, writes it to no
+log, audit line or reply, and changing it means adding it again (the next
+session then asks once, in its pane, whether to use the new key). A
+session under the profile exports the key as `ANTHROPIC_API_KEY`
+(`tmux::PROFILE_API_KEY`, read with the shell's own `read`). A name that is
+already a `/login` profile on that host is refused. The usage poll skips
+API-key accounts: they have spend, not usage windows.
+
+**Daily limit.** An API-key account can carry a daily limit in USD (the
+form's field; MCP: `add_account { action: "daily_limit", daily_limit_usd }`,
+0 clears it), kept in the `accounts.daily_limits` setting. When the
+account's spend today (UTC, the Accounts page's per-account roll-up)
+reaches it, a start or relaunch under any login on that account is refused
+with `E_ACCOUNT_LIMIT`, whatever `over_limit_ok` says, and automation leaves
+the login alone. A session already running is not stopped, and spend is
+booked as transcripts are read, so the limit can be passed by what is
+running when it is reached.
+
 ### Switch a running session
 
 Desktop: session details → **Login**, pick the login, **Switch**, confirm.

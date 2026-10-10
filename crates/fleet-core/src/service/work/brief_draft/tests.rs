@@ -168,6 +168,7 @@ fn a_reply_is_redacted_defused_and_cut_at_the_brief_budget() {
 /// A store whose ticket key ABC-1 ran once before and left a progress note.
 fn ticket_with_history() -> Arc<Mutex<Store>> {
     let s = Store::open_in_memory().unwrap();
+    crate::service::settings::set(&s, crate::service::settings::WORK_DRAFT_BRIEFS, "true").unwrap();
     s.upsert_host("h-old").unwrap();
     s.upsert_host("h-new").unwrap();
     let id = s

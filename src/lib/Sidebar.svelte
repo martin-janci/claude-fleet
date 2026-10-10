@@ -28,7 +28,6 @@
     isSharedAccess,
     scopeTab,
     scopeTabCounts,
-    sharedByLine,
     SCOPE_TAB_LABELS,
     SCOPE_TABS,
   } from './session_scope';
@@ -54,7 +53,8 @@
   import { selectedSession, selectSession, selectSessionExplicitly, revealSeq } from './selection';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import { readPref, writePref } from './prefs';
-  import { accessOf, backendMode } from './access';
+  import { accessOf, backendMode, myGrantInfo } from './access';
+  import { sharedRowLine, sharerName } from './shared_view';
   import AddProjectDialog from './AddProjectDialog.svelte';
   import { hostFilter, effectiveHostFilter, hosts, hostByAlias } from './hosts';
   import { bootstrapError } from './bootstrap_state';
@@ -124,6 +124,7 @@
     workFilters,
   } from './work_filters';
   import {
+    attentionState,
     bucketState,
     ciStatusColor,
     ciStatusLabel,
@@ -2035,7 +2036,12 @@
               {@const level = $accessOf(sess)}
               {#snippet sharedBy()}
                 {#if isSharedAccess(level)}
-                  <div class="shared-by" data-testid="shared-by">{sharedByLine(sess, level, $orgList)}</div>
+                  {@const info = $myGrantInfo.get(sess.id)}
+                  <!-- Gap plan G4.2, the Watch board's Inbox row: "Martin ·
+                       Read · waiting for Martin", "Martin · via 32bit · Steer". -->
+                  <div class="shared-by" data-testid="shared-by"
+                    >{sharedRowLine(level, info, sharerName(sess, info, $orgList), attentionState(sess, attentionOpts))}</div
+                  >
                 {/if}
               {/snippet}
               {@render sessionRow(sess, false, false, sharedBy)}

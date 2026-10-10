@@ -73,6 +73,14 @@
             },
             {
               "type": "field",
+              "key": "projects"
+            },
+            {
+              "type": "field",
+              "key": "accounts"
+            },
+            {
+              "type": "field",
               "key": "hosts"
             },
             {
@@ -98,9 +106,41 @@
               "key": "members"
             },
             {
+              "type": "field",
+              "key": "removed_members"
+            },
+            {
               "type": "notice",
               "tone": "info",
               "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. Adding a member offers a pairing code for their device; Pair a device mints another."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Sharing",
+      "sections": [
+        {
+          "title": "Team",
+          "items": [
+            {
+              "type": "field",
+              "key": "team"
+            }
+          ]
+        },
+        {
+          "title": "Sharing",
+          "items": [
+            {
+              "type": "field",
+              "key": "shares"
+            },
+            {
+              "type": "notice",
+              "tone": "info",
+              "text": "An admin takes a share back or narrows it to watch; only a session's owner shares or widens."
             }
           ]
         }
@@ -162,6 +202,10 @@
               "type": "notice",
               "tone": "warn",
               "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way."
+            },
+            {
+              "type": "field",
+              "key": "members_own_sessions_only"
             },
             {
               "type": "field",

@@ -739,6 +739,101 @@ async fn merge_host_folds_the_old_alias_into_the_new_one() {
     assert!(s.get_session("dev-old", "local").unwrap().is_some());
 }
 
+/// M15 step G2.10: an answer-only device reads what a readonly one reads,
+/// plus `send_prompt` and `ask` — and each of those narrows itself to
+/// answering (below). Everything else that writes is refused.
+#[test]
+fn an_answer_only_device_reads_and_answers_and_nothing_more() {
+    let a = client_caller("phone", TokenMode::Answer);
+    for t in ["list_sessions", "capture_session", "send_prompt", "ask"] {
+        assert!(enforce_mode(&a, t).is_ok(), "{t}");
+        assert!(present::visible_to(&a, t), "{t}");
+    }
+    for t in [
+        "kill_session",
+        "new_session",
+        "send_message",
+        "set_friendly_name",
+        "run_prompt",
+    ] {
+        let e = enforce_mode(&a, t).expect_err(t);
+        assert!(e.message.contains("answer-only"), "{t}: {}", e.message);
+        assert!(!present::visible_to(&a, t), "{t}");
+    }
+}
+
+#[tokio::test]
+async fn an_answer_only_device_presses_keys_and_never_types_a_prompt() {
+    let (tools, _store, sid) = keys_test_tools();
+    let typed = tools
+        .send_prompt(
+            Extension(client_caller("phone", TokenMode::Answer)),
+            Parameters(SendPromptParams {
+                session_id: Some(sid),
+                host_alias: None,
+                tmux_name: None,
+                prompt: "rm -rf".into(),
+                submit: true,
+                raw: false,
+                keys: None,
+                force: false,
+                client_msg_id: None,
+                confirm_nonce: None,
+                expect: None,
+            }),
+        )
+        .await
+        .expect_err("a prompt");
+    assert!(
+        typed.message.starts_with("E_FORBIDDEN") && typed.message.contains("never sends a prompt"),
+        "{}",
+        typed.message
+    );
+    // A key that is no answer (an interrupt) is refused before the pane is
+    // read, as for an answer grant: its own session is held to the rule.
+    let interrupt = tools
+        .send_prompt(
+            Extension(client_caller("phone", TokenMode::Answer)),
+            Parameters(SendPromptParams {
+                session_id: Some(sid),
+                host_alias: None,
+                tmux_name: None,
+                prompt: String::new(),
+                submit: true,
+                raw: false,
+                keys: Some("C-c".into()),
+                force: false,
+                client_msg_id: None,
+                confirm_nonce: None,
+                expect: None,
+            }),
+        )
+        .await
+        .expect_err("an interrupt");
+    assert!(
+        interrupt.message.starts_with("E_FORBIDDEN"),
+        "{}",
+        interrupt.message
+    );
+}
+
+#[tokio::test]
+async fn an_answer_only_device_answers_forms_and_never_opens_one() {
+    let g = gate_fixture();
+    let t = test_tools(g.store);
+    let err = t
+        .ask(
+            Extension(client_caller("phone", TokenMode::Answer)),
+            Parameters(AskParams {
+                form: Some(small_form()),
+                ..ask_p()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("never opens one"), "{err:?}");
+}
+
 #[tokio::test]
 async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
     let (tools, _store, sid) = keys_test_tools();
@@ -2684,6 +2779,7 @@ fn router_sum_serves_every_tool() {
         include_str!("prs.rs"),
         include_str!("pr_shepherd.rs"),
         include_str!("api_tokens.rs"),
+        include_str!("add_account.rs"),
         include_str!("routines.rs"),
         include_str!("start_rules.rs"),
         include_str!("presence.rs"),
@@ -3697,6 +3793,8 @@ fn every_caller_kind() -> Vec<(&'static str, Caller)> {
             client_caller("phone", TokenMode::Readonly),
         ),
         ("client peer", client_caller("hub-b", TokenMode::Peer)),
+        // M15 step G2.10: a person's answer-only device.
+        ("client answer", client_caller("phone", TokenMode::Answer)),
         // `fleet-updater`'s token (update-channel design §6.1): `/update/*`
         // and nothing else. Listed here so every gate loop in this file
         // covers it — it is a paired client row bound to no org, which is
@@ -11000,6 +11098,10 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // what a `watch` grant promised. (`share.ts::SESSION_TIER` carries the
     // same four at `own`.)
     ("session_access", &["Own"]),
+    // Gap plan G4.2: the owner's list and answer of asks is `Own` (it names
+    // the people asking); asking is `Read`, any grantee's.
+    ("access_requests", &["Own"]),
+    ("session_ask_access", &["Read"]),
     ("session_narrow", &["Own"]),
     ("session_share", &["Own"]),
     ("session_unshare", &["Own"]),
@@ -18057,6 +18159,8 @@ fn the_sharing_tools_are_never_a_per_host_tokens() {
         "session_access",
         "my_grants",
         "session_presence",
+        "session_ask_access",
+        "access_requests",
     ] {
         assert!(
             guard::NOT_FOR_HOST_TOKENS.contains(&tool),
@@ -18364,6 +18468,61 @@ async fn sharing_is_the_owners_alone_and_a_grantee_cannot_share_on() {
     share(f.ada_device(), f.a_row, "bob", "watch")
         .await
         .expect("ada owns it");
+}
+
+/// Gap plan G4.2: a grantee asks, the owner sees and grants it, and an ask's
+/// id is no oracle — anyone else answering it hears exactly what a missing
+/// id earns.
+#[tokio::test]
+async fn an_ask_reaches_the_owner_alone_and_its_id_is_no_oracle() {
+    let f = shared_fixture();
+    f.t.session_share(
+        Extension(f.ada_device()),
+        Parameters(SessionShareParams {
+            session_id: f.a_row,
+            person: "bob".into(),
+            org: None,
+            level: "watch".into(),
+        }),
+    )
+    .await
+    .expect("ada shares with bob");
+    let asked =
+        f.t.session_ask_access(
+            Extension(f.bob_device()),
+            Parameters(SessionAskAccessParams {
+                session_id: f.a_row,
+                level: "answer".into(),
+            }),
+        )
+        .await
+        .expect("bob asks");
+    let id = result_json(&asked)["id"].as_i64().expect("id");
+    let answer = |caller: Caller, id: i64| {
+        f.t.access_requests(
+            Extension(caller),
+            Parameters(AccessRequestsParams {
+                action: Some("grant".into()),
+                session_id: None,
+                id: Some(id),
+            }),
+        )
+    };
+    let missing = answer(f.bob_device(), id + 100)
+        .await
+        .expect_err("no such ask");
+    for who in [f.bob_device(), device_of(f.carol, f.ada)] {
+        let err = answer(who, id).await.expect_err("not the owner");
+        assert_eq!(err_code(&err), codes::E_NOTFOUND);
+        assert_eq!(
+            err.message.replace(&id.to_string(), "N"),
+            missing.message.replace(&(id + 100).to_string(), "N"),
+            "the same answer as an id that does not exist"
+        );
+    }
+    answer(f.ada_device(), id).await.expect("ada grants");
+    let mine = result_json(&f.t.my_grants(Extension(f.bob_device())).await.unwrap());
+    assert_eq!(mine["grants"][0]["level"], "answer");
 }
 
 #[tokio::test]

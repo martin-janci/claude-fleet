@@ -2,7 +2,8 @@ import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 import AppearanceSettings from './AppearanceSettings.svelte';
-import { uiDensity } from './prefs';
+import { agentTabLabel, agentTabName, badgeCounts, badgeNumber, uiDensity } from './prefs';
+import { applyTextSize, textSize } from './text_size';
 import { applyTheme, theme } from './theme';
 import { motionPref } from './motion';
 
@@ -10,6 +11,10 @@ afterEach(() => {
   uiDensity.set('compact');
   applyTheme('auto');
   motionPref.set('system');
+  textSize.set(100);
+  agentTabName.set('agent');
+  badgeCounts.set('needs_you');
+  document.documentElement.style.removeProperty('zoom');
 });
 
 describe('AppearanceSettings', () => {
@@ -63,5 +68,41 @@ describe('AppearanceSettings', () => {
       expect(get(motionPref)).toBe(id);
       expect(localStorage.getItem('cf:pref:ui.motion')).toBe(`"${id}"`);
     }
+  });
+});
+
+describe('text size, agent tab name and badge counts (gap plan G4.6)', () => {
+  it('sets each per-device pref from Settings › Appearance and keeps it', async () => {
+    render(AppearanceSettings);
+    await fireEvent.change(screen.getByTestId('appearance-text-size'), { target: { value: '125' } });
+    expect(get(textSize)).toBe(125);
+    expect(localStorage.getItem('cf:pref:ui.textSize')).toBe('125');
+    await fireEvent.click(screen.getByTestId('appearance-agent-tab-terminal'));
+    expect(get(agentTabName)).toBe('terminal');
+    expect(localStorage.getItem('cf:pref:ui.agentTabName')).toBe('"terminal"');
+    await fireEvent.change(screen.getByTestId('appearance-badge-counts'), { target: { value: 'off' } });
+    expect(get(badgeCounts)).toBe('off');
+    expect(localStorage.getItem('cf:pref:ui.badgeCounts')).toBe('"off"');
+  });
+
+  it("zooms the desktop's webview, or the page where there is none", async () => {
+    const zoom = vi.fn(async () => {});
+    await applyTextSize(125, zoom);
+    expect(zoom).toHaveBeenCalledWith(1.25);
+    expect(document.documentElement.style.getPropertyValue('zoom')).toBe('');
+    await applyTextSize(110, async () => {
+      throw new Error('no webview');
+    });
+    expect(document.documentElement.style.getPropertyValue('zoom')).toBe('1.1');
+    await applyTextSize(100);
+    expect(document.documentElement.style.getPropertyValue('zoom')).toBe('');
+  });
+
+  it('names the agent tab and counts the badge by the pref', () => {
+    expect(agentTabLabel('Codex', 'agent')).toBe('Codex');
+    expect(agentTabLabel('Codex', 'terminal')).toBe('Terminal');
+    expect(agentTabLabel(undefined, 'agent')).toBe('Terminal');
+    expect(badgeNumber(3, 'needs_you')).toBe(3);
+    expect(badgeNumber(3, 'off')).toBe(0);
   });
 });

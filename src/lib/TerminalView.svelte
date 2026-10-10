@@ -45,6 +45,7 @@
   } from './terminals';
   import TerminalStrip from './TerminalStrip.svelte';
   import { AGENT_LABELS } from './row_groups';
+  import { agentTabLabel, agentTabName } from './prefs';
   import Self from './TerminalView.svelte';
   import HostOffline from './states/HostOffline.svelte';
   import { errorText } from './error_copy';
@@ -1525,7 +1526,7 @@
 {:else if $selectedSession}
   <div class="term-root" class:nested={!isRoot}>
   {#if popoutTarget}
-    {@const what = myShell == null ? (AGENT_LABELS[sessionAgent($selectedSession)] ?? 'Terminal') : `Shell ${myShell}`}
+    {@const what = myShell == null ? agentTabLabel(AGENT_LABELS[sessionAgent($selectedSession)], $agentTabName) : `Shell ${myShell}`}
     <div class="popout-bar" data-testid="popout-bar">
       <span class="popout-name">{what} · popped out</span>
       <span class="popout-gap"></span>
@@ -1558,7 +1559,7 @@
   {/if}
   {#if showStrip}
     <TerminalStrip
-      agentLabel={AGENT_LABELS[sessionAgent($selectedSession)] ?? 'Terminal'}
+      agentLabel={agentTabLabel(AGENT_LABELS[sessionAgent($selectedSession)], $agentTabName)}
       {shells}
       active={activeShell}
       {split}

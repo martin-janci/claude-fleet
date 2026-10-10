@@ -25,13 +25,14 @@ account usage history (122), the Hosts page's probe facts (123), token use
 (126), the cost of fleet's own `claude -p` runs (127), every PR a session's
 branch has had (`pull_requests`, 128), cost per account (130), prompts
 queued for a busy session (133), the agent CLIs a host has (134) and the
-add-host wizard's state (135). The hub contract is revision 15
+add-host wizard's state (135). The hub contract is revision 16
 (`CONTRACT_REVISION`, `crates/fleet-core/src/wire_contract.rs`):
 revisions 11 to 14 add tools a revision-10 hub does not serve, so the
 desktop and its hub are upgraded together; 15 widens the form spec and
 adds the attention model's two classes (a mission waiting on a person, and
-Jev's "probably waiting" kept apart from Needs you) and no tool, so a
-desktop still accepts a revision-14 hub.
+Jev's "probably waiting" kept apart from Needs you) and no tool; 16 adds
+named tokens (`api_tokens`) and + Add account (`add_account`), so a
+desktop accepts only a revision-16 hub.
 
 A session start reports its three real steps (worktree, tmux, agent) as
 `start:progress` frames (redesign 5.13, `service/sessions/start_progress.rs`):
@@ -299,7 +300,7 @@ built on it — walks one level; a filed task cannot hold subtasks, and a task
 with subtasks is not filed. Going deeper is the owner's decision (it moves
 the org fence). Not yet: the phone. E9–E11 run on their defaults.
 
-Task comments (migration 158, `work_item_comments`; the Comments tab G3.4
+Task comments (migration 161, `work_item_comments`; the Comments tab G3.4
 had cut is back on the owner's word, 2026-10-10): `work_link { comment,
 item_id, notes }` (`comment_on_work`) and `{ comment_delete, comment_id }`
 (`delete_work_comment`), both routed. A comment is about the ITEM — its
@@ -528,7 +529,11 @@ and merge, read from the `pull_requests` changes reconcile records, with a
 repo filter, "me or anyone in its org" and a rate per PR. The scheduler stops on
 `automation.paused`, a fire past the routine's day budget is skipped, a run
 past its run budget fails and pauses the routine, and a run whose account
-is at or past `accounts.pause_at` is skipped (8.7). Each finished run
+is at or past `accounts.pause_at` is skipped (8.7). M15 G3.8 (migration
+159) adds the guards: a fleet daily budget for every routine's runs
+(`automation.daily_budget`), a per-run time cap, a fallback host, retry
+once, an autonomy line under the prompt, and a named fix on a failed run
+from its error code. Each finished run
 records what it came to (8.10; Jev N6 is off), and a failed run shows in
 the Inbox. `runs` (8.3, migration 141) lists tasks, missions, Jev,
 `claude -p` and routine runs in one list. Start rules (8.11,

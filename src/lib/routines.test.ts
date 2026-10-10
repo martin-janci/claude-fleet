@@ -7,6 +7,13 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
+  autonomyWords,
+  capSecsOf,
+  capWords,
+  fixLabel,
+  hostWords,
+  onFailureWords,
+  startedByWords,
   routineDeleteLoss,
   ROUTINE_RUNS_SHOWN,
   clockChange,
@@ -227,5 +234,24 @@ describe('the schedule picker and its next run (G2.3)', () => {
     expect(dryRunLine({ host_alias: 'mac', profile: 'work' }, 'acme/web', null)).toBe(
       'Dry run: on mac, in acme/web, as profile work, no limit a run.',
     );
+  });
+});
+
+describe('automation guards in words (G3.8)', () => {
+  it('a time cap, a host with its fallback, autonomy and what started a retry', () => {
+    expect(capWords(20 * 60)).toBe('20 min');
+    expect(capWords(2 * 3600)).toBe('2 h');
+    expect(capWords(90 * 60)).toBe('1 h 30 min');
+    expect(capSecsOf('')).toBeUndefined();
+    expect(capSecsOf('20')).toBe(1200);
+    expect(capSecsOf('nope')).toBeUndefined();
+    expect(hostWords({ host_alias: 'mac', fallback_host: 'nas' })).toBe('mac, else nas');
+    expect(hostWords({ host_alias: 'mac' })).toBe('mac');
+    expect(autonomyWords(0)).toBe('L0 · reports only');
+    expect(autonomyWords(undefined)).toBe('L2 · pushes and opens PRs');
+    expect(onFailureWords({ retry_once: true })).toMatch(/^Retry once/);
+    expect(startedByWords({ trigger: 'cron', trigger_ref: 'retry:4' })).toBe('its schedule, retried once after run 4 failed');
+    expect(startedByWords({ trigger: 'event', trigger_ref: 'pr:2:9' })).toBe('an event (pr:2:9)');
+    expect(fixLabel(undefined)).toBe('Fix');
   });
 });

@@ -329,9 +329,29 @@ fn deferred_prompts_has_not_before(conn: &Connection) -> rusqlite::Result<bool> 
 
 /// `already_applied` guard of migration 156: `routines` already has its
 /// `event_rate_secs` column (the last of the three it adds).
+fn orgs_has_members_own_sessions_only(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'members_own_sessions_only'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn routines_has_event_rate(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('routines') WHERE name = 'event_rate_secs'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 159: `routine_runs` already has its
+/// `host_alias` column (the last column it adds).
+fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'host_alias'",
         [],
         |r| r.get(0),
     )?;
@@ -1779,10 +1799,31 @@ const MIGRATIONS: &[Migration] = &[
     },
     // M15 step G2.8: named Control API tokens — a new table, idempotent.
     Migration::plain(157, include_str!("../../migrations/157_control_tokens.sql")),
+    // M15 step G2.10: the org's own-sessions switch (ADD COLUMN, so a
+    // guard) and its project catalog.
+    Migration {
+        version: 158,
+        sql: include_str!("../../migrations/158_org_switches_and_projects.sql"),
+        already_applied: Some(orgs_has_members_own_sessions_only),
+    },
+    // M15 step G3.8: a routine's guards (time zone, time cap, host fallback,
+    // retry, autonomy) and a run's error code and host — ADD COLUMNs, so a
+    // guard.
+    Migration {
+        version: 159,
+        sql: include_str!("../../migrations/159_routine_guards.sql"),
+        already_applied: Some(routine_runs_has_host),
+    },
+    // M15 step G4.2: `access_requests`, a recipient's ask for a wider share
+    // level. `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        160,
+        include_str!("../../migrations/160_access_requests.sql"),
+    ),
     // Task comments: a new table, idempotent.
     Migration::plain(
-        158,
-        include_str!("../../migrations/158_work_item_comments.sql"),
+        161,
+        include_str!("../../migrations/161_work_item_comments.sql"),
     ),
 ];
 

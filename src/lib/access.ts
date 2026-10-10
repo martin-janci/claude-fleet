@@ -189,30 +189,84 @@ export function noAttachReason(
 
 // ── the client's own identity and grant set ────────────────────────────────
 
-/** One entry of `my_grants`. */
+/** One entry of `my_grants`. The four optional fields (gap plan G4.2) name
+ *  the share for the recipient's header; an older hub sends none. */
 export interface MyGrant {
   session_id: number;
   level: string;
+  shared_by?: number | null;
+  shared_by_name?: string | null;
+  granted_at?: number | null;
+  via_org?: string | null;
+}
+
+/** One of this person's own open asks for a wider level (gap plan G4.2). */
+export interface MyAccessRequest {
+  id: number;
+  session_id: number;
+  level: string;
+  requested_at: number;
 }
 
 /** `my_grants`' answer: who this caller is, and every live grant TO them. */
 export interface MyGrantsAnswer {
   person_id: number | null;
   grants: MyGrant[];
+  requests?: MyAccessRequest[];
 }
+
+/** Who shared a session with this person, and how (the recipient's header:
+ *  "Shared by Martin · Read · since 13:20", "via 32bit"). Labels only: the
+ *  level that decides anything is `myGrants`'. */
+export interface GrantInfo {
+  sharedBy: number | null;
+  sharedByName: string | null;
+  grantedAt: number | null;
+  viaOrg: string | null;
+}
+
+/** Session id → how its share reached this person. Refreshed with
+ *  `my_grants`; a revoke frame drops the entry. */
+export const myGrantInfo = writable<ReadonlyMap<number, GrantInfo>>(new Map());
+
+/** Session id → this person's open ask on it ("Asked for Answer"). */
+export const myAccessRequests = writable<ReadonlyMap<number, { id: number; level: GrantLevel; requestedAt: number }>>(
+  new Map(),
+);
 
 /** Replace both halves at once — the only way they are written together, so a
  *  half-applied identity cannot be observed. */
-export function setMyGrants(personId: number | null, grants: readonly MyGrant[]): void {
+export function setMyGrants(
+  personId: number | null,
+  grants: readonly MyGrant[],
+  requests: readonly MyAccessRequest[] = [],
+): void {
   const m = new Map<number, GrantLevel>();
+  const info = new Map<number, GrantInfo>();
   for (const g of grants) {
     // A level this app does not know is DROPPED, not coerced: a newer hub
     // adding a third level must read as "no grant" (no terminal, no drive)
     // rather than as the nearest thing we recognise.
-    if (typeof g?.session_id === 'number' && isGrantLevel(g.level)) m.set(g.session_id, g.level);
+    if (typeof g?.session_id === 'number' && isGrantLevel(g.level)) {
+      m.set(g.session_id, g.level);
+      info.set(g.session_id, {
+        sharedBy: typeof g.shared_by === 'number' ? g.shared_by : null,
+        sharedByName: typeof g.shared_by_name === 'string' ? g.shared_by_name : null,
+        grantedAt: typeof g.granted_at === 'number' ? g.granted_at : null,
+        viaOrg: typeof g.via_org === 'string' ? g.via_org : null,
+      });
+    }
+  }
+  const asks = new Map<number, { id: number; level: GrantLevel; requestedAt: number }>();
+  for (const r of requests) {
+    if (typeof r?.session_id === 'number' && typeof r.id === 'number' && isGrantLevel(r.level)) {
+      asks.set(r.session_id, { id: r.id, level: r.level, requestedAt: r.requested_at });
+    }
   }
   myPersonId.set(personId);
   myGrants.set(m);
+  myGrantInfo.set(info);
+  myAccessRequests.set(asks);
 }
 
 /**
@@ -237,7 +291,7 @@ export async function loadMyGrants(): Promise<Result<MyGrantsAnswer>> {
   // answer: a revoke stays revoked, a new grant stays (review r07).
   const before = get(myGrants);
   const personId = r.value.person_id ?? null;
-  setMyGrants(personId, r.value.grants ?? []);
+  setMyGrants(personId, r.value.grants ?? [], r.value.requests ?? []);
   if (grantFrameSeq !== since && personId === grantFramesFor) {
     myGrants.update((cur) => {
       const next = new Map(cur);
@@ -260,11 +314,13 @@ let grantFrameSeq = 0;
 let grantFramesFor: number | null = null;
 const grantTouchedAt = new Map<number, number>();
 
-/** The `grant:changed` frame: ids only, `level: null` for a revoke. */
+/** The `grant:changed` frame: ids only, `level: null` for a revoke.
+ *  `request` (gap plan G4.2) is the level of an ask that just opened. */
 export interface GrantChanged {
   session_id: number;
   person_id: number;
   level: GrantLevel | null;
+  request?: GrantLevel;
 }
 
 /**
@@ -282,7 +338,9 @@ export function parseGrantChanged(payload: unknown): GrantChanged | null {
   const p = payload as Record<string, unknown>;
   if (typeof p.session_id !== 'number' || typeof p.person_id !== 'number') return null;
   const level = isGrantLevel(p.level) ? p.level : null;
-  return { session_id: p.session_id, person_id: p.person_id, level };
+  const out: GrantChanged = { session_id: p.session_id, person_id: p.person_id, level };
+  if (isGrantLevel(p.request)) out.request = p.request;
+  return out;
 }
 
 /**
@@ -311,10 +369,42 @@ export function applyGrantChanges(changes: readonly GrantChanged[]): void {
     }
     return next;
   });
+  // Gap plan G4.2: an ask this person just made shows at once; any other
+  // frame may have answered one (or changed who shared what), so the
+  // labels are re-read from `my_grants` rather than guessed.
+  const opened = mine.filter((c) => c.request !== undefined);
+  if (opened.length > 0) {
+    myAccessRequests.update((cur) => {
+      const next = new Map(cur);
+      for (const c of opened) next.set(c.session_id, { id: next.get(c.session_id)?.id ?? -1, level: c.request!, requestedAt: Math.floor(Date.now() / 1000) });
+      return next;
+    });
+  }
+  const revoked = mine.filter((c) => c.level === null);
+  if (revoked.length > 0) {
+    myGrantInfo.update((cur) => {
+      const next = new Map(cur);
+      for (const c of revoked) next.delete(c.session_id);
+      return next;
+    });
+  }
+  if (mine.some((c) => c.request === undefined)) scheduleGrantRefresh();
+}
+
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+/** Re-read `my_grants` once a burst of frames has settled. */
+function scheduleGrantRefresh(): void {
+  if (refreshTimer !== null) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    void loadMyGrants();
+  }, 300);
 }
 
 /** Test seam: forget who we are, the way a fresh launch has not asked yet. */
 export function resetAccessForTests(): void {
   myPersonId.set(null);
   myGrants.set(new Map());
+  myGrantInfo.set(new Map());
+  myAccessRequests.set(new Map());
 }

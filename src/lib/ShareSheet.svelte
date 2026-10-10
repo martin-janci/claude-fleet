@@ -44,6 +44,9 @@
   import { devices, loadDevices } from './devices';
   import { readOnlyRecipient } from './share_devices';
   import { errorSentence } from './error_copy';
+  import { accessRequests, answerAccessRequest, askerName, loadAccessRequests } from './access_requests';
+  import { LEVEL_NAMES } from './shared_view';
+  import type { GrantLevel } from './access';
 
   const id = $derived($shareSheetFor);
   const session = $derived(id === null ? undefined : $sessions.find((s) => s.id === id));
@@ -75,6 +78,19 @@
    *  hub is back" would be a promise to a grantee who will still not be the
    *  owner when it is. The buttons above keep both halves. */
   const notOwnerReason = $derived($sessionBlocked(session, 'session_share'));
+  /** Gap plan G4.2: the asks for a wider level on this session, and the
+   *  gate on answering one (owner only, the hub link up). */
+  const asks = $derived(id === null ? [] : $accessRequests.filter((a) => a.session_id === id));
+  const answerBlocked = $derived(
+    hubActionBlocked('access_requests', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'session_share'),
+  );
+
+  function doAnswer(askId: number, grant: boolean) {
+    const forId = id;
+    if (forId === null) return;
+    void run(forId, answerBlocked, () => answerAccessRequest(askId, grant));
+  }
   const label = $derived(session?.friendly_name || session?.tmux_name || 'this session');
 
   /** The live grant list, as `session_access` answers it. `null` while the
@@ -121,6 +137,7 @@
     listError = null;
     if (forId !== null) {
       void load(forId);
+      void loadAccessRequests();
       // Only feeds the read-only warning (step 5.8); a client the hub will
       // not list devices for keeps the list it had and warns about nobody.
       void loadDevices();
@@ -348,6 +365,38 @@
           </ul>
         {/if}
       </section>
+
+      {#if asks.length > 0}
+        <!-- Gap plan G4.2: someone this is shared with asked for more.
+             Grant re-shares at the asked level (a fresh share, never a
+             widened one); Decline says no and holds a repeat back an hour. -->
+        <section class="block" data-testid="share-asks">
+          <h4>Asked for more</h4>
+          <ul class="grants">
+            {#each asks as a (a.id)}
+              <li class="grant" data-testid="share-ask">
+                <span class="who">{askerName(a)}</span>
+                <span class="level">asks for {LEVEL_NAMES[a.level as GrantLevel] ?? a.level}</span>
+                <button
+                  type="button"
+                  class="primary"
+                  data-testid="share-ask-grant"
+                  disabled={busy || answerBlocked !== null}
+                  title={answerBlocked ?? `Share at ${a.level} with ${askerName(a)}`}
+                  onclick={() => doAnswer(a.id, true)}>Grant</button
+                >
+                <button
+                  type="button"
+                  data-testid="share-ask-decline"
+                  disabled={busy || answerBlocked !== null}
+                  title={answerBlocked ?? 'Say no; they keep the level they have'}
+                  onclick={() => doAnswer(a.id, false)}>Decline</button
+                >
+              </li>
+            {/each}
+          </ul>
+        </section>
+      {/if}
 
       <!-- The two things a sharer is deciding without being told, said out
            loud. Making them visible rather than silent turns the share into a

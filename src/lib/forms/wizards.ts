@@ -14,6 +14,7 @@ import newSession from './wizards/new_session.json';
 import getStarted from './wizards/get_started.json';
 import linkPeer from './wizards/link_peer.json';
 import newToken from './wizards/new_token.json';
+import addAccount from './wizards/add_account.json';
 
 export type WizardId =
   | 'link_hub'
@@ -23,7 +24,8 @@ export type WizardId =
   | 'new_session'
   | 'get_started'
   | 'link_peer'
-  | 'new_token';
+  | 'new_token'
+  | 'add_account';
 
 export interface Wizard {
   id: WizardId;
@@ -60,6 +62,10 @@ export const WIZARDS: Record<WizardId, Wizard> = {
   // Settings › Control API's + Token (M15 G2.8): the token is shown once
   // after, by ApiTokenCreated.
   new_token: { id: 'new_token', spec: newToken as FormSpec, sending: 'Creating…', loader: 'halo' },
+  // The Accounts page's + Add account (M15 G2.9): an API key is checked with
+  // Anthropic while the Sonar runs; a subscription goes on to the login pane
+  // (AddAccountLogin).
+  add_account: { id: 'add_account', spec: addAccount as FormSpec, sending: 'Adding…', loader: 'sonar' },
 };
 
 /** `spec` with the choices only known when it opens (the fleet's hosts, a

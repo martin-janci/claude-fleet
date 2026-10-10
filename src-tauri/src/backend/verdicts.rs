@@ -122,6 +122,13 @@ const BUCKETS_ARE_ADMIN: &str = "a sprint or release reshapes what every client 
      is never the fleet's administrator; plan them on the hub with a master token's work_admin \
      bucket_create|bucket_update|bucket_close|bucket_delete (membership is routed)";
 
+/// Settings' Repair now and Restore lost sessions (gap plan G4.6) are this
+/// app's own fleet-wide passes; a paired client repairs or restores one
+/// host at a time from Hosts.
+const FLEET_PASS_IS_LOCAL: &str = "repairing every workspace or restoring every host's lost \
+     sessions at once is the fleet's own pass: on a paired client, open the host in Hosts and \
+     use its Repair or Restore, which route to the hub";
+
 const RETENTION_IS_ADMIN: &str = "work retention is the hub's own sweep of its store: its \
      status and sweep_now are the hub's work_admin, master-only, and a paired client is never \
      the fleet's administrator; set the windows with set_setting and read the status on the \
@@ -520,6 +527,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "repair_workspaces_now",
+        Verdict::LocalOnly {
+            instead: FLEET_PASS_IS_LOCAL,
+        },
+    ),
+    (
+        "restore_all_lost_sessions",
+        Verdict::LocalOnly {
+            instead: FLEET_PASS_IS_LOCAL,
+        },
+    ),
+    (
         "work_retention_sweep",
         Verdict::LocalOnly {
             instead: RETENTION_IS_ADMIN,
@@ -551,6 +570,17 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("set_org_member", Verdict::Routed { tool: "org_admin" }),
     ("remove_org_member", Verdict::Routed { tool: "org_admin" }),
     ("org_member_grants", Verdict::Routed { tool: "org_admin" }),
+    // M15 step G2.10: a rule's live impact (a read) and the org's project
+    // catalog.
+    ("org_rule_preview", Verdict::Routed { tool: "org_admin" }),
+    ("add_org_project", Verdict::Routed { tool: "org_admin" }),
+    ("remove_org_project", Verdict::Routed { tool: "org_admin" }),
+    ("revoke_org_share", Verdict::Routed { tool: "org_admin" }),
+    ("narrow_org_share", Verdict::Routed { tool: "org_admin" }),
+    (
+        "revoke_org_member_grants",
+        Verdict::Routed { tool: "org_admin" },
+    ),
     ("list_orgs", Verdict::Routed { tool: "work" }),
     ("org_suggestions", Verdict::Routed { tool: "work" }),
     // Org administration phase B: the company's paired devices and people,
@@ -640,6 +670,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     ("my_grants", Verdict::Routed { tool: "my_grants" }),
+    // Gap plan G4.2: a recipient's ask for a wider level, and the owner's
+    // list and answer. Both route; the hub gates each per request.
+    (
+        "session_ask_access",
+        Verdict::Routed {
+            tool: "session_ask_access",
+        },
+    ),
+    (
+        "access_requests",
+        Verdict::Routed {
+            tool: "access_requests",
+        },
+    ),
     (
         "restart_session",
         Verdict::Routed {
@@ -924,6 +968,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // window is onto, so the hub's. Its tool serves the owner's trusted full
     // device read and act tokens; an admin one stays the hub master's.
     ("api_tokens", Verdict::Routed { tool: "api_tokens" }),
+    // Add account (M15 step G2.9): the profile goes on a host of the fleet
+    // this window is onto, and its account into that fleet's list.
+    (
+        "add_account",
+        Verdict::Routed {
+            tool: "add_account",
+        },
+    ),
     // Start rules (Orbit Fleet 8.11): the hub decides and tallies its own
     // starts, so its rules are the ones that count.
     (

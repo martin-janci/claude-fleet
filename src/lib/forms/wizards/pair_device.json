@@ -14,8 +14,8 @@
           "label": "Mode",
           "required": true,
           "value": "full",
-          "options": [["full", "Full"], ["readonly", "Read-only"]],
-          "help": "Full drives sessions; read-only watches."
+          "options": [["full", "Full"], ["answer", "Answer only"], ["readonly", "Watch only"]],
+          "help": "Full drives sessions; answer only answers their questions and never types a prompt; watch only reads."
         },
         {
           "name": "org",

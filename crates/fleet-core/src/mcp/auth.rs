@@ -30,6 +30,11 @@ pub enum TokenMode {
     Full,
     /// Only tools that observe the fleet; mutating tools get `E_FORBIDDEN`.
     Readonly,
+    /// A person's "answer only" device (M15 step G2.10): what `Readonly`
+    /// may call, plus answering — a dialog key through `send_prompt` and a
+    /// form through `ask` ([`crate::mcp::guard::ANSWER_TOOLS`]). It never
+    /// types a prompt. Only a paired client row can hold it.
+    Answer,
     /// Another fleet's hub (federation): `peer_exchange` and nothing else.
     /// Only a paired client row can hold it (see `parse_client`).
     Peer,
@@ -53,10 +58,11 @@ impl TokenMode {
         }
     }
 
-    /// A paired client row's mode: `full`, `peer`, `updater`, else
-    /// `readonly`.
+    /// A paired client row's mode: `full`, `answer`, `peer`, `updater`,
+    /// else `readonly`.
     fn parse_client(s: &str) -> TokenMode {
         match s {
+            "answer" => TokenMode::Answer,
             "peer" => TokenMode::Peer,
             "updater" => TokenMode::Updater,
             other => TokenMode::parse(other),
@@ -393,6 +399,12 @@ impl Caller {
             Some(p) => crate::service::org_admin::unclaimed_reach(store, p)?,
             None => crate::service::view_scope::UnclaimedReach::None,
         };
+        // M15 step G2.10: teammates in an org whose members see each
+        // other's sessions. A person-less caller has none.
+        let team = match person {
+            Some(p) => crate::service::org_admin::team_reach(store, p)?,
+            None => Default::default(),
+        };
         Ok(ViewScope::for_caller(
             org,
             person,
@@ -401,6 +413,7 @@ impl Caller {
             proven_session,
             sole_person,
             unclaimed,
+            team,
         )
         .with_hosts(self.api_hosts().map(<[String]>::to_vec)))
     }
@@ -747,7 +760,7 @@ pub(crate) fn refuses_peer(caller: &Caller) -> Option<axum::response::Response> 
         TokenMode::Peer => "a hub link may call peer_exchange only\n",
         // Same rule for the updater's token: its only door is `/update/*`.
         TokenMode::Updater => "an updater token may call /update only\n",
-        TokenMode::Full | TokenMode::Readonly => return None,
+        TokenMode::Full | TokenMode::Readonly | TokenMode::Answer => return None,
     };
     Some((StatusCode::FORBIDDEN, body).into_response())
 }

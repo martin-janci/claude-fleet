@@ -468,6 +468,10 @@ export const ROUTED_ACTIONS = [
   'session_share',
   'session_unshare',
   'session_narrow',
+  // Gap plan G4.2: a recipient's ask for a wider level, and the owner's
+  // grant or decline of one (both buttons, so both are writes here).
+  'session_ask_access',
+  'access_requests',
   // Orchestration O1: the Missions tab's writes.
   'save_mission',
   'set_mission_state',

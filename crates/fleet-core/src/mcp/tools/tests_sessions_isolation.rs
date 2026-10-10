@@ -387,6 +387,8 @@ const NEVER_A_HOST_TOKENS: &[&str] = &[
     "session_access",
     "my_grants",
     "session_presence",
+    "session_ask_access",
+    "access_requests",
     "list_downloads",
     "library",
     // The Automation screen's Runs list (Orbit Fleet 8.3): a person's.
@@ -809,6 +811,8 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "session_claim" => fx.t.session_claim(ext, p!()).await,
         "my_grants" => fx.t.my_grants(ext).await,
         "session_presence" => fx.t.session_presence(ext, p!()).await,
+        "session_ask_access" => fx.t.session_ask_access(ext, p!()).await,
+        "access_requests" => fx.t.access_requests(ext, p!()).await,
         // ---- downloads.rs -------------------------------------------------
         "send_file" => fx.t.send_file(ext, p!()).await,
         "list_downloads" => fx.t.list_downloads(ext, p!()).await,
@@ -1114,6 +1118,29 @@ async fn run_matrix() {
     // gets the not-found every session tool answers, and learns nobody's
     // there.
     m.gated("session_presence", Reach::Read, row).await;
+    // Gap plan G4.2: asking the owner for more is for someone the session is
+    // shared with below drive. The gate is `Read` (a stranger learns
+    // nothing); the store then refuses the owner (nobody to ask) and a
+    // driver (already at the top).
+    m.at(
+        "session_ask_access",
+        Reach::Read,
+        |fx, _| json!({ "session_id": fx.row, "level": "drive" }),
+        |who| match who {
+            w if w.is_host() => Out::Code(codes::E_FORBIDDEN),
+            Who::Owner | Who::Driver => Out::Code(codes::E_VALIDATE),
+            w => tier(Reach::Read, w),
+        },
+    )
+    .await;
+    // The owner's list of asks names other people, so it is `Own`, like
+    // `session_access`.
+    m.gated(
+        "access_requests",
+        Reach::Own,
+        |fx, _| json!({ "action": "list", "session_id": fx.row }),
+    )
+    .await;
     // `send_file` is the `own` tier, and the reason is the FILE's path
     // rather than anything about the session: `send_file { session_id, path }`
     // copies a file off the session's host at an UNCONSTRAINED absolute path
@@ -2108,6 +2135,7 @@ fn own_tier_args(fx: &Fx, tool: &str) -> Value {
     match tool {
         "kill_session" | "safe_kill_session" | "restart_session" | "recreate_session"
         | "session_access" | "shell_terminals" => json!({ "session_id": fx.row }),
+        "access_requests" => json!({ "action": "list", "session_id": fx.row }),
         "move_session" => {
             json!({ "session_id": fx.row, "target_host_alias": FAR, "dry_run": true })
         }

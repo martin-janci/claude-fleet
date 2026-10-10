@@ -74,6 +74,8 @@ vi.mock('@tauri-apps/api/core', () => ({
     if (cmd === 'session_share') return null;
     if (cmd === 'session_unshare') return null;
     if (cmd === 'session_narrow') return null;
+    // Gap plan G4.2: no open asks by default.
+    if (cmd === 'access_requests') return [];
     // Plain text, not JSON (the watcher's read-only pane snapshot).
     if (cmd === 'capture_session') return '';
     if (cmd === 'send_prompt') return null;

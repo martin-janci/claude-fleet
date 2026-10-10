@@ -17,6 +17,7 @@
   import { sessionAgent } from './sessions';
   import AgentMark from './AgentMark.svelte';
   import { AGENT_LABELS, STATE_LABELS } from './row_groups';
+  import { agentTabLabel, agentTabName } from './prefs';
   import { attentionState } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { shortcutLabel } from './shortcuts';
@@ -24,6 +25,11 @@
   import { editorBlockedReason, openSessionInEditor } from './editor';
   import PresenceStrip from './PresenceStrip.svelte';
   import VisibilityBadge from './VisibilityBadge.svelte';
+  import SharedWithYou from './SharedWithYou.svelte';
+  import { myGrantInfo } from './access';
+  import { orgs as orgList } from './orgs';
+  import { isSharedAccess } from './session_scope';
+  import { recipientStateLabel, sharedByMeta, sharerName } from './shared_view';
   import { sessionBlocked, shareSheetFor } from './share';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
@@ -68,8 +74,10 @@
       ? attentionState(session, { idleSecs: $attentionIdleMinutes * 60, now: Math.floor(Date.now() / 1000) })
       : null,
   );
-  const agent = $derived(session ? sessionAgent(session) : null);
-  const agentLabel = $derived(session ? (AGENT_LABELS[sessionAgent(session)] ?? 'Terminal') : 'Terminal');
+  // Settings › Appearance › Agent tab name (G4.6): the agent's own name
+  // and mark, or "Terminal" for every agent.
+  const agent = $derived(session && $agentTabName === 'agent' ? sessionAgent(session) : null);
+  const agentLabel = $derived(agentTabLabel(session ? AGENT_LABELS[sessionAgent(session)] : null, $agentTabName));
   const prNumber = $derived(session?.pr_url?.match(/\/pull\/(\d+)/)?.[1] ?? null);
   // The header's meta line and context meter (UX audit 2026-10-09, H2 and
   // H3): host · account · worktree · PR, and how full the context window is.
@@ -80,6 +88,17 @@
       : (session.account_uuid ?? $hostByAlias.get(session.host_alias)?.account_uuid ?? null);
     return uuid ? ($accountByUuid.get(uuid)?.email ?? null) : null;
   });
+  // Gap plan G4.2: someone the session is shared with reads who shared it,
+  // at what level and since when, and "Waiting for Martin" for its state.
+  const sharedLevel = $derived.by(() => {
+    const a = session ? $accessOf(session) : null;
+    return isSharedAccess(a) ? a : null;
+  });
+  const shareInfo = $derived(session ? $myGrantInfo.get(session.id) : undefined);
+  const sharer = $derived(session && sharedLevel ? sharerName(session, shareInfo, $orgList) : null);
+  const stateLabel = $derived(
+    state ? ((sharedLevel ? recipientStateLabel(state, sharer) : null) ?? STATE_LABELS[state]) : '',
+  );
   const ctxPct = $derived(session?.context_pct ?? null);
   const ctxLevel = $derived(contextLevel(ctxPct));
 
@@ -109,8 +128,9 @@
   {#if session && state}
     <div class="title-row">
       <span class="name" data-testid="session-head-name">{name}</span>
-      <span class="state state-{state}" data-testid="session-head-state">{STATE_LABELS[state]}</span>
+      <span class="state state-{state}" data-testid="session-head-state">{stateLabel}</span>
       <VisibilityBadge {session} />
+      <SharedWithYou {session} />
       <span class="grow"></span>
       {#if ctxPct !== null && ctxLevel !== null}
         <span class="ctx" data-testid="session-head-context" data-level={ctxLevel} title="Context window used">
@@ -168,6 +188,8 @@
       </button>
     </div>
     <div class="meta" data-testid="session-head-meta">
+      {#if sharedLevel}<span data-testid="session-head-shared-by">{sharedByMeta(sharedLevel, shareInfo, sharer)}</span
+        ><span class="sep" aria-hidden="true">·</span>{/if}
       <span>{session.host_alias}</span>
       {#if accountEmail}<span class="sep" aria-hidden="true">·</span><span data-testid="session-head-account">{accountEmail}</span>{/if}
       {#if session.worktree_key}<span class="sep" aria-hidden="true">·</span><span class="mono" data-testid="session-head-worktree">{session.worktree_key}</span>{/if}

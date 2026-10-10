@@ -33,6 +33,12 @@ fn person(store: &Mutex<Store>, id: i64) -> ViewScope {
 /// A mission of a new person's, and the deps around its store.
 fn fixture(name: &str) -> (Deps, ViewScope, MissionRow) {
     let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    settings::set(
+        &lock(&store).unwrap(),
+        settings::WORK_DRAFT_RELEASE_NOTES,
+        "true",
+    )
+    .unwrap();
     let who = lock(&store).unwrap().create_person(name, None).unwrap().id;
     let me = person(&store, who);
     let m = missions::save(

@@ -36,6 +36,7 @@ fn person_scope(person: Option<i64>, grants: &[(i64, &str)], sole: bool) -> View
         None,
         sole,
         UnclaimedReach::None,
+        TeamReach::default(),
     )
 }
 
@@ -53,6 +54,7 @@ fn host_scope(alias: &str, proven: Option<i64>) -> ViewScope {
         proven,
         false,
         UnclaimedReach::None,
+        TeamReach::default(),
     )
 }
 
@@ -70,6 +72,51 @@ fn host_scope(alias: &str, proven: Option<i64>) -> ViewScope {
 /// bites through the verbs built on the predicate (`may_drive`, `may_own`),
 /// and the hub's own UNnarrowed reader is untouched — `OrgScope::All` passes
 /// the org clause trivially, which is what makes putting it first free.
+/// M15 step G2.10: an org whose members see each other's sessions lets a
+/// teammate WATCH a session of the org owned by another member — never
+/// answer, drive or own it, never another org's, never a non-member's,
+/// never an unclaimed row.
+#[test]
+fn a_teammate_watches_and_nothing_more() {
+    let team: BTreeMap<i64, std::collections::BTreeSet<i64>> =
+        [(10, [2].into_iter().collect())].into_iter().collect();
+    let me = ViewScope::for_caller(
+        OrgScope::All,
+        Some(1),
+        GrantSet::default(),
+        None,
+        None,
+        false,
+        UnclaimedReach::None,
+        TeamReach::from_map(team),
+    );
+    let in_org = |id, owner: Option<i64>, org: Option<i64>, vis: &str| {
+        let mut r = row(id, "h", owner, vis);
+        r.org_id = org;
+        r
+    };
+    let teammates = in_org(1, Some(2), Some(10), "private");
+    assert!(me.sees_session_row(&teammates).is_visible());
+    assert!(me.watches_as_teammate(&teammates));
+    assert!(!me.may_answer(&teammates));
+    assert!(!me.may_drive(&teammates));
+    assert!(!me.may_own(&teammates));
+    // Another org, a non-member's session, an unclaimed one: nothing.
+    assert!(!me
+        .sees_session_row(&in_org(2, Some(2), Some(11), "private"))
+        .is_visible());
+    assert!(!me
+        .sees_session_row(&in_org(3, Some(3), Some(10), "private"))
+        .is_visible());
+    assert!(!me
+        .sees_session_row(&in_org(4, None, Some(10), "unclaimed"))
+        .is_visible());
+    // The switch on (no team reach): the teammate's row is private again.
+    assert!(!person_scope(Some(1), &[], false)
+        .sees_session_row(&teammates)
+        .is_visible());
+}
+
 #[test]
 fn a_narrowed_hub_reader_is_still_fenced_by_its_org() {
     let mine = row(1, "alpha", None, crate::store::VISIBILITY_UNCLAIMED);
