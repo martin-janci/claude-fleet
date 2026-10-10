@@ -1,7 +1,9 @@
 <script lang="ts">
-  import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
-  import Modal from './Modal.svelte';
+  import DialogSheet from './DialogSheet.svelte';
+  import { savedWithUndo } from './forms/form_frame';
+  import type { IpcError } from './result';
+  import { pushError } from './toasts';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import {
@@ -21,6 +23,12 @@
   // `set_work_status` for the status, both Routed, so a paired desktop
   // edits on its hub. A tracker's ticket is not offered here: its text and
   // status are its tracker's.
+  //
+  // The form kit (G1.2) through DialogSheet: the title is checked once the
+  // person leaves it, the off Save says why under it, a failure (a hub
+  // refusal too) is a banner over the fields with the edit kept, closing a
+  // changed form asks "Discard changes?", and a save offers Undo, which
+  // writes the previous values back.
 
   let {
     taskId,
@@ -48,7 +56,9 @@
   let assignees = $state('');
   let due = $state('');
   let busy = $state(false);
-  let failure = $state<string | null>(null);
+  let failure = $state<string | IpcError | null>(null);
+  let titleLeft = $state(false);
+  let tried = $state(false);
 
   function statusOf(raw: string | null | undefined): WorkItemStatus {
     return raw === 'done' || raw === 'in_progress' ? raw : 'todo';
@@ -106,19 +116,43 @@
   });
   const dirty = $derived(Object.keys(changes.edit).length > 0 || changes.status !== null);
   const canSubmit = $derived(editable && !busy && blocked === null && titleError === null && dirty);
+  const shownTitleError = $derived(titleLeft || tried ? titleError : null);
+  /** Why Save is off, under it. */
+  const why = $derived(blocked ?? titleError ?? (dirty ? null : 'Nothing changed yet.'));
 
-  async function submit(e?: Event) {
-    e?.preventDefault();
+  /** A refusal stays an `IpcError` so the banner can say the hub refused. */
+  const failed = (e: IpcError): string | IpcError => (e.code === 'E_FORBIDDEN' ? e : readErrorText(e));
+
+  /** Put the fields this save changed back to what they were. */
+  async function undo(itemId: number, before: typeof initial, edit: typeof changes.edit, nextStatus: WorkItemStatus | null) {
+    const back: WorkItemEdit = {};
+    if (edit.title !== undefined) back.title = before.title;
+    if (edit.notes !== undefined) back.notes = before.notes;
+    if (edit.assignees !== undefined) back.assignees = before.assignees;
+    if (edit.due_at !== undefined) back.due_at = before.due;
+    if (Object.keys(back).length > 0) {
+      const r = await editWorkItem(itemId, back);
+      if (!r.ok) return void pushError(r.error, 'Undo failed');
+    }
+    if (nextStatus !== null) {
+      const r = await setWorkStatus(itemId, before.status);
+      if (!r.ok) return void pushError(r.error, 'Undo failed');
+    }
+    ondone?.();
+  }
+
+  async function submit() {
     if (!canSubmit || task?.item_id == null) return;
     const itemId = task.item_id;
     const { edit, status: nextStatus } = changes;
+    const before = { ...initial };
     busy = true;
     failure = null;
     if (Object.keys(edit).length > 0) {
       const r = await editWorkItem(itemId, edit);
       if (!r.ok) {
         busy = false;
-        failure = readErrorText(r.error);
+        failure = failed(r.error);
         return;
       }
       initial = {
@@ -133,121 +167,102 @@
       const r = await setWorkStatus(itemId, nextStatus);
       if (!r.ok) {
         busy = false;
-        failure = readErrorText(r.error);
+        failure = failed(r.error);
         return;
       }
     }
     busy = false;
     ondone?.();
     onclose();
+    savedWithUndo('Task saved.', () => undo(itemId, before, edit, nextStatus));
   }
 </script>
 
-<Modal title="Edit task" {onclose} width="480px" testid="edit-task-dialog">
+<DialogSheet
+  title="Edit task"
+  lead={task?.key ? `${task.key}: changes save to this task in Fleet.` : 'Changes save to this task in Fleet.'}
+  verb="Save"
+  busyVerb="Saving…"
+  onconfirm={() => void submit()}
+  {onclose}
+  canConfirm={canSubmit}
+  {busy}
+  error={loadError ?? failure}
+  {dirty}
+  oninvalid={() => (tried = true)}
+  testid="edit-task-dialog"
+  confirmTestid="edit-task-submit"
+  errorTestid={loadError ? 'edit-task-load-error' : 'edit-task-error'}
+  confirmTitle={editable ? why : null}
+>
   {#if loadError}
-    <p class="err" role="alert" data-testid="edit-task-load-error">{loadError}</p>
-    <div class="actions"><button type="button" onclick={onclose}>Close</button></div>
+    <!-- Nothing to edit: the banner says why. -->
   {:else if !task}
     <p class="note" data-testid="edit-task-loading">Loading…</p>
   {:else if !editable}
     <p class="note" data-testid="edit-task-tracker">
       {task.key ?? 'This task'} belongs to {task.tracker_name || task.provider || 'its tracker'}: edit it there.
     </p>
-    <div class="actions"><button type="button" onclick={onclose}>Close</button></div>
   {:else}
-    <form class="form" onsubmit={submit}>
-      {#if task.key}<p class="note">{task.key}</p>{/if}
+    <label class="field">
+      <span class="field-label">Title</span>
+      <input
+        type="text"
+        bind:value={title}
+        maxlength={LOCAL_WORK_TITLE_MAX * 2}
+        data-autofocus=""
+        autocomplete="off"
+        data-testid="edit-task-title"
+        aria-invalid={shownTitleError !== null}
+        onblur={() => (titleLeft = true)}
+      />
+      {#if shownTitleError}<span class="err" data-testid="edit-task-title-error">{shownTitleError}</span>{/if}
+    </label>
+    <label class="field">
+      <span class="field-label">Description</span>
+      <textarea
+        rows="6"
+        bind:value={notes}
+        disabled={notesLocked}
+        placeholder="What needs doing, links, context…"
+        data-testid="edit-task-notes"
+      ></textarea>
+      {#if notesLocked}
+        <span class="field-note" data-testid="edit-task-notes-locked"
+          >A delegated job's description is its prompt and stays as sent.</span
+        >
+      {/if}
+    </label>
+    <div class="row">
       <label class="field">
-        <span>Title</span>
+        <span class="field-label">Status</span>
+        <select bind:value={status} data-testid="edit-task-status">
+          {#each STATUSES as s (s.value)}<option value={s.value}>{s.label}</option>{/each}
+        </select>
+      </label>
+      <label class="field grow">
+        <span class="field-label">Assignees</span>
         <input
           type="text"
-          bind:value={title}
-          maxlength={LOCAL_WORK_TITLE_MAX * 2}
-          data-autofocus=""
+          bind:value={assignees}
+          placeholder="Names, comma-separated"
           autocomplete="off"
-          data-testid="edit-task-title"
-          aria-invalid={titleError !== null}
+          data-testid="edit-task-assignees"
         />
       </label>
-      {#if titleError}<p class="err" data-testid="edit-task-title-error">{titleError}</p>{/if}
       <label class="field">
-        <span>Description</span>
-        <textarea
-          rows="6"
-          bind:value={notes}
-          disabled={notesLocked}
-          placeholder="What needs doing, links, context…"
-          data-testid="edit-task-notes"
-        ></textarea>
+        <span class="field-label">Due</span>
+        <input type="date" bind:value={due} data-testid="edit-task-due" />
       </label>
-      {#if notesLocked}
-        <p class="note" data-testid="edit-task-notes-locked">A delegated job's description is its prompt and stays as sent.</p>
-      {/if}
-      <div class="row">
-        <label class="field">
-          <span>Status</span>
-          <select bind:value={status} data-testid="edit-task-status">
-            {#each STATUSES as s (s.value)}<option value={s.value}>{s.label}</option>{/each}
-          </select>
-        </label>
-        <label class="field grow">
-          <span>Assignees</span>
-          <input
-            type="text"
-            bind:value={assignees}
-            placeholder="Names, comma-separated"
-            autocomplete="off"
-            data-testid="edit-task-assignees"
-          />
-        </label>
-        <label class="field">
-          <span>Due</span>
-          <input type="date" bind:value={due} data-testid="edit-task-due" />
-        </label>
-      </div>
-      {#if blocked}<p class="err" data-testid="edit-task-blocked">{blocked}</p>{/if}
-      {#if failure}<p class="err" role="alert" data-testid="edit-task-error">{failure}</p>{/if}
-      <div class="actions">
-        <button type="button" onclick={onclose}>Cancel</button>
-        <button type="submit" class="primary" disabled={!canSubmit} title={blocked ?? ''} data-testid="edit-task-submit"
-          >{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Saving…' : 'Save'}</button
-        >
-      </div>
-    </form>
+    </div>
   {/if}
-</Modal>
+</DialogSheet>
 
 <style>
-  .form { display: flex; flex-direction: column; gap: 0.6rem; }
-  .row { display: flex; gap: 0.6rem; }
-  .field { display: flex; flex-direction: column; gap: 0.25rem; }
+  .row { display: flex; gap: var(--space-3); }
   .field.grow { flex: 1; }
-  .field span { font-size: var(--text-2xs); color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
-  .field input,
-  .field textarea,
-  .field select {
-    font: inherit;
-    padding: 0.35rem 0.5rem;
-    border: 1px solid var(--border);
-    background: var(--bg-pane);
-    color: var(--fg);
-    border-radius: var(--radius-sm);
-  }
-  .field textarea { resize: vertical; min-height: 5rem; }
   .field textarea:disabled { opacity: 0.6; }
   .field input[aria-invalid='true'] { border-color: var(--danger); }
   .note { font-size: var(--text-2xs); color: var(--fg-muted); margin: 0; }
-  .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
-  .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
-  .actions button {
-    font-size: var(--text-xs);
-    padding: 0.3rem 0.8rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-  }
-  .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .actions button.primary { border-color: var(--accent); }
+  .err { color: var(--danger); font-size: var(--text-xs); margin: 0; }
 </style>

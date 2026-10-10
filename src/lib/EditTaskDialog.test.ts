@@ -7,6 +7,8 @@ import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
+import { get } from 'svelte/store';
+import { clearToasts, runToastAction, toasts } from './toasts';
 import EditTaskDialog from './EditTaskDialog.svelte';
 import { dueLabel, ownerDueChip, parseAssignees } from './work';
 import type { TaskDetail, WorkTask } from './work_view';
@@ -45,6 +47,7 @@ const calls = (cmd: string) => vi.mocked(invoke).mock.calls.filter(([c]) => c ==
 
 beforeEach(() => {
   vi.mocked(invoke).mockReset();
+  clearToasts();
 });
 
 describe('parseAssignees', () => {
@@ -122,6 +125,21 @@ describe('EditTaskDialog', () => {
     expect(calls('edit_work_item')).toEqual([['edit_work_item', { args: { item_id: 9, due_at: '2026-10-23' } }]]);
   });
 
+  it('Undo puts the old due date back', async () => {
+    answer({ task: task({ due_at: '2026-10-16' }), notes: null });
+    const onclose = vi.fn();
+    render(EditTaskDialog, { props: { taskId: 'item:9', onclose } });
+    await waitFor(() => expect(screen.getByTestId('edit-task-due')).toBeTruthy());
+    await type('edit-task-due', '2026-10-23');
+    await fireEvent.click(screen.getByTestId('edit-task-submit'));
+    await waitFor(() => expect(onclose).toHaveBeenCalled());
+    const [t] = get(toasts);
+    vi.mocked(invoke).mockClear();
+    runToastAction(t.id);
+    await waitFor(() => expect(calls('edit_work_item')).toHaveLength(1));
+    expect(calls('edit_work_item')).toEqual([['edit_work_item', { args: { item_id: 9, due_at: '2026-10-16' } }]]);
+  });
+
   it('clears a due date with an empty value', async () => {
     answer({ task: task({ due_at: '2026-10-16' }), notes: null });
     const onclose = vi.fn();
@@ -139,7 +157,11 @@ describe('EditTaskDialog', () => {
     render(EditTaskDialog, { props: { taskId: 'item:9', onclose } });
     await waitFor(() => expect(screen.getByTestId('edit-task-title')).toBeTruthy());
     await type('edit-task-title', '  ');
-    expect(screen.getByTestId('edit-task-title-error')).toBeTruthy();
+    // Checked on blur, never on each key; the off Save says why under it.
+    expect(screen.queryByTestId('edit-task-title-error')).toBeNull();
+    expect(screen.getByTestId('sheet-why').textContent).toBe('A title is required.');
+    await fireEvent.blur(screen.getByTestId('edit-task-title'));
+    expect(screen.getByTestId('edit-task-title-error').textContent).toBe('A title is required.');
     expect((screen.getByTestId('edit-task-submit') as HTMLButtonElement).disabled).toBe(true);
     await type('edit-task-title', 'Fix login');
     await fireEvent.change(screen.getByTestId('edit-task-status'), { target: { value: 'done' } });
@@ -165,6 +187,68 @@ describe('EditTaskDialog', () => {
     expect(onclose).not.toHaveBeenCalled();
   });
 
+  it('an untouched form says why Save is off', async () => {
+    answer({ task: task(), notes: 'old' });
+    render(EditTaskDialog, { props: { taskId: 'item:9', onclose: vi.fn() } });
+    await waitFor(() => expect(screen.getByTestId('edit-task-title')).toBeTruthy());
+    expect(screen.getByTestId('sheet-why').textContent).toBe('Nothing changed yet.');
+  });
+
+  it('a saved edit closes with an Undo toast that writes the old values back', async () => {
+    answer({ task: task(), notes: 'old' });
+    const onclose = vi.fn();
+    const ondone = vi.fn();
+    render(EditTaskDialog, { props: { taskId: 'item:9', onclose, ondone } });
+    await waitFor(() => expect(screen.getByTestId('edit-task-title')).toBeTruthy());
+    await type('edit-task-title', 'Fix the login');
+    await fireEvent.change(screen.getByTestId('edit-task-status'), { target: { value: 'done' } });
+    await tick();
+    // ⌘↵ / Ctrl+Enter submits from any field (jsdom is not a Mac).
+    await fireEvent.keyDown(screen.getByTestId('edit-task-notes'), { key: 'Enter', ctrlKey: true });
+    await waitFor(() => expect(onclose).toHaveBeenCalled());
+    const [t] = get(toasts);
+    expect(t.message).toBe('Task saved.');
+    expect(t.action?.label).toBe('Undo');
+
+    vi.mocked(invoke).mockClear();
+    runToastAction(t.id);
+    await waitFor(() => expect(calls('set_work_status')).toHaveLength(1));
+    expect(calls('edit_work_item')).toEqual([['edit_work_item', { args: { item_id: 9, title: 'Fix login' } }]]);
+    expect(calls('set_work_status')).toEqual([['set_work_status', { args: { item_id: 9, status: 'todo' } }]]);
+    await waitFor(() => expect(ondone).toHaveBeenCalledTimes(2));
+  });
+
+  it("a hub refusal is a banner on top, and the person's edit stays", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_task') return { task: task(), notes: 'old' };
+      throw { code: 'E_FORBIDDEN', message: 'you are a Viewer in 32bit' };
+    });
+    const onclose = vi.fn();
+    render(EditTaskDialog, { props: { taskId: 'item:9', onclose } });
+    await waitFor(() => expect(screen.getByTestId('edit-task-title')).toBeTruthy());
+    await type('edit-task-title', 'Mine');
+    await fireEvent.click(screen.getByTestId('edit-task-submit'));
+    const banner = await screen.findByTestId('edit-task-error');
+    expect(banner.textContent).toMatch(/The hub refused this: you are a Viewer in 32bit\./);
+    expect(banner.textContent).toMatch(/Ask an admin/);
+    expect((screen.getByTestId('edit-task-title') as HTMLInputElement).value).toBe('Mine');
+    expect(onclose).not.toHaveBeenCalled();
+    expect(get(toasts)).toEqual([]);
+  });
+
+  it('closing a changed task asks "Discard changes?" before it closes', async () => {
+    answer({ task: task(), notes: 'old' });
+    const onclose = vi.fn();
+    render(EditTaskDialog, { props: { taskId: 'item:9', onclose } });
+    await waitFor(() => expect(screen.getByTestId('edit-task-title')).toBeTruthy());
+    await type('edit-task-title', 'Changed');
+    await fireEvent.click(screen.getByTestId('sheet-cancel'));
+    expect(onclose).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByTestId('form-discard'));
+    expect(onclose).toHaveBeenCalledOnce();
+    expect(calls('edit_work_item')).toEqual([]);
+  });
+
   it("locks a delegated job's description: it is the prompt", async () => {
     answer({ task: task({ origin: 'agent' }), notes: 'the prompt' });
     render(EditTaskDialog, { props: { taskId: 'item:9', onclose: vi.fn() } });
@@ -176,6 +260,8 @@ describe('EditTaskDialog', () => {
     answer({ task: task({ kind: 'tracker', item_id: 3, key: 'OPS-1', tracker_name: 'Jira' }) });
     render(EditTaskDialog, { props: { taskId: 'item:3', onclose: vi.fn() } });
     await waitFor(() => expect(screen.getByTestId('edit-task-tracker').textContent).toMatch(/OPS-1 belongs to Jira/));
-    expect(screen.queryByTestId('edit-task-submit')).toBeNull();
+    // Nothing to fill in, and Save stays off.
+    expect(screen.queryByTestId('edit-task-title')).toBeNull();
+    expect((screen.getByTestId('edit-task-submit') as HTMLButtonElement).disabled).toBe(true);
   });
 });

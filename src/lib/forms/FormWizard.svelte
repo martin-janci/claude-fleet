@@ -14,6 +14,7 @@
   import { neverDecidesField, preselect } from '../ai_proposal';
   import { QUICK_ANSWER, risky } from '../quick_answer';
   import Loader from '../Loader.svelte';
+  import { fieldCount, submitKey } from './form_frame';
 
   let {
     spec,
@@ -58,13 +59,46 @@
   // The spec of one form never changes under the wizard (FormCard unmounts the
   // wizard while it loads another form), so the starting values are read once on purpose.
   // svelte-ignore state_referenced_locally
-  let values = $state<Values>({ ...startingValues(spec, !ownDefaults), ...initial });
+  const started: Values = { ...startingValues(spec, !ownDefaults), ...initial };
+  let values = $state<Values>({ ...started });
   let index = $state(0);
   const steps = $derived(visibleSteps(spec, values));
   const step = $derived(steps[Math.min(index, steps.length - 1)]);
   const last = $derived(index >= steps.length - 1);
-  const ready = $derived(stepProblems(spec, Math.min(index, steps.length - 1), values).length === 0);
-  const problemOf = (name: string) => serverProblems.find((p) => p.field === name)?.problem ?? null;
+  const localProblems = $derived(stepProblems(spec, Math.min(index, steps.length - 1), values));
+  const ready = $derived(localProblems.length === 0);
+
+  // Checked on blur and on submit, never on each key (FormsAnatomy): a
+  // field's own problem shows once the person has left it, or once they
+  // tried to go on with the step unfinished.
+  let touched = $state<Record<string, true>>({});
+  let tried = $state(false);
+  function leave(name: string) {
+    if (!touched[name]) touched = { ...touched, [name]: true };
+  }
+  const problemOf = (name: string) =>
+    serverProblems.find((p) => p.field === name)?.problem ??
+    (touched[name] || tried ? (localProblems.find((p) => p.field === name)?.problem ?? null) : null);
+  /** Why Next / the last button is off, said under it. */
+  const why = $derived.by(() => {
+    const p = localProblems[0];
+    if (!p) return null;
+    const label = step?.fields.find((f) => f.name === p.field)?.label ?? p.field;
+    return `${label.replace(/[\s:*]+$/, '')} ${p.problem}.`;
+  });
+
+  /** Whether anything differs from where the form started. */
+  export function isDirty(): boolean {
+    const keys = new Set([...Object.keys(values), ...Object.keys(started)]);
+    for (const k of keys) {
+      const a = values[k];
+      const b = started[k];
+      const blank = (v: unknown) => v === undefined || v === '' || (Array.isArray(v) && v.length === 0);
+      if (blank(a) && blank(b)) continue;
+      if (JSON.stringify(a) !== JSON.stringify(b)) return true;
+    }
+    return false;
+  }
 
   // A problem on another step is invisible where the user stands: go to the
   // first visible step that holds one. Only a new problem list moves the
@@ -90,6 +124,23 @@
   $effect(() => {
     if (!busy) sent = false;
   });
+
+  function next() {
+    index += 1;
+    tried = false;
+  }
+
+  // Enter in a one-field step and ⌘↵ / Ctrl+Enter anywhere go on: Next, or
+  // the last button. An unfinished step shows its problems instead.
+  let stepEl: HTMLDivElement | undefined = $state();
+  function onFormKeydown(e: KeyboardEvent) {
+    if (e.defaultPrevented || off) return;
+    if (!submitKey(e, fieldCount(stepEl), isMac)) return;
+    e.preventDefault();
+    if (!ready) tried = true;
+    else if (last) submit();
+    else next();
+  }
 
   /** Only what a visible field holds is sent: a hidden step's values stay
    *  behind, as the backend would drop them anyway. */
@@ -179,15 +230,17 @@
 
 <svelte:window onkeydown={onWindowKeydown} />
 
-<div class="wizard">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="wizard" onkeydown={onFormKeydown}>
   {#if steps.length > 1}
     <div class="count" data-testid="form-step-count">Step {index + 1} of {steps.length}</div>
   {/if}
   {#if step}
     <h6 data-testid="form-step-title">{step.title}</h6>
     {#if step.intro}<p class="intro">{step.intro}</p>{/if}
+    <div class="fields" bind:this={stepEl}>
     {#each step.fields as f (f.name)}
-      <div class="field">
+      <div class="field" onfocusout={() => leave(f.name)}>
         {#if f.type === 'bool'}
           <label class="check">
             <input
@@ -294,22 +347,24 @@
         {#if problemOf(f.name)}<span class="err" data-testid={`form-problem-${f.name}`}>{problemOf(f.name)}</span>{/if}
       </div>
     {/each}
+    </div>
   {/if}
   <div class="row">
     {#if oncancel}
       <button type="button" class="cancel" data-testid="form-cancel" disabled={busy} onclick={oncancel}>Cancel</button>
     {/if}
     {#if index > 0}
-      <button type="button" data-testid="form-back" disabled={busy} onclick={() => (index -= 1)}>Back</button>
+      <button type="button" data-testid="form-back" disabled={busy} onclick={() => ((index -= 1), (tried = false))}>Back</button>
     {/if}
     {#if last}
       <button type="button" class="primary" data-testid="form-submit" disabled={off || !ready} onclick={submit}>
         {#if busy && sent}{#if buttonLoader}<Loader name="comet" size={12} class="btn-loader" />{/if}{sending}{:else}{spec.submit ?? 'Submit'}{/if}
       </button>
     {:else}
-      <button type="button" class="primary" data-testid="form-next" disabled={off || !ready} onclick={() => (index += 1)}>Next</button>
+      <button type="button" class="primary" data-testid="form-next" disabled={off || !ready} onclick={next}>Next</button>
     {/if}
   </div>
+  {#if why && !off}<p class="why" data-testid="form-submit-why">{why}</p>{/if}
 </div>
 
 <style>
@@ -317,7 +372,9 @@
   .count { font-size: var(--text-2xs); color: var(--fg-muted); }
   h6 { margin: 0; font-size: var(--text-sm); }
   .intro { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); }
+  .fields { display: flex; flex-direction: column; gap: 0.6rem; }
   .field { display: flex; flex-direction: column; gap: 0.2rem; }
+  .why { margin: -0.3rem 0 0; text-align: right; font-size: var(--text-2xs); color: var(--fg-muted); }
   label, .label { font-size: var(--text-2xs); }
   .check { display: flex; gap: 0.35rem; align-items: flex-start; }
   input:not([type='checkbox']), select, textarea { font: inherit; font-size: var(--text-2xs); padding: 0.25rem 0.4rem; }
