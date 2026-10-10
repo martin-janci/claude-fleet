@@ -3,7 +3,8 @@
 //! graph to draw (Missions › Graph).
 //!
 //! Each row is a step: its id (`3.1`), its title, the lane that owns it,
-//! the steps it needs and, optionally, its status. A step becomes a local
+//! the steps it needs and, optionally, its status and the repository its
+//! task works in (gap plan G2.5). A step becomes a local
 //! task under the mission's root (top-level when it has none) titled
 //! `"<step> <title>"`; its lane is its one assignee (a lane has one owner,
 //! so the graph's "Assignee" lanes are the plan's lanes). Importing again
@@ -46,6 +47,10 @@ pub struct PlanRow {
     /// new one starts `todo`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// The repository (project id) a new step's task works in; a task the
+    /// mission already has keeps its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
 }
 
 /// What an import did.
@@ -136,6 +141,7 @@ pub fn check_plan(rows: &[PlanRow]) -> Result<Vec<PlanRow>, IpcError> {
                 .map(str::to_string),
             needs,
             status: r.status.clone(),
+            project_id: r.project_id,
         });
     }
     if let Some(step) = cycle_in(&out) {
@@ -206,6 +212,18 @@ pub fn import(
     let who = actor(scope);
     let s = lock(store)?;
     let m = changeable(&s, scope, id)?;
+    // A repository that is not there refuses the whole table, before any
+    // row is written.
+    for r in &rows {
+        if let Some(pid) = r.project_id {
+            if s.get_project(pid)?.is_none() {
+                return Err(IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("step {}: repository {pid} not found", r.step),
+                ));
+            }
+        }
+    }
     let root = m.root_item_id;
 
     let members = s.mission_items(id)?;
@@ -239,7 +257,7 @@ pub fn import(
                 let it = s.create_native_item(&NativeItem {
                     title: &title,
                     parent_id: root,
-                    project_id: None,
+                    project_id: r.project_id,
                     notes: None,
                 })?;
                 s.set_mission_item(id, it.id, true, &who)?;

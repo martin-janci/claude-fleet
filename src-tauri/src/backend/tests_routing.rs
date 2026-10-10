@@ -4195,6 +4195,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                             lane: Some("A".into()),
                             needs: vec!["0.9".into()],
                             status: None,
+                            project_id: None,
                         }],
                     },
                     s,
