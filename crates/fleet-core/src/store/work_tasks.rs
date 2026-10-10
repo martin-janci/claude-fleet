@@ -63,12 +63,59 @@ pub const ASSIGNEES_MAX: usize = 10;
 pub const ASSIGNEE_MAX_CHARS: usize = 80;
 
 /// A person's edit of a local item: each field `None` is left as it is.
-/// `notes: Some("")` and `assignees: Some(&[])` clear them.
+/// `notes: Some("")`, `assignees: Some(&[])` and `due_at: Some("")` clear
+/// them.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ItemEdit<'a> {
     pub title: Option<&'a str>,
     pub notes: Option<&'a str>,
     pub assignees: Option<&'a [String]>,
+    /// `YYYY-MM-DD` ([`validate_due_date`]).
+    pub due_at: Option<&'a str>,
+}
+
+/// A due date a person typed: `YYYY-MM-DD`, a real calendar day in years
+/// 1970–9999, trimmed. `""` is no date (`None`). Anything else is
+/// `E_INVALID` naming the format.
+pub fn validate_due_date(raw: &str) -> Result<Option<String>, IpcError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    parse_due_date(raw)
+        .map(|_| Some(raw.to_string()))
+        .ok_or_else(|| {
+            IpcError::new(
+                codes::E_INVALID,
+                format!("due date {raw:?} is not a date: use YYYY-MM-DD"),
+            )
+        })
+}
+
+/// `(year, month, day)` of a `YYYY-MM-DD` calendar date, `None` for
+/// anything else (a time, a zone, a 31st of a 30-day month).
+pub fn parse_due_date(raw: &str) -> Option<(u32, u32, u32)> {
+    let b = raw.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<u32> {
+        let part = raw.get(r)?;
+        part.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| part.parse().ok())
+            .flatten()
+    };
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    ((1970..=9999).contains(&y) && (1..=days).contains(&d)).then_some((y, m, d))
 }
 
 /// Assignees a person typed: trimmed, empty ones dropped, each name once
@@ -542,8 +589,8 @@ impl Store {
         ))
     }
 
-    /// A person edits a LOCAL item's title, notes and assignees (task
-    /// editing). `None` when `item_id` is not a local item: a tracker's
+    /// A person edits a LOCAL item's title, notes, assignees and due date
+    /// (task editing). `None` when `item_id` is not a local item: a tracker's
     /// ticket is its tracker's to edit. A job mirror's notes are its
     /// dispatch prompt ([`Self::create_agent_task_item`]), so editing them
     /// is `E_INVALID`. Nothing changed answers the row as it is, unwritten.
@@ -554,6 +601,7 @@ impl Store {
     ) -> Result<Option<WorkItemRow>, IpcError> {
         let title = edit.title.map(validate_local_work_title).transpose()?;
         let assignees = edit.assignees.map(validate_assignees).transpose()?;
+        let due_at = edit.due_at.map(validate_due_date).transpose()?;
         let Some(before) = self.get_work_item(item_id)? else {
             return Ok(None);
         };
@@ -573,13 +621,15 @@ impl Store {
         let title = title.filter(|t| *t != before.title);
         let notes = notes.filter(|n| *n != before.notes);
         let assignees = assignees.filter(|a| *a != before.assignees);
-        if title.is_none() && notes.is_none() && assignees.is_none() {
+        let due_at = due_at.filter(|d| *d != before.due_at);
+        if title.is_none() && notes.is_none() && assignees.is_none() && due_at.is_none() {
             return Ok(Some(before));
         }
         self.conn.execute(
             "UPDATE work_items SET title = COALESCE(?1, title), \
                     notes = CASE WHEN ?2 THEN ?3 ELSE notes END, \
                     assignees = CASE WHEN ?4 THEN ?5 ELSE assignees END, \
+                    due_at = CASE WHEN ?8 THEN ?9 ELSE due_at END, \
                     updated_at = ?6 \
               WHERE id = ?7 AND source = 'local'",
             rusqlite::params![
@@ -592,11 +642,14 @@ impl Store {
                     .filter(|a| !a.is_empty())
                     .and_then(|a| serde_json::to_string(a).ok()),
                 now_unix(),
-                item_id
+                item_id,
+                due_at.is_some(),
+                due_at.clone().flatten()
             ],
         )?;
         // A title shows as a row's primary work and as its top suggestion,
-        // as for a rename; notes and assignees show on the item alone.
+        // as for a rename; notes, assignees and the due date show on the
+        // item alone.
         self.emit_work_item(
             item_id,
             super::tracker_items::SessionChange {

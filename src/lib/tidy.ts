@@ -96,6 +96,9 @@ export interface TidyCandidate {
   auto?: boolean;
   /** `same_work`: the session Jev says does the same work (the one kept). */
   same_as?: number | null;
+  /** A `safe_kill` row's own worktree size in kB, as the host probe last
+   *  measured it; absent when not measured (or from an older hub). */
+  worktree_kb?: number | null;
 }
 
 /** `work { action: tidy }`. */
@@ -198,6 +201,24 @@ export function defaultChoice(c: TidyCandidate): TidyChoice | null {
   const choices = choicesFor(c);
   if ((choices as string[]).includes(c.action)) return c.action as TidyChoice;
   return choices[0] ?? null;
+}
+
+/** What the ticked rows free, in kB: the measured worktree of every ticked
+ *  row whose choice is a safe kill (the one that removes its tree). `null`
+ *  when none of them has a measured size, so the sheet says nothing rather
+ *  than "frees about 0 MB". */
+export function freedKb(
+  candidates: readonly TidyCandidate[],
+  ticked: ReadonlySet<number>,
+  choice: ReadonlyMap<number, TidyChoice>,
+): number | null {
+  let total: number | null = null;
+  for (const c of candidates) {
+    if (!ticked.has(c.session_id) || c.worktree_kb == null) continue;
+    if ((choice.get(c.session_id) ?? defaultChoice(c)) !== 'safe_kill') continue;
+    total = (total ?? 0) + c.worktree_kb;
+  }
+  return total;
 }
 
 /** Whether a row starts ticked: every row whose default is an action,

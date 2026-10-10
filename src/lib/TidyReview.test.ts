@@ -224,6 +224,29 @@ describe('TidyReview', () => {
     );
   });
 
+  it('says what the ticked safe kills free, and follows the ticks and choices (G1.9)', async () => {
+    const GB = 1024 * 1024;
+    candidates = [
+      cand(1, { worktree_kb: 1.5 * GB }),
+      cand(2, { reason: 'pr_merged_idle', worktree_kb: 0.6 * GB }),
+      cand(3, { reason: 'pr_merged_idle' }),
+    ];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    expect(screen.getByTestId('tidy-frees')).toHaveTextContent('3 selected · frees about 2.1 GB');
+    // Archive keeps the tree: it frees nothing.
+    const selects = screen.getAllByTestId('tidy-choice') as HTMLSelectElement[];
+    await fireEvent.change(selects[1], { target: { value: 'archive' } });
+    await tick();
+    expect(screen.getByTestId('tidy-frees')).toHaveTextContent('3 selected · frees about 1.5 GB');
+    // Unticking the only measured safe kill left: nothing measured, nothing said.
+    const sheet = screen.getByTestId('tidy-sheet');
+    await fireEvent.keyDown(sheet, { key: ' ' });
+    await tick();
+    expect(screen.queryByTestId('tidy-frees')).toBeNull();
+  });
+
   it('a per-row choice changes the action sent', async () => {
     candidates = [cand(1)];
     await mount();

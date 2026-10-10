@@ -180,6 +180,8 @@ export interface WorkTask {
   unavailable?: boolean;
   unavailable_reason?: string | null;
   assignees?: string[];
+  /** The date the work is due, `YYYY-MM-DD` (absent from an older hub). */
+  due_at?: string | null;
   mine?: boolean;
   org_id?: number | null;
   org_source?: OrgSource | string;

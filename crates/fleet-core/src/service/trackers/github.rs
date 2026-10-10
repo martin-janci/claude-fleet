@@ -282,6 +282,9 @@ impl GitHub {
             assignee_id,
             iteration: None,
             iteration_active: false,
+            // An issue has no due date of its own (its milestone's is the
+            // release's, not the issue's).
+            due_at: None,
             // A milestone is GitHub's release: a due date and a closed state.
             versions: n["milestone"]["title"]
                 .as_str()

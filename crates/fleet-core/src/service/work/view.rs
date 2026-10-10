@@ -243,6 +243,9 @@ pub struct WorkTask {
     pub unavailable_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assignees: Vec<String>,
+    /// The date the work is due, `YYYY-MM-DD` (the Board card's "You · Fri").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
     pub mine: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
@@ -2103,6 +2106,7 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         unavailable: item.is_some_and(|i| i.item.unavailable_at.is_some()),
         unavailable_reason: item.and_then(|i| i.item.unavailable_reason.clone()),
         assignees: item.map(|i| i.item.assignees.clone()).unwrap_or_default(),
+        due_at: item.and_then(|i| i.item.due_at.clone()),
         mine: item.is_some_and(|i| g.is_mine(i)),
         org_id,
         org_source: org_source.into(),

@@ -257,6 +257,7 @@ pub fn import(
                         title: new_title,
                         notes: None,
                         assignees: new_lane,
+                        due_at: None,
                     },
                 )?;
                 changed = true;

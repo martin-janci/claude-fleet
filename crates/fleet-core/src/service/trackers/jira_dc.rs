@@ -123,6 +123,7 @@ impl JiraDc {
             "project",
             "description",
             "fixVersions",
+            "duedate",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -320,6 +321,7 @@ impl JiraDc {
             iteration,
             iteration_active,
             versions: super::jira_common::fix_versions(&f["fixVersions"]),
+            due_at: super::jira_common::due_date(&f["duedate"]),
             updated: f["updated"].as_str().and_then(super::parse_timestamp),
             description,
             description_chars,

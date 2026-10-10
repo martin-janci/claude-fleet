@@ -621,6 +621,7 @@ mod tests {
                 proposal_why: None,
                 held_at: None,
                 done_when: Vec::new(),
+                due_at: None,
             },
             org_id: None,
         }

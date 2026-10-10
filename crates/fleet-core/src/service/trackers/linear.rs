@@ -298,6 +298,8 @@ impl Linear {
             iteration_active: cycle["isActive"].as_bool().unwrap_or(false),
             // E8: a release is a project milestone (it carries a target
             // date; a Linear project is closer to an epic).
+            // No due date read from this tracker yet.
+            due_at: None,
             versions: n["projectMilestone"]["name"]
                 .as_str()
                 .map(|t| vec![t.to_string()])

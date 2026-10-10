@@ -222,6 +222,7 @@ pub fn work_tidy(
             c.redact_link();
         }
     }
+    fill_worktree_sizes(store, &snap, &mut candidates)?;
     Ok(TidyReport {
         candidates,
         auto_tidy: snap.cfg.auto,
@@ -230,6 +231,38 @@ pub fn work_tidy(
         idle_hours: snap.cfg.idle_secs / 3600,
         idle_unlinked_days: snap.cfg.unlinked_idle_secs / 86_400,
     })
+}
+
+/// Each `safe_kill` candidate's worktree size, from the host probe's last
+/// measurement (G1.9): what the sheet totals as "frees about …". A tree
+/// the probe has not measured stays `None`, never 0.
+fn fill_worktree_sizes(
+    store: &Mutex<Store>,
+    snap: &Snapshot,
+    candidates: &mut [TidyCandidate],
+) -> Result<(), IpcError> {
+    if !candidates.iter().any(|c| c.action == TidyAction::SafeKill) {
+        return Ok(());
+    }
+    let s = lock(store)?;
+    for c in candidates
+        .iter_mut()
+        .filter(|c| c.action == TidyAction::SafeKill)
+    {
+        let Some(wt) = snap
+            .sessions
+            .iter()
+            .find(|t| t.row.id == c.session_id)
+            .and_then(|t| t.row.worktree_id)
+        else {
+            continue;
+        };
+        if let Some(path) = s.worktree_path(wt)? {
+            c.worktree_kb = crate::service::sessions::worktree_sizes::size_kb(&c.host_alias, &path)
+                .map(|(kb, _)| kb);
+        }
+    }
+    Ok(())
 }
 
 /// `work { action: reopened }`. A per-host token reads only work whose

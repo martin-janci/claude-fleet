@@ -260,6 +260,8 @@ impl Asana {
             assignee_id: t["assignee"]["gid"].as_str().map(str::to_string),
             iteration: None,
             iteration_active: false,
+            // No due date read from this tracker yet.
+            due_at: None,
             versions: Vec::new(),
             updated: t["modified_at"].as_str().and_then(super::parse_timestamp),
             description,

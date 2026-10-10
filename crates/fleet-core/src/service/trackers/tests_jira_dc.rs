@@ -887,3 +887,17 @@ async fn the_admin_settings_reach_the_real_transport() {
         .unwrap_err();
     assert!(matches!(e, TransportError::Refused(_)), "{e}");
 }
+
+#[test]
+fn data_center_reads_the_due_date_too() {
+    let f = FakeTransport::new();
+    let j = dc(&f);
+    assert!(j.fields().iter().any(|x| x == "duedate"));
+    let issue = json!({ "id": "10101", "key": "ABC-101",
+        "fields": { "summary": "S", "duedate": "2026-10-16",
+                    "status": { "name": "To Do", "statusCategory": { "key": "new" } } } });
+    assert_eq!(
+        j.snapshot(&issue).unwrap().due_at.as_deref(),
+        Some("2026-10-16")
+    );
+}

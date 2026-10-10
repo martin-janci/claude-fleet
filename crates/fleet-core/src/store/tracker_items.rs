@@ -54,6 +54,8 @@ pub struct TrackerItemWrite {
     /// Release-like containers the item is planned into (Jira
     /// `fixVersions`, a GitHub milestone, a Linear project milestone).
     pub versions: Vec<String>,
+    /// `YYYY-MM-DD` (migration 154).
+    pub due_at: Option<String>,
     pub updated_ext: Option<i64>,
     pub description: Option<String>,
     pub description_chars: Option<i64>,
@@ -139,6 +141,7 @@ struct Visible {
     updated_ext: Option<i64>,
     unavailable: bool,
     meta: Option<String>,
+    due_at: Option<String>,
 }
 
 impl Visible {
@@ -296,7 +299,7 @@ impl Store {
         Ok(self.conn.query_row(
             "SELECT key, aliases, title, url, kind, hierarchy_level, status_name, status_category, \
                     resolution, parent_id, containers, assignees, iteration, updated_ext, \
-                    unavailable_at IS NOT NULL, meta \
+                    unavailable_at IS NOT NULL, meta, due_at \
              FROM work_items WHERE id = ?1",
             rusqlite::params![id],
             |r| {
@@ -319,6 +322,7 @@ impl Store {
                         updated_ext: r.get(13)?,
                         unavailable: r.get(14)?,
                         meta: meta.clone(),
+                        due_at: r.get(16)?,
                     },
                     ItemMeta::parse(meta.as_deref()),
                 ))
@@ -511,6 +515,7 @@ impl Store {
             updated_ext: w.updated_ext,
             unavailable: false,
             meta: meta_json.clone(),
+            due_at: w.due_at.clone(),
         };
 
         let (id, changed, status_change, session_change) = match (existing, before) {
@@ -532,7 +537,8 @@ impl Store {
                            resolution = ?9, parent_id = ?10, containers = ?11, assignees = ?12, \
                            iteration = ?13, updated_ext = ?14, meta = ?15, fetched_at = ?16, \
                            updated_at = ?16, unavailable_at = NULL, unavailable_reason = NULL, \
-                           status_changed_at = CASE WHEN ?17 THEN ?16 ELSE status_changed_at END \
+                           status_changed_at = CASE WHEN ?17 THEN ?16 ELSE status_changed_at END, \
+                           due_at = ?19 \
                          WHERE id = ?18",
                         rusqlite::params![
                             after.key,
@@ -552,7 +558,8 @@ impl Store {
                             after.meta,
                             now,
                             status_moved,
-                            id
+                            id,
+                            after.due_at
                         ],
                     )?;
                 } else if touch_unchanged {
@@ -617,9 +624,9 @@ impl Store {
                     "INSERT INTO work_items (source, tracker_id, external_id, key, aliases, title, \
                        url, kind, hierarchy_level, status_name, status_category, resolution, \
                        parent_id, containers, assignees, iteration, updated_ext, meta, fetched_at, \
-                       status_changed_at, created_at, updated_at) \
+                       status_changed_at, created_at, updated_at, due_at) \
                      VALUES ((SELECT provider FROM trackers WHERE id = ?1), ?1, ?2, ?3, ?4, ?5, ?6, \
-                       ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, ?18, ?18)",
+                       ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, ?18, ?18, ?19)",
                     rusqlite::params![
                         tracker_id,
                         w.external_id,
@@ -638,7 +645,8 @@ impl Store {
                         after.iteration,
                         after.updated_ext,
                         after.meta,
-                        now
+                        now,
+                        after.due_at
                     ],
                 )?;
                 (
@@ -1271,6 +1279,59 @@ mod tests {
         .unwrap();
         bus.take();
         (s, t.id, bus)
+    }
+
+    #[test]
+    fn a_trackers_due_date_is_stored_moved_and_cleared_as_a_change() {
+        let (s, t, bus) = with_tracker(&["ABC"]);
+        let first = s
+            .upsert_tracker_item(
+                t,
+                &TrackerItemWrite {
+                    due_at: Some("2026-10-16".into()),
+                    ..write("1", "ABC-1", ("To Do", "todo"))
+                },
+            )
+            .unwrap();
+        let row = s.get_work_item(first.id).unwrap().unwrap();
+        assert_eq!(row.due_at.as_deref(), Some("2026-10-16"));
+        bus.take();
+        // The tracker moved the date: a change a reader sees, emitted.
+        let moved = s
+            .upsert_tracker_item(
+                t,
+                &TrackerItemWrite {
+                    due_at: Some("2026-10-23".into()),
+                    ..write("1", "ABC-1", ("To Do", "todo"))
+                },
+            )
+            .unwrap();
+        assert!(moved.changed);
+        assert!(!bus.take().is_empty(), "a moved due date emits the item");
+        assert_eq!(
+            s.get_work_item(first.id)
+                .unwrap()
+                .unwrap()
+                .due_at
+                .as_deref(),
+            Some("2026-10-23")
+        );
+        // The same date again is no change; no date at all clears it.
+        let same = s
+            .upsert_tracker_item(
+                t,
+                &TrackerItemWrite {
+                    due_at: Some("2026-10-23".into()),
+                    ..write("1", "ABC-1", ("To Do", "todo"))
+                },
+            )
+            .unwrap();
+        assert!(!same.changed);
+        let cleared = s
+            .upsert_tracker_item(t, &write("1", "ABC-1", ("To Do", "todo")))
+            .unwrap();
+        assert!(cleared.changed);
+        assert_eq!(s.get_work_item(first.id).unwrap().unwrap().due_at, None);
     }
 
     #[test]

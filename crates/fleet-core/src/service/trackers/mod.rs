@@ -145,6 +145,9 @@ pub struct WorkItemSnapshot {
     pub iteration_active: bool,
     /// The versions the item is planned into, by name (`Caps.versions`).
     pub versions: Vec<String>,
+    /// The due date, `YYYY-MM-DD` (Jira `duedate`); `None` where the
+    /// tracker has none or the adapter does not read it.
+    pub due_at: Option<String>,
     /// The tracker's `updated`, unix seconds.
     pub updated: Option<i64>,
     /// The first [`DESCRIPTION_MAX_CHARS`] of the description as plain text.
