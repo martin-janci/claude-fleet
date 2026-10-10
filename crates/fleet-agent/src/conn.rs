@@ -766,34 +766,78 @@ fn no_welcome_timeout_reason() -> String {
     )
 }
 
+/// A frame at or under this many bytes rides the small lane of the writer
+/// ([`Lanes`]): pongs, reports, an exec's ordinary result.
+pub(crate) const SMALL_FRAME_BYTES: usize = 64 * 1024;
+
+/// The writer's two lanes. Every frame used to go out in the order it was
+/// queued, through one writer: a pong, or a probe's few-KB result, queued
+/// behind a transcript read of tens of MB waited for all of it to cross a
+/// slow uplink — long enough, at two missed 30 s heartbeats, for the hub to
+/// drop a healthy link. Small frames now go first; big ones keep their own
+/// order. Reordering is safe: the hub pairs a `result` with its request by
+/// `id`, and a `pong` and a `report` answer nothing in sequence. A frame
+/// already being written still finishes — splitting one needs the chunked
+/// protocol (device-communication analysis, phase 4 item 13).
+#[derive(Default)]
+pub(crate) struct Lanes {
+    small: VecDeque<String>,
+    bulk: VecDeque<String>,
+    close: Option<(CloseCode, String)>,
+}
+
+impl Lanes {
+    fn push(&mut self, out: Out) {
+        match out {
+            Out::Frame(text) if text.len() <= SMALL_FRAME_BYTES => self.small.push_back(text),
+            Out::Frame(text) => self.bulk.push_back(text),
+            // Kept for last: the frames queued before it still go out.
+            Out::Close(code, reason) => self.close = Some((code, reason)),
+        }
+    }
+
+    /// The next frame to write: small first.
+    fn pop(&mut self) -> Option<String> {
+        self.small.pop_front().or_else(|| self.bulk.pop_front())
+    }
+}
+
 async fn write_loop<S>(
     mut sink: SplitSink<WebSocketStream<S>, Message>,
     mut rx: mpsc::UnboundedReceiver<Out>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    while let Some(out) = rx.recv().await {
-        match out {
-            Out::Frame(text) => {
-                if sink.send(Message::Text(text.into())).await.is_err() {
-                    return;
-                }
-            }
-            Out::Close(code, reason) => {
-                // A close reason is at most `CLOSE_REASON_MAX` bytes on the
-                // wire.
-                let mut reason = reason;
-                while reason.len() > CLOSE_REASON_MAX {
-                    reason.pop();
-                }
-                let frame = CloseFrame {
-                    code,
-                    reason: reason.into(),
-                };
-                let _ = sink.send(Message::Close(Some(frame))).await;
-                let _ = sink.close().await;
+    let mut lanes = Lanes::default();
+    loop {
+        // Everything queued meanwhile is sorted before the next write.
+        while let Ok(out) = rx.try_recv() {
+            lanes.push(out);
+        }
+        if let Some(text) = lanes.pop() {
+            if sink.send(Message::Text(text.into())).await.is_err() {
                 return;
             }
+            continue;
+        }
+        if let Some((code, reason)) = lanes.close.take() {
+            // A close reason is at most `CLOSE_REASON_MAX` bytes on the
+            // wire.
+            let mut reason = reason;
+            while reason.len() > CLOSE_REASON_MAX {
+                reason.pop();
+            }
+            let frame = CloseFrame {
+                code,
+                reason: reason.into(),
+            };
+            let _ = sink.send(Message::Close(Some(frame))).await;
+            let _ = sink.close().await;
+            return;
+        }
+        match rx.recv().await {
+            Some(out) => lanes.push(out),
+            None => break,
         }
     }
     let _ = sink.close().await;
@@ -1192,6 +1236,23 @@ fn shutdown_signal() -> Result<impl std::future::Future<Output = ()>, String> {
 
 #[cfg(test)]
 mod tests {
+    /// A pong queued behind a big result goes out first; big frames keep
+    /// their order; a close waits for what was queued before it.
+    #[test]
+    fn small_frames_overtake_bulk_ones_and_a_close_goes_last() {
+        let mut lanes = Lanes::default();
+        let big = |c: char| c.to_string().repeat(SMALL_FRAME_BYTES + 1);
+        lanes.push(Out::Frame(big('a')));
+        lanes.push(Out::Frame(big('b')));
+        lanes.push(Out::Close(CloseCode::Normal, "bye".into()));
+        lanes.push(Out::Frame("pong".into()));
+        assert_eq!(lanes.pop().as_deref(), Some("pong"));
+        assert_eq!(lanes.pop(), Some(big('a')));
+        assert_eq!(lanes.pop(), Some(big('b')));
+        assert_eq!(lanes.pop(), None);
+        assert!(lanes.close.is_some(), "the close is kept for last");
+    }
+
     use super::*;
     use crate::test_util::{alive, wait_for_pid};
     use fleet_proto::{
