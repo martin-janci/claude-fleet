@@ -1220,7 +1220,7 @@ describe('QuickSwitcher finds work beyond the three views', () => {
       expect(screen.getAllByTestId('switcher-ticket').some((el) => el.textContent?.includes('Oprava prihlásenia'))).toBe(true),
     );
     // The words found are marked in the row, accents and all.
-    const marks = [...document.querySelectorAll('[data-testid="switcher-ticket"] mark.hit')].map((m) => m.textContent);
+    const marks = Array.from(document.querySelectorAll('[data-testid="switcher-ticket"] mark.hit')).map((m) => m.textContent);
     expect(marks).toEqual(expect.arrayContaining(['prihlásenia', 'SSO']));
   });
 
