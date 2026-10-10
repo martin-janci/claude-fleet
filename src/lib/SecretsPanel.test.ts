@@ -101,3 +101,45 @@ describe('SecretsPanel accessibility (7.2)', () => {
     await expectAccessible(container);
   });
 });
+
+// G2.6: one secret written to several hosts in one form; the value is
+// cleared once written and never shown.
+describe('SecretsPanel: Add a secret', () => {
+  it('writes the value everywhere chosen, then forgets it', async () => {
+    const calls: unknown[] = [];
+    invoke.mockImplementation(async (cmd: string, a: { args?: unknown }) => {
+      if (cmd === 'catalog_list_secrets') return [];
+      if (cmd === 'catalog_set_secret') {
+        calls.push(a.args);
+        return null;
+      }
+      throw { code: 'E_TEST', message: `unexpected ${cmd}` };
+    });
+    render(SecretsPanel, { names: [], onclose: () => {} });
+    await fireEvent.input(screen.getByTestId('secrets-add-secret-name'), { target: { value: 'fleet_token' } });
+    const value = screen.getByTestId('secrets-add-secret-value') as HTMLInputElement;
+    expect(value.type).toBe('password');
+    await fireEvent.input(value, { target: { value: 's3cret' } });
+    await fireEvent.click(screen.getByTestId('secrets-add-global'));
+    await fireEvent.change(screen.getByTestId('secrets-add-host-mefistos'), { target: { value: 'write' } });
+    await fireEvent.change(screen.getByTestId('secrets-add-host-local'), { target: { value: 'write' } });
+    await fireEvent.click(screen.getByTestId('secrets-add-secret'));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls).toEqual([
+      { name: 'FLEET_TOKEN', host_alias: 'local', value: 's3cret' },
+      { name: 'FLEET_TOKEN', host_alias: 'mefistos', value: 's3cret' },
+    ]);
+    await waitFor(() => expect(value.value).toBe(''));
+    expect(document.body.textContent).not.toContain('s3cret');
+  });
+
+  it('needs somewhere to write it', async () => {
+    byCmd({ catalog_list_secrets: [] });
+    render(SecretsPanel, { names: [], onclose: () => {} });
+    await fireEvent.input(screen.getByTestId('secrets-add-secret-name'), { target: { value: 'X' } });
+    await fireEvent.input(screen.getByTestId('secrets-add-secret-value'), { target: { value: 'v' } });
+    expect((screen.getByTestId('secrets-add-secret') as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(screen.getByTestId('secrets-add-global'));
+    expect((screen.getByTestId('secrets-add-secret') as HTMLButtonElement).disabled).toBe(true);
+  });
+});

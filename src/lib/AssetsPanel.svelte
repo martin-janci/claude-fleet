@@ -4,7 +4,7 @@
   import {
     catalog, catalogConfig, loadCatalogConfig, configureCatalog, loadCatalog, loadAssets, loadInventory, scanHosts,
     planSync, lastSync, lastSyncRun,
-    commitPending, pushCatalog, repoStatus,
+    commitPending, pushCatalog, repoStatus, repoStatusStore,
     type HostScanResult, type SyncPlan, type SyncRunSummary, type AssetKind, type AssetIdentity,
   } from './assets';
   import AssetsWorkspace from './AssetsWorkspace.svelte';
@@ -20,8 +20,9 @@
   import ImportDialog from './ImportDialog.svelte';
   import SecretsPanel from './SecretsPanel.svelte';
   import NewAssetDialog from './NewAssetDialog.svelte';
+  import CommitAssetsDialog from './CommitAssetsDialog.svelte';
+  import AuthorSessionDialog from './AuthorSessionDialog.svelte';
   import LintAllDialog from './LintAllDialog.svelte';
-  import PromptDialog from './PromptDialog.svelte';
   import { authorSessionOpened, clearAuthorSessionOpened } from './AuthorSessionDialog.svelte';
   import { hubStatus, hubBlock, hubActionBlocked, ownsTheFleet } from './hub';
   import { hubConnection } from './hub_connection';
@@ -68,6 +69,8 @@
   let showNewAsset = $state(false);
   let showLintAll = $state(false);
   let showCommitPrompt = $state(false);
+  /** "Write it with Claude…" from New asset (G2.6): its seeded instructions. */
+  let authorNew = $state<string | null>(null);
   // A just-created asset's key, set together with the selection so the
   // Inspector opens it in Source, editing, and cleared once that happened:
   // selecting the asset again later opens its Overview.
@@ -160,6 +163,8 @@
   // every other routed mutation gates on. "Open in session" stays this
   // machine's (see its REASONS entry).
   const importBlocked = $derived(hubActionBlocked('catalog_import_host', $hubStatus, $hubConnection));
+  // A session is this machine's (local-only): no "Write it with Claude" on a hub client.
+  const authorNewBlocked = $derived(hubBlock('catalog_spawn_author_session', $hubStatus));
 
   // ...but the list itself, and the scan that refreshes it, route for every
   // paired client: the read-only overview of the hub's catalog — which asset
@@ -359,13 +364,14 @@
     return `${err.message}: ${truncated}`;
   }
 
-  async function submitCommit(message: string) {
+  async function submitCommit(message: string, push = false) {
     showCommitPrompt = false;
     busy = 'commit'; error = null;
     const r = await commitPending(message);
     busy = '';
     if (!r.ok) { error = withGitStderr(r.error); return; }
     await afterWrite();
+    if (push) await doPush();
   }
 
   async function doPush() {
@@ -520,18 +526,27 @@
     <SecretsPanel names={secretNames} onclose={() => (showSecrets = false)} />
   {/if}
   {#if showNewAsset}
-    <NewAssetDialog onclose={() => (showNewAsset = false)} onsaved={onAssetCreated} />
+    <NewAssetDialog
+      onclose={() => (showNewAsset = false)}
+      onsaved={onAssetCreated}
+      onwrite={authorNewBlocked === null
+        ? (instructions) => {
+            showNewAsset = false;
+            authorNew = instructions;
+          }
+        : undefined}
+    />
+  {/if}
+  {#if authorNew !== null}
+    <AuthorSessionDialog instructions={authorNew} onclose={() => (authorNew = null)} />
   {/if}
   {#if showLintAll}
     <LintAllDialog onclose={() => (showLintAll = false)} onselect={onLintAllSelect} />
   {/if}
   {#if showCommitPrompt}
-    <PromptDialog
-      title="Commit pending changes"
-      label="Commit message"
-      initialValue="catalog: commit pending changes"
-      confirmLabel="Commit"
-      onsubmit={submitCommit}
+    <CommitAssetsDialog
+      canPush={!!$catalogConfig?.remote_url || !!$repoStatusStore?.has_upstream}
+      oncommit={(message, push) => void submitCommit(message, push)}
       oncancel={() => (showCommitPrompt = false)}
     />
   {/if}

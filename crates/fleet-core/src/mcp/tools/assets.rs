@@ -970,7 +970,7 @@ fn forbidden(touches: &catalog::admin::Touches, caller: &Caller) -> McpError {
 
 /// Parse an MCP `kind` filter string into a `Kind`, using the same
 /// snake_case names the JSON representation already uses elsewhere
-/// (`skill`, `agent`, `hook`, `mcp_server`, `plugin_ref`).
+/// (`skill`, `agent`, `hook`, `mcp_server`, `plugin_ref`, `command`).
 fn parse_kind(s: &str) -> Result<catalog::model::Kind, McpError> {
     serde_json::from_value(serde_json::Value::String(s.to_string()))
         .map_err(|_| mcp_err(codes::E_INVALID, format!("unknown asset kind '{s}'"), None))

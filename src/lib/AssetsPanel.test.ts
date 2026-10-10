@@ -614,12 +614,15 @@ describe('AssetsPanel authoring', () => {
     expect(await screen.findByTestId('assets-push')).toBeDisabled();
   });
 
-  it('Commit pending prompts for a message (defaulted) and calls catalog_commit_pending', async () => {
+  it('Commit lists the changes, starts the message from them and calls catalog_commit_pending (G2.6)', async () => {
     byCmd({
       catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
       catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
       catalog_list_assets: listing, assets_inventory: [],
-      catalog_repo_status: { head: 'h', dirty: 2, ahead: 0, behind: 0, has_upstream: true },
+      catalog_repo_status: {
+        head: 'h', dirty: 2, ahead: 0, behind: 0, has_upstream: false,
+        changes: [{ path: 'skills/release-notes', status: 'M' }, { path: 'commands/ship', status: 'A' }],
+      },
       catalog_commit_pending: 'sha-commit',
     });
     render(AssetsPanel, { visible: true });
@@ -627,11 +630,43 @@ describe('AssetsPanel authoring', () => {
     await openPersonalChip();
     await fireEvent.click(await screen.findByTestId('assets-commit-pending'));
 
-    expect(await screen.findByTestId('prompt-dialog')).toBeTruthy();
-    expect((screen.getByTestId('prompt-input') as HTMLInputElement).value).toBe('catalog: commit pending changes');
-    await fireEvent.click(screen.getByTestId('prompt-submit'));
+    const dialog = await screen.findByTestId('commit-assets-dialog');
+    expect(dialog.textContent).toContain('Commit 2 asset changes');
+    expect(screen.getAllByTestId('commit-assets-change').map((li) => li.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+      'skills/release-notes M',
+      'commands/ship A',
+    ]);
+    const msg = screen.getByTestId('commit-assets-message') as HTMLTextAreaElement;
+    await waitFor(() => expect(msg.value).toBe('catalog: update skills/release-notes, commands/ship'));
+    // No remote: nothing to push to.
+    expect(screen.queryByTestId('commit-assets-push')).toBeNull();
+    await fireEvent.click(screen.getByTestId('commit-assets-commit'));
 
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_commit_pending', { args: { message: 'catalog: commit pending changes' } }));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('catalog_commit_pending', { args: { message: 'catalog: update skills/release-notes, commands/ship' } }),
+    );
+    expect(invoke.mock.calls.some((c: unknown[]) => c[0] === 'catalog_push')).toBe(false);
+  });
+
+  it('Commit and push commits, then pushes', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: 'git@github.com:o/r.git', head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [],
+      catalog_repo_status: { head: 'h', dirty: 1, ahead: 0, behind: 0, has_upstream: true, changes: [{ path: 'hooks/stop', status: 'D' }] },
+      catalog_commit_pending: 'sha-commit',
+      catalog_push: { head: 'h2', dirty: 0, ahead: 0, behind: 0, has_upstream: true },
+    });
+    render(AssetsPanel, { visible: true });
+    await waitFor(() => expect(screen.getByTestId('assets-head').textContent).toContain('±1'));
+    await openPersonalChip();
+    await fireEvent.click(await screen.findByTestId('assets-commit-pending'));
+    const msg = (await screen.findByTestId('commit-assets-message')) as HTMLTextAreaElement;
+    await waitFor(() => expect(msg.value).toBe('catalog: remove hooks/stop'));
+    await fireEvent.input(msg, { target: { value: 'catalog: drop the stop hook' } });
+    await fireEvent.click(screen.getByTestId('commit-assets-push'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_push', undefined));
+    expect(invoke).toHaveBeenCalledWith('catalog_commit_pending', { args: { message: 'catalog: drop the stop hook' } });
   });
 
   it('Push calls catalog_push and refreshes', async () => {

@@ -383,6 +383,101 @@ pub struct RepoStatus {
     pub ahead: Option<u64>,
     pub behind: Option<u64>,
     pub has_upstream: bool,
+    /// What the uncommitted changes touch, one row per asset (gap plan
+    /// G2.6, "Commit 3 asset changes"). Absent from an older hub.
+    #[serde(default)]
+    pub changes: Vec<RepoChange>,
+}
+
+/// One uncommitted change, grouped to the asset it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoChange {
+    /// `skills/release-notes`, `hooks/stop`, or the file for anything that
+    /// is not an asset (`catalog.yaml`, a layer file).
+    pub path: String,
+    /// `A` added, `M` modified, `D` deleted.
+    pub status: String,
+}
+
+/// PURE: `git status --porcelain` lines grouped per asset. A folder kind
+/// groups by its folder, a single-file kind by its file stem; a path that
+/// is not under a kind directory stays as it is. An asset with any added
+/// file and nothing else is `A`, one whose every file went is `D`, the rest
+/// `M`.
+pub fn changes_of(porcelain: &str) -> Vec<RepoChange> {
+    let mut out: Vec<(String, std::collections::BTreeSet<char>)> = Vec::new();
+    for line in porcelain.lines() {
+        // `XY path`; `git()` trims the output, so the first line may have
+        // lost X's leading space: split at the first space instead.
+        let Some((xy, rest)) = line.trim_start().split_once(' ') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let path = rest.rsplit(" -> ").next().unwrap_or(rest).trim_matches('"');
+        if path.is_empty() {
+            continue;
+        }
+        let code = if xy.starts_with("??") || xy.contains('A') {
+            'A'
+        } else if xy.contains('D') {
+            'D'
+        } else {
+            'M'
+        };
+        let mut parts = path.splitn(3, '/');
+        let key = match (parts.next(), parts.next(), parts.next()) {
+            (Some(dir), Some(name), rest) => match Kind::from_dir(dir) {
+                Some(k) if k.is_folder() && rest.is_some() => format!("{dir}/{name}"),
+                Some(k) if !k.is_folder() && rest.is_none() => {
+                    format!("{dir}/{}", name.strip_suffix(".yaml").unwrap_or(name))
+                }
+                _ => path.to_string(),
+            },
+            _ => path.to_string(),
+        };
+        match out.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, codes)) => {
+                codes.insert(code);
+            }
+            None => out.push((key, std::collections::BTreeSet::from([code]))),
+        }
+    }
+    out.into_iter()
+        .map(|(path, codes)| {
+            let status = if codes.len() == 1 {
+                codes.into_iter().next().unwrap_or('M')
+            } else {
+                'M'
+            };
+            RepoChange {
+                path,
+                status: status.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// PURE: the commit message the Commit form starts from, written from the
+/// changes by rule (no model): `catalog: update skills/a, hooks/b (+2)`.
+pub fn commit_message_for(changes: &[RepoChange]) -> String {
+    if changes.is_empty() {
+        return "catalog: commit pending changes".to_string();
+    }
+    let verb = if changes.iter().all(|c| c.status == "A") {
+        "add"
+    } else if changes.iter().all(|c| c.status == "D") {
+        "remove"
+    } else {
+        "update"
+    };
+    let named: Vec<&str> = changes.iter().take(3).map(|c| c.path.as_str()).collect();
+    let more = changes.len().saturating_sub(named.len());
+    let tail = if more > 0 {
+        format!(" (+{more})")
+    } else {
+        String::new()
+    };
+    format!("catalog: {verb} {}{tail}", named.join(", "))
 }
 
 /// Backs `author::repo_status` (the toolbar's dirty / ahead / behind badge).
@@ -390,6 +485,16 @@ pub fn git_status(root: &Path) -> Result<RepoStatus, IpcError> {
     let head_sha = head(root)?;
     let porcelain = git(root, &["status", "--porcelain"])?;
     let dirty = porcelain.lines().filter(|l| !l.is_empty()).count();
+    // Every untracked file, not just its new folder, so a new single-file
+    // asset (`hooks/x.yaml` in a new `hooks/`) groups by its own name.
+    let changes = if dirty == 0 {
+        Vec::new()
+    } else {
+        changes_of(&git(
+            root,
+            &["status", "--porcelain", "--untracked-files=all"],
+        )?)
+    };
     let has_upstream = git(root, &["rev-parse", "--abbrev-ref", "@{u}"]).is_ok();
     let (behind, ahead) = if has_upstream {
         let out = git(
@@ -409,6 +514,7 @@ pub fn git_status(root: &Path) -> Result<RepoStatus, IpcError> {
         ahead,
         behind,
         has_upstream,
+        changes,
     })
 }
 
@@ -1050,7 +1156,7 @@ pub fn asset_path(root: &Path, kind: Kind, name: &str) -> PathBuf {
 fn body_file(kind: Kind) -> &'static str {
     match kind {
         Kind::Skill => "body.md",
-        Kind::Agent => "prompt.md",
+        Kind::Agent | Kind::Command => "prompt.md",
         _ => "",
     }
 }
@@ -2240,6 +2346,32 @@ mod tests {
     }
 
     #[test]
+    fn changes_group_per_asset_and_draft_a_message() {
+        let porcelain = "M skills/notes/body.md\n M skills/notes/asset.yaml\n?? commands/ship/\n D hooks/stop.yaml\n M catalog.yaml\nR  mcp/a.yaml -> mcp/b.yaml";
+        let c = changes_of(porcelain);
+        let got: Vec<(&str, &str)> = c
+            .iter()
+            .map(|c| (c.path.as_str(), c.status.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("skills/notes", "M"),
+                ("commands/ship", "A"),
+                ("hooks/stop", "D"),
+                ("catalog.yaml", "M"),
+                ("mcp/b", "M"),
+            ]
+        );
+        assert_eq!(
+            commit_message_for(&c),
+            "catalog: update skills/notes, commands/ship, hooks/stop (+2)"
+        );
+        assert_eq!(commit_message_for(&c[1..2]), "catalog: add commands/ship");
+        assert_eq!(commit_message_for(&[]), "catalog: commit pending changes");
+    }
+
+    #[test]
     fn git_status_counts_dirty_and_ahead() {
         let root = tmp("status");
         init_repo(&root);
@@ -2258,6 +2390,13 @@ mod tests {
         write(&root, "hooks/x.yaml", "kind: hook\n");
         let status = git_status(&root).unwrap();
         assert_eq!(status.dirty, 1);
+        assert_eq!(
+            status.changes,
+            vec![RepoChange {
+                path: "hooks/x".into(),
+                status: "A".into()
+            }]
+        );
 
         let remote = tmp("status-remote");
         git_run(&remote, &["init", "-q", "--bare", "-b", "main"]);

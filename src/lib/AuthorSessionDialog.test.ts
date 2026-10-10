@@ -64,3 +64,24 @@ describe('AuthorSessionDialog', () => {
     expect(onclose).not.toHaveBeenCalled();
   });
 });
+
+// G2.6: the Host picker.
+describe('AuthorSessionDialog: Host', () => {
+  it('runs on the catalog host unless another is picked, and then says it pushes', async () => {
+    const { hosts } = await import('./hosts');
+    hosts.set([
+      { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true, transport: 'ssh' },
+      { alias: 'mercury', ssh_alias: 'mercury', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true, transport: 'ssh' },
+    ] as never);
+    invoke.mockResolvedValue(sessionRow);
+    render(AuthorSessionDialog, { instructions: 'Create a new command named "ship" that …', onclose: () => {} });
+    expect((screen.getByTestId('author-instructions') as HTMLTextAreaElement).value).toBe('Create a new command named "ship" that …');
+    expect(screen.queryByTestId('author-host-note')).toBeNull();
+    await fireEvent.change(screen.getByTestId('author-host'), { target: { value: 'mercury' } });
+    expect(screen.getByTestId('author-host-note').textContent).toContain('clone of the catalog on mercury');
+    await fireEvent.click(screen.getByTestId('author-open'));
+    await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'catalog_spawn_author_session')).toBe(true));
+    const call = invoke.mock.calls.find((c) => c[0] === 'catalog_spawn_author_session')!;
+    expect((call[1] as { args: { host_alias?: string } }).args.host_alias).toBe('mercury');
+  });
+});

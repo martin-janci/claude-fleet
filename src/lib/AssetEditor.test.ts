@@ -355,3 +355,55 @@ describe('AssetEditor', () => {
     expect(screen.queryByTestId('editor-install-as')).toBeNull();
   });
 });
+
+// G2.6: the Command kind's fields and the Harness boxes.
+describe('AssetEditor: Toolkit forms', () => {
+  const saved = () => {
+    const call = invoke.mock.calls.find((c) => c[0] === 'catalog_update_asset');
+    return (call![1] as { args: { asset: EditableAsset } }).args.asset;
+  };
+  const ok = () =>
+    byCmd({
+      catalog_lint_asset: { errors: [], warnings: [] },
+      catalog_update_asset: { commit: 'sha', lint: { errors: [], warnings: [] } },
+    });
+
+  it('a command edits its tools, arguments and model, and its prompt', async () => {
+    ok();
+    const onsaved = vi.fn();
+    render(AssetEditor, {
+      asset: { kind: 'command', name: 'ship-it', version: '1', description: 'Ship it.', tags: [], body: 'Ship $ARGUMENTS.', resources: [] },
+      onsaved,
+      oncancel: () => {},
+    });
+    expect(screen.getByTestId('editor-field-argument_hint')).toBeTruthy();
+    expect(screen.getByTestId('editor-install-as')).toBeTruthy();
+    // Claude Code only: Codex cannot render a command, so there is no box.
+    expect(screen.queryByTestId('editor-field-harnesses')).toBeNull();
+    await fireEvent.click(screen.getByTestId('editor-tool-allowed_tools-bash'));
+    await fireEvent.input(screen.getByTestId('editor-field-argument_hint').querySelector('input')!, { target: { value: '[ticket]' } });
+    const model = screen.getByTestId('editor-field-model').querySelector('select')!;
+    expect(model.value).toBe('');
+    await fireEvent.change(model, { target: { value: 'fast' } });
+    await fireEvent.click(screen.getByTestId('editor-save'));
+    await waitFor(() => expect(onsaved).toHaveBeenCalled());
+    const a = saved();
+    expect(a.allowed_tools).toEqual(['bash']);
+    expect(a.argument_hint).toBe('[ticket]');
+    expect(a.model).toBe('fast');
+  });
+
+  it('Harness boxes turn a harness off and on through targets', async () => {
+    ok();
+    const onsaved = vi.fn();
+    render(AssetEditor, { asset: mcpAsset(), onsaved, oncancel: () => {} });
+    expect(screen.getByTestId('editor-field-env').textContent).toContain('Use ${NAME} for values from Secrets');
+    const codex = screen.getByTestId('editor-harness-codex') as HTMLInputElement;
+    expect(codex.checked).toBe(true);
+    expect((screen.getByTestId('editor-harness-claude') as HTMLInputElement).checked).toBe(true);
+    await fireEvent.click(codex);
+    await fireEvent.click(screen.getByTestId('editor-save'));
+    await waitFor(() => expect(onsaved).toHaveBeenCalled());
+    expect(saved().targets).toEqual({ codex: { enabled: false } });
+  });
+});
