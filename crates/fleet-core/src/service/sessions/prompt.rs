@@ -140,6 +140,10 @@ pub struct SendPromptArgs {
     /// what sets this today.
     #[serde(default)]
     pub keys: Option<String>,
+    /// Mirrors `SendPromptParams.expect`: with `keys`, the dialog the answer
+    /// is for — pressed only while the pane still shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect: Option<super::ExpectDialog>,
 }
 
 /// Run `script` as one tmux invocation on `host_alias`: locally via
@@ -674,6 +678,21 @@ pub async fn send_prompt(
                 "keys and a non-empty prompt cannot be sent together",
             ));
         }
+        if let Some(expect) = &args.expect {
+            let id = {
+                let s = crate::ipc_error::lock(store)?;
+                s.find_sessions_by_tmux_name(&args.tmux_name, Some(&args.host_alias))?
+                    .first()
+                    .map(|r| r.id)
+            }
+            .ok_or_else(|| {
+                IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("session {} not found", args.tmux_name),
+                )
+            })?;
+            super::check_expected_dialog(store, ssh, id, expect, key).await?;
+        }
         return send_keys(&args.host_alias, &args.tmux_name, key, store, ssh).await;
     }
     send_prompt_inner(
@@ -1119,6 +1138,7 @@ mod prompt_tests {
                 prompt: String::new(),
                 submit: true,
                 keys: Some("Delete".into()),
+                expect: None,
             },
             &store,
             &ssh,
@@ -1134,6 +1154,7 @@ mod prompt_tests {
                 prompt: "hi".into(),
                 submit: true,
                 keys: Some("Enter".into()),
+                expect: None,
             },
             &store,
             &ssh,
@@ -1172,6 +1193,7 @@ mod prompt_tests {
             prompt: "Continue ABC-1: fix the login".into(),
             submit: true,
             keys: None,
+            expect: None,
         };
         send_prompt(args(), &store, &ssh)
             .await
@@ -1243,6 +1265,7 @@ mod prompt_tests {
                 prompt: String::new(),
                 submit: true,
                 keys: Some("Escape".into()),
+                expect: None,
             },
             &store,
             &ssh,
@@ -1356,6 +1379,7 @@ mod prompt_tests {
                 prompt: "fix the failing test".into(),
                 submit: true,
                 keys: None,
+                expect: None,
             },
             &store,
             &ssh,

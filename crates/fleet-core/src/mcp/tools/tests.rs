@@ -753,6 +753,7 @@ async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
                 force: false,
                 client_msg_id: None,
                 confirm_nonce: None,
+                expect: None,
             }),
         )
         .await
@@ -772,6 +773,7 @@ async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
                 force: false,
                 client_msg_id: None,
                 confirm_nonce: None,
+                expect: None,
             }),
         )
         .await
@@ -844,6 +846,7 @@ async fn keys_press_a_key_without_a_marker_and_without_recording_a_prompt() {
                 force: false,
                 client_msg_id: None,
                 confirm_nonce: None,
+                expect: None,
             }),
         )
         .await
@@ -4703,6 +4706,7 @@ async fn send_prompt_with_a_body_is_refused_into_a_blocked_session() {
                 client_msg_id: None,
                 keys: None,
                 confirm_nonce: None,
+                expect: None,
             }),
         )
         .await
@@ -4744,6 +4748,7 @@ async fn an_empty_prompt_without_submit_is_refused_before_the_gate() {
                 client_msg_id: None,
                 keys: None,
                 confirm_nonce: None,
+                expect: None,
             }),
         )
         .await
@@ -4778,6 +4783,7 @@ async fn an_empty_prompt_without_submit_is_refused_regardless_of_session_state()
                 client_msg_id: None,
                 keys: None,
                 confirm_nonce: None,
+                expect: None,
             }),
         )
         .await

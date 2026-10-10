@@ -1042,10 +1042,31 @@ export async function sendPrompt(
  * key-only write to the `answer` gate and every other `send_prompt` to
  * `drive`.
  */
-export async function answerDialog(hostAlias: string, tmuxName: string, key: string): Promise<Result<void>> {
+export async function answerDialog(
+  hostAlias: string,
+  tmuxName: string,
+  key: string,
+  expect?: ExpectDialog,
+): Promise<Result<void>> {
   return invokeCmd<void>('send_prompt', {
-    args: { host_alias: hostAlias, tmux_name: tmuxName, prompt: '', keys: key },
+    args: { host_alias: hostAlias, tmux_name: tmuxName, prompt: '', keys: key, ...(expect ? { expect } : {}) },
   });
+}
+
+/**
+ * The dialog an answer is for, sent with its key: the backend re-reads the
+ * pane and presses only while it still shows this (`E_CONFLICT` otherwise),
+ * in one step rather than a read here and a press a round trip later. A
+ * backend too old to know the field ignores it, and the caller's own re-read
+ * still stands.
+ */
+export interface ExpectDialog {
+  kind: string;
+  question: string | null;
+  options: { n: number; label: string }[];
+  detail: string | null;
+  /** For Enter: the option that must still be highlighted. */
+  selected: number | null;
 }
 
 /** What `queue_prompt` did with one prompt (step 5.10). */

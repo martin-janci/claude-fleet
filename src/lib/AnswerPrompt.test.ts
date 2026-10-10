@@ -97,7 +97,7 @@ describe('AnswerPrompt', () => {
     await settle();
 
     expect(mockedAct).toHaveBeenCalledWith(7);
-    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '2');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '2', expect.anything());
   });
 
   it('sends nothing when the pane is now showing a different dialog', async () => {
@@ -190,7 +190,7 @@ describe('AnswerPrompt', () => {
     await fireEvent.click(screen.getByTestId('answer-esc'));
     await settle();
 
-    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', 'Escape');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', 'Escape', expect.anything());
   });
 
   it('opens the terminal when asked', async () => {
@@ -302,13 +302,13 @@ describe('AnswerPrompt, multi-select', () => {
     render(AnswerPrompt, { session: session({ pending_input: MULTI }), view: view(MULTI) });
     await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
     await settle();
-    expect(mockedSend).toHaveBeenLastCalledWith('local', 'dev-foo', '1');
+    expect(mockedSend).toHaveBeenLastCalledWith('local', 'dev-foo', '1', expect.anything());
     expect(screen.queryByTestId('answer-sent')).toBeNull();
     expect(ticked(screen.getAllByTestId('answer-option')[0])).toBe(true);
 
     await fireEvent.click(screen.getAllByTestId('answer-option')[2]);
     await settle();
-    expect(mockedSend).toHaveBeenLastCalledWith('local', 'dev-foo', '3');
+    expect(mockedSend).toHaveBeenLastCalledWith('local', 'dev-foo', '3', expect.anything());
     expect(screen.queryByTestId('answer-stale')).toBeNull();
   });
 
@@ -323,7 +323,7 @@ describe('AnswerPrompt, multi-select', () => {
     render(AnswerPrompt, { session: session({ pending_input: MULTI }), view: view(MULTI) });
     await fireEvent.click(screen.getAllByTestId('answer-option')[2]);
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '3');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '3', expect.anything());
     expect(screen.queryByTestId('answer-stale')).toBeNull();
   });
 
@@ -331,7 +331,7 @@ describe('AnswerPrompt, multi-select', () => {
     render(AnswerPrompt, { session: session({ pending_input: MULTI }), view: view(MULTI) });
     await fireEvent.click(screen.getByTestId('answer-continue'));
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', 'Tab');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', 'Tab', expect.anything());
     expect(screen.getByTestId('answer-sent').textContent).toContain('Logging');
   });
 
@@ -532,6 +532,23 @@ describe('AnswerPrompt: the command being approved', () => {
   });
 });
 
+describe('AnswerPrompt: the backend re-checks the dialog with the key', () => {
+  it('sends the dialog it answers, and reads E_CONFLICT as a moved dialog', async () => {
+    mockedSend.mockResolvedValueOnce({ ok: false, error: { code: 'E_CONFLICT', message: 'The dialog changed — nothing was sent.' } });
+    render(AnswerPrompt, { session: session(), view: view(DIALOG) });
+    await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '1', {
+      kind: DIALOG.kind,
+      question: DIALOG.question,
+      options: DIALOG.options.map((o) => ({ n: o.n, label: o.label })),
+      detail: null,
+      selected: DIALOG.options.find((o) => o.selected)?.n ?? null,
+    });
+    expect(screen.queryByTestId('answer-sent')).toBeNull();
+  });
+});
+
 describe('AnswerPrompt in the New layout (redesign 5.9)', () => {
   it('the New layout draws the kit card, with the command, on a row as in the Conversation', async () => {
     const v = { ...view({ ...DIALOG, detail: 'Bash(git push)' }) };
@@ -546,7 +563,7 @@ describe('AnswerPrompt in the New layout (redesign 5.9)', () => {
     expect(screen.queryByTestId('question-own-words')).toBeNull();
     await fireEvent.click(screen.getAllByTestId('answer-option')[2]);
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '3');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '3', expect.anything());
     expect(onAnswered).toHaveBeenCalledWith('No, and tell Claude what to do differently');
     expect(screen.getByTestId('answer-sent').textContent).toContain('No, and tell Claude');
   });

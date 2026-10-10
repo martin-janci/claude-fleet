@@ -86,6 +86,14 @@ impl FleetTools {
                 answer_key_allowed(key, probe.pending_input.as_ref())
                     .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))?;
             }
+            // The client's check and its press, made one step here: the pane
+            // is re-read now and the key goes out right after, with no round
+            // trip to the client in between.
+            if let Some(expect) = &p.expect {
+                sessions::check_expected_dialog(&self.store, &self.ssh, row.id, expect, key)
+                    .await
+                    .map_err(to_mcp_err)?;
+            }
             sessions::send_keys(&row.host_alias, &row.tmux_name, key, &self.store, &self.ssh)
                 .await
                 .map_err(to_mcp_err)?;
