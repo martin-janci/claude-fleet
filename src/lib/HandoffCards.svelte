@@ -24,6 +24,8 @@
   import Button from './kit/Button.svelte';
   import QuestionCard from './kit/QuestionCard.svelte';
   import StatusChip from './kit/StatusChip.svelte';
+  import StatusDot from './kit/StatusDot.svelte';
+  import { STATE_WORD } from './kit/status';
   import {
     createFromTree,
     finishesWhen,
@@ -39,6 +41,9 @@
     undoable,
     workState,
     ACCEPT_UNDO_SECS,
+    taskSummary,
+    splitTaskReceipts,
+    TASKS_OPEN_UP_TO,
     type ControlHandoff,
     type HandoffItem,
   } from './handoffs';
@@ -202,6 +207,20 @@
     }
   }
 
+  // ── Control chat UX (2026-10-10): the task group ──
+
+  const split = $derived(splitTaskReceipts($recentHandoffs));
+  const others = $derived(split.others);
+  const tasks = $derived(split.tasks);
+  const listId = `handoff-tasks-${Math.random().toString(36).slice(2, 8)}`;
+  /** The person's own fold, once they pressed the header. */
+  let tasksChoice = $state<boolean | null>(null);
+  /** A draft or an error waiting on a row is never folded away. */
+  const tasksForced = $derived(
+    tasks.some((h) => (nowSec - h.at < FRESH_SECS && h.item!.status === 'todo') || errors[h.id] !== undefined),
+  );
+  const tasksOpen = $derived(tasksForced || (tasksChoice ?? tasks.length <= TASKS_OPEN_UP_TO));
+
   function minutesLeft(h: ControlHandoff): number {
     const at = Math.max(...undoable(h, nowSec).map((i) => i.accepted_at ?? 0));
     return Math.max(1, Math.ceil((at + ACCEPT_UNDO_SECS - nowSec) / 60));
@@ -210,7 +229,7 @@
 
 {#if $recentHandoffs.length > 0}
   <div class="handoffs" data-testid="handoffs">
-    {#each $recentHandoffs as h (h.id)}
+    {#each others as h (h.id)}
       {#if h.kind === 'session'}
         {@const c = sessionChip(h, $sessions)}
         {@const inFlight = flying.includes(h.id)}
@@ -248,66 +267,6 @@
           <span class="target">{h.mission_name ?? 'a deleted mission'}</span>
           {#if h.mission_state}<StatusChip state={workState(h.mission_state)} />{/if}
         </button>
-      {:else if h.kind === 'task' && h.item}
-        {@const item = h.item}
-        {@const live = liveSessionsOf(item.id, $sessions)}
-        {@const fresh = nowSec - h.at < FRESH_SECS && item.status === 'todo'}
-        {@const when = finishesWhen(item.done_when)}
-        <div class="task-card" data-testid="handoff-task-card">
-          <button type="button" class="handoff task" data-testid="handoff-task" onclick={() => showTaskInWorkView(`item:${item.id}`)}>
-            <span class="what">#TASK</span>
-            <span class="target">{item.title}</span>
-            <StatusChip state={workState(item.status)} />
-          </button>
-          {#if fresh}<p class="sub" data-testid="handoff-task-drafted">Drafted from your message</p>{/if}
-          {#if when}<p class="sub" data-testid="handoff-task-when">{when}</p>{/if}
-          <p class="sub" data-testid="handoff-task-live">
-            {#if live.length > 0}Running in {live.map((x) => `${displayName(x, true)} on ${x.host_alias}`).join(', ')}{:else}No session on it{/if}
-          </p>
-          {#if fresh}
-            <form
-              class="draft"
-              onsubmit={(e) => {
-                e.preventDefault();
-                void saveDraft(h, item);
-              }}
-            >
-              <label>Owner <input bind:value={owner[h.id]} placeholder="You, or a name" data-testid="handoff-task-owner" /></label>
-              <label>Due <input type="date" bind:value={due[h.id]} data-testid="handoff-task-due" /></label>
-              <Button
-                variant="quiet"
-                size="sm"
-                type="submit"
-                disabled={busy === h.id || (!parseAssignees(owner[h.id] ?? '').length && !due[h.id])}
-                testid="handoff-task-save">Save</Button
-              >
-              {#if saved[h.id]}<span class="sub" role="status">Saved {saved[h.id]}</span>{/if}
-            </form>
-          {/if}
-          <div class="actions">
-            {#if taskUndoable(item, nowSec)}
-              <Button variant="quiet" size="sm" disabled={busy === h.id} onclick={() => void taskAction(h, () => undoWorkAccept([item.id]))} testid="handoff-task-undo"
-                >Undo</Button
-              >
-            {/if}
-            {#if item.status !== 'done'}
-              <Button variant="quiet" size="sm" disabled={busy === h.id} onclick={() => void taskAction(h, () => setWorkStatus(item.id, 'done'))} testid="handoff-task-done"
-                >Move to Done</Button
-              >
-            {/if}
-            {#if (item.done_when ?? []).includes('person')}
-              <Button
-                variant="quiet"
-                size="sm"
-                disabled={busy === h.id}
-                onclick={() => void taskAction(h, () => verifyWorkItem(item.id, 'person', true))}
-                testid="handoff-task-verify">Mark verified</Button
-              >
-            {/if}
-            <Button variant="quiet" size="sm" onclick={() => showTaskInWorkView(`item:${item.id}`)} testid="handoff-task-open">Open in Work</Button>
-          </div>
-          {#if errors[h.id]}<p class="error" role="alert">{errors[h.id]}</p>{/if}
-        </div>
       {:else if h.kind === 'tree'}
         {@const open = openProposals(h)}
         {@const back = undoable(h, nowSec)}
@@ -385,6 +344,102 @@
         {/if}
       {/if}
     {/each}
+    {#if tasks.length > 0}
+      <!-- Control chat UX (2026-10-10): the created tasks as one group of
+           one-line rows under a summary, folded once there are more than a
+           few, so they never take the chat's height. -->
+      <section class="task-group" data-testid="handoff-task-group">
+        <button
+          type="button"
+          class="group-head"
+          aria-expanded={tasksOpen}
+          aria-controls={listId}
+          data-testid="handoff-task-toggle"
+          disabled={tasksForced}
+          onclick={() => (tasksChoice = !tasksOpen)}
+        >
+          <span class="chev" aria-hidden="true">{tasksOpen ? '▾' : '▸'}</span>
+          <span>{taskSummary(tasks.map((h) => h.item!.status))}</span>
+        </button>
+        <ul class="task-rows" id={listId} hidden={!tasksOpen}>
+          {#each tasks as h (h.id)}
+            {@const item = h.item!}
+            {@const live = liveSessionsOf(item.id, $sessions)}
+            {@const fresh = nowSec - h.at < FRESH_SECS && item.status === 'todo'}
+            {@const when = finishesWhen(item.done_when)}
+            {@const state = workState(item.status)}
+            {@const liveLong = live.length > 0 ? `Running in ${live.map((x) => `${displayName(x, true)} on ${x.host_alias}`).join(', ')}` : 'No session on it'}
+            <li class="task-card" class:is-done={item.status === 'done'} data-testid="handoff-task-card">
+              <StatusDot {state} size={8} />
+              <button
+                type="button"
+                class="handoff task"
+                title={item.title}
+                data-testid="handoff-task"
+                onclick={() => showTaskInWorkView(`item:${item.id}`)}
+              >
+                <span class="what">#TASK</span>
+                <span class="target">{item.title}</span>
+              </button>
+              <span class="live" title={liveLong} data-testid="handoff-task-live"
+                ><span class="sr-only">{liveLong}</span><span aria-hidden="true"
+                  >{live.length > 0 ? live.map((x) => `${displayName(x, true)} · ${x.host_alias}`).join(', ') : STATE_WORD[state]}</span
+                ></span
+              >
+              <div class="actions">
+                {#if taskUndoable(item, nowSec)}
+                  <Button variant="quiet" size="sm" disabled={busy === h.id} onclick={() => void taskAction(h, () => undoWorkAccept([item.id]))} testid="handoff-task-undo"
+                    >Undo</Button
+                  >
+                {/if}
+                {#if item.status !== 'done'}
+                  <Button variant="quiet" size="sm" disabled={busy === h.id} onclick={() => void taskAction(h, () => setWorkStatus(item.id, 'done'))} testid="handoff-task-done"
+                    >Move to Done</Button
+                  >
+                {/if}
+                {#if (item.done_when ?? []).includes('person')}
+                  <Button
+                    variant="quiet"
+                    size="sm"
+                    disabled={busy === h.id}
+                    onclick={() => void taskAction(h, () => verifyWorkItem(item.id, 'person', true))}
+                    testid="handoff-task-verify">Mark verified</Button
+                  >
+                {/if}
+                <Button variant="quiet" size="sm" onclick={() => showTaskInWorkView(`item:${item.id}`)} testid="handoff-task-open">Open in Work</Button>
+              </div>
+              {#if fresh || when || errors[h.id]}
+                <div class="more">
+                  {#if fresh}<p class="sub" data-testid="handoff-task-drafted">Drafted from your message</p>{/if}
+                  {#if when}<p class="sub" data-testid="handoff-task-when">{when}</p>{/if}
+                  {#if fresh}
+                    <form
+                      class="draft"
+                      onsubmit={(e) => {
+                        e.preventDefault();
+                        void saveDraft(h, item);
+                      }}
+                    >
+                      <label>Owner <input bind:value={owner[h.id]} placeholder="You, or a name" data-testid="handoff-task-owner" /></label>
+                      <label>Due <input type="date" bind:value={due[h.id]} data-testid="handoff-task-due" /></label>
+                      <Button
+                        variant="quiet"
+                        size="sm"
+                        type="submit"
+                        disabled={busy === h.id || (!parseAssignees(owner[h.id] ?? '').length && !due[h.id])}
+                        testid="handoff-task-save">Save</Button
+                      >
+                      {#if saved[h.id]}<span class="sub" role="status">Saved {saved[h.id]}</span>{/if}
+                    </form>
+                  {/if}
+                  {#if errors[h.id]}<p class="error" role="alert">{errors[h.id]}</p>{/if}
+                </div>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
   </div>
 {/if}
 
@@ -486,19 +541,122 @@
     gap: var(--space-2);
     align-items: baseline;
   }
-  .task-card {
+  /* Control chat UX (2026-10-10): one line per task under a header. */
+  .task-group {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    padding: 4px 8px;
-    border: 1px solid var(--border);
+  }
+  .group-head {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 2px var(--space-1);
+    border: 0;
     border-radius: var(--radius-sm);
+    background: none;
+    color: var(--fg-muted);
+    font: inherit;
+    font-size: var(--text-xs);
+    cursor: pointer;
+  }
+  .group-head:hover:not(:disabled) {
+    color: var(--fg);
+  }
+  .group-head:disabled {
+    cursor: default;
+  }
+  .group-head:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+  }
+  .chev {
+    display: inline-block;
+    width: 1ch;
+  }
+  .task-rows {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
     background: var(--bg-raise);
+    overflow: hidden;
+  }
+  .task-rows[hidden] {
+    display: none;
+  }
+  .task-card {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    align-items: center;
+    column-gap: var(--space-2);
+    min-height: 28px;
+    padding: 2px var(--space-2);
+    font-size: var(--text-xs);
+  }
+  .task-card + .task-card {
+    border-top: 1px solid var(--border);
+  }
+  .task-card:hover,
+  .task-card:focus-within {
+    background: color-mix(in srgb, var(--fg) 4%, transparent);
   }
   .task-card > .handoff {
     border: 0;
     padding: 0;
     background: transparent;
+  }
+  .task-card > .handoff:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    border-radius: var(--radius-sm);
+  }
+  .task-card.is-done .target {
+    color: var(--fg-muted);
+  }
+  .task-card.is-done {
+    opacity: 0.7;
+  }
+  .live {
+    max-width: 22ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--fg-muted);
+  }
+  /* The row's actions show on hover or focus; they stay in the tab order. */
+  .task-card .actions {
+    flex-wrap: nowrap;
+    gap: 0;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--dur-fast) ease-out;
+  }
+  .task-card:hover .actions,
+  .task-card:focus-within .actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  @media (hover: none) {
+    .task-card .actions {
+      opacity: 1;
+      pointer-events: auto;
+    }
+  }
+  .more {
+    grid-column: 2 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-bottom: 2px;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
   .sub,
   .wave,

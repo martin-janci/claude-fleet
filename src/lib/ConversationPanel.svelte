@@ -138,6 +138,7 @@
   import { inboxQueue, nextInInbox } from './inbox';
   import { push as pushToast } from './toasts';
   import { projectSkills } from './project_skills';
+  import { overflowMark } from './overflow_mark';
 
   let {
     session,
@@ -2459,7 +2460,19 @@
   {/if}
   </div>
   {#if composerAbove && showComposer && canPrompt && bgEntry === null}
-    <div class="composer-above">{@render composerAbove()}</div>
+    <!-- Capped and scrolled on its own (Control chat UX, 2026-10-10): a
+         stack of task cards here used to take the whole pane and leave the
+         transcript with no height and nothing to scroll. -->
+    <div
+      class="composer-above"
+      role="region"
+      aria-label="Activity above the box"
+      tabindex="-1"
+      data-testid="conv-composer-above"
+      use:overflowMark
+    >
+      {@render composerAbove()}
+    </div>
   {/if}
   {#if showComposer && canPrompt && bgEntry === null}
     <form
@@ -2706,10 +2719,34 @@
 
 <style>
   .composer-above {
+    flex: 0 1 auto;
+    min-height: 0;
+    /* The transcript keeps the rest; the tray scrolls. */
+    max-height: min(40%, 22rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
     display: flex;
     flex-wrap: wrap;
+    align-content: flex-start;
     gap: 0.35rem;
-    padding: 0 var(--chat-inset);
+    padding: var(--space-1) var(--chat-inset);
+  }
+  /* Says there is more below while the tray overflows. */
+  .composer-above:global([data-overflow='true']) {
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--space-4)), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - var(--space-4)), transparent);
+  }
+  .composer-above:global([data-overflow='true'][data-at-end='true']) {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+  .composer-above:focus {
+    outline: none;
+  }
+  .composer-above:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
   }
   .conversation-panel {
     /* The reading column every part of the thread lines up with: the turns,

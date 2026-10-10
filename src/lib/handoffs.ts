@@ -161,6 +161,39 @@ export function workState(state: string | null | undefined): OfState {
   }
 }
 
+// ── Control chat UX (2026-10-10): the task group above the composer ──
+
+/** The task group opens by itself up to this many tasks, folded beyond. */
+export const TASKS_OPEN_UP_TO = 3;
+
+/** What needs a person comes first, finished work last. */
+const STATE_RANK: Record<OfState, number> = { waiting: 0, failed: 1, working: 2, idle: 3, done: 4 };
+
+/** Task receipts apart from the rest, ordered by state (stable within one),
+ *  so the tray's task group can fold them under one header. */
+export function splitTaskReceipts(list: readonly ControlHandoff[]): { tasks: ControlHandoff[]; others: ControlHandoff[] } {
+  const tasks: ControlHandoff[] = [];
+  const others: ControlHandoff[] = [];
+  for (const h of list) (h.kind === 'task' && h.item ? tasks : others).push(h);
+  tasks.sort((a, b) => STATE_RANK[workState(a.item!.status)] - STATE_RANK[workState(b.item!.status)]);
+  return { tasks, others };
+}
+
+/** The group header: "6 tasks · 3 working · 2 idle · 1 done", zero counts
+ *  left out, in the order the rows are. */
+export function taskSummary(statuses: readonly string[]): string {
+  const counts = new Map<OfState, number>();
+  for (const s of statuses) {
+    const st = workState(s);
+    counts.set(st, (counts.get(st) ?? 0) + 1);
+  }
+  const parts = (Object.keys(STATE_RANK) as OfState[])
+    .filter((st) => counts.get(st))
+    .map((st) => `${counts.get(st)} ${st === 'waiting' ? 'need you' : st}`);
+  const n = statuses.length;
+  return [`${n} ${n === 1 ? 'task' : 'tasks'}`, ...parts].join(' · ');
+}
+
 /** The tree's items still waiting on a person. */
 export function openProposals(h: ControlHandoff): HandoffItem[] {
   return (h.items ?? []).filter((i) => i.proposal_state === 'proposed');
