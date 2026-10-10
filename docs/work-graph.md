@@ -1168,7 +1168,13 @@ in [the settings reference](settings-reference.md).
 | `work.evidence_snippets` | `true` | on / off | fleet | Keep a short, redacted prompt snippet around a detected ticket key as evidence. Off keeps only the matched text. |
 | `work.session_start_context` | `false` | on / off | fleet | Give Claude the linked ticket at session start. Makes the start hook synchronous, which can add up to 2 s when the hub is down. Experimental. Applies when the hooks are next installed. |
 | `work.classify_nudge` | `false` | on / off | fleet, per org | After three prompts with no ticket, ask Claude once which of your few open tickets it is on. Its answer is only ever a suggestion. Experimental. |
+| `work.members_plan_sprints` | `false` | on / off | fleet, per org | Let an organisation's members, not only its admins, create and change its sprints and releases. Viewers never can; anyone can keep personal ones. |
 | `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet, per org | The model Summarise runs on for a past session, on that session's own host and account. |
+| `work.help_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet | The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account. |
+| `work.draft_commit_messages` | `false` | on / off | fleet | Files tab: Draft writes a commit message from the staged diff with claude -p on the session's host. A draft is text you edit and commit yourself. |
+| `work.draft_briefs` | `false` | on / off | fleet | Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host. |
+| `work.draft_release_notes` | `false` | on / off | fleet | Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host. |
+| `work.catch_up_summaries` | `false` | on / off | fleet | A watched session offers "Since 13:20": what it did since you last looked, summarised on its own host and account. |
 | `work.tidy_done_days` | `2` | 1–365 days | fleet | Days a linked ticket must be done before Tidy up suggests its session. |
 | `work.tidy_idle_hours` | `4` | 1–720 hours | fleet | Hours a session must be idle before any tidy reason suggests it. |
 | `work.tidy_idle_unlinked_days` | `7` | 1–90 days | fleet, per org | Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied. |

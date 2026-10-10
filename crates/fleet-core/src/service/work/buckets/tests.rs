@@ -13,8 +13,9 @@ struct Fx {
 }
 
 impl Fx {
-    fn scope(&self, host: &str) -> OrgScope {
-        OrgScope::for_host(&self.store.lock().unwrap(), host).unwrap()
+    fn scope(&self, host: &str) -> ViewScope {
+        ViewScope::internal()
+            .with_org(OrgScope::for_host(&self.store.lock().unwrap(), host).unwrap())
     }
 
     fn bucket(&self, kind: &str, name: &str, org: Option<i64>) -> i64 {
@@ -84,7 +85,7 @@ fn a_host_lists_its_orgs_buckets_and_unassigned_ones_only() {
     let a = fx.bucket("sprint", "A1", Some(fx.org_a));
     let b = fx.bucket("sprint", "B1", Some(fx.org_b));
     let none = fx.bucket("release", "shared", None);
-    let ids = |scope: &OrgScope| -> Vec<i64> {
+    let ids = |scope: &ViewScope| -> Vec<i64> {
         buckets(&fx.store, scope, None)
             .unwrap()
             .into_iter()
@@ -95,7 +96,7 @@ fn a_host_lists_its_orgs_buckets_and_unassigned_ones_only() {
     seen.sort();
     assert_eq!(seen, [a, none]);
     assert!(!ids(&fx.scope("h-b")).contains(&a));
-    assert_eq!(ids(&OrgScope::All).len(), 3);
+    assert_eq!(ids(&ViewScope::internal()).len(), 3);
     let _ = b;
 }
 
@@ -127,7 +128,7 @@ fn a_member_the_caller_cannot_see_is_left_out() {
     bucket_add(
         &link_args("bucket_add", shared, fx.ticket_a),
         &fx.store,
-        &OrgScope::All,
+        &ViewScope::internal(),
     )
     .unwrap();
     assert_eq!(
@@ -272,4 +273,188 @@ fn the_admin_actions_parse_and_delete_is_a_removal() {
     }
     assert!(AdminAction::parse("bucket_delete").unwrap().is_removal());
     assert!(!AdminAction::parse("bucket_close").unwrap().is_removal());
+}
+
+/// A person's device, bound to `org` or to none, scoped the way a request is.
+fn person(store: &Mutex<Store>, org: Option<i64>, id: i64) -> ViewScope {
+    use crate::mcp::auth::{Caller, ClientRef, TokenMode};
+    Caller {
+        api: None,
+        host_alias: None,
+        client: Some(ClientRef {
+            id: 7,
+            name: "phone".into(),
+            trusted: false,
+            org_id: org,
+            person_id: Some(id),
+        }),
+        mode: TokenMode::Full,
+        pane: None,
+        is_personal_owner: false,
+    }
+    .view_scope(&lock(store).unwrap())
+    .unwrap()
+}
+
+fn op(action: &str) -> WorkAdminArgs {
+    WorkAdminArgs {
+        action: action.into(),
+        ..Default::default()
+    }
+}
+
+fn create_op(name: &str, org: Option<i64>) -> WorkAdminArgs {
+    WorkAdminArgs {
+        kind: Some("sprint".into()),
+        name: Some(name.into()),
+        org_id: org,
+        ..op("bucket_create")
+    }
+}
+
+fn created(v: serde_json::Value) -> BucketRow {
+    serde_json::from_value(v["bucket"].clone()).unwrap()
+}
+
+#[test]
+fn a_personal_sprint_is_its_persons_alone() {
+    let fx = fixture();
+    let (ana, bo) = {
+        let s = lock(&fx.store).unwrap();
+        let ana = s.create_person("ana", None).unwrap().id;
+        let bo = s.create_person("bo", None).unwrap().id;
+        s.set_org_member(fx.org_a, ana, "viewer", None).unwrap();
+        s.set_org_member(fx.org_a, bo, "viewer", None).unwrap();
+        (ana, bo)
+    };
+    let as_ana = person(&fx.store, Some(fx.org_a), ana);
+    let as_bo = person(&fx.store, Some(fx.org_a), bo);
+    // A viewer plans nothing of the team's, but keeps sprints of their own.
+    let mine = created(person_admin(&create_op("Mine", None), &fx.store, &as_ana).unwrap());
+    assert_eq!(mine.owner_person_id, Some(ana));
+    assert_eq!(mine.org_id, None);
+    // Bo may name one the same: the name is unique per owner.
+    let bos = created(person_admin(&create_op("Mine", None), &fx.store, &as_bo).unwrap());
+    assert_ne!(bos.id, mine.id);
+    let listed = |scope: &ViewScope| -> Vec<i64> {
+        buckets(&fx.store, scope, None)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.id)
+            .collect()
+    };
+    assert!(listed(&as_ana).contains(&mine.id));
+    assert!(
+        !listed(&as_ana).contains(&bos.id),
+        "Bo's is not Ana's to see"
+    );
+    // Unknown to everyone else, read or write alike.
+    let read = bucket(&fx.store, &as_bo, mine.id).unwrap_err();
+    assert_eq!(read.code, codes::E_NOTFOUND);
+    let del = WorkAdminArgs {
+        bucket_id: Some(mine.id),
+        ..op("bucket_delete")
+    };
+    assert_eq!(
+        person_admin(&del, &fx.store, &as_bo).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+    let add = bucket_add(
+        &link_args("bucket_add", mine.id, fx.ticket_a),
+        &fx.store,
+        &as_bo,
+    );
+    assert_eq!(add.unwrap_err().code, codes::E_NOTFOUND);
+    // Its person plans into it, beside the team's sprint the item is in.
+    let team = fx.bucket("sprint", "Team", Some(fx.org_a));
+    bucket_add(
+        &link_args("bucket_add", team, fx.ticket_a),
+        &fx.store,
+        &ViewScope::internal(),
+    )
+    .unwrap();
+    bucket_add(
+        &link_args("bucket_add", mine.id, fx.ticket_a),
+        &fx.store,
+        &as_ana,
+    )
+    .unwrap();
+    // Adopting a tracker's sprint is never a personal bucket's.
+    let adopt = WorkAdminArgs {
+        bucket_id: Some(mine.id),
+        tracker_id: Some(fx.tracker_a),
+        external_id: Some("S1".into()),
+        ..op("bucket_adopt")
+    };
+    assert_eq!(
+        person_admin(&adopt, &fx.store, &as_ana).unwrap_err().code,
+        codes::E_FORBIDDEN
+    );
+    // And its person deletes it.
+    person_admin(
+        &WorkAdminArgs {
+            bucket_id: Some(mine.id),
+            ..op("bucket_delete")
+        },
+        &fx.store,
+        &as_ana,
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_orgs_sprints_are_its_admins_and_its_members_when_the_org_allows() {
+    let fx = fixture();
+    let (adm, mem, view) = {
+        let s = lock(&fx.store).unwrap();
+        let ids: Vec<i64> = ["adm", "mem", "view"]
+            .iter()
+            .map(|n| s.create_person(n, None).unwrap().id)
+            .collect();
+        s.set_org_member(fx.org_a, ids[0], "admin", None).unwrap();
+        s.set_org_member(fx.org_a, ids[1], "member", None).unwrap();
+        s.set_org_member(fx.org_a, ids[2], "viewer", None).unwrap();
+        (ids[0], ids[1], ids[2])
+    };
+    let scope = |p| person(&fx.store, Some(fx.org_a), p);
+    let team =
+        created(person_admin(&create_op("S1", Some(fx.org_a)), &fx.store, &scope(adm)).unwrap());
+    assert_eq!(team.owner_person_id, None);
+    assert_eq!(team.org_id, Some(fx.org_a));
+    // A member and a viewer read it but do not plan it, by default.
+    for p in [mem, view] {
+        assert!(bucket(&fx.store, &scope(p), team.id).is_ok());
+        let e = person_admin(&create_op("S2", Some(fx.org_a)), &fx.store, &scope(p)).unwrap_err();
+        assert_eq!(e.code, codes::E_FORBIDDEN);
+    }
+    lock(&fx.store)
+        .unwrap()
+        .set_org_setting(
+            fx.org_a,
+            crate::service::settings::WORK_MEMBERS_PLAN_SPRINTS,
+            Some("true"),
+        )
+        .unwrap();
+    // The org turned it on: a member plans; a viewer still does not.
+    person_admin(&create_op("S2", Some(fx.org_a)), &fx.store, &scope(mem)).unwrap();
+    let start = WorkAdminArgs {
+        bucket_id: Some(team.id),
+        state: Some("active".into()),
+        ..op("bucket_update")
+    };
+    person_admin(&start, &fx.store, &scope(mem)).unwrap();
+    let e = person_admin(&create_op("S3", Some(fx.org_a)), &fx.store, &scope(view)).unwrap_err();
+    assert_eq!(e.code, codes::E_FORBIDDEN);
+    // Another org's sprint is unknown, whatever the role here.
+    let b = fx.bucket("sprint", "B1", Some(fx.org_b));
+    let close = WorkAdminArgs {
+        bucket_id: Some(b),
+        ..op("bucket_close")
+    };
+    assert_eq!(
+        person_admin(&close, &fx.store, &scope(adm))
+            .unwrap_err()
+            .code,
+        codes::E_NOTFOUND
+    );
 }

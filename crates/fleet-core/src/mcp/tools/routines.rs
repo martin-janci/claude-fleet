@@ -9,13 +9,12 @@ use crate::service::routines;
 #[tool_router(router = routines_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(description = "Routines: a saved prompt that starts a session \
-        on a cron schedule, a session or pull request event or Run now. list; get \
-        {routine_id}: with its last runs; runs {routine_id, limit?}; failing: \
-        each routine whose newest run failed, for the Inbox; save \
-        {routine, routine_id?}: the whole routine; preview: save's dry run, \
-        writes nothing; delete; set_enabled \
-        {enabled}; skip_next {skip?}; run_now. Pause all stops the \
-        schedule, not run_now. E_NOTFOUND, E_INVALID.")]
+        on cron, a session or PR event or Run now. list; get \
+        {routine_id}: runs and fixes; runs {routine_id, limit?}; \
+        failing: Inbox; budget: fleet spend today; \
+        save {routine, routine_id?}: the whole routine; preview: save's dry \
+        run; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause \
+        all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.")]
     pub(super) async fn routines(
         &self,
         Extension(caller): Extension<Caller>,
@@ -59,6 +58,9 @@ impl FleetTools {
             "list" => ok_json_compact(&routines::list(store, &scope).map_err(to_mcp_err)?),
             "get" => ok_json_compact(&routines::get(store, &scope, id()?).map_err(to_mcp_err)?),
             "failing" => ok_json_compact(&routines::failing(store, &scope).map_err(to_mcp_err)?),
+            "budget" => ok_json_compact(
+                &routines::budget(store, crate::store::now_unix()).map_err(to_mcp_err)?,
+            ),
             "runs" => {
                 ok_json_compact(&routines::runs(store, &scope, id()?, p.limit).map_err(to_mcp_err)?)
             }
@@ -114,7 +116,7 @@ impl FleetTools {
             other => Err(mcp_err(
                 codes::E_INVALID,
                 format!(
-                    "action must be list | get | runs | failing | save | preview | delete | \
+                    "action must be list | get | runs | failing | budget | save | preview | delete | \
                      set_enabled | skip_next | run_now, got {other:?}"
                 ),
                 None,

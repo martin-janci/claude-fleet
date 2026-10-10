@@ -182,6 +182,118 @@ impl FleetTools {
         ok_json(&answer)
     }
 
+    #[tool(description = "Ask the owner of a session shared with you for a \
+        wider level (answer or drive). Confers nothing until they grant it; \
+        one open ask per session. Errors: E_NOTFOUND, E_FORBIDDEN, \
+        E_VALIDATE, E_EXISTS, E_INVALID_STATE (declined within the hour).")]
+    pub(super) async fn session_ask_access(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionAskAccessParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "session_ask_access",
+            &format!("session_id={} level={:?}", p.session_id, p.level),
+        );
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        // `Reach::Read`: the asker is a grantee at any level, never the
+        // owner. A caller who cannot see the row gets `E_NOTFOUND` here; the
+        // store then checks the grant itself.
+        resolve_row_and_gate(
+            &s,
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Read,
+            "the session to ask about",
+        )?;
+        let asker = super::fleet::owner_for(&caller, &s);
+        let view = sessions::ask_access(&s, p.session_id, &p.level, asker).map_err(to_mcp_err)?;
+        ok_json(&view)
+    }
+
+    #[tool(description = "Asks for a wider level on sessions you OWN. \
+        list (default; session_id narrows it), grant {id} (re-shares at the \
+        asked level) or decline {id}. Errors: E_NOTFOUND, E_FORBIDDEN, \
+        E_VALIDATE, E_INVALID_STATE (the asker's share is gone).")]
+    pub(super) async fn access_requests(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<AccessRequestsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let action = p.action.as_deref().unwrap_or("list");
+        audit(
+            "access_requests",
+            &format!(
+                "action={action} session_id={:?} id={:?}",
+                p.session_id, p.id
+            ),
+        );
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        let owner = super::fleet::owner_for(&caller, &s);
+        match action {
+            "list" => {
+                if let Some(id) = p.session_id {
+                    resolve_row_and_gate(
+                        &s,
+                        &caller,
+                        Some(id),
+                        None,
+                        None,
+                        Reach::Own,
+                        "the session whose asks to read",
+                    )?;
+                }
+                let list =
+                    sessions::access_requests(&s, owner, p.session_id).map_err(to_mcp_err)?;
+                ok_json_compact(&list)
+            }
+            "grant" | "decline" => {
+                let id = p.id.ok_or_else(|| {
+                    to_mcp_err(IpcError::new(
+                        codes::E_VALIDATE,
+                        format!("{action} needs the ask's id"),
+                    ))
+                })?;
+                // The ask's session passes the same owner gate as a share
+                // (`Reach::Own`); the store compares the owner again. Every
+                // refusal before the store's is the store's own "no open
+                // ask" sentence, so an id says nothing about whether it
+                // exists or which session it is on.
+                let not_found = || {
+                    to_mcp_err(IpcError::new(
+                        codes::E_NOTFOUND,
+                        format!("no open access request {id} on a session of yours"),
+                    ))
+                };
+                let session_id = s
+                    .access_request(id)
+                    .map_err(to_mcp_err)?
+                    .filter(|r| r.resolved_at.is_none())
+                    .map(|r| r.session_id)
+                    .ok_or_else(not_found)?;
+                resolve_row_and_gate(
+                    &s,
+                    &caller,
+                    Some(session_id),
+                    None,
+                    None,
+                    Reach::Own,
+                    "the session the ask is about",
+                )
+                .map_err(|_| not_found())?;
+                let view = sessions::resolve_access_request(&s, id, action == "grant", owner)
+                    .map_err(to_mcp_err)?;
+                ok_json(&view)
+            }
+            other => Err(to_mcp_err(IpcError::new(
+                codes::E_VALIDATE,
+                format!("access_requests action must be list, grant or decline, not {other:?}"),
+            ))),
+        }
+    }
+
     #[tool(description = "Claim the unclaimed session THIS pane is in for a \
         person: it becomes theirs and private. Only the session whose active \
         pane this request's X-Fleet-Pane header names — being on the same \

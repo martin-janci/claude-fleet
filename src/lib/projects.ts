@@ -1,6 +1,7 @@
-import { writable, derived } from 'svelte/store';
+import { writable, derived, type Readable } from 'svelte/store';
 import { invokeCmd, invokeCmdAbortable, type IpcError, type Result } from './result';
 import { createListRace, type ListToken } from './row_store';
+import { filterHubProjects, hubProjectFilter } from './hub_projects';
 
 export interface ProjectRow {
   id: number;
@@ -39,7 +40,24 @@ export interface ProjectTreeRow {
   worktrees: WorktreeRow[];
 }
 
-export const projects = writable<ProjectTreeRow[]>([]);
+const allProjectsStore = writable<ProjectTreeRow[]>([]);
+
+/** Every project the backend listed, before this desktop's pick of its
+ *  hub's projects (Settings › Hub & sync, G4.6). Only that picker reads it. */
+export const allProjects: Readable<ProjectTreeRow[]> = { subscribe: allProjectsStore.subscribe };
+
+const shownProjects = derived([allProjectsStore, hubProjectFilter], ([$all, $filter]) =>
+  filterHubProjects($all, $filter),
+);
+
+/** The projects this app lists and starts sessions in: every one, or on a
+ *  paired desktop the hub's projects it picked. `set` / `update` write the
+ *  full list. */
+export const projects = {
+  subscribe: shownProjects.subscribe,
+  set: allProjectsStore.set,
+  update: allProjectsStore.update,
+};
 
 /** O(1) project-id -> tree-row lookup, derived once per `projects` change. */
 export const projectById = derived(projects, ($p) => new Map($p.map((p) => [p.project.id, p])));

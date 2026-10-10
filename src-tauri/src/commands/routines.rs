@@ -18,7 +18,7 @@ use tauri::State;
 /// The `routines` tool's arguments, as the tool reads them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoutinesArgs {
-    /// list | get | runs | failing | save | preview | delete | set_enabled | skip_next | run_now
+    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine_id: Option<i64>,
@@ -79,6 +79,7 @@ pub(crate) mod routed {
             "get" => json(svc::get(store, &scope, id()?)?),
             "runs" => json(svc::runs(store, &scope, id()?, args.limit)?),
             "failing" => json(svc::failing(store, &scope)?),
+            "budget" => json(svc::budget(store, fleet_core::store::now_unix())?),
             "save" => {
                 let input = args
                     .routine
@@ -119,7 +120,7 @@ pub(crate) mod routed {
             other => Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
-                    "action must be list | get | runs | failing | save | preview | delete | \
+                    "action must be list | get | runs | failing | budget | save | preview | delete | \
                      set_enabled | skip_next | run_now, got {other:?}"
                 ),
             )),

@@ -420,6 +420,12 @@ export const ROUTED_ACTIONS = [
   'set_work_status',
   // Task editing: a native item's title, notes and assignees.
   'edit_work_item',
+  // Task comments: kept in fleet; deleting is the author's own.
+  'comment_on_work',
+  'delete_work_comment',
+  // Sprints and releases: the hub decides who plans (a person's own; an
+  // org's as its admin, or member when the org allows it).
+  'work_bucket_admin',
   // The Work view (work graph M14): every write is `work_link { … }` on the
   // hub, so a paired desktop sends them while the link is up.
   'set_primary_work',
@@ -461,6 +467,10 @@ export const ROUTED_ACTIONS = [
   'session_share',
   'session_unshare',
   'session_narrow',
+  // Gap plan G4.2: a recipient's ask for a wider level, and the owner's
+  // grant or decline of one (both buttons, so both are writes here).
+  'session_ask_access',
+  'access_requests',
   // Orchestration O1: the Missions tab's writes.
   'save_mission',
   'set_mission_state',

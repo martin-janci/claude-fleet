@@ -7,6 +7,7 @@ import './lib/kit/of.generated.css';
 import { mount } from 'svelte';
 import { initTheme } from './lib/theme';
 import { initMotion } from './lib/motion';
+import { initTextSize } from './lib/text_size';
 import { installErrorReporting } from './lib/error_report';
 import { selectedSession } from './lib/selection';
 import { trackViewedSession } from './lib/session_viewed';
@@ -19,6 +20,7 @@ import TerminalPopout from './lib/TerminalPopout.svelte';
 
 initTheme();
 initMotion();
+initTextSize();
 installErrorReporting();
 // A pop-out terminal window (redesign 5.4) is this page too, and shows one
 // terminal: no tray (the main window owns it), no "viewed" marks, no presence.

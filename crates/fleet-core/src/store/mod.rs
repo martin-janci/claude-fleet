@@ -8,6 +8,7 @@ use crate::events::{EventBus, RowChange};
 use rusqlite::{Connection, OptionalExtension, Result, TransactionBehavior};
 use std::sync::Arc;
 
+mod access_requests;
 mod account_usage_snapshots;
 mod aux_usage;
 pub mod backup;
@@ -36,6 +37,7 @@ mod nl_census;
 mod orchestration;
 mod org_activity;
 mod org_members;
+mod org_projects;
 mod orgs;
 mod participants;
 mod peer_links;
@@ -72,6 +74,7 @@ mod update;
 mod usage;
 mod work;
 mod work_buckets;
+mod work_comments;
 mod work_describe;
 mod work_detect;
 mod work_journal;
@@ -83,11 +86,12 @@ mod work_tidy;
 mod work_usage;
 mod work_view;
 
+pub use access_requests::{AccessRequestRow, ACCESS_REQUEST_COOLDOWN_SECS};
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
 pub use aux_usage::{
     AuxUsageRow, NewAuxUsage, AUX_ORIGINS, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE,
-    AUX_ORIGIN_MORNING_BRIEF, AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE, AUX_ORIGIN_SUMMARY,
-    AUX_ORIGIN_TRIAGE, AUX_ORIGIN_WATCH_SUMMARY,
+    AUX_ORIGIN_CONTEXT_HELP, AUX_ORIGIN_MORNING_BRIEF, AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE,
+    AUX_ORIGIN_SUMMARY, AUX_ORIGIN_TRIAGE, AUX_ORIGIN_WATCH_SUMMARY,
 };
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use changesets::{
@@ -144,6 +148,7 @@ pub use org_members::{
     effective_device, role_receives_shares, validate_org_role, DeviceOrg, OrgMemberRow, NO_ORG,
     ORG_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_VIEWER,
 };
+pub use org_projects::{NewOrgProject, OrgProjectRow, ORG_PROJECT_NAME_MAX_CHARS};
 pub use orgs::{
     normalize_rule, org_of_session, validate_org_color, validate_org_name, OrgRow, OrgRuleRow,
     SessionOrgFacts, ORG_JEV_REPLY_KEY, ORG_NAME_MAX_CHARS,
@@ -183,8 +188,8 @@ pub use schema::known_schema_version;
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use schema::{is_newer_schema_error, open_failure_advice};
 pub use session_grants::{
-    grant_generation, validate_grant_level, GrantRecipient, SessionGrantRow, GRANT_ANSWER,
-    GRANT_DRIVE, GRANT_LEVELS, GRANT_WATCH,
+    grant_generation, validate_grant_level, GrantDetail, GrantRecipient, SessionGrantRow,
+    GRANT_ANSWER, GRANT_DRIVE, GRANT_LEVELS, GRANT_WATCH,
 };
 pub use sessions::PromptAckState;
 pub use setting_review::{
@@ -217,9 +222,10 @@ pub use work::{
     WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, PERSON_SOURCES, WORK_LINK_SOURCES,
 };
 pub use work_buckets::{
-    bucket_states, BucketMemberRow, BucketPatch, BucketRefRow, BucketRow, ItemBucketRow, NewBucket,
-    SprintClosed, BUCKET_KINDS,
+    bucket_states, BucketMemberRow, BucketMembership, BucketPatch, BucketRefRow, BucketRow,
+    ItemBucketRow, NewBucket, SprintClosed, BUCKET_KINDS,
 };
+pub use work_comments::{validate_comment, CommentRow, COMMENTS_SERVED_MAX, COMMENT_MAX_CHARS};
 pub use work_detect::{
     DetectionState, WITHDRAWN_CARRIED, WITHDRAWN_DECAY, WITHDRAWN_REASONS, WITHDRAWN_WITHDRAW,
     WORK_SUGGESTION_WITHDRAWN,
@@ -232,8 +238,9 @@ pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
 pub use work_status::STATUS_CATEGORIES;
 pub use work_tasks::{
-    job_status, parse_due_date, validate_assignees, validate_due_date, ItemEdit, NativeItem,
-    Proposal, TreeEntry, TreeRef, ACCEPT_UNDO_SECS, PROPOSALS_OPEN_CAP, TASK_KEY_PREFIX,
+    is_epic, job_status, parse_due_date, validate_assignees, validate_due_date, ItemEdit,
+    NativeItem, Proposal, TreeEntry, TreeRef, ACCEPT_UNDO_SECS, EPIC_KIND, LOCAL_DEPTH_MAX,
+    PROPOSALS_OPEN_CAP, TASK_KEY_PREFIX,
 };
 pub use work_tidy::ReopenedWork;
 pub use work_usage::{DetectionCounts, JournalCounts};

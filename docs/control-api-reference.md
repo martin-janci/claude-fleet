@@ -7,9 +7,21 @@ Auto-generated from the embedded MCP tool router. See [`control-api.md`](control
 
 ## MCP tools
 
+### `access_requests`
+
+Asks for a wider level on sessions you OWN. list (default; session_id narrows it), grant {id} (re-shares at the asked level) or decline {id}. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_INVALID_STATE (the asker's share is gone).
+
+Parameters: `action`, `id`, `session_id`
+
 ### `account_usage`
 
 Each Claude account's latest plan usage: 5-hour and weekly utilization with reset times, status, fetched_at. Never fetches.
+
+### `add_account`
+
+Add a Claude login profile on a host: a subscription login or an API key.
+
+Parameters: `action`, `api_key`, `code`, `daily_limit_usd`, `host_alias`, `key`, `nickname`, `profile`
 
 ### `add_host`
 
@@ -41,7 +53,7 @@ Which agent hosts (transport "agent") have a fleet-agent connected: since (unix 
 
 ### `answer_mcp_confirm`
 
-Approve or deny one waiting call by its nonce; false when it was already answered or expired.
+Approve or deny one waiting call by nonce; false if already answered or expired.
 
 Parameters: `approved`, `nonce`
 
@@ -357,7 +369,7 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 Administer the company: orgs (work_admin's org actions), devices (list, pair_device → code + QR, revoke, trust, bind, hand over, grant a catalog), people and members (roles, a member's grants). Hub owner's device: all; an org admin's: their org. Changes need a trusted full device, never locking out the one in use.
 
-Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `host_alias`, `isolate_sessions`, `jev`, `jev_reply`, `keep_grants`, `key`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path_prefix`, `person`, `person_id`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
+Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `grant_id`, `host_alias`, `hosts`, `isolate_sessions`, `jev`, `jev_reply`, `keep_grants`, `key`, `members_own_sessions_only`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path`, `path_prefix`, `person`, `person_id`, `project_id`, `remote`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
 
 ### `pair_client`
 
@@ -589,7 +601,7 @@ Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 
 ### `routines`
 
-Routines: a saved prompt that starts a session on a cron schedule, a session or pull request event or Run now. list; get {routine_id}: with its last runs; runs {routine_id, limit?}; failing: each routine whose newest run failed, for the Inbox; save {routine, routine_id?}: the whole routine; preview: save's dry run, writes nothing; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
+Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
 
 Parameters: `action`, `enabled`, `limit`, `routine`, `routine_id`, `skip`
 
@@ -631,7 +643,7 @@ Parameters: `body`, `client_msg_id`, `deliver`, `from_session_id`, `kind`, `raw`
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a running Claude session's REPL (pasted, then one Enter); the first prompt to an unnamed session also names it. Marked untrusted unless raw=true (master only) or a trusted client. keys presses a key instead. Returns { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } for the reply (run_prompt does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working one queues it. acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable.
+Send and SUBMIT a prompt to a Claude session's REPL (pasted, then one Enter); the first prompt to an unnamed session also names it. Marked untrusted unless raw=true (master only) or a trusted client. Returns { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } for the reply (run_prompt does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working one queues it. acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable.
 
 Parameters: `client_msg_id`, `confirm_nonce`, `expect`, `force`, `host_alias`, `keys`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
@@ -646,6 +658,12 @@ Parameters: `session_id`
 What the session's pane shows now: claude_status, stuck_kind, current_activity, waiting_for and the spinner line. One capture, nothing stored: the cheap read behind a live indicator (capture_session is the whole pane). E_INVALID_STATE outside tmux.
 
 Parameters: `session_id`
+
+### `session_ask_access`
+
+Ask the owner of a session shared with you for a wider level (answer or drive). Confers nothing until they grant it; one open ask per session. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS, E_INVALID_STATE (declined within the hour).
+
+Parameters: `level`, `session_id`
 
 ### `session_claim`
 
@@ -871,7 +889,7 @@ Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket
 
 Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. edit {item_id, title?, notes?, assignees?, due_at?}: a person edits work with no ticket. create {title, parent?, notes?, assignees?, due_at?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status} (paused reopens a finished one); mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check. mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours?, budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; missions_pause_all. mission_release_note {mission_id}: a drafted release note of a completed mission; today_brief {refresh?, org_id?, since?}: Today's morning brief, drafted only on refresh; mission_triage {mission_id, refresh?}: a stuck mission's card, Jev's proposed outcome and next step (never applied), and with refresh its drafted words. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
 
-Parameters: `ack_live`, `action`, `assignees`, `brief`, `bucket_id`, `budget_cents`, `card_id`, `confirm_nonce`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `item_id`, `item_ids`, `items`, `key`, `level`, `line`, `link_id`, `max_parallel`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `primary`, `profile`, `project_id`, `project_ids`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `step`, `task_id`, `title`, `tree`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
+Parameters: `ack_live`, `action`, `assignees`, `brief`, `bucket_id`, `bucket_op`, `budget_cents`, `card_id`, `comment_id`, `confirm_nonce`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `epic`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `item_id`, `item_ids`, `items`, `key`, `level`, `line`, `link_id`, `max_parallel`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `primary`, `profile`, `project_id`, `project_ids`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `step`, `task_id`, `title`, `tree`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -942,6 +960,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::create_work_task`
 - `commands::work::set_work_status`
 - `commands::work::edit_work_item`
+- `commands::work::set_work_parent`
 - `commands::work::accept_work_proposal`
 - `commands::work::reject_work_proposal`
 - `commands::work_view::work_tree`
@@ -963,6 +982,13 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work_view::delete_work_rule`
 - `commands::work_view::save_work_view`
 - `commands::work_view::delete_work_view`
+- `commands::work_view::comment_on_work`
+- `commands::work_view::delete_work_comment`
+- `commands::work_view::work_buckets`
+- `commands::work_view::work_bucket`
+- `commands::work_view::add_work_to_bucket`
+- `commands::work_view::remove_work_from_bucket`
+- `commands::work_view::work_bucket_admin`
 - `commands::missions::work_missions`
 - `commands::missions::work_mission`
 - `commands::missions::save_mission`
@@ -1015,6 +1041,12 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::orgs::set_org_member`
 - `commands::orgs::remove_org_member`
 - `commands::orgs::org_member_grants`
+- `commands::orgs::org_rule_preview`
+- `commands::orgs::add_org_project`
+- `commands::orgs::remove_org_project`
+- `commands::orgs::revoke_org_share`
+- `commands::orgs::narrow_org_share`
+- `commands::orgs::revoke_org_member_grants`
 - `commands::orgs::list_orgs`
 - `commands::orgs::org_suggestions`
 - `commands::org_devices::list_devices`
@@ -1040,6 +1072,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_narrow`
 - `commands::sessions::session_access`
 - `commands::sessions::my_grants`
+- `commands::sessions::session_ask_access`
+- `commands::sessions::access_requests`
 - `commands::sessions::restart_session`
 - `commands::sessions::rewind_conversation`
 - `commands::sessions::send_prompt`
@@ -1049,6 +1083,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::cancel_queued_prompt`
 - `commands::sessions::recreate_session`
 - `commands::sessions::restore_host_sessions`
+- `commands::sessions::restore_all_lost_sessions`
+- `commands::sessions::repair_workspaces_now`
 - `commands::sessions::discover_lost_sessions`
 - `commands::move_session::move_session`
 - `commands::resolve_move::resolve_move`
@@ -1105,6 +1141,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::prs::list_pull_requests`
 - `commands::start_rules::start_rules`
 - `commands::api_tokens::api_tokens`
+- `commands::add_account::add_account`
 - `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
@@ -1247,6 +1284,7 @@ Frontend commands registered in `src/lib.rs`:
 - `pty::pty_drain`
 - `commands::editor::open_session_in_editor`
 - `commands::windows::open_terminal_window`
+- `commands::context_help::context_help`
 - `commands::voice::voice_claim`
 - `commands::voice::voice_release`
 - `cancel_command`

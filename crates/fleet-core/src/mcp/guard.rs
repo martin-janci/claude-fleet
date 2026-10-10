@@ -665,6 +665,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     // device, and only the master creates an admin token
     // (`tools::api_tokens::token_minter`). Not readonly: create and revoke
     // hand out and take away fleet access.
+    // M15 step G2.9: a new login profile on a host, signed in or holding an
+    // API key. Fleet administration like `add_host`; the writes also need
+    // the master or a trusted full device (`owner_device_admin`).
+    ToolPolicy {
+        name: "add_account",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     ToolPolicy {
         name: "api_tokens",
         access: Access::Person,
@@ -1520,6 +1530,24 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Gap plan G4.2: a recipient's ask for a wider level, and the owner's
+    // list and answer. Person-only like the rest of this block. Neither is
+    // readonly (`access_requests` grants and declines) nor confirm-gated:
+    // an ask confers nothing, and granting is the owner's own share.
+    ToolPolicy {
+        name: "session_ask_access",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "access_requests",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // The claim path (spec §4.4, clause 1 + the pane proof). The ONE
     // `Access::HostToken` row: see that variant's doc for why no existing one
     // expresses it. Not readonly — it writes the owner and flips the row to
@@ -1548,6 +1576,23 @@ pub fn policy(name: &str) -> Option<&'static ToolPolicy> {
 /// session row such as `set_friendly_name` — is refused with `E_FORBIDDEN`.
 pub fn is_readonly_tool(name: &str) -> bool {
     policy(name).is_some_and(|p| p.readonly)
+}
+
+/// The tools an "answer only" device (`TokenMode::Answer`, M15 step G2.10)
+/// may call beyond the readonly ones. Each narrows itself to answering:
+/// `send_prompt` takes a dialog key and never a prompt, `ask` answers or
+/// declines a form and never opens one.
+pub const ANSWER_TOOLS: &[&str] = &["send_prompt", "ask"];
+
+/// May a token in `mode` call `tool` at all (the readonly and answer-only
+/// half of `enforce_mode`)?
+pub fn mode_allows_tool(mode: crate::mcp::auth::TokenMode, tool: &str) -> bool {
+    use crate::mcp::auth::TokenMode;
+    match mode {
+        TokenMode::Readonly => is_readonly_tool(tool),
+        TokenMode::Answer => is_readonly_tool(tool) || ANSWER_TOOLS.contains(&tool),
+        _ => true,
+    }
 }
 
 /// Tools gated by the `mcp.confirm_destructive` toggle.
@@ -1651,6 +1696,8 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "session_narrow",
     "session_access",
     "my_grants",
+    "session_ask_access",
+    "access_requests",
     "session_presence",
     // The Automation screen's Runs list is a person's: a host's Claude has
     // `list_tasks` for the tasks it dispatched, and proves no person, so
@@ -2337,8 +2384,10 @@ const REDACT_KEYS: &[&str] = &[
 /// `set_secret`'s secret value — not even its length may be persisted (a
 /// length still leaks information about a secret). `secret` is `work_admin`'s
 /// tracker credential, for the same reason. `code` is `link_peer`'s one-time
-/// pairing code, still valid when the link fails (review r04 S3).
-const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret", "code"];
+/// pairing code, still valid when the link fails (review r04 S3), and
+/// `add_account`'s sign-in code. `api_key` is `add_account`'s Anthropic key
+/// (M15 G2.9), which fleet never stores.
+const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret", "code", "api_key"];
 /// Argument keys whose value is an object of person-typed answers (`ask`'s
 /// `values` may carry a form's secret fields): only the field count is kept,
 /// as `<N fields>`, never a name or a value. `args` is a nested payload
@@ -2936,6 +2985,22 @@ mod tests {
         ] {
             assert!(!could_pass_for_a_marker_line(line), "{line:?}");
         }
+    }
+
+    #[test]
+    fn redact_args_never_keeps_an_api_key() {
+        let args = serde_json::json!({
+            "action": "api_key",
+            "api_key": "sk-ant-api03-secretsecretsecret",
+            "host_alias": "mercury",
+            "profile": "api",
+        });
+        let out = redact_args(args.as_object());
+        assert!(
+            !out.contains("sk-ant") && !out.contains("api_key="),
+            "{out}"
+        );
+        assert!(out.contains("host_alias=mercury"), "{out}");
     }
 
     #[test]

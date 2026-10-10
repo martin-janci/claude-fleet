@@ -55,6 +55,10 @@
         {
           "type": "field",
           "key": "restore.stagger_ms"
+        },
+        {
+          "type": "action",
+          "action": "restore.lost"
         }
       ]
     },

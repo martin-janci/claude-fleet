@@ -6,10 +6,15 @@
 
 mod client_header;
 pub mod http1;
+pub mod keep_alive;
 
 #[cfg(test)]
 #[path = "tests_transport.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests_keep_alive.rs"]
+mod tests_keep_alive;
 
 use client_header::client_header_line;
 pub use client_header::set_client_header;
@@ -70,9 +75,11 @@ impl HubTransport for NoTransport {
 // --- the real transport ------------------------------------------------------
 
 /// The hub over HTTP or HTTPS, written by hand onto a `TcpStream` — the same
-/// way `fleet-hub`'s own CLI talks to `/mcp`. One request, one response,
-/// `Connection: close`; there is no connection pool because a desktop makes a
-/// handful of calls a second at worst, and no *usable outbound HTTP client*
+/// way `fleet-hub`'s own CLI talks to `/mcp`. `POST /mcp` reuses kept-alive
+/// connections ([`keep_alive`]: a TLS handshake per call was one to three
+/// round trips in front of every answer); everything else is one request,
+/// one response, `Connection: close`. Written by hand because no *usable
+/// outbound HTTP client*
 /// crate is in this workspace's graph to borrow one from: `hyper` is present
 /// only as `axum`'s server side (via `fleet-core`'s embedded MCP server), and
 /// `reqwest` appears in `Cargo.lock` only through a target-specific `tauri`
@@ -212,7 +219,7 @@ impl HubTransport for TcpTransport {
         let request = format!(
             "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n{}\
              Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+             Content-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
             at.target(),
             at.authority(),
             client_header_line(),
@@ -221,8 +228,7 @@ impl HubTransport for TcpTransport {
         // Unbounded here on purpose: the caller that knows the tool
         // (`HubBackend::call_text`, in `src-tauri`) is the one that times
         // the exchange.
-        let raw = exchange(&at, &request).await?;
-        split_response(&raw)
+        post_kept_alive(&at, request.as_bytes()).await
     }
 
     async fn get_to_file(
@@ -233,6 +239,44 @@ impl HubTransport for TcpTransport {
         max: u64,
     ) -> Result<u64, String> {
         download_to(url, bearer, dest, max).await
+    }
+}
+
+/// Send `request` on a kept-alive connection to `at` ([`keep_alive`]),
+/// opening one when none is kept, and keep it again if the response allows.
+/// A kept connection that answers nothing at all (the server closed it while
+/// it sat idle) costs one retry on a fresh connection; nothing else is ever
+/// sent twice.
+async fn post_kept_alive(at: &Endpoint, request: &[u8]) -> Result<HubResponse, String> {
+    let key = format!(
+        "{}://{}",
+        if at.is_tls() { "https" } else { "http" },
+        at.authority()
+    );
+    let mut kept = keep_alive::take(&key);
+    loop {
+        let reused = kept.is_some();
+        let mut conn = match kept.take() {
+            Some(conn) => conn,
+            None => connect(at).await?,
+        };
+        match keep_alive::exchange(&mut conn, at.host(), at.port(), request, MAX_RESPONSE).await {
+            Ok((response, reusable)) => {
+                if reusable {
+                    keep_alive::put(&key, conn);
+                }
+                return Ok(response);
+            }
+            Err(keep_alive::Failure::NothingBack(why)) if reused => {
+                tracing::debug!(
+                    why,
+                    "[hub] a kept connection had gone; sending on a fresh one"
+                );
+            }
+            Err(keep_alive::Failure::NothingBack(why) | keep_alive::Failure::Other(why)) => {
+                return Err(why)
+            }
+        }
     }
 }
 

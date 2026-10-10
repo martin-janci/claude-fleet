@@ -25,13 +25,29 @@ account usage history (122), the Hosts page's probe facts (123), token use
 (126), the cost of fleet's own `claude -p` runs (127), every PR a session's
 branch has had (`pull_requests`, 128), cost per account (130), prompts
 queued for a busy session (133), the agent CLIs a host has (134) and the
-add-host wizard's state (135). The hub contract is revision 15
+add-host wizard's state (135). The hub contract is revision 16
 (`CONTRACT_REVISION`, `crates/fleet-core/src/wire_contract.rs`):
 revisions 11 to 14 add tools a revision-10 hub does not serve, so the
 desktop and its hub are upgraded together; 15 widens the form spec and
 adds the attention model's two classes (a mission waiting on a person, and
-Jev's "probably waiting" kept apart from Needs you) and no tool, so a
-desktop still accepts a revision-14 hub.
+Jev's "probably waiting" kept apart from Needs you) and no tool; 16 adds
+named tokens (`api_tokens`) and + Add account (`add_account`), so a
+desktop accepts only a revision-16 hub.
+
+The canvas gap plan (M15, steps G0.1 to G6.2; transition plan section M15)
+landed in #779, #812 and #814 and fleet-mobile #192 to #198: the form spec's
+contract-15 fields and the form kit, settings with one Save bar, mission asks
+and Jev proposals in the attention model, task due dates, timed Send later,
+routine event triggers and guards, named Control API tokens, + Add account,
+org switches and the project catalog, access requests for shared sessions,
+and the phone's bottom sheets, chat forms and Inbox rows (migrations 153 to
+160). The re-run audit (`docs/redesign/canvas-gaps-2026-10-10.md`) closes
+233 of 396 rows and leaves 36 missing and 127 partial. Waiting on the owner:
+tracker write-back from Fleet (D3, D29), start rules that name a host,
+account, model or agent, and the six items the plan left out on purpose
+(Wake host, liquid orbit for rebase, the database upgrade ring, waiting for
+the other hub to sign, Bedrock and Vertex accounts, hub settings that follow
+an org).
 
 A session start reports its three real steps (worktree, tmux, agent) as
 `start:progress` frames (redesign 5.13, `service/sessions/start_progress.rs`):
@@ -266,9 +282,59 @@ A native task is edited (title, description, status, assignees) from its
 card's ✎ or E, the List row's ✎ and the task page's *Edit*:
 `EditTaskDialog` writes `edit_work_item` → `work_link { edit }` and
 `set_work_status`; a tracker's ticket stays its tracker's to edit.
-It is not yet scoped to a sprint: the Work view's Sprint / Release axis and
-bulk assignment are not built, nor are epics for local items (phase 4). E9–E11 run on their
-defaults.
+The Work view's Sprint / Release axis (§6a) and bulk assignment (§6b) are
+built: `filters.group_by: sprint | release` (`view::regroup`, the bucket of
+each item read once per tree by `Store::bucket_membership`, fenced by
+`sees_org`), a section header with the bucket's roll-up, a selection in the
+Grouped tree that plans tasks into a sprint or release (moving one out of
+the sprint that held it) or takes them out, and *Sprints & releases*
+(`WorkBuckets.svelte`): create, start, release, close with the carry-over
+confirmed (E9) and delete. Desktop commands `work_buckets` / `work_bucket`
+(→ `work`) and `add_work_to_bucket` / `remove_work_from_bucket` (→
+`work_link`) route; so does `work_bucket_admin`, as `work_link { action:
+bucket_admin, bucket_op }` (owner decision 2026-10-10,
+`buckets::person_admin` / `may_plan`): a person creates and changes
+personal sprints and releases of their own (migration 162,
+`work_buckets.owner_person_id`; one current sprint per owner, a personal
+one wins a group by sprint for its person, never linked to a tracker), and
+an org's team ones as its admin — or member, when the org turns the per-org
+`work.members_plan_sprints` on (off by default; a viewer never). Standalone
+it stays `work_admin`. The board is scoped to a sprint (§6c): a picker over All tasks, each
+open sprint and *No sprint (backlog)* (`boardScope`, kept per machine; a
+sprint is the section of a group by sprint, `boardFilters`, so no new read),
+the sprint's roll-up, dates and goal above the columns with *Start sprint* /
+*Close sprint…* (the close dialog of E9), and Done holding everything the
+sprint delivered rather than the last week; a sprint that closes falls back
+to All tasks. Epics for local items (phase 4, §3) are built: `work_link {
+edit, epic }` marks a top-level local item an epic (`kind = 'epic'`,
+`Store::set_local_epic`), `work_link { set_parent }` (`set_work_parent`,
+routed) files a local item under an epic or a task or takes it out to the
+top (`Store::set_local_parent`), `filters.group_by: epic` sections the Work
+view by the epic a task is or is filed under, and every task carries its
+children's roll-up (`children_total` / `children_done`, computed, never
+closing the parent). The selection's *Under epic…* files tasks in bulk, the
+Edit dialog's *Epic* box marks one, and the row and the Board card show
+*Epic* and *n/m done*. Depth stays ONE, not the spec's three: a local item
+with a parent is never a parent (`parent_for_new_child` now checks every
+local item, not only a native one), because `item_org` — and the org fences
+built on it — walks one level; a filed task cannot hold subtasks, and a task
+with subtasks is not filed. Going deeper is the owner's decision (it moves
+the org fence). Not yet: the phone. E9–E11 run on their defaults.
+
+Task comments (migration 161, `work_item_comments`; the Comments tab G3.4
+had cut is back on the owner's word, 2026-10-10): `work_link { comment,
+item_id, notes }` (`comment_on_work`) and `{ comment_delete, comment_id }`
+(`delete_work_comment`), both routed. A comment is about the ITEM — its
+org fence, `edit`'s person gate for writing — stays in fleet (never a
+tracker's), and is deleted by its author alone (the person when both sides
+prove one, else the caller's label). `work { task }` serves them oldest
+first with `mine`. Device names are their person's (owner decision
+2026-10-10): a comment's author shows to its own person only, and
+`Placement.updated_by` (a device label with no person) only to the hub
+itself and the one person of a one-person hub. The
+task page's Activity tab also lists each session that started, was
+suggested, turned down or stopped, and each comment. Not yet: comments on
+the phone.
 
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
@@ -486,7 +552,11 @@ and merge, read from the `pull_requests` changes reconcile records, with a
 repo filter, "me or anyone in its org" and a rate per PR. The scheduler stops on
 `automation.paused`, a fire past the routine's day budget is skipped, a run
 past its run budget fails and pauses the routine, and a run whose account
-is at or past `accounts.pause_at` is skipped (8.7). Each finished run
+is at or past `accounts.pause_at` is skipped (8.7). M15 G3.8 (migration
+159) adds the guards: a fleet daily budget for every routine's runs
+(`automation.daily_budget`), a per-run time cap, a fallback host, retry
+once, an autonomy line under the prompt, and a named fix on a failed run
+from its error code. Each finished run
 records what it came to (8.10; Jev N6 is off), and a failed run shows in
 the Inbox. `runs` (8.3, migration 141) lists tasks, missions, Jev,
 `claude -p` and routine runs in one list. Start rules (8.11,

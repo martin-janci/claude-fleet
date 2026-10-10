@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HubProjectsPick from './HubProjectsPick.svelte';
   import Icon from './kit/Icon.svelte';
   import Loader from './Loader.svelte';
   import WorkSettings from './WorkSettings.svelte';
@@ -480,6 +481,7 @@
             its own banner, not as this line.
           {/if}
         </p>
+        <HubProjectsPick />
         {#if $hubStatus.warning}
           <p class="err" data-testid="hub-status-warning"><Icon name="warning" size={12} /> {$hubStatus.warning}</p>
         {/if}

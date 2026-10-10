@@ -154,3 +154,44 @@ export function tableOrder(hosts: readonly HostRow[]): HostRow[] {
     return a.alias.localeCompare(b.alias);
   });
 }
+
+/** The Hosts view's Tidy hint (gap plan G4.5): the stopped sessions on one
+ *  host whose worktrees a Tidy clean up would free, with their total size.
+ *  Null when the tidy report names none there with a measured worktree. */
+export interface HostTidyHint {
+  sessionIds: number[];
+  kb: number;
+  text: string;
+}
+
+export function hostTidyHint(
+  candidates: readonly { session_id: number; host_alias: string; worktree_kb?: number | null }[],
+  alias: string,
+): HostTidyHint | null {
+  const here = candidates.filter((c) => c.host_alias === alias && c.worktree_kb != null && c.worktree_kb > 0);
+  if (here.length === 0) return null;
+  const kb = here.reduce((t, c) => t + (c.worktree_kb ?? 0), 0);
+  const n = here.length;
+  return {
+    sessionIds: here.map((c) => c.session_id),
+    kb,
+    text: `${n} stopped session${n === 1 ? '' : 's'} on ${alias} hold${n === 1 ? 's' : ''} ${sizeText(kb)} of worktrees.`,
+  };
+}
+
+/** "Move to host" facts (gap plan G4.5): free disk, load and whether the
+ *  host's account is at its limit, for picking where a session goes.
+ *  `limited` is `attentionFacts.limited_accounts`. Empty when nothing is
+ *  known. */
+export function moveTargetFacts(
+  h: Pick<HostRow, 'disk_home_free_kb' | 'load_1m' | 'account_uuid'>,
+  limited: Readonly<Record<string, { resets_at: number | null }>> | undefined,
+  now: number,
+): string {
+  const parts: string[] = [];
+  if (h.disk_home_free_kb != null) parts.push(`${sizeText(h.disk_home_free_kb)} free`);
+  if (h.load_1m != null) parts.push(`load ${h.load_1m.toFixed(1)}`);
+  const limit = h.account_uuid ? limited?.[h.account_uuid] : undefined;
+  if (limit && (limit.resets_at == null || limit.resets_at > now)) parts.push('account at limit');
+  return parts.join(' · ');
+}

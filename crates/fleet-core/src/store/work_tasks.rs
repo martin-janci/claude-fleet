@@ -2,8 +2,12 @@
 //! subtasks written in fleet (`origin = 'manual'`), agent proposals
 //! (`'proposed'`) and the mirror of a dispatched job (`'agent'`). Every one is
 //! a local item with a `TASK-<id>` key, so the key-driven start path and
-//! branch detection work on them unchanged. Depth is one: a native subtask
-//! is never a parent.
+//! branch detection work on them unchanged. A chain of local items is at
+//! most [`LOCAL_DEPTH_MAX`] deep (epic → task → subtask; owner decision
+//! 2026-10-10), kept by `parent_for_new_child` and
+//! [`Store::set_local_parent`], and `Store::item_org` walks exactly that far.
+//! An epic (sprints design 2026-09-28 §3, `kind = 'epic'`) is a top-level
+//! local item.
 //!
 //! The only writers of `origin`, `project_id`, `notes`, `task_id` and the
 //! proposal columns, and (with `work_status.rs`) of `status_set_by`:
@@ -17,6 +21,20 @@ use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 
 pub const TASK_KEY_PREFIX: &str = "TASK";
+/// The deepest a chain of local items goes: an epic, its task, the task's
+/// subtask. A tracker parent above them is not counted (its tracker owns
+/// that hierarchy).
+pub const LOCAL_DEPTH_MAX: usize = 3;
+
+/// `work_items.kind` of a local epic (sprints design 2026-09-28 §3, E2).
+pub const EPIC_KIND: &str = "epic";
+
+/// An epic: a local one, or a tracker's (Jira's issue type "Epic").
+pub fn is_epic(item: &WorkItemRow) -> bool {
+    item.kind
+        .as_deref()
+        .is_some_and(|k| k.eq_ignore_ascii_case(EPIC_KIND))
+}
 /// Open proposals one parent may hold (counter-review risk 2).
 pub const PROPOSALS_OPEN_CAP: usize = 10;
 
@@ -184,17 +202,66 @@ impl Store {
                 format!("work item {parent_id} not found"),
             )
         })?;
-        let native = matches!(p.origin.as_deref(), Some("manual" | "proposed" | "agent"));
-        if native && p.parent_id.is_some() {
+        // Every local item, not only a native one: `set_local_parent` can
+        // give a named piece of work a parent too.
+        if self.local_depth(parent_id)? >= LOCAL_DEPTH_MAX {
             return Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
-                    "{} is itself a subtask; add the subtask to its parent instead",
+                    "{} is already {LOCAL_DEPTH_MAX} levels deep; add the subtask to its parent \
+                     instead",
                     p.key.as_deref().unwrap_or("that item")
                 ),
             ));
         }
         Ok(p)
+    }
+
+    /// How many local items stand in a row from `item_id` up (itself
+    /// included), stopping at a tracker item or the top: 0 for a tracker
+    /// item. Bounded one past [`LOCAL_DEPTH_MAX`].
+    pub fn local_depth(&self, item_id: i64) -> Result<usize, IpcError> {
+        let n: i64 = self.conn.query_row(
+            "WITH RECURSIVE up(id, parent_id, source, hop) AS ( \
+               SELECT id, parent_id, source, 0 FROM work_items WHERE id = ?1 AND source = 'local' \
+               UNION ALL \
+               SELECT w.id, w.parent_id, w.source, u.hop + 1 FROM work_items w \
+                 JOIN up u ON w.id = u.parent_id \
+                WHERE w.source = 'local' AND u.hop < ?2) \
+             SELECT COUNT(*) FROM up",
+            rusqlite::params![item_id, LOCAL_DEPTH_MAX as i64],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// How many levels hang from `item_id` (itself included): 1 for an item
+    /// with no children. Bounded one past [`LOCAL_DEPTH_MAX`].
+    pub fn subtree_height(&self, item_id: i64) -> Result<usize, IpcError> {
+        let n: i64 = self.conn.query_row(
+            "WITH RECURSIVE down(id, lvl) AS ( \
+               SELECT ?1, 1 \
+               UNION ALL \
+               SELECT w.id, d.lvl + 1 FROM work_items w JOIN down d ON w.parent_id = d.id \
+                WHERE d.lvl <= ?2) \
+             SELECT MAX(lvl) FROM down",
+            rusqlite::params![item_id, LOCAL_DEPTH_MAX as i64],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// Whether `ancestor` is `item_id` or above it.
+    fn is_ancestor_or_self(&self, ancestor: i64, item_id: i64) -> Result<bool, IpcError> {
+        let mut up = Some(item_id);
+        for _ in 0..=LOCAL_DEPTH_MAX + 1 {
+            match up {
+                Some(id) if id == ancestor => return Ok(true),
+                Some(id) => up = self.get_work_item(id)?.and_then(|r| r.parent_id),
+                None => return Ok(false),
+            }
+        }
+        Ok(false)
     }
 
     fn check_project(&self, project_id: Option<i64>) -> Result<(), IpcError> {
@@ -530,11 +597,15 @@ impl Store {
             }
             up = self.get_work_item(id)?.and_then(|r| r.parent_id);
         }
-        let children = self.native_children(item_id)?;
-        if !children.is_empty() && target.parent_id.is_some() {
+        // Its subtasks move under `into`: the chain stays LOCAL_DEPTH_MAX deep.
+        let below = self.subtree_height(item_id)?.saturating_sub(1);
+        if below > 0 && self.local_depth(target.id)? + below > LOCAL_DEPTH_MAX {
             return Err(IpcError::new(
                 codes::E_INVALID,
-                "its subtasks cannot move under a subtask; keep both instead",
+                format!(
+                    "its subtasks would sit more than {LOCAL_DEPTH_MAX} levels deep; keep both \
+                     instead"
+                ),
             ));
         }
         let tx = self.conn.unchecked_transaction()?;
@@ -658,6 +729,155 @@ impl Store {
                 rejected: false,
             },
         )?;
+        self.get_work_item(item_id)
+    }
+
+    /// A person files a local item under `parent` (`Some`), or takes it out
+    /// to the top (`None`) — sprints design 2026-09-28 §3. `None` when the
+    /// item is unknown or not local. Refused (`E_INVALID`, naming why):
+    /// a tracker's ticket (its tracker owns its parent); a delegated job or
+    /// an open proposal (their parent is what they were made for); an epic
+    /// (it sits at the top); a parent that would put the item, or what hangs
+    /// under it, more than [`LOCAL_DEPTH_MAX`] levels deep; the item itself or
+    /// one of its own subtasks (a cycle); a parent of another organisation
+    /// than the one the item is in now (`E_FORBIDDEN`). Taken out to the top, an item that read its org
+    /// from its parent keeps that org as its own, so it never turns
+    /// unassigned by moving.
+    pub fn set_local_parent(
+        &self,
+        item_id: i64,
+        parent: Option<i64>,
+    ) -> Result<Option<WorkItemRow>, IpcError> {
+        let Some(before) = self.get_work_item(item_id)? else {
+            return Ok(None);
+        };
+        if before.source != "local" {
+            return Ok(None);
+        }
+        let label = |i: &WorkItemRow| i.key.clone().unwrap_or_else(|| format!("item {}", i.id));
+        let invalid = |m: String| IpcError::new(codes::E_INVALID, m);
+        if before.origin.as_deref() == Some("agent") {
+            return Err(invalid(format!(
+                "{} is a delegated job; it stays under the task it runs for",
+                label(&before)
+            )));
+        }
+        if matches!(
+            before.proposal_state.as_deref(),
+            Some("proposed" | "rejected")
+        ) {
+            return Err(invalid(format!(
+                "{} is a proposal; accept it before you move it",
+                label(&before)
+            )));
+        }
+        if before.parent_id == parent {
+            return Ok(Some(before));
+        }
+        let own_org: Option<i64> = self.conn.query_row(
+            "SELECT org_id FROM work_items WHERE id = ?1",
+            [item_id],
+            |r| r.get(0),
+        )?;
+        let mut stamp_org = None;
+        match parent {
+            Some(pid) => {
+                if pid == item_id {
+                    return Err(invalid(format!(
+                        "{} cannot be its own parent",
+                        label(&before)
+                    )));
+                }
+                if is_epic(&before) {
+                    return Err(invalid(format!(
+                        "{} is an epic; an epic sits at the top",
+                        label(&before)
+                    )));
+                }
+                if self.is_ancestor_or_self(item_id, pid)? {
+                    return Err(invalid(format!(
+                        "{} cannot go under one of its own subtasks",
+                        label(&before)
+                    )));
+                }
+                let p = self.get_work_item(pid)?.ok_or_else(|| {
+                    IpcError::new(codes::E_NOTFOUND, format!("work item {pid} not found"))
+                })?;
+                if self.local_depth(pid)? + self.subtree_height(item_id)? > LOCAL_DEPTH_MAX {
+                    return Err(invalid(format!(
+                        "{} and what hangs under it would sit more than {LOCAL_DEPTH_MAX} \
+                         levels deep under {}",
+                        label(&before),
+                        label(&p)
+                    )));
+                }
+                let parent_org = self.item_org(pid)?;
+                // The org it has now, its own or read from its parent: a
+                // subtask moves between parents of one org only.
+                if let (Some(mine), Some(theirs)) = (self.item_org(item_id)?, parent_org) {
+                    if mine != theirs {
+                        return Err(IpcError::new(
+                            codes::E_FORBIDDEN,
+                            format!(
+                                "{} belongs to organisation {mine} and {} to organisation \
+                                 {theirs}; fleet does not file work across organisations",
+                                label(&before),
+                                label(&p)
+                            ),
+                        )
+                        .with_details(serde_json::json!({
+                            "work_org_id": mine, "parent_org_id": theirs, "cross_org": true
+                        })));
+                    }
+                }
+            }
+            None => {
+                if own_org.is_none() {
+                    stamp_org = self.item_org(item_id)?;
+                }
+            }
+        }
+        self.conn.execute(
+            "UPDATE work_items SET parent_id = ?1, org_id = COALESCE(org_id, ?2), updated_at = ?3 \
+              WHERE id = ?4 AND source = 'local'",
+            rusqlite::params![parent, stamp_org, now_unix(), item_id],
+        )?;
+        self.emit_work_item(item_id, super::tracker_items::SessionChange::default())?;
+        self.get_work_item(item_id)
+    }
+
+    /// A person marks a top-level local item an epic, or back a task.
+    /// `None` when the item is unknown or not local. An item under a parent
+    /// is refused: an epic sits at the top.
+    pub fn set_local_epic(
+        &self,
+        item_id: i64,
+        epic: bool,
+    ) -> Result<Option<WorkItemRow>, IpcError> {
+        let Some(before) = self.get_work_item(item_id)? else {
+            return Ok(None);
+        };
+        if before.source != "local" {
+            return Ok(None);
+        }
+        if is_epic(&before) == epic {
+            return Ok(Some(before));
+        }
+        if epic && before.parent_id.is_some() {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "{} is under another task; take it out to the top before you make it \
+                     an epic",
+                    before.key.as_deref().unwrap_or("this item")
+                ),
+            ));
+        }
+        self.conn.execute(
+            "UPDATE work_items SET kind = ?1, updated_at = ?2 WHERE id = ?3 AND source = 'local'",
+            rusqlite::params![epic.then_some(EPIC_KIND), now_unix(), item_id],
+        )?;
+        self.emit_work_item(item_id, super::tracker_items::SessionChange::default())?;
         self.get_work_item(item_id)
     }
 

@@ -34,6 +34,9 @@
   import ReplyActions from './ReplyActions.svelte';
   import ForkSheet from './ForkSheet.svelte';
   import SendLaterSheet from './SendLaterSheet.svelte';
+  import ContextHelp from './ContextHelp.svelte';
+  import { askContextHelp, commandLine, helpModel } from './context_help';
+  import { fleetSettings } from './fleet_settings';
   import Icon from './kit/Icon.svelte';
   import { suggestedForkName } from './reply_actions';
   import {
@@ -131,6 +134,10 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
+  import { accessOf, myGrantInfo } from './access';
+  import { orgs as orgList } from './orgs';
+  import { isSharedAccess } from './session_scope';
+  import { readOnlyAnswerLine, sharerName } from './shared_view';
   import { inboxQueue, nextInInbox } from './inbox';
   import { push as pushToast } from './toasts';
   import { projectSkills } from './project_skills';
@@ -1221,6 +1228,12 @@
   // `share.ts::SESSION_TIER`, so a `drive` grantee keeps the whole composer
   // and a `watch` grantee loses it.
   const shareBlocked = $derived($sessionBlocked(session, 'send_prompt'));
+  /** The grant level this person holds on someone else's session, or null
+   *  for their own (gap plan G4.2: the answer card shows to a recipient). */
+  const recipientLevel = $derived.by(() => {
+    const a = $accessOf(session);
+    return isSharedAccess(a) ? a : null;
+  });
   const writeBlocked = $derived(
     hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ?? shareBlocked,
   );
@@ -1685,6 +1698,32 @@
   // (G1.8). Its own question: `queue_prompt`, `drive` like a send. Text
   // only, so a tray with files keeps them for a send now.
   let sendLaterOpen = $state(false);
+  // Context help (`context_help.ts`): ask Haiku about the draft, with the
+  // earlier prompts (the ↑ recall list) and the commands the box accepts as
+  // context. It runs over this machine's ssh, as the terminal does, so it is
+  // offered where the terminal is: on a session this client owns.
+  let helpOpen = $state(false);
+  let helpCommands = $state<string[]>([]);
+  const helpBlocked = $derived(
+    $accessOf(session) !== 'own'
+      ? 'Context help runs over this machine’s SSH, which reaches only sessions you own'
+      : null,
+  );
+  function openHelp() {
+    helpOpen = true;
+    const id = session.id;
+    void projectSkills(id).then((list) => {
+      if (session.id === id) helpCommands = matchSlashCommands('/', list).map(commandLine);
+    });
+  }
+  function askHelp(question: string) {
+    return askContextHelp(
+      { host_alias: session.host_alias, session_name: session.tmux_name, profile: session.claude_profile },
+      { surface: 'composer', line: draft, history, commands: helpCommands },
+      question,
+      helpModel($fleetSettings),
+    );
+  }
   const sendLaterBlocked = $derived(
     viewing !== null
       ? 'Viewing an earlier conversation — go back to current to send.'
@@ -2340,7 +2379,7 @@
             formId={pendingForm.form_id}
             sessionName={session.friendly_name ?? session.tmux_name}
             blocked={formBlocked} />
-        {:else if answerView && writeBlocked === null}
+        {:else if answerView && (writeBlocked === null || recipientLevel !== null)}
           <!-- Hidden rather than disabled when this client may not write to
                the session (multi-user M1), the same shape `SessionRowItem`
                uses for the same card: it is a set of answer BUTTONS, each one
@@ -2348,12 +2387,17 @@
                E_FORBIDDEN. The two surfaces rendered the same card with
                different gating until this; the `blocked` notice below (and the
                row's status chip) still says the session is waiting. -->
+          <!-- Gap plan G4.2: someone the session is shared with sees the
+               question too. At Answer its choices work (the card's own gate
+               is `answer_dialog`); at Read they are disabled and a line says
+               whose question it is. Typing an answer stays drive. -->
           <AnswerPrompt
             {session}
             view={answerView}
-            {onOpenTerminal}
+            onOpenTerminal={writeBlocked === null ? onOpenTerminal : undefined}
             onAnswered={afterAnswer}
-            onOwnWords={showComposer ? () => void tick().then(() => box?.focus()) : undefined}
+            onOwnWords={showComposer && writeBlocked === null ? () => void tick().then(() => box?.focus()) : undefined}
+            readOnlyNote={recipientLevel === 'watch' ? readOnlyAnswerLine(sharerName(session, $myGrantInfo.get(session.id), $orgList)) : undefined}
           />
         {:else if indicator?.kind === 'blocked'}
           <div class="blocked" data-testid="conv-blocked" role="status">
@@ -2481,6 +2525,24 @@
             </li>
           {/each}
         </ul>
+      {/if}
+      {#if helpOpen}
+        <ContextHelp
+          model={helpModel($fleetSettings)}
+          line={draft}
+          what="your earlier prompts"
+          ask={askHelp}
+          insertLabel="Put in the box"
+          testid="conv-help"
+          oninsert={(c) => {
+            draft = c;
+            histIndex = null;
+          }}
+          onclose={() => {
+            helpOpen = false;
+            box?.focus();
+          }}
+        />
       {/if}
       {#if sendError}
         <div class="composer-error" data-testid="conv-composer-error">{sendError}</div>
@@ -2630,6 +2692,15 @@
             {/each}
           </select>
           <span class="composer-hint" id={COMPOSER_HINT_ID} data-testid="conv-composer-hint">{composerHint}</span>
+          <button
+            type="button"
+            class="btn btn--icon btn--quiet"
+            data-testid="conv-help-button"
+            aria-label="Ask {helpModel($fleetSettings)} about this prompt"
+            aria-expanded={helpOpen}
+            title={helpBlocked ?? `Ask ${helpModel($fleetSettings)} about this prompt, with your earlier prompts as context`}
+            disabled={helpBlocked !== null}
+            onclick={() => (helpOpen ? (helpOpen = false) : openHelp())}>?</button>
           <button
             type="button"
             class="btn btn--icon btn--quiet"

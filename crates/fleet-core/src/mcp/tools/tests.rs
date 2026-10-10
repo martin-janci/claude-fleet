@@ -739,6 +739,101 @@ async fn merge_host_folds_the_old_alias_into_the_new_one() {
     assert!(s.get_session("dev-old", "local").unwrap().is_some());
 }
 
+/// M15 step G2.10: an answer-only device reads what a readonly one reads,
+/// plus `send_prompt` and `ask` — and each of those narrows itself to
+/// answering (below). Everything else that writes is refused.
+#[test]
+fn an_answer_only_device_reads_and_answers_and_nothing_more() {
+    let a = client_caller("phone", TokenMode::Answer);
+    for t in ["list_sessions", "capture_session", "send_prompt", "ask"] {
+        assert!(enforce_mode(&a, t).is_ok(), "{t}");
+        assert!(present::visible_to(&a, t), "{t}");
+    }
+    for t in [
+        "kill_session",
+        "new_session",
+        "send_message",
+        "set_friendly_name",
+        "run_prompt",
+    ] {
+        let e = enforce_mode(&a, t).expect_err(t);
+        assert!(e.message.contains("answer-only"), "{t}: {}", e.message);
+        assert!(!present::visible_to(&a, t), "{t}");
+    }
+}
+
+#[tokio::test]
+async fn an_answer_only_device_presses_keys_and_never_types_a_prompt() {
+    let (tools, _store, sid) = keys_test_tools();
+    let typed = tools
+        .send_prompt(
+            Extension(client_caller("phone", TokenMode::Answer)),
+            Parameters(SendPromptParams {
+                session_id: Some(sid),
+                host_alias: None,
+                tmux_name: None,
+                prompt: "rm -rf".into(),
+                submit: true,
+                raw: false,
+                keys: None,
+                force: false,
+                client_msg_id: None,
+                confirm_nonce: None,
+                expect: None,
+            }),
+        )
+        .await
+        .expect_err("a prompt");
+    assert!(
+        typed.message.starts_with("E_FORBIDDEN") && typed.message.contains("never sends a prompt"),
+        "{}",
+        typed.message
+    );
+    // A key that is no answer (an interrupt) is refused before the pane is
+    // read, as for an answer grant: its own session is held to the rule.
+    let interrupt = tools
+        .send_prompt(
+            Extension(client_caller("phone", TokenMode::Answer)),
+            Parameters(SendPromptParams {
+                session_id: Some(sid),
+                host_alias: None,
+                tmux_name: None,
+                prompt: String::new(),
+                submit: true,
+                raw: false,
+                keys: Some("C-c".into()),
+                force: false,
+                client_msg_id: None,
+                confirm_nonce: None,
+                expect: None,
+            }),
+        )
+        .await
+        .expect_err("an interrupt");
+    assert!(
+        interrupt.message.starts_with("E_FORBIDDEN"),
+        "{}",
+        interrupt.message
+    );
+}
+
+#[tokio::test]
+async fn an_answer_only_device_answers_forms_and_never_opens_one() {
+    let g = gate_fixture();
+    let t = test_tools(g.store);
+    let err = t
+        .ask(
+            Extension(client_caller("phone", TokenMode::Answer)),
+            Parameters(AskParams {
+                form: Some(small_form()),
+                ..ask_p()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("never opens one"), "{err:?}");
+}
+
 #[tokio::test]
 async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
     let (tools, _store, sid) = keys_test_tools();
@@ -1493,6 +1588,47 @@ fn control_skill_quotes_status_vocabulary() {
             "SKILL.md documents a value that does not exist: {bogus}"
         );
     }
+}
+
+/// The skill's tool index ("Finding the tools") names every tool a client can
+/// be served and nothing else. A client defers the surface and loads only what
+/// it searches for, so this list is how an agent knows what to load in one
+/// search; by October 2026 it had silently fallen to 65 of 135 tools.
+#[test]
+fn control_skill_tool_index_matches_the_router() {
+    let section = CONTROL_SKILL
+        .split("## Finding the tools")
+        .nth(1)
+        .expect("SKILL.md has a Finding the tools section");
+    let block = section
+        .split("```text")
+        .nth(1)
+        .and_then(|b| b.split("```").next())
+        .expect("the section holds a ```text index");
+    // Each unindented line opens with its job label, the rest are tool names.
+    let listed: std::collections::BTreeSet<&str> = block
+        .lines()
+        .flat_map(|line| {
+            let words = line.split_whitespace();
+            words.skip(usize::from(!line.starts_with(' ')))
+        })
+        .collect();
+    let served: std::collections::BTreeSet<String> = FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .filter(|n| n != crate::mcp::auth::PEER_TOOL)
+        .collect();
+    let missing: Vec<_> = served
+        .iter()
+        .filter(|n| !listed.contains(n.as_str()))
+        .collect();
+    let bogus: Vec<_> = listed.iter().filter(|n| !served.contains(**n)).collect();
+    assert!(
+        missing.is_empty() && bogus.is_empty(),
+        "skills/claude-fleet-control/SKILL.md's tool index is out of date: \
+         add {missing:?} under a job, drop {bogus:?}"
+    );
 }
 
 #[test]
@@ -2643,6 +2779,7 @@ fn router_sum_serves_every_tool() {
         include_str!("prs.rs"),
         include_str!("pr_shepherd.rs"),
         include_str!("api_tokens.rs"),
+        include_str!("add_account.rs"),
         include_str!("routines.rs"),
         include_str!("start_rules.rs"),
         include_str!("presence.rs"),
@@ -3656,6 +3793,8 @@ fn every_caller_kind() -> Vec<(&'static str, Caller)> {
             client_caller("phone", TokenMode::Readonly),
         ),
         ("client peer", client_caller("hub-b", TokenMode::Peer)),
+        // M15 step G2.10: a person's answer-only device.
+        ("client answer", client_caller("phone", TokenMode::Answer)),
         // `fleet-updater`'s token (update-channel design §6.1): `/update/*`
         // and nothing else. Listed here so every gate loop in this file
         // covers it — it is a paired client row bound to no org, which is
@@ -3916,6 +4055,74 @@ fn slimming_never_eats_a_property_named_like_a_keyword() {
     assert_eq!(schema["required"], serde_json::json!(["title"]));
 }
 
+/// An optional parameter loses its `null` (omitting it says the same), a
+/// required one keeps it; an unsigned integer loses `"minimum": 0`, any other
+/// minimum stays.
+#[test]
+fn slimming_drops_null_only_from_optional_parameters() {
+    let mut schema: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_value(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "opt": { "type": ["string", "null"] },
+                "req": { "type": ["string", "null"] },
+                "n": { "type": ["integer", "null"], "format": "uint32", "minimum": 0 },
+                "floor": { "type": "integer", "minimum": 1 },
+                "minimum": { "type": "string" },
+                "kind": { "type": ["string", "null"], "enum": ["a", "b", null] },
+                "spec": {
+                    "anyOf": [{ "$ref": "#/$defs/Spec" }, { "type": "null" }],
+                    "description": "d"
+                }
+            },
+            "required": ["req"]
+        }))
+        .unwrap();
+    present::slim_schema(&mut schema);
+    let p = schema["properties"].as_object().unwrap();
+    assert_eq!(p["opt"], serde_json::json!({ "type": "string" }));
+    assert_eq!(p["req"]["type"], serde_json::json!(["string", "null"]));
+    assert_eq!(p["n"], serde_json::json!({ "type": "integer" }));
+    assert_eq!(p["floor"]["minimum"], 1);
+    assert!(p.contains_key("minimum"), "a property named minimum stays");
+    assert_eq!(p["kind"]["enum"], serde_json::json!(["a", "b"]));
+    assert_eq!(
+        p["spec"],
+        serde_json::json!({ "$ref": "#/$defs/Spec", "description": "d" })
+    );
+}
+
+/// No served tool offers `null` as a type on an optional top-level parameter.
+#[test]
+fn served_optional_parameters_carry_no_null() {
+    for tool in FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .map(present::present)
+    {
+        if let Some(serde_json::Value::Object(props)) = tool.input_schema.get("properties") {
+            let required = tool
+                .input_schema
+                .get("required")
+                .cloned()
+                .unwrap_or_default();
+            for (name, prop) in props {
+                if required
+                    .as_array()
+                    .is_some_and(|r| r.iter().any(|n| n == name))
+                {
+                    continue;
+                }
+                assert!(
+                    !prop.get("type").is_some_and(|t| t.is_array()),
+                    "{}.{name} still offers null: {prop}",
+                    tool.name
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn annotations_follow_the_policy_table() {
     for tool in FleetTools::tool_router_for_doc()
@@ -4167,13 +4374,13 @@ fn list_host_worktrees_is_open_to_a_paired_client_in_either_mode() {
 #[test]
 fn the_served_definition_budget_stays_bounded() {
     /// Definition bytes per tool served to the master token (the widest
-    /// surface). Measured at 107,112 bytes for 133 tools (805 a tool) on
-    /// 2026-10-09, when the redesign audit branch (send_prompt's key list,
-    /// new_session's start token, ask's draft) met main's update_admin
-    /// rollout and policy actions. Raise it only from a measurement the
+    /// surface). Lowered from 815 on 2026-10-10: dropping `null` from
+    /// optional parameters' types and `"minimum": 0` from unsigned ones
+    /// (`present::drop_optional_null`) measured 106,006 bytes for 135 tools
+    /// (785 a tool), down from 110,022. Raise it only from a measurement the
     /// failure prints, and say in the commit message what was measured and
     /// when.
-    const BYTES_PER_TOOL: usize = 815;
+    const BYTES_PER_TOOL: usize = 795;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10891,6 +11098,10 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // what a `watch` grant promised. (`share.ts::SESSION_TIER` carries the
     // same four at `own`.)
     ("session_access", &["Own"]),
+    // Gap plan G4.2: the owner's list and answer of asks is `Own` (it names
+    // the people asking); asking is `Read`, any grantee's.
+    ("access_requests", &["Own"]),
+    ("session_ask_access", &["Read"]),
     ("session_narrow", &["Own"]),
     ("session_share", &["Own"]),
     ("session_unshare", &["Own"]),
@@ -11572,6 +11783,10 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // Task editing: the text the owner's sidebar shows for their own row,
     // behind `set_status`'s gate.
     ("work_link", "edit", &["Drive"]),
+    // Epics: where a person's live work is filed, behind `edit`'s gate.
+    ("work_link", "set_parent", &["Drive"]),
+    // A comment is written into the owner's task: `edit`'s gate.
+    ("work_link", "comment", &["Drive"]),
     // Sprint and release membership: `set_status`'s person gate, on the
     // item planned.
     ("work_link", "bucket_add", &["Drive"]),
@@ -11804,6 +12019,12 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
 /// INSTEAD of a session.
 const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
     (
+        "work_link",
+        "comment_delete",
+        "a comment, by id: its item's org fence first (outside it, unknown), \
+         then its author's alone; no session is named or answered",
+    ),
+    (
         "work",
         "missions",
         "missions, each fenced by its org and then its owner or the org's \
@@ -11993,6 +12214,11 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
     ("work_link", "rule_delete", "a placement rule"),
     ("work_link", "view_save", "a saved view"),
     ("work_link", "view_delete", "a saved view"),
+    (
+        "work_link",
+        "bucket_admin",
+        "a sprint or release itself (no item, no session): fenced by `buckets::may_plan`",
+    ),
 ];
 
 /// The coverage gate: **does every call that can reach a session row say how
@@ -17938,6 +18164,8 @@ fn the_sharing_tools_are_never_a_per_host_tokens() {
         "session_access",
         "my_grants",
         "session_presence",
+        "session_ask_access",
+        "access_requests",
     ] {
         assert!(
             guard::NOT_FOR_HOST_TOKENS.contains(&tool),
@@ -18245,6 +18473,61 @@ async fn sharing_is_the_owners_alone_and_a_grantee_cannot_share_on() {
     share(f.ada_device(), f.a_row, "bob", "watch")
         .await
         .expect("ada owns it");
+}
+
+/// Gap plan G4.2: a grantee asks, the owner sees and grants it, and an ask's
+/// id is no oracle — anyone else answering it hears exactly what a missing
+/// id earns.
+#[tokio::test]
+async fn an_ask_reaches_the_owner_alone_and_its_id_is_no_oracle() {
+    let f = shared_fixture();
+    f.t.session_share(
+        Extension(f.ada_device()),
+        Parameters(SessionShareParams {
+            session_id: f.a_row,
+            person: "bob".into(),
+            org: None,
+            level: "watch".into(),
+        }),
+    )
+    .await
+    .expect("ada shares with bob");
+    let asked =
+        f.t.session_ask_access(
+            Extension(f.bob_device()),
+            Parameters(SessionAskAccessParams {
+                session_id: f.a_row,
+                level: "answer".into(),
+            }),
+        )
+        .await
+        .expect("bob asks");
+    let id = result_json(&asked)["id"].as_i64().expect("id");
+    let answer = |caller: Caller, id: i64| {
+        f.t.access_requests(
+            Extension(caller),
+            Parameters(AccessRequestsParams {
+                action: Some("grant".into()),
+                session_id: None,
+                id: Some(id),
+            }),
+        )
+    };
+    let missing = answer(f.bob_device(), id + 100)
+        .await
+        .expect_err("no such ask");
+    for who in [f.bob_device(), device_of(f.carol, f.ada)] {
+        let err = answer(who, id).await.expect_err("not the owner");
+        assert_eq!(err_code(&err), codes::E_NOTFOUND);
+        assert_eq!(
+            err.message.replace(&id.to_string(), "N"),
+            missing.message.replace(&(id + 100).to_string(), "N"),
+            "the same answer as an id that does not exist"
+        );
+    }
+    answer(f.ada_device(), id).await.expect("ada grants");
+    let mine = result_json(&f.t.my_grants(Extension(f.bob_device())).await.unwrap());
+    assert_eq!(mine["grants"][0]["level"], "answer");
 }
 
 #[tokio::test]

@@ -4,6 +4,7 @@
   "title": "Debug devices",
   "layout": "master_detail",
   "resource": "debug_device",
+  "list_items": [{ "type": "action", "action": "debug_devices.scan_all" }],
   "intro": "Phones, emulators and simulators on your hosts. Set one up once where it is plugged in; sessions use it through fleet's control API (debug_devices), and a shared one from every host of its org.",
   "sections": [
     {

@@ -409,12 +409,16 @@ pub struct SendPromptParams {
     #[serde(default)]
     pub client_msg_id: Option<String>,
     /// Press a key instead; `1`-`9` picks that `pending_input` option
-    /// (toggles it when `multi`). Not recorded; `prompt` must be empty.
+    /// (toggles if `multi`). `prompt` must be empty.
     #[serde(default)]
     #[schemars(extend("enum" = crate::tmux::NamedKey::all_names()))]
     pub keys: Option<String>,
-    /// With `keys`: press only if the pane still shows this dialog.
+    /// With `keys`: its `pending_input`; E_CONFLICT if it moved.
+    // Advertised as a bare object: the nested `ExpectDialog` schema cost
+    // every client ~500 bytes of tool definitions on every connect
+    // (`the_served_definition_budget_stays_bounded`). Still parsed strictly.
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub expect: Option<crate::service::sessions::ExpectDialog>,
     /// Operator only: the nonce a person approved.
     #[serde(default)]
@@ -1354,7 +1358,7 @@ pub struct UpdateAdminParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RoutinesParams {
-    /// list | get | runs | failing | save | preview | delete | set_enabled | skip_next | run_now.
+    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now.
     pub action: String,
     /// Every action but list, and save or preview of a change.
     #[serde(default)]
@@ -1443,6 +1447,29 @@ pub struct SessionGrantParams {
 pub struct SessionAccessParams {
     /// The session, by fleet row id.
     pub session_id: i64,
+}
+
+/// `session_ask_access` (gap plan G4.2).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionAskAccessParams {
+    /// The session shared with you, by fleet row id.
+    pub session_id: i64,
+    /// The level to ask for: answer or drive.
+    pub level: String,
+}
+
+/// `access_requests` (gap plan G4.2).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AccessRequestsParams {
+    /// list (default), grant or decline.
+    #[serde(default)]
+    pub action: Option<String>,
+    /// list: only this session's asks.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// grant / decline: the ask's id.
+    #[serde(default)]
+    pub id: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

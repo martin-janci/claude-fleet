@@ -910,3 +910,70 @@ describe('HostDetail Lost and found with proposals (4.12)', () => {
     localStorage.clear();
   });
 });
+
+describe('HostDetail hosts and accounts (G4.5)', () => {
+  const papaya = { id: 3, owner: 'acme', repo: 'papaya-pos', base_path: '/p', last_session_at: null, adopted: false, system: false };
+  beforeEach(() => {
+    localStorage.clear();
+    mockedDiscover.mockReset();
+    projects.set([{ project: papaya, worktrees: [] }]);
+  });
+  afterEach(() => localStorage.clear());
+
+  it('Ignore leaves an outside pane out on this device, and Show them brings it back', async () => {
+    const scratch = session('mefistos', 'fleet-trn-scratch', { started_at: null, created_at: NOW - 7200 });
+    mount('mefistos', { hostSessions: [scratch] });
+    await fireEvent.click(screen.getByTestId('outside-ignore'));
+    await tick();
+    expect(screen.queryByTestId('outside-panes')).toBeNull();
+    expect(screen.getByTestId('outside-ignored-count').textContent).toContain('1 ignored on this device');
+    await fireEvent.click(screen.getByTestId('outside-show-ignored'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('outside-unignore'));
+    await tick();
+    expect(screen.queryByTestId('outside-ignored-count')).toBeNull();
+    expect(screen.getByTestId('outside-ignore')).toBeTruthy();
+  });
+
+  it('Find another lists the other conversations, its own project first', async () => {
+    const row = lost('mefistos', 'mefistos-a', { project_id: 3, claude_session_id: 'own' });
+    mockedDiscover.mockResolvedValueOnce({
+      ok: true,
+      value: [
+        candidate({ claude_session_id: 'own', cwd: '/own', project_id: 3 }),
+        candidate({ claude_session_id: 'other', cwd: '/other', project_id: 9 }),
+        candidate({ claude_session_id: 'same', cwd: '/same', project_id: 3 }),
+      ],
+    });
+    mount('mefistos', { hostSessions: [row] });
+    await fireEvent.click(screen.getByTestId('detail-find-another'));
+    await tick();
+    await tick();
+    expect(screen.getByTestId('discover-finding-for')).toBeTruthy();
+    const list = screen.getByTestId('discover-list').textContent ?? '';
+    expect(list).not.toContain('/own');
+    expect(list.indexOf('/same')).toBeLessThan(list.indexOf('/other'));
+  });
+
+  it('shows the Tidy hint and Review in Tidy hands over its sessions', async () => {
+    const onreviewtidy = vi.fn();
+    mount('mefistos', {
+      tidyHint: { sessionIds: [4, 5], kb: 1, text: '2 stopped sessions on mefistos hold 3.0 GB of worktrees.' },
+      onreviewtidy,
+    });
+    expect(screen.getByTestId('detail-tidy-hint').textContent).toContain('hold 3.0 GB');
+    await fireEvent.click(screen.getByTestId('detail-tidy-review'));
+    expect(onreviewtidy).toHaveBeenCalledWith([4, 5]);
+  });
+
+  it('+ Add account opens the wizard and Open a shell asks for a shell on this host', async () => {
+    const { switcherRequest } = await import('./switcher_request');
+    mount('mefistos', { onnewsession: vi.fn() });
+    await fireEvent.click(screen.getByTestId('detail-open-shell'));
+    expect(get(switcherRequest)).toEqual({ mode: 'new', host: 'mefistos', ticket: undefined, kind: 'shell' });
+    switcherRequest.set(null);
+    await fireEvent.click(screen.getByTestId('detail-add-account'));
+    await tick();
+    expect(document.body.textContent).toContain('Add account');
+  });
+});

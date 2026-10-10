@@ -6,6 +6,25 @@
       "help": "Delete what is past its window now, as the GC tick would: at most 2,000 rows per table, the rest over later sweeps.",
       "id": "work.retention_sweep",
       "label": "Sweep now"
+    },
+    {
+      "command": "repair_workspaces_now",
+      "help": "Re-add deleted worktree folders on every host now, as the automatic repair would: at most five per run, and an unmounted volume is never touched.",
+      "id": "repair.now",
+      "label": "Repair now"
+    },
+    {
+      "command": "restore_all_lost_sessions",
+      "confirm": "Resume every lost session on every host now? Each one starts its agent again on its host.",
+      "help": "Resume every host's lost sessions now, in batches with the pause between them set above.",
+      "id": "restore.lost",
+      "label": "Restore lost sessions"
+    },
+    {
+      "command": "scan_debug_devices",
+      "help": "Look for attached phones, emulators and simulators on every host now.",
+      "id": "debug_devices.scan_all",
+      "label": "Scan all hosts"
     }
   ],
   "descriptors": [
@@ -165,6 +184,28 @@
       "tags": [],
       "unit": "none",
       "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "0",
+      "help": "What every routine's runs together may spend in one UTC day. Once they have spent it no routine starts a run, Run now included, until the next day. A run already going finishes.",
+      "key": "automation.daily_budget",
+      "kind": {
+        "max": 1000000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Routines daily budget",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "usd",
+      "value": "0",
+      "zero": "none"
     },
     {
       "ai": "suggest",
@@ -1368,6 +1409,26 @@
       "danger": {
         "level": "none"
       },
+      "default": "false",
+      "help": "Let an organisation's members, not only its admins, create and change its sprints and releases. Viewers never can; anyone can keep personal ones.",
+      "key": "work.members_plan_sprints",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Members plan sprints",
+      "modified": false,
+      "per_org": true,
+      "restart": "none",
+      "scope": "org",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "haiku",
       "help": "The model Summarise runs on for a past session, on that session's own host and account.",
       "key": "work.summary_model",
@@ -1389,6 +1450,116 @@
       ],
       "unit": "none",
       "value": "haiku"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "haiku",
+      "help": "The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account.",
+      "key": "work.help_model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Context help model",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "haiku"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Files tab: Draft writes a commit message from the staged diff with claude -p on the session's host. A draft is text you edit and commit yourself.",
+      "key": "work.draft_commit_messages",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft commit messages",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host.",
+      "key": "work.draft_briefs",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft agent briefs",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host.",
+      "key": "work.draft_release_notes",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft release notes",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "A watched session offers \"Since 13:20\": what it did since you last looked, summarised on its own host and account.",
+      "key": "work.catch_up_summaries",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Catch-up summaries",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
     },
     {
       "ai": "suggest",
@@ -1566,7 +1737,7 @@
       "danger": {
         "level": "none"
       },
-      "default": "notify",
+      "default": "automatic",
       "help": "The same choice for fleet-agent on hosts the hub cannot reach.",
       "key": "update.agent.mode",
       "kind": {
@@ -1583,7 +1754,7 @@
       "scope": "fleet",
       "tags": [],
       "unit": "none",
-      "value": "notify"
+      "value": "automatic"
     },
     {
       "ai": "suggest",
@@ -3310,6 +3481,15 @@
         {
           "items": [
             {
+              "key": "automation.daily_budget",
+              "type": "field"
+            }
+          ],
+          "title": "Routines"
+        },
+        {
+          "items": [
+            {
               "key": "playbooks.press_enter",
               "type": "field"
             },
@@ -3391,6 +3571,10 @@
                 "key": "repair.auto_on_tick",
                 "truthy": true
               }
+            },
+            {
+              "action": "repair.now",
+              "type": "action"
             }
           ],
           "title": "Workspace repair"
@@ -3507,6 +3691,10 @@
             {
               "key": "restore.stagger_ms",
               "type": "field"
+            },
+            {
+              "action": "restore.lost",
+              "type": "action"
             }
           ],
           "title": "Restoring lost sessions"
@@ -3723,6 +3911,10 @@
                   "type": "field"
                 },
                 {
+                  "key": "work.members_plan_sprints",
+                  "type": "field"
+                },
+                {
                   "hint": "Set from the work popover; clear it here.",
                   "key": "work.trusted_branch_projects",
                   "type": "field"
@@ -3735,9 +3927,29 @@
                 {
                   "key": "work.summary_model",
                   "type": "field"
+                },
+                {
+                  "key": "work.help_model",
+                  "type": "field"
+                },
+                {
+                  "key": "work.draft_commit_messages",
+                  "type": "field"
+                },
+                {
+                  "key": "work.draft_briefs",
+                  "type": "field"
+                },
+                {
+                  "key": "work.draft_release_notes",
+                  "type": "field"
+                },
+                {
+                  "key": "work.catch_up_summaries",
+                  "type": "field"
                 }
               ],
-              "title": "Summaries"
+              "title": "Writing help"
             }
           ],
           "title": "Detection"
@@ -4346,6 +4558,14 @@
                   "type": "field"
                 },
                 {
+                  "key": "projects",
+                  "type": "field"
+                },
+                {
+                  "key": "accounts",
+                  "type": "field"
+                },
+                {
                   "key": "hosts",
                   "type": "field"
                 },
@@ -4372,6 +4592,10 @@
                   "type": "field"
                 },
                 {
+                  "key": "removed_members",
+                  "type": "field"
+                },
+                {
                   "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. Adding a member offers a pairing code for their device; Pair a device mints another.",
                   "tone": "info",
                   "type": "notice"
@@ -4381,6 +4605,34 @@
             }
           ],
           "title": "Members"
+        },
+        {
+          "sections": [
+            {
+              "items": [
+                {
+                  "key": "team",
+                  "type": "field"
+                }
+              ],
+              "title": "Team"
+            },
+            {
+              "items": [
+                {
+                  "key": "shares",
+                  "type": "field"
+                },
+                {
+                  "text": "An admin takes a share back or narrows it to watch; only a session's owner shares or widens.",
+                  "tone": "info",
+                  "type": "notice"
+                }
+              ],
+              "title": "Sharing"
+            }
+          ],
+          "title": "Sharing"
         },
         {
           "sections": [
@@ -4436,6 +4688,10 @@
                   "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way.",
                   "tone": "warn",
                   "type": "notice"
+                },
+                {
+                  "key": "members_own_sessions_only",
+                  "type": "field"
                 },
                 {
                   "key": "bound_sees_unassigned",
@@ -4593,6 +4849,22 @@
         }
       ],
       "spec": "fleet.page/1",
+      "table": {
+        "columns": [
+          "person",
+          "name",
+          "org",
+          "mode",
+          "trusted",
+          "last_seen_at"
+        ],
+        "filters": [
+          "org",
+          "person"
+        ],
+        "group_by": "person",
+        "title": "People & devices"
+      },
       "title": "Devices"
     },
     {
@@ -5047,6 +5319,12 @@
       "id": "debug_devices",
       "intro": "Phones, emulators and simulators on your hosts. Set one up once where it is plugged in; sessions use it through fleet's control API (debug_devices), and a shared one from every host of its org.",
       "layout": "master_detail",
+      "list_items": [
+        {
+          "action": "debug_devices.scan_all",
+          "type": "action"
+        }
+      ],
       "resource": "debug_device",
       "sections": [
         {
@@ -5144,6 +5422,13 @@
               "from": "param",
               "name": "color"
             }
+          ],
+          [
+            "isolate_sessions",
+            {
+              "from": "param",
+              "name": "isolate_sessions"
+            }
           ]
         ],
         "command": "add_org",
@@ -5164,6 +5449,13 @@
             "name": "color",
             "required": false,
             "type": "color"
+          },
+          {
+            "default": false,
+            "label": "Its sessions are visible only to its members",
+            "name": "isolate_sessions",
+            "required": false,
+            "type": "toggle"
           }
         ],
         "report": false
@@ -5338,108 +5630,59 @@
                   }
                 ],
                 [
-                  "owner",
+                  "match_by",
                   {
                     "from": "param",
-                    "name": "owner"
+                    "name": "match_by"
                   }
                 ],
                 [
-                  "repo",
+                  "value",
                   {
                     "from": "param",
-                    "name": "repo"
+                    "name": "value"
                   }
                 ]
               ],
               "command": "add_org_rule",
               "envelope": "args",
-              "id": "org.add_owner_rule",
-              "label": "Add owner rule",
+              "id": "org.add_rule",
+              "label": "Add rule",
               "params": [
                 {
-                  "label": "GitHub owner",
-                  "max": 100,
-                  "name": "owner",
-                  "placeholder": "acme",
+                  "label": "Match by",
+                  "name": "match_by",
+                  "options": [
+                    [
+                      "repository",
+                      "Repository"
+                    ],
+                    [
+                      "path",
+                      "Path"
+                    ],
+                    [
+                      "host",
+                      "Host"
+                    ],
+                    [
+                      "owner",
+                      "Owner"
+                    ]
+                  ],
                   "required": true,
-                  "type": "text"
+                  "type": "choice"
                 },
                 {
-                  "label": "Repository (optional)",
-                  "max": 100,
-                  "name": "repo",
-                  "placeholder": "api",
-                  "required": false,
-                  "type": "text"
-                }
-              ],
-              "report": false
-            },
-            {
-              "bind": [
-                [
-                  "org_id",
-                  {
-                    "from": "record",
-                    "name": "id"
-                  }
-                ],
-                [
-                  "path_prefix",
-                  {
-                    "from": "param",
-                    "name": "path_prefix"
-                  }
-                ]
-              ],
-              "command": "add_org_rule",
-              "envelope": "args",
-              "id": "org.add_path_rule",
-              "label": "Add path rule",
-              "params": [
-                {
-                  "label": "Path prefix",
+                  "label": "Matches",
                   "max": 1024,
-                  "name": "path_prefix",
-                  "placeholder": "/home/me/work/acme",
+                  "name": "value",
+                  "placeholder": "acme/api · /home/me/work/acme · hetzner-a · acme",
                   "required": true,
                   "type": "text"
                 }
               ],
-              "report": false
-            },
-            {
-              "bind": [
-                [
-                  "org_id",
-                  {
-                    "from": "record",
-                    "name": "id"
-                  }
-                ],
-                [
-                  "host_alias",
-                  {
-                    "from": "param",
-                    "name": "host_alias"
-                  }
-                ]
-              ],
-              "command": "add_org_rule",
-              "envelope": "args",
-              "id": "org.add_host_rule",
-              "label": "Add host rule",
-              "params": [
-                {
-                  "label": "Host",
-                  "max": 100,
-                  "name": "host_alias",
-                  "placeholder": "hetzner-a",
-                  "required": true,
-                  "type": "text"
-                }
-              ],
+              "preview": "org_rule_preview",
               "report": false
             }
           ],
@@ -5463,6 +5706,112 @@
             "envelope": "args",
             "id": "org.remove_rule",
             "label": "Remove rule",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "from": "param",
+                    "name": "name"
+                  }
+                ],
+                [
+                  "remote",
+                  {
+                    "from": "param",
+                    "name": "remote"
+                  }
+                ],
+                [
+                  "path",
+                  {
+                    "from": "param",
+                    "name": "path"
+                  }
+                ],
+                [
+                  "hosts",
+                  {
+                    "from": "param",
+                    "name": "hosts"
+                  }
+                ]
+              ],
+              "command": "add_org_project",
+              "envelope": "args",
+              "id": "org.add_project",
+              "label": "Add project",
+              "params": [
+                {
+                  "label": "Name",
+                  "max": 80,
+                  "name": "name",
+                  "placeholder": "api",
+                  "required": true,
+                  "type": "text"
+                },
+                {
+                  "label": "Remote (optional)",
+                  "max": 1024,
+                  "name": "remote",
+                  "placeholder": "git@github.com:acme/api.git",
+                  "required": false,
+                  "type": "text"
+                },
+                {
+                  "label": "Path on hosts (optional)",
+                  "max": 1024,
+                  "name": "path",
+                  "placeholder": "~/src/api",
+                  "required": false,
+                  "type": "text"
+                },
+                {
+                  "label": "Hosts allowed (optional; every host of the org when empty)",
+                  "max": 1024,
+                  "name": "hosts",
+                  "placeholder": "hetzner-a, hetzner-b",
+                  "required": false,
+                  "type": "text"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "The org's project catalog: a project its people work on, with its remote, where it is checked out and the hosts it may run on (none: every host of the org).",
+          "id": "projects",
+          "item_label": {
+            "type": "org_project"
+          },
+          "label": "Projects",
+          "remove": {
+            "bind": [
+              [
+                "project_id",
+                {
+                  "from": "item_field",
+                  "name": "id"
+                }
+              ]
+            ],
+            "command": "remove_org_project",
+            "envelope": "args",
+            "id": "org.remove_project",
+            "label": "Remove the project",
             "params": [],
             "report": false
           },
@@ -5602,6 +5951,16 @@
         },
         {
           "add": [],
+          "help": "The Claude accounts its hosts are signed in to. Add or switch one on Settings → Hosts.",
+          "id": "accounts",
+          "item_label": {
+            "type": "org_account"
+          },
+          "label": "Accounts",
+          "type": "items"
+        },
+        {
+          "add": [],
           "help": "Asset catalogs this org owns; its hosts receive them. Add or remove one in Settings → Catalogs.",
           "id": "catalogs",
           "item_label": {
@@ -5707,7 +6066,8 @@
                   "name": "person",
                   "placeholder": "jane",
                   "required": true,
-                  "type": "text"
+                  "source": "people",
+                  "type": "suggest"
                 },
                 {
                   "label": "Role",
@@ -5767,6 +6127,115 @@
           "type": "items"
         },
         {
+          "add": [],
+          "each": [
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "person_id",
+                  {
+                    "from": "item_field",
+                    "name": "person_id"
+                  }
+                ]
+              ],
+              "command": "revoke_org_member_grants",
+              "confirm": "Every share they still hold on this org's sessions is taken back. The sessions' owners can share again.",
+              "envelope": "args",
+              "id": "org.revoke_former_grants",
+              "label": "Take back their shares",
+              "params": [],
+              "report": false
+            }
+          ],
+          "help": "Who left the company, and the shares on its sessions they still hold. Take those back here. Shown to its admins.",
+          "id": "removed_members",
+          "item_label": {
+            "type": "removed_member"
+          },
+          "label": "Removed members",
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "Who is working on what: each member's live sessions in this org that you can see, with their state, and how many more are private.",
+          "id": "team",
+          "item_label": {
+            "type": "team_member"
+          },
+          "label": "Team",
+          "type": "items"
+        },
+        {
+          "add": [],
+          "each": [
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "grant_id",
+                  {
+                    "from": "item_field",
+                    "name": "id"
+                  }
+                ]
+              ],
+              "command": "narrow_org_share",
+              "confirm": "They keep reading the session and can no longer answer or drive it.",
+              "envelope": "args",
+              "id": "org.narrow_share",
+              "label": "Narrow to watch",
+              "params": [],
+              "report": false
+            }
+          ],
+          "help": "Every share on this org's sessions: whose session, with whom, at what level, since when. An admin can take one back or narrow it to watch, never widen it. A session you cannot see reads \"a private session\".",
+          "id": "shares",
+          "item_label": {
+            "type": "org_share"
+          },
+          "label": "Sharing",
+          "remove": {
+            "bind": [
+              [
+                "org_id",
+                {
+                  "from": "record",
+                  "name": "id"
+                }
+              ],
+              [
+                "grant_id",
+                {
+                  "from": "item_field",
+                  "name": "id"
+                }
+              ]
+            ],
+            "command": "revoke_org_share",
+            "confirm": "They lose this session at once. Its owner can share it again.",
+            "envelope": "args",
+            "id": "org.revoke_share",
+            "label": "Revoke",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
           "badge": {
             "text": "owns the hub",
             "when": "true"
@@ -5800,6 +6269,20 @@
           "help": "Also hide this org's sessions from other orgs' hosts, and theirs from its hosts: list, peer status, messages. Work data is fenced either way.",
           "id": "isolate_sessions",
           "label": "Isolate sessions",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "members see the team's sessions",
+            "when": "false"
+          },
+          "confirm": "Its members will watch each other's sessions in this org: what each one's Claude is doing and has said. They still cannot answer or drive them without a share.",
+          "default": true,
+          "edit": "members_own_sessions_only",
+          "help": "On (the default): a member sees their own sessions and what is shared with them. Off: the org's members also watch each other's sessions in it — read only; answering or driving one still needs a share. Only the hub's owner turns it off; an org admin can turn it back on.",
+          "id": "members_own_sessions_only",
+          "label": "Members see only their own sessions",
           "on_off": false,
           "type": "bool"
         },
@@ -6470,9 +6953,10 @@
               "label": "Person",
               "max": 64,
               "name": "person",
-              "placeholder": "ada",
+              "placeholder": "jane",
               "required": true,
-              "type": "text"
+              "source": "people",
+              "type": "suggest"
             }
           ],
           "report": false
@@ -6531,8 +7015,12 @@
                 "Full"
               ],
               [
+                "answer",
+                "Answer only"
+              ],
+              [
                 "readonly",
-                "Read-only"
+                "Watch only"
               ]
             ],
             "required": true,
@@ -6549,9 +7037,10 @@
             "label": "Belongs to (optional; you when empty)",
             "max": 64,
             "name": "person",
-            "placeholder": "ada",
+            "placeholder": "jane",
             "required": false,
-            "type": "text"
+            "source": "people",
+            "type": "suggest"
           }
         ],
         "report": false,
@@ -6590,7 +7079,7 @@
             "when": "label"
           },
           "edit": "mode",
-          "help": "Full drives sessions; read-only watches. A viewer's device stays read-only whatever it says here.",
+          "help": "Full drives sessions; answer only answers their questions and permission prompts and never types a prompt; watch only reads. A viewer's device watches only whatever it says here.",
           "id": "mode",
           "label": "Mode",
           "options": [
@@ -6599,8 +7088,12 @@
               "Full"
             ],
             [
+              "answer",
+              "Answer only"
+            ],
+            [
               "readonly",
-              "Read-only"
+              "Watch only"
             ]
           ],
           "type": "choice"

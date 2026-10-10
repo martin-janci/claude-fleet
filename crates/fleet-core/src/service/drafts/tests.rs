@@ -13,7 +13,28 @@ fn store_with_session(profile: Option<&str>) -> (Mutex<Store>, i64) {
         .upsert_session("dev-1", "mercury", None, None, 1, 1, "running", None)
         .unwrap();
     s.set_session_profile(id, profile).unwrap();
+    settings::set(&s, settings::WORK_DRAFT_COMMIT_MESSAGES, "true").unwrap();
     (Mutex::new(s), id)
+}
+
+#[tokio::test]
+async fn nothing_runs_while_writing_help_is_off() {
+    let (store, id) = store_with_session(None);
+    settings::set(
+        &lock(&store).unwrap(),
+        settings::WORK_DRAFT_COMMIT_MESSAGES,
+        "false",
+    )
+    .unwrap();
+    let fake = FakeSsh::new();
+    let e = draft_commit_message(&store, &fake, id).await.unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID_STATE);
+    assert!(
+        e.message.contains("Draft commit messages is off"),
+        "{}",
+        e.message
+    );
+    assert!(fake.calls().is_empty());
 }
 
 #[tokio::test]

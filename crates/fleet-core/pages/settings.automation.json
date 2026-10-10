@@ -16,6 +16,15 @@
       ]
     },
     {
+      "title": "Routines",
+      "items": [
+        {
+          "type": "field",
+          "key": "automation.daily_budget"
+        }
+      ]
+    },
+    {
       "title": "Playbooks",
       "items": [
         {
@@ -100,6 +109,10 @@
             "key": "repair.auto_on_tick",
             "truthy": true
           }
+        },
+        {
+          "type": "action",
+          "action": "repair.now"
         }
       ]
     },

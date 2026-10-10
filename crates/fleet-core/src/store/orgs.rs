@@ -115,9 +115,19 @@ pub struct OrgRow {
     /// (the hub owner's switch, off by default).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub admins_see_unclaimed: bool,
+    /// M15 step G2.10 (migration 158): its members see only their own
+    /// sessions and what is shared with them (the default). Off, they also
+    /// watch each other's sessions in it (`ViewScope`'s team reach). Absent
+    /// from an older hub, which has no team reach.
+    #[serde(default = "members_own_sessions_only_default")]
+    pub members_own_sessions_only: bool,
 }
 
 fn bound_sees_unassigned_default() -> bool {
+    true
+}
+
+fn members_own_sessions_only_default() -> bool {
     true
 }
 
@@ -298,7 +308,8 @@ pub fn normalize_rule(mut r: OrgRuleRow) -> Result<OrgRuleRow, IpcError> {
 const ORG_COLUMNS: &str = "id, name, color, isolate_sessions, created_at, auto_tidy, jev_allowed, \
                            bound_sees_unassigned, owns_hub, admins_see_unclaimed, \
                            EXISTS (SELECT 1 FROM org_settings os WHERE os.org_id = orgs.id \
-                                   AND os.key = 'decide.jev.reply_consent' AND os.value = 'true')";
+                                   AND os.key = 'decide.jev.reply_consent' AND os.value = 'true'), \
+                           members_own_sessions_only";
 
 /// `org_settings.key` of an org's reply-text consent (D48, J2): `true` =
 /// consented. NOT a settings spec on purpose: a consent is never inherited
@@ -321,6 +332,7 @@ fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
         owns_hub: r.get::<_, i64>(8)? != 0,
         admins_see_unclaimed: r.get::<_, i64>(9)? != 0,
         jev_reply_allowed: r.get::<_, i64>(10)? != 0,
+        members_own_sessions_only: r.get::<_, i64>(11)? != 0,
     })
 }
 
@@ -433,6 +445,19 @@ impl Store {
         let n = self.conn.execute(
             "UPDATE orgs SET auto_tidy = ?2 WHERE id = ?1",
             rusqlite::params![id, on.map(|b| b as i64)],
+        )?;
+        if n == 0 {
+            return Err(org_not_found(id));
+        }
+        self.get_org(id)?.ok_or_else(|| org_not_found(id))
+    }
+
+    /// Set an org's "members see only their own sessions" switch (M15 step
+    /// G2.10). Off lets its members watch each other's sessions in it.
+    pub fn set_org_members_own_sessions_only(&self, id: i64, on: bool) -> Result<OrgRow, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE orgs SET members_own_sessions_only = ?2 WHERE id = ?1",
+            rusqlite::params![id, on as i64],
         )?;
         if n == 0 {
             return Err(org_not_found(id));
@@ -595,6 +620,11 @@ impl Store {
         )?;
         tx.execute(
             "DELETE FROM org_rules WHERE org_id = ?1",
+            rusqlite::params![id],
+        )?;
+        // M15 step G2.10 (migration 158): its project catalog.
+        tx.execute(
+            "DELETE FROM org_projects WHERE org_id = ?1",
             rusqlite::params![id],
         )?;
         // Org administration phase C (migration 106): its own settings and
@@ -818,25 +848,29 @@ impl Store {
         // native subtask reads as unassigned and the org gates on a start
         // (`check_cross_org`, `brief_visible_on`) pass everything.
         //
-        // One level is the whole hierarchy: `parent_for_new_child` refuses a
-        // native parent that is itself a subtask, and a tracker parent's org
-        // comes from its tracker, so no further walk is possible.
+        // The walk goes up through local items with no org of their own, at
+        // most `LOCAL_DEPTH_MAX` hops (epic → task → subtask, then a tracker
+        // parent above them), and stops at the first item that answers: a
+        // tracker item answers with its tracker's org (unassigned included),
+        // a local item with its own. `set_local_parent` / `parent_for_new_child`
+        // keep a local chain that deep and refuse a cycle, and the hop cap
+        // bounds the walk even if one existed.
         Ok(self
             .conn
             .query_row(
-                "SELECT CASE \
-                   WHEN i.tracker_id IS NOT NULL \
-                     THEN (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id) \
-                   WHEN i.org_id IS NOT NULL THEN i.org_id \
-                   WHEN i.parent_id IS NOT NULL \
-                     THEN (SELECT CASE WHEN p.tracker_id IS NOT NULL \
-                                         THEN (SELECT t.org_id FROM trackers t \
-                                                WHERE t.id = p.tracker_id) \
-                                         ELSE p.org_id END \
-                             FROM work_items p WHERE p.id = i.parent_id) \
-                   ELSE NULL END \
-                 FROM work_items i WHERE i.id = ?1",
-                rusqlite::params![item_id],
+                "WITH RECURSIVE chain(id, parent_id, tracker_id, org_id, hop) AS ( \
+                   SELECT id, parent_id, tracker_id, org_id, 0 FROM work_items WHERE id = ?1 \
+                   UNION ALL \
+                   SELECT w.id, w.parent_id, w.tracker_id, w.org_id, c.hop + 1 \
+                     FROM work_items w JOIN chain c ON w.id = c.parent_id \
+                    WHERE c.tracker_id IS NULL AND c.org_id IS NULL AND c.hop < ?2) \
+                 SELECT CASE WHEN c.tracker_id IS NOT NULL \
+                               THEN (SELECT t.org_id FROM trackers t WHERE t.id = c.tracker_id) \
+                             ELSE c.org_id END \
+                   FROM chain c \
+                  WHERE c.tracker_id IS NOT NULL OR c.org_id IS NOT NULL \
+                  ORDER BY c.hop LIMIT 1",
+                rusqlite::params![item_id, super::LOCAL_DEPTH_MAX as i64],
                 |r| r.get::<_, Option<i64>>(0),
             )
             .optional()?

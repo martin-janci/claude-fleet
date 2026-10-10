@@ -44,7 +44,11 @@
     type ShellTerminalsResult,
   } from './terminals';
   import TerminalStrip from './TerminalStrip.svelte';
+  import ContextHelp from './ContextHelp.svelte';
+  import { askContextHelp, helpModel, screenHistory } from './context_help';
+  import { fleetSettings } from './fleet_settings';
   import { AGENT_LABELS } from './row_groups';
+  import { agentTabLabel, agentTabName } from './prefs';
   import Self from './TerminalView.svelte';
   import HostOffline from './states/HostOffline.svelte';
   import { errorText } from './error_copy';
@@ -317,6 +321,53 @@
   onDestroy(() => {
     if (isRoot) terminalPane.set({ sessionId: null, shells: [], active: null });
   });
+
+  // ── Context help on the picked shell (`context_help.ts`) ─────────────
+  // Haiku answers about the shell's prompt line, with the shell's own tmux
+  // scrollback (read on the host) as its history; what this window shows
+  // stands in when that cannot be read. Its proposal is typed onto the
+  // prompt line — Ctrl+U first, so it replaces what was typed — and never
+  // followed by Enter.
+  let helpOpen = $state(false);
+  $effect(() => {
+    void activeShell;
+    helpOpen = false;
+  });
+  /** The picked shell's screen as this window holds it: only when this pane
+   *  shows it (not split, where the side pane holds its own screen). */
+  function shellScreen(): { text: string; line: string } {
+    void renderVersion;
+    if (!screen || split || activeShell == null) return { text: '', line: '' };
+    const s = screen;
+    const text = s.selectionText({ row: 0, col: 0 }, { row: s.rows - 1, col: s.cols - 1 });
+    const line = s.selectionText({ row: s.cursorRow, col: 0 }, { row: s.cursorRow, col: s.cols - 1 });
+    return { text, line };
+  }
+  const helpInsertBlocked = $derived(
+    activeShell != null && activity[activeShell]?.state === 'running'
+      ? `${activity[activeShell]?.command} is running in this shell: copy the command instead`
+      : null,
+  );
+  function askShellHelp(question: string) {
+    const sel = $selectedSession;
+    const n = activeShell;
+    if (!sel || n == null) {
+      return Promise.resolve({ ok: false as const, error: { code: 'E_INVALID', message: 'No shell is picked' } });
+    }
+    const { text, line } = shellScreen();
+    return askContextHelp(
+      { host_alias: sel.host_alias, session_name: sel.tmux_name, profile: sel.claude_profile },
+      { surface: 'shell', terminal: n, line, history: screenHistory(text) },
+      question,
+      helpModel($fleetSettings),
+    );
+  }
+  function insertShellCommand(command: string) {
+    if (activeShell == null) return;
+    void invoke('pty_write', { args: { id: terminalPtyId(activeShell), data: `\x15${command}` } }).catch((e) => {
+      pushError(toIpcError(e), 'Insert failed');
+    });
+  }
 
   /** Clear the picked terminal's screen: Ctrl+L to its shell. */
   function clearTerminal() {
@@ -1525,7 +1576,7 @@
 {:else if $selectedSession}
   <div class="term-root" class:nested={!isRoot}>
   {#if popoutTarget}
-    {@const what = myShell == null ? (AGENT_LABELS[sessionAgent($selectedSession)] ?? 'Terminal') : `Shell ${myShell}`}
+    {@const what = myShell == null ? agentTabLabel(AGENT_LABELS[sessionAgent($selectedSession)], $agentTabName) : `Shell ${myShell}`}
     <div class="popout-bar" data-testid="popout-bar">
       <span class="popout-name">{what} · popped out</span>
       <span class="popout-gap"></span>
@@ -1558,7 +1609,7 @@
   {/if}
   {#if showStrip}
     <TerminalStrip
-      agentLabel={AGENT_LABELS[sessionAgent($selectedSession)] ?? 'Terminal'}
+      agentLabel={agentTabLabel(AGENT_LABELS[sessionAgent($selectedSession)], $agentTabName)}
       {shells}
       active={activeShell}
       {split}
@@ -1573,7 +1624,25 @@
       opensOn={$terminalOpensOn}
       onopenson={(at) => terminalOpensOn.set(at)}
       {activity}
+      onhelp={activeShell != null ? () => (helpOpen = !helpOpen) : undefined}
+      helpModel={helpModel($fleetSettings)}
+      {helpOpen}
     />
+    {#if helpOpen && activeShell != null}
+      <div class="shell-help">
+        <ContextHelp
+          model={helpModel($fleetSettings)}
+          line={shellScreen().line}
+          what="shell {activeShell}’s history"
+          ask={askShellHelp}
+          insertLabel="Put on the prompt line"
+          insertBlocked={helpInsertBlocked}
+          testid="terminal-help-panel"
+          oninsert={insertShellCommand}
+          onclose={() => (helpOpen = false)}
+        />
+      </div>
+    {/if}
   {/if}
   <div class="term-panes">
   <div class="wrap">
@@ -1842,6 +1911,11 @@
   }
   .popout-act:hover {
     color: var(--fg);
+  }
+  .shell-help {
+    flex: none;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
   }
   .term-panes {
     flex: 1 1 auto;

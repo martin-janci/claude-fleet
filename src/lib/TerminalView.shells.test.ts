@@ -371,3 +371,77 @@ describe('pop out (step 5.4)', () => {
     expect(args(calls('open_terminal_window')[1])).toEqual({ session_id: 1, shell: null, title: 'api' });
   });
 });
+
+describe('context help on a shell', () => {
+  /** Answer `context_help` with `reply`; every other command as before. */
+  function helpAnswers(reply: unknown) {
+    const base = inv().getMockImplementation() as (cmd: string, payload?: unknown) => unknown;
+    inv().mockImplementation(async (cmd: string, payload?: unknown) =>
+      cmd === 'context_help' ? reply : base(cmd, payload),
+    );
+  }
+  it('asks about the picked shell with its own history and types the proposal without Enter', async () => {
+    open = [1, 2];
+    cmds = { 1: 'zsh', 2: 'vim' };
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    expect(screen.queryByTestId('terminal-help')).toBeNull();
+    await fireEvent.click(screen.getByTestId('terminal-tab-1'));
+    await settle();
+    helpAnswers({
+      answer: 'No upstream yet.',
+      command: 'git push -u origin HEAD',
+      model: 'haiku',
+      host_alias: 'alpha',
+      history_items: 40,
+      at: 1,
+    });
+    await fireEvent.click(screen.getByTestId('terminal-help'));
+    await settle();
+    const q = screen.getByTestId('terminal-help-panel-question');
+    await fireEvent.input(q, { target: { value: 'why?' } });
+    await fireEvent.keyDown(q, { key: 'Enter' });
+    await settle();
+    expect(args(calls('context_help')[0])).toMatchObject({
+      surface: 'shell',
+      host_alias: 'alpha',
+      session_name: 'api',
+      terminal: 1,
+      question: 'why?',
+      model: 'haiku',
+    });
+    expect(calls('pty_write')).toHaveLength(0);
+    await fireEvent.click(screen.getByTestId('terminal-help-panel-insert'));
+    await settle();
+    // Ctrl+U clears what was typed; no newline follows.
+    expect(args(calls('pty_write').at(-1)!)).toEqual({ id: 'sh1', data: '\x15git push -u origin HEAD' });
+    expect(screen.queryByTestId('terminal-help-panel')).toBeNull();
+  });
+
+  it('keeps Insert off while a program runs in the shell', async () => {
+    open = [2];
+    cmds = { 2: 'vim' };
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-tab-2'));
+    await settle();
+    helpAnswers({
+      answer: 'Quit with :q',
+      command: 'ls',
+      model: 'haiku',
+      host_alias: 'alpha',
+      history_items: 3,
+      at: 1,
+    });
+    await fireEvent.click(screen.getByTestId('terminal-help'));
+    await settle();
+    await fireEvent.input(screen.getByTestId('terminal-help-panel-question'), { target: { value: 'how do I quit?' } });
+    await fireEvent.click(screen.getByTestId('terminal-help-panel-ask'));
+    await settle();
+    const insert = screen.getByTestId('terminal-help-panel-insert') as HTMLButtonElement;
+    expect(insert.disabled).toBe(true);
+    expect(insert.title).toContain('vim is running');
+  });
+});

@@ -8,6 +8,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WatchSummary from './WatchSummary.svelte';
 import { checkLabel, clock, defaultSince, type WatchSummary as Summary } from './watch_summary';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 
 const viewed = new Date(2026, 9, 8, 13, 20).getTime() / 1000;
 const session = { id: 7, last_viewed_at: viewed };
@@ -32,6 +33,7 @@ function calls() {
 
 describe('WatchSummary', () => {
   beforeEach(() => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.catch_up_summaries': 'true' });
     vi.mocked(invoke).mockReset();
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date(2026, 9, 8, 14, 0));

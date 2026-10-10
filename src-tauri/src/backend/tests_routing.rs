@@ -871,6 +871,27 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "add_account",
+            "add_account",
+            json!({ "action": "daily_limit", "host_alias": "trn", "profile": "api", "daily_limit_usd": 5.0 }),
+            r#"{"account_uuid":"apikey-0123456789abcdef","daily_limit_usd":5.0}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::add_account::routed::add_account(
+                    b,
+                    s,
+                    h,
+                    fleet_core::service::add_account::AddAccountArgs {
+                        action: "daily_limit".into(),
+                        host_alias: "trn".into(),
+                        profile: "api".into(),
+                        daily_limit_usd: Some(5.0),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "start_rules",
             "start_rules",
             json!({ "action": "accept", "rule_id": 3 }),
@@ -1204,6 +1225,59 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Task comments.
+        (
+            "comment_on_work",
+            "work_link",
+            json!({ "session_id": null, "action": "comment", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "notes": "Looks good" }),
+            r#"{"id":3,"item_id":9,"author":"client:desk","body":"Looks good","created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::comment_on_work(
+                    b,
+                    commands::work_view::CommentOnWorkArgs {
+                        item_id: 9,
+                        body: "Looks good".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "delete_work_comment",
+            "work_link",
+            json!({ "session_id": null, "action": "comment_delete", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "comment_id": 3 }),
+            r#"{"id":3,"item_id":9,"author":"client:desk","body":"Looks good","created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::delete_work_comment(
+                    b,
+                    commands::work_view::DeleteWorkCommentArgs { comment_id: 3 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Epics (sprints design 2026-09-28 §3).
+        (
+            "set_work_parent",
+            "work_link",
+            json!({ "session_id": null, "action": "set_parent", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "parent": "item:5" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::set_work_parent(
+                    b,
+                    commands::work::SetWorkParentArgs {
+                        item_id: 9,
+                        parent: "item:5".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // Task editing.
         (
             "edit_work_item",
@@ -1221,6 +1295,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                         notes: Some(String::new()),
                         assignees: Some(vec!["Ana".into()]),
                         due_at: Some("2026-10-16".into()),
+                        epic: None,
                     },
                     s,
                 ))
@@ -1798,6 +1873,37 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Sprints and releases (design 2026-09-28 §6a).
+        (
+            "work_buckets",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "buckets", "kind": "sprint" }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_buckets(
+                    b,
+                    commands::work_view::WorkBucketsArgs {
+                        kind: Some("sprint".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_bucket",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "bucket", "bucket_id": 4 }),
+            r#"{"bucket":{"id":4,"kind":"sprint","name":"Sprint 24","state":"active","created_at":1,"updated_at":1,"version":1},"members":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_bucket(
+                    b,
+                    commands::work_view::WorkBucketArgs { bucket_id: 4 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "work_org_impact",
             "work",
@@ -1966,6 +2072,24 @@ fn routed_mutation_cases() -> Vec<Case> {
 fn org_admin_read_cases() -> Vec<Case> {
     use fleet_core::service::org_admin::OrgAdminArgs;
     vec![
+        (
+            "org_rule_preview",
+            "org_admin",
+            json!({ "action": "rule_preview", "org_id": 1, "owner": "acme" }),
+            r#"{"matches":0,"moving":0,"from":[],"kept":0,"sentence":""}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::org_rule_preview(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        owner: Some("acme".into()),
+                        ..OrgAdminArgs::new("rule_preview")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "list_devices",
             "org_admin",
@@ -2162,6 +2286,96 @@ fn org_admin_mutation_cases() -> Vec<Case> {
                     OrgAdminArgs {
                         rule_id: Some(3),
                         ..OrgAdminArgs::new("remove_rule")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "add_org_project",
+            "org_admin",
+            json!({ "action": "add_project", "org_id": 1, "name": "api", "hosts": "h" }),
+            r#"{"id":4}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::add_org_project(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        name: Some("api".into()),
+                        hosts: Some("h".into()),
+                        ..OrgAdminArgs::new("add_project")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_org_project",
+            "org_admin",
+            json!({ "action": "remove_project", "project_id": 4 }),
+            r#"{"removed":4}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::remove_org_project(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        project_id: Some(4),
+                        ..OrgAdminArgs::new("remove_project")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "revoke_org_share",
+            "org_admin",
+            json!({ "action": "revoke_share", "org_id": 1, "grant_id": 5 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::revoke_org_share(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        grant_id: Some(5),
+                        ..OrgAdminArgs::new("revoke_share")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "narrow_org_share",
+            "org_admin",
+            json!({ "action": "narrow_share", "org_id": 1, "grant_id": 5 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::narrow_org_share(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        grant_id: Some(5),
+                        ..OrgAdminArgs::new("narrow_share")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "revoke_org_member_grants",
+            "org_admin",
+            json!({ "action": "revoke_member_grants", "org_id": 1, "person_id": 2 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::revoke_org_member_grants(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        person_id: Some(2),
+                        ..OrgAdminArgs::new("revoke_member_grants")
                     },
                 ))
                 .map(|_| ())
@@ -4111,6 +4325,62 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Sprints and releases (design 2026-09-28 §6b).
+        (
+            "add_work_to_bucket",
+            "work_link",
+            json!({ "session_id": null, "action": "bucket_add", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "bucket_id": 4 }),
+            r#"{"id":4,"kind":"sprint","name":"Sprint 24","state":"active","created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::add_work_to_bucket(
+                    b,
+                    commands::work_view::BucketMemberArgs {
+                        bucket_id: 4,
+                        item_id: 9,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_work_from_bucket",
+            "work_link",
+            json!({ "session_id": null, "action": "bucket_remove", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "bucket_id": 4 }),
+            r#"{"id":4,"kind":"sprint","name":"Sprint 24","state":"active","created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::remove_work_from_bucket(
+                    b,
+                    commands::work_view::BucketMemberArgs {
+                        bucket_id: 4,
+                        item_id: 9,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_bucket_admin",
+            "work_link",
+            json!({ "session_id": null, "action": "bucket_admin", "key": null, "item_id": null,
+                    "link_id": null, "source": null,
+                    "bucket_op": { "action": "bucket_create", "kind": "sprint", "name": "Mine" } }),
+            r#"{"bucket":{"id":4,"kind":"sprint","name":"Mine","state":"planned","created_at":1,"updated_at":1,"version":1}}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_bucket_admin(
+                    b,
+                    serde_json::from_value(json!({
+                        "action": "bucket_create", "kind": "sprint", "name": "Mine"
+                    }))
+                    .unwrap(),
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // ── orchestration O1: missions ────────────────────────────────────
         (
             "save_mission",
@@ -4588,8 +4858,48 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Gap plan G4.2: a recipient's ask, and the owner's answer to it.
+        (
+            "session_ask_access",
+            "session_ask_access",
+            json!({ "session_id": 42, "level": "answer" }),
+            ACCESS_REQUEST_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_ask_access(
+                    b,
+                    commands::sessions::SessionAskAccessArgs {
+                        session_id: 42,
+                        level: "answer".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "access_requests",
+            "access_requests",
+            json!({ "action": "grant", "id": 3 }),
+            ACCESS_REQUEST_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::access_requests(
+                    b,
+                    commands::sessions::AccessRequestsArgs {
+                        action: Some("grant".into()),
+                        session_id: None,
+                        id: Some(3),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
     ]
 }
+
+/// An `AccessRequestView` as the hub answers `session_ask_access` and an
+/// `access_requests` grant or decline.
+const ACCESS_REQUEST_PAYLOAD: &str = r#"{"id":3,"session_id":42,"person_id":2,"person_name":"bob","level":"answer","requested_at":1700000000}"#;
 
 /// A complete `MovePreview` (every field required — no `#[serde(default)]`,
 /// per the wire rule), wrapped as a `MoveOutcome::Preview` the way a hub
@@ -6523,6 +6833,10 @@ const SOURCES: &[(&str, &str)] = &[
     ("commands/assets.rs", include_str!("../commands/assets.rs")),
     ("commands/cancel.rs", include_str!("../commands/cancel.rs")),
     (
+        "commands/context_help.rs",
+        include_str!("../commands/context_help.rs"),
+    ),
+    (
         "commands/diagnostics.rs",
         include_str!("../commands/diagnostics.rs"),
     ),
@@ -6574,6 +6888,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/api_tokens.rs",
         include_str!("../commands/api_tokens.rs"),
+    ),
+    (
+        "commands/add_account.rs",
+        include_str!("../commands/add_account.rs"),
     ),
     (
         "commands/presence.rs",

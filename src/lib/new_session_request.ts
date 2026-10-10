@@ -16,6 +16,9 @@ export interface NewSessionRequest {
   initialName?: string;
   /** Preselect this host. */
   initialHost?: string;
+  /** Preselect what the session runs: a plain shell for the Hosts view's
+   *  "Open a shell" (gap plan G4.5). */
+  initialKind?: 'work' | 'shell';
   /** Start work on this ticket (work graph M3): the dialog offers the
    *  "Brief Claude with the ticket" preview, and creating links it. */
   ticket?: TicketRow;

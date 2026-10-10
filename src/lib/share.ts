@@ -416,6 +416,20 @@ export function visibilityBadge(
   row: Pick<SessionRow, 'visibility'>,
   access: SessionAccess,
   grants: readonly SessionGrant[] | null,
+  asks = 0,
+): VisibilityBadge | null {
+  const badge = baseBadge(row, access, grants);
+  // Gap plan G4.2: an open ask for a wider level, on the owner's badge, so
+  // the click that opens the Share sheet (where it is answered) is right there.
+  if (!badge || badge.kind === 'unclaimed' || asks <= 0) return badge;
+  const word = asks === 1 ? '1 ask' : `${asks} asks`;
+  return { ...badge, text: `${badge.text} · ${word}`, title: `${badge.title}. ${word} for a wider level` };
+}
+
+function baseBadge(
+  row: Pick<SessionRow, 'visibility'>,
+  access: SessionAccess,
+  grants: readonly SessionGrant[] | null,
 ): VisibilityBadge | null {
   if (row.visibility === 'unclaimed') {
     return {

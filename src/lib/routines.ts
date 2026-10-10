@@ -48,6 +48,16 @@ export interface RoutineRow {
   event_author?: string;
   /** At most one run per PR (or session) in this many seconds. */
   event_rate_secs?: number;
+  /** The IANA zone it was saved in, shown with the schedule (M15 G3.8). */
+  time_zone?: string;
+  /** A run still going after this many seconds is stopped and failed. */
+  run_max_secs?: number;
+  /** Where a run starts when its host cannot take it. */
+  fallback_host?: string;
+  /** A failed run is started again once. */
+  retry_once?: boolean;
+  /** 0 report only | 1 ask before push; absent = push and open PRs. */
+  autonomy?: number;
 }
 
 /** One run of a routine. */
@@ -68,6 +78,29 @@ export interface RoutineRunRow {
   /** did_work | nothing | failed | needs_person (8.10). */
   outcome?: string;
   outcome_source?: string;
+  /** Why it failed, as a code: `E_SSH`, `E_RUN_TIME_CAP`, … (G3.8). */
+  error_code?: string;
+  /** The host its session started on: the routine's, or its fallback. */
+  host_alias?: string;
+}
+
+/** The named fix of a failed run (fleet-core `routines::fix::RunFix`). */
+export interface RunFix {
+  run_id: number;
+  code: string;
+  /** "Log in again on mac". */
+  label: string;
+  /** edit | host | accounts | session | retry */
+  action: string;
+  host?: string;
+}
+
+/** `budget`: every routine's runs in this UTC day against
+ *  `automation.daily_budget` (absent = none). */
+export interface FleetBudget {
+  spent_micros: number;
+  budget_micros?: number;
+  since: number;
 }
 
 /** `get`: the routine and its last runs. */
@@ -76,6 +109,8 @@ export interface RoutineDetail {
   runs: RoutineRunRow[];
   may_change: boolean;
   account?: RoutineAccount;
+  /** Each failed run's named fix (G3.8); absent from an older hub. */
+  fixes?: RunFix[];
 }
 
 /** The account a routine's login bills (fleet-core
@@ -109,6 +144,8 @@ export interface FailingRoutine {
   routine: RoutineRow;
   run: RoutineRunRow;
   may_change: boolean;
+  /** Its named fix (G3.8); absent from an older hub. */
+  fix?: RunFix;
 }
 
 /** What `save` writes: the whole routine. */
@@ -129,6 +166,11 @@ export interface RoutineInput {
   event_repo?: string;
   event_author?: EventAuthor;
   event_rate_secs?: number;
+  time_zone?: string;
+  run_max_secs?: number;
+  fallback_host?: string;
+  retry_once?: boolean;
+  autonomy?: number;
 }
 
 /** `preview`: the editor's dry run (gap plan G2.3, fleet-core
@@ -154,6 +196,7 @@ function call<T>(args: Args): Promise<Result<T>> {
 export const listRoutines = () => call<RoutineRow[]>({ action: 'list' });
 export const getRoutine = (id: number) => call<RoutineDetail>({ action: 'get', routine_id: id });
 export const failingRoutines = () => call<FailingRoutine[]>({ action: 'failing' });
+export const routineBudget = () => call<FleetBudget>({ action: 'budget' });
 export const saveRoutine = (routine: RoutineInput, id?: number) =>
   call<RoutineRow>({ action: 'save', routine, ...(id !== undefined ? { routine_id: id } : {}) });
 export const previewRoutine = (routine: RoutineInput, id?: number) =>
@@ -214,20 +257,95 @@ export function openRoutines(r: Omit<RoutinesRequest, 'at'> = {}): void {
 }
 
 /**
- * Fix: what a failed run needs is in its session, so Fix opens it there;
- * a run that never started a session (an unreachable host, a refused
- * start) opens the routine's definition instead, where the host, account
- * and prompt are changed. Answers what it opened.
+ * Fix: the run's named fix (G3.8) when the hub names one: open the host,
+ * the accounts, the session, the routine's editor, or run it again. An
+ * older hub names none: what a failed run needs is in its session, so Fix
+ * opens it there, and a run that never started a session (an unreachable
+ * host, a refused start) opens the routine's definition instead. Answers
+ * what it opened.
  */
-export function fixRoutine(f: FailingRoutine): 'session' | 'definition' {
+export function fixRoutine(f: FailingRoutine): 'session' | 'definition' | 'host' | 'accounts' | 'retry' {
+  const action = f.fix?.action;
+  if (action === 'host') {
+    goTo('hosts');
+    return 'host';
+  }
+  if (action === 'accounts') {
+    goTo('accounts');
+    return 'accounts';
+  }
+  if (action === 'retry') {
+    void retryRoutine(f);
+    return 'retry';
+  }
   const id = f.run.session_id;
   const s = id !== undefined ? get(sessions).find((x) => x.id === id) : undefined;
-  if (s && s.status !== 'ghost') {
+  if (action !== 'edit' && s && s.status !== 'ghost') {
     selectSessionExplicitly(s);
+    goTo('session');
     return 'session';
   }
-  openRoutines({ select: f.routine.id, tab: 'definition' });
+  openRoutines({ select: f.routine.id, tab: action === 'edit' ? 'limits' : 'definition' });
   return 'definition';
+}
+
+/** The Fix button's words: the named fix, else Fix. */
+export function fixLabel(fix: RunFix | undefined): string {
+  return fix?.label ?? 'Fix';
+}
+
+// ---- guards (M15 G3.8) ------------------------------------------------------
+
+/** A time cap in words: "20 min", "2 h", "1 h 30 min". */
+export function capWords(secs: number): string {
+  const m = Math.round(secs / 60);
+  const h = Math.floor(m / 60);
+  const r = m % 60;
+  if (h === 0) return `${r} min`;
+  return r === 0 ? `${h} h` : `${h} h ${r} min`;
+}
+
+/** "mac, else nas" when there is a fallback host. */
+export function hostWords(r: Pick<RoutineRow, 'host_alias' | 'fallback_host'>): string {
+  return r.fallback_host ? `${r.host_alias}, else ${r.fallback_host}` : r.host_alias;
+}
+
+/** The autonomy levels the editor offers; 2 is stored as none. */
+export const AUTONOMY_CHOICES: readonly { level: number; label: string; short: string }[] = [
+  { level: 0, label: 'L0 · report only, changes nothing', short: 'L0 · reports only' },
+  { level: 1, label: 'L1 · asks before push', short: 'L1 · asks before push' },
+  { level: 2, label: 'L2 · pushes and opens pull requests', short: 'L2 · pushes and opens PRs' },
+];
+
+/** "L1 · asks before push". */
+export function autonomyWords(level: number | undefined): string {
+  return (AUTONOMY_CHOICES.find((c) => c.level === (level ?? 2)) ?? AUTONOMY_CHOICES[2]).short;
+}
+
+/** The inspector's On failure row. */
+export function onFailureWords(r: Pick<RoutineRow, 'retry_once'>): string {
+  return r.retry_once ? 'Retry once, then Inbox as Failed until you retry or pause it' : 'Inbox as Failed until you retry or pause it';
+}
+
+/** Where each outcome goes (8.10's routing, as it is): needs you to the
+ *  Inbox, nothing to do stays in Runs, failed to the Inbox. */
+export const OUTCOME_ROUTING = 'Needs you goes to the Inbox; Nothing to do stays in Runs; Failed goes to the Inbox';
+
+/** The minutes field of the editor as seconds; empty = no cap. */
+export function capSecsOf(text: string): number | undefined {
+  const t = text.trim();
+  if (t === '') return undefined;
+  const n = Number(t);
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 60) : undefined;
+}
+
+/** What started a run, for its Details: a retry names the run it retried. */
+export function startedByWords(run: Pick<RoutineRunRow, 'trigger' | 'trigger_ref'>): string {
+  const by: Record<string, string> = { cron: 'its schedule', event: 'an event', run_now: 'Run now' };
+  const what = by[run.trigger] ?? run.trigger;
+  const ref = run.trigger_ref;
+  if (ref?.startsWith('retry:')) return `${what}, retried once after run ${ref.slice(6)} failed`;
+  return ref ? `${what} (${ref})` : what;
 }
 
 // ---- words ----------------------------------------------------------------

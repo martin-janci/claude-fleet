@@ -3,10 +3,21 @@
 //! `work` and ten decisions of `work_link`, each routed by command name on a
 //! paired desktop and served by `service::work::{view, structure}` here.
 //! Thin wrappers, as `commands::work` is: the rules live in fleet-core.
+//!
+//! Sprints and releases (design 2026-09-28 §6a/§6b): `work_buckets` /
+//! `work_bucket` read `work`, `add_work_to_bucket` /
+//! `remove_work_from_bucket` write `work_link`, and `work_bucket_admin`
+//! (create, update, close, delete) is `work_admin` here and, on a paired
+//! desktop, `work_link { action: bucket_admin }` — the hub decides whether
+//! this person may plan (their own personal buckets; an org's as its admin,
+//! or member when the org allows it).
 
 use crate::backend::FleetBackend;
+use fleet_core::ipc_error::codes;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::orgs::OrgScope;
+use fleet_core::service::trackers::admin::{self as tracker_admin, WorkAdminArgs};
+use fleet_core::service::work::buckets::{self, BucketAction, BucketDetail};
 use fleet_core::service::work::structure::{
     self, BatchResult, Deleted, LinkDecision, OrgImpact, RuleInput, RulePreview, ViewInput,
 };
@@ -15,7 +26,7 @@ use fleet_core::service::work::view::{
     WorkTreeFilters,
 };
 use fleet_core::service::work::{self, WorkArgs, WorkLinkArgs};
-use fleet_core::store::{Decider, SessionRow, Store, WorkRule, WorkView};
+use fleet_core::store::{BucketRow, CommentRow, Decider, SessionRow, Store, WorkRule, WorkView};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -173,6 +184,40 @@ pub struct DeleteWorkViewArgs {
     pub expected_version: Option<i64>,
 }
 
+/// `work_buckets`: the sprints and releases in scope, with roll-ups.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkBucketsArgs {
+    /// sprint | release; absent: both.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// `work_bucket`: one bucket with its members, past ones too.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkBucketArgs {
+    pub bucket_id: i64,
+}
+
+/// `comment_on_work`: a comment on a task (a work item).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CommentOnWorkArgs {
+    pub item_id: i64,
+    pub body: String,
+}
+
+/// `delete_work_comment`: the author's own comment.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeleteWorkCommentArgs {
+    pub comment_id: i64,
+}
+
+/// `add_work_to_bucket` / `remove_work_from_bucket`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BucketMemberArgs {
+    pub bucket_id: i64,
+    pub item_id: i64,
+}
+
 fn read(action: &str) -> WorkArgs {
     WorkArgs {
         action: Some(action.into()),
@@ -190,6 +235,72 @@ fn decide(action: &str, session_id: i64, link_id: i64) -> WorkLinkArgs {
 }
 
 // --- the commands --------------------------------------------------------------
+
+#[tauri::command]
+pub async fn comment_on_work(
+    args: CommentOnWorkArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<CommentRow, IpcError> {
+    routed::comment_on_work(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn delete_work_comment(
+    args: DeleteWorkCommentArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<CommentRow, IpcError> {
+    routed::delete_work_comment(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn work_buckets(
+    args: WorkBucketsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<BucketRow>, IpcError> {
+    routed::work_buckets(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn work_bucket(
+    args: WorkBucketArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<BucketDetail, IpcError> {
+    routed::work_bucket(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn add_work_to_bucket(
+    args: BucketMemberArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<BucketRow, IpcError> {
+    routed::add_work_to_bucket(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn remove_work_from_bucket(
+    args: BucketMemberArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<BucketRow, IpcError> {
+    routed::remove_work_from_bucket(&backend, args, &store).await
+}
+
+/// Create, change, close or delete a sprint or release: `work_admin`'s
+/// `bucket_*` actions and no other (adoption stays with the hub's admin).
+/// Paired, it routes as `work_link { action: bucket_admin, bucket_op }`.
+#[tauri::command]
+pub async fn work_bucket_admin(
+    args: WorkAdminArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::work_bucket_admin(&backend, args, &store).await
+}
 
 /// The standalone desktop's reader (multi-user M1): one person at the
 /// keyboard, so the Work view's reads run with the hub's own unrestricted
@@ -416,7 +527,15 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_task", &wire).await,
-            None => view::task(store, &internal_view(), &args.task_id),
+            None => {
+                let mut detail = view::task(store, &internal_view(), &args.task_id)?;
+                // A standalone desktop writes as LOCAL_ACTOR: its own comments
+                // are the ones it may delete.
+                for c in &mut detail.comments {
+                    c.mark_mine(None, LOCAL_ACTOR);
+                }
+                Ok(detail)
+            }
         }
     }
 
@@ -714,6 +833,132 @@ pub(crate) mod routed {
             None => {
                 structure::view_delete(store, &OrgScope::All, args.view_id, args.expected_version)
             }
+        }
+    }
+    pub async fn work_buckets(
+        backend: &FleetBackend,
+        args: WorkBucketsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<BucketRow>, IpcError> {
+        let wire = WorkArgs {
+            kind: args.kind.clone(),
+            ..read("buckets")
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("work_buckets", &wire).await,
+            None => buckets::buckets(store, &internal_view(), args.kind.as_deref()),
+        }
+    }
+
+    pub async fn work_bucket(
+        backend: &FleetBackend,
+        args: WorkBucketArgs,
+        store: &Mutex<Store>,
+    ) -> Result<BucketDetail, IpcError> {
+        let wire = WorkArgs {
+            bucket_id: Some(args.bucket_id),
+            ..read("bucket")
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("work_bucket", &wire).await,
+            None => buckets::bucket(store, &internal_view(), args.bucket_id),
+        }
+    }
+
+    pub async fn work_bucket_admin(
+        backend: &FleetBackend,
+        args: WorkAdminArgs,
+        store: &Mutex<Store>,
+    ) -> Result<serde_json::Value, IpcError> {
+        match BucketAction::parse(&args.action) {
+            Some(BucketAction::Create)
+            | Some(BucketAction::Update)
+            | Some(BucketAction::Close)
+            | Some(BucketAction::Delete) => match backend.hub() {
+                Some(hub) => {
+                    let wire = WorkLinkArgs {
+                        action: "bucket_admin".into(),
+                        bucket_op: Some(args),
+                        ..Default::default()
+                    };
+                    hub.route("work_bucket_admin", &wire).await
+                }
+                None => tracker_admin::admin_sync(&args, store),
+            },
+            _ => Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "work_bucket_admin is bucket_create, bucket_update, bucket_close or \
+                     bucket_delete, not {:?}",
+                    args.action
+                ),
+            )),
+        }
+    }
+
+    fn member(action: &str, args: &BucketMemberArgs) -> WorkLinkArgs {
+        WorkLinkArgs {
+            action: action.into(),
+            bucket_id: Some(args.bucket_id),
+            item_id: Some(args.item_id),
+            ..Default::default()
+        }
+    }
+
+    pub async fn add_work_to_bucket(
+        backend: &FleetBackend,
+        args: BucketMemberArgs,
+        store: &Mutex<Store>,
+    ) -> Result<BucketRow, IpcError> {
+        let wire = member("bucket_add", &args);
+        match backend.hub() {
+            Some(hub) => hub.route("add_work_to_bucket", &wire).await,
+            None => buckets::bucket_add(&wire, store, &internal_view()),
+        }
+    }
+
+    pub async fn remove_work_from_bucket(
+        backend: &FleetBackend,
+        args: BucketMemberArgs,
+        store: &Mutex<Store>,
+    ) -> Result<BucketRow, IpcError> {
+        let wire = member("bucket_remove", &args);
+        match backend.hub() {
+            Some(hub) => hub.route("remove_work_from_bucket", &wire).await,
+            None => buckets::bucket_remove(&wire, store, &internal_view()),
+        }
+    }
+
+    pub async fn comment_on_work(
+        backend: &FleetBackend,
+        args: CommentOnWorkArgs,
+        store: &Mutex<Store>,
+    ) -> Result<CommentRow, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "comment".into(),
+            item_id: Some(args.item_id),
+            notes: Some(args.body),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("comment_on_work", &wire).await,
+            None => work::local::comment(&wire, store, &OrgScope::All, LOCAL_ACTOR, None),
+        }
+    }
+
+    pub async fn delete_work_comment(
+        backend: &FleetBackend,
+        args: DeleteWorkCommentArgs,
+        store: &Mutex<Store>,
+    ) -> Result<CommentRow, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "comment_delete".into(),
+            comment_id: Some(args.comment_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("delete_work_comment", &wire).await,
+            None => work::local::comment_delete(&wire, store, &OrgScope::All, LOCAL_ACTOR, None),
         }
     }
 }

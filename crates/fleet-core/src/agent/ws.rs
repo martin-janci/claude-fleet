@@ -435,7 +435,7 @@ pub(crate) async fn handle_agent(
     };
     // A readonly token may observe the fleet; an agent is handed every
     // command the hub runs on its host, secret-file uploads included.
-    if caller.mode == TokenMode::Readonly {
+    if matches!(caller.mode, TokenMode::Readonly | TokenMode::Answer) {
         tracing::warn!(host = %alias, "[agent] refused an upgrade: readonly host token");
         return (StatusCode::FORBIDDEN, READONLY_HOST).into_response();
     }
@@ -568,9 +568,17 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
     // after hello, not merely first unless a ping wins a race. The agent
     // relies on that: it refuses to act on anything else until it has seen
     // a compatible `welcome` (see `conn.rs`'s main loop).
+    //
+    // The proto it carries is the one this connection speaks: ours, capped
+    // at the agent's own. A released agent judges `welcome.proto` against
+    // its OWN `PROTO_VERSION` and refuses a hub above it, so sending ours
+    // unchanged locked every proto-1 agent (0.6.0 and older) out of a
+    // proto-2 hub — the very upgrade order `MIN_SUPPORTED_PROTO` exists to
+    // allow. The hub already admitted `hello.proto` above, so the cap is
+    // always in range for both sides.
     let _ = tx.send(HubFrame::Welcome {
         hub_version: crate::app_version::get().to_string(),
-        proto: fleet_proto::PROTO_VERSION,
+        proto: fleet_proto::PROTO_VERSION.min(hello.proto),
     });
     let conn_id = registry.connect_bound(&alias, hello, tx, credential.clone());
     if stale() {
@@ -2430,6 +2438,26 @@ mod tests {
         match next_frame(&mut ws).await {
             Some(HubFrame::Welcome { proto, .. }) => {
                 assert_eq!(proto, fleet_proto::PROTO_VERSION);
+            }
+            other => panic!("expected welcome, got {other:?}"),
+        }
+    }
+
+    /// An older agent inside the window is welcomed at ITS version, not the
+    /// hub's: a released proto-1 agent refuses a `welcome` above its own
+    /// `PROTO_VERSION`, so the hub must not offer one.
+    #[tokio::test]
+    async fn an_older_agent_is_welcomed_at_its_own_proto() {
+        let hub = hub().await;
+        let mut ws = dial(hub.addr, Some(LAPTOP_TOKEN)).await.expect("upgrade");
+        send(
+            &mut ws,
+            &hello_with_proto("0.6.0", fleet_proto::MIN_SUPPORTED_PROTO),
+        )
+        .await;
+        match next_frame(&mut ws).await {
+            Some(HubFrame::Welcome { proto, .. }) => {
+                assert_eq!(proto, fleet_proto::MIN_SUPPORTED_PROTO);
             }
             other => panic!("expected welcome, got {other:?}"),
         }
