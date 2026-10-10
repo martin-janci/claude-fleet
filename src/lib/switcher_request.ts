@@ -12,12 +12,15 @@ export interface SwitcherRequest {
    *  New session dialog's "Change" on a proposed project). The chosen
    *  project opens the dialog with the ticket still attached. */
   ticket?: TicketRow;
+  /** Preselect what the session runs (gap plan G4.5: the Hosts view's
+   *  "Open a shell"). */
+  kind?: 'work' | 'shell';
 }
 
 export const switcherRequest = writable<SwitcherRequest | null>(null);
 
-export function openNewSessionPicker(host?: string, ticket?: TicketRow): void {
-  switcherRequest.set({ mode: 'new', host, ticket });
+export function openNewSessionPicker(host?: string, ticket?: TicketRow, kind?: 'work' | 'shell'): void {
+  switcherRequest.set({ mode: 'new', host, ticket, kind });
 }
 
 /** Open the plain switcher, as ⌘K does (the header's command field). */

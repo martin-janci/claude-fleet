@@ -11,6 +11,7 @@
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionBlocked, shareSheetFor, visibilityBadge } from './share';
+  import { accessRequests } from './access_requests';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -47,7 +48,8 @@
     sheetWasOpen = sheetOpen;
   });
 
-  const badge = $derived(visibilityBadge(session, access, grants));
+  const asks = $derived($accessRequests.filter((a) => a.session_id === session.id).length);
+  const badge = $derived(visibilityBadge(session, access, grants, asks));
   const shareBlocked = $derived(
     hubActionBlocked('session_share', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'session_share'),
   );

@@ -49,7 +49,7 @@
           ]
         },
         {
-          "title": "Summaries and help",
+          "title": "Writing help",
           "items": [
             {
               "type": "field",
@@ -58,6 +58,22 @@
             {
               "type": "field",
               "key": "work.help_model"
+            },
+            {
+              "type": "field",
+              "key": "work.draft_commit_messages"
+            },
+            {
+              "type": "field",
+              "key": "work.draft_briefs"
+            },
+            {
+              "type": "field",
+              "key": "work.draft_release_notes"
+            },
+            {
+              "type": "field",
+              "key": "work.catch_up_summaries"
             }
           ]
         }

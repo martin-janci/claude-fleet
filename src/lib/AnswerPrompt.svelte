@@ -57,9 +57,12 @@
     /** "Answer in your own words…": the dialog is dismissed
      *  first, then this puts the caret where the words go. */
     onOwnWords?: () => void;
+    /** Gap plan G4.2: shown under the choices when this person may read the
+     *  session but not answer it ("You can read this session…"). */
+    readOnlyNote?: string;
   }
 
-  const { session, view, compact = false, onOpenTerminal, onAnswered, onOwnWords }: Props = $props();
+  const { session, view, compact = false, onOpenTerminal, onAnswered, onOwnWords, readOnlyNote }: Props = $props();
 
   let busy = $state(false);
   let errorMsg = $state<string | null>(null);
@@ -322,6 +325,7 @@
         {/if}
       </div>
     {/if}
+    {#if readOnlyNote && writeBlocked !== null}<p class="readonly" data-testid="answer-readonly">{readOnlyNote}</p>{/if}
     {#if staleMsg}<p class="stale" role="status" data-testid="answer-stale">{staleMsg}</p>{/if}
     {#if errorMsg}<p class="err" role="status" data-testid="answer-error">{errorMsg}</p>{/if}
   </QuestionCard>
@@ -332,6 +336,7 @@
     margin: 0.35rem 0 0.6rem;
   }
   .answer-new .sent,
+  .answer-new .readonly,
   .answer-new .stale,
   .answer-new .err {
     font-size: var(--text-xs);
@@ -367,6 +372,11 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.35rem;
+  }
+  .readonly {
+    margin: 0;
+    line-height: 1.35;
+    color: var(--fg-muted);
   }
   .stale,
   .err {

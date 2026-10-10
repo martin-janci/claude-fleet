@@ -12,6 +12,7 @@ pub mod account_limits;
 pub mod account_spend;
 pub mod account_usage;
 pub mod account_usage_poll;
+pub mod add_account;
 pub mod add_project;
 pub mod address;
 pub mod agent_install;

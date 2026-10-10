@@ -58,6 +58,9 @@ pub enum OptionSource {
     Devices,
     /// Asset catalogs, by name.
     Catalogs,
+    /// The people this hub knows, by name (what `list_people` answers;
+    /// M15 step G2.10).
+    People,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -76,6 +79,17 @@ pub enum ParamKind {
     /// One of a fixed set (`(value, label)`); the first is preselected.
     Choice {
         options: &'static [(&'static str, &'static str)],
+    },
+    /// Free text with the source's values offered as you type: pick one
+    /// that exists or type a new one (a person, M15 step G2.10).
+    Suggest {
+        max: usize,
+        placeholder: &'static str,
+        source: OptionSource,
+    },
+    /// A switch, sent as a boolean; `default` is where it starts.
+    Toggle {
+        default: bool,
     },
 }
 
@@ -118,6 +132,11 @@ pub struct ActionSpec {
     /// command that takes a while (linking two hubs exchanges keys).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub busy: Option<BusyLoader>,
+    /// A read-only command run with the form's arguments while the person
+    /// fills it in; its answer's `sentence` is shown under the form (an org
+    /// rule's live impact, M15 step G2.10). It writes nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<&'static str>,
 }
 
 /// A loader an action shows while it runs: a closed set from the loader kit.
@@ -162,6 +181,13 @@ impl ActionSpec {
             report: false,
             result: None,
             busy: None,
+            preview: None,
+        }
+    }
+    pub const fn preview(self, command: &'static str) -> Self {
+        ActionSpec {
+            preview: Some(command),
+            ..self
         }
     }
     pub const fn params(self, params: &'static [ParamSpec]) -> Self {
@@ -268,6 +294,10 @@ pub enum FieldKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         remove: Option<ActionSpec>,
         add: &'static [ActionSpec],
+        /// Actions on one item besides `remove`, each a button on the item
+        /// (M15 step G4.7: a share's "Narrow to watch").
+        #[serde(skip_serializing_if = "<[ActionSpec]>::is_empty")]
+        each: &'static [ActionSpec],
     },
 }
 
@@ -293,6 +323,21 @@ pub enum ItemLabel {
     /// PersonSpend`): a table row of who, then today, 7 days and the month
     /// in dollars; nobody's reads "Routines, missions and unclaimed".
     PersonSpend,
+    /// An org's catalog project (M15 step G2.10): its name, then its remote,
+    /// path and hosts when set.
+    OrgProject,
+    /// M15 step G4.7: a share on an org's session (`service::orgs::OrgShare`),
+    /// a table row of session · owner, shared with, level and since; a
+    /// session the caller may not see reads "a private session".
+    OrgShare,
+    /// G4.7: a member and their live sessions with states, then how many
+    /// more are private (`service::orgs::TeamMember`).
+    TeamMember,
+    /// G4.7: a former member, "removed 3 d ago", and the shares they still
+    /// hold (`service::orgs::RemovedMember`).
+    RemovedMember,
+    /// G4.7: a Claude account the org's hosts use, and on which hosts.
+    OrgAccount,
 }
 
 /// A line under a field's value where its section shows tiles: a closed
@@ -454,9 +499,13 @@ impl ResourceType {
             .collect();
         out.extend(self.actions.iter());
         for f in self.fields {
-            if let FieldKind::Items { remove, add, .. } = &f.kind {
+            if let FieldKind::Items {
+                remove, add, each, ..
+            } = &f.kind
+            {
                 out.extend(remove.iter());
                 out.extend(add.iter());
+                out.extend(each.iter());
             }
             if let FieldKind::Settings { set } = &f.kind {
                 out.push(set);
@@ -473,42 +522,54 @@ const fn text(max: usize, placeholder: &'static str) -> ParamKind {
     ParamKind::Text { max, placeholder }
 }
 
-/// An org's rule, added one kind at a time: each form asks for one thing.
-const ORG_RULE_ADDS: &[ActionSpec] = &[
-    ActionSpec::new(
-        "org.add_owner_rule",
-        "Add owner rule",
-        "add_org_rule",
-        &[
-            ORG_ID,
-            ("owner", Bind::Param("owner")),
-            ("repo", Bind::Param("repo")),
-        ],
-    )
-    .params(&[
-        param("owner", "GitHub owner", text(100, "acme"), true),
-        param("repo", "Repository (optional)", text(100, "api"), false),
-    ]),
-    ActionSpec::new(
-        "org.add_path_rule",
-        "Add path rule",
-        "add_org_rule",
-        &[ORG_ID, ("path_prefix", Bind::Param("path_prefix"))],
-    )
-    .params(&[param(
-        "path_prefix",
-        "Path prefix",
-        text(1024, "/home/me/work/acme"),
-        true,
-    )]),
-    ActionSpec::new(
-        "org.add_host_rule",
-        "Add host rule",
-        "add_org_rule",
-        &[ORG_ID, ("host_alias", Bind::Param("host_alias"))],
-    )
-    .params(&[param("host_alias", "Host", text(100, "hetzner-a"), true)]),
+/// A person: one this hub knows, picked as you type, or a new name.
+const fn person() -> ParamKind {
+    ParamKind::Suggest {
+        max: 64,
+        placeholder: "jane",
+        source: OptionSource::People,
+    }
+}
+
+/// What an org rule matches by (M15 step G2.10): `add_org_rule` turns the
+/// one value into the rule's owner / repo, path prefix or host
+/// (`service::orgs::rule_from_match`).
+pub const ORG_RULE_MATCH: &[(&str, &str)] = &[
+    ("repository", "Repository"),
+    ("path", "Path"),
+    ("host", "Host"),
+    ("owner", "Owner"),
 ];
+
+/// An org's rule: one form, a "Match by" choice and its value, with the live
+/// impact under it while it is typed.
+const ORG_RULE_ADDS: &[ActionSpec] = &[ActionSpec::new(
+    "org.add_rule",
+    "Add rule",
+    "add_org_rule",
+    &[
+        ORG_ID,
+        ("match_by", Bind::Param("match_by")),
+        ("value", Bind::Param("value")),
+    ],
+)
+.params(&[
+    param(
+        "match_by",
+        "Match by",
+        ParamKind::Choice {
+            options: ORG_RULE_MATCH,
+        },
+        true,
+    ),
+    param(
+        "value",
+        "Matches",
+        text(1024, "acme/api · /home/me/work/acme · hetzner-a · acme"),
+        true,
+    ),
+])
+.preview("org_rule_preview")];
 
 /// The roles of an org member (`store::ORG_ROLES`), as a form offers them.
 pub const ORG_ROLE_CHOICES: &[(&str, &str)] = &[
@@ -551,13 +612,13 @@ const ORG: ResourceType = ResourceType {
             "spend_by_person",
             "By person",
             "Whose sessions spent it: today, the last 7 days and this month (UTC). Shown only to an admin who sees every session; otherwise it is hidden whole, never in part.",
-            FieldKind::Items { item_label: ItemLabel::PersonSpend, remove: None, add: &[] },
+            FieldKind::Items { item_label: ItemLabel::PersonSpend, remove: None, add: &[], each: &[] },
         ),
         FieldSpec::new(
             "needs_admin",
             "Needs an admin",
             "What its admins should look at: a budget at 80% or past it (Fleet only warns; it never stops a session), a device that may prompt but is not trusted yet (trust it in Settings → Devices), sessions on its hosts nobody has claimed.",
-            FieldKind::Items { item_label: ItemLabel::AdminNeed, remove: None, add: &[] },
+            FieldKind::Items { item_label: ItemLabel::AdminNeed, remove: None, add: &[], each: &[] },
         ),
         FieldSpec::new(
             "settings",
@@ -584,6 +645,40 @@ const ORG: ResourceType = ResourceType {
                 item_label: ItemLabel::OrgRule,
                 remove: Some(ActionSpec::new("org.remove_rule", "Remove rule", "remove_org_rule", &[("rule_id", Bind::ItemField("id"))])),
                 add: ORG_RULE_ADDS,
+                each: &[],
+            },
+        ),
+        FieldSpec::new(
+            "projects",
+            "Projects",
+            "The org's project catalog: a project its people work on, with its remote, where it is checked out and the hosts it may run on (none: every host of the org).",
+            FieldKind::Items {
+                item_label: ItemLabel::OrgProject,
+                remove: Some(ActionSpec::new(
+                    "org.remove_project",
+                    "Remove the project",
+                    "remove_org_project",
+                    &[("project_id", Bind::ItemField("id"))],
+                )),
+                add: &[ActionSpec::new(
+                    "org.add_project",
+                    "Add project",
+                    "add_org_project",
+                    &[
+                        ORG_ID,
+                        ("name", Bind::Param("name")),
+                        ("remote", Bind::Param("remote")),
+                        ("path", Bind::Param("path")),
+                        ("hosts", Bind::Param("hosts")),
+                    ],
+                )
+                .params(&[
+                    param("name", "Name", text(80, "api"), true),
+                    param("remote", "Remote (optional)", text(1024, "git@github.com:acme/api.git"), false),
+                    param("path", "Path on hosts (optional)", text(1024, "~/src/api"), false),
+                    param("hosts", "Hosts allowed (optional; every host of the org when empty)", text(1024, "hetzner-a, hetzner-b"), false),
+                ])],
+                each: &[],
             },
         ),
         FieldSpec::new(
@@ -600,6 +695,7 @@ const ORG: ResourceType = ResourceType {
                 )),
                 add: &[ActionSpec::new("org.assign_host", "Add host", "assign_host_org", &[("host_alias", Bind::Param("host")), ORG_ID])
                     .params(&[param("host", "Host", ParamKind::Options { source: OptionSource::Hosts }, true)])],
+                each: &[],
             },
         ),
         FieldSpec::new(
@@ -616,13 +712,20 @@ const ORG: ResourceType = ResourceType {
                 )),
                 add: &[ActionSpec::new("org.assign_tracker", "Add tracker", "assign_tracker_org", &[("tracker_id", Bind::Param("tracker")), ORG_ID])
                     .params(&[param("tracker", "Tracker", ParamKind::Options { source: OptionSource::Trackers }, true)])],
+                each: &[],
             },
+        ),
+        FieldSpec::new(
+            "accounts",
+            "Accounts",
+            "The Claude accounts its hosts are signed in to. Add or switch one on Settings → Hosts.",
+            FieldKind::Items { item_label: ItemLabel::OrgAccount, remove: None, add: &[], each: &[] },
         ),
         FieldSpec::new(
             "catalogs",
             "Catalogs",
             "Asset catalogs this org owns; its hosts receive them. Add or remove one in Settings → Catalogs.",
-            FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[] },
+            FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] },
         ),
         FieldSpec::new(
             "devices",
@@ -633,6 +736,7 @@ const ORG: ResourceType = ResourceType {
                 remove: Some(ActionSpec::new("org.unbind_device", "Unbind the device", "bind_device_org", &[("device", Bind::ItemField("name"))])),
                 add: &[ActionSpec::new("org.bind_device", "Bind a device", "bind_device_org", &[("device", Bind::Param("device")), ORG_ID])
                     .params(&[param("device", "Device", ParamKind::Options { source: OptionSource::Devices }, true)])],
+                each: &[],
             },
         ),
         FieldSpec::new(
@@ -657,9 +761,48 @@ const ORG: ResourceType = ResourceType {
                     &[ORG_ID, ("person", Bind::Param("person")), ("role", Bind::Param("role"))],
                 )
                 .params(&[
-                    param("person", "Person", text(64, "jane"), true),
+                    param("person", "Person", person(), true),
                     param("role", "Role", ParamKind::Choice { options: ORG_ROLE_CHOICES }, true),
                 ])],
+                each: &[],
+            },
+        ),
+        FieldSpec::new(
+            "removed_members",
+            "Removed members",
+            "Who left the company, and the shares on its sessions they still hold. Take those back here. Shown to its admins.",
+            FieldKind::Items {
+                item_label: ItemLabel::RemovedMember,
+                remove: None,
+                add: &[],
+                each: &[ActionSpec::new(
+                    "org.revoke_former_grants",
+                    "Take back their shares",
+                    "revoke_org_member_grants",
+                    &[ORG_ID, ("person_id", Bind::ItemField("person_id"))],
+                )
+                .confirm("Every share they still hold on this org's sessions is taken back. The sessions' owners can share again.")],
+            },
+        ),
+        FieldSpec::new(
+            "team",
+            "Team",
+            "Who is working on what: each member's live sessions in this org that you can see, with their state, and how many more are private.",
+            FieldKind::Items { item_label: ItemLabel::TeamMember, remove: None, add: &[], each: &[] },
+        ),
+        FieldSpec::new(
+            "shares",
+            "Sharing",
+            "Every share on this org's sessions: whose session, with whom, at what level, since when. An admin can take one back or narrow it to watch, never widen it. A session you cannot see reads \"a private session\".",
+            FieldKind::Items {
+                item_label: ItemLabel::OrgShare,
+                remove: Some(
+                    ActionSpec::new("org.revoke_share", "Revoke", "revoke_org_share", &[ORG_ID, ("grant_id", Bind::ItemField("id"))])
+                        .confirm("They lose this session at once. Its owner can share it again."),
+                ),
+                add: &[],
+                each: &[ActionSpec::new("org.narrow_share", "Narrow to watch", "narrow_org_share", &[ORG_ID, ("grant_id", Bind::ItemField("id"))])
+                    .confirm("They keep reading the session and can no longer answer or drive it.")],
             },
         ),
         FieldSpec::new(
@@ -687,6 +830,15 @@ const ORG: ResourceType = ResourceType {
         .edit("isolate_sessions")
         .badge(Badge::True { text: "isolates sessions" })
         .confirm("Hosts outside this org will no longer list or message its sessions, and its hosts will not see other orgs' sessions. It can break a controller that dispatches across companies."),
+        FieldSpec::new(
+            "members_own_sessions_only",
+            "Members see only their own sessions",
+            "On (the default): a member sees their own sessions and what is shared with them. Off: the org's members also watch each other's sessions in it — read only; answering or driving one still needs a share. Only the hub's owner turns it off; an org admin can turn it back on.",
+            FieldKind::Bool { on_off: false, default: true },
+        )
+        .edit("members_own_sessions_only")
+        .badge(Badge::False { text: "members see the team's sessions" })
+        .confirm("Its members will watch each other's sessions in this org: what each one's Claude is doing and has said. They still cannot answer or drive them without a share."),
         FieldSpec::new(
             "auto_tidy",
             "Auto-tidy",
@@ -723,8 +875,26 @@ const ORG: ResourceType = ResourceType {
         .badge(Badge::False { text: "bound devices: own only" }),
     ],
     create: Some(
-        ActionSpec::new("org.add", "Add organisation", "add_org", &[("name", Bind::Param("name")), ("color", Bind::Param("color"))])
-            .params(&[param("name", "Name", text(80, "Company A"), true), param("color", "Colour", ParamKind::Color, false)]),
+        ActionSpec::new(
+            "org.add",
+            "Add organisation",
+            "add_org",
+            &[
+                ("name", Bind::Param("name")),
+                ("color", Bind::Param("color")),
+                ("isolate_sessions", Bind::Param("isolate_sessions")),
+            ],
+        )
+        .params(&[
+            param("name", "Name", text(80, "Company A"), true),
+            param("color", "Colour", ParamKind::Color, false),
+            param(
+                "isolate_sessions",
+                "Its sessions are visible only to its members",
+                ParamKind::Toggle { default: false },
+                false,
+            ),
+        ]),
     ),
     update: Some(ActionSpec::new("org.update", "Apply", "update_org", &[ORG_ID])),
     delete: Some(
@@ -854,13 +1024,14 @@ const CATALOG: ResourceType = ResourceType {
                     &[("host_alias", Bind::Param("host")), ("catalog", Bind::Record("name"))],
                 )
                 .params(&[param("host", "Host", ParamKind::Options { source: OptionSource::Hosts }, true)])],
+                each: &[],
             },
         ),
         FieldSpec::new(
             "granted",
             "Granted to",
             "Paired desktops that may change this catalog. Granted in Settings → Devices.",
-            FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[] },
+            FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] },
         ),
     ],
     create: Some(
@@ -895,7 +1066,11 @@ const CATALOG: ResourceType = ResourceType {
 const DEVICE: (&str, Bind) = ("device", Bind::Record("name"));
 
 /// A device's modes as `DeviceSummary.mode` says them.
-const DEVICE_MODES: &[(&str, &str)] = &[("full", "Full"), ("readonly", "Read-only")];
+const DEVICE_MODES: &[(&str, &str)] = &[
+    ("full", "Full"),
+    ("answer", "Answer only"),
+    ("readonly", "Watch only"),
+];
 
 const DEVICE_RESOURCE: ResourceType = ResourceType {
     id: "device",
@@ -909,7 +1084,7 @@ const DEVICE_RESOURCE: ResourceType = ResourceType {
     empty: "No paired devices. Pair a phone or a browser with Pair a device.",
     fields: &[
         FieldSpec::new("name", "Name", "How the apps and the audit name it. Its grants, catalogs and person follow a new name.", FieldKind::Text { max: 64 }).edit("name"),
-        FieldSpec::new("mode", "Mode", "Full drives sessions; read-only watches. A viewer's device stays read-only whatever it says here.", FieldKind::Choice { options: DEVICE_MODES })
+        FieldSpec::new("mode", "Mode", "Full drives sessions; answer only answers their questions and permission prompts and never types a prompt; watch only reads. A viewer's device watches only whatever it says here.", FieldKind::Choice { options: DEVICE_MODES })
             .edit("mode")
             .badge(Badge::Label),
         FieldSpec::new("this_device", "This device", "The device you are using now. It cannot revoke, untrust, bind, hand over or make itself read-only.", FieldKind::Bool { on_off: false, default: false })
@@ -939,6 +1114,7 @@ const DEVICE_RESOURCE: ResourceType = ResourceType {
                 )),
                 add: &[ActionSpec::new("device.grant_catalog", "Grant a catalog", "grant_device_catalog", &[DEVICE, ("catalog", Bind::Param("catalog")), ("on", Bind::True)])
                     .params(&[param("catalog", "Catalog", ParamKind::Options { source: OptionSource::Catalogs }, true)])],
+                each: &[],
             },
         ),
         FieldSpec::new("last_seen_at", "Last seen", "Its last request to the hub.", FieldKind::Time),
@@ -960,7 +1136,7 @@ const DEVICE_RESOURCE: ResourceType = ResourceType {
             param("device", "Name", text(64, "ada-phone"), true),
             param("mode", "Mode", ParamKind::Choice { options: DEVICE_MODES }, true),
             param("org", "Bind to org (optional)", ParamKind::Options { source: OptionSource::Orgs }, false),
-            param("person", "Belongs to (optional; you when empty)", text(64, "ada"), false),
+            param("person", "Belongs to (optional; you when empty)", person(), false),
         ])
         .result(ResultView::Pairing),
     ),
@@ -976,7 +1152,7 @@ const DEVICE_RESOURCE: ResourceType = ResourceType {
         ActionSpec::new("device.unbind", "Unbind from its org", "bind_device_org", &[DEVICE])
             .confirm("From its next request it sees every org again."),
         ActionSpec::new("device.hand_over", "Hand to a person", "set_device_person", &[DEVICE, ("person", Bind::Param("person"))])
-            .params(&[param("person", "Person", text(64, "ada"), true)])
+            .params(&[param("person", "Person", person(), true)])
             .confirm("From its next request it sees that person's sessions and the ones shared with them, and no others."),
     ],
     create_flow: None,
@@ -997,7 +1173,7 @@ const PERSON_RESOURCE: ResourceType = ResourceType {
         FieldSpec::new("name", "Name", "What grants and devices are addressed to.", FieldKind::Text { max: 64 }).edit("name"),
         FieldSpec::new("display_name", "Shown as", "How the apps show them; empty shows the name.", FieldKind::Text { max: 80 }).edit("display_name"),
         FieldSpec::new("owner", "Owner", "This hub's own owner.", FieldKind::Bool { on_off: false, default: false }).badge(Badge::True { text: "owner" }),
-        FieldSpec::new("devices", "Devices", "Their live paired devices. Manage them in Settings → Devices.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[] }),
+        FieldSpec::new("devices", "Devices", "Their live paired devices. Manage them in Settings → Devices.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] }),
         FieldSpec::new("created_at", "Added", "When the hub first heard of them.", FieldKind::Time),
         FieldSpec::new("disabled_at", "Disabled", "When their devices and the shares made to them were revoked.", FieldKind::Time),
     ],
@@ -1171,6 +1347,7 @@ pub fn commands() -> Vec<&'static str> {
         out.push(r.list);
         for a in r.actions() {
             out.push(a.command);
+            out.extend(a.preview);
         }
         if r.create_flow.is_some() {
             out.extend(["flow_start", "flow_submit", "flow_back", "flow_cancel"]);
@@ -1313,11 +1490,36 @@ mod tests {
             "a new flow: name the commands of its resource here"
         );
         for f in org.fields {
-            if let FieldKind::Items { remove, add, .. } = &f.kind {
+            if let FieldKind::Items {
+                remove, add, each, ..
+            } = &f.kind
+            {
+                // Every action on one item names it.
+                for a in *each {
+                    assert!(
+                        a.bind
+                            .iter()
+                            .any(|(_, b)| matches!(b, Bind::Item | Bind::ItemField(_))),
+                        "{}: an item's action names the item",
+                        a.id
+                    );
+                }
                 // The org's catalogs are shown, never changed here: they are
                 // added and removed on Settings → Catalogs. Spend by person
-                // and what needs an admin are read-only reports.
-                if ["catalogs", "needs_admin", "spend_by_person"].contains(&f.id) {
+                // and what needs an admin are read-only reports; so are the
+                // team and the accounts its hosts use (G4.7). A former
+                // member is never re-added from here, only their shares
+                // taken back.
+                if [
+                    "catalogs",
+                    "needs_admin",
+                    "spend_by_person",
+                    "team",
+                    "accounts",
+                    "removed_members",
+                ]
+                .contains(&f.id)
+                {
                     assert!(remove.is_none() && add.is_empty(), "{}", f.id);
                     continue;
                 }
@@ -1335,6 +1537,7 @@ mod tests {
             commands(),
             [
                 "add_org",
+                "add_org_project",
                 "add_org_rule",
                 "assign_host_org",
                 "assign_tracker_org",
@@ -1363,14 +1566,21 @@ mod tests {
                 "list_peer_links",
                 "list_people",
                 "list_trackers",
+                "narrow_org_share",
+                "org_rule_preview",
                 "pair_device",
                 "release_debug_device",
                 "remove_org",
                 "remove_org_member",
+                "remove_org_project",
                 "remove_org_rule",
                 "remove_tracker",
                 "rename_person",
+                "repair_workspaces_now",
+                "restore_all_lost_sessions",
                 "revoke_device",
+                "revoke_org_member_grants",
+                "revoke_org_share",
                 "scan_debug_devices",
                 "set_device_person",
                 "set_org_member",

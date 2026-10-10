@@ -10,7 +10,8 @@ export function readOnlyRecipient(person: string, devices: readonly DeviceSummar
   const name = person.trim().toLowerCase();
   if (!name) return null;
   const theirs = devices.filter((d) => (d.person ?? '').toLowerCase() === name);
-  if (theirs.length === 0 || theirs.some((d) => d.mode !== 'readonly')) return null;
+  // Only a full device sends prompts: an answer-only one (M15 G2.10) answers.
+  if (theirs.length === 0 || theirs.some((d) => d.mode === 'full')) return null;
   const who = theirs[0].person ?? person.trim();
   return theirs.length === 1
     ? `${who}'s only device (${theirs[0].name}) is read-only, so they can watch this session but not send it prompts.`

@@ -92,6 +92,17 @@ Devices does; the device you are using has none). A rotation keeps the host's
 created time, records the rotation and starts "used" over; stamping use never
 invalidates the hub's token cache (`auth_epoch`), a rotation does.
 
+### Add account
+
+`add_account` makes a new login profile on a host (M15 step G2.9,
+[accounts.md](accounts.md#add-an-account)): a Claude subscription through a
+login pane fleet opens on the host (`start_login`, `login_status`,
+`login_key`, `login_code`, `end_login`), or an Anthropic API key checked
+with Anthropic and written to the host only (`api_key`, with an optional
+`daily_limit_usd`; `daily_limit` changes it). Served to the master and the
+hub owner's devices; everything but `login_status` needs the master or a
+trusted full device. The key and the code are never logged or returned.
+
 ### Named tokens
 
 Settings → Control API → **+ Token** (or the `api_tokens` tool) creates a
@@ -366,8 +377,13 @@ Index by area (names only; see the reference for details):
   `session_access` (who holds a live grant on your session), `my_grants`
   (who *you* are on this fleet and every live grant to you, which is what a
   client derives access from together with each row's `owner_person_id` and
-  `visibility`), and `session_claim` (give an `unclaimed` session to a
-  person). The first five are a person's device and the master; a per-host
+  `visibility`), `session_ask_access` (someone a session is shared with
+  asks its owner for `answer` or `drive`; it confers nothing, one open ask
+  each, and a decline holds a repeat back an hour), `access_requests` (the
+  owner's open asks: `list`, then `grant`, which revokes the asker's share
+  and shares again at the asked level, or `decline`), and `session_claim`
+  (give an `unclaimed` session to a person). All but the last are a
+  person's device and the master; a per-host
   token is refused all of them, because it proves no person. `session_claim`
   is the mirror image: a **per-host token only**, and only for the session
   whose active pane its `X-Fleet-Pane` header names — the operator's own
@@ -934,6 +950,21 @@ Index by area (names only; see the reference for details):
   `overlap: skip`, today's budget is spent, the account its login bills
   is at or past `accounts.pause_at` (Orbit Fleet 8.7, read from the stored
   usage readings), or a person skipped it.
+  Guards (gap plan G3.8, migration 159), all optional in `save`:
+  `time_zone` (the IANA zone shown with the schedule; `utc_offset_min`
+  still drives it), `run_max_secs` (60 to 21600: a run still going after
+  it has its turn stopped with Escape and fails), `fallback_host` (a host
+  of the same org that takes a run when its host is unreachable, its login
+  is past `accounts.pause_at`, or its start failed; the run's `host_alias`
+  says where it ran), `retry_once` (a failed run starts again once on the
+  next pass, `trigger_ref` `retry:<run id>`, never while paused) and
+  `autonomy` (0 report only, 1 ask before push, 2 or absent push: a line
+  under the prompt, not a sandbox). `automation.daily_budget` (whole USD,
+  0 none) skips every routine's runs, `run_now` included, once all of them
+  spent it in the UTC day; `budget` answers `{ spent_micros,
+  budget_micros?, since }`. A failed run carries `error_code`, and `get`'s
+  `fixes` and `failing`'s `fix` name its fix `{ run_id, code, label,
+  action: edit | host | accounts | session | retry, host? }`.
   A finished run also carries an `outcome` (8.10): `did_work`, `nothing`,
   `failed` or `needs_person`, with `outcome_source` `exit` (a failed run,
   which nothing overrides), `rule` (an open question or a wedged session is

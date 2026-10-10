@@ -81,7 +81,40 @@ describe('Settings → Devices', () => {
     await waitFor(() => expect(screen.getAllByTestId('resource-row')).toHaveLength(2));
     const [me, other] = screen.getAllByTestId('resource-row');
     expect(within(me).getAllByTestId('resource-badge').map((b) => b.textContent)).toEqual(['Full', 'this device', 'trusted']);
-    expect(within(other).getAllByTestId('resource-badge').map((b) => b.textContent)).toEqual(['Read-only']);
+    expect(within(other).getAllByTestId('resource-badge').map((b) => b.textContent)).toEqual(['Watch only']);
+  });
+
+  it('M15 G4.7: one People & devices table, filtered by org and person, grouped by person; a row opens it', async () => {
+    const tablet: DeviceSummary = { name: 'ada-tablet', mode: 'answer', trusted: true, person: 'ada', org: 'Acme', created_at: 1, catalogs: [] };
+    route({ list_devices: [laptop, phone, tablet] });
+    devices.set([laptop, phone, tablet]);
+    show();
+    const table = await screen.findByTestId('resource-table');
+    await waitFor(() => expect(within(table).getAllByTestId('table-row')).toHaveLength(3));
+    expect(Array.from(table.querySelectorAll('th')).map((t) => t.textContent)).toEqual([
+      'Belongs to',
+      'Name',
+      'Org',
+      'Mode',
+      'Trusted',
+      'Last seen',
+    ]);
+    const cells = (r: HTMLElement) => Array.from(r.querySelectorAll('td')).map((c) => c.textContent);
+    expect(cells(within(table).getAllByTestId('table-row')[2])).toEqual(['ada', 'ada-tablet', 'Acme', 'Answer only', 'Yes', 'never']);
+
+    await fireEvent.change(within(table).getByTestId('table-filter-org'), { target: { value: 'Acme' } });
+    expect(within(table).getAllByTestId('table-row')).toHaveLength(1);
+    await fireEvent.change(within(table).getByTestId('table-filter-org'), { target: { value: '' } });
+    await fireEvent.change(within(table).getByTestId('table-filter-person'), { target: { value: 'ada' } });
+    expect(within(table).getAllByTestId('table-row')).toHaveLength(2);
+    await fireEvent.change(within(table).getByTestId('table-filter-person'), { target: { value: '' } });
+
+    await fireEvent.click(within(table).getByTestId('table-group'));
+    expect(within(table).getAllByTestId('table-group-head').map((h) => h.textContent)).toEqual(['ada · 2', '— · 1']);
+
+    await fireEvent.click(within(table).getByTestId('table-group'));
+    await fireEvent.click(within(table).getAllByTestId('table-row')[1]);
+    expect(await screen.findByTestId('record-device-ada-phone')).toBeTruthy();
   });
 
   it('binds to an org picked from the orgs, and grants and takes back a catalog', async () => {

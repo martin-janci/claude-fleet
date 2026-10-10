@@ -197,6 +197,23 @@ export function routinesOn(
   return routines.filter((r) => r.enabled && loginAccount(r.host_alias, r.profile, hosts) === uuid).length;
 }
 
+/** The fallback role (gap plan G4.5): how many switched-on routines fall
+ *  back to `uuid` when their own host cannot run them (`fallback_host`,
+ *  same profile), not counting the ones that already run as it. */
+export function fallbackRoutinesOn(
+  uuid: string,
+  routines: readonly { host_alias: string; fallback_host?: string; profile?: string | null; enabled: boolean }[],
+  hosts: readonly HostRow[],
+): number {
+  return routines.filter(
+    (r) =>
+      r.enabled &&
+      !!r.fallback_host &&
+      loginAccount(r.fallback_host, r.profile, hosts) === uuid &&
+      loginAccount(r.host_alias, r.profile, hosts) !== uuid,
+  ).length;
+}
+
 /** The limit a usage reading puts an account at (`attentionFacts`). */
 export interface AccountLimitFact {
   resets_at: number | null;
@@ -215,9 +232,10 @@ export function pausedSessions(
 }
 
 /** "7 sessions · 2 routines · $18.40 today": the card's count line. */
-export function countLine(sessions: number, routines: number, spend: string | null): string {
+export function countLine(sessions: number, routines: number, spend: string | null, fallbacks = 0): string {
   const parts = [`${sessions} ${sessions === 1 ? 'session' : 'sessions'}`];
   if (routines > 0) parts.push(`${routines} ${routines === 1 ? 'routine' : 'routines'}`);
+  if (fallbacks > 0) parts.push(`fallback for ${fallbacks} ${fallbacks === 1 ? 'routine' : 'routines'}`);
   if (spend !== null) parts.push(`${spend} today`);
   return parts.join(' · ');
 }

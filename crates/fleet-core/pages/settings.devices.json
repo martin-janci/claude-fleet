@@ -6,6 +6,22 @@
   "layout": "master_detail",
   "resource": "device",
   "intro": "Every phone, browser and desktop paired to the hub: pair a new one, trust it, bind it to an org, hand it to a person, let it change a catalog, or revoke it. Changes need this device to be trusted.",
+  "table": {
+    "title": "People & devices",
+    "columns": [
+      "person",
+      "name",
+      "org",
+      "mode",
+      "trusted",
+      "last_seen_at"
+    ],
+    "filters": [
+      "org",
+      "person"
+    ],
+    "group_by": "person"
+  },
   "sections": [
     {
       "title": "Device",

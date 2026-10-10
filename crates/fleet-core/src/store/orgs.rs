@@ -115,9 +115,19 @@ pub struct OrgRow {
     /// (the hub owner's switch, off by default).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub admins_see_unclaimed: bool,
+    /// M15 step G2.10 (migration 158): its members see only their own
+    /// sessions and what is shared with them (the default). Off, they also
+    /// watch each other's sessions in it (`ViewScope`'s team reach). Absent
+    /// from an older hub, which has no team reach.
+    #[serde(default = "members_own_sessions_only_default")]
+    pub members_own_sessions_only: bool,
 }
 
 fn bound_sees_unassigned_default() -> bool {
+    true
+}
+
+fn members_own_sessions_only_default() -> bool {
     true
 }
 
@@ -298,7 +308,8 @@ pub fn normalize_rule(mut r: OrgRuleRow) -> Result<OrgRuleRow, IpcError> {
 const ORG_COLUMNS: &str = "id, name, color, isolate_sessions, created_at, auto_tidy, jev_allowed, \
                            bound_sees_unassigned, owns_hub, admins_see_unclaimed, \
                            EXISTS (SELECT 1 FROM org_settings os WHERE os.org_id = orgs.id \
-                                   AND os.key = 'decide.jev.reply_consent' AND os.value = 'true')";
+                                   AND os.key = 'decide.jev.reply_consent' AND os.value = 'true'), \
+                           members_own_sessions_only";
 
 /// `org_settings.key` of an org's reply-text consent (D48, J2): `true` =
 /// consented. NOT a settings spec on purpose: a consent is never inherited
@@ -321,6 +332,7 @@ fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
         owns_hub: r.get::<_, i64>(8)? != 0,
         admins_see_unclaimed: r.get::<_, i64>(9)? != 0,
         jev_reply_allowed: r.get::<_, i64>(10)? != 0,
+        members_own_sessions_only: r.get::<_, i64>(11)? != 0,
     })
 }
 
@@ -433,6 +445,19 @@ impl Store {
         let n = self.conn.execute(
             "UPDATE orgs SET auto_tidy = ?2 WHERE id = ?1",
             rusqlite::params![id, on.map(|b| b as i64)],
+        )?;
+        if n == 0 {
+            return Err(org_not_found(id));
+        }
+        self.get_org(id)?.ok_or_else(|| org_not_found(id))
+    }
+
+    /// Set an org's "members see only their own sessions" switch (M15 step
+    /// G2.10). Off lets its members watch each other's sessions in it.
+    pub fn set_org_members_own_sessions_only(&self, id: i64, on: bool) -> Result<OrgRow, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE orgs SET members_own_sessions_only = ?2 WHERE id = ?1",
+            rusqlite::params![id, on as i64],
         )?;
         if n == 0 {
             return Err(org_not_found(id));
@@ -595,6 +620,11 @@ impl Store {
         )?;
         tx.execute(
             "DELETE FROM org_rules WHERE org_id = ?1",
+            rusqlite::params![id],
+        )?;
+        // M15 step G2.10 (migration 158): its project catalog.
+        tx.execute(
+            "DELETE FROM org_projects WHERE org_id = ?1",
             rusqlite::params![id],
         )?;
         // Org administration phase C (migration 106): its own settings and

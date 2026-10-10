@@ -228,4 +228,15 @@
 //!   it carries `cost_micros`, and `work { action: today }` answers
 //!   `missions` (those waiting on a person) and a session's `proposed`.
 //!   The golden file pins `MissionRow.waiting_on`.
-pub const CONTRACT_REVISION: u32 = 15;
+//! - **16** — *new tools and new actions* (gap plan M15, batch 2). The
+//!   desktop routes `api_tokens` (named Control API tokens with a scope,
+//!   expiry and host limit, G2.8) and `add_account` (a subscription login
+//!   pane or an API key with a daily limit, G2.9) to tools of those names;
+//!   a revision-15 hub serves neither. A shared session's watcher asks for
+//!   more access with `session_ask_access`, and its owner answers on
+//!   `access_requests`. `routines` takes trigger guards (fleet budget, time
+//!   cap, host fallback, retry once, autonomy), and `org_admin` gains the
+//!   org's project catalog, a rule's live impact and the Sharing tab's
+//!   revoke and narrow actions, which a revision-15 hub refuses as unknown.
+//!   Every row change is additive.
+pub const CONTRACT_REVISION: u32 = 16;
