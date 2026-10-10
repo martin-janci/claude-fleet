@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "version": "0.6.2",
+  "mobile_accepts": [
+    0,
+    16
+  ],
+  "components": {
+    "android": {
+      "version": "0.6.2",
+      "artifacts": [
+        {
+          "kind": "apk",
+          "url": "https://github.com/martin-janci/fleet-mobile/releases/download/v0.6.2/fleet-mobile-0.6.2.apk",
+          "sha256": "23a4676c7f92ff39771b058b0ad3b6394018182c3864da1c5ae1cd5266593fa1",
+          "size": 17762178,
+          "version_code": 29,
+          "signer_sha256": "87081ff376e7ad2cb3082bf8f48dac2f451bffda66693b575c31cd4c354b9a15"
+        }
+      ]
+    }
+  }
+}

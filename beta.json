@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "track": "beta",
-  "sequence": 22,
-  "generated_at": "2026-10-10T21:31:21Z",
-  "expires_at": "2026-10-24T21:31:21Z",
+  "sequence": 23,
+  "generated_at": "2026-10-10T21:48:19Z",
+  "expires_at": "2026-10-24T21:48:19Z",
   "current": "0.6.2",
   "recommended": "0.6.2",
   "minimum_supported": {},
@@ -14,7 +14,14 @@
     {
       "version": "0.6.2",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.2/release-manifest.json",
-      "manifest_sha256": "09bce4ad3acb56f464d067c2bdca99da3cc6f011620d07f42fd5baceac22e876"
+      "manifest_sha256": "09bce4ad3acb56f464d067c2bdca99da3cc6f011620d07f42fd5baceac22e876",
+      "amendments": [
+        {
+          "component": "android",
+          "manifest": "https://raw.githubusercontent.com/martin-janci/claude-fleet/update-channels/amendments/0.6.2/android.json",
+          "manifest_sha256": "330dc0030b893539ed5bd84fe5ebbba8434fd0c9ce2af69fac5f4af8dbbb5b2e"
+        }
+      ]
     },
     {
       "version": "0.6.1",
