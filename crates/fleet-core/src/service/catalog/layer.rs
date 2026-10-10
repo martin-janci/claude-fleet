@@ -43,6 +43,14 @@ pub struct Layer {
     /// `<kind>/<name>` → a partial asset mapping, deep-merged over the asset.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: BTreeMap<String, serde_yaml::Value>,
+    /// Org names this layer applies by (Toolkit forms board, "Applies by
+    /// Organisation"): a context layer that every host of one of these orgs
+    /// takes on top of its own assignment in this catalog, without a
+    /// per-host row. A host with no rows here still takes the whole
+    /// catalog — an org layer adds to an assignment, it never narrows a
+    /// host that has none (`sync::layers::resolve_rows_for`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orgs: Vec<String>,
 }
 
 fn default_version() -> String {
@@ -95,6 +103,15 @@ impl Layer {
             if split_key(key).is_none() {
                 return Err(format!("'{key}' is not a valid <kind>/<name> key"));
             }
+        }
+        if !self.orgs.is_empty() && self.axis != Axis::Context {
+            return Err(format!(
+                "layer '{}' applies by organisation, so it must be a context layer",
+                self.name
+            ));
+        }
+        if self.orgs.iter().any(|o| o.trim().is_empty()) {
+            return Err(format!("layer '{}' names an empty organisation", self.name));
         }
         for key in &self.members {
             if self.exclude.contains(key) {
@@ -242,6 +259,27 @@ mod tests {
         let good =
             Layer::from_yaml("kind: layer\nname: a\naxis: role\nmembers:\n  - skill/x\n").unwrap();
         assert!(good.validate().is_ok());
+    }
+
+    #[test]
+    fn an_org_layer_is_a_context_layer_naming_real_orgs() {
+        let l = Layer::from_yaml(
+            "kind: layer\nname: papaya\naxis: context\norgs:\n  - Papaya\nmembers:\n  - skill/x\n",
+        )
+        .unwrap();
+        assert_eq!(l.orgs, vec!["Papaya".to_string()]);
+        assert!(l.validate().is_ok());
+        assert!(l.to_yaml().contains("orgs:\n- Papaya"), "{}", l.to_yaml());
+
+        let role =
+            Layer::from_yaml("kind: layer\nname: r\naxis: role\norgs:\n  - Papaya\n").unwrap();
+        assert!(role.validate().unwrap_err().contains("context layer"));
+        let blank =
+            Layer::from_yaml("kind: layer\nname: b\naxis: context\norgs:\n  - \" \"\n").unwrap();
+        assert!(blank.validate().unwrap_err().contains("empty organisation"));
+        // No `orgs` key is written for a layer that applies by host.
+        let plain = Layer::from_yaml("kind: layer\nname: p\naxis: context\n").unwrap();
+        assert!(!plain.to_yaml().contains("orgs"));
     }
 
     fn layer(name: &str, axis: &str, extends: Option<&str>) -> Layer {

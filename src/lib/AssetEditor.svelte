@@ -56,6 +56,33 @@
     });
   });
 
+  // Toolkit forms board: Lint runs the server lint now, on the stored asset
+  // (the draft is linted by Save), and says what it found.
+  let linting = $state(false);
+  let lintNote = $state<string | null>(null);
+  async function runLint() {
+    linting = true;
+    lintNote = null;
+    const r = await lintAsset(draft.kind, draft.name);
+    linting = false;
+    if (!r.ok) {
+      lintNote = r.error.message;
+      return;
+    }
+    serverLint = r.value;
+    const e = r.value.errors.length, w = r.value.warnings.length;
+    const found = e + w === 0 ? 'No problems found' : `${e} error${e === 1 ? '' : 's'}, ${w} warning${w === 1 ? '' : 's'}`;
+    lintNote = changed ? `${found} in the saved version. Save to lint your changes.` : `${found}.`;
+  }
+
+  // Discard drops the staged edits and goes back to what the editor opened
+  // with (resources already committed stay as they are).
+  function discard() {
+    const resources = draft.resources;
+    draft = { ...clone(initial), resources };
+    saveError = null;
+  }
+
   // Compares everything except the resources' base64 `bytes` payloads: those
   // can be multi-MB, and `changed` is a `$derived` that re-stringifies on
   // every reactive update (including each keystroke in the body textarea).
@@ -569,8 +596,12 @@
     </div>
   {/if}
   {#if saveError}<p class="error" data-testid="editor-save-error">{saveError}</p>{/if}
+  {#if lintNote}<p class="muted lint-note" data-testid="editor-lint-note" role="status">{lintNote}</p>{/if}
 
   <div class="actions">
+    <button type="button" onclick={runLint} disabled={linting || saving} data-testid="editor-lint-run">{linting ? 'Linting…' : 'Lint'}</button>
+    <button type="button" onclick={discard} disabled={!changed || saving} data-testid="editor-discard">Discard</button>
+    <span class="spacer"></span>
     <button type="button" onclick={oncancel} disabled={saving} data-testid="editor-cancel">Cancel</button>
     <button type="button" class="primary" onclick={save} disabled={!canSave} data-testid="editor-save">{#if saving}<Loader name="comet" size={12} class="btn-loader" />{/if}{saving ? 'Saving…' : 'Save'}</button>
   </div>
@@ -614,6 +645,8 @@
   .error { color: var(--usage-crit); margin: 0; }
   .muted { color: var(--fg-muted); font-size: var(--text-xs); }
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .actions .spacer { flex: 1; }
+  .lint-note { margin: 0; }
   .actions button { font-size: var(--text-xs); padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: var(--radius-sm); cursor: pointer; }
   .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
   .actions button.primary { border-color: var(--accent); }

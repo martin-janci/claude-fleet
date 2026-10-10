@@ -81,6 +81,19 @@ describe('AssetsPanel', () => {
     expect(screen.queryByTestId('assets-setup')).toBeNull();
   });
 
+  it('"Push after each change" needs a remote and writes catalog.auto_push on setup (G7.5)', async () => {
+    byCmd({ catalog_config: null, catalog_configure: { repo_path: '/r', remote_url: 'git@x:y.git', head_commit: null, last_loaded_at: null }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 0, problem_count: 0 }, catalog_list_assets: { ...listing, assets: [], unmanaged: [], problems: [] }, assets_inventory: [], get_fleet_settings: {}, set_fleet_setting: { 'catalog.auto_push': 'true' } });
+    render(AssetsPanel);
+    await tick(); await tick();
+    const box = screen.getByTestId('assets-setup-auto-push') as HTMLInputElement;
+    expect(box.disabled).toBe(true);
+    await fireEvent.input(screen.getByPlaceholderText('git@github.com:you/agent-assets.git'), { target: { value: 'git@x:y.git' } });
+    expect(box.disabled).toBe(false);
+    await fireEvent.click(box);
+    await fireEvent.click(screen.getByTestId('assets-setup-submit'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('set_fleet_setting', { key: 'catalog.auto_push', value: 'true' }));
+  });
+
   // `catalog` is only ever set on success, so a failed load used to render
   // the error line AND a permanent "Loading…" at the same time, with no way
   // to try again but the panel header's ↻.
