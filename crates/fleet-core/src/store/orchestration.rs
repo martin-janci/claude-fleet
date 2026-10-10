@@ -250,6 +250,11 @@ pub struct MissionRow {
     /// "spent of budget" meter. Filled where `cost_micros` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_micros: Option<i64>,
+    /// Whether it waits on a person, and why (gap plan G1.6,
+    /// `service::attention::mission_waiting`; hub contract 15). Filled
+    /// where `cost_micros` is; absent when it waits on nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_on: Option<crate::service::attention::MissionWait>,
 }
 
 /// A repo a mission may run in.
@@ -371,6 +376,7 @@ fn map_mission(r: &rusqlite::Row<'_>) -> rusqlite::Result<MissionRow> {
         next_wake_at: r.get(20)?,
         cost_micros: None,
         budget_micros: None,
+        waiting_on: None,
     })
 }
 

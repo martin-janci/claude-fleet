@@ -30,6 +30,7 @@ fn mission(policy: MissionPolicy) -> MissionRow {
         next_wake_at: None,
         cost_micros: None,
         budget_micros: None,
+        waiting_on: None,
     }
 }
 

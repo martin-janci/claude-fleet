@@ -37,6 +37,20 @@ export interface Mission {
   repos?: MissionRepo[];
   /** What it asks of its loop (O4); absent from a hub older than O4. */
   policy?: MissionPolicy;
+  /** Whether it waits on a person, and why (G1.6, hub contract 15;
+   *  `attention::MissionWait`). Absent when it waits on nobody, and from an
+   *  older hub. */
+  waiting_on?: MissionWait | null;
+}
+
+/** Why a mission waits on a person (`attention::MissionWaitReason`). */
+export type MissionWaitReason = 'question' | 'sign_grant' | 'confirm';
+
+/** `attention::MissionWait`. */
+export interface MissionWait {
+  reason: MissionWaitReason;
+  since: number;
+  open_cards: number;
 }
 
 /** `store::MissionPolicy`. The backend reads a missing field as its

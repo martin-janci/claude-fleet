@@ -1,5 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { inboxRows, nextInInbox, notWaiting, notWaitingText } from './inbox';
+import { get } from 'svelte/store';
+import {
+  inboxCount,
+  inboxRows,
+  nextInInbox,
+  notWaiting,
+  notWaitingSaid,
+  notWaitingText,
+  proposedRows,
+  proposedText,
+  sayNotWaiting,
+} from './inbox';
+import { sessions } from './sessions';
+import { waitingMissions, waitingOf } from './mission_waits';
 import { attentionState, countNeedsYou } from './attention';
 import { session } from './hosts_fixture';
 
@@ -41,5 +54,39 @@ describe('nextInInbox (redesign 5.9)', () => {
     expect(nextInInbox(q, 9)?.id).toBe(1);
     expect(nextInInbox([row(4)], 4)).toBeNull();
     expect(nextInInbox([], 4)).toBeNull();
+  });
+});
+
+describe('G1.6: Jev proposals and waiting missions', () => {
+  const jev = session('mac', 'maybe', { claude_status: 'idle', turn_outcome: 'asked', last_stop_at: 50 });
+
+  it('keeps a Jev proposal out of the Inbox and the badge, in its own list', () => {
+    const all = [...rows, jev];
+    expect(inboxRows(all, opts).map((s) => s.tmux_name)).toEqual(['asking', 'crashed']);
+    expect(countNeedsYou(all, opts)).toBe(2);
+    expect(proposedRows(all, opts).map((s) => s.tmux_name)).toEqual(['maybe']);
+    expect(proposedText(1)).toBe('+1 proposed');
+    expect(proposedText(0)).toBe('');
+  });
+
+  it('"Not waiting" sets one reading aside, and a later turn is a new one', () => {
+    sayNotWaiting(jev);
+    const aside = get(notWaitingSaid);
+    expect(proposedRows([jev], opts, aside)).toEqual([]);
+    expect(proposedRows([{ ...jev, last_stop_at: 90 }], opts, aside)).toHaveLength(1);
+    notWaitingSaid.set(new Set());
+  });
+
+  it('counts a mission waiting on a person in the rail badge', () => {
+    sessions.set([]);
+    waitingMissions.set([]);
+    expect(get(inboxCount)).toBe(0);
+    waitingMissions.set(
+      waitingOf([
+        { id: 1, name: 'Hub federation v2', goal: 'g', mode: 'finite', state: 'active', level: 2, plan_version: 1, created_at: 1, updated_at: 1, version: 1, waiting_on: { reason: 'sign_grant', since: 10, open_cards: 0 } },
+      ]),
+    );
+    expect(get(inboxCount)).toBe(1);
+    waitingMissions.set([]);
   });
 });

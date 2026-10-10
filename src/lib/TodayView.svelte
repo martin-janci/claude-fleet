@@ -17,6 +17,8 @@
   import { candidatesFor, inScope, refreshTidy, requestTidy, tidyReport } from './tidy';
   import MorningBrief from './MorningBrief.svelte';
   import MissionNudge from './MissionNudge.svelte';
+  import { openMission } from './missions';
+  import { waitWords } from './mission_waits';
   import Skeleton from './states/Skeleton.svelte';
   import { errorText } from './error_copy';
   import {
@@ -209,9 +211,22 @@
     {#if isEmptyView(view)}
       <p class="empty" data-testid="details-empty">Nothing running today. Pick a session, or start work from ⌘K.</p>
     {/if}
-    {#if view.waiting.length > 0}
+    {#if view.waiting.length > 0 || (view.missions?.length ?? 0) > 0}
       <h3 data-testid="today-waiting">Waiting on you</h3>
-      {@render groups(view.waiting, 'waiting')}
+      {#if view.waiting.length > 0}{@render groups(view.waiting, 'waiting')}{/if}
+      {#if view.missions?.length}
+        <!-- G1.6: missions waiting on a person, beside the sessions. -->
+        <ul class="groups" data-testid="today-missions">
+          {#each view.missions as m (m.id)}
+            <li class="group">
+              <button class="btn btn--quiet link" type="button" data-testid="today-mission-open" onclick={() => openMission(m.id)}
+                >Mission {m.name}</button
+              >
+              <span class="status">{waitWords(m.waiting_on)}</span>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     {/if}
     {#if view.inProgress.length > 0}
       <h3 data-testid="today-in-progress">In progress</h3>

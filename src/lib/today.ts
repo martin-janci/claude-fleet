@@ -12,6 +12,8 @@
 import { invokeCmd, type Result } from './result';
 import type { SessionRow } from './sessions';
 import { ALL_SCOPES, type ScopeId } from './orgs';
+import type { MissionWait } from './missions';
+import { waitWords } from './mission_waits';
 
 export type TodayBucket = 'waiting' | 'in_progress' | 'stale';
 
@@ -22,6 +24,9 @@ export interface TodaySession {
   org_id?: number | null;
   /** waiting | stuck | failed | lifecycle — a person is needed. */
   attention?: string | null;
+  /** `probably_waiting` when Jev proposes it waits (G1.6): kept apart from
+   *  `attention`, never what puts its group in Waiting on you. */
+  proposed?: string | null;
   /** idle | done — why this session is stale. */
   stale?: string | null;
   claude_status?: string | null;
@@ -54,19 +59,31 @@ export interface TodayShipped {
   org_id?: number | null;
 }
 
+/** A mission waiting on a person (G1.6, `today.rs` `TodayMission`). */
+export interface TodayMission {
+  id: number;
+  name: string;
+  org_id?: number | null;
+  waiting_on: MissionWait;
+}
+
 export interface Today {
   since: number;
   now: number;
   groups: TodayGroup[];
   shipped: TodayShipped[];
+  /** Missions waiting on a person; absent from an older hub (contract < 15). */
+  missions?: TodayMission[];
 }
 
-/** What the view draws: the four sections, scoped. */
+/** What the view draws: the four sections, scoped, and the missions that
+ *  wait on you beside Waiting on you. */
 export interface TodayView {
   waiting: TodayGroup[];
   inProgress: TodayGroup[];
   shipped: TodayShipped[];
   stale: TodayGroup[];
+  missions?: TodayMission[];
 }
 
 /** Local midnight of `nowMs`, in unix seconds: "today" is the viewer's. */
@@ -121,6 +138,8 @@ export function scopeToday(
     else out.inProgress.push(group);
   }
   out.shipped = (t.shipped ?? []).filter(keepShipped);
+  // A mission by its org, as a shipped entry.
+  out.missions = (t.missions ?? []).filter((m) => all || (orgScope !== null ? m.org_id === orgScope : m.org_id == null));
   return out;
 }
 
@@ -136,6 +155,8 @@ export function sessionPhrase(s: TodaySession, bucket: TodayBucket): string {
   if (bucket === 'waiting' && s.attention) {
     return `${s.name} (${ATTENTION_WORDS[s.attention] ?? s.attention})`;
   }
+  // G1.6: Jev's proposal says so, wherever its group stands.
+  if (s.proposed && !s.attention) return `${s.name} (probably waiting)`;
   if (bucket === 'stale' && s.stale) {
     return `${s.name} (${s.stale === 'done' ? 'ticket done, session still running' : 'idle'})`;
   }
@@ -198,12 +219,20 @@ export function standupText(v: TodayView): string {
   };
   section('Shipped', v.shipped.map(shippedLine));
   section('In progress', v.inProgress.flatMap((g) => groupLine(g, 'in_progress')));
-  section('Waiting on me', v.waiting.flatMap((g) => groupLine(g, 'waiting')));
+  section('Waiting on me', [
+    ...v.waiting.flatMap((g) => groupLine(g, 'waiting')),
+    ...(v.missions ?? []).map(missionLine),
+  ]);
   section('Stale', v.stale.flatMap((g) => groupLine(g, 'stale')));
   return parts.length > 0 ? parts.join('\n\n') + '\n' : 'Nothing to report.\n';
 }
 
+/** "- Mission Hub federation v2 — sign the autonomy grant". */
+export function missionLine(m: TodayMission): string {
+  return `- Mission ${m.name} — ${waitWords(m.waiting_on)}`;
+}
+
 /** Whether the view has nothing at all to show. */
 export function isEmptyView(v: TodayView): boolean {
-  return v.waiting.length + v.inProgress.length + v.shipped.length + v.stale.length === 0;
+  return v.waiting.length + v.inProgress.length + v.shipped.length + v.stale.length + (v.missions?.length ?? 0) === 0;
 }

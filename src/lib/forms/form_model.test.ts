@@ -25,9 +25,9 @@ describe('form_model, against the shared cases', () => {
 
 describe('visibleSteps', () => {
   it('drops a step whose condition does not hold, and follows the answers', () => {
-    expect(visibleSteps(spec, { db: false }).map((s) => s.title)).toEqual(['Basics', 'Notes']);
-    expect(visibleSteps(spec, { db: true }).map((s) => s.title)).toEqual(['Basics', 'Database', 'Notes']);
-    expect(visibleSteps(spec, { tags: ['b'] }).map((s) => s.title)).toEqual(['Basics', 'Features', 'Notes']);
+    expect(visibleSteps(spec, { db: false }).map((s) => s.title)).toEqual(['Basics', 'Notes', 'Review']);
+    expect(visibleSteps(spec, { db: true }).map((s) => s.title)).toEqual(['Basics', 'Database', 'Notes', 'Review']);
+    expect(visibleSteps(spec, { tags: ['b'] }).map((s) => s.title)).toEqual(['Basics', 'Features', 'Notes', 'Review']);
   });
   it('drops a field whose condition does not hold', () => {
     const db = visibleSteps(spec, { db: true, engine: 'sqlite' })[1];

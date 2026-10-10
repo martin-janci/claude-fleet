@@ -1049,6 +1049,12 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     .unwrap();
     mission.cost_micros = Some(31_800_000);
     mission.budget_micros = Some(40_000_000);
+    // Revision 15 (G1.6): a mission waiting on a person says why.
+    mission.waiting_on = Some(fleet_core::service::attention::MissionWait {
+        reason: fleet_core::service::attention::MissionWaitReason::SignGrant,
+        since: 1,
+        open_cards: 0,
+    });
     put("MissionRow", wire_keys(&mission));
     put(
         "RunEstimate",

@@ -79,11 +79,18 @@ The JSON Schema is `docs/form-spec.schema.json`; the validator is
 | `title` | yes | ≤ 120 chars |
 | `intro` | no | ≤ 500 chars |
 | `submit` | no | The last step's button; default "Submit" |
+| `save_later` | no | Offer "Save and finish later" (hub contract 15) |
 | `steps` | yes | 1–12 steps |
 
-A step has `title` (required, unique within the form), `intro`, `when`
-and `fields` (≥ 1). One step is a plain form; the wizard chrome (Back /
-Next, *Step 2 of 4*) appears from two visible steps on.
+A step has `title` (required, unique within the form), `name` (≤ 24
+chars, the word on its step chip; default the title), `intro`, `when`
+and `fields` (≥ 1). One step is a plain form; the wizard chrome (step
+chips, Back / Next, *Step 2 of 4*) appears from two visible steps on.
+
+A step with `"kind": "review"` has no fields: it summarises every visible
+step before it, each with an **Edit** link back to that step (a secret
+reads "set, never shown to the agent", never its value). It is the last
+step and never the first.
 
 ### Fields
 
@@ -97,9 +104,35 @@ Every field has `name` (`[a-z][a-z0-9_]*`, ≤ 40 chars, unique across the
 | `textarea` | `placeholder`, `max_len` (≤ 20000, default 5000) | string |
 | `number` | `min`, `max`, `integer` (bool) | number |
 | `bool` | — | bool |
-| `select` | `options`: `[[value, label], …]`, 1–50 | string, one of the values |
+| `select` | `options`: 1–50, see below; `other` (bool) | string, one of the values (any text with `other`) |
 | `multiselect` | `options` as above | array of values, in option order |
-| `secret` | — (`value` refused) | written to the host; see Secrets below |
+| `secret` | `secret_note` (≤ 500); `value` refused | written to the host; see Secrets below |
+
+An option is the pair `[value, label]` or an object
+`{ "value", "label", "detail"?, "proposed"?: { "by", "reason" } }`; the
+two shapes mix in one list. `detail` (≤ 200) is a line under the label
+("2 idle"). `proposed` marks the likely choice of a `select` (at most one
+per field; `by` is `rule`, `jev` or `llm`): it is shown first and chosen
+while the field is empty, with "Proposed by Jev · reason · Change", unless
+the field asks something AI never decides or the option is risky.
+
+`other: true` on a `select` adds **Another…**, a free entry: the answer may
+then be any text up to 500 characters.
+
+Any field but a secret may carry:
+
+- `disabled_reason` (≤ 500): the field is shown, greyed, with the reason
+  under it, and never answered (its value is dropped like a hidden one's).
+  A disabled field cannot be `required`.
+- `drafted: { "by", "from" }`: its `value` was drafted by an AI ("haiku on
+  mercury", "the Jira epic PD-3012"). It needs a `value`, and shows the
+  Drafted label until the person changes it.
+
+With `save_later`, **Save and finish later** folds the card to one line
+with Resume; what was typed (never a secret, never a disabled field) is
+kept on that device until the form is answered or declined. The hub's
+`form_drafts` table (migration 153) is the agent's spec while it is being
+written, purged after 10 minutes, so it does not hold answers.
 
 A `required` bool means "must be on" (a consent box). A `required`
 multiselect needs at least one value. A `value` must be valid for its

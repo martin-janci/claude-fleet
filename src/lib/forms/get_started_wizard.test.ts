@@ -10,6 +10,7 @@ import ChatForm from './ChatForm.svelte';
 import WizardDialog from './WizardDialog.svelte';
 import { buildFirstFleet, getStartedSource, getStartedWizard, runGetStarted } from './get_started_wizard';
 import { WIZARDS, type Wizard } from './wizards';
+import { readOption } from './forms';
 import type { SessionRow } from '../sessions';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
@@ -32,10 +33,10 @@ describe('the Get started wizard', () => {
       ['local', 'This machine'],
       ['mercury', 'mercury'],
     ]);
-    expect(fieldOf(none, 'source')?.options?.map(([v]) => v)).toEqual(['clone', 'folder']);
+    expect(fieldOf(none, 'source')?.options?.map((o) => readOption(o).value)).toEqual(['clone', 'folder']);
     expect(none.spec.steps.map((s) => s.title)).toEqual(['Host', 'Project', 'Agent']);
     const some = getStartedWizard({ projects: [{ id: 4, owner: 'acme', repo: 'pos' }], hosts: [] });
-    expect(fieldOf(some, 'source')?.options?.map(([v]) => v)).toEqual(['existing', 'clone', 'folder']);
+    expect(fieldOf(some, 'source')?.options?.map((o) => readOption(o).value)).toEqual(['existing', 'clone', 'folder']);
     expect(fieldOf(some, 'project')?.options).toEqual([['4', 'acme/pos']]);
     expect(fieldOf(some, 'host')?.options).toEqual([['local', 'This machine']]);
   });

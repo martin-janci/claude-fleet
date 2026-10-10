@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect } from 'vitest';
 import {
   byTriage,
+  jevOutcome,
   ciStatusLabel,
   classify,
   claudeStatusColor,
@@ -313,7 +314,7 @@ describe('triage rank', () => {
   });
 
   it('needsYou covers every bucket above working, and nothing below', () => {
-    expect([...NEEDS_YOU_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 13));
+    expect([...NEEDS_YOU_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 14).filter((b) => b !== 'probably_waiting'));
     expect(needsYou(row({ claude_status: 'blocked' }), opts)).toBe(true);
     expect(needsYou(row({ stuck_kind: 'oom' }), opts)).toBe(true);
     expect(needsYou(row({ idle_since: 0 }), opts)).toBe(true);
@@ -329,7 +330,7 @@ describe('triage rank', () => {
   // agree, read NEEDS_YOU_COUNTED_BUCKETS before changing it.
   it('counts narrower than it filters: idle_long and lifecycle are shown, not counted', () => {
     expect([...NEEDS_YOU_COUNTED_BUCKETS]).toEqual(
-      [...TRIAGE_BUCKETS].slice(0, 12).filter((b) => b !== 'done_unread' && b !== 'lifecycle'),
+      [...TRIAGE_BUCKETS].slice(0, 13).filter((b) => b !== 'done_unread' && b !== 'lifecycle' && b !== 'probably_waiting'),
     );
     const idleRows = Array.from({ length: 6 }, () => row({ idle_since: 0 }));
     const blocked = row({ claude_status: 'blocked' });
@@ -387,9 +388,9 @@ describe('triage rank', () => {
 describe('the seven attention states (shared fixture with attention.rs)', () => {
   const opts = { idleSecs: 0, now: 1000 };
 
-  it('maps every triage bucket, in order, to one of seven states', () => {
+  it('maps every triage bucket, in order, to one of eight states', () => {
     expect(attentionTable.buckets.map(([b]) => b)).toEqual([...TRIAGE_BUCKETS]);
-    expect(ATTENTION_STATES).toEqual(['action_required', 'failed', 'blocked', 'working', 'paused', 'done', 'idle']);
+    expect(ATTENTION_STATES).toEqual(['action_required', 'failed', 'blocked', 'proposed', 'working', 'paused', 'done', 'idle']);
     for (const b of TRIAGE_BUCKETS) expect(ATTENTION_STATES).toContain(bucketState(b));
   });
 
@@ -411,4 +412,17 @@ describe('the seven attention states (shared fixture with attention.rs)', () => 
       expect(countNeedsYou([r], o)).toBe(c.counted ? 1 : 0);
     });
   }
+});
+
+describe('G1.6: Jev\'s "probably waiting"', () => {
+  const opts = { idleSecs: 0, now: 1000 };
+  it('is its own bucket and state, out of the Needs you filter and the count', () => {
+    const r = row({ claude_status: 'idle', turn_outcome: 'asked', host_alias: 'alpha' });
+    expect(classify(r, opts)).toBe('probably_waiting');
+    expect(attentionState(r, opts)).toBe('proposed');
+    expect(needsYou(r, opts)).toBe(false);
+    expect(countNeedsYou([r], opts)).toBe(0);
+    // Jev's reading still says who read it.
+    expect(jevOutcome(r)).toBe('asked');
+  });
 });

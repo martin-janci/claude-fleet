@@ -5,7 +5,7 @@
 // (`every_wizard_spec_is_valid`). What the last button does stays with the
 // screen that opens the wizard: the spec is data only.
 import type { LoaderName } from '../loader-kit.generated';
-import type { FormSpec } from './forms';
+import { readOption, type FormOption, type FormSpec } from './forms';
 import linkHub from './wizards/link_hub.json';
 import addProject from './wizards/add_project.json';
 import addHost from './wizards/add_host.json';
@@ -67,6 +67,7 @@ export function withChoices(spec: FormSpec, choices: Record<string, [string, str
   // A step left with no field goes; so does the option that led to it.
   const gone = new Set<string>();
   const steps = spec.steps.flatMap((s) => {
+    if (s.kind === 'review') return [s];
     const fields = s.fields.filter((f) => !empty(f.name));
     if (fields.length > 0) return [{ ...s, fields }];
     if (s.when?.field !== undefined && typeof s.when.eq === 'string') gone.add(`${s.when.field}=${s.when.eq}`);
@@ -78,8 +79,8 @@ export function withChoices(spec: FormSpec, choices: Record<string, [string, str
       ...s,
       fields: s.fields.map((f) => {
         if (!f.options) return f;
-        const options = choices[f.name] ?? f.options.filter(([v]) => !gone.has(`${f.name}=${v}`));
-        const kept = f.value === undefined || options.some(([v]) => v === f.value);
+        const options: FormOption[] = choices[f.name] ?? f.options.filter((o) => !gone.has(`${f.name}=${readOption(o).value}`));
+        const kept = f.value === undefined || options.some((o) => readOption(o).value === f.value);
         return { ...f, options, value: kept ? f.value : undefined };
       }),
     })),

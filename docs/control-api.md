@@ -1097,11 +1097,19 @@ derive from them.
   last turn ended in an API error; re-prompt),
   `failed` (a pane-less agent reported failure), `context_full` (context at or
   past `health.context_red_pct`), `stale_working` (the demotion above),
-  `ci_failing` (idle with failing PR checks) and `lifecycle` (a failed or
+  `ci_failing` (idle with failing PR checks), `probably_waiting` (contract
+  15: Jev read the end of a silent turn as a question; a proposal, never
+  counted as Needs you) and `lifecycle` (a failed or
   pending safe kill, a ghost, a lost row). `since` is when the session
   entered that state. `state` (contract 11) is the attention state the
   reason puts it in: `action_required`, `failed`, `blocked` (`host_down`,
-  `account_limit`, `no_credentials`) or `paused` (`lifecycle`).
+  `account_limit`, `no_credentials`), `proposed` (`probably_waiting`) or
+  `paused` (`lifecycle`). A `needs_attention=true` listing includes
+  `probably_waiting` rows; the Needs you count is the first three states.
+- **`waiting_on`** (on a mission row, contract 15): why an active mission
+  waits on a person: `question` (an open `ask` card), `sign_grant` (it asks
+  for autonomy and no live grant covers its plan) or `confirm` (open cards
+  in its confirm queue), with `since` and `open_cards`.
 
 ### Errors and limits
 

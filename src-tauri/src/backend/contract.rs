@@ -177,7 +177,11 @@ pub const MIN_HUB_CONTRACT: u32 = 14;
 /// Raised to 13 with revision 13.
 ///
 /// Raised to 14 with revision 14.
-pub const MAX_HUB_CONTRACT: u32 = 14;
+///
+/// Raised to 15 with revision 15 (the wider form spec, G1.1). The minimum
+/// stays 14: revision 15 adds no tool the desktop routes to, and a
+/// revision-14 hub's forms are in the older shape this build still reads.
+pub const MAX_HUB_CONTRACT: u32 = 15;
 
 /// Where a hub's wire-contract revision stands against what this build
 /// accepts. A pure function of the three numbers on purpose: the real bounds

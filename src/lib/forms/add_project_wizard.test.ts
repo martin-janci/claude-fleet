@@ -7,6 +7,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import ChatForm from './ChatForm.svelte';
 import { addProjectSources, runAddProject } from './add_project_wizard';
 import { WIZARDS, withChoices } from './wizards';
+import { optionsOfField } from './forms';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -41,7 +42,7 @@ describe('the Add project wizard (redesign step 10.12)', () => {
     const spec = withChoices(WIZARDS.add_project.spec, { host: HOSTS, repos: [] });
     expect(spec.steps.map((s) => s.title)).toEqual(['Source', 'Clone', 'Folder', 'New repo']);
     const source = spec.steps[0].fields.find((f) => f.name === 'source')!;
-    expect(source.options!.map(([v]) => v)).toEqual(['clone', 'folder', 'new']);
+    expect(optionsOfField(source).map((o) => o.value)).toEqual(['clone', 'folder', 'new']);
     expect(source.value).toBeUndefined();
   });
 

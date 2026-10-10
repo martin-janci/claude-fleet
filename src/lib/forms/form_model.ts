@@ -1,7 +1,7 @@
 // The TS twin of crates/fleet-core/src/pages/forms.rs `check_answers`:
 // which steps and fields are asked, and what is wrong with an answer. Both
 // run docs/form-examples/answers.json, so the words must match exactly.
-import type { FieldCondition, FieldProblem, FormField, FormSpec, FormStep, Values } from './forms';
+import { optionsOfField, type FieldCondition, type FieldProblem, type FormField, type FormSpec, type FormStep, type Values } from './forms';
 import { risky } from '../quick_answer';
 export type { FormSpec, FormStep, FormField, FieldProblem, Values } from './forms';
 
@@ -38,7 +38,7 @@ function isBlank(v: unknown): boolean {
 }
 
 function optionValues(f: FormField): string[] {
-  return (f.options ?? []).map(([v]) => v);
+  return optionsOfField(f).map((o) => o.value);
 }
 
 /** `v` as an answer to `f`, normalised, or what is wrong with it. */
@@ -62,9 +62,14 @@ function checkValue(f: FormField, v: unknown): { ok: true; value: unknown } | { 
     case 'bool':
       return typeof v === 'boolean' ? { ok: true, value: v } : { ok: false, problem: 'must be on or off' };
     case 'select':
-      return typeof v === 'string' && optionValues(f).includes(v)
-        ? { ok: true, value: v }
-        : { ok: false, problem: 'must be one of the options' };
+      if (typeof v === 'string' && optionValues(f).includes(v)) return { ok: true, value: v };
+      // "Another…": any text the person typed.
+      if (f.other) {
+        if (typeof v !== 'string') return { ok: false, problem: 'must be one of the options or your own text' };
+        if ([...v].length > TEXT_LEN) return { ok: false, problem: `is longer than ${TEXT_LEN} characters` };
+        return { ok: true, value: v };
+      }
+      return { ok: false, problem: 'must be one of the options' };
     case 'multiselect': {
       const bad = { ok: false as const, problem: 'must be a list of the options' };
       if (!Array.isArray(v) || !v.every((x) => typeof x === 'string')) return bad;
@@ -88,9 +93,11 @@ function walk(spec: FormSpec, values: Values, onlyStep?: number): Walk {
     if (!holds(step.when, out.answers)) return;
     const shown: FormField[] = [];
     const index = out.steps.length;
-    for (const f of step.fields) {
+    for (const f of step.fields ?? []) {
       if (!holds(f.when, out.answers)) continue;
       shown.push(f);
+      // Disabled: shown with its reason, never answered.
+      if (f.disabled_reason !== undefined) continue;
       const report = onlyStep === undefined || onlyStep === index;
       const given = own(values, f.name);
       if (isBlank(given)) {
@@ -126,7 +133,7 @@ export function checkAnswers(
   values: Values,
 ): { ok: true; answers: Values; secrets: string[] } | { ok: false; problems: FieldProblem[] } {
   const w = walk(spec, values);
-  const known = new Set(spec.steps.flatMap((s) => s.fields.map((f) => f.name)));
+  const known = new Set(spec.steps.flatMap((s) => (s.fields ?? []).map((f) => f.name)));
   for (const k of Object.keys(values).sort()) {
     if (!known.has(k)) w.problems.push({ field: k, problem: 'is not a field of this form' });
   }
@@ -145,7 +152,7 @@ export function checkAnswers(
 export function startingValues(spec: FormSpec, fromAgent: boolean): Values {
   const out: Values = {};
   for (const step of spec.steps)
-    for (const f of step.fields) {
+    for (const f of step.fields ?? []) {
       if (f.type === 'secret' || f.value === undefined) continue;
       const v = fromAgent ? agentDefault(f, f.value) : f.value;
       if (v !== undefined) out[f.name] = v;
@@ -155,8 +162,8 @@ export function startingValues(spec: FormSpec, fromAgent: boolean): Values {
 
 function agentDefault(f: FormField, v: unknown): unknown {
   const optionRisky = (value: unknown) => {
-    const o = (f.options ?? []).find(([ov]) => ov === value);
-    return risky(o ? o[1] : String(value));
+    const o = optionsOfField(f).find((x) => x.value === value);
+    return risky(o ? o.label : String(value));
   };
   switch (f.type) {
     case 'bool':

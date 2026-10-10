@@ -250,8 +250,10 @@ async fn assist_sets_the_inbox_state_once_per_turn() {
     );
     let row = w.row();
     assert_eq!(row.turn_outcome.as_deref(), Some("asked"));
-    let a = attention::needs_attention(&row).expect("needs a person");
-    assert_eq!(a.reason, Reason::Waiting);
+    let a = attention::needs_attention(&row).expect("Jev proposes it waits");
+    // A proposal, kept apart from Needs you (gap plan G1.6).
+    assert_eq!(a.reason, Reason::ProbablyWaiting);
+    assert!(!a.state.counts_toward_badge());
     // The same turn is never asked again.
     assert_eq!(ask(&ctx, &input).await, Asked::Skipped);
     assert_eq!(fake.calls(), 1);

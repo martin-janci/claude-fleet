@@ -28,11 +28,47 @@ export interface FormField {
   min?: number;
   max?: number;
   integer?: boolean;
-  options?: [string, string][];
+  options?: FormOption[];
+  /** select: offer "Another…", a free entry beside the options. */
+  other?: boolean;
+  /** Shown, not answerable, with this reason under it. */
+  disabled_reason?: string;
+  /** The default `value` was drafted by an AI. */
+  drafted?: { by: string; from: string };
+  /** secret: where the value goes, under the field. */
+  secret_note?: string;
+}
+
+/** Who proposes an option (forms.rs `ProposedBy`). */
+export type OptionProposer = 'rule' | 'jev' | 'llm';
+
+/** `{value, label, detail?, proposed?}` (forms.rs `OptionSpec`). */
+export interface OptionSpec {
+  value: string;
+  label: string;
+  detail?: string;
+  proposed?: { by: OptionProposer; reason: string };
+}
+
+/** An option: the original `[value, label]` pair, or an object. */
+export type FormOption = [string, string] | OptionSpec;
+
+/** One option read the same whichever shape it was written in. */
+export function readOption(o: FormOption): OptionSpec {
+  return Array.isArray(o) ? { value: o[0], label: o[1] } : o;
+}
+
+/** A field's options, each read as an object. */
+export function optionsOfField(f: { options?: FormOption[] }): OptionSpec[] {
+  return (f.options ?? []).map(readOption);
 }
 
 export interface FormStep {
   title: string;
+  /** The word on the step chip; the title when absent. */
+  name?: string;
+  /** `review`: a summary of the earlier steps, with no fields. */
+  kind?: 'fields' | 'review';
   intro?: string;
   when?: FieldCondition;
   fields: FormField[];
@@ -43,6 +79,8 @@ export interface FormSpec {
   title: string;
   intro?: string;
   submit?: string;
+  /** Offer "Save and finish later". */
+  save_later?: boolean;
   steps: FormStep[];
 }
 

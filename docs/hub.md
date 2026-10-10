@@ -373,7 +373,7 @@ upgrade before the hub is touched (point `FLEET_HUB_DATA` at the right
 directory) — it never migrates without a backup. An upgrade never prunes an older
 version's `pre-<version>-*.db` (see *Backups*).
 
-**Order across the three binaries.** Today (contract 14 on both sides,
+**Order across the three binaries.** Today (the hub serves contract 15, the desktop accepts 14–15,
 proto 1 on both sides; `fleet-hub compat` prints a build's windows) the order is a habit: hub, then desktop, then the
 agents. When a release bumps `CONTRACT_REVISION`, upgrade the **hub first,
 then the desktop in the same window** — there is no mixed window, the desktop
@@ -2251,12 +2251,18 @@ token was rejected, and the session is not working), `stop_failed`,
 `stale_working` (a `working` row demoted after `reconcile.stale_working_secs`
 with no activity; it lifts on the next hook, when its terminal is opened,
 when the row works again, or after `reconcile.stale_working_ttl_secs`),
-`ci_failing` and `lifecycle`. The three after `stuck` are decided from what
+`ci_failing`, `probably_waiting` (contract 15: Jev read a silent turn's end
+as a question; a proposal, not a fact) and `lifecycle`. The three after `stuck` are decided from what
 the hub's event bus follows of hosts and account usage, not from the row, so
 every site that stamps `needs_attention` (`list_sessions`, `/events`, Today,
 the org counts, the work view) agrees. Beside the reason, `state` (contract
 11) is the attention state it puts the session in: `action_required`,
-`failed`, `blocked` (the three above) or `paused` (`lifecycle`). `tags`
+`failed`, `blocked` (the three the Needs you badge counts), `proposed`
+(`probably_waiting`, contract 15: shown apart from Needs you, never counted)
+or `paused` (`lifecycle`). A mission waiting on a person is the model's
+other class (contract 15): its row's `waiting_on` (`question`,
+`sign_grant` or `confirm`, with `since` and `open_cards`), and Today's
+`missions`; the badge counts it. `tags`
 is there because the phone's tag editor starts from them and
 `set_session_tags` replaces the whole list: without them a phone that added
 one tag deleted the rest. `work` (the primary work link: key, title) is the
