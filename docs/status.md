@@ -34,6 +34,21 @@ Jev's "probably waiting" kept apart from Needs you) and no tool; 16 adds
 named tokens (`api_tokens`) and + Add account (`add_account`), so a
 desktop accepts only a revision-16 hub.
 
+The canvas gap plan (M15, steps G0.1 to G6.2; transition plan section M15)
+landed in #779, #812 and #814 and fleet-mobile #192 to #198: the form spec's
+contract-15 fields and the form kit, settings with one Save bar, mission asks
+and Jev proposals in the attention model, task due dates, timed Send later,
+routine event triggers and guards, named Control API tokens, + Add account,
+org switches and the project catalog, access requests for shared sessions,
+and the phone's bottom sheets, chat forms and Inbox rows (migrations 153 to
+160). The re-run audit (`docs/redesign/canvas-gaps-2026-10-10.md`) closes
+233 of 396 rows and leaves 36 missing and 127 partial. Waiting on the owner:
+tracker write-back from Fleet (D3, D29), start rules that name a host,
+account, model or agent, and the six items the plan left out on purpose
+(Wake host, liquid orbit for rebase, the database upgrade ring, waiting for
+the other hub to sign, Bedrock and Vertex accounts, hub settings that follow
+an org).
+
 A session start reports its three real steps (worktree, tmux, agent) as
 `start:progress` frames (redesign 5.13, `service/sessions/start_progress.rs`):
 `new_session` takes an optional `start_token` the client mints, and the frames

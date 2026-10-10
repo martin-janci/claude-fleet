@@ -231,7 +231,7 @@ The Startup board (step 3.15) and the Loaders in wizards and chats board (Loader
 
 ## Milestones and steps
 
-Fifteen milestones, about 165 PR-sized steps: 18 AI steps from the AI map, 12 loader steps, 7 from the design manual and wizards in chat, and 22 for the phone app redesign (M14) among them. Milestones 0 to 7 bring today's functions into the new shell and end with New as the default; 8 to 13 add what does not exist yet. Steps in one milestone can run in parallel unless the Needs column says otherwise, and the task graph after M13 shows which steps across milestones can run at once. Every step is in `martin-janci/claude-fleet` unless it says phone (`fleet-mobile`).
+Sixteen milestones, about 220 PR-sized steps (M15, the gap plan, adds 57): 18 AI steps from the AI map, 12 loader steps, 7 from the design manual and wizards in chat, and 22 for the phone app redesign (M14) among them. Milestones 0 to 7 bring today's functions into the new shell and end with New as the default; 8 to 13 add what does not exist yet. Steps in one milestone can run in parallel unless the Needs column says otherwise, and the task graph after M13 shows which steps across milestones can run at once. Every step is in `martin-janci/claude-fleet` unless it says phone (`fleet-mobile`).
 
 A step is done when: `scripts/verify.sh full` passes; its parity checklist is filled; the shortcut freeze test is green; any `REGEN_*` file it touches is regenerated; a contract change has its golden file and phone PR; and the screen matches its canvas board in both themes.
 
@@ -482,6 +482,24 @@ The Mobile app row on the canvas (MobileNav, MobileSession, MobileControl, Mobil
 | 14.21 | Landscape and full screen (MobileFullscreen): the Claude Code TUI with a key bar, a split diff, a two-pane session, and split terminals | Phone | none | 14.14 | UI tests in landscape for each layout; rotating keeps the session and scroll position |
 | 14.22 | Tutorials and help modes (MobileTutorials, MobileTutorialModes): a help-mode picker after pairing (Show me around, Tips only as the usual choice, No help) and Help settings under This phone; a coach-mark tour on the real Inbox (5 stops, Skip); a practice fleet from hub-free fixtures with its own banner and notifications marked Practice; one-time tips in place; More › Learn with lessons, progress and the desktop's approved guides; a lesson inside the real Control chat; a guide with Undo per change | Phone | none | 14.3, 14.11 | Lessons and guides never answer a permission; the practice fleet never reaches the hub; Skip and No help leave nothing behind |
 | 14.13 | Phone parity sign-off: the analysis checklists 100%, Martin uses New on the phone for a week, New becomes the default; the old navigation goes one release later | Phone | none | 14.1–14.12, 14.14–14.22 | Checklist and Martin's OK; every screen checked in light against MobileLight (Inbox, question card, My work, More) |
+
+### M15 · Close the canvas gaps (gap plan)
+
+The canvas audit of 2026-10-09 (`docs/redesign/canvas-gaps-2026-10-09.md`) found 204 missing and 177 partial items against both apps, most of them on the nine Forms boards added after this plan. The [Orbit Fleet gap plan](https://claude.ai/code/artifact/c4caae1a-3fea-404d-8241-56d6e97771bb) closes them in 57 steps, G0.1 to G6.2, in seven iterations and eight lanes. It builds the shared pieces first (form spec fields, the form kit, settings rows with one Save bar, the attention model, five backend primitives) and the screens on them after. The step table lives in the gap plan; this section records what landed.
+
+| Iteration | Steps | Landed in | State |
+| --- | --- | --- | --- |
+| I0 · Land what is built | G0.1 to G0.3 | #779, fleet-mobile #194 | landed |
+| I1 · Shared pieces | G1.1 to G1.11 | #812, fleet-mobile #196 | landed; contract 15 |
+| I2 · Forms everywhere | G2.1 to G2.10 | #812, #814 | landed; contract 16 |
+| I3 · Work, Control, Inbox | G3.1 to G3.13 | #812, #814 | landed |
+| I4 · Sessions, sharing, hosts, settings | G4.1 to G4.9 | #812, #814 | landed |
+| I5 · Phone | G5.1 to G5.9 | fleet-mobile #192, #195, #197, #198 | landed |
+| I6 · Sign-off | G6.1, G6.2 | this docs PR | G6.1 bar not met, see below |
+
+Migrations 153 to 160 came from this milestone: `form_drafts` (153), task due date and assignee (154), deferred prompt timing (155), routine triggers (156), named Control API tokens (157), org switches and the org project catalog (158), routine guards (159) and access requests (160). The planned `wizard_state` migration (G5.8) was not built, so a wizard still does not resume on another device.
+
+G6.1 re-ran the audit on 2026-10-10 (`docs/redesign/canvas-gaps-2026-10-10.md`): 233 of the 396 rows are closed, 36 missing and 127 partial remain. The bar was "only the left-out list stays open", so it is not met. Most open rows are the second half of a row whose first half landed. About a dozen were cut while building and wait on an owner decision: tracker write-back (D3, D29), start rules that name a host, account, model or agent, layers by organisation, read-only share links, and the six items the gap plan left out on purpose (Wake host, liquid orbit for rebase, the database upgrade ring, waiting for the other hub to sign, Bedrock and Vertex accounts, hub settings that follow an org).
 
 ## Design changes from the design manual
 
