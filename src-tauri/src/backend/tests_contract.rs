@@ -909,6 +909,8 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         terminals: vec![fleet_core::service::sessions::ShellTerminal {
             n: 1,
             tmux_name: "fleet-dev-t1".into(),
+            // Some, so the golden pins the name the strip reads (M15 G4.4).
+            command: Some("node".into()),
         }],
         opened: Some(1),
     };

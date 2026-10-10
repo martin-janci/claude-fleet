@@ -1,12 +1,15 @@
 // A pop-out terminal window (redesign step 5.4): it loads what the pane
 // needs, picks its session without overwriting the main window's remembered
 // one, and attaches under its own label — never the main window's pty ids.
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => {})) }));
+const emitTo = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => {})), emitTo }));
+const win = vi.hoisted(() => ({ close: vi.fn(async () => {}), setFocus: vi.fn(async () => {}) }));
+vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => win }));
 vi.mock('@tauri-apps/api/webview', () => ({
   getCurrentWebview: () => ({ label: 'term-1-sh2', onDragDropEvent: async () => () => {} }),
 }));
@@ -99,5 +102,66 @@ describe('pop-out terminal window (step 5.4)', () => {
     await settle();
     expect(screen.getByTestId('terminal-popout-gone')).toBeTruthy();
     expect(calls('pty_open')).toHaveLength(0);
+  });
+});
+
+describe("a pop-out's own bar (Agent board, M15 G4.4)", () => {
+  const writes = () => calls('pty_write').map((c) => args(c));
+
+  it('Send keys… sends a key and a line of text to this window\'s terminal only', async () => {
+    render(TerminalPopout, { popout: { label: 'term-1-agent', sessionId: 1, shell: null } });
+    await settle();
+    expect(screen.getByTestId('popout-bar').textContent).toContain('popped out');
+    await fireEvent.click(screen.getByTestId('popout-send-keys'));
+    await fireEvent.click(screen.getByTestId('send-key-esc'));
+    await fireEvent.click(screen.getByTestId('send-key-shift-tab'));
+    // Empty text sends nothing.
+    expect((screen.getByTestId('send-keys-send') as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.input(screen.getByTestId('send-keys-text'), { target: { value: '/compact' } });
+    await fireEvent.click(screen.getByTestId('send-keys-send'));
+    await settle(4);
+    expect(writes()).toEqual([
+      { id: 'term-1-agent', data: '\x1b' },
+      { id: 'term-1-agent', data: '\x1b[Z' },
+      { id: 'term-1-agent', data: '/compact\r' },
+    ]);
+    // Escape closes the panel; it is not a key sent.
+    await fireEvent.keyDown(screen.getByTestId('send-keys'), { key: 'Escape' });
+    expect(screen.queryByTestId('send-keys')).toBeNull();
+    expect(writes()).toHaveLength(3);
+  });
+
+  it('Clear view blanks the grid and sends nothing to the terminal', async () => {
+    let drained = false;
+    const base = inv().getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
+    inv().mockImplementation(async (cmd: string, payload?: unknown) => {
+      if (cmd === 'pty_drain' && !drained) {
+        drained = true;
+        return { data: 'hello from claude', bytes: 17 };
+      }
+      return base(cmd, payload);
+    });
+    render(TerminalPopout, { popout: { label: 'term-1-sh2', sessionId: 1, shell: 2 } });
+    await settle(30);
+    const grid = screen.getByTestId('terminal-host');
+    expect(grid.textContent).toContain('hello from claude');
+    await fireEvent.click(screen.getByTestId('popout-clear-view'));
+    await settle(2);
+    expect(grid.textContent).not.toContain('hello from claude');
+    expect(writes()).toHaveLength(0);
+    expect(screen.getByTestId('popout-clear-view').getAttribute('title')).toContain('/clear is never sent');
+  });
+
+  it('Pop back in hands the terminal to the main window and closes this one', async () => {
+    render(TerminalPopout, { popout: { label: 'term-1-sh2', sessionId: 1, shell: 2 } });
+    await settle();
+    expect(screen.getByTestId('popout-bar').textContent).toContain('Shell 2 · popped out');
+    await fireEvent.click(screen.getByTestId('popout-pop-back-in'));
+    await settle(4);
+    expect(emitTo).toHaveBeenCalledWith('main', 'terminal-pop-back-in', { sessionId: 1, shell: 2 });
+    expect(win.close).toHaveBeenCalled();
+    // Nothing was killed or closed on the backend by the pane itself.
+    expect(calls('shell_terminals').filter((c) => args(c).action === 'close')).toHaveLength(0);
+    expect(calls('kill_session')).toHaveLength(0);
   });
 });

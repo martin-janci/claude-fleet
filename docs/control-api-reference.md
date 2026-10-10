@@ -773,7 +773,7 @@ Settings proposals waiting for review, each with the key's value now, and can_wr
 
 ### `shell_terminals`
 
-A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory (at=home: home) and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals.
+A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory (at=home: home) and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals, each with the command running in it.
 
 Parameters: `action`, `at`, `n`, `session_id`
 

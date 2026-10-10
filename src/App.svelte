@@ -37,6 +37,7 @@
   import { tidyRequest } from './lib/tidy';
   import TerminalView from './lib/TerminalView.svelte';
   import { terminalPane, requestTerminalTab } from './lib/terminals';
+  import { listenForPopBackIn, type PopBackIn } from './lib/terminal_popout';
   import WatchView from './lib/WatchView.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
@@ -180,6 +181,8 @@
   }
   let unlistenEvents: UnlistenFn | null = null;
   let unlistenVoice: UnlistenFn | null = null;
+  let unlistenPopBackIn: UnlistenFn | null = null;
+  let appDestroyed = false;
   let showWelcome = $state(false);
   // Redesign step 3.15: the version to reveal once after an update.
   let revealVersion = $state<string | null>(null);
@@ -510,7 +513,27 @@
     window.addEventListener('dragover', swallowDrag);
     window.addEventListener('drop', swallowDrag);
     window.addEventListener('fleet:outcome-unknown', onOutcomeUnknown);
+    // A pop-out's Pop back in (Agent board, M15 G4.4): show its session on
+    // the same terminal here; the pop-out closes itself.
+    void listenForPopBackIn(onPopBackIn)
+      .then((off) => {
+        if (appDestroyed) off?.();
+        else unlistenPopBackIn = off ?? null;
+      })
+      .catch(() => {});
   });
+
+  async function onPopBackIn(req: PopBackIn) {
+    const row = get(sessions).find((s) => s.id === req.sessionId);
+    if (!row) return;
+    selectSessionExplicitly(row);
+    // The view guards read the new selection's derived facts.
+    await tick();
+    showSession();
+    setSessionView('terminal');
+    if (req.shell == null) requestTerminalTab('agent');
+    else requestTerminalTab('shells', req.shell);
+  }
 
   // Opening a session from anywhere (sidebar, quick switcher, a Hosts-view
   // session row, a fresh create) means "go to it": leave the Hosts view so
@@ -546,6 +569,8 @@
     unsubHostsClose();
     unlistenEvents?.();
     unlistenVoice?.();
+    appDestroyed = true;
+    unlistenPopBackIn?.();
     setGapHandler(null);
   });
 

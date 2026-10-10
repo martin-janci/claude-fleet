@@ -13,8 +13,9 @@
 use super::*;
 use crate::ipc_error::{codes, lock};
 use crate::tmux::{
-    close_shell_terminal_script, open_shell_terminal_script, shell_terminal_name,
-    shell_terminals_in, LIST_SESSION_NAMES_SCRIPT, MAX_SHELL_TERMINALS, SHELL_TERMINAL_NO_SESSION,
+    close_shell_terminal_script, open_shell_terminal_script, shell_terminal_commands_in,
+    shell_terminal_name, LIST_SESSION_COMMANDS_SCRIPT, MAX_SHELL_TERMINALS,
+    SHELL_TERMINAL_NO_SESSION,
 };
 
 #[derive(
@@ -69,12 +70,17 @@ pub struct ShellTerminalsArgs {
     pub at: ShellTerminalStart,
 }
 
-/// One open terminal: its number and the tmux session a terminal pane
-/// attaches to.
+/// One open terminal: its number, the tmux session a terminal pane
+/// attaches to, and what runs in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellTerminal {
     pub n: u32,
     pub tmux_name: String,
+    /// What runs in the front of the terminal (tmux's
+    /// `pane_current_command`): its shell when it is idle, `node` while
+    /// `pnpm dev` runs. Absent from an older hub, or when tmux said nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,7 +142,11 @@ pub(crate) async fn shell_terminals_with(
             let n = match args.n {
                 Some(n) => valid_n(n)?,
                 None => {
-                    let open = list(tmux, name).await?;
+                    let open: Vec<u32> = list(tmux, name)
+                        .await?
+                        .into_iter()
+                        .map(|(n, _)| n)
+                        .collect();
                     next_free(&open).ok_or_else(|| {
                         IpcError::new(
                             codes::E_VALIDATE,
@@ -181,9 +191,10 @@ pub(crate) async fn shell_terminals_with(
     let terminals = list(tmux, name)
         .await?
         .into_iter()
-        .map(|n| ShellTerminal {
+        .map(|(n, command)| ShellTerminal {
             n,
             tmux_name: shell_terminal_name(name, n),
+            command,
         })
         .collect();
     Ok(ShellTerminalsResult {
@@ -210,10 +221,11 @@ pub fn next_free(open: &[u32]) -> Option<u32> {
     (1..=MAX_SHELL_TERMINALS).find(|n| !open.contains(n))
 }
 
-async fn list(tmux: &dyn TmuxExec, session: &str) -> Result<Vec<u32>, IpcError> {
-    let out = tmux.run_script(LIST_SESSION_NAMES_SCRIPT).await?;
+/// The session's open terminals by number, each with what runs in it.
+async fn list(tmux: &dyn TmuxExec, session: &str) -> Result<Vec<(u32, Option<String>)>, IpcError> {
+    let out = tmux.run_script(LIST_SESSION_COMMANDS_SCRIPT).await?;
     check(&out)?;
-    Ok(shell_terminals_in(
+    Ok(shell_terminal_commands_in(
         session,
         &String::from_utf8_lossy(&out.stdout),
     ))
@@ -251,7 +263,7 @@ mod tests {
     use super::*;
     use crate::tmux::{
         close_all_shell_terminals_script, is_shell_terminal_name, parse_shell_terminal_name,
-        rename_shell_terminals_script,
+        rename_shell_terminals_script, shell_terminals_in, LIST_SESSION_NAMES_SCRIPT,
     };
 
     #[test]
@@ -289,6 +301,86 @@ mod tests {
         assert_eq!(shell_terminals_in("api", names), vec![1, 2]);
         assert_eq!(shell_terminals_in("api-2", names), vec![1]);
         assert!(shell_terminals_in("nope", names).is_empty());
+    }
+
+    /// What runs in each shell (M15 G4.4): the command comes first, so a
+    /// `|` in either half still finds the terminal, and another session's
+    /// terminals (or the agent's own row) never leak in.
+    #[test]
+    fn each_terminal_carries_what_runs_in_it() {
+        let lines = "zsh|api\nnode|api--sh2\nzsh|api--sh1\nvim|api-2--sh1\n\
+                     a|b|api--sh3\n|api--sh4\nzsh|a|pi--sh5\nnode|api--sh2\n";
+        assert_eq!(
+            shell_terminal_commands_in("api", lines),
+            vec![
+                (1, Some("zsh".into())),
+                (2, Some("node".into())),
+                (3, Some("a|b".into())),
+                (4, None),
+            ]
+        );
+        assert_eq!(
+            shell_terminal_commands_in("a|pi", lines),
+            vec![(5, Some("zsh".into()))]
+        );
+        assert_eq!(
+            shell_terminal_commands_in("api-2", lines),
+            vec![(1, Some("vim".into()))]
+        );
+        assert!(shell_terminal_commands_in("nope", lines).is_empty());
+    }
+
+    /// The list a strip reads, through the service and a fake tmux: each
+    /// terminal with its command, and none on the wire when tmux said none.
+    #[tokio::test]
+    async fn the_list_names_what_runs_in_each_terminal() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let fake = FakeSsh::new();
+        fake.on_host(
+            "h",
+            Match::script_contains("pane_current_command"),
+            Reply::ok("zsh|api\nnode|api--sh1\n|api--sh2\n"),
+        );
+        let tmux = crate::tmux::RemoteTmux {
+            client: fake.clone(),
+            host: "h".into(),
+        };
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("h").unwrap();
+        let id = store
+            .upsert_session("api", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let row = store.get_session_by_id(id).unwrap().unwrap();
+        let got = shell_terminals_with(
+            ShellTerminalsArgs {
+                session_id: row.id,
+                action: ShellTerminalAction::List,
+                n: None,
+                at: ShellTerminalStart::Worktree,
+            },
+            &row,
+            &tmux,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            got.terminals,
+            vec![
+                ShellTerminal {
+                    n: 1,
+                    tmux_name: "api--sh1".into(),
+                    command: Some("node".into()),
+                },
+                ShellTerminal {
+                    n: 2,
+                    tmux_name: "api--sh2".into(),
+                    command: None,
+                },
+            ]
+        );
+        let wire = serde_json::to_value(&got.terminals).unwrap();
+        assert_eq!(wire[0]["command"], "node");
+        assert!(wire[1].get("command").is_none(), "{wire}");
     }
 
     #[test]

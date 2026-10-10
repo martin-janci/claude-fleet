@@ -788,6 +788,7 @@
       "terminals"
     ],
     "ShellTerminalsResult.terminals": [
+      "command",
       "n",
       "tmux_name"
     ],

@@ -38,6 +38,9 @@
     terminalPane,
     terminalRequest,
     terminalOpensOn,
+    shellActivity,
+    SHELL_ACTIVITY_POLL_MS,
+    type ShellActivity,
     type ShellTerminalsResult,
   } from './terminals';
   import TerminalStrip from './TerminalStrip.svelte';
@@ -45,7 +48,8 @@
   import Self from './TerminalView.svelte';
   import HostOffline from './states/HostOffline.svelte';
   import { errorText } from './error_copy';
-  import { openTerminalWindow, popoutTitle } from './terminal_popout';
+  import { openTerminalWindow, popoutTitle, parsePopoutLabel, popBackIn } from './terminal_popout';
+  import SendKeys from './SendKeys.svelte';
 
   /** Shell terminals (step 5.3). App mounts this pane with no `shell`: it is
    *  the session's terminal area, with the Agent | Shell N strip in the new
@@ -151,6 +155,8 @@
   );
   /** The session's open terminals, by number. */
   let shells: number[] = $state([]);
+  /** What runs in each of them (M15 G4.4), from the same list. */
+  let activity: Record<number, ShellActivity> = $state({});
   /** The picked tab: `null` is the agent. */
   let activeShell: number | null = $state(null);
   /** Agent on the left, the picked terminal on the right. */
@@ -178,6 +184,7 @@
   function takeTerminals(r: ShellTerminalsResult | null) {
     if (!r || r.session_id !== stripFor) return;
     shells = r.terminals.map((t) => t.n);
+    activity = Object.fromEntries(r.terminals.map((t) => [t.n, shellActivity(t.command)]));
     listed = true;
     if (activeShell != null && !shells.includes(activeShell)) activeShell = null;
     if (activeShell == null) split = false;
@@ -192,6 +199,7 @@
     if (id === stripFor) return;
     stripFor = id;
     shells = [];
+    activity = {};
     activeShell = null;
     split = false;
     listed = false;
@@ -201,6 +209,22 @@
     void shellTerminals(id).then((r) => {
       if (r.ok && r.value) takeTerminals(r.value);
     });
+  });
+
+  // What runs in each shell changes without an event (a command starts or
+  // ends), so the list is asked again while the strip shows terminals and
+  // the window is on screen. Never while a new/close is out: its own reply
+  // carries the list.
+  $effect(() => {
+    if (!showStrip || shells.length === 0) return;
+    const t = setInterval(() => {
+      const id = stripFor;
+      if (id == null || stripBusy || (typeof document !== 'undefined' && document.hidden)) return;
+      void shellTerminals(id).then((r) => {
+        if (r.ok && r.value && !stripBusy) takeTerminals(r.value);
+      });
+    }, SHELL_ACTIVITY_POLL_MS);
+    return () => clearInterval(t);
   });
 
   async function newTerminal() {
@@ -269,7 +293,16 @@
     const req = $terminalRequest;
     if (!isRoot || !req || req.seq <= seenRequest) return;
     seenRequest = req.seq;
-    untrack(() => (req.to === 'agent' ? selectTab(null) : showShells()));
+    untrack(() => {
+      if (req.to === 'agent') selectTab(null);
+      else if (req.n != null && listed && shells.includes(req.n)) selectTab(req.n);
+      else {
+        // Before the list: the terminal it names is the one showShells
+        // goes back to once the list is in.
+        if (req.n != null) lastShell = req.n;
+        showShells();
+      }
+    });
   });
 
   // What the bar's Terminals tab reads: the count, and whether it is current.
@@ -301,6 +334,34 @@
     const n = activeShell;
     const r = await openTerminalWindow(sel.id, n, popoutTitle(displayName(sel, $showFriendlyNames), n));
     if (!r.ok) pushError(r.error, 'Pop out failed');
+  }
+
+  // ── A pop-out window's own bar (Agent board, M15 G4.4) ────────────────
+  /** The window this pane fills, when it is a pop-out. */
+  const popoutTarget = $derived(popout === undefined ? null : parsePopoutLabel(popout));
+  let sendKeysOpen = $state(false);
+
+  /** Send keys…: bytes to this terminal, as if typed. */
+  function sendKeys(bytes: string) {
+    if (!bytes) return;
+    writePty(bytes);
+  }
+
+  /** Clear view: blank this window's copy of the screen. Nothing reaches the
+   *  terminal (no Ctrl+L, no /clear); what the program repaints shows again. */
+  function clearView() {
+    if (!screen) return;
+    screen.clearView();
+    clearSelection();
+    renderVersion++;
+  }
+
+  /** Pop back in: the main window shows this terminal, this window closes. */
+  async function popBack() {
+    const t = popoutTarget;
+    if (!t) return;
+    const r = await popBackIn(t);
+    if (!r.ok) pushError(r.error, 'Pop back in failed');
   }
 
   /** ⌥⌘T (Ctrl+Alt+T) opens a terminal, ⌘` (Ctrl+`) goes to the next tab.
@@ -1463,6 +1524,38 @@
   </div>
 {:else if $selectedSession}
   <div class="term-root" class:nested={!isRoot}>
+  {#if popoutTarget}
+    {@const what = myShell == null ? (AGENT_LABELS[sessionAgent($selectedSession)] ?? 'Terminal') : `Shell ${myShell}`}
+    <div class="popout-bar" data-testid="popout-bar">
+      <span class="popout-name">{what} · popped out</span>
+      <span class="popout-gap"></span>
+      <button
+        type="button"
+        class="popout-act"
+        aria-haspopup="dialog"
+        aria-expanded={sendKeysOpen}
+        onclick={() => (sendKeysOpen = !sendKeysOpen)}
+        data-testid="popout-send-keys">Send keys…</button
+      >
+      <button
+        type="button"
+        class="popout-act"
+        title="Clears this view only. /clear is never sent for you."
+        onclick={clearView}
+        data-testid="popout-clear-view">Clear view</button
+      >
+      <button
+        type="button"
+        class="popout-act"
+        title="Show this terminal in the main window again and close this one. It keeps running."
+        onclick={() => void popBack()}
+        data-testid="popout-pop-back-in">Pop back in</button
+      >
+      {#if sendKeysOpen}
+        <SendKeys target={what} onsend={sendKeys} onclose={() => (sendKeysOpen = false)} />
+      {/if}
+    </div>
+  {/if}
   {#if showStrip}
     <TerminalStrip
       agentLabel={AGENT_LABELS[sessionAgent($selectedSession)] ?? 'Terminal'}
@@ -1479,6 +1572,7 @@
       host={$selectedSession.host_alias}
       opensOn={$terminalOpensOn}
       onopenson={(at) => terminalOpensOn.set(at)}
+      {activity}
     />
   {/if}
   <div class="term-panes">
@@ -1715,6 +1809,39 @@
     height: 100%;
     width: 100%;
     min-height: 0;
+  }
+  .popout-bar {
+    position: relative;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.25rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-pane);
+    font-size: var(--text-2xs);
+  }
+  .popout-name {
+    color: var(--fg-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .popout-gap {
+    flex: 1 1 auto;
+  }
+  .popout-act {
+    font: inherit;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg-muted);
+    border-radius: var(--radius-sm);
+    padding: 0.15rem 0.5rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .popout-act:hover {
+    color: var(--fg);
   }
   .term-panes {
     flex: 1 1 auto;

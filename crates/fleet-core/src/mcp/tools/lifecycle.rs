@@ -57,7 +57,8 @@ impl FleetTools {
         <name>--sh<N> (N 1-9) beside its agent, started in the agent's \
         directory (at=home: home) and never listed as sessions. \
         action=list (default), open (n, or the lowest free) or close (n). \
-        Closing one never stops the session. Returns the open terminals.")]
+        Closing one never stops the session. Returns the open terminals, \
+        each with the command running in it.")]
     pub(super) async fn shell_terminals(
         &self,
         Extension(caller): Extension<Caller>,
