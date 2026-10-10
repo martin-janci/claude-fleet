@@ -109,6 +109,10 @@
             "key": "repair.auto_on_tick",
             "truthy": true
           }
+        },
+        {
+          "type": "action",
+          "action": "repair.now"
         }
       ]
     },

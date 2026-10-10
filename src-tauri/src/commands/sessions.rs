@@ -1528,3 +1528,28 @@ mod history_tests {
         assert!(a.limit.is_none());
     }
 }
+
+/// Settings › Repair workspace › Repair now (gap plan G4.6): one run of the
+/// tick's automatic, create-only workspace repair across the fleet, even
+/// with `repair.auto_on_tick` off.
+#[tauri::command]
+pub async fn repair_workspaces_now(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<fleet_core::service::repair_tick::RepairNow, IpcError> {
+    backend.refuse_local_only("repair_workspaces_now")?;
+    fleet_core::service::repair_tick::run_now(&store, &ssh).await
+}
+
+/// Settings › Restore lost sessions › Restore (gap plan G4.6): every host's
+/// lost sessions, host after host, each as Restore on its Hosts page would.
+#[tauri::command]
+pub async fn restore_all_lost_sessions(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<fleet_core::service::sessions::RestoreAll, IpcError> {
+    backend.refuse_local_only("restore_all_lost_sessions")?;
+    fleet_core::service::sessions::restore_all_lost(&store, &ssh).await
+}

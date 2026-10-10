@@ -361,6 +361,10 @@ pub async fn summarize_since(
 ) -> Result<WatchSummary, IpcError> {
     let p = {
         let s = lock(store)?;
+        crate::service::settings::require_writing_help(
+            &s,
+            crate::service::settings::WORK_CATCH_UP_SUMMARIES,
+        )?;
         plan(&s, row)?
     };
     let conv = crate::service::transcript::fetch_conversation_for_row(

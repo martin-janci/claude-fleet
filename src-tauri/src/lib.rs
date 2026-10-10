@@ -561,6 +561,8 @@ pub fn run() {
             commands::sessions::cancel_queued_prompt,
             commands::sessions::recreate_session,
             commands::sessions::restore_host_sessions,
+            commands::sessions::restore_all_lost_sessions,
+            commands::sessions::repair_workspaces_now,
             commands::sessions::discover_lost_sessions,
             commands::move_session::move_session,
             commands::resolve_move::resolve_move,

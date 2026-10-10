@@ -32,6 +32,8 @@
   import {
     fleetSettings,
     loadFleetSettings,
+    settingBool,
+    SETTING_KEYS,
     settingPathMap,
     settingLayout,
     projectDir,
@@ -1266,6 +1268,8 @@
       }
     }
   }
+  /** Writing help's "Draft agent briefs" (G4.6), off by default. */
+  const draftsBriefs = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftBriefs));
 </script>
 
 <Modal label="New session" onclose={onCancel} width="520px">
@@ -1360,14 +1364,14 @@
                 value={briefText}
                 oninput={(e) => onBriefInput((e.target as HTMLTextAreaElement).value)}
               ></textarea>
-              <button
+              {#if draftsBriefs}<button
                 type="button"
                 class="btn btn--quiet draft-ask"
                 data-testid="ticket-brief-draft-ask"
                 disabled={startBlocked != null || !chosenHost}
                 title="Write the brief from the ticket and earlier sessions on it, with a model call on {chosenHost || 'the host'}"
                 onclick={() => void draftTicketBrief(ticket)}>Draft with Claude</button
-              >
+              >{/if}
             {/if}
             {#if draftError}
               <p class="draft-error small" role="alert" data-testid="ticket-brief-draft-error">{draftError}</p>

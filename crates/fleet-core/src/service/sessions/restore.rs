@@ -599,6 +599,100 @@ where
 }
 
 /// Restore a host's lost sessions over `recreate_session`.
+/// What Settings › Restore lost sessions answers (gap plan G4.6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RestoreAll {
+    pub hosts: usize,
+    pub restored: usize,
+    pub failed: usize,
+    /// The toast's sentence.
+    pub summary: String,
+}
+
+/// The active hosts with lost sessions the batch would restore, and how
+/// many on each, in alias order. A store read only.
+pub fn lost_by_host(s: &Store) -> Result<Vec<(String, usize)>, IpcError> {
+    let hosts = crate::service::hosts::active_hosts(
+        s.list_hosts()?,
+        crate::service::hub::local_host_enabled(),
+    );
+    let mut out = Vec::new();
+    for h in hosts {
+        let rows = s.list_sessions_for_host(&h.alias)?;
+        let n = plan_all_lost(s, &rows)?
+            .iter()
+            .filter(|e| e.action == "restore")
+            .count();
+        if n > 0 {
+            out.push((h.alias, n));
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Restore every host's lost sessions, one host after another, each as
+/// that host's own batch (`restore.batch_size`, `restore.stagger_ms`). A
+/// host that fails counts its sessions as failed and the next one still
+/// runs. `restore` is the per-host batch (tests pass a fake).
+pub async fn restore_all_lost_with<F, Fut>(
+    store: &Mutex<Store>,
+    restore: F,
+) -> Result<RestoreAll, IpcError>
+where
+    F: Fn(RestoreHostSessionsArgs) -> Fut,
+    Fut: Future<Output = Result<RestoreReport, IpcError>>,
+{
+    let plan = lost_by_host(&*lock(store)?)?;
+    let (mut restored, mut failed) = (0, 0);
+    for (host, n) in &plan {
+        let args = RestoreHostSessionsArgs {
+            host_alias: host.clone(),
+            dry_run: false,
+            session_ids: None,
+        };
+        match restore(args).await {
+            Ok(r) => {
+                restored += r.results.iter().filter(|o| o.ok).count();
+                failed += r.results.iter().filter(|o| !o.ok).count();
+            }
+            Err(e) => {
+                tracing::warn!(host = %host, error = %e.message, "[restore] restore all: host failed");
+                failed += n;
+            }
+        }
+    }
+    let summary = if plan.is_empty() {
+        "No lost session to restore.".to_string()
+    } else {
+        let mut s = format!(
+            "Restored {restored} lost session{} on {} host{}",
+            if restored == 1 { "" } else { "s" },
+            plan.len(),
+            if plan.len() == 1 { "" } else { "s" }
+        );
+        if failed > 0 {
+            s.push_str(&format!("; {failed} could not be restored"));
+        }
+        s.push('.');
+        s
+    };
+    Ok(RestoreAll {
+        hosts: plan.len(),
+        restored,
+        failed,
+        summary,
+    })
+}
+
+/// [`restore_all_lost_with`] over [`restore_host_sessions`].
+pub async fn restore_all_lost(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<RestoreAll, IpcError> {
+    restore_all_lost_with(store, |args| restore_host_sessions(args, store, ssh)).await
+}
+
 pub async fn restore_host_sessions(
     args: RestoreHostSessionsArgs,
     store: &Mutex<Store>,
@@ -1513,5 +1607,58 @@ mod tests {
                 sorted
             );
         }
+    }
+
+    // Gap plan G4.6: Settings' Restore lost sessions, every host at once.
+    #[tokio::test]
+    async fn restore_all_runs_each_hosts_batch_and_says_what_it_did() {
+        let (s, (lost1, lost2, lost3, ..)) = seed_mixed_host("mercury");
+        assert_eq!(lost_by_host(&s).unwrap(), vec![("mercury".to_string(), 3)]);
+        let store = Mutex::new(s);
+        let asked = Mutex::new(Vec::new());
+        let r = restore_all_lost_with(&store, |args| {
+            asked.lock().unwrap().push(args.host_alias.clone());
+            let results = [(lost1, true), (lost2, true), (lost3, false)]
+                .into_iter()
+                .map(|(id, ok)| RestoreOutcome {
+                    session_id: id,
+                    tmux_name: format!("t{id}"),
+                    ok,
+                    error: (!ok).then(|| "no".into()),
+                })
+                .collect();
+            async move {
+                Ok(RestoreReport {
+                    host_alias: args.host_alias,
+                    dry_run: false,
+                    plan: vec![],
+                    results,
+                })
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(*asked.lock().unwrap(), vec!["mercury".to_string()]);
+        assert_eq!((r.hosts, r.restored, r.failed), (1, 2, 1));
+        assert_eq!(
+            r.summary,
+            "Restored 2 lost sessions on 1 host; 1 could not be restored."
+        );
+
+        let r = restore_all_lost_with(&store, |_| async {
+            Err(IpcError::new(codes::E_HOST_OFFLINE, "down"))
+        })
+        .await
+        .unwrap();
+        assert_eq!((r.restored, r.failed), (0, 3));
+    }
+
+    #[tokio::test]
+    async fn restore_all_with_nothing_lost_runs_nothing() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let r = restore_all_lost_with(&store, |_| async { panic!("no host has a lost session") })
+            .await
+            .unwrap();
+        assert_eq!(r.summary, "No lost session to restore.");
     }
 }

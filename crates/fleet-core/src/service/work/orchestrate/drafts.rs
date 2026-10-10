@@ -424,6 +424,7 @@ pub async fn release_note(
     let id = mission_id(args)?;
     let (m, host, model, prompt, from) = {
         let s = lock(&deps.store)?;
+        settings::require_writing_help(&s, settings::WORK_DRAFT_RELEASE_NOTES)?;
         let m = changeable(&s, scope, id)?;
         if m.state != "completed" {
             return Err(IpcError::new(

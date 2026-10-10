@@ -17,6 +17,7 @@
   import { sessionAgent } from './sessions';
   import AgentMark from './AgentMark.svelte';
   import { AGENT_LABELS, STATE_LABELS } from './row_groups';
+  import { agentTabLabel, agentTabName } from './prefs';
   import { attentionState } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { shortcutLabel } from './shortcuts';
@@ -73,8 +74,10 @@
       ? attentionState(session, { idleSecs: $attentionIdleMinutes * 60, now: Math.floor(Date.now() / 1000) })
       : null,
   );
-  const agent = $derived(session ? sessionAgent(session) : null);
-  const agentLabel = $derived(session ? (AGENT_LABELS[sessionAgent(session)] ?? 'Terminal') : 'Terminal');
+  // Settings › Appearance › Agent tab name (G4.6): the agent's own name
+  // and mark, or "Terminal" for every agent.
+  const agent = $derived(session && $agentTabName === 'agent' ? sessionAgent(session) : null);
+  const agentLabel = $derived(agentTabLabel(session ? AGENT_LABELS[sessionAgent(session)] : null, $agentTabName));
   const prNumber = $derived(session?.pr_url?.match(/\/pull\/(\d+)/)?.[1] ?? null);
   // The header's meta line and context meter (UX audit 2026-10-09, H2 and
   // H3): host · account · worktree · PR, and how full the context window is.

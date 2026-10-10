@@ -6,6 +6,19 @@
       "help": "Delete what is past its window now, as the GC tick would: at most 2,000 rows per table, the rest over later sweeps.",
       "id": "work.retention_sweep",
       "label": "Sweep now"
+    },
+    {
+      "command": "repair_workspaces_now",
+      "help": "Re-add deleted worktree folders on every host now, as the automatic repair would: at most five per run, and an unmounted volume is never touched.",
+      "id": "repair.now",
+      "label": "Repair now"
+    },
+    {
+      "command": "restore_all_lost_sessions",
+      "confirm": "Resume every lost session on every host now? Each one starts its agent again on its host.",
+      "help": "Resume every host's lost sessions now, in batches with the pause between them set above.",
+      "id": "restore.lost",
+      "label": "Restore lost sessions"
     }
   ],
   "descriptors": [
@@ -1411,6 +1424,90 @@
       ],
       "unit": "none",
       "value": "haiku"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Files tab: Draft writes a commit message from the staged diff with claude -p on the session's host. A draft is text you edit and commit yourself.",
+      "key": "work.draft_commit_messages",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft commit messages",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host.",
+      "key": "work.draft_briefs",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft agent briefs",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host.",
+      "key": "work.draft_release_notes",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft release notes",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "A watched session offers \"Since 13:20\": what it did since you last looked, summarised on its own host and account.",
+      "key": "work.catch_up_summaries",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Catch-up summaries",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
     },
     {
       "ai": "suggest",
@@ -3422,6 +3519,10 @@
                 "key": "repair.auto_on_tick",
                 "truthy": true
               }
+            },
+            {
+              "action": "repair.now",
+              "type": "action"
             }
           ],
           "title": "Workspace repair"
@@ -3538,6 +3639,10 @@
             {
               "key": "restore.stagger_ms",
               "type": "field"
+            },
+            {
+              "action": "restore.lost",
+              "type": "action"
             }
           ],
           "title": "Restoring lost sessions"
@@ -3766,9 +3871,25 @@
                 {
                   "key": "work.summary_model",
                   "type": "field"
+                },
+                {
+                  "key": "work.draft_commit_messages",
+                  "type": "field"
+                },
+                {
+                  "key": "work.draft_briefs",
+                  "type": "field"
+                },
+                {
+                  "key": "work.draft_release_notes",
+                  "type": "field"
+                },
+                {
+                  "key": "work.catch_up_summaries",
+                  "type": "field"
                 }
               ],
-              "title": "Summaries"
+              "title": "Writing help"
             }
           ],
           "title": "Detection"

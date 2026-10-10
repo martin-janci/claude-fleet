@@ -8,8 +8,12 @@
   import DraftField from './DraftField.svelte';
   import { copyText } from './clipboard';
   import { draftReleaseNote, type Draft } from './drafts';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
 
   let { missionId }: { missionId: number } = $props();
+
+  /** Writing help's "Draft release notes" (G4.6), off by default. */
+  const on = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftReleaseNotes));
 
   let draft = $state<Draft | null>(null);
   let text = $state('');
@@ -37,6 +41,7 @@
   }
 </script>
 
+{#if on}
 <div class="note" data-testid="release-note">
   {#if draft || busy}
     <DraftField
@@ -65,6 +70,7 @@
     <p class="error" role="alert" data-testid="release-note-error">{error}</p>
   {/if}
 </div>
+{/if}
 
 <style>
   .note {

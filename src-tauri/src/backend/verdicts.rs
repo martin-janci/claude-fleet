@@ -115,6 +115,13 @@ const SECTION_PROPOSALS_ARE_ADMIN: &str = "the decision model's Asana section pr
      on the hub with `fleet-hub decide proposals apply|reject`";
 
 /// Retention (work graph M12.3): the hub sweeps its own store.
+/// Settings' Repair now and Restore lost sessions (gap plan G4.6) are this
+/// app's own fleet-wide passes; a paired client repairs or restores one
+/// host at a time from Hosts.
+const FLEET_PASS_IS_LOCAL: &str = "repairing every workspace or restoring every host's lost \
+     sessions at once is the fleet's own pass: on a paired client, open the host in Hosts and \
+     use its Repair or Restore, which route to the hub";
+
 const RETENTION_IS_ADMIN: &str = "work retention is the hub's own sweep of its store: its \
      status and sweep_now are the hub's work_admin, master-only, and a paired client is never \
      the fleet's administrator; set the windows with set_setting and read the status on the \
@@ -490,6 +497,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "work_retention_status",
         Verdict::LocalOnly {
             instead: RETENTION_IS_ADMIN,
+        },
+    ),
+    (
+        "repair_workspaces_now",
+        Verdict::LocalOnly {
+            instead: FLEET_PASS_IS_LOCAL,
+        },
+    ),
+    (
+        "restore_all_lost_sessions",
+        Verdict::LocalOnly {
+            instead: FLEET_PASS_IS_LOCAL,
         },
     ),
     (

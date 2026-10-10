@@ -1983,6 +1983,7 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
   });
 
   it('drafts the brief with Claude on the chosen host, sends the draft, and Clear goes back (redesign 6.10)', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.draft_briefs': 'true' });
     const mock = mockedInvoke as ReturnType<typeof vi.fn>;
     mock.mockImplementation(async (cmd: string) => {
       if (cmd === 'preview_start_work')
@@ -2017,6 +2018,7 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
   });
 
   it('Clear drops the draft for the ticket brief, and a hub that cannot draft says so', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.draft_briefs': 'true' });
     const mock = mockedInvoke as ReturnType<typeof vi.fn>;
     let drafts = true;
     mock.mockImplementation(async (cmd: string) => {

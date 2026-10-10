@@ -530,6 +530,20 @@ pub const WORK_SUMMARY_MODEL: &str = "work.summary_model";
 /// The aliases [`WORK_SUMMARY_MODEL`] accepts.
 pub const SUMMARY_MODELS: &[&str] = &["haiku", "sonnet", "opus"];
 
+// ── writing help (gap plan G4.6): each LLM draft is off until turned on ──
+/// Files › Changed drafts a commit message from the staged diff
+/// (`service::drafts`).
+pub const WORK_DRAFT_COMMIT_MESSAGES: &str = "work.draft_commit_messages";
+/// A start drafts the agent's brief from its ticket
+/// (`work::brief_draft`).
+pub const WORK_DRAFT_BRIEFS: &str = "work.draft_briefs";
+/// Finish drafts a mission's release note from its merged PRs
+/// (`work::orchestrate::drafts::release_note`).
+pub const WORK_DRAFT_RELEASE_NOTES: &str = "work.draft_release_notes";
+/// A watched session's "Since 13:20" catch-up summary
+/// (`service::watch_summary`).
+pub const WORK_CATCH_UP_SUMMARIES: &str = "work.catch_up_summaries";
+
 /// Tidy-up (work graph M7): a session whose linked item has been done at
 /// least this many days (and that is idle, below) is suggested for tidying.
 pub const WORK_TIDY_DONE_DAYS: &str = "work.tidy_done_days";
@@ -1288,6 +1302,38 @@ pub const SPECS: &[Spec] = &[
     .tags(&[Tag::Ai])
     .per_org(),
     Spec::new(
+        WORK_DRAFT_COMMIT_MESSAGES,
+        "false",
+        Kind::Bool,
+        "Draft commit messages",
+        "Files tab: Draft writes a commit message from the staged diff with claude -p on the session's host. A draft is text you edit and commit yourself.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_DRAFT_BRIEFS,
+        "false",
+        Kind::Bool,
+        "Draft agent briefs",
+        "Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_DRAFT_RELEASE_NOTES,
+        "false",
+        Kind::Bool,
+        "Draft release notes",
+        "Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_CATCH_UP_SUMMARIES,
+        "false",
+        Kind::Bool,
+        "Catch-up summaries",
+        "A watched session offers \"Since 13:20\": what it did since you last looked, summarised on its own host and account.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
         WORK_TIDY_DONE_DAYS,
         "2",
         Kind::Int { min: 1, max: 365 },
@@ -2006,6 +2052,20 @@ pub fn resolve(key: &str, raw: Option<&str>) -> String {
 
 pub fn get_bool(s: &Store, key: &str) -> bool {
     get_string(s, key) == "true"
+}
+
+/// Writing help (gap plan G4.6): `E_INVALID_STATE` naming the toggle when
+/// the draft `key` gates is off, so a caller that skipped the UI's check
+/// learns where to turn it on.
+pub fn require_writing_help(s: &Store, key: &str) -> Result<(), IpcError> {
+    if get_bool(s, key) {
+        return Ok(());
+    }
+    let label = spec(key).map_or(key, |sp| sp.label);
+    Err(IpcError::new(
+        codes::E_INVALID_STATE,
+        format!("{label} is off. Turn it on in Settings › Work & trackers › Writing help."),
+    ))
 }
 
 pub fn get_secs(s: &Store, key: &str) -> u64 {

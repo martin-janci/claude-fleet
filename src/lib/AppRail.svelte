@@ -13,7 +13,7 @@
   import { settingsOpen } from './app_views';
   import { currentRailItem, visibleRailItems, type RailId, type RailItem } from './rail';
   import { shortcutLabel } from './shortcuts';
-  import { inboxCount } from './inbox';
+  import { inboxBadge } from './inbox';
   import Rail from './kit/Rail.svelte';
   import { hintAnchor } from './hints';
   import { onMount } from 'svelte';
@@ -48,7 +48,7 @@
         label: item.label,
         icon: item.id,
         title: viewCount ? `${title(item)}  ·  ${viewCount.name}: ${viewCount.count}` : title(item),
-        badge: item.id === 'inbox' && $inboxCount > 0 ? $inboxCount : viewCount ? viewCount.count : undefined,
+        badge: item.id === 'inbox' && $inboxBadge > 0 ? $inboxBadge : viewCount ? viewCount.count : undefined,
         badgeLabel: viewCount ? `in ${viewCount.name}` : undefined,
         badgeQuiet: viewCount !== null,
         bottom: item.id === 'settings',

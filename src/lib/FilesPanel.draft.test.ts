@@ -6,6 +6,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import FilesPanel from './FilesPanel.svelte';
 import type { SessionRow } from './sessions';
 import type { ChangedFile } from './files';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -14,6 +15,7 @@ const staged: ChangedFile = { path: 'src/a.ts', status: 'modified', staged: true
 let draftFails = false;
 
 beforeEach(() => {
+  fleetSettings.set({ ...SETTING_DEFAULTS, 'work.draft_commit_messages': 'true' });
   draftFails = false;
   invoke.mockReset();
   invoke.mockImplementation(async (cmd: string) => {

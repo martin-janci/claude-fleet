@@ -172,6 +172,7 @@ pub async fn draft_commit_message(
 ) -> Result<CommitDraft, IpcError> {
     let p = {
         let s = lock(store)?;
+        settings::require_writing_help(&s, settings::WORK_DRAFT_COMMIT_MESSAGES)?;
         plan(&s, session_id)?
     };
     let body = commit_body(&p.model, p.profile.as_deref())

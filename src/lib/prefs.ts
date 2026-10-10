@@ -119,3 +119,40 @@ uiDensity.subscribe((v) => writePref('ui.rowDensity', v));
  *  them fit a 1080p window with the shell's chrome (SessionRowDensity.test.ts
  *  renders and measures them). */
 export const COMPACT_ROW_PX = 40;
+
+// ─── Agent tab name and badge counts (gap plan G4.6) ─────────────────────
+
+export type AgentTabName = 'agent' | 'terminal';
+
+const isAgentTabName = (v: unknown): v is AgentTabName => v === 'agent' || v === 'terminal';
+
+/**
+ * What the session's agent tab is called. `agent` (the default, step 5.1)
+ * names it after the agent in it, with its mark: "Claude Code", "Codex";
+ * `terminal` calls every one "Terminal", with no mark.
+ */
+export const agentTabName = writable<AgentTabName>(readPref<AgentTabName>('ui.agentTabName', 'agent', isAgentTabName));
+agentTabName.subscribe((v) => writePref('ui.agentTabName', v));
+
+/** The agent tab's label under `pref`; `agent` is the agent's own name, or
+ *  null when the row names none. */
+export function agentTabLabel(agent: string | null | undefined, pref: AgentTabName): string {
+  return pref === 'terminal' || !agent ? 'Terminal' : agent;
+}
+
+export type BadgeCounts = 'needs_you' | 'off';
+
+const isBadgeCounts = (v: unknown): v is BadgeCounts => v === 'needs_you' || v === 'off';
+
+/**
+ * What raises the Inbox badge (the rail's count and the dock's). `needs_you`
+ * (the default) counts only Waiting, Failed and Blocked, never a ghost or
+ * lost row; `off` shows no number anywhere. The Inbox itself is unchanged.
+ */
+export const badgeCounts = writable<BadgeCounts>(readPref<BadgeCounts>('ui.badgeCounts', 'needs_you', isBadgeCounts));
+badgeCounts.subscribe((v) => writePref('ui.badgeCounts', v));
+
+/** The badge's number under `pref`. */
+export function badgeNumber(count: number, pref: BadgeCounts): number {
+  return pref === 'off' ? 0 : count;
+}

@@ -1576,6 +1576,8 @@ mod tests {
                 "remove_org_rule",
                 "remove_tracker",
                 "rename_person",
+                "repair_workspaces_now",
+                "restore_all_lost_sessions",
                 "revoke_device",
                 "revoke_org_member_grants",
                 "revoke_org_share",
