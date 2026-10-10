@@ -1550,6 +1550,7 @@ fn the_control_api_guide_names_every_attention_reason_and_status() {
         Reason::ContextFull,
         Reason::StaleWorking,
         Reason::CiFailing,
+        Reason::ProbablyWaiting,
         Reason::Lifecycle,
     ] {
         assert!(

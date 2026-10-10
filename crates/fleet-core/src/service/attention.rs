@@ -73,6 +73,12 @@ pub enum Reason {
     StaleWorking,
     /// Idle with a PR whose checks are failing.
     CiFailing,
+    /// Jev read a silent turn's end as a question (J2, `turn_outcome`
+    /// `asked`), on a row still idle after it: *probably* waiting (gap plan
+    /// G1.6). A proposal, not a fact, so it is kept apart from Needs you and
+    /// never raises the badge; the person confirms it by answering or sets
+    /// it aside with "Not waiting". Hub contract 15.
+    ProbablyWaiting,
     /// The session's lifecycle is broken: a safe kill that failed or is still
     /// pending, a ghost row, or a row the fleet has lost track of.
     Lifecycle,
@@ -92,6 +98,7 @@ impl Reason {
             Reason::ContextFull => "context_full",
             Reason::StaleWorking => "stale_working",
             Reason::CiFailing => "ci_failing",
+            Reason::ProbablyWaiting => "probably_waiting",
             Reason::Lifecycle => "lifecycle",
         }
     }
@@ -107,6 +114,8 @@ impl Reason {
             Reason::StopFailed | Reason::Failed | Reason::CiFailing => State::Failed,
             // Waiting on something outside the session (step 2.4).
             Reason::HostDown | Reason::AccountLimit | Reason::NoCredentials => State::Blocked,
+            // Jev's reading, offered beside Needs you (G1.6).
+            Reason::ProbablyWaiting => State::Proposed,
             // A ghost, a lost row or a pending safe kill: nobody can answer
             // it, so it leaves the badge (step 1.1 folds a mass loss into one
             // Restore row instead).
@@ -115,8 +124,8 @@ impl Reason {
     }
 }
 
-/// The seven attention states of the Orbit Fleet redesign (step 0.4), in
-/// urgency order. The twelve triage buckets fold into these, and the badge
+/// The attention states of the Orbit Fleet redesign (step 0.4; the eighth,
+/// `Proposed`, since gap plan G1.6), in urgency order. The twelve triage buckets fold into these, and the badge
 /// counts only the first three. The table is shared with the desktop
 /// through `src/lib/attention_states.json`, which both test suites check.
 ///
@@ -132,6 +141,9 @@ pub enum State {
     /// Waiting on something outside the session (a host, credentials, a
     /// limit, another task); shown as "Needs you" with its reason line.
     Blocked,
+    /// Jev proposes the session is waiting (G1.6, hub contract 15): shown
+    /// as "+1 proposed" apart from Needs you, never counted by the badge.
+    Proposed,
     Working,
     Paused,
     Done,
@@ -139,10 +151,11 @@ pub enum State {
 }
 
 impl State {
-    pub const ALL: [State; 7] = [
+    pub const ALL: [State; 8] = [
         State::ActionRequired,
         State::Failed,
         State::Blocked,
+        State::Proposed,
         State::Working,
         State::Paused,
         State::Done,
@@ -154,6 +167,7 @@ impl State {
             State::ActionRequired => "action_required",
             State::Failed => "failed",
             State::Blocked => "blocked",
+            State::Proposed => "proposed",
             State::Working => "working",
             State::Paused => "paused",
             State::Done => "done",
@@ -168,10 +182,10 @@ impl State {
 }
 
 /// Every triage bucket, in the desktop's `TRIAGE_BUCKETS` order, and its
-/// state. The hub decides the eleven [`Reason`]s; `done_unread`, `idle_long`,
+/// state. The hub decides the twelve [`Reason`]s; `done_unread`, `idle_long`,
 /// `working` and `idle` are the desktop's own buckets, listed so the whole
 /// map lives in one table.
-pub const BUCKET_STATES: [(&str, State); 15] = [
+pub const BUCKET_STATES: [(&str, State); 16] = [
     ("waiting", State::ActionRequired),
     ("stuck", State::ActionRequired),
     ("host_down", State::Blocked),
@@ -182,6 +196,7 @@ pub const BUCKET_STATES: [(&str, State); 15] = [
     ("context_full", State::ActionRequired),
     ("stale_working", State::ActionRequired),
     ("ci_failing", State::Failed),
+    ("probably_waiting", State::Proposed),
     ("done_unread", State::Done),
     ("lifecycle", State::Paused),
     ("idle_long", State::Idle),
@@ -374,10 +389,7 @@ pub fn needs_attention_in(
     // is still idle after it. Every hook clears it, so it never outvotes
     // one.
     let jev = |o: &str| idle && row.turn_outcome.as_deref() == Some(o);
-    let reason = if row.claude_status.as_deref() == Some("blocked")
-        || row.pending_form.is_some()
-        || jev("asked")
-    {
+    let reason = if row.claude_status.as_deref() == Some("blocked") || row.pending_form.is_some() {
         Reason::Waiting
     } else if row.stuck_kind.is_some() || jev("stuck") {
         Reason::Stuck
@@ -398,6 +410,10 @@ pub fn needs_attention_in(
         Reason::StaleWorking
     } else if idle && row.ci_status.as_deref() == Some("failing") {
         Reason::CiFailing
+    } else if live && jev("asked") {
+        // After every reason a person must act on: a proposal never hides
+        // one, and a dead row is `Lifecycle` whatever Jev read.
+        Reason::ProbablyWaiting
     } else if is_lifecycle_broken(row) {
         Reason::Lifecycle
     } else {
@@ -407,6 +423,81 @@ pub fn needs_attention_in(
         reason,
         since: since_for(row, reason),
         state: reason.state(),
+    })
+}
+
+/// Why a mission waits on a person (gap plan G1.6): the class of the one
+/// attention model that is a mission, not a session. Inbox and Today list
+/// it beside the sessions that need you, the rail badge counts it, and the
+/// phone reads it off the mission row (`MissionRow::waiting_on`, hub
+/// contract 15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissionWaitReason {
+    /// The planner asked a question only a person answers (an open `ask`
+    /// card on the mission).
+    Question,
+    /// The mission asks for autonomy (level 1–3) and no live grant covers
+    /// its current plan: sign the autonomy grant, or it runs nothing alone.
+    SignGrant,
+    /// Commands wait in its confirm queue (open cards) for a person.
+    Confirm,
+}
+
+impl MissionWaitReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MissionWaitReason::Question => "question",
+            MissionWaitReason::SignGrant => "sign_grant",
+            MissionWaitReason::Confirm => "confirm",
+        }
+    }
+}
+
+/// A mission waiting on a person, and since when.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MissionWait {
+    pub reason: MissionWaitReason,
+    /// Unix second it started waiting: the oldest open card, or the
+    /// mission's last change for a grant to sign.
+    pub since: i64,
+    /// Open cards in its confirm queue.
+    pub open_cards: u32,
+}
+
+/// Whether an active mission waits on a person, and why. Only an `active`
+/// mission is asked: a draft is still being written, a paused one has its
+/// brake reason, a finished one waits on nobody. A question outranks the
+/// grant (only a person answers it, and signing does not), and the grant
+/// outranks plain confirmations (signing clears most of them at once).
+pub fn mission_waiting(
+    mission: &crate::store::MissionRow,
+    live_grant: bool,
+    open_cards: &[crate::store::CardRow],
+) -> Option<MissionWait> {
+    if mission.state != "active" {
+        return None;
+    }
+    let open: Vec<&crate::store::CardRow> =
+        open_cards.iter().filter(|c| c.state == "open").collect();
+    let oldest = |kind: Option<&str>| {
+        open.iter()
+            .filter(|c| kind.is_none_or(|k| c.kind == k))
+            .map(|c| c.created_at)
+            .min()
+    };
+    let n = u32::try_from(open.len()).unwrap_or(u32::MAX);
+    let (reason, since) = if let Some(at) = oldest(Some("ask")) {
+        (MissionWaitReason::Question, at)
+    } else if mission.level > 0 && !live_grant {
+        (MissionWaitReason::SignGrant, mission.updated_at)
+    } else {
+        (MissionWaitReason::Confirm, oldest(None)?)
+    };
+    Some(MissionWait {
+        reason,
+        since,
+        open_cards: n,
     })
 }
 
@@ -424,9 +515,10 @@ fn since_for(row: &SessionRow, reason: Reason) -> i64 {
         Reason::StopFailed => row.last_stop_at.unwrap_or(row.last_activity_at),
         Reason::ContextFull => row.context.context_at.unwrap_or(row.last_activity_at),
         Reason::StaleWorking => row.stale_working_at.unwrap_or(row.last_activity_at),
-        Reason::CiFailing | Reason::AccountLimit | Reason::NoCredentials => {
-            row.idle_since.unwrap_or(row.last_activity_at)
-        }
+        Reason::CiFailing
+        | Reason::AccountLimit
+        | Reason::NoCredentials
+        | Reason::ProbablyWaiting => row.idle_since.unwrap_or(row.last_activity_at),
         Reason::Lifecycle => row
             .lost_at
             .or(row.safe_kill_requested_at)
@@ -506,6 +598,106 @@ mod tests {
             work_suggested: None,
             org_id: None,
         }
+    }
+
+    /// G1.6: what Jev reads as a question is a proposal: its own class,
+    /// in the state the badge never counts, and it never outranks a reason
+    /// a person must act on.
+    #[test]
+    fn jevs_question_is_probably_waiting_and_never_counted() {
+        let mut r = row();
+        r.claude_status = Some("idle".into());
+        r.turn_outcome = Some("asked".into());
+        r.idle_since = Some(60);
+        let a = needs_attention(&r).unwrap();
+        assert_eq!(
+            a,
+            Attention {
+                reason: Reason::ProbablyWaiting,
+                since: 60,
+                state: State::Proposed,
+            }
+        );
+        assert!(!a.state.counts_toward_badge());
+        assert_eq!(
+            serde_json::to_value(a).unwrap(),
+            serde_json::json!({ "reason": "probably_waiting", "since": 60, "state": "proposed" })
+        );
+        // A real question on the row is Needs you, whatever Jev read.
+        r.claude_status = Some("blocked".into());
+        assert_eq!(needs_attention(&r).unwrap().reason, Reason::Waiting);
+    }
+
+    fn mission(state: &str, level: i64) -> crate::store::MissionRow {
+        serde_json::from_value(serde_json::json!({
+            "id": 7, "name": "Hub federation v2", "goal": "g", "mode": "finite",
+            "state": state, "level": level, "plan_version": 1, "created_at": 1,
+            "updated_at": 40, "version": 1
+        }))
+        .unwrap()
+    }
+
+    fn card(kind: &str, state: &str, at: i64) -> crate::store::CardRow {
+        crate::store::CardRow {
+            id: at,
+            mission_id: 7,
+            decision_id: format!("d{at}"),
+            source: "planner".into(),
+            kind: kind.into(),
+            work_item_id: None,
+            payload: None,
+            state: state.into(),
+            note: None,
+            created_at: at,
+            decided_at: None,
+            decided_by: None,
+        }
+    }
+
+    /// G1.6: a mission waits on a person for a question, a grant to sign,
+    /// or commands to confirm, in that order; an inactive one never does.
+    #[test]
+    fn a_mission_waits_on_a_question_a_grant_or_its_confirm_queue() {
+        let cards = [
+            card("run", "open", 50),
+            card("ask", "open", 70),
+            card("run", "applied", 10),
+        ];
+        assert_eq!(
+            mission_waiting(&mission("active", 2), false, &cards),
+            Some(MissionWait {
+                reason: MissionWaitReason::Question,
+                since: 70,
+                open_cards: 2,
+            })
+        );
+        assert_eq!(
+            mission_waiting(&mission("active", 2), false, &cards[..1]).map(|w| (w.reason, w.since)),
+            Some((MissionWaitReason::SignGrant, 40)),
+            "autonomy asked, no grant: sign it"
+        );
+        assert_eq!(
+            mission_waiting(&mission("active", 2), true, &cards[..1]).map(|w| (w.reason, w.since)),
+            Some((MissionWaitReason::Confirm, 50)),
+            "under a grant, an open card still waits"
+        );
+        assert_eq!(
+            mission_waiting(&mission("active", 0), false, &cards[2..]),
+            None,
+            "level 0 asks for no grant, and a decided card waits on nobody"
+        );
+        for state in ["draft", "paused", "completed"] {
+            assert_eq!(
+                mission_waiting(&mission(state, 2), false, &cards),
+                None,
+                "{state}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(mission_waiting(&mission("active", 1), false, &[]).unwrap())
+                .unwrap(),
+            serde_json::json!({ "reason": "sign_grant", "since": 40, "open_cards": 0 })
+        );
     }
 
     #[test]
@@ -775,6 +967,7 @@ mod tests {
             Reason::ContextFull,
             Reason::StaleWorking,
             Reason::CiFailing,
+            Reason::ProbablyWaiting,
             Reason::Lifecycle,
         ];
         for r in reasons {

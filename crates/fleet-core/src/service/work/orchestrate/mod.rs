@@ -160,12 +160,20 @@ pub fn run_estimate(s: &Store, id: i64) -> Result<Option<RunEstimate>, IpcError>
     }))
 }
 
-/// Fill a listed mission's spend: what it cost and its live grant's budget.
+/// Fill a listed mission's spend (what it cost, its live grant's budget)
+/// and whether it waits on a person (`waiting_on`, G1.6).
 pub fn fill_spend(s: &Store, m: &mut MissionRow, now: i64) -> Result<(), IpcError> {
     m.cost_micros = Some(s.mission_cost_micros(m.id)?);
-    m.budget_micros = s
-        .live_mission_grant(m.id, now)?
-        .and_then(|g| g.budget_micros);
+    let grant = s.live_mission_grant(m.id, now)?;
+    m.budget_micros = grant.as_ref().and_then(|g| g.budget_micros);
+    // Whether it waits on a person (G1.6): only an active mission does, so
+    // the others skip the card read.
+    m.waiting_on = if m.state == "active" {
+        let cards = s.mission_cards(m.id, crate::store::CARDS_OPEN_CAP)?;
+        crate::service::attention::mission_waiting(m, grant.is_some(), &cards)
+    } else {
+        None
+    };
     Ok(())
 }
 

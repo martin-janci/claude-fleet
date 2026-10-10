@@ -142,6 +142,7 @@ fn digest() -> Today {
             org_id: Some(1),
             ..Default::default()
         }],
+        missions: vec![],
     }
 }
 
@@ -340,6 +341,7 @@ fn a_brief_never_runs_on_another_orgs_host() {
         now: 100,
         groups: vec![group(acme, 1, "mercury", 50), group(beta, 2, "mercury", 90)],
         shipped: vec![],
+        missions: vec![],
     };
     let s = lock(&deps.store).unwrap();
     let sees = |host: &str, org: Option<i64>| host_sees_org(&s, host, org).unwrap();

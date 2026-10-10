@@ -466,7 +466,9 @@ Jev one Choice: `finished`, `asked`, `stuck`, `working` or `unsure`.
   `none` when they read nothing).
 - **Assist.** A usable answer (confidence 50% or more, not `unsure`) is
   written to `sessions.turn_outcome`, and the Inbox follows: `asked` reads
-  as *waiting*, `stuck` as *stuck*.
+  as *probably waiting* (gap plan G1.6: its own state, `proposed`, listed
+  apart from Needs you and never counted by the badge; before, *waiting*),
+  `stuck` as *stuck*.
 - **Hooks always win.** Every hook (Notification, the next prompt, Stop,
   StopFailure, SessionEnd) clears `turn_outcome`, and an answer lands only
   while no hook has spoken since the turn's Stop. A hook before the answer

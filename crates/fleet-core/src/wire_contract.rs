@@ -218,4 +218,14 @@
 //!   the older shape are unchanged. The desktop routes no new
 //!   tool, so it still accepts a revision-14 hub (`MIN_HUB_CONTRACT`
 //!   stays 14).
+//!   The attention model gains two classes (G1.6). `needs_attention.reason`
+//!   gains `probably_waiting` and its `state` gains `proposed` (Jev read a
+//!   silent turn's end as a question: kept apart from Needs you, never
+//!   counted by the badge; before, such a row read `waiting` /
+//!   `action_required`), new enum values a client reading either as a
+//!   closed enum fails on. Additive: `MissionRow` carries `waiting_on`
+//!   (`{reason: question | sign_grant | confirm, since, open_cards}`) where
+//!   it carries `cost_micros`, and `work { action: today }` answers
+//!   `missions` (those waiting on a person) and a session's `proposed`.
+//!   The golden file pins `MissionRow.waiting_on`.
 pub const CONTRACT_REVISION: u32 = 15;

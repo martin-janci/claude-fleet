@@ -45,6 +45,21 @@ pub struct Today {
     pub groups: Vec<TodayGroup>,
     #[serde(default)]
     pub shipped: Vec<TodayShipped>,
+    /// Missions waiting on a person (gap plan G1.6, hub contract 15): Today's
+    /// Needs you lists them beside the sessions, as the Inbox does. Absent
+    /// from an older hub's answer, and when none waits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missions: Vec<TodayMission>,
+}
+
+/// A mission that waits on a person, as Today lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodayMission {
+    pub id: i64,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
+    pub waiting_on: crate::service::attention::MissionWait,
 }
 
 /// Live sessions sharing one piece of work (or none), in one bucket.
@@ -85,6 +100,11 @@ pub struct TodaySession {
     /// ghost, lost or pending-kill row (`lifecycle`, state Paused) has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention: Option<String>,
+    /// `probably_waiting` when Jev proposes the session waits on a person
+    /// (G1.6, hub contract 15): kept apart from `attention`, so it never
+    /// puts its group in Needs you.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed: Option<String>,
     /// idle | done, when this session is why its group is stale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale: Option<String>,
@@ -157,6 +177,7 @@ fn session_of(
     context_red_pct: f64,
     facts: &crate::service::attention::Facts,
 ) -> TodaySession {
+    let attention = crate::service::attention::needs_attention_in(row, context_red_pct, facts);
     TodaySession {
         id: row.id,
         name: row
@@ -166,8 +187,11 @@ fn session_of(
             .unwrap_or_else(|| row.tmux_name.clone()),
         host_alias: row.host_alias.clone(),
         org_id: row.org_id,
-        attention: crate::service::attention::needs_attention_in(row, context_red_pct, facts)
+        attention: attention
             .filter(|a| a.reason.state().counts_toward_badge())
+            .map(|a| a.reason.as_str().into()),
+        proposed: attention
+            .filter(|a| a.reason.state() == crate::service::attention::State::Proposed)
             .map(|a| a.reason.as_str().into()),
         stale: stale_reason(row, now).map(str::to_string),
         claude_status: row.claude_status.clone(),
@@ -353,6 +377,7 @@ pub fn digest_in(
         now,
         groups,
         shipped,
+        missions: Vec::new(),
     }
 }
 
@@ -484,7 +509,36 @@ pub fn today(
     }
     let red = crate::service::health::context_red_pct(&s);
     let facts = s.attention_facts();
-    Ok(digest_in(&rows, &done, &ended, now, since, red, &facts))
+    let mut today = digest_in(&rows, &done, &ended, now, since, red, &facts);
+    today.missions = waiting_missions(&s, view, now)?;
+    Ok(today)
+}
+
+/// The missions `view` sees that wait on a person, the longest waiting
+/// first (G1.6).
+fn waiting_missions(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    now: i64,
+) -> Result<Vec<TodayMission>, IpcError> {
+    let mut out = Vec::new();
+    for mut m in s.list_missions()? {
+        if m.state != "active" || !super::missions::sees_mission(s, view, &m)? {
+            continue;
+        }
+        super::orchestrate::fill_spend(s, &mut m, now)?;
+        if let Some(w) = m.waiting_on {
+            out.push(TodayMission {
+                id: m.id,
+                name: m.name,
+                org_id: m.org_id,
+                waiting_on: w,
+            });
+        }
+    }
+    out.sort_by_key(|m| (m.waiting_on.since, m.id));
+    out.truncate(TODAY_MAX);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -775,6 +829,79 @@ mod tests {
             .unwrap()
             .sessions[0];
         assert_eq!(ghost.attention, None);
+    }
+
+    /// G1.6: Jev's "probably waiting" is kept apart from Needs you: the
+    /// session says so in `proposed`, and its group stays in progress.
+    #[test]
+    fn jevs_question_is_proposed_not_needs_you() {
+        let mut r = row(3, Some("PD-3"));
+        r.claude_status = Some("idle".into());
+        r.turn_outcome = Some("asked".into());
+        let t = digest(&[r], &[], &[], NOW, SINCE, DEFAULT_CONTEXT_RED_PCT);
+        assert_eq!(bucket_of(&t, Some("PD-3")), vec!["in_progress"]);
+        let s = &t.groups[0].sessions[0];
+        assert_eq!(s.attention, None);
+        assert_eq!(s.proposed.as_deref(), Some("probably_waiting"));
+    }
+
+    /// G1.6: a mission waiting on a person reaches Today, with why.
+    #[test]
+    fn a_mission_waiting_on_its_grant_is_in_today() {
+        let (st, _) = store_with_day();
+        {
+            let s = st.lock().unwrap();
+            let m = s
+                .create_mission(
+                    &crate::store::NewMission {
+                        org_id: None,
+                        owner_person_id: None,
+                        root_item_id: None,
+                        name: "Hub federation v2",
+                        goal: "g",
+                        non_goals: None,
+                        done_when: &[],
+                        mode: None,
+                        level: Some(2),
+                    },
+                    "test",
+                )
+                .unwrap();
+            s.set_mission_state(m.id, None, "active", "test").unwrap();
+            s.create_mission(
+                &crate::store::NewMission {
+                    org_id: None,
+                    owner_person_id: None,
+                    root_item_id: None,
+                    name: "Still a draft",
+                    goal: "g",
+                    non_goals: None,
+                    done_when: &[],
+                    mode: None,
+                    level: Some(2),
+                },
+                "test",
+            )
+            .unwrap();
+        }
+        let t = today(
+            &st,
+            None,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
+        let names: Vec<(&str, crate::service::attention::MissionWaitReason)> = t
+            .missions
+            .iter()
+            .map(|m| (m.name.as_str(), m.waiting_on.reason))
+            .collect();
+        assert_eq!(
+            names,
+            [(
+                "Hub federation v2",
+                crate::service::attention::MissionWaitReason::SignGrant
+            )]
+        );
     }
 
     #[test]

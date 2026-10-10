@@ -18,9 +18,19 @@
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
   import { groupRows, isFlatGroupBy } from './row_groups';
-  import { inboxRows, notWaiting, notWaitingText } from './inbox';
+  import {
+    inboxRows,
+    notWaiting,
+    notWaitingSaid,
+    notWaitingText,
+    proposedRows,
+    proposedText,
+    sayNotWaiting,
+  } from './inbox';
   import RoutineFailures from './automation/RoutineFailures.svelte';
+  import MissionWaits from './MissionWaits.svelte';
   import { failingCount } from './routines';
+  import { waitingMissionCount } from './mission_waits';
   import { sessionMatchesSearch } from './search';
   import { sessionFocus } from './session_focus';
   import { type ProjectRow } from './projects';
@@ -972,7 +982,9 @@
       : [],
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
-  const inboxNeeding = $derived(inboxList.length + $failingCount);
+  const inboxNeeding = $derived(inboxList.length + $failingCount + $waitingMissionCount);
+  // G1.6: Jev's "probably waiting" rows, listed apart and never counted.
+  const inboxProposed = $derived(proposedRows(inboxPool, attentionOpts, $notWaitingSaid));
   // The footer's row count (UX audit L4): what this list holds right now.
   const listCountText = $derived.by(() => {
     if ($sidebarView === 'work') return '';
@@ -1508,6 +1520,7 @@
         : inboxNeeding === 0
           ? 'Nothing needs you'
           : `${inboxNeeding} need${inboxNeeding === 1 ? 's' : ''} you`}
+      {#if inboxProposed.length > 0}<span class="muted" data-testid="inbox-proposed-count">{proposedText(inboxProposed.length)}</span>{/if}
     </div>
     {#if inboxNeeding === 0}
       {@render listState('inbox')}
@@ -1519,6 +1532,27 @@
     </div>
     <!-- Redesign 8.6: routines whose newest run failed, with Fix, Retry, Pause. -->
     <RoutineFailures />
+    <!-- G1.6: missions waiting on a person (a grant to sign, a question). -->
+    <MissionWaits />
+    {#if inboxProposed.length > 0}
+      <!-- G1.6: Jev's "probably waiting", apart from Needs you, never in
+           the badge; "Not waiting" sets the reading aside here. -->
+      <div class="section-header inbox-head" data-testid="inbox-proposed">Probably waiting · proposed by Jev</div>
+      <div class="tree" role="tree" aria-label="Probably waiting">
+        {#each inboxProposed as sess (sess.id)}
+          {@render sessionRow(sess)}
+          <div class="proposed-line">
+            <span class="muted">Last turn ended with a question</span>
+            <button
+              type="button"
+              class="btn btn--quiet"
+              data-testid="inbox-not-waiting"
+              onclick={() => sayNotWaiting(sess)}>Not waiting</button
+            >
+          </div>
+        {/each}
+      </div>
+    {/if}
     <div class="inbox-rest" data-testid="inbox-rest">
       {#if inboxRestText && !(inboxNeeding === 0 && !listUnavailable)}<span class="muted">Not waiting · {inboxRestText}</span>{/if}
       <button
@@ -2342,6 +2376,9 @@
     font-size: var(--text-2xs);
   }
   .inbox-rest .muted { color: var(--fg-muted); }
+  .inbox-head .muted { color: var(--fg-muted); font-weight: 400; margin-left: 6px; }
+  .proposed-line { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 0 12px 6px 28px; font-size: var(--text-xs); }
+  .proposed-line .muted { color: var(--fg-muted); }
   .section-header {
     font-size: var(--text-2xs);
     text-transform: uppercase;

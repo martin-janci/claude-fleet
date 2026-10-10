@@ -6,7 +6,12 @@
 // Inbox and Today's "Needs you" (`service/work/today.rs`) all ask that one
 // table, so they list the same sessions. A lost or ghost row (Paused) and a
 // finished turn (Done) are not in it; the line below the list counts them.
-import { derived } from 'svelte/store';
+//
+// Gap plan G1.6 adds the model's two other classes: a mission waiting on a
+// person (`mission_waits.ts`), listed and counted beside the sessions, and
+// Jev's "probably waiting" (state Proposed), listed apart as "+N proposed"
+// and never counted by the badge.
+import { derived, writable } from 'svelte/store';
 import {
   attentionState,
   byTriage,
@@ -21,6 +26,7 @@ import { sessions, showBgAgents, type SessionRow } from './sessions';
 import { sessionVisible } from './sidebar_index';
 import { attentionFacts } from './attention_facts';
 import { failingCount } from './routines';
+import { waitingMissionCount } from './mission_waits';
 
 /** The rows that need you, worst first (`byTriage`). */
 export function inboxRows(rows: readonly SessionRow[], opts: AttentionOptions): SessionRow[] {
@@ -28,6 +34,38 @@ export function inboxRows(rows: readonly SessionRow[], opts: AttentionOptions): 
     rows.filter((s) => countsTowardBadge(attentionState(s, opts))),
     opts,
   );
+}
+
+/** One Jev reading: the session and the turn it read. A later turn is a
+ *  new reading, so "Not waiting" on an earlier one does not hide it. */
+export function proposalKey(s: Pick<SessionRow, 'id' | 'last_stop_at'>): string {
+  return `${s.id}:${s.last_stop_at ?? 0}`;
+}
+
+/** The readings the person set aside with "Not waiting" on this device.
+ *  The next hook clears Jev's reading on the hub anyway. */
+export const notWaitingSaid = writable<ReadonlySet<string>>(new Set());
+
+export function sayNotWaiting(s: Pick<SessionRow, 'id' | 'last_stop_at'>): void {
+  notWaitingSaid.update((set) => new Set([...set, proposalKey(s)]));
+}
+
+/** Jev's "probably waiting" rows (G1.6): shown apart from Needs you, the
+ *  longest waiting first, never in the badge; one set aside is left out. */
+export function proposedRows(
+  rows: readonly SessionRow[],
+  opts: AttentionOptions,
+  setAside: ReadonlySet<string> = new Set(),
+): SessionRow[] {
+  return byTriage(
+    rows.filter((s) => attentionState(s, opts) === 'proposed' && !setAside.has(proposalKey(s))),
+    opts,
+  );
+}
+
+/** "+1 proposed": the header's note for Jev's rows, or '' with none. */
+export function proposedText(n: number): string {
+  return n > 0 ? `+${n} proposed` : '';
 }
 
 /** Everything the Inbox leaves out, by state. */
@@ -62,13 +100,23 @@ export function notWaitingText(n: NotWaiting): string {
 
 /** The rail's Inbox count: the Needs you pill's number, under the same host,
  *  background-agent and organisation filters, plus the routines whose
- *  newest run failed (redesign 8.6: a failed run raises the badge). */
+ *  newest run failed (redesign 8.6: a failed run raises the badge) and the
+ *  missions waiting on a person (G1.6). Jev's proposed rows never count. */
 export const inboxCount = derived(
-  [sessions, effectiveHostFilter, showBgAgents, effectiveScope, scopeOf, attentionIdleMinutes, failingCount],
-  ([$sessions, $host, $bg, $scope, $of, $idle, $failing]) => {
+  [
+    sessions,
+    effectiveHostFilter,
+    showBgAgents,
+    effectiveScope,
+    scopeOf,
+    attentionIdleMinutes,
+    failingCount,
+    waitingMissionCount,
+  ],
+  ([$sessions, $host, $bg, $scope, $of, $idle, $failing, $missions]) => {
     const scope = $scope === 'all' ? null : { id: $scope, of: $of };
     const visible = $sessions.filter((s) => sessionVisible(s, $host, $bg, null, scope));
-    return countNeedsYou(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000) }) + $failing;
+    return countNeedsYou(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000) }) + $failing + $missions;
   },
 );
 

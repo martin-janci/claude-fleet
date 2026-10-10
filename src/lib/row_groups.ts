@@ -22,14 +22,17 @@ export function isFlatGroupBy(v: unknown): v is FlatGroupBy {
 }
 
 /** The status words of the design manual's content rules (step 7.8 lints
- *  them): one per attention state from step 0.4. The model keeps seven
- *  states, the manual six words: Blocked reads as Needs you, and its reason
+ *  them): one per attention state from step 0.4. The model keeps eight
+ *  states (G1.6 added Proposed, an Idle with its reason), the manual six words: Blocked reads as Needs you, and its reason
  *  line says what it is blocked on (`blockedLine`, transition plan decision
  *  on status words). */
 export const STATE_LABELS: Record<AttentionState, string> = {
   action_required: 'Needs you',
   failed: 'Failed',
   blocked: 'Needs you',
+  // G1.6: Jev's proposal, kept apart from Needs you: the session is idle,
+  // and Jev reads it as waiting until the person says otherwise.
+  proposed: 'Idle · probably waiting',
   working: 'Working',
   paused: 'Paused',
   done: 'Done',

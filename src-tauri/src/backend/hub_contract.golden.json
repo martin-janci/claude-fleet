@@ -506,7 +506,8 @@
       "state",
       "total",
       "updated_at",
-      "version"
+      "version",
+      "waiting_on"
     ],
     "MyGrants": [
       "grants",

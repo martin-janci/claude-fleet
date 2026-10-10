@@ -1,9 +1,10 @@
 {
-  "_comment": "Redesign step 0.4: the one attention model. Read by src/lib/attention.ts at runtime and checked against crates/fleet-core/src/service/attention.rs by both test suites. `states` is the seven states in urgency order; `counted` marks the three the Needs you badge counts. `buckets` maps every triage bucket, in TRIAGE_BUCKETS order, to its state. `cases` are rows (overrides on a plain running work session on host alpha), optionally with `facts` about the fleet (step 2.4: down hosts, accounts at a limit, accounts without a login), with the bucket, state and count both sides must agree on.",
+  "_comment": "Redesign step 0.4: the one attention model. Read by src/lib/attention.ts at runtime and checked against crates/fleet-core/src/service/attention.rs by both test suites. `states` is the eight states in urgency order (`proposed`, Jev's probably-waiting, since gap plan G1.6); `counted` marks the three the Needs you badge counts. `buckets` maps every triage bucket, in TRIAGE_BUCKETS order, to its state. `cases` are rows (overrides on a plain running work session on host alpha), optionally with `facts` about the fleet (step 2.4: down hosts, accounts at a limit, accounts without a login), with the bucket, state and count both sides must agree on.",
   "states": [
     { "id": "action_required", "counted": true },
     { "id": "failed", "counted": true },
     { "id": "blocked", "counted": true },
+    { "id": "proposed", "counted": false },
     { "id": "working", "counted": false },
     { "id": "paused", "counted": false },
     { "id": "done", "counted": false },
@@ -20,6 +21,7 @@
     ["context_full", "action_required"],
     ["stale_working", "action_required"],
     ["ci_failing", "failed"],
+    ["probably_waiting", "proposed"],
     ["done_unread", "done"],
     ["lifecycle", "paused"],
     ["idle_long", "idle"],
@@ -53,7 +55,10 @@
     { "name": "a session on another account is not blocked", "row": { "claude_status": "idle", "account_uuid": "other" }, "facts": { "limited_accounts": { "acc": { "window": "weekly", "resets_at": 5000 } }, "uncredentialed_accounts": ["acc"] }, "bucket": "idle", "state": "idle", "counted": false },
     { "name": "an external session never counts", "row": { "kind": "external", "claude_status": "blocked" }, "bucket": "idle", "state": "idle", "counted": false },
     { "name": "a shell never counts", "row": { "kind": "shell", "claude_status": "failed" }, "bucket": "idle", "state": "idle", "counted": false },
-    { "name": "Jev read a silent turn's end as a question", "row": { "claude_status": "idle", "turn_outcome": "asked" }, "bucket": "waiting", "state": "action_required", "counted": true },
+    { "name": "Jev read a silent turn's end as a question: probably waiting, kept apart from Needs you", "row": { "claude_status": "idle", "turn_outcome": "asked" }, "bucket": "probably_waiting", "state": "proposed", "counted": false },
+    { "name": "Jev's question never hides a reason a person must act on", "row": { "claude_status": "idle", "turn_outcome": "asked", "ci_status": "failing" }, "bucket": "ci_failing", "state": "failed", "counted": true },
+    { "name": "Jev's question on a down host reads as the host", "row": { "claude_status": "idle", "turn_outcome": "asked" }, "facts": { "down_hosts": ["alpha"] }, "bucket": "host_down", "state": "blocked", "counted": true },
+    { "name": "Jev's question on a lost row leaves it lost", "row": { "claude_status": "idle", "turn_outcome": "asked", "lost_at": 80 }, "bucket": "lifecycle", "state": "paused", "counted": false },
     { "name": "Jev read a silent turn's end as stuck", "row": { "claude_status": "idle", "turn_outcome": "stuck" }, "bucket": "stuck", "state": "action_required", "counted": true },
     { "name": "Jev's finished leaves an idle row idle", "row": { "claude_status": "idle", "turn_outcome": "finished" }, "bucket": "idle", "state": "idle", "counted": false },
     { "name": "a working row outranks a stale Jev answer", "row": { "claude_status": "working", "turn_outcome": "asked" }, "bucket": "working", "state": "working", "counted": false }

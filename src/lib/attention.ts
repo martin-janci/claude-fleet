@@ -175,6 +175,7 @@ export const TRIAGE_BUCKETS = [
   'context_full',
   'stale_working',
   'ci_failing',
+  'probably_waiting',
   'done_unread',
   'lifecycle',
   'idle_long',
@@ -184,12 +185,14 @@ export const TRIAGE_BUCKETS = [
 
 export type TriageBucket = (typeof TRIAGE_BUCKETS)[number];
 
-/** Buckets the "Needs you" FILTER shows. `idle_long` is in: the toggle is the
+/** Buckets the "Needs you" FILTER shows (never `probably_waiting`). `idle_long` is in: the toggle is the
  *  only surface for the operator-configured idle nudge, so leaving it out
  *  would delete that reach and reduce `attentionIdleMinutes` to a sort knob.
  *  `working` and `idle` are never in it. */
 export const NEEDS_YOU_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.filter(
-  (b) => b !== 'working' && b !== 'idle',
+  // G1.6: Jev's "probably waiting" is kept apart from Needs you, in its own
+  // Inbox section, so the filter leaves it out as the badge does.
+  (b) => b !== 'working' && b !== 'idle' && b !== 'probably_waiting',
 );
 
 // ── the seven attention states (redesign step 0.4) ──
@@ -203,6 +206,7 @@ export type AttentionState =
   | 'action_required'
   | 'failed'
   | 'blocked'
+  | 'proposed'
   | 'working'
   | 'paused'
   | 'done'
@@ -270,7 +274,7 @@ export interface TriageRank {
 /** A2: `waiting_for` will distinguish permission, question and elicitation.
  *  Until then a blocked session is the only thing known to await the user. */
 function isWaiting(s: SessionRow): boolean {
-  return s.claude_status === 'blocked' || s.pending_form != null || jevSays(s, 'asked');
+  return s.claude_status === 'blocked' || s.pending_form != null;
 }
 
 /** J2 (step 5.11): what Jev read a silent turn's end as, on a row still idle
@@ -280,8 +284,9 @@ function jevSays(s: SessionRow, outcome: 'asked' | 'stuck'): boolean {
   return isIdleStatus(s.claude_status) && s.turn_outcome === outcome;
 }
 
-/** The J2 reading that put a row in Needs you, if one did: the row says so
- *  (review r15 F17), since the person, not Jev, decides what to do next. */
+/** The J2 reading on a row, if any: the row says so (review r15 F17), since
+ *  the person, not Jev, decides what to do next. `stuck` puts it in Needs
+ *  you; `asked` makes it "probably waiting", kept apart (G1.6). */
 export function jevOutcome(s: SessionRow): 'asked' | 'stuck' | null {
   if (jevSays(s, 'asked')) return 'asked';
   if (jevSays(s, 'stuck')) return 'stuck';
@@ -336,6 +341,9 @@ export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
   if (live && contextLevel(s.context_pct) === 'crit') return 'context_full';
   if (live && (s.stale_working_at ?? null) !== null) return 'stale_working';
   if (s.ci_status === 'failing' && isIdleStatus(s.claude_status)) return 'ci_failing';
+  // G1.6: Jev's reading of a silent turn's end as a question is a proposal,
+  // after every reason a person must act on, and never on a dead row.
+  if (live && jevSays(s, 'asked')) return 'probably_waiting';
   if (isDoneUnread(s)) return 'done_unread';
   if (isLifecycleBroken(s)) return 'lifecycle';
   if (isIdleLong(s, opts)) return 'idle_long';
@@ -376,6 +384,7 @@ function bucketSince(s: SessionRow, bucket: TriageBucket): number {
     case 'stale_working':
       return s.stale_working_at ?? s.last_activity_at;
     case 'ci_failing':
+    case 'probably_waiting':
     case 'account_limit':
     case 'no_credentials':
       return s.idle_since ?? s.last_activity_at;
