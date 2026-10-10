@@ -1811,7 +1811,15 @@ automatically on app start.
   `decide.jev.control_route`) tells the owner's device where a message just
   sent in Control goes: `propose {text}` answers `{outcome: proposed | ask |
   none, target?, proposal?, targets, run_id?}` over the active missions and
-  running sessions, and `follow {run_id, chosen}` records the person's pick. Both are the owner's own device only, never the
+  running sessions, and `follow {run_id, chosen}` records the person's pick.
+  `resume_or_new` (gap plan G7.10, Jev N2, `decide.jev.resume_or_new`)
+  answers the New session dialog's past-work notice for a work key:
+  `propose {key}` answers `{value?: l<link id> | new, link_id?, session_id?,
+  name?, source?: rule | jev, reason?, confidence_pct?, run_id?, unsure}` —
+  a rule's when the key has exactly one recent resumable past session,
+  else Jev's at assist, else nothing — and `follow {key, chosen}` records
+  the person's Resume (`l<link id>`) or "Start fresh instead" (`new`). Both
+  are a person's own device only, never the
   operator; each change sends an empty `confirm:changed` event. Every
   other caller is unaffected: for them these tools are not gated.
 - **Handoff receipts.** Each successful call of the operator that hands

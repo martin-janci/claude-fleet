@@ -8545,6 +8545,53 @@ async fn control_route_is_the_persons_and_quiet_by_default() {
     }
 }
 
+/// Gap plan G7.10: `resume_or_new` proposes nothing for a key with no past
+/// work, refuses the operator, and checks its action and its pick.
+#[tokio::test]
+async fn resume_or_new_is_the_persons_and_quiet_without_past_work() {
+    let (s, _, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    let phone = client_caller("phone", TokenMode::Full);
+    let p = |action: &str, chosen: Option<&str>| ResumeOrNewParams {
+        action: action.into(),
+        key: "PD-2412".into(),
+        chosen: chosen.map(str::to_string),
+    };
+    let r = t
+        .resume_or_new(Extension(phone.clone()), Parameters(p("propose", None)))
+        .await
+        .unwrap();
+    assert_eq!(result_json(&r), serde_json::json!({ "unsure": false }));
+    let r = t
+        .resume_or_new(
+            Extension(phone.clone()),
+            Parameters(p("follow", Some("new"))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_json(&r), false, "nothing proposed, nothing marked");
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    let e = t
+        .resume_or_new(Extension(op), Parameters(p("propose", None)))
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    for (action, chosen) in [("follow", None), ("follow", Some("l999")), ("resume", None)] {
+        let e = t
+            .resume_or_new(Extension(phone.clone()), Parameters(p(action, chosen)))
+            .await
+            .unwrap_err();
+        assert!(
+            e.message.starts_with("E_INVALID"),
+            "{action} {chosen:?}: {}",
+            e.message
+        );
+    }
+}
+
 #[tokio::test]
 async fn an_operator_new_session_or_kill_is_gated_before_anything_runs() {
     let (s, pid, on_b) = two_host_store();

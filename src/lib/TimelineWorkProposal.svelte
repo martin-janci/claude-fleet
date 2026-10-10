@@ -9,7 +9,7 @@
   * the session's primary link that started as one: who proposed it, kept
     after the person confirmed it, as the AI patterns board's "When AI
     changed something" line with its Undo (G7.15), which puts the link back
-    to a suggestion.
+    to a suggestion, and Unlink (G7.10), which removes it.
 
   The gating is the backend's: a J1 answer becomes a suggestion only in
   assist mode (`service/decide/work_link.rs`); shadow records it and writes
@@ -28,6 +28,7 @@
     confirmSessionWork,
     rejectWorkLink,
     sessionWorkLinks,
+    unlinkSessionWork,
     linkProposal,
     workWhy,
     JEV_RULE,
@@ -97,6 +98,16 @@
     busy = false;
     if (!r.ok) pushError(r.error, 'Undo failed');
   }
+
+  /** Unlink a confirmed link: not a rejection, so it may be suggested again. */
+  async function unlink(): Promise<void> {
+    const l = linked;
+    if (!l || busy || blocked !== null) return;
+    busy = true;
+    const r = await unlinkSessionWork(session.id, l.link_id);
+    busy = false;
+    if (!r.ok) pushError(r.error, 'Unlink failed');
+  }
 </script>
 
 {#if shown && key}
@@ -119,6 +130,14 @@
           undoBlocked={blocked}
           testid="timeline-ai-change"
         />
+        <Button
+          size="sm"
+          variant="quiet"
+          testid="timeline-work-unlink"
+          disabled={busy || blocked !== null}
+          title={blocked ?? 'Unlink this task (not a rejection: it may be suggested again)'}
+          onclick={() => void unlink()}>Unlink</Button
+        >
       {/if}
     </div>
     {#if suggestion}<ProposedBy {proposal} field="work_link" testid="timeline-proposed-by" />{/if}

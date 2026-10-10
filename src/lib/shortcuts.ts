@@ -171,7 +171,9 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('global', 'inspector', 'Inspector', split(['Alt+Meta+B'], ['Ctrl+Alt+B'])),
   // Step 5.3: matched by TerminalView , where the strip is.
   row('global', 'new-terminal', 'New terminal', split(['Alt+Meta+T'], ['Ctrl+Alt+T']), { step: '5.3' }),
-  row('global', 'next-terminal', 'Next terminal', split(['Meta+`'], ['Ctrl+`']), { step: '5.3' }),
+  // Ctrl+Alt+` is the advertised chord off the Mac (the canvas's); plain
+  // Ctrl+` stays accepted for those who learned it first.
+  row('global', 'next-terminal', 'Next terminal', split(['Meta+`'], ['Ctrl+Alt+`', 'Ctrl+`']), { step: '5.3' }),
   row('global', 'go-to-file', 'Go to file (Files tab only)',
     split(['Alt+Meta+P'], ['Ctrl+Alt+P'])),
   // Step 3.8: the list keys that work from anywhere outside a text field

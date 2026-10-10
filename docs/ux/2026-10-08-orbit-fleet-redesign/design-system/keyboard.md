@@ -16,7 +16,7 @@ Every 0.5.3 shortcut keeps working. New chords avoid clashes; on Windows and Lin
 | ⌘⇧E | Open in VS Code (Ctrl+Alt+E) | new |
 | ⌥⌘B | Inspector (Ctrl+Alt+B) | new |
 | ⌥⌘T | New terminal (Ctrl+Alt+T) | new |
-| ⌘` | Next terminal | new |
+| ⌘` | Next terminal (Ctrl+Alt+`) | new |
 | ⌥⌘P | Go to file, Files tab only (Ctrl+Alt+P) | new |
 | 1, 2, 3 | Answer a question card | new |
 

@@ -78,6 +78,20 @@ describe('LocalChangesDialog', () => {
     await waitFor(() => expect(onclose).toHaveBeenCalled());
   });
 
+  it('takes an optional question with any intent', async () => {
+    route();
+    render(LocalChangesDialog, { link, onclose: () => {} });
+    await screen.findAllByTestId('lw-change');
+    await fireEvent.change(screen.getByTestId('lw-ask-intent'), { target: { value: 'review' } });
+    const q = screen.getByTestId('lw-ask-question');
+    expect(q).toHaveAttribute('placeholder', 'Anything to add? (optional)');
+    await fireEvent.input(q, { target: { value: ' check the error paths ' } });
+    await fireEvent.click(screen.getByTestId('lw-ask'));
+    expect(invoke).toHaveBeenCalledWith('ask_ai_about_local_changes', {
+      args: { id: 9, intent: 'review', question: 'check the error paths', paths: ['src/a.rs', 'src/b.rs'] },
+    });
+  });
+
   it('commits with a message and discards only after confirming', async () => {
     route({ commit_local_workspace: { commit: 'abc1234567' } });
     render(LocalChangesDialog, { link, onclose: () => {} });

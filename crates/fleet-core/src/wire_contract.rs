@@ -239,4 +239,9 @@
 //!   org's project catalog, a rule's live impact and the Sharing tab's
 //!   revoke and narrow actions, which a revision-15 hub refuses as unknown.
 //!   Every row change is additive.
+//!   Gap plan G7.10 added the `resume_or_new` tool (Jev N2) at this
+//!   revision without a bump: the desktop's `resume_or_new_propose` treats
+//!   an older hub's `E_HUB_PROTOCOL` as "nothing proposed" and keeps the
+//!   plain past-work notice, as `control_route_propose` does. The golden
+//!   file pins `ResumeOrNew`.
 pub const CONTRACT_REVISION: u32 = 16;

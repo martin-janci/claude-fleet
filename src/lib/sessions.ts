@@ -1161,7 +1161,7 @@ Pass 1 — correctness: does the code do what it should? Any bugs?
 Pass 2 — code quality: clarity, structure, test coverage.
 Pass 3 — risk: anything dangerous, security-sensitive, or destructive?
 
-Cite file:line for every point. End with an overall verdict: approve / approve-with-fixes / needs-rework.`;
+Cite file:line for every point. End with one line in this form: \`Verdict: approve | approve-with-fixes | needs-rework · <N> blocking · <M> nits\`.`;
 
 export async function spawnReview(
   sourceSessionId: number,

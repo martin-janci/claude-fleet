@@ -97,7 +97,8 @@ admin      add_host remove_host probe_host hide_host merge_host discover_hosts
            update_status update_admin link_peer unlink_peer list_peer_links
 device     pr_shepherd mcp_confirms answer_mcp_confirm setting_proposals
            decide_setting_proposals setting_history control_route
-           control_handoffs list_pages project_picks set_project_pick
+           resume_or_new control_handoffs list_pages project_picks
+           set_project_pick
            org_admin update_policy session_claim
 ```
 

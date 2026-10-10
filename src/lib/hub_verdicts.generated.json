@@ -252,6 +252,8 @@
     "resolve_move",
     "restart_session",
     "restore_host_sessions",
+    "resume_or_new_follow",
+    "resume_or_new_propose",
     "resume_work",
     "retry_work_item",
     "revoke_device",

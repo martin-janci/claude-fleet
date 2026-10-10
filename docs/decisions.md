@@ -892,6 +892,37 @@ Code: `service/decide/tracker_duplicate.rs` (`spawn_ask` after `work_link
 create`), `tracker_duplicate_of` in `service/work/view.rs`; test map J7,
 step 6.8 of the redesign's transition plan.
 
+## `resume_or_new` — resume past work or start fresh (N2)
+
+When the New session dialog's work key (read from the branch it will run
+on) has only past work, the dialog says so and offers Resume. With
+`decide.jev.resume_or_new` on, it also asks which: resume ONE of the key's
+past sessions, or start fresh.
+
+- **Rule first.** Exactly one resumable past session that ended within
+  `work.recent_days` is that session (*Proposed by a rule*), whatever the
+  mode, and nobody is asked. No resumable past session: nothing to ask.
+- **What is sent.** The key; each past session's name, branch, days since
+  it ended, role and whether it opened a PR, redacted. No conversation
+  content. Options are `l<work link id>` (a past session's row may be gone;
+  its link is what the resume flow re-opens), `new`, `unsure`.
+- **Shadow.** Recorded only, with `unsure` as the baseline.
+- **Assist.** A usable answer (at least 50%) shows *Has previous work:
+  Resume receipt-totals · Proposed by Jev · likely · Start fresh instead*.
+  Resume opens the existing resume flow on that past session; nothing
+  resumes or starts by itself. `unsure` or a weak answer keeps the plain
+  notice.
+- **Follow-up.** Resume marks the proposal `confirmed` (or `corrected` to
+  another session); *Start fresh instead* marks it `corrected` to `new`
+  (`resume_or_new { action: follow }`).
+- **Asked once per input.**
+- **What is recorded.** Subject `work_resume` `key:<HMAC of the key>`.
+- **Benchmark.** None yet.
+
+Code: `service/decide/resume_or_new.rs`, the `resume_or_new` tool, the
+desktop's `resume_or_new_propose` / `resume_or_new_follow`, and the notice
+in `src/lib/NewSessionDialog.svelte`; gap plan G7.10.
+
 ## Context order for a drafted brief (J4) — a rule, not a Jev use case
 
 The test map's J4 (ranking context for a brief) is **built as a rule, not
@@ -1006,6 +1037,7 @@ redesign's transition plan.
 | `decide.jev.pr_triage` | `off` | `off` / `shadow` / `assist` | fleet | Guessing what a stuck pull request needs (a fix, a regenerate, a base merge, a re-run, or a person) when the PR shepherd finds it conflicting or red. Sends the PR's check names and states, no code. Shadow only records; assist is recorded the same way for now. Experimental. |
 | `decide.jev.main_ticket` | `off` | `off` / `shadow` / `assist` | fleet | Proposing the main ticket in Review when a session's first prompt names several. A branch naming one decides without Jev. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.tracker_duplicate` | `off` | `off` / `shadow` / `assist` | fleet | Flagging in Review a new local task that may be the same work as an open tracker ticket. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.resume_or_new` | `off` | `off` / `shadow` / `assist` | fleet | Proposing, in New session, whether to resume a past session of the same work or start fresh. A single recent past session decides without Jev. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | fleet | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.unassigned_reply` | `false` | on / off | fleet | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | fleet | How long one call may take. A call is never retried. |

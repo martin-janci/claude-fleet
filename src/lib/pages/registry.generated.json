@@ -2641,6 +2641,47 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Proposing, in New session, whether to resume a past session of the same work or start fresh. A single recent past session decides without Jev. Shadow only records; assist suggests.",
+      "key": "decide.jev.resume_or_new",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: resume or start fresh",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -4131,6 +4172,11 @@
             {
               "hint": "Marks a new local task in Review that may repeat a tracker ticket; linking the ticket instead is yours.",
               "key": "decide.jev.tracker_duplicate",
+              "type": "field"
+            },
+            {
+              "hint": "In New session, proposes resuming a past session of the same work or starting fresh; you still press Resume or Create.",
+              "key": "decide.jev.resume_or_new",
               "type": "field"
             },
             {

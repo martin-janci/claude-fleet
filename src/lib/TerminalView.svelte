@@ -365,7 +365,7 @@
     if (!r.ok) pushError(r.error, 'Pop back in failed');
   }
 
-  /** ⌥⌘T (Ctrl+Alt+T) opens a terminal, ⌘` (Ctrl+`) goes to the next tab.
+  /** ⌥⌘T (Ctrl+Alt+T) opens a terminal, ⌘` (Ctrl+Alt+`) goes to the next tab.
    *  Captured before the grid sees them, so neither reaches the pty. */
   function onTerminalChord(e: KeyboardEvent) {
     if (!showStrip) return;
