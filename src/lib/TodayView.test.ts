@@ -337,3 +337,72 @@ describe('TodayView', () => {
     await expectAccessible(container);
   });
 });
+
+// Gap plan G3.2 (board Today).
+describe('TodayView: tiles, date line, inline limit, provenance (G3.2)', () => {
+  beforeEach(() => {
+    clearSelection();
+    vi.mocked(invoke).mockReset();
+  });
+
+  it('draws the four KPI tiles and the date and fleet line', async () => {
+    sessions.set([session('mefistos', 'pay', { id: 41 }), session('mefistos', 'old', { id: 42 })]);
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => (cmd === 'work_today' ? digest : null));
+    render(TodayView, { now: () => new Date(2026, 9, 8, 9, 0).getTime() });
+    await flush();
+    const tiles = screen.getByTestId('today-kpis').querySelectorAll('li');
+    expect(Array.from(tiles).map((t) => t.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+      '1 Needs you',
+      '0 In progress',
+      '1 Shipped today',
+      '1 Stale',
+    ]);
+    expect(screen.getByTestId('today-dateline').textContent).toMatch(/^Thursday 8 October · \d+ hosts?/);
+  });
+
+  it('In progress shows four groups, then "N more ›"; shipped says where it came from', async () => {
+    const groups = Array.from({ length: 6 }, (_, i) => ({
+      bucket: 'in_progress',
+      key: `IP-${i}`,
+      sessions: [{ id: 100 + i, name: `w${i}`, host_alias: 'mac', last_activity_at: 100 }],
+    }));
+    vi.mocked(invoke).mockImplementation(async (cmd: string) =>
+      cmd === 'work_today'
+        ? { since: 0, now: 200, groups, shipped: [{ how: 'pr', key: 'PR-1', title: 'Sweep', at: 150, pr_url: 'https://x/pull/1', from: 'Morning PR sweep' }] }
+        : null,
+    );
+    sessions.set(groups.map((_, i) => session('mac', `w${i}`, { id: 100 + i })));
+    render(TodayView);
+    await flush();
+    expect(screen.getAllByTestId('today-group')).toHaveLength(4);
+    await fireEvent.click(screen.getByTestId('today-more'));
+    expect(screen.getAllByTestId('today-group')).toHaveLength(6);
+    expect(screen.queryByTestId('today-more')).toBeNull();
+    expect(screen.getByTestId('today-shipped-from').textContent).toBe('from Morning PR sweep');
+  });
+
+  it('a waiting row paused on a limit offers Switch account and Wait right there, and Open', async () => {
+    const { accountUsage } = await import('./account_usage_store');
+    const { snapshot } = await import('./hosts_fixture');
+    const nowS = Math.floor(Date.now() / 1000);
+    accountUsage.set({
+      'acc-1': snapshot('acc-1', {
+        status: 'ok',
+        usage: {
+          five_hour: { utilization: 100, resets_at: nowS + 3600 },
+          seven_day: { utilization: 10, resets_at: nowS + 86_400 },
+          seven_day_opus: null,
+          seven_day_sonnet: null,
+        },
+      }),
+    });
+    sessions.set([session('mefistos', 'pay', { id: 41, claude_status: 'idle', account_uuid: 'acc-1' }), session('mefistos', 'old', { id: 42 })]);
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => (cmd === 'work_today' ? digest : null));
+    render(TodayView);
+    await flush();
+    expect(screen.getByTestId('today-limit').textContent).toMatch(/Switch account|Wait/);
+    await fireEvent.click(screen.getAllByTestId('today-session-open')[0]);
+    expect(get(selectedSession)?.id).toBe(41);
+    accountUsage.set({});
+  });
+});
