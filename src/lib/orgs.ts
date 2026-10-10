@@ -12,7 +12,7 @@
 // exists (or a single-scope fleet) reads as "all", never as a filter nobody
 // can see.
 import type { Descriptor } from './pages/pages';
-import type { AdminNeed, PersonSpend } from './pages/resources';
+import type { AdminNeed, OrgAccount, OrgShare, PersonSpend, RemovedMember, TeamMember } from './pages/resources';
 import { writable, derived, get } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import type { Pairing } from './devices';
@@ -97,6 +97,14 @@ export interface OrgDetail extends OrgRow {
   owns_hub?: boolean;
   /** Phase D: its admins see the unclaimed count on its hosts. */
   admins_see_unclaimed?: boolean;
+  /** M15 G4.7, for its admins: every live share on its sessions. */
+  shares?: OrgShare[];
+  /** M15 G4.7: who is working on what. */
+  team?: TeamMember[];
+  /** M15 G4.7, for its admins: former members and the shares they hold. */
+  removed_members?: RemovedMember[];
+  /** M15 G4.7: the Claude accounts its hosts use. */
+  accounts?: OrgAccount[];
 }
 
 /** One member of an org, as its page lists them. */

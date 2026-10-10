@@ -294,6 +294,10 @@ pub enum FieldKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         remove: Option<ActionSpec>,
         add: &'static [ActionSpec],
+        /// Actions on one item besides `remove`, each a button on the item
+        /// (M15 step G4.7: a share's "Narrow to watch").
+        #[serde(skip_serializing_if = "<[ActionSpec]>::is_empty")]
+        each: &'static [ActionSpec],
     },
 }
 
@@ -322,6 +326,18 @@ pub enum ItemLabel {
     /// An org's catalog project (M15 step G2.10): its name, then its remote,
     /// path and hosts when set.
     OrgProject,
+    /// M15 step G4.7: a share on an org's session (`service::orgs::OrgShare`),
+    /// a table row of session · owner, shared with, level and since; a
+    /// session the caller may not see reads "a private session".
+    OrgShare,
+    /// G4.7: a member and their live sessions with states, then how many
+    /// more are private (`service::orgs::TeamMember`).
+    TeamMember,
+    /// G4.7: a former member, "removed 3 d ago", and the shares they still
+    /// hold (`service::orgs::RemovedMember`).
+    RemovedMember,
+    /// G4.7: a Claude account the org's hosts use, and on which hosts.
+    OrgAccount,
 }
 
 /// A line under a field's value where its section shows tiles: a closed
@@ -483,9 +499,13 @@ impl ResourceType {
             .collect();
         out.extend(self.actions.iter());
         for f in self.fields {
-            if let FieldKind::Items { remove, add, .. } = &f.kind {
+            if let FieldKind::Items {
+                remove, add, each, ..
+            } = &f.kind
+            {
                 out.extend(remove.iter());
                 out.extend(add.iter());
+                out.extend(each.iter());
             }
             if let FieldKind::Settings { set } = &f.kind {
                 out.push(set);
@@ -592,13 +612,13 @@ const ORG: ResourceType = ResourceType {
             "spend_by_person",
             "By person",
             "Whose sessions spent it: today, the last 7 days and this month (UTC). Shown only to an admin who sees every session; otherwise it is hidden whole, never in part.",
-            FieldKind::Items { item_label: ItemLabel::PersonSpend, remove: None, add: &[] },
+            FieldKind::Items { item_label: ItemLabel::PersonSpend, remove: None, add: &[], each: &[] },
         ),
         FieldSpec::new(
             "needs_admin",
             "Needs an admin",
             "What its admins should look at: a budget at 80% or past it (Fleet only warns; it never stops a session), a device that may prompt but is not trusted yet (trust it in Settings → Devices), sessions on its hosts nobody has claimed.",
-            FieldKind::Items { item_label: ItemLabel::AdminNeed, remove: None, add: &[] },
+            FieldKind::Items { item_label: ItemLabel::AdminNeed, remove: None, add: &[], each: &[] },
         ),
         FieldSpec::new(
             "settings",
@@ -625,6 +645,7 @@ const ORG: ResourceType = ResourceType {
                 item_label: ItemLabel::OrgRule,
                 remove: Some(ActionSpec::new("org.remove_rule", "Remove rule", "remove_org_rule", &[("rule_id", Bind::ItemField("id"))])),
                 add: ORG_RULE_ADDS,
+                each: &[],
             },
         ),
         FieldSpec::new(
@@ -657,6 +678,7 @@ const ORG: ResourceType = ResourceType {
                     param("path", "Path on hosts (optional)", text(1024, "~/src/api"), false),
                     param("hosts", "Hosts allowed (optional; every host of the org when empty)", text(1024, "hetzner-a, hetzner-b"), false),
                 ])],
+                each: &[],
             },
         ),
         FieldSpec::new(
@@ -673,6 +695,7 @@ const ORG: ResourceType = ResourceType {
                 )),
                 add: &[ActionSpec::new("org.assign_host", "Add host", "assign_host_org", &[("host_alias", Bind::Param("host")), ORG_ID])
                     .params(&[param("host", "Host", ParamKind::Options { source: OptionSource::Hosts }, true)])],
+                each: &[],
             },
         ),
         FieldSpec::new(
@@ -689,13 +712,20 @@ const ORG: ResourceType = ResourceType {
                 )),
                 add: &[ActionSpec::new("org.assign_tracker", "Add tracker", "assign_tracker_org", &[("tracker_id", Bind::Param("tracker")), ORG_ID])
                     .params(&[param("tracker", "Tracker", ParamKind::Options { source: OptionSource::Trackers }, true)])],
+                each: &[],
             },
+        ),
+        FieldSpec::new(
+            "accounts",
+            "Accounts",
+            "The Claude accounts its hosts are signed in to. Add or switch one on Settings → Hosts.",
+            FieldKind::Items { item_label: ItemLabel::OrgAccount, remove: None, add: &[], each: &[] },
         ),
         FieldSpec::new(
             "catalogs",
             "Catalogs",
             "Asset catalogs this org owns; its hosts receive them. Add or remove one in Settings → Catalogs.",
-            FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[] },
+            FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] },
         ),
         FieldSpec::new(
             "devices",
@@ -706,6 +736,7 @@ const ORG: ResourceType = ResourceType {
                 remove: Some(ActionSpec::new("org.unbind_device", "Unbind the device", "bind_device_org", &[("device", Bind::ItemField("name"))])),
                 add: &[ActionSpec::new("org.bind_device", "Bind a device", "bind_device_org", &[("device", Bind::Param("device")), ORG_ID])
                     .params(&[param("device", "Device", ParamKind::Options { source: OptionSource::Devices }, true)])],
+                each: &[],
             },
         ),
         FieldSpec::new(
@@ -733,6 +764,45 @@ const ORG: ResourceType = ResourceType {
                     param("person", "Person", person(), true),
                     param("role", "Role", ParamKind::Choice { options: ORG_ROLE_CHOICES }, true),
                 ])],
+                each: &[],
+            },
+        ),
+        FieldSpec::new(
+            "removed_members",
+            "Removed members",
+            "Who left the company, and the shares on its sessions they still hold. Take those back here. Shown to its admins.",
+            FieldKind::Items {
+                item_label: ItemLabel::RemovedMember,
+                remove: None,
+                add: &[],
+                each: &[ActionSpec::new(
+                    "org.revoke_former_grants",
+                    "Take back their shares",
+                    "revoke_org_member_grants",
+                    &[ORG_ID, ("person_id", Bind::ItemField("person_id"))],
+                )
+                .confirm("Every share they still hold on this org's sessions is taken back. The sessions' owners can share again.")],
+            },
+        ),
+        FieldSpec::new(
+            "team",
+            "Team",
+            "Who is working on what: each member's live sessions in this org that you can see, with their state, and how many more are private.",
+            FieldKind::Items { item_label: ItemLabel::TeamMember, remove: None, add: &[], each: &[] },
+        ),
+        FieldSpec::new(
+            "shares",
+            "Sharing",
+            "Every share on this org's sessions: whose session, with whom, at what level, since when. An admin can take one back or narrow it to watch, never widen it. A session you cannot see reads \"a private session\".",
+            FieldKind::Items {
+                item_label: ItemLabel::OrgShare,
+                remove: Some(
+                    ActionSpec::new("org.revoke_share", "Revoke", "revoke_org_share", &[ORG_ID, ("grant_id", Bind::ItemField("id"))])
+                        .confirm("They lose this session at once. Its owner can share it again."),
+                ),
+                add: &[],
+                each: &[ActionSpec::new("org.narrow_share", "Narrow to watch", "narrow_org_share", &[ORG_ID, ("grant_id", Bind::ItemField("id"))])
+                    .confirm("They keep reading the session and can no longer answer or drive it.")],
             },
         ),
         FieldSpec::new(
@@ -954,13 +1024,14 @@ const CATALOG: ResourceType = ResourceType {
                     &[("host_alias", Bind::Param("host")), ("catalog", Bind::Record("name"))],
                 )
                 .params(&[param("host", "Host", ParamKind::Options { source: OptionSource::Hosts }, true)])],
+                each: &[],
             },
         ),
         FieldSpec::new(
             "granted",
             "Granted to",
             "Paired desktops that may change this catalog. Granted in Settings → Devices.",
-            FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[] },
+            FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] },
         ),
     ],
     create: Some(
@@ -1043,6 +1114,7 @@ const DEVICE_RESOURCE: ResourceType = ResourceType {
                 )),
                 add: &[ActionSpec::new("device.grant_catalog", "Grant a catalog", "grant_device_catalog", &[DEVICE, ("catalog", Bind::Param("catalog")), ("on", Bind::True)])
                     .params(&[param("catalog", "Catalog", ParamKind::Options { source: OptionSource::Catalogs }, true)])],
+                each: &[],
             },
         ),
         FieldSpec::new("last_seen_at", "Last seen", "Its last request to the hub.", FieldKind::Time),
@@ -1101,7 +1173,7 @@ const PERSON_RESOURCE: ResourceType = ResourceType {
         FieldSpec::new("name", "Name", "What grants and devices are addressed to.", FieldKind::Text { max: 64 }).edit("name"),
         FieldSpec::new("display_name", "Shown as", "How the apps show them; empty shows the name.", FieldKind::Text { max: 80 }).edit("display_name"),
         FieldSpec::new("owner", "Owner", "This hub's own owner.", FieldKind::Bool { on_off: false, default: false }).badge(Badge::True { text: "owner" }),
-        FieldSpec::new("devices", "Devices", "Their live paired devices. Manage them in Settings → Devices.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[] }),
+        FieldSpec::new("devices", "Devices", "Their live paired devices. Manage them in Settings → Devices.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] }),
         FieldSpec::new("created_at", "Added", "When the hub first heard of them.", FieldKind::Time),
         FieldSpec::new("disabled_at", "Disabled", "When their devices and the shares made to them were revoked.", FieldKind::Time),
     ],
@@ -1418,11 +1490,36 @@ mod tests {
             "a new flow: name the commands of its resource here"
         );
         for f in org.fields {
-            if let FieldKind::Items { remove, add, .. } = &f.kind {
+            if let FieldKind::Items {
+                remove, add, each, ..
+            } = &f.kind
+            {
+                // Every action on one item names it.
+                for a in *each {
+                    assert!(
+                        a.bind
+                            .iter()
+                            .any(|(_, b)| matches!(b, Bind::Item | Bind::ItemField(_))),
+                        "{}: an item's action names the item",
+                        a.id
+                    );
+                }
                 // The org's catalogs are shown, never changed here: they are
                 // added and removed on Settings → Catalogs. Spend by person
-                // and what needs an admin are read-only reports.
-                if ["catalogs", "needs_admin", "spend_by_person"].contains(&f.id) {
+                // and what needs an admin are read-only reports; so are the
+                // team and the accounts its hosts use (G4.7). A former
+                // member is never re-added from here, only their shares
+                // taken back.
+                if [
+                    "catalogs",
+                    "needs_admin",
+                    "spend_by_person",
+                    "team",
+                    "accounts",
+                    "removed_members",
+                ]
+                .contains(&f.id)
+                {
                     assert!(remove.is_none() && add.is_empty(), "{}", f.id);
                     continue;
                 }
@@ -1469,6 +1566,7 @@ mod tests {
                 "list_peer_links",
                 "list_people",
                 "list_trackers",
+                "narrow_org_share",
                 "org_rule_preview",
                 "pair_device",
                 "release_debug_device",
@@ -1479,6 +1577,8 @@ mod tests {
                 "remove_tracker",
                 "rename_person",
                 "revoke_device",
+                "revoke_org_member_grants",
+                "revoke_org_share",
                 "scan_debug_devices",
                 "set_device_person",
                 "set_org_member",

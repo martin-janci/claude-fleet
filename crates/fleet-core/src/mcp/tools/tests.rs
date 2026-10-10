@@ -4262,10 +4262,12 @@ fn the_served_definition_budget_stays_bounded() {
     /// surface). Measured at 107,112 bytes for 133 tools (805 a tool) on
     /// 2026-10-09, when the redesign audit branch (send_prompt's key list,
     /// new_session's start token, ask's draft) met main's update_admin
-    /// rollout and policy actions. Raise it only from a measurement the
-    /// failure prints, and say in the commit message what was measured and
-    /// when.
-    const BYTES_PER_TOOL: usize = 815;
+    /// rollout and policy actions; re-measured at 110,093 bytes for 135
+    /// tools (815 a tool) on 2026-10-10, when the org forms and pages (M15
+    /// G2.10, G4.7) added org_admin's project and share parameters. Raise it
+    /// only from a measurement the failure prints, and say in the commit
+    /// message what was measured and when.
+    const BYTES_PER_TOOL: usize = 825;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

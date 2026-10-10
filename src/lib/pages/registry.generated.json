@@ -4381,6 +4381,10 @@
                   "type": "field"
                 },
                 {
+                  "key": "accounts",
+                  "type": "field"
+                },
+                {
                   "key": "hosts",
                   "type": "field"
                 },
@@ -4407,6 +4411,10 @@
                   "type": "field"
                 },
                 {
+                  "key": "removed_members",
+                  "type": "field"
+                },
+                {
                   "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. Adding a member offers a pairing code for their device; Pair a device mints another.",
                   "tone": "info",
                   "type": "notice"
@@ -4416,6 +4424,34 @@
             }
           ],
           "title": "Members"
+        },
+        {
+          "sections": [
+            {
+              "items": [
+                {
+                  "key": "team",
+                  "type": "field"
+                }
+              ],
+              "title": "Team"
+            },
+            {
+              "items": [
+                {
+                  "key": "shares",
+                  "type": "field"
+                },
+                {
+                  "text": "An admin takes a share back or narrows it to watch; only a session's owner shares or widens.",
+                  "tone": "info",
+                  "type": "notice"
+                }
+              ],
+              "title": "Sharing"
+            }
+          ],
+          "title": "Sharing"
         },
         {
           "sections": [
@@ -4632,6 +4668,22 @@
         }
       ],
       "spec": "fleet.page/1",
+      "table": {
+        "columns": [
+          "person",
+          "name",
+          "org",
+          "mode",
+          "trusted",
+          "last_seen_at"
+        ],
+        "filters": [
+          "org",
+          "person"
+        ],
+        "group_by": "person",
+        "title": "People & devices"
+      },
       "title": "Devices"
     },
     {
@@ -5712,6 +5764,16 @@
         },
         {
           "add": [],
+          "help": "The Claude accounts its hosts are signed in to. Add or switch one on Settings → Hosts.",
+          "id": "accounts",
+          "item_label": {
+            "type": "org_account"
+          },
+          "label": "Accounts",
+          "type": "items"
+        },
+        {
+          "add": [],
           "help": "Asset catalogs this org owns; its hosts receive them. Add or remove one in Settings → Catalogs.",
           "id": "catalogs",
           "item_label": {
@@ -5872,6 +5934,115 @@
             "envelope": "args",
             "id": "org.remove_member",
             "label": "Remove from the org",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "add": [],
+          "each": [
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "person_id",
+                  {
+                    "from": "item_field",
+                    "name": "person_id"
+                  }
+                ]
+              ],
+              "command": "revoke_org_member_grants",
+              "confirm": "Every share they still hold on this org's sessions is taken back. The sessions' owners can share again.",
+              "envelope": "args",
+              "id": "org.revoke_former_grants",
+              "label": "Take back their shares",
+              "params": [],
+              "report": false
+            }
+          ],
+          "help": "Who left the company, and the shares on its sessions they still hold. Take those back here. Shown to its admins.",
+          "id": "removed_members",
+          "item_label": {
+            "type": "removed_member"
+          },
+          "label": "Removed members",
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "Who is working on what: each member's live sessions in this org that you can see, with their state, and how many more are private.",
+          "id": "team",
+          "item_label": {
+            "type": "team_member"
+          },
+          "label": "Team",
+          "type": "items"
+        },
+        {
+          "add": [],
+          "each": [
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "grant_id",
+                  {
+                    "from": "item_field",
+                    "name": "id"
+                  }
+                ]
+              ],
+              "command": "narrow_org_share",
+              "confirm": "They keep reading the session and can no longer answer or drive it.",
+              "envelope": "args",
+              "id": "org.narrow_share",
+              "label": "Narrow to watch",
+              "params": [],
+              "report": false
+            }
+          ],
+          "help": "Every share on this org's sessions: whose session, with whom, at what level, since when. An admin can take one back or narrow it to watch, never widen it. A session you cannot see reads \"a private session\".",
+          "id": "shares",
+          "item_label": {
+            "type": "org_share"
+          },
+          "label": "Sharing",
+          "remove": {
+            "bind": [
+              [
+                "org_id",
+                {
+                  "from": "record",
+                  "name": "id"
+                }
+              ],
+              [
+                "grant_id",
+                {
+                  "from": "item_field",
+                  "name": "id"
+                }
+              ]
+            ],
+            "command": "revoke_org_share",
+            "confirm": "They lose this session at once. Its owner can share it again.",
+            "envelope": "args",
+            "id": "org.revoke_share",
+            "label": "Revoke",
             "params": [],
             "report": false
           },

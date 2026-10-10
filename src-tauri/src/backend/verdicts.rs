@@ -529,6 +529,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("org_rule_preview", Verdict::Routed { tool: "org_admin" }),
     ("add_org_project", Verdict::Routed { tool: "org_admin" }),
     ("remove_org_project", Verdict::Routed { tool: "org_admin" }),
+    ("revoke_org_share", Verdict::Routed { tool: "org_admin" }),
+    ("narrow_org_share", Verdict::Routed { tool: "org_admin" }),
+    (
+        "revoke_org_member_grants",
+        Verdict::Routed { tool: "org_admin" },
+    ),
     ("list_orgs", Verdict::Routed { tool: "work" }),
     ("org_suggestions", Verdict::Routed { tool: "work" }),
     // Org administration phase B: the company's paired devices and people,

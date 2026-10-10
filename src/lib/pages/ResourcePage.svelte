@@ -8,6 +8,7 @@
   import { get } from 'svelte/store';
   import RecordEditor from './RecordEditor.svelte';
   import ResourceGraph from './ResourceGraph.svelte';
+  import ResourceTable from './ResourceTable.svelte';
   import ActionForm from './ActionForm.svelte';
   import FlowView from './FlowView.svelte';
   import OrgSuggestions from '../OrgSuggestions.svelte';
@@ -238,6 +239,10 @@
 
   {#if page.graph}
     <ResourceGraph graph={page.graph} {resource} {records} {selected} />
+  {/if}
+
+  {#if page.table && records.length}
+    <ResourceTable {resource} table={page.table} {records} {selected} onselect={(id) => (selected = id)} />
   {/if}
 
   <div class="md">

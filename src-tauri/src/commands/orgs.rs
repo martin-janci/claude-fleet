@@ -138,6 +138,20 @@ pub struct ProjectIdArgs {
     pub project_id: i64,
 }
 
+/// One share on one of an org's sessions (M15 step G4.7).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OrgShareArgs {
+    pub org_id: i64,
+    pub grant_id: i64,
+}
+
+/// One person of an org, current or former (M15 step G4.7).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OrgPersonArgs {
+    pub org_id: i64,
+    pub person_id: i64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuleIdArgs {
     pub rule_id: i64,
@@ -292,6 +306,64 @@ pub async fn remove_org_project(
         OrgAdminArgs {
             project_id: Some(args.project_id),
             ..OrgAdminArgs::new("remove_project")
+        },
+    )
+    .await
+}
+
+/// M15 step G4.7: take back one share on the org's sessions (Sharing tab).
+#[tauri::command]
+pub async fn revoke_org_share(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: OrgShareArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::revoke_org_share(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            org_id: Some(args.org_id),
+            grant_id: Some(args.grant_id),
+            ..OrgAdminArgs::new("revoke_share")
+        },
+    )
+    .await
+}
+
+/// M15 step G4.7: narrow one share on the org's sessions to watch.
+#[tauri::command]
+pub async fn narrow_org_share(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: OrgShareArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::narrow_org_share(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            org_id: Some(args.org_id),
+            grant_id: Some(args.grant_id),
+            ..OrgAdminArgs::new("narrow_share")
+        },
+    )
+    .await
+}
+
+/// M15 step G4.7: take back every share a member, current or former, holds on
+/// the org's sessions ("removed 3 d ago · Take back their shares").
+#[tauri::command]
+pub async fn revoke_org_member_grants(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: OrgPersonArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::revoke_org_member_grants(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            org_id: Some(args.org_id),
+            person_id: Some(args.person_id),
+            ..OrgAdminArgs::new("revoke_member_grants")
         },
     )
     .await
@@ -689,6 +761,39 @@ pub(crate) mod routed {
     ) -> Result<serde_json::Value, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("remove_org_project", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn revoke_org_share(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("revoke_org_share", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn narrow_org_share(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("narrow_org_share", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn revoke_org_member_grants(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("revoke_org_member_grants", &args).await,
             None => local(&args, store),
         }
     }

@@ -1084,3 +1084,204 @@ fn an_answer_only_device_is_a_device_mode_and_a_viewer_still_watches_only() {
         "the device in hand is not narrowed through itself"
     );
 }
+
+// ---- M15 step G4.7: the org pages ----
+
+/// `person`'s scope, built by `Caller::view_scope` for their device fenced
+/// to Acme.
+fn person_view(c: &Company, person: i64) -> crate::service::view_scope::ViewScope {
+    use crate::mcp::auth::{Caller, ClientRef, TokenMode};
+    let caller = Caller {
+        host_alias: None,
+        client: Some(ClientRef {
+            id: 0,
+            name: format!("device-of-{person}"),
+            trusted: true,
+            org_id: Some(c.acme),
+            person_id: Some(person),
+        }),
+        mode: TokenMode::Full,
+        pane: None,
+        is_personal_owner: false,
+        api: None,
+    };
+    caller.view_scope(&c.st.lock().unwrap()).unwrap()
+}
+
+/// Acme as `person` sees it on the org page, with `role`.
+fn acme_for(c: &Company, person: i64, role: &str) -> crate::service::orgs::OrgDetail {
+    let view = person_view(c, person);
+    let roles = [(c.acme, role.to_string())].into_iter().collect();
+    crate::service::orgs::org_details(
+        &c.st,
+        &view,
+        crate::service::orgs::AdminView::Person { roles },
+    )
+    .unwrap()
+    .into_iter()
+    .find(|d| d.org.id == c.acme)
+    .unwrap()
+}
+
+fn session_id(c: &Company, name: &str) -> i64 {
+    c.st.lock()
+        .unwrap()
+        .conn_for_test()
+        .query_row(
+            "SELECT id FROM sessions WHERE tmux_name = ?1",
+            [name],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn the_sharing_tab_lists_every_share_and_names_only_what_the_admin_sees() {
+    use crate::store::GrantRecipient;
+    let (c, eve) = company_with_sessions();
+    let (bob1, bob2, jane_api) = (
+        session_id(&c, "bob-1"),
+        session_id(&c, "bob-2"),
+        session_id(&c, "jane-api"),
+    );
+    let (to_jane, to_eve, outside) = {
+        let s = c.st.lock().unwrap();
+        (
+            s.grant_session(bob1, GrantRecipient::Person(c.jane), "drive", c.bob)
+                .unwrap()
+                .id,
+            s.grant_session(bob2, GrantRecipient::Person(eve), "answer", c.bob)
+                .unwrap()
+                .id,
+            s.grant_session(jane_api, GrantRecipient::Person(c.bob), "watch", c.jane)
+                .unwrap()
+                .id,
+        )
+    };
+    let d = acme_for(&c, c.jane, "admin");
+    let shares = d.shares.expect("an admin is shown the org's shares");
+    assert_eq!(shares.len(), 2, "{shares:?}");
+    let mine = shares.iter().find(|x| x.id == to_jane).unwrap();
+    assert_eq!(
+        (
+            mine.session.as_deref(),
+            mine.owner.as_deref(),
+            mine.shared_with.as_str(),
+            mine.level.as_str()
+        ),
+        (Some("bob-1"), Some("bob"), "jane", "drive")
+    );
+    let private = shares.iter().find(|x| x.id == to_eve).unwrap();
+    assert_eq!(
+        private.session, None,
+        "a session the admin cannot see is not named"
+    );
+    assert_eq!(private.session_id, None);
+    assert_eq!(private.shared_with, "eve");
+
+    // A member is shown no Sharing tab.
+    assert!(acme_for(&c, c.bob, "member").shares.is_none());
+
+    // Narrow, then revoke, as the org's admin; never another org's share.
+    let mut narrow = c.with_org("narrow_share", c.acme);
+    narrow.grant_id = Some(to_jane);
+    assert_eq!(run(&narrow, &c.st, c.jane()).unwrap()["level"], "watch");
+    let mut revoke = c.with_org("revoke_share", c.acme);
+    revoke.grant_id = Some(to_eve);
+    assert!(run(&revoke, &c.st, c.jane()).unwrap()["revoked_at"].is_i64());
+    let mut far = c.with_org("revoke_share", c.acme);
+    far.grant_id = Some(outside);
+    assert_eq!(err_code(run(&far, &c.st, c.jane())), "E_NOTFOUND");
+    let mut beta = c.with_org("revoke_share", c.beta);
+    beta.grant_id = Some(to_jane);
+    assert_eq!(err_code(run(&beta, &c.st, c.jane())), "E_FORBIDDEN");
+    let left = acme_for(&c, c.jane, "admin").shares.unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].level, "watch");
+}
+
+#[test]
+fn the_team_panel_names_what_the_caller_sees_and_counts_the_rest() {
+    use crate::store::GrantRecipient;
+    let (c, _) = company_with_sessions();
+    let team = acme_for(&c, c.jane, "admin").team.unwrap();
+    let bob = team.iter().find(|m| m.person_id == c.bob).unwrap();
+    assert!(bob.sessions.is_empty());
+    assert_eq!(
+        bob.private, 2,
+        "bob-1 and bob-2 are private; bob-api is in no org"
+    );
+    let bob1 = session_id(&c, "bob-1");
+    c.st.lock()
+        .unwrap()
+        .grant_session(bob1, GrantRecipient::Person(c.jane), "watch", c.bob)
+        .unwrap();
+    let team = acme_for(&c, c.jane, "admin").team.unwrap();
+    let bob = team.iter().find(|m| m.person_id == c.bob).unwrap();
+    assert_eq!(
+        bob.sessions
+            .iter()
+            .map(|x| x.name.as_str())
+            .collect::<Vec<_>>(),
+        ["bob-1"]
+    );
+    assert_eq!(bob.private, 1);
+    // A member is shown the team too.
+    assert!(acme_for(&c, c.bob, "member").team.is_some());
+}
+
+#[test]
+fn a_removed_member_keeps_a_row_until_their_shares_are_taken_back() {
+    use crate::store::GrantRecipient;
+    let (c, _) = company_with_sessions();
+    let bob1 = session_id(&c, "bob-1");
+    let carl = {
+        let s = c.st.lock().unwrap();
+        let carl = s.create_person("carl", None).unwrap().id;
+        s.set_org_member(c.acme, carl, "member", None).unwrap();
+        s.grant_session(bob1, GrantRecipient::Person(carl), "drive", c.bob)
+            .unwrap();
+        carl
+    };
+    let mut rm = c.with_org("remove_member", c.acme);
+    rm.person_id = Some(carl);
+    rm.keep_grants = Some(true);
+    run(&rm, &c.st, c.jane()).unwrap();
+    let gone = acme_for(&c, c.jane, "admin").removed_members.unwrap();
+    assert_eq!(gone.len(), 1);
+    assert_eq!((gone[0].name.as_str(), gone[0].grants), ("carl", 1));
+    let mut take = c.with_org("revoke_member_grants", c.acme);
+    take.person_id = Some(carl);
+    assert_eq!(run(&take, &c.st, c.jane()).unwrap()["revoked"], 1);
+    assert_eq!(
+        acme_for(&c, c.jane, "admin").removed_members.unwrap()[0].grants,
+        0
+    );
+    // Only its admins are shown former members.
+    assert!(acme_for(&c, c.bob, "member").removed_members.is_none());
+}
+
+#[test]
+fn what_belongs_lists_the_accounts_its_hosts_use() {
+    let (c, _) = company_with_sessions();
+    {
+        let s = c.st.lock().unwrap();
+        s.conn_for_test()
+            .execute_batch(
+                "INSERT INTO accounts (uuid, email, seat_tier) VALUES ('u-1', 'ops@acme.dev', 'max'), ('u-2', 'z@else.dev', NULL); \
+                 UPDATE hosts SET account_uuid = 'u-1' WHERE alias = 'ha'; \
+                 UPDATE hosts SET account_uuid = 'u-2' WHERE alias = 'hz';",
+            )
+            .unwrap();
+    }
+    let a = acme_for(&c, c.bob, "member").accounts.unwrap();
+    assert_eq!(a.len(), 1, "{a:?}");
+    assert_eq!(
+        (
+            a[0].name.as_str(),
+            a[0].seat_tier.as_deref(),
+            a[0].hosts.clone()
+        ),
+        ("ops@acme.dev", Some("max"), vec!["ha".to_string()])
+    );
+}

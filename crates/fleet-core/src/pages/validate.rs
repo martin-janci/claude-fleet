@@ -730,6 +730,7 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
             }
         }
         check_graph(&mut cx, page);
+        check_table(&mut cx, page);
         if let Some(res) = resource {
             for f in res.fields {
                 if !placed.contains_key(&format!("{}#{}", page.id, f.id)) {
@@ -826,6 +827,46 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
         });
     }
     problems
+}
+
+/// Most columns a `table` (`Page::table`) shows.
+pub const MAX_TABLE_COLUMNS: usize = 6;
+
+/// A `table` is a `master_detail` page's: its columns are the resource's
+/// plain fields (text, choice, yes/no, count or time), its filters and its
+/// grouping name columns of it.
+fn check_table(cx: &mut Ctx, page: &Page) {
+    use super::resources::FieldKind;
+    let Some(t) = &page.table else { return };
+    let Some(res) = cx.resource else {
+        cx.bad("table", "a table belongs to a master_detail page");
+        return;
+    };
+    cx.text("table", "title", &t.title, MAX_TITLE);
+    if t.columns.is_empty() || t.columns.len() > MAX_TABLE_COLUMNS {
+        cx.bad("table", format!("1 to {MAX_TABLE_COLUMNS} columns"));
+    }
+    for c in &t.columns {
+        match res.field(c).map(|f| f.kind) {
+            Some(
+                FieldKind::Text { .. }
+                | FieldKind::Choice { .. }
+                | FieldKind::Bool { .. }
+                | FieldKind::Count
+                | FieldKind::Time,
+            ) => {}
+            Some(_) => cx.bad("table", format!("`{c}` is not a plain field of {}", res.id)),
+            None => cx.bad("table", format!("{} has no field `{c}`", res.id)),
+        }
+    }
+    for f in t.filters.iter().chain(t.group_by.iter()) {
+        if !t.columns.contains(f) {
+            cx.bad(
+                "table",
+                format!("`{f}` filters or groups but is not a column"),
+            );
+        }
+    }
 }
 
 /// Most facts a graph node shows under its name.

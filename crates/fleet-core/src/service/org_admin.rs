@@ -48,7 +48,7 @@ use std::sync::Mutex;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "OrgAdminParams")]
 pub struct OrgAdminArgs {
-    /// list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|set_org_setting|list_devices|pair_device|revoke_device|set_device_trust|rename_device|set_device_mode|bind_device|set_device_person|grant_catalog|list_people|rename_person|disable_person|list_members|set_member|remove_member|member_grants|revoke_member_grants|narrow_member_grants|set_hub_org|set_admins_see_unclaimed|rule_preview|add_project|remove_project
+    /// list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|set_org_setting|list_devices|pair_device|revoke_device|set_device_trust|rename_device|set_device_mode|bind_device|set_device_person|grant_catalog|list_people|rename_person|disable_person|list_members|set_member|remove_member|member_grants|revoke_member_grants|narrow_member_grants|set_hub_org|set_admins_see_unclaimed|rule_preview|add_project|remove_project|revoke_share|narrow_share
     pub action: String,
     /// Org name (add/update_org), or a person's or device's new name
     /// (rename_person, rename_device).
@@ -158,6 +158,10 @@ pub struct OrgAdminArgs {
     /// remove_project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<i64>,
+    /// revoke_share / narrow_share: the share (a session grant) on one of
+    /// the org's sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<i64>,
 }
 
 impl OrgAdminArgs {
@@ -195,6 +199,7 @@ impl OrgAdminArgs {
             ("tracker_id", self.tracker_id),
             ("person_id", self.person_id),
             ("project_id", self.project_id),
+            ("grant_id", self.grant_id),
         ] {
             if let Some(v) = v {
                 out.push_str(&format!(" {k}={v}"));
@@ -254,6 +259,10 @@ pub enum Action {
     /// M15 step G2.10: the org's project catalog.
     AddProject,
     RemoveProject,
+    /// M15 step G4.7: take back or narrow to watch one share on the org's
+    /// sessions, from its Sharing tab. Downward only.
+    RevokeShare,
+    NarrowShare,
 }
 
 impl Action {
@@ -283,6 +292,8 @@ impl Action {
             "rule_preview" => Action::RulePreview,
             "add_project" => Action::AddProject,
             "remove_project" => Action::RemoveProject,
+            "revoke_share" => Action::RevokeShare,
+            "narrow_share" => Action::NarrowShare,
             // A device's org is `bind_device`, which keeps the lock-out rule
             // `assign_client` does not know about.
             other => match OrgAction::parse(other) {
@@ -668,7 +679,9 @@ fn check(s: &Store, action: Action, args: &OrgAdminArgs, me: Me<'_>) -> Result<(
         | Action::MemberGrants
         | Action::RevokeMemberGrants
         | Action::NarrowMemberGrants
-        | Action::AddProject => own_org(),
+        | Action::AddProject
+        | Action::RevokeShare
+        | Action::NarrowShare => own_org(),
         // The entry's org is checked in the arm, against the entry.
         Action::RemoveProject => Ok(()),
         // The device's org is checked in the arm, against the device.
@@ -1058,6 +1071,15 @@ pub fn run(
                 }
             }
             Ok(serde_json::json!({ "removed": s.remove_org_project(id)? }))
+        }
+        Action::RevokeShare | Action::NarrowShare => {
+            let org = org_of(&s, args)?.ok_or_else(|| {
+                IpcError::new(codes::E_INVALID, format!("{name} needs org_id or org"))
+            })?;
+            let grant = *need(&args.grant_id, name, "grant_id")?;
+            let row = s.org_admin_change_grant(grant, org, action == Action::NarrowShare)?;
+            tracing::info!(org, grant, level = %row.level, revoked = row.revoked_at.is_some(), "[org_admin] {name}");
+            to_json(&row)
         }
         Action::SetOrgSetting => {
             let org = org_of(&s, args)?.ok_or_else(|| {

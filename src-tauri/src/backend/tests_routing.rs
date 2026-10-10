@@ -2222,6 +2222,60 @@ fn org_admin_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "revoke_org_share",
+            "org_admin",
+            json!({ "action": "revoke_share", "org_id": 1, "grant_id": 5 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::revoke_org_share(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        grant_id: Some(5),
+                        ..OrgAdminArgs::new("revoke_share")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "narrow_org_share",
+            "org_admin",
+            json!({ "action": "narrow_share", "org_id": 1, "grant_id": 5 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::narrow_org_share(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        grant_id: Some(5),
+                        ..OrgAdminArgs::new("narrow_share")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "revoke_org_member_grants",
+            "org_admin",
+            json!({ "action": "revoke_member_grants", "org_id": 1, "person_id": 2 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::revoke_org_member_grants(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        person_id: Some(2),
+                        ..OrgAdminArgs::new("revoke_member_grants")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "assign_host_org",
             "org_admin",
             json!({ "action": "assign_host", "host_alias": "h", "org_id": 1 }),

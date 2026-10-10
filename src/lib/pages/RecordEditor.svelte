@@ -11,6 +11,7 @@
   import TrackerExtras from '../TrackerExtras.svelte';
   import OrgSettingsList from './OrgSettingsList.svelte';
   import OrgMembers from './OrgMembers.svelte';
+  import OrgShares from './OrgShares.svelte';
   import type { OrgMember } from '../orgs';
   import Chart from './Chart.svelte';
   import Loader from '../Loader.svelte';
@@ -39,6 +40,11 @@
     needLine,
     personSpendName,
     type PersonSpend,
+    removedLine,
+    teamRest,
+    type OrgShare,
+    type RemovedMember,
+    type TeamMember,
     recordValues,
     subLine,
     syncLine,
@@ -104,6 +110,8 @@
   }
 
   const fieldOf = (id: string) => resource.fields.find((f) => f.id === id);
+  /** Field types left out when the record does not carry them at all. */
+  const ABSENT_WHEN_NULL: string[] = ['items', 'money', 'money_series', 'settings', 'sync'];
   /** A field's label, `{title}` filled with this record's title. */
   const lbl = (f: FieldSpec) => labelOf(f, titleOf(resource, record));
   const saved = $derived(
@@ -125,12 +133,14 @@
   const tabSections = $derived(
     shownTabs.length ? (shownTabs.find((t) => t.title === tab) ?? shownTabs[0]).sections : sections,
   );
+  /** Lists a tab's count leaves out: reports, the team, former members. */
+  const TAB_UNCOUNTED: string[] = ['admin_need', 'person_spend', 'team_member', 'removed_member'];
   /** A tab's count: how many entries its one list holds (Members 5). */
   function tabCount(t: Tab): number | undefined {
     const lists = t.sections
       .flatMap((s) => s.items)
       .flatMap((i) => (i.type === 'field' ? [fieldOf(i.key)] : []))
-      .filter((f): f is FieldSpec => f?.type === 'items' && f.item_label.type !== 'admin_need' && f.item_label.type !== 'person_spend');
+      .filter((f): f is FieldSpec => f?.type === 'items' && !TAB_UNCOUNTED.includes(f.item_label.type));
     if (lists.length !== 1 || !Array.isArray(record[lists[0].id])) return undefined;
     return itemsOf(lists[0], record).length;
   }
@@ -291,7 +301,7 @@
           <!-- A list the record does not carry at all is not known here (a
                hub too old for it, or a list only the operator is shown):
                left out, rather than shown as empty. -->
-          {#if f && !(['items', 'money', 'money_series', 'settings', 'sync'].includes(f.type) && record[f.id] == null)}
+          {#if f && !(ABSENT_WHEN_NULL.includes(f.type) && record[f.id] == null)}
             <div class="field" class:changed={changed.includes(f)} data-testid={`record-field-${f.id}`}>
               <span class="label" id={`rf-${f.id}`}>{lbl(f)}</span>
               <div class="control">
@@ -384,6 +394,53 @@
                       return ok;
                     }}
                     {now} />
+                {:else if f.type === 'items' && f.item_label.type === 'org_share'}
+                  <OrgShares
+                    shares={itemsOf(f, record) as OrgShare[]}
+                    revoke={f.remove}
+                    narrow={f.each?.[0]}
+                    {readonly}
+                    {busy}
+                    onaction={(a, it) => runItem(a, it, {})}
+                    {now} />
+                {:else if f.type === 'items' && f.item_label.type === 'team_member'}
+                  <ul class="team" aria-labelledby={`rf-${f.id}`}>
+                    {#each itemsOf(f, record) as it (itemKey(it))}
+                      {@const m = it as TeamMember}
+                      <li data-testid={`item-${f.id}`}>
+                        <span class="who">{m.name}</span>
+                        {#each m.sessions as x (x.id)}<span class="chip" data-testid="team-session"
+                            >{x.name} <span class="state">{x.state}</span></span
+                          >{/each}
+                        {#if teamRest(m)}<span class="none" data-testid="team-rest">{teamRest(m)}</span>{/if}
+                      </li>
+                    {:else}
+                      <li class="none">None</li>
+                    {/each}
+                  </ul>
+                {:else if f.type === 'items' && f.item_label.type === 'removed_member'}
+                  <ul class="removed" aria-labelledby={`rf-${f.id}`}>
+                    {#each itemsOf(f, record) as it (itemKey(it))}
+                      {@const m = it as RemovedMember}
+                      <li data-testid={`item-${f.id}`}>
+                        <span class="who">{m.name}</span>
+                        <span class="none">{removedLine(m, now())}</span>
+                        {#if !readonly && m.grants > 0}
+                          {#each f.each ?? [] as a (a.id)}
+                            <button
+                              type="button"
+                              class="btn btn--quiet"
+                              disabled={busy}
+                              aria-label={`${a.label}: ${m.name}`}
+                              data-testid={`item-action-${a.id}`}
+                              onclick={() => runItem(a, it, {})}>{a.label}</button>
+                          {/each}
+                        {/if}
+                      </li>
+                    {:else}
+                      <li class="none">None</li>
+                    {/each}
+                  </ul>
                 {:else if f.type === 'items'}
                   <div class="chips" aria-labelledby={`rf-${f.id}`}>
                     {#each itemsOf(f, record) as it (itemKey(it))}
@@ -395,7 +452,14 @@
                             aria-label={`${f.remove.label}: ${itemLabel(f.item_label, it)}`}
                             data-testid={`item-remove-${f.id}`}
                             onclick={() => runItem(f.remove!, it, {})}>×</button
-                          >{/if}</span
+                          >{/if}{#if !readonly}{#each f.each ?? [] as a (a.id)}<button
+                              type="button"
+                              class="btn btn--quiet"
+                              disabled={busy}
+                              aria-label={`${a.label}: ${itemLabel(f.item_label, it)}`}
+                              data-testid={`item-action-${a.id}`}
+                              onclick={() => runItem(a, it, {})}>{a.label}</button
+                            >{/each}{/if}</span
                       >
                     {:else}
                       <span class="none">None</span>
@@ -584,6 +648,29 @@
     font: inherit;
     font-size: var(--text-2xs);
     max-width: 20rem;
+  }
+  .team,
+  .removed {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .team li,
+  .removed li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem;
+  }
+  .who {
+    font-size: var(--text-xs);
+    min-width: 6rem;
+  }
+  .state {
+    color: var(--fg-muted);
   }
   .chips {
     display: flex;

@@ -1015,6 +1015,89 @@ pub struct OrgDetail {
     /// so a page offers what the caller may do. Absent when they have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub my_role: Option<String>,
+    /// M15 step G4.7, for whoever administers it: every live share on its
+    /// sessions (the Sharing tab). A session the caller may not see is not
+    /// named. Absent for anyone else, and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares: Option<Vec<OrgShare>>,
+    /// G4.7, for the org's own people and the fleet's administrator: who is
+    /// working on what — each live member's live sessions in it that the
+    /// caller sees, and how many more are private.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<Vec<TeamMember>>,
+    /// G4.7, for whoever administers it: its former members, with the shares
+    /// on its sessions they still hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_members: Option<Vec<RemovedMember>>,
+    /// G4.7, for the org's own people and the fleet's administrator: the
+    /// Claude accounts its hosts are signed in to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<Vec<OrgAccount>>,
+}
+
+/// One live share on an org's session (M15 step G4.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgShare {
+    /// The grant, for Revoke and Narrow.
+    pub id: i64,
+    /// The session's name, only when the caller may see the session;
+    /// absent, it reads "a private session".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
+    /// Whose session it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// A person's name, or "everyone in <org>" for an org share.
+    pub shared_with: String,
+    /// `watch`, `answer` or `drive`.
+    pub level: String,
+    pub since: i64,
+}
+
+/// One live member and what they are working on (M15 step G4.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamMember {
+    pub person_id: i64,
+    pub name: String,
+    pub role: String,
+    /// Their live sessions in the org the caller sees.
+    #[serde(default)]
+    pub sessions: Vec<TeamSession>,
+    /// Their live sessions in the org the caller does not see: counted,
+    /// never named.
+    #[serde(default)]
+    pub private: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamSession {
+    pub id: i64,
+    pub name: String,
+    /// `needs you`, else what Claude reports (`working`, `idle`, …).
+    pub state: String,
+}
+
+/// A former member (M15 step G4.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedMember {
+    pub person_id: i64,
+    pub name: String,
+    pub removed_at: i64,
+    /// Live shares TO them still standing on the org's sessions.
+    pub grants: usize,
+}
+
+/// A Claude account one of an org's hosts is signed in to (M15 step G4.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgAccount {
+    /// Its nickname, else its email, else its uuid.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seat_tier: Option<String>,
+    /// The org's hosts signed in to it.
+    pub hosts: Vec<String>,
 }
 
 /// One member as the org overview lists them (phase D).
@@ -1608,7 +1691,16 @@ fn org_details_locked(
                 }
             }
         }
+        let people_of_org = admin || my_role.is_some();
         let mut d = OrgDetail {
+            shares: administers.then(|| org_shares(s, view, o.id)).transpose()?,
+            team: people_of_org
+                .then(|| org_team(s, view, o.id, &needs))
+                .transpose()?,
+            removed_members: administers.then(|| removed_members(s, o.id)).transpose()?,
+            accounts: people_of_org
+                .then(|| org_accounts(s, &hosts, o.id))
+                .transpose()?,
             needs_admin,
             spend_series: None,
             spend_by_person: None,
@@ -1687,6 +1779,152 @@ fn org_details_locked(
             }
         }
         out.push(d);
+    }
+    Ok(out)
+}
+
+/// A person as a list names them: their display name, else their name.
+fn person_label(s: &Store, person: Option<i64>) -> Result<Option<String>, IpcError> {
+    let Some(p) = person else { return Ok(None) };
+    Ok(s.get_person(p)?.map(|p| p.display_name.unwrap_or(p.name)))
+}
+
+/// A session as a list names it.
+fn session_label(r: &SessionRow) -> String {
+    r.friendly_name
+        .clone()
+        .unwrap_or_else(|| r.tmux_name.clone())
+}
+
+/// Every live share on `org`'s sessions (M15 step G4.7), naming only the
+/// sessions `view` sees.
+fn org_shares(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    org: i64,
+) -> Result<Vec<OrgShare>, IpcError> {
+    let mut out = Vec::new();
+    for (g, owner) in s.live_grants_in_org(org)? {
+        let row = s
+            .get_session_by_id(g.session_id)?
+            .filter(|r| view.sees_session_row(r).is_visible());
+        let shared_with = match (g.person_id, g.org_id) {
+            (Some(p), _) => person_label(s, Some(p))?.unwrap_or_else(|| format!("person {p}")),
+            (None, Some(o)) => match s.get_org(o)? {
+                Some(o) => format!("everyone in {}", o.name),
+                None => "a removed org".to_string(),
+            },
+            (None, None) => continue,
+        };
+        out.push(OrgShare {
+            id: g.id,
+            session: row.as_ref().map(session_label),
+            session_id: row.as_ref().map(|r| r.id),
+            owner: person_label(s, owner)?,
+            shared_with,
+            level: g.level,
+            since: g.granted_at,
+        });
+    }
+    Ok(out)
+}
+
+/// Who is working on what in `org` (M15 step G4.7): each live member's live
+/// sessions in it, the ones `view` sees by name and the rest as a count.
+fn org_team(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    org: i64,
+    needs: &dyn Fn(&SessionRow) -> bool,
+) -> Result<Vec<TeamMember>, IpcError> {
+    let live: Vec<SessionRow> = s
+        .list_all_sessions()?
+        .into_iter()
+        .filter(|r| r.org_id == Some(org) && r.status == "running" && r.lost_at.is_none())
+        .collect();
+    let mut out = Vec::new();
+    for m in s.org_members(org)? {
+        let Some(p) = s
+            .get_person(m.person_id)?
+            .filter(|p| p.disabled_at.is_none())
+        else {
+            continue;
+        };
+        let mut member = TeamMember {
+            person_id: p.id,
+            name: p.display_name.unwrap_or(p.name),
+            role: m.role,
+            sessions: Vec::new(),
+            private: 0,
+        };
+        for r in live.iter().filter(|r| r.owner_person_id == Some(p.id)) {
+            if view.sees_session_row(r).is_visible() {
+                member.sessions.push(TeamSession {
+                    id: r.id,
+                    name: session_label(r),
+                    state: if needs(r) {
+                        "needs you".to_string()
+                    } else {
+                        r.claude_status
+                            .clone()
+                            .unwrap_or_else(|| "idle".to_string())
+                    },
+                });
+            } else {
+                member.private += 1;
+            }
+        }
+        out.push(member);
+    }
+    Ok(out)
+}
+
+/// `org`'s former members and the shares they still hold on it (G4.7). A
+/// person who is a live member again is not listed.
+fn removed_members(s: &Store, org: i64) -> Result<Vec<RemovedMember>, IpcError> {
+    let mut out = Vec::new();
+    for m in s.removed_org_members(org)? {
+        let Some(removed_at) = m.removed_at else {
+            continue;
+        };
+        let Some(p) = s.get_person(m.person_id)? else {
+            continue;
+        };
+        let (w, a, d) = s.person_grants_in_org(p.id, org)?;
+        out.push(RemovedMember {
+            person_id: p.id,
+            name: p.display_name.unwrap_or(p.name),
+            removed_at,
+            grants: w + a + d,
+        });
+    }
+    Ok(out)
+}
+
+/// The Claude accounts `org`'s hosts are signed in to (G4.7).
+fn org_accounts(
+    s: &Store,
+    hosts: &[crate::store::HostRow],
+    org: i64,
+) -> Result<Vec<OrgAccount>, IpcError> {
+    let mut by_uuid: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for h in hosts.iter().filter(|h| h.org_id == Some(org)) {
+        if let Some(u) = h.account_uuid.as_ref() {
+            by_uuid.entry(u.clone()).or_default().push(h.alias.clone());
+        }
+    }
+    if by_uuid.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for a in s.list_accounts()? {
+        if let Some(hosts) = by_uuid.remove(&a.uuid) {
+            out.push(OrgAccount {
+                name: a.nickname.or(a.email).unwrap_or(a.uuid),
+                seat_tier: a.seat_tier,
+                hosts,
+            });
+        }
     }
     Ok(out)
 }

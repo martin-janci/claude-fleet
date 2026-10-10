@@ -331,6 +331,89 @@ describe('Organisations (master_detail over the org resource)', () => {
     await waitFor(() => expect(argsOf(inv, 'set_org_member')).toEqual({ org_id: 1, person: 'newbie', role: 'member' }));
   });
 
+  it('M15 G4.7: the Sharing tab lists every share, filters, narrows and revokes; a private session is not named', async () => {
+    const inv = route({
+      list_orgs: [
+        {
+          ...acme,
+          shares: [
+            { id: 7, session: 'bob-1', session_id: 11, owner: 'bob', shared_with: 'jane', level: 'drive', since: 1 },
+            { id: 8, owner: 'bob', shared_with: 'eve', level: 'answer', since: 1 },
+            { id: 9, session: 'ann-1', session_id: 12, owner: 'ann', shared_with: 'everyone in Company A', level: 'watch', since: 1 },
+          ],
+        },
+      ],
+    });
+    show();
+    await openRecordTab('Sharing');
+    const rows = await screen.findAllByTestId('item-shares');
+    expect(rows.map((r) => r.querySelector('td')!.textContent!.trim())).toEqual(['bob-1 · bob', 'a private session · bob', 'ann-1 · ann']);
+    // A watch share has nothing to narrow.
+    expect(within(rows[2]).queryByTestId('share-narrow')).toBeNull();
+    await fireEvent.change(screen.getByTestId('shares-level'), { target: { value: 'answer' } });
+    expect(screen.getAllByTestId('item-shares')).toHaveLength(1);
+    await fireEvent.change(screen.getByTestId('shares-level'), { target: { value: '' } });
+    await fireEvent.change(screen.getByTestId('shares-owner'), { target: { value: 'ann' } });
+    expect(screen.getAllByTestId('item-shares')).toHaveLength(1);
+    await fireEvent.change(screen.getByTestId('shares-owner'), { target: { value: '' } });
+
+    await fireEvent.click(within(screen.getAllByTestId('item-shares')[0]).getByTestId('share-narrow'));
+    expect((await screen.findByTestId('confirm-dialog')).textContent).toContain('no longer answer or drive');
+    await fireEvent.click(screen.getByTestId('record-confirm'));
+    await waitFor(() => expect(argsOf(inv, 'narrow_org_share')).toEqual({ org_id: 1, grant_id: 7 }));
+    await fireEvent.click(within(screen.getAllByTestId('item-shares')[1]).getByTestId('share-revoke'));
+    await fireEvent.click(await screen.findByTestId('record-confirm'));
+    await waitFor(() => expect(argsOf(inv, 'revoke_org_share')).toEqual({ org_id: 1, grant_id: 8 }));
+  });
+
+  it('M15 G4.7: the team panel, an inline role, a removed member whose shares are taken back, and accounts', async () => {
+    const inv = route({
+      list_orgs: [
+        {
+          ...acme,
+          members: [
+            { person_id: 2, name: 'jane', role: 'admin' },
+            { person_id: 3, name: 'bob', role: 'member' },
+          ],
+          team: [
+            { person_id: 2, name: 'jane', role: 'admin', sessions: [], private: 0 },
+            { person_id: 3, name: 'bob', role: 'member', sessions: [{ id: 11, name: 'bob-1', state: 'needs you' }], private: 2 },
+          ],
+          removed_members: [
+            { person_id: 4, name: 'carl', removed_at: 1_000_000 - 3 * 86_400, grants: 2 },
+            { person_id: 5, name: 'dana', removed_at: 1_000_000 - 9 * 86_400, grants: 0 },
+          ],
+          accounts: [{ name: 'ops@acme.dev', seat_tier: 'max', hosts: ['hetzner-a'] }],
+        },
+      ],
+    });
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000 * 1000);
+    show();
+    await openRecordTab('Sharing');
+    const team = await screen.findAllByTestId('item-team');
+    expect(team[0].textContent).toContain('nothing live');
+    expect(within(team[1]).getByTestId('team-session').textContent).toBe('bob-1 needs you');
+    expect(within(team[1]).getByTestId('team-rest').textContent).toBe('2 private');
+
+    await openRecordTab('Members');
+
+    await fireEvent.change(screen.getByTestId('member-role-3'), { target: { value: 'viewer' } });
+    await waitFor(() => expect(argsOf(inv, 'set_org_member')).toEqual({ org_id: 1, person: 'bob', role: 'viewer' }));
+
+    const gone = screen.getAllByTestId('item-removed_members');
+    expect(gone.map((g) => g.textContent!.replace(/\s+/g, ' ').trim())).toEqual([
+      'carl removed 3 d ago · holds 2 shares Take back their shares',
+      'dana removed 9 d ago · holds no share',
+    ]);
+    await fireEvent.click(within(gone[0]).getByTestId('item-action-org.revoke_former_grants'));
+    await fireEvent.click(await screen.findByTestId('record-confirm'));
+    await waitFor(() => expect(argsOf(inv, 'revoke_org_member_grants')).toEqual({ org_id: 1, person_id: 4 }));
+
+    await openRecordTab('Overview');
+    expect((await screen.findByTestId('item-accounts')).textContent).toBe('ops@acme.dev (max) · on hetzner-a');
+    vi.restoreAllMocks();
+  });
+
   it('a failed command is a toast, and the list is still re-read', async () => {
     const inv = route({ remove_org: Object.assign(new Error('x'), { code: 'E_INVALID', message: 'org 1 still has hosts' }) });
     show();
