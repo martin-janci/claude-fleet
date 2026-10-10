@@ -90,6 +90,17 @@
       "description": "Always \"fleet.page/1\".",
       "type": "string"
     },
+    "table": {
+      "description": "A `master_detail` page's records also shown as one table (M15 step\nG4.7: People & devices), with filters and a grouping. A row opens\nits record; the list stays the keyboard path.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TableView"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "tabs": {
       "type": "array",
       "items": {
@@ -724,6 +735,42 @@
       "required": [
         "title",
         "sections"
+      ]
+    },
+    "TableView": {
+      "description": "How a `master_detail` page shows its records as a table (`Page::table`).",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "description": "The resource's plain fields, one column each, at most six.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "filters": {
+          "description": "Columns that get a filter: a select over the values the records hold.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "group_by": {
+          "description": "A column the rows can be grouped by, offered as a switch.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "The view's name, e.g. \"People & devices\".",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "columns"
       ]
     },
     "Tone": {

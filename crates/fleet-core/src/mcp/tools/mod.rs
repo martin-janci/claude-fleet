@@ -37,6 +37,7 @@ use rmcp::{
 };
 use std::sync::{Arc, Mutex};
 
+mod add_account;
 mod api_tokens;
 mod assets;
 mod devices;
@@ -63,6 +64,8 @@ mod start_rules;
 mod support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_add_account;
 #[cfg(test)]
 mod tests_api_tokens;
 #[cfg(test)]
@@ -382,6 +385,7 @@ impl FleetTools {
             + Self::devices_router()
             + Self::prs_router()
             + Self::pr_shepherd_router()
+            + Self::add_account_router()
             + Self::api_tokens_router()
             + Self::routines_router()
             + Self::start_rules_router()

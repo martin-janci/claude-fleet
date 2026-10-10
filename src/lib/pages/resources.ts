@@ -7,7 +7,7 @@ import { invokeCmd, type Result } from '../result';
 import { loadOrgs, ruleChip, type OrgRuleRow } from '../orgs';
 import { loadTrackers } from '../trackers';
 import { loadCatalogStatuses } from '../assets_workspace';
-import { loadDevices } from '../devices';
+import { loadDevices, loadPeople } from '../devices';
 
 export type Bind =
   | { from: 'record'; name: string }
@@ -18,7 +18,7 @@ export type Bind =
   | { from: 'true' }
   | { from: 'false' };
 
-export type OptionSource = 'hosts' | 'trackers' | 'orgs' | 'devices' | 'catalogs';
+export type OptionSource = 'hosts' | 'trackers' | 'orgs' | 'devices' | 'catalogs' | 'people';
 
 export type ParamSpec = { name: string; label: string; required: boolean } & (
   | { type: 'text'; max: number; placeholder: string }
@@ -26,6 +26,10 @@ export type ParamSpec = { name: string; label: string; required: boolean } & (
   | { type: 'secret' }
   | { type: 'options'; source: OptionSource }
   | { type: 'choice'; options: [string, string][] }
+  /** Free text with the source's values offered (pick one or type a new one). */
+  | { type: 'suggest'; max: number; placeholder: string; source: OptionSource }
+  /** A switch, sent as a boolean. */
+  | { type: 'toggle'; default: boolean }
 );
 
 /** How an action's answer is shown (`ResultView`). */
@@ -47,6 +51,9 @@ export interface ActionSpec {
   result?: ResultView;
   /** The loader beside the form while it runs. */
   busy?: 'counter-orbit';
+  /** A read-only command run with the form's arguments as it is filled in;
+   *  its answer's `sentence` is shown under the form (M15 G2.10). */
+  preview?: string;
 }
 
 export type ItemLabel =
@@ -56,7 +63,12 @@ export type ItemLabel =
   | { type: 'device' }
   | { type: 'member' }
   | { type: 'admin_need' }
-  | { type: 'person_spend' };
+  | { type: 'person_spend' }
+  | { type: 'org_project' }
+  | { type: 'org_share' }
+  | { type: 'team_member' }
+  | { type: 'removed_member' }
+  | { type: 'org_account' };
 
 /** A tile's line under its value (`Sub`). */
 export type Sub = { type: 'budget'; field: string } | { type: 'count'; field: string; text: string };
@@ -79,7 +91,7 @@ export type FieldKind =
   | { type: 'money_series' }
   | { type: 'sync'; unit: string }
   | { type: 'settings'; set: ActionSpec }
-  | { type: 'items'; item_label: ItemLabel; remove?: ActionSpec; add: ActionSpec[] };
+  | { type: 'items'; item_label: ItemLabel; remove?: ActionSpec; add: ActionSpec[]; each?: ActionSpec[] };
 
 export type FieldSpec = {
   id: string;
@@ -196,6 +208,17 @@ export function ago(secs: unknown, now: number): string {
   return `${Math.floor(d / 86_400)} d ago`;
 }
 
+/** One cell of a page's table view (M15 G4.7): a time as how long ago, a
+ *  choice by its label, yes/no as "Yes" / "No", nothing as "—". */
+export function cellText(f: FieldSpec, record: ResourceRecord, now: number): string {
+  const raw = rawOf(f, record);
+  if (f.type === 'time') return ago(raw, now);
+  if (f.type === 'bool') return fieldValue(f, record) ? 'Yes' : 'No';
+  if (raw === null || raw === undefined || raw === '') return '—';
+  if (f.type === 'choice') return choiceLabel(f, String(raw));
+  return String(raw);
+}
+
 /** The action applies to this record: no variants, or its variant is one. */
 export function applies(r: ResourceType, a: ActionSpec, record: ResourceRecord): boolean {
   if (!a.variants?.length || !r.variant_by) return true;
@@ -223,12 +246,94 @@ export function itemLabel(label: ItemLabel, item: unknown): string {
   if (label.type === 'device') return deviceChip(item as DeviceItem);
   if (label.type === 'admin_need') return needLine(item as AdminNeed).text;
   if (label.type === 'person_spend') return personSpendName(item as PersonSpend);
+  if (label.type === 'org_project') return projectLine(item as OrgProject);
+  if (label.type === 'org_share') return shareLine(item as OrgShare).session;
+  if (label.type === 'team_member') return (item as TeamMember).name;
+  if (label.type === 'removed_member') return (item as RemovedMember).name;
+  if (label.type === 'org_account') return accountLine(item as OrgAccount);
   if (label.type === 'member') {
     const m = item as { name?: string; display_name?: string; role?: string };
     return `${m.display_name || m.name || ''} · ${m.role ?? ''}`;
   }
   const v = (item as Record<string, unknown> | null)?.[label.field];
   return v === undefined || v === null ? '' : String(v);
+}
+
+/** An entry of an org's project catalog (`store::OrgProjectRow`, M15 G2.10). */
+export interface OrgProject {
+  id: number;
+  name: string;
+  remote?: string;
+  path?: string;
+  hosts?: string[];
+}
+
+/** "api · git@github.com:acme/api.git · ~/src/api · on hetzner-a, hetzner-b". */
+export function projectLine(p: OrgProject): string {
+  const parts = [p.name, p.remote, p.path].filter((x): x is string => !!x);
+  if (p.hosts?.length) parts.push(`on ${p.hosts.join(', ')}`);
+  return parts.join(' · ');
+}
+
+/** One live share on an org's session (`service::orgs::OrgShare`, M15 G4.7). */
+export interface OrgShare {
+  id: number;
+  session?: string;
+  session_id?: number;
+  owner?: string;
+  shared_with: string;
+  level: string;
+  since: number;
+}
+
+/** The row an org's Sharing tab shows: a session the caller may not see is
+ *  "a private session", never named. */
+export function shareLine(x: OrgShare): { session: string; owner: string } {
+  return { session: x.session ?? 'a private session', owner: x.owner ?? 'nobody' };
+}
+
+/** A member and what they are working on (`service::orgs::TeamMember`). */
+export interface TeamMember {
+  person_id: number;
+  name: string;
+  role: string;
+  sessions: { id: number; name: string; state: string }[];
+  private: number;
+}
+
+/** "2 private" / "nothing live", after the sessions the caller sees. */
+export function teamRest(m: TeamMember): string {
+  if (m.private > 0) return `${m.private} private`;
+  return m.sessions.length ? '' : 'nothing live';
+}
+
+/** A former member (`service::orgs::RemovedMember`). */
+export interface RemovedMember {
+  person_id: number;
+  name: string;
+  removed_at: number;
+  grants: number;
+}
+
+/** "removed 3 d ago · holds 2 shares" / "removed today · holds no share". */
+export function removedLine(m: RemovedMember, now: number): string {
+  const days = Math.floor((now - m.removed_at) / 86_400);
+  const when = days <= 0 ? 'removed today' : `removed ${days} d ago`;
+  const holds = m.grants === 0 ? 'holds no share' : `holds ${m.grants} ${m.grants === 1 ? 'share' : 'shares'}`;
+  return `${when} · ${holds}`;
+}
+
+/** A Claude account an org's hosts use (`service::orgs::OrgAccount`). */
+export interface OrgAccount {
+  name: string;
+  seat_tier?: string;
+  hosts: string[];
+}
+
+/** "ops@acme.dev (max) · on hetzner-a". */
+export function accountLine(a: OrgAccount): string {
+  const name = a.seat_tier ? `${a.name} (${a.seat_tier})` : a.name;
+  return a.hosts.length ? `${name} · on ${a.hosts.join(', ')}` : name;
 }
 
 /** One person's share of an org's spend (`service::org_spend::PersonSpend`);
@@ -374,7 +479,8 @@ export interface DeviceItem {
 }
 
 function deviceChip(d: DeviceItem): string {
-  const tags = [d.mode === 'readonly' ? 'read-only' : null, d.trusted ? 'trusted' : null].filter(Boolean);
+  const mode = d.mode === 'readonly' ? 'watch only' : d.mode === 'answer' ? 'answer only' : null;
+  const tags = [mode, d.trusted ? 'trusted' : null].filter(Boolean);
   return tags.length ? `${d.name} · ${tags.join(', ')}` : d.name;
 }
 
@@ -439,8 +545,9 @@ export function buildArgs(
         break;
       case 'param': {
         const spec = action.params.find((p) => p.name === bind.name);
-        const v = (params[bind.name] ?? '').trim();
-        if (v === '') out[arg] = null;
+        const v = (params[bind.name] ?? (spec?.type === 'toggle' ? String(spec.default) : '')).trim();
+        if (spec?.type === 'toggle') out[arg] = v === 'true';
+        else if (v === '') out[arg] = null;
         else if (spec?.type === 'options' && /^\d+$/.test(v)) out[arg] = Number(v);
         else out[arg] = v;
         break;
@@ -462,6 +569,7 @@ export function buildArgs(
 /** A param's value as the form holds it: what was typed or picked, else
  *  a choice's first option (preselected). */
 export function paramValue(p: ParamSpec, params: Record<string, string>): string {
+  if (p.type === 'toggle') return params[p.name] ?? String(p.default);
   return params[p.name] ?? (p.type === 'choice' ? (p.options[0]?.[0] ?? '') : '');
 }
 
@@ -479,6 +587,15 @@ export function runAction(action: ActionSpec, args: Record<string, unknown>): Pr
   return invokeCmd<unknown>(action.command, { args });
 }
 
+/** An action's preview (`ActionSpec.preview`): its one-line answer, or
+ *  null when it has none, the form is not filled in yet, or the command
+ *  refused (the form says why on Add). */
+export async function previewAction(action: ActionSpec, args: Record<string, unknown>): Promise<string | null> {
+  if (!action.preview) return null;
+  const r = await invokeCmd<{ sentence?: string }>(action.preview, { args });
+  return r.ok && typeof r.value?.sentence === 'string' ? r.value.sentence : null;
+}
+
 export function listRecords(r: ResourceType): Promise<Result<ResourceRecord[]>> {
   return invokeCmd<ResourceRecord[]>(r.list);
 }
@@ -489,16 +606,18 @@ export function listRecords(r: ResourceType): Promise<Result<ResourceRecord[]>> 
  * like the custom components.
  */
 export const RESOURCE_RELOADERS: Record<string, (() => Promise<unknown>)[]> = {
-  org: [loadOrgs, loadTrackers, loadDevices],
+  org: [loadOrgs, loadTrackers, loadDevices, loadPeople],
   tracker: [loadTrackers, loadOrgs],
   catalog: [loadCatalogStatuses, loadOrgs],
-  device: [loadDevices, loadOrgs, loadCatalogStatuses],
-  person: [loadDevices],
+  device: [loadDevices, loadOrgs, loadCatalogStatuses, loadPeople],
+  person: [loadDevices, loadPeople],
 };
 
 export async function afterChange(r: ResourceType): Promise<void> {
   await Promise.all((RESOURCE_RELOADERS[r.id] ?? []).map((f) => f()));
 }
+
+const NOT_HELD: ItemLabel['type'][] = ['admin_need', 'person_spend', 'org_share', 'team_member', 'removed_member', 'org_account'];
 
 /**
  * What removing `record` takes with it, for the destructive confirm (G1.4):
@@ -511,7 +630,9 @@ export function recordLoss(resource: ResourceType, record: ResourceRecord): { lo
   const parts: string[] = [];
   let loss = 0;
   for (const f of resource.fields) {
-    if (f.type !== 'items' || f.item_label.type === 'admin_need' || f.item_label.type === 'person_spend') continue;
+    // What the org holds: reports, the team, its shares (on sessions, not
+    // the org) and its hosts' accounts go nowhere with it.
+    if (f.type !== 'items' || NOT_HELD.includes(f.item_label.type)) continue;
     const n = itemsOf(f, record).length;
     if (n === 0) continue;
     loss += n;

@@ -44,7 +44,7 @@ pub struct BucketRow {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
-    /// A personal bucket's person (migration 159): only they read it, plan
+    /// A personal bucket's person (migration 162): only they read it, plan
     /// into it and change it. `None`: the team's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_person_id: Option<i64>,

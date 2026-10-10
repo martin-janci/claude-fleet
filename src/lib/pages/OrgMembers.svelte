@@ -56,6 +56,15 @@
     return day(m.shares_since) === day(now()) ? 'today' : day(m.shares_since);
   }
 
+  // --- role -----------------------------------------------------------------
+
+  const ROLES = ['admin', 'member', 'viewer'];
+
+  function setRole(m: OrgMember, role: string) {
+    if (!addAction || role === m.role) return;
+    void run(addAction, buildArgs(addAction, record, null, { person: m.name, role }));
+  }
+
   // --- remove ---------------------------------------------------------------
 
   /** The member being removed, and what was shared with them (null while
@@ -146,7 +155,20 @@
           <td class="person">
             <span>{nameOf(m)}</span>{#if m.display_name && m.display_name !== m.name}<span class="dim">{m.name}</span>{/if}
           </td>
-          <td>{m.role}</td>
+          <td>
+            {#if !readonly && addAction}
+              <!-- M15 G4.7: the role is changed in place, through the same
+                   set_member the add form runs. -->
+              <select
+                aria-label={`Role of ${nameOf(m)}`}
+                disabled={busy}
+                data-testid={`member-role-${m.person_id}`}
+                value={m.role}
+                onchange={(e) => void setRole(m, (e.currentTarget as HTMLSelectElement).value)}>
+                {#each ROLES as r (r)}<option value={r}>{r}</option>{/each}
+              </select>
+            {:else}{m.role}{/if}
+          </td>
           {#if showDevices}<td class="dim" data-testid="member-devices">{m.devices?.length ? m.devices.join(', ') : 'none'}</td>{/if}
           {#if showSessions}<td
               data-testid="member-sessions"

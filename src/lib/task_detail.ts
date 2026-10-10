@@ -12,7 +12,7 @@ import { occurrenceKind, taskSpend, type LastOutcome, type TaskComment, type Tas
 import type { StartRule } from './start_rules';
 
 /** The Task detail's tabs. Comments came back (G3.4 had cut them): fleet
- *  keeps a task's comments itself (migration 158) and never writes one to a
+ *  keeps a task's comments itself (migration 161) and never writes one to a
  *  tracker. */
 export const TASK_TABS = ['overview', 'sessions', 'activity', 'comments'] as const;
 export type TaskTab = (typeof TASK_TABS)[number];

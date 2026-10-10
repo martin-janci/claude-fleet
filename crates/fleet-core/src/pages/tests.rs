@@ -819,3 +819,49 @@ fn a_graph_follows_a_choice_field_of_the_resource() {
             .unwrap();
     assert!(messages(&[cat]).contains("a graph belongs to a master_detail page"));
 }
+
+/// People & devices (`Page::table`, M15 step G4.7): a master_detail page's,
+/// its columns plain fields, its filters and grouping among them.
+#[test]
+fn a_table_shows_plain_fields_and_filters_its_own_columns() {
+    let fields = json!(super::resources::resource("device")
+        .unwrap()
+        .fields
+        .iter()
+        .map(|f| json!({ "type": "field", "key": f.id }))
+        .collect::<Vec<_>>());
+    let devices = |table: Value| {
+        page(json!({
+            "spec": "fleet.page/1", "id": "p", "title": "P", "layout": "master_detail",
+            "resource": "device", "table": table,
+            "sections": [{ "title": "All", "items": fields.clone() }]
+        }))
+    };
+    let ok = json!({ "title": "People & devices", "columns": ["person", "name", "mode", "trusted", "last_seen_at"], "filters": ["person"], "group_by": "person" });
+    assert_eq!(messages(&[devices(ok)]), "");
+    for (table, want) in [
+        (json!({ "title": "T", "columns": [] }), "1 to 6 columns"),
+        (
+            json!({ "title": "T", "columns": ["name", "catalogs"] }),
+            "not a plain field",
+        ),
+        (json!({ "title": "T", "columns": ["nope"] }), "has no field"),
+        (
+            json!({ "title": "T", "columns": ["name"], "filters": ["mode"] }),
+            "is not a column",
+        ),
+        (
+            json!({ "title": "T", "columns": ["name"], "group_by": "person" }),
+            "is not a column",
+        ),
+    ] {
+        let got = messages(&[devices(table.clone())]);
+        assert!(
+            got.contains(want),
+            "{table}\n  wanted: {want}\n  got: {got}"
+        );
+    }
+    let mut cat = category(json!([{ "type": "notice", "tone": "info", "text": "x" }]));
+    cat.table = serde_json::from_value(json!({ "title": "T", "columns": ["name"] })).unwrap();
+    assert!(messages(&[cat]).contains("a table belongs to a master_detail page"));
+}

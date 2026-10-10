@@ -52,6 +52,17 @@ pub fn is_shell_terminal_name(name: &str) -> bool {
     parse_shell_terminal_name(name).is_some()
 }
 
+/// The tmux session name prefix of an Add account login pane (M15 step
+/// G2.9, `service::add_account::login_session_name`).
+pub const LOGIN_SESSION_PREFIX: &str = "fleet-login--";
+
+/// Whether `name` is an Add account login pane: fleet's own, never a
+/// session, so every list leaves it out as it does a shell terminal.
+pub fn is_login_session_name(name: &str) -> bool {
+    name.strip_prefix(LOGIN_SESSION_PREFIX)
+        .is_some_and(|p| crate::validate::claude_profile(p).is_ok())
+}
+
 /// Every tmux session name on the server, one per line; nothing when no
 /// server runs. [`shell_terminals_in`] picks a session's terminals out.
 pub const LIST_SESSION_NAMES_SCRIPT: &str =
@@ -418,12 +429,18 @@ pub struct HostProfile {
 /// directory whose name is a valid profile name (anything else is skipped,
 /// never echoed into a line a parser splits on tabs). The account is read
 /// by the same script as the host's own, with `CLAUDE_CONFIG_DIR` pointed
-/// at the profile, and squeezed onto one line.
+/// at the profile, and squeezed onto one line. An API-key profile (M15 step
+/// G2.9: `.fleet-api-key` beside a `.fleet-account.json` that
+/// `service::add_account` wrote) has no `/login`; its line carries that
+/// file instead, so it is an account like any other. The key file is only
+/// tested for, never read.
 pub(crate) fn profiles_script() -> String {
     format!(
         "for d in \"$HOME\"/.claude-profiles/*/; do [ -d \"$d\" ] || continue; n=$(basename \"$d\"); \
          case \"$n\" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_-]*) continue;; esac; \
-         printf '@@P\\t%s\\t%s\\n' \"$n\" \"$(CLAUDE_CONFIG_DIR=\"${{d%/}}\"; {} | tr -d '\\n')\"; done",
+         if [ -r \"$d.fleet-api-key\" ] && [ -r \"$d.fleet-account.json\" ]; then a=$(head -c 4096 \"$d.fleet-account.json\" | tr -d '\\n'); \
+         else a=$(CLAUDE_CONFIG_DIR=\"${{d%/}}\"; {} | tr -d '\\n'); fi; \
+         printf '@@P\\t%s\\t%s\\n' \"$n\" \"$a\"; done",
         crate::service::hosts::OAUTH_ACCOUNT_SCRIPT
     )
 }
@@ -466,15 +483,33 @@ pub(crate) fn read_local_profiles(home: &std::path::Path) -> Option<Vec<HostProf
         .filter_map(|e| {
             let name = e.file_name().to_str()?.to_string();
             crate::validate::claude_profile(&name).ok()?;
-            let account = match crate::service::hosts::probe_local_account_in(&e.path()) {
-                crate::service::hosts::LocalAccountProbe::LoggedIn(a) => Some(a),
-                _ => None,
+            let account = match api_key_account_in(&e.path()) {
+                Some(a) => Some(a),
+                None => match crate::service::hosts::probe_local_account_in(&e.path()) {
+                    crate::service::hosts::LocalAccountProbe::LoggedIn(a) => Some(a),
+                    _ => None,
+                },
             };
             Some(HostProfile { name, account })
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Some(out)
+}
+
+/// The account of an API-key profile at `dir`, as [`profiles_script`]
+/// reads it on a remote host: `.fleet-account.json` when `.fleet-api-key`
+/// is beside it. The key file is only tested for, never read.
+fn api_key_account_in(dir: &std::path::Path) -> Option<crate::service::hosts::OauthAccount> {
+    if !dir
+        .join(crate::service::add_account::API_KEY_FILE)
+        .is_file()
+    {
+        return None;
+    }
+    let raw = std::fs::read(dir.join(crate::service::add_account::API_ACCOUNT_FILE)).ok()?;
+    let line = String::from_utf8_lossy(&raw[..raw.len().min(4096)]).replace('\n', "");
+    crate::service::hosts::parse_oauth_account(&line)
 }
 
 /// Shell script listing the most recently modified Claude transcripts under
@@ -1669,7 +1704,8 @@ fn parse_sessions_checked(input: &str) -> Result<Vec<TmuxSession>, IpcError> {
         // Shell terminals (step 5.3) leave AFTER the "nothing parsed"
         // check: a host running only terminals parsed fine, it just has no
         // session for the list.
-        sessions.retain(|s| !is_shell_terminal_name(&s.name));
+        // Add account's login panes (M15 G2.9) leave with them.
+        sessions.retain(|s| !is_shell_terminal_name(&s.name) && !is_login_session_name(&s.name));
         return Ok(sessions);
     }
     let sample: String = first.chars().take(80).collect();
@@ -1699,6 +1735,15 @@ pub(crate) fn scrollback_start(lines: u32) -> String {
 /// (`--resume`, `--session-id`, `--continue`, `--name`, `--model`,
 /// `--effort`), so the chain below is identical whichever one runs.
 pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then if [ -x "$HOME/.local/share/ag/ag" ]; then cl() { "$HOME/.local/share/ag/ag" claude --yolo "$@"; }; else cl() { claude --dangerously-skip-permissions "$@"; }; fi; fi;"#;
+
+/// Exports an API-key profile's key (M15 step G2.9,
+/// `service::add_account`): when `$CLAUDE_CONFIG_DIR` holds
+/// `.fleet-api-key`, its one line becomes `ANTHROPIC_API_KEY` for the
+/// `claude` that follows (rung 3 of docs/accounts.md, ahead of any
+/// `/login`). Read with the shell's own `read`, so the key is never in an
+/// argv, a tmux environment or the pane command; a profile without the file
+/// is untouched. Follows the `export CLAUDE_CONFIG_DIR=…;` it needs.
+pub const PROFILE_API_KEY: &str = r#"if [ -r "$CLAUDE_CONFIG_DIR/.fleet-api-key" ]; then IFS= read -r ANTHROPIC_API_KEY < "$CLAUDE_CONFIG_DIR/.fleet-api-key"; export ANTHROPIC_API_KEY; fi; "#;
 
 /// Makes `$CLAUDE_CONFIG_DIR` a credential profile that shares everything
 /// with `~/.claude` except the login (docs/accounts.md). Each visible entry
@@ -1769,7 +1814,7 @@ impl ClaudeLaunch {
     fn profile_prefix(&self) -> String {
         match self.profile.as_deref() {
             Some(p) => format!(
-                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; /bin/sh -c {} 2>/dev/null; ",
+                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; /bin/sh -c {} 2>/dev/null; {PROFILE_API_KEY}",
                 crate::shell::quote(p),
                 crate::shell::quote(PROFILE_LINKS),
             ),

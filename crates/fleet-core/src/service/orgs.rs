@@ -955,6 +955,9 @@ pub struct OrgDetail {
     /// The asset catalogs it owns (`catalogs.org_id`), by name.
     #[serde(default)]
     pub catalogs: Vec<String>,
+    /// M15 step G2.10: its project catalog. Absent from an older hub.
+    #[serde(default)]
+    pub projects: Vec<crate::store::OrgProjectRow>,
     /// Its live sessions the caller may count, as `work { action: scopes }`
     /// counts them.
     #[serde(default)]
@@ -1012,6 +1015,89 @@ pub struct OrgDetail {
     /// so a page offers what the caller may do. Absent when they have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub my_role: Option<String>,
+    /// M15 step G4.7, for whoever administers it: every live share on its
+    /// sessions (the Sharing tab). A session the caller may not see is not
+    /// named. Absent for anyone else, and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares: Option<Vec<OrgShare>>,
+    /// G4.7, for the org's own people and the fleet's administrator: who is
+    /// working on what — each live member's live sessions in it that the
+    /// caller sees, and how many more are private.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<Vec<TeamMember>>,
+    /// G4.7, for whoever administers it: its former members, with the shares
+    /// on its sessions they still hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_members: Option<Vec<RemovedMember>>,
+    /// G4.7, for the org's own people and the fleet's administrator: the
+    /// Claude accounts its hosts are signed in to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<Vec<OrgAccount>>,
+}
+
+/// One live share on an org's session (M15 step G4.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgShare {
+    /// The grant, for Revoke and Narrow.
+    pub id: i64,
+    /// The session's name, only when the caller may see the session;
+    /// absent, it reads "a private session".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
+    /// Whose session it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// A person's name, or "everyone in <org>" for an org share.
+    pub shared_with: String,
+    /// `watch`, `answer` or `drive`.
+    pub level: String,
+    pub since: i64,
+}
+
+/// One live member and what they are working on (M15 step G4.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamMember {
+    pub person_id: i64,
+    pub name: String,
+    pub role: String,
+    /// Their live sessions in the org the caller sees.
+    #[serde(default)]
+    pub sessions: Vec<TeamSession>,
+    /// Their live sessions in the org the caller does not see: counted,
+    /// never named.
+    #[serde(default)]
+    pub private: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamSession {
+    pub id: i64,
+    pub name: String,
+    /// `needs you`, else what Claude reports (`working`, `idle`, …).
+    pub state: String,
+}
+
+/// A former member (M15 step G4.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedMember {
+    pub person_id: i64,
+    pub name: String,
+    pub removed_at: i64,
+    /// Live shares TO them still standing on the org's sessions.
+    pub grants: usize,
+}
+
+/// A Claude account one of an org's hosts is signed in to (M15 step G4.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgAccount {
+    /// Its nickname, else its email, else its uuid.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seat_tier: Option<String>,
+    /// The org's hosts signed in to it.
+    pub hosts: Vec<String>,
 }
 
 /// One member as the org overview lists them (phase D).
@@ -1122,6 +1208,180 @@ pub fn org_details(
     devices: AdminView,
 ) -> Result<Vec<OrgDetail>, IpcError> {
     org_details_locked(&*lock(store)?, view, devices)
+}
+
+// --- rule preview (M15 step G2.10) ----------------------------------------------
+
+/// One "Match by" value as the rule it makes (the org form's single rule
+/// form, `pages::resources::ORG_RULE_MATCH`): `repository` takes `owner/name`
+/// (or the repository's GitHub URL), `owner` a GitHub owner, `path` a path
+/// prefix, `host` a host alias. The rule's `org_id` is the caller's.
+pub fn rule_from_match(org_id: i64, match_by: &str, value: &str) -> Result<OrgRuleRow, IpcError> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Err(IpcError::new(codes::E_INVALID, "say what the rule matches"));
+    }
+    let mut rule = OrgRuleRow {
+        id: 0,
+        org_id,
+        owner: None,
+        repo: None,
+        path_prefix: None,
+        host_alias: None,
+    };
+    match match_by.trim() {
+        "repository" => {
+            let bare = v
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_start_matches("git@github.com:")
+                .trim_start_matches("github.com/")
+                .trim_end_matches('/')
+                .trim_end_matches(".git");
+            let Some((owner, repo)) = bare
+                .split_once('/')
+                .filter(|(o, r)| !o.is_empty() && !r.is_empty() && !r.contains('/'))
+            else {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("a repository is owner/name, not {v:?}"),
+                ));
+            };
+            rule.owner = Some(owner.to_string());
+            rule.repo = Some(repo.to_string());
+        }
+        "owner" => rule.owner = Some(v.to_string()),
+        "path" => rule.path_prefix = Some(v.to_string()),
+        "host" => rule.host_alias = Some(v.to_string()),
+        other => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("match_by is repository, path, host or owner, not {other:?}"),
+            ))
+        }
+    }
+    Ok(rule)
+}
+
+/// What an unsaved org rule would do now: the live sessions its condition
+/// matches, and how many of them would move into the org, from where.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RulePreview {
+    /// Live sessions the rule's condition matches.
+    pub matches: usize,
+    /// Of those, the ones that would move into the org (another rule that is
+    /// more specific keeps the rest where they are).
+    pub moving: usize,
+    /// Where the moving ones are now, largest first.
+    #[serde(default)]
+    pub from: Vec<RuleMoveFrom>,
+    /// Matched sessions a more specific rule keeps elsewhere.
+    #[serde(default)]
+    pub kept: usize,
+    /// "Matches 14 sessions now; 3 of them are in Personal and would move."
+    pub sentence: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleMoveFrom {
+    /// The org they are in now; `None` = no org (Personal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
+    /// Its name, or `Personal`.
+    pub name: String,
+    pub count: usize,
+}
+
+/// Preview `rule` for `org` (M15 step G2.10): normalised and checked as
+/// `add_rule` would, then answered over the live sessions without writing.
+/// Counts only, never a session: an admin previewing a rule learns how many
+/// of the fleet's sessions it reaches, which the org overview's counts
+/// already tell the hub's owner.
+pub fn rule_preview(s: &Store, org: i64, rule: OrgRuleRow) -> Result<RulePreview, IpcError> {
+    if s.get_org(org)?.is_none() {
+        return Err(not_found("org", org));
+    }
+    let rule = crate::store::normalize_rule(OrgRuleRow {
+        org_id: org,
+        ..rule
+    })?;
+    let rows = s.preview_org_rule(&rule)?;
+    let names: std::collections::HashMap<i64, String> =
+        s.list_orgs()?.into_iter().map(|o| (o.id, o.name)).collect();
+    let matches = rows.iter().filter(|r| r.matched).count();
+    let mut from: std::collections::BTreeMap<Option<i64>, usize> = Default::default();
+    let mut kept = 0;
+    for r in rows.iter().filter(|r| r.matched) {
+        if r.after == Some(org) && r.before != Some(org) {
+            *from.entry(r.before).or_default() += 1;
+        } else if r.after != Some(org) {
+            kept += 1;
+        }
+    }
+    let mut from: Vec<RuleMoveFrom> = from
+        .into_iter()
+        .map(|(o, count)| RuleMoveFrom {
+            org_id: o,
+            name: o
+                .and_then(|o| names.get(&o).cloned())
+                .unwrap_or_else(|| "Personal".into()),
+            count,
+        })
+        .collect();
+    from.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+    let moving: usize = from.iter().map(|f| f.count).sum();
+    let sentence = rule_preview_sentence(matches, moving, &from, kept);
+    Ok(RulePreview {
+        matches,
+        moving,
+        from,
+        kept,
+        sentence,
+    })
+}
+
+fn sessions_word(n: usize) -> String {
+    format!("{n} {}", if n == 1 { "session" } else { "sessions" })
+}
+
+/// The preview in one sentence, the form's live impact line.
+fn rule_preview_sentence(
+    matches: usize,
+    moving: usize,
+    from: &[RuleMoveFrom],
+    kept: usize,
+) -> String {
+    if matches == 0 {
+        return "Matches no session now; it applies to sessions started later.".into();
+    }
+    let mut out = format!("Matches {} now", sessions_word(matches));
+    if moving == 0 {
+        out.push_str("; none would move");
+    } else if let [only] = from {
+        out.push_str(&format!(
+            "; {moving} of them {} in {} and would move",
+            if moving == 1 { "is" } else { "are" },
+            only.name
+        ));
+    } else {
+        let wheres: Vec<String> = from
+            .iter()
+            .map(|f| format!("{} from {}", f.count, f.name))
+            .collect();
+        out.push_str(&format!(
+            "; {moving} of them would move ({})",
+            wheres.join(", ")
+        ));
+    }
+    if kept > 0 {
+        out.push_str(&format!(
+            "; a more specific rule keeps {} where {}",
+            sessions_word(kept),
+            if kept == 1 { "it is" } else { "they are" }
+        ));
+    }
+    out.push('.');
+    out
 }
 
 // --- administration (work graph M5.2) ------------------------------------------
@@ -1431,7 +1691,16 @@ fn org_details_locked(
                 }
             }
         }
+        let people_of_org = admin || my_role.is_some();
         let mut d = OrgDetail {
+            shares: administers.then(|| org_shares(s, view, o.id)).transpose()?,
+            team: people_of_org
+                .then(|| org_team(s, view, o.id, &needs))
+                .transpose()?,
+            removed_members: administers.then(|| removed_members(s, o.id)).transpose()?,
+            accounts: people_of_org
+                .then(|| org_accounts(s, &hosts, o.id))
+                .transpose()?,
             needs_admin,
             spend_series: None,
             spend_by_person: None,
@@ -1455,6 +1724,7 @@ fn org_details_locked(
                     .collect()
             }),
             rules: rules.iter().filter(|r| r.org_id == o.id).cloned().collect(),
+            projects: s.org_projects(o.id)?,
             hosts: hosts
                 .iter()
                 .filter(|h| h.org_id == Some(o.id))
@@ -1509,6 +1779,152 @@ fn org_details_locked(
             }
         }
         out.push(d);
+    }
+    Ok(out)
+}
+
+/// A person as a list names them: their display name, else their name.
+fn person_label(s: &Store, person: Option<i64>) -> Result<Option<String>, IpcError> {
+    let Some(p) = person else { return Ok(None) };
+    Ok(s.get_person(p)?.map(|p| p.display_name.unwrap_or(p.name)))
+}
+
+/// A session as a list names it.
+fn session_label(r: &SessionRow) -> String {
+    r.friendly_name
+        .clone()
+        .unwrap_or_else(|| r.tmux_name.clone())
+}
+
+/// Every live share on `org`'s sessions (M15 step G4.7), naming only the
+/// sessions `view` sees.
+fn org_shares(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    org: i64,
+) -> Result<Vec<OrgShare>, IpcError> {
+    let mut out = Vec::new();
+    for (g, owner) in s.live_grants_in_org(org)? {
+        let row = s
+            .get_session_by_id(g.session_id)?
+            .filter(|r| view.sees_session_row(r).is_visible());
+        let shared_with = match (g.person_id, g.org_id) {
+            (Some(p), _) => person_label(s, Some(p))?.unwrap_or_else(|| format!("person {p}")),
+            (None, Some(o)) => match s.get_org(o)? {
+                Some(o) => format!("everyone in {}", o.name),
+                None => "a removed org".to_string(),
+            },
+            (None, None) => continue,
+        };
+        out.push(OrgShare {
+            id: g.id,
+            session: row.as_ref().map(session_label),
+            session_id: row.as_ref().map(|r| r.id),
+            owner: person_label(s, owner)?,
+            shared_with,
+            level: g.level,
+            since: g.granted_at,
+        });
+    }
+    Ok(out)
+}
+
+/// Who is working on what in `org` (M15 step G4.7): each live member's live
+/// sessions in it, the ones `view` sees by name and the rest as a count.
+fn org_team(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    org: i64,
+    needs: &dyn Fn(&SessionRow) -> bool,
+) -> Result<Vec<TeamMember>, IpcError> {
+    let live: Vec<SessionRow> = s
+        .list_all_sessions()?
+        .into_iter()
+        .filter(|r| r.org_id == Some(org) && r.status == "running" && r.lost_at.is_none())
+        .collect();
+    let mut out = Vec::new();
+    for m in s.org_members(org)? {
+        let Some(p) = s
+            .get_person(m.person_id)?
+            .filter(|p| p.disabled_at.is_none())
+        else {
+            continue;
+        };
+        let mut member = TeamMember {
+            person_id: p.id,
+            name: p.display_name.unwrap_or(p.name),
+            role: m.role,
+            sessions: Vec::new(),
+            private: 0,
+        };
+        for r in live.iter().filter(|r| r.owner_person_id == Some(p.id)) {
+            if view.sees_session_row(r).is_visible() {
+                member.sessions.push(TeamSession {
+                    id: r.id,
+                    name: session_label(r),
+                    state: if needs(r) {
+                        "needs you".to_string()
+                    } else {
+                        r.claude_status
+                            .clone()
+                            .unwrap_or_else(|| "idle".to_string())
+                    },
+                });
+            } else {
+                member.private += 1;
+            }
+        }
+        out.push(member);
+    }
+    Ok(out)
+}
+
+/// `org`'s former members and the shares they still hold on it (G4.7). A
+/// person who is a live member again is not listed.
+fn removed_members(s: &Store, org: i64) -> Result<Vec<RemovedMember>, IpcError> {
+    let mut out = Vec::new();
+    for m in s.removed_org_members(org)? {
+        let Some(removed_at) = m.removed_at else {
+            continue;
+        };
+        let Some(p) = s.get_person(m.person_id)? else {
+            continue;
+        };
+        let (w, a, d) = s.person_grants_in_org(p.id, org)?;
+        out.push(RemovedMember {
+            person_id: p.id,
+            name: p.display_name.unwrap_or(p.name),
+            removed_at,
+            grants: w + a + d,
+        });
+    }
+    Ok(out)
+}
+
+/// The Claude accounts `org`'s hosts are signed in to (G4.7).
+fn org_accounts(
+    s: &Store,
+    hosts: &[crate::store::HostRow],
+    org: i64,
+) -> Result<Vec<OrgAccount>, IpcError> {
+    let mut by_uuid: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for h in hosts.iter().filter(|h| h.org_id == Some(org)) {
+        if let Some(u) = h.account_uuid.as_ref() {
+            by_uuid.entry(u.clone()).or_default().push(h.alias.clone());
+        }
+    }
+    if by_uuid.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for a in s.list_accounts()? {
+        if let Some(hosts) = by_uuid.remove(&a.uuid) {
+            out.push(OrgAccount {
+                name: a.nickname.or(a.email).unwrap_or(a.uuid),
+                seat_tier: a.seat_tier,
+                hosts,
+            });
+        }
     }
     Ok(out)
 }

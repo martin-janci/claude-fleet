@@ -1,4 +1,4 @@
-//! Task comments (migration 158): a note on a task, kept in fleet and never
+//! Task comments (migration 161): a note on a task, kept in fleet and never
 //! written to a tracker. About the ITEM, so the caller fences it with the
 //! item; deleting one is its author's alone ([`Store::delete_comment`]).
 

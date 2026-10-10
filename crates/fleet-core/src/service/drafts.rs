@@ -95,8 +95,9 @@ pub fn commit_body(model: &str, profile: Option<&str>) -> Result<String, String>
         Some(p) => {
             crate::validate::claude_profile(p).map_err(|e| e.message)?;
             format!(
-                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; ",
-                quote(p)
+                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; {}",
+                quote(p),
+                crate::tmux::PROFILE_API_KEY
             )
         }
         None => String::new(),
@@ -171,7 +172,10 @@ pub async fn draft_commit_message(
 ) -> Result<CommitDraft, IpcError> {
     let p = {
         let s = lock(store)?;
-        plan(&s, session_id)?
+        // The session's own refusal (gone, wrong kind) before the setting's.
+        let p = plan(&s, session_id)?;
+        settings::require_writing_help(&s, settings::WORK_DRAFT_COMMIT_MESSAGES)?;
+        p
     };
     let body = commit_body(&p.model, p.profile.as_deref())
         .map_err(|e| IpcError::new(codes::E_INVALID, e))?;

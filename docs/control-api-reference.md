@@ -7,9 +7,21 @@ Auto-generated from the embedded MCP tool router. See [`control-api.md`](control
 
 ## MCP tools
 
+### `access_requests`
+
+Asks for a wider level on sessions you OWN. list (default; session_id narrows it), grant {id} (re-shares at the asked level) or decline {id}. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_INVALID_STATE (the asker's share is gone).
+
+Parameters: `action`, `id`, `session_id`
+
 ### `account_usage`
 
 Each Claude account's latest plan usage: 5-hour and weekly utilization with reset times, status, fetched_at. Never fetches.
+
+### `add_account`
+
+Add a Claude login profile on a host: a subscription login or an API key.
+
+Parameters: `action`, `api_key`, `code`, `daily_limit_usd`, `host_alias`, `key`, `nickname`, `profile`
 
 ### `add_host`
 
@@ -357,7 +369,7 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 Administer the company: orgs (work_admin's org actions), devices (list, pair_device → code + QR, revoke, trust, bind, hand over, grant a catalog), people and members (roles, a member's grants). Hub owner's device: all; an org admin's: their org. Changes need a trusted full device, never locking out the one in use.
 
-Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `host_alias`, `isolate_sessions`, `jev`, `jev_reply`, `keep_grants`, `key`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path_prefix`, `person`, `person_id`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
+Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `grant_id`, `host_alias`, `hosts`, `isolate_sessions`, `jev`, `jev_reply`, `keep_grants`, `key`, `members_own_sessions_only`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path`, `path_prefix`, `person`, `person_id`, `project_id`, `remote`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
 
 ### `pair_client`
 
@@ -589,7 +601,7 @@ Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 
 ### `routines`
 
-Routines: a saved prompt that starts a session on a cron schedule, a session or pull request event or Run now. list; get {routine_id}: with its last runs; runs {routine_id, limit?}; failing: each routine whose newest run failed, for the Inbox; save {routine, routine_id?}: the whole routine; preview: save's dry run, writes nothing; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
+Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
 
 Parameters: `action`, `enabled`, `limit`, `routine`, `routine_id`, `skip`
 
@@ -646,6 +658,12 @@ Parameters: `session_id`
 What the session's pane shows now: claude_status, stuck_kind, current_activity, waiting_for and the spinner line. One capture, nothing stored: the cheap read behind a live indicator (capture_session is the whole pane). E_INVALID_STATE outside tmux.
 
 Parameters: `session_id`
+
+### `session_ask_access`
+
+Ask the owner of a session shared with you for a wider level (answer or drive). Confers nothing until they grant it; one open ask per session. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS, E_INVALID_STATE (declined within the hour).
+
+Parameters: `level`, `session_id`
 
 ### `session_claim`
 
@@ -1023,6 +1041,12 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::orgs::set_org_member`
 - `commands::orgs::remove_org_member`
 - `commands::orgs::org_member_grants`
+- `commands::orgs::org_rule_preview`
+- `commands::orgs::add_org_project`
+- `commands::orgs::remove_org_project`
+- `commands::orgs::revoke_org_share`
+- `commands::orgs::narrow_org_share`
+- `commands::orgs::revoke_org_member_grants`
 - `commands::orgs::list_orgs`
 - `commands::orgs::org_suggestions`
 - `commands::org_devices::list_devices`
@@ -1048,6 +1072,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_narrow`
 - `commands::sessions::session_access`
 - `commands::sessions::my_grants`
+- `commands::sessions::session_ask_access`
+- `commands::sessions::access_requests`
 - `commands::sessions::restart_session`
 - `commands::sessions::rewind_conversation`
 - `commands::sessions::send_prompt`
@@ -1057,6 +1083,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::cancel_queued_prompt`
 - `commands::sessions::recreate_session`
 - `commands::sessions::restore_host_sessions`
+- `commands::sessions::restore_all_lost_sessions`
+- `commands::sessions::repair_workspaces_now`
 - `commands::sessions::discover_lost_sessions`
 - `commands::move_session::move_session`
 - `commands::resolve_move::resolve_move`
@@ -1113,6 +1141,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::prs::list_pull_requests`
 - `commands::start_rules::start_rules`
 - `commands::api_tokens::api_tokens`
+- `commands::add_account::add_account`
 - `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`

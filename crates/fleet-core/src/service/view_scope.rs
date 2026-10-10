@@ -153,6 +153,37 @@ pub enum UnclaimedReach {
     Orgs(std::collections::BTreeSet<i64>),
 }
 
+/// Whose sessions a person WATCHES through an org whose "members see only
+/// their own sessions" switch is off (M15 step G2.10): org id → the live
+/// members of that org other than the person. A session is in reach when it
+/// is in one of these orgs and one of that org's listed members owns it.
+///
+/// Read only, by construction: [`ViewScope::may_answer`],
+/// [`ViewScope::may_drive`] and [`ViewScope::may_own`] never consult it, so a
+/// teammate sees a row and its content and cannot press a key on it. An
+/// `unclaimed` row is never in reach (it has no owner to be a teammate).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TeamReach(BTreeMap<i64, std::collections::BTreeSet<i64>>);
+
+impl TeamReach {
+    /// Wrap what [`crate::service::org_admin::team_reach`] computed.
+    pub fn from_map(m: BTreeMap<i64, std::collections::BTreeSet<i64>>) -> Self {
+        TeamReach(m)
+    }
+
+    /// Is a session of `org` owned by `owner` in reach?
+    pub fn covers(&self, org: Option<i64>, owner: Option<i64>) -> bool {
+        match (org, owner) {
+            (Some(o), Some(p)) => self.0.get(&o).is_some_and(|members| members.contains(&p)),
+            _ => false,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// Who is asking, for every session read and write.
 ///
 /// Built once per request, off the same store handle the rows come from —
@@ -215,6 +246,9 @@ pub struct ViewScope {
     /// on another host is invisible whoever owns it. Private: set only by
     /// [`Self::with_hosts`], which can only narrow.
     hosts: Option<Vec<String>>,
+    /// Teammates whose sessions this person watches ([`TeamReach`]). Private
+    /// for the reason `sole_person` is.
+    team: TeamReach,
     /// This is the hub's own reader, not a caller.
     ///
     /// Private, and the reason the struct has no public literal form: "the
@@ -242,6 +276,7 @@ impl ViewScope {
             sole_person: false,
             unclaimed: UnclaimedReach::None,
             hosts: None,
+            team: TeamReach::default(),
             internal: true,
         }
     }
@@ -251,6 +286,7 @@ impl ViewScope {
     /// `pub(crate)` rather than `pub` so the surface stays inside this
     /// crate, and taking every field positionally so that a new dimension
     /// added later breaks the one call site instead of defaulting there.
+    #[allow(clippy::too_many_arguments)] // positional on purpose, see above
     pub(crate) fn for_caller(
         org: OrgScope,
         person: Option<i64>,
@@ -259,6 +295,7 @@ impl ViewScope {
         proven_session: Option<i64>,
         sole_person: bool,
         unclaimed: UnclaimedReach,
+        team: TeamReach,
     ) -> Self {
         ViewScope {
             org,
@@ -269,6 +306,7 @@ impl ViewScope {
             sole_person,
             unclaimed,
             hosts: None,
+            team,
             internal: false,
         }
     }
@@ -292,6 +330,13 @@ impl ViewScope {
         self.hosts
             .as_ref()
             .is_none_or(|h| h.iter().any(|x| x == host))
+    }
+
+    /// Does this person watch `row` only as a teammate — in reach through
+    /// [`TeamReach`], neither owned nor granted? The org page's Team panel
+    /// names such a session; `count_member_sessions` counts it as open.
+    pub fn watches_as_teammate(&self, row: &SessionRow) -> bool {
+        self.team.covers(row.org_id, row.owner_person_id)
     }
 
     /// The same scope with its ORG half replaced — the one narrowing a
@@ -501,6 +546,14 @@ impl ViewScope {
             }
             None => {
                 if self.owns_person(f.owner_person_id) || self.grants.level(f.id).is_some() {
+                    return Visibility::RowAndContent;
+                }
+                // M15 step G2.10: a teammate in an org whose members see each
+                // other's sessions. Below the org clause (a bound device
+                // stays fenced) and read only (see `TeamReach`).
+                if f.visibility != VISIBILITY_UNCLAIMED
+                    && self.team.covers(f.org_id, f.owner_person_id)
+                {
                     return Visibility::RowAndContent;
                 }
                 // Single-person installs keep their ROWS, not only a count.

@@ -22,4 +22,4 @@ CREATE TABLE IF NOT EXISTS work_item_comments (
 CREATE INDEX IF NOT EXISTS idx_work_item_comments_item
   ON work_item_comments(item_id, created_at);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (158);
+INSERT OR IGNORE INTO schema_version (version) VALUES (161);

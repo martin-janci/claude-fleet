@@ -28,6 +28,8 @@
   import { selectSessionExplicitly } from './selection';
   import { sessionBlocked, sessionIdBlocked } from './share';
   import { sessions } from './sessions';
+  import { moveTargetFacts } from './hosts_table';
+  import { attentionFacts } from './attention_facts';
 
   // One sheet for the whole app. Which view shows is a function of the run:
   // none → setup, running → progress, done → result, failed/partial → failure.
@@ -371,7 +373,8 @@
           <span class="key">To</span>
           <select bind:value={target} data-testid="move-target">
             {#each targets as h (h.alias)}
-              <option value={h.alias}>{h.alias}</option>
+              {@const facts = moveTargetFacts(h, $attentionFacts?.limited_accounts, Math.floor(now / 1000))}
+              <option value={h.alias}>{facts ? `${h.alias} · ${facts}` : h.alias}</option>
             {/each}
           </select>
         </label>

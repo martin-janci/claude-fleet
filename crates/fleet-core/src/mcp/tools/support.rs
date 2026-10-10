@@ -164,11 +164,16 @@ pub(super) fn enforce_mode(caller: &Caller, tool: &str) -> Result<(), McpError> 
             None,
         ));
     }
-    if caller.mode == TokenMode::Readonly && !guard::is_readonly_tool(tool) {
+    if !guard::mode_allows_tool(caller.mode, tool) {
         return Err(mcp_err(
             "E_FORBIDDEN",
             format!(
-                "{tool} is not available to a readonly token ({})",
+                "{tool} is not available to {} token ({})",
+                if caller.mode == TokenMode::Answer {
+                    "an answer-only"
+                } else {
+                    "a readonly"
+                },
                 caller.label()
             ),
             None,

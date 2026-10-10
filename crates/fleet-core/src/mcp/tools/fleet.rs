@@ -1002,11 +1002,11 @@ impl FleetTools {
         authority: crate::service::org_admin::Authority,
     ) -> Result<serde_json::Value, McpError> {
         let mode = args.mode.clone().unwrap_or_else(|| "full".into());
-        if !matches!(mode.as_str(), "full" | "readonly") {
+        if !matches!(mode.as_str(), "full" | "answer" | "readonly") {
             return Err(mcp_err(
                 codes::E_VALIDATE,
                 format!(
-                    "pair_device pairs a person's device (full or readonly), not {mode:?}; \
+                    "pair_device pairs a person's device (full, answer or readonly), not {mode:?}; \
                      a peer link or an updater token is paired on the hub (fleet-hub pair --mode)"
                 ),
                 None,

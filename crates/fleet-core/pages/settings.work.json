@@ -53,11 +53,27 @@
           ]
         },
         {
-          "title": "Summaries",
+          "title": "Writing help",
           "items": [
             {
               "type": "field",
               "key": "work.summary_model"
+            },
+            {
+              "type": "field",
+              "key": "work.draft_commit_messages"
+            },
+            {
+              "type": "field",
+              "key": "work.draft_briefs"
+            },
+            {
+              "type": "field",
+              "key": "work.draft_release_notes"
+            },
+            {
+              "type": "field",
+              "key": "work.catch_up_summaries"
             }
           ]
         }

@@ -373,7 +373,7 @@ upgrade before the hub is touched (point `FLEET_HUB_DATA` at the right
 directory) — it never migrates without a backup. An upgrade never prunes an older
 version's `pre-<version>-*.db` (see *Backups*).
 
-**Order across the three binaries.** Today (the hub serves contract 15, the desktop accepts 14–15,
+**Order across the three binaries.** Today (the hub serves contract 16, the desktop accepts 16,
 proto 1 on both sides; `fleet-hub compat` prints a build's windows) the order is a habit: hub, then desktop, then the
 agents. When a release bumps `CONTRACT_REVISION`, upgrade the **hub first,
 then the desktop in the same window** — there is no mixed window, the desktop
@@ -3349,6 +3349,7 @@ Every command below refuses in hub client mode; the full table, with the command
 | `remove_host` | removing a host is fleet administration, which the hub reserves for its own operator — remove it there with `fleet-hub` |
 | `remove_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `repair_session` | Refuses when explicit: false, the automatic pre-attach check (otherwise routes to `repair_session`): the hub's repair_session always runs the EXPLICIT repair, which may unregister a stale worktree entry, adopt a moved checkout and recreate a branch — this app will not turn an automatic pre-attach check into that; repair explicitly, or from the hub |
+| `repair_workspaces_now` | repairing every workspace or restoring every host's lost sessions at once is the fleet's own pass: on a paired client, open the host in Hosts and use its Repair or Restore, which route to the hub |
 | `repo_checkout` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_checkout_commit` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_commit_create` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
@@ -3360,6 +3361,7 @@ Every command below refuses in hub client mode; the full table, with the command
 | `repo_push` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_stage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_unstage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
+| `restore_all_lost_sessions` | repairing every workspace or restoring every host's lost sessions at once is the fleet's own pass: on a paired client, open the host in Hosts and use its Repair or Restore, which route to the hub |
 | `rotate_host_token` | it re-provisions the host to report to this app; rotate the token on the hub |
 | `run_host_setup_check` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `save_host_setup` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |

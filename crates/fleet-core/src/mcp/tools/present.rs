@@ -69,7 +69,7 @@ pub(super) fn visible_to(caller: &Caller, tool: &str) -> bool {
     if caller.mode == TokenMode::Peer || peer_tool {
         return caller.mode == TokenMode::Peer && peer_tool;
     }
-    if caller.mode == TokenMode::Readonly && !guard::is_readonly_tool(tool) {
+    if !guard::mode_allows_tool(caller.mode, tool) {
         return false;
     }
     // Refused to every per-host token at the central gate (`enforce_admin`);

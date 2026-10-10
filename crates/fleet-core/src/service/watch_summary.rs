@@ -204,8 +204,9 @@ pub fn since_script(model: &str, profile: Option<&str>, excerpt: &str) -> Result
         Some(p) => {
             crate::validate::claude_profile(p).map_err(|e| e.message)?;
             format!(
-                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; ",
-                quote(p)
+                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; {}",
+                quote(p),
+                crate::tmux::PROFILE_API_KEY
             )
         }
         None => String::new(),
@@ -360,6 +361,10 @@ pub async fn summarize_since(
 ) -> Result<WatchSummary, IpcError> {
     let p = {
         let s = lock(store)?;
+        crate::service::settings::require_writing_help(
+            &s,
+            crate::service::settings::WORK_CATCH_UP_SUMMARIES,
+        )?;
         plan(&s, row)?
     };
     let conv = crate::service::transcript::fetch_conversation_for_row(

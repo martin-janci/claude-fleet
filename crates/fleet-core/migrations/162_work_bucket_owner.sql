@@ -16,4 +16,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_work_buckets_name
   ON work_buckets(kind, COALESCE(org_id, 0), COALESCE(owner_person_id, 0), name);
 CREATE INDEX IF NOT EXISTS idx_work_buckets_owner ON work_buckets(owner_person_id);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (159);
+INSERT OR IGNORE INTO schema_version (version) VALUES (162);
