@@ -753,6 +753,11 @@ pub const DECIDE_JEV_MODEL: &str = "decide.jev.model";
 pub const DECIDE_JEV_MODELS: &[&str] = &["jev-1.13.0", "jev-latest"];
 /// Days a `decision_runs` row is kept (`0` = forever).
 pub const DECIDE_RETENTION_DAYS: &str = "decide.retention_days";
+/// Per-feature confidence floors fitted from person-labelled runs
+/// (`service::decide::floor`), as JSON; `""` = none. Written by `fleet-hub
+/// decide floor fit --apply`; a value `decide::floor::parse` refuses is
+/// refused.
+pub const DECIDE_JEV_FLOORS: &str = "decide.jev.floors";
 
 /// What `hub.tls` holds (`fleet-hub`'s `TlsMode`).
 pub const HUB_TLS_MODES: &[&str] = &["off", "cert"];
@@ -1796,6 +1801,14 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Days)
     .zero("forever"),
+    Spec::new(
+        DECIDE_JEV_FLOORS,
+        "",
+        Kind::Text { max: 8192 },
+        "Jev: fitted floors",
+        "Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against.",
+    )
+    .tags(&[Tag::Advanced]),
     // ── read-only: owned and written elsewhere (D-P7) ──
     Spec::new(
         crate::service::hub::SETTING_BIND,
@@ -2100,7 +2113,13 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
             .map(|_| ())
             .map_err(|e| IpcError::new(codes::E_INVALID, format!("{key} {}", e.message))),
         Kind::PriceMap => crate::service::usage::parse_price_overrides(v).map(|_| ()),
-        Kind::Text { max } if v.len() <= max && !v.chars().any(char::is_control) => Ok(()),
+        Kind::Text { max } if v.len() <= max && !v.chars().any(char::is_control) => {
+            if key == DECIDE_JEV_FLOORS {
+                crate::service::decide::floor::parse(v)
+                    .map_err(|e| IpcError::new(codes::E_INVALID, format!("{key}: {e}")))?;
+            }
+            Ok(())
+        }
         Kind::Text { max } => Err(IpcError::new(
             codes::E_INVALID,
             format!("{key} must be one line of at most {max} characters"),

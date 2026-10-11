@@ -238,6 +238,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `decide.jev.daily_token_budget` | `2000000` | 0–1000000000 tokens, `0` = none | fleet | Input tokens the decision model may be sent per UTC day. At $0.042 per million, the default is under $0.09 a day. |
 | `decide.jev.model` | `jev-1.13.0` | `jev-1.13.0` / `jev-latest` | fleet | The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe. |
 | `decide.retention_days` | `90` | 0–3650 days, `0` = forever | fleet | Days a decision record (ids and numbers, never text) is kept. |
+| `decide.jev.floors` | `` | text, up to 8192 characters | fleet | Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against. |
 
 ## Hub daemon (read-only)
 
