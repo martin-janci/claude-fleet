@@ -41,7 +41,7 @@ use serde_json::{json, Value};
 pub use super::start_project::{DESCRIPTION_CHARS, MIN_CONFIDENCE, REASK_DAYS, UNSURE};
 
 /// The question's version: bump it when the question below changes.
-pub const QUESTION_VERSION: &str = "sibling_repos.v1";
+pub const QUESTION_VERSION: &str = "sibling_repos.v2";
 /// What a run is about: one task's start, and the siblings it offers.
 pub const SUBJECT_KIND: &str = "work_start_siblings";
 /// The option that proposes no sibling (and the baseline: today nothing is
@@ -49,14 +49,17 @@ pub const SUBJECT_KIND: &str = "work_start_siblings";
 pub const NONE: &str = "none";
 
 /// The instruction, read literally: the exact condition and what to use.
-pub const INSTRUCTIONS: &str = "state.task is one task (a ticket) a person is about to start \
+pub const INSTRUCTIONS: &str = concat!(
+    "state.task is one task (a ticket) a person is about to start \
      working on in the git repository state.chosen (owner/repo): its key, its title and the \
      start of its description. state.candidates are other repositories this task's key was \
      worked on in before. Each option except none and unsure is one of those repositories. \
      Decide which ONE of them the same task also needs code changes in, using only the task's \
      text and the repository names. Choose none when the task's changes belong in \
      state.chosen alone. Choose unsure when the text does not show whether another repository \
-     is needed.";
+     is needed.",
+    super::quoted_data!()
+);
 
 /// What the adapter asks about.
 #[derive(Debug, Clone, PartialEq, Eq)]
