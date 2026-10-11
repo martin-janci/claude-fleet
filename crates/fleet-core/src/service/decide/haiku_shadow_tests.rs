@@ -27,6 +27,7 @@ fn request(feature: Feature, org_id: Option<i64>) -> DecideRequest {
                     ("ACME-2".to_string(), Some(json!("Billing export"))),
                 ]),
             },
+            order_salt: None,
         },
         baseline: Some("ACME-2".into()),
         question_version: "wl.1".into(),
