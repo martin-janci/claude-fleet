@@ -369,6 +369,7 @@ impl TrackerProvider for JiraCloud {
             write: true,
             describe: true,
             comments: true,
+            attachments: false,
         }
     }
 

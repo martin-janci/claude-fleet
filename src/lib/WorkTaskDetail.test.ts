@@ -1077,6 +1077,30 @@ describe('WorkTaskDetail', () => {
       await expectAccessible(screen.getByTestId('work-task-detail'));
     });
 
+    it('Comments: the ticket’s attachments are listed above the comments and open in the tracker', async () => {
+      handlers.work_task = () => ({ ...trackerTask, comments: [], comments_tracker: 'Asana' });
+      handlers.work_tracker_comments = () => ({
+        key: 'ABC-12',
+        tracker: 'Asana',
+        provider: 'asana',
+        comments: [],
+        attachments: [
+          { id: 'a1', name: 'spec.pdf', url: 'https://app.asana.com/app/asana/-/get_asset?asset_id=1', size: 2048 },
+          { id: 'a2', name: 'notes.txt' },
+        ],
+      });
+      render(WorkTaskDetail, { taskId: 'ABC-12' });
+      await flush();
+      await fireEvent.click(screen.getByTestId('work-task-tab-comments'));
+      await flush();
+      const rows = screen.getAllByTestId('work-task-tracker-attachment');
+      expect(rows.map((r) => r.textContent?.replace(/\s+/g, ' ').trim())).toEqual(['spec.pdf · 2 KB', 'notes.txt']);
+      await fireEvent.click(within(rows[0]).getByText('spec.pdf'));
+      expect(vi.mocked(openExternal)).toHaveBeenCalledWith('https://app.asana.com/app/asana/-/get_asset?asset_id=1');
+      expect(within(rows[1]).queryByRole('button')).toBeNull();
+      await expectAccessible(screen.getByTestId('work-task-detail'));
+    });
+
     it('Comments: the tracker’s failing never hides fleet’s own, and Retry asks again', async () => {
       handlers.work_task = () => ({
         ...trackerTask,

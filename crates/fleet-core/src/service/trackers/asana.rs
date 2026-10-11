@@ -31,8 +31,9 @@
 
 use super::{
     check_http, description_and_len, map_transport, CallKind, Caps, Changes, Fetched, Incremental,
-    ItemRef, Page, RefCtx, StatusSnapshot, TrackerComment, TrackerError, TrackerInfo,
-    TrackerProvider, ViewDef, WorkItemSnapshot, WriteOp, WriteOutcome, NOT_FOUND_OR_NO_PERMISSION,
+    ItemRef, Page, RefCtx, StatusSnapshot, TrackerAttachment, TrackerComment, TrackerError,
+    TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot, WriteOp, WriteOutcome,
+    NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerCredential, TrackerSettings};
@@ -422,6 +423,7 @@ impl TrackerProvider for Asana {
             // ticket", which is what the capability is for.
             describe: false,
             comments: true,
+            attachments: true,
         }
     }
 
@@ -756,6 +758,51 @@ impl TrackerProvider for Asana {
             }
         }
         Ok(super::newest_comments(out, limit))
+    }
+
+    /// A task's attachments, one page of [`PAGE_SIZE`], oldest first.
+    /// `permanent_url` opens the file in Asana behind the person's sign-in;
+    /// an external file (Google Drive, Dropbox) has none, and its
+    /// `view_url` is used instead.
+    async fn attachments(
+        &self,
+        r: &ItemRef,
+        limit: usize,
+    ) -> Result<Vec<TrackerAttachment>, TrackerError> {
+        let limit = limit.clamp(1, super::TRACKER_ATTACHMENTS_MAX);
+        let Some(gid) = self.gid_of(r) else {
+            return Err(TrackerError::Invalid("not an Asana task".into()));
+        };
+        let v = self
+            .get(
+                &format!(
+                    "/attachments?parent={gid}&limit={PAGE_SIZE}\
+                     &opt_fields=name,permanent_url,view_url,size,created_at"
+                ),
+                CallKind::Other,
+            )
+            .await?;
+        let mut out: Vec<TrackerAttachment> = v["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| {
+                let url = a["permanent_url"]
+                    .as_str()
+                    .filter(|u| !u.is_empty())
+                    .or_else(|| a["view_url"].as_str());
+                TrackerAttachment::from_parts(
+                    a["gid"].as_str().unwrap_or_default(),
+                    a["name"].as_str().unwrap_or_default(),
+                    url,
+                    a["size"].as_u64(),
+                    a["created_at"].as_str(),
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+        out.truncate(limit);
+        Ok(out)
     }
 
     async fn write(&self, op: &WriteOp) -> Result<WriteOutcome, TrackerError> {

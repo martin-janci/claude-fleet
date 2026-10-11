@@ -378,6 +378,14 @@ task page's Activity tab also lists each session that started, was
 suggested, turned down or stopped, and each comment. Not yet: comments on
 the phone.
 
+Tracker attachments and a start's comments (owner report 2026-10-11, an
+Asana session briefed with the key alone): `tracker_comments` also answers
+an Asana ticket's attachments (`TrackerProvider::attachments`,
+`caps.attachments`, Asana only so far), listed above the Comments tab; and
+a ticket start's brief ends with the ticket's attachments and newest 10
+comments, read live by the hub (`work::tracker_comments::brief_extras`), so
+the session's Claude needs no tracker access of its own.
+
 Tracker comments (owner decision 2026-10-11, changing D29; migration 172):
 the Comments tab shows the ticket's own comments beside fleet's, read live
 when the tab opens (`work { tracker_comments, key }`, routed desktop
@@ -396,7 +404,7 @@ drains at once. Deleting a comment cancels a pending post; a sent one stays
 at the tracker. `CommentRow.tracker_post` carries the post's state, error
 and URL; `TaskDetail.comments_tracker` / `can_post_to_tracker` say whose
 comments the tab reads and whether the reader may post. Not yet: the phone,
-editing a posted comment, a tracker's attachments.
+editing a posted comment, attachments from trackers other than Asana.
 
 Task attachments (migration 168, `work_item_attachments` and the
 content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept
