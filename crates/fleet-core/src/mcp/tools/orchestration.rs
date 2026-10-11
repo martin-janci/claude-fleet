@@ -1945,22 +1945,28 @@ impl FleetTools {
             let item_id = args
                 .item_id
                 .ok_or_else(|| mcp_err("E_INVALID", "set_parent needs item_id", None))?;
-            self.require_drive_on_item_sessions(&caller, item_id)?;
+            // `set_status`'s exception: an agent files its own task.
+            if !self.own_session_works_on(&caller, item_id)? {
+                self.require_drive_on_item_sessions(&caller, item_id)?;
+            }
             return ok_json(
                 &crate::service::work::local::set_parent(&args, &self.store, &scope)
                     .map_err(to_mcp_err)?,
             );
         }
         // Sprint and release membership (design 2026-09-28 §7): the team's
-        // plan, which a session does not decide — so never a per-host token
-        // (`planned_item`). The org fence (bucket and item, each answering as
-        // unknown outside the scope) is inside, and the person fence is
-        // `set_status`'s: planning someone's live work is theirs to drive.
+        // plan, which a session does not decide — so a per-host token only
+        // for a task its own session is on (`planned_item`). The org fence
+        // (bucket and item, each answering as unknown outside the scope) is
+        // inside, and the person fence is `set_status`'s: planning someone's
+        // live work is theirs to drive, and an agent's own task is its own.
         // A personal bucket is its person's alone, so the whole
         // `view_scope` decides which bucket the caller sees.
         if args.action == "bucket_add" {
-            let item_id = planned_item(&caller, &args)?;
-            self.require_drive_on_item_sessions(&caller, item_id)?;
+            let (item_id, own) = self.planned_item(&caller, &args)?;
+            if !own {
+                self.require_drive_on_item_sessions(&caller, item_id)?;
+            }
             let view_scope = self.view_scope(&caller)?;
             return ok_json(
                 &crate::service::work::buckets::bucket_add(&args, &self.store, &view_scope)
@@ -1968,8 +1974,10 @@ impl FleetTools {
             );
         }
         if args.action == "bucket_remove" {
-            let item_id = planned_item(&caller, &args)?;
-            self.require_drive_on_item_sessions(&caller, item_id)?;
+            let (item_id, own) = self.planned_item(&caller, &args)?;
+            if !own {
+                self.require_drive_on_item_sessions(&caller, item_id)?;
+            }
             let view_scope = self.view_scope(&caller)?;
             return ok_json(
                 &crate::service::work::buckets::bucket_remove(&args, &self.store, &view_scope)
@@ -2838,6 +2846,40 @@ impl FleetTools {
         Ok(self.view_scope(caller)?.proven_session)
     }
 
+    /// The item a `bucket_add` / `bucket_remove` plans, and whether it is the
+    /// caller's own task ([`Self::own_session_works_on`]). A per-host token
+    /// plans only its own task: anything else is the team's plan, which a
+    /// session does not decide.
+    fn planned_item(
+        &self,
+        caller: &Caller,
+        args: &crate::service::work::WorkLinkArgs,
+    ) -> Result<(i64, bool), McpError> {
+        let not_a_session = || {
+            mcp_err(
+                "E_FORBIDDEN",
+                "a session does not plan sprints or releases, except for a task it works on; \
+                 a person does",
+                None,
+            )
+        };
+        let Some(item_id) = args.item_id else {
+            if caller.host_alias.is_some() {
+                return Err(not_a_session());
+            }
+            return Err(mcp_err(
+                "E_INVALID",
+                format!("{} needs item_id", args.action),
+                None,
+            ));
+        };
+        let own = self.own_session_works_on(caller, item_id)?;
+        if caller.host_alias.is_some() && !own {
+            return Err(not_a_session());
+        }
+        Ok((item_id, own))
+    }
+
     /// The scope the operator reads missions with: the hub's owner's
     /// (`operator_owner_scope`). Everyone else keeps their own.
     fn mission_read_scope(
@@ -2980,24 +3022,6 @@ fn mission_caller(caller: &Caller) -> Result<(), McpError> {
         ));
     }
     Ok(())
-}
-
-/// The item a `work_link { bucket_add | bucket_remove }` plans, refusing a
-/// per-host token first: a session does not decide the team's plan
-/// (design 2026-09-28 §7).
-fn planned_item(
-    caller: &Caller,
-    args: &crate::service::work::WorkLinkArgs,
-) -> Result<i64, McpError> {
-    if caller.host_alias.is_some() {
-        return Err(mcp_err(
-            "E_FORBIDDEN",
-            "a session does not plan sprints or releases; a person does",
-            None,
-        ));
-    }
-    args.item_id
-        .ok_or_else(|| mcp_err("E_INVALID", format!("{} needs item_id", args.action), None))
 }
 
 /// The operator is an unbound client, so its view scope is `All` and the

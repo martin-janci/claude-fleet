@@ -18107,6 +18107,77 @@ async fn an_agent_writes_its_own_shared_task() {
     }
 }
 
+/// Planning its own task: an agent files it under a parent and puts it in
+/// or takes it out of a sprint, even when the task is shared with a session
+/// it cannot drive. A task its session is not on stays the team's plan.
+#[tokio::test]
+async fn an_agent_plans_its_own_shared_task() {
+    let g = gate_fixture();
+    let (a_row, b_row) = (g.a_row, g.b_row);
+    let shared = g
+        .store
+        .name_session_work(a_row, Some("LOC-1"), "Shared work")
+        .unwrap()
+        .0
+        .id;
+    let bobs = g
+        .store
+        .name_session_work(b_row, Some("LOC-2"), "Bob's alone")
+        .unwrap()
+        .0
+        .id;
+    let sprint = g
+        .store
+        .create_bucket(&crate::store::NewBucket {
+            kind: "sprint",
+            name: "Sprint 1",
+            ..Default::default()
+        })
+        .unwrap()
+        .id;
+    let t = test_tools(g.store);
+    let call = |who: Caller, args: serde_json::Value| {
+        t.work_link(
+            Extension(who),
+            Parameters(serde_json::from_value(args).unwrap()),
+        )
+    };
+    call(
+        device_of(g.bob, g.ada),
+        serde_json::json!({
+            "action": "link", "session_id": b_row, "item_id": shared, "primary": false,
+        }),
+    )
+    .await
+    .expect("Bob links his own session");
+    let plan = |who: Caller, action: &str, item: i64| {
+        let args = match action {
+            "set_parent" => serde_json::json!({ "action": action, "item_id": item, "parent": "" }),
+            _ => serde_json::json!({ "action": action, "item_id": item, "bucket_id": sprint }),
+        };
+        call(who, args)
+    };
+    let me = pane_caller(Some("%7"));
+
+    for action in ["set_parent", "bucket_add", "bucket_remove"] {
+        plan(me.clone(), action, shared)
+            .await
+            .unwrap_or_else(|e| panic!("{action}: its own task, shared with Bob's: {e:?}"));
+        for (who, item, what) in [
+            (pane_caller(None), shared, "no pane proven"),
+            (me.clone(), bobs, "a task its session is not on"),
+        ] {
+            let e = format!("{:?}", plan(who, action, item).await.expect_err(what));
+            let want = if action == "set_parent" {
+                "E_NOTFOUND"
+            } else {
+                "a session does not plan"
+            };
+            assert!(e.contains(want), "{action}, {what}: {e}");
+        }
+    }
+}
+
 /// **A local item whose only link was UNLINKED is nobody's to write**
 /// (multi-user M1, T9e).
 ///
