@@ -165,6 +165,7 @@ mod tests {
                 })
                 .collect(),
             overall: None,
+            description: None,
         }
     }
 

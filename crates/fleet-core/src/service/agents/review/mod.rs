@@ -28,8 +28,10 @@
 //! Every call on the host goes through [`ReviewHost`], so the poller and the
 //! runner are tested against a fake one.
 
+pub mod debate;
 pub mod diff;
 pub mod format;
+pub mod labels;
 pub mod output;
 pub mod plan;
 pub mod post;
@@ -81,6 +83,16 @@ pub struct ReviewConfig {
     pub comment_trigger: String,
     /// Minutes between two checks that a posted review is still there.
     pub verify_interval_mins: i64,
+    /// Labels a review puts on its pull request (auto-label).
+    pub labels: labels::LabelRules,
+    /// Write the description of a pull request that has none (auto-description).
+    pub auto_description: bool,
+    /// Also replace an existing description, on a pull request's first review.
+    pub overwrite_description: bool,
+    /// Answer an author who argues a missing-test finding (at propose or act).
+    pub test_debate: bool,
+    /// The reviewer's replies per debate thread, at most.
+    pub debate_max_rounds: usize,
 }
 
 impl Default for ReviewConfig {
@@ -112,6 +124,11 @@ impl Default for ReviewConfig {
             request_changes_event: true,
             comment_trigger: r"^\s*/review\s*$".into(),
             verify_interval_mins: 60,
+            labels: labels::LabelRules::default(),
+            auto_description: false,
+            overwrite_description: false,
+            test_debate: true,
+            debate_max_rounds: 2,
         }
     }
 }
@@ -139,6 +156,10 @@ impl ReviewConfig {
             return Err("verify_interval_mins must be at least 1".into());
         }
         c.trigger().map_err(|e| format!("comment_trigger: {e}"))?;
+        c.labels.check()?;
+        if !(1..=5).contains(&c.debate_max_rounds) {
+            return Err("debate_max_rounds must be 1-5".into());
+        }
         Ok(c)
     }
 
@@ -203,7 +224,40 @@ pub trait ReviewHost: Send + Sync {
         repo: &str,
         since: &str,
     ) -> Result<Vec<PrComment>, String>;
+    /// The pull request's description and labels.
+    async fn pr_meta(&self, host: &str, repo: &str, number: i64) -> Result<labels::PrMeta, String>;
+    /// Add and remove labels.
+    async fn set_labels(&self, req: &labels::LabelsRequest) -> Result<(), String>;
+    /// Replace the description.
+    async fn set_description(&self, req: &labels::DescriptionRequest) -> Result<(), String>;
+    /// The repo's inline review comments updated since `since` (RFC 3339).
+    async fn review_comments_since(
+        &self,
+        host: &str,
+        repo: &str,
+        since: &str,
+    ) -> Result<Vec<debate::ReviewComment>, String>;
+    /// A pull request's inline review comments.
+    async fn pr_review_comments(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+    ) -> Result<Vec<debate::ReviewComment>, String>;
+    /// Reply in a review thread.
+    async fn reply_in_thread(&self, req: &debate::DebateReply) -> Result<(), String>;
+    /// Resolve the review thread whose first comment is `root_id`.
+    async fn resolve_thread(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+        root_id: i64,
+    ) -> Result<(), String>;
 }
+
+/// `gh api --jq` for inline review comments, one JSON object a line.
+const REVIEW_COMMENT_JQ: &str = ".[] | {id, pull_request_url, in_reply_to_id, path, line, original_line, body, diff_hunk, user: .user.login, user_type: .user.type}";
 
 /// One comment on a pull request (or an issue: its number is then not a
 /// tracked pull request's, and nothing comes of it).
@@ -271,6 +325,19 @@ impl SshReviewHost {
             .await
             .map_err(|e| e.message)
     }
+}
+
+/// PURE: a label as one URL path segment (percent-encoded but for unreserved bytes).
+pub fn url_path_segment(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
 }
 
 /// PURE: `gh pr list --json …`'s answer as open pull requests.
@@ -502,6 +569,182 @@ impl ReviewHost for SshReviewHost {
         }
         Ok(parse_comments(&String::from_utf8_lossy(&out.stdout)))
     }
+
+    async fn pr_meta(&self, host: &str, repo: &str, number: i64) -> Result<labels::PrMeta, String> {
+        let out = self
+            .sh(
+                host,
+                &format!(
+                    "gh api {} --jq {}",
+                    quote(&format!("repos/{repo}/pulls/{number}")),
+                    quote("{body: .body, labels: [.labels[].name]}")
+                ),
+            )
+            .await?;
+        if !out.status.success() {
+            return Err(gh_error(&out));
+        }
+        labels::parse_meta(&String::from_utf8_lossy(&out.stdout))
+    }
+
+    async fn set_labels(&self, req: &labels::LabelsRequest) -> Result<(), String> {
+        let issue = format!("repos/{}/issues/{}/labels", req.repo, req.number);
+        let mut script = String::from("set -e\n");
+        if !req.add.is_empty() {
+            let body = serde_json::json!({ "labels": req.add }).to_string();
+            script.push_str(&format!(
+                "printf '%s' {} | gh api --method POST {} --input - >/dev/null\n",
+                quote(&body),
+                quote(&issue)
+            ));
+        }
+        for l in &req.remove {
+            // A label already gone is not an error.
+            script.push_str(&format!(
+                "gh api --method DELETE {} >/dev/null 2>&1 || true\n",
+                quote(&format!("{issue}/{}", url_path_segment(l)))
+            ));
+        }
+        let out = self.sh(&req.host, &script).await?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(gh_error(&out))
+        }
+    }
+
+    async fn set_description(&self, req: &labels::DescriptionRequest) -> Result<(), String> {
+        let script = format!(
+            "gh api --method PATCH {} --input - >/dev/null",
+            quote(&format!("repos/{}/pulls/{}", req.repo, req.number))
+        );
+        let out = self
+            .ssh
+            .run_with_stdin(
+                &req.host,
+                &["bash", "-lc", &quote(&script)],
+                serde_json::json!({ "body": req.body })
+                    .to_string()
+                    .into_bytes(),
+                CONNECT,
+                GH_WALL_CLOCK,
+                64 * 1024,
+            )
+            .await
+            .map_err(|e| e.message)?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(gh_error(&out))
+        }
+    }
+
+    async fn review_comments_since(
+        &self,
+        host: &str,
+        repo: &str,
+        since: &str,
+    ) -> Result<Vec<debate::ReviewComment>, String> {
+        let out = self
+            .sh(
+                host,
+                &format!(
+                    "gh api -X GET {} -f since={} -f per_page=100 --paginate --jq {}",
+                    quote(&format!("repos/{repo}/pulls/comments")),
+                    quote(since),
+                    quote(REVIEW_COMMENT_JQ)
+                ),
+            )
+            .await?;
+        if !out.status.success() {
+            return Err(gh_error(&out));
+        }
+        Ok(debate::parse_review_comments(&String::from_utf8_lossy(
+            &out.stdout,
+        )))
+    }
+
+    async fn pr_review_comments(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+    ) -> Result<Vec<debate::ReviewComment>, String> {
+        let out = self
+            .sh(
+                host,
+                &format!(
+                    "gh api -X GET {} -f per_page=100 --paginate --jq {}",
+                    quote(&format!("repos/{repo}/pulls/{number}/comments")),
+                    quote(REVIEW_COMMENT_JQ)
+                ),
+            )
+            .await?;
+        if !out.status.success() {
+            return Err(gh_error(&out));
+        }
+        Ok(debate::parse_review_comments(&String::from_utf8_lossy(
+            &out.stdout,
+        )))
+    }
+
+    async fn reply_in_thread(&self, req: &debate::DebateReply) -> Result<(), String> {
+        let script = format!(
+            "gh api --method POST {} --input - >/dev/null",
+            quote(&format!(
+                "repos/{}/pulls/{}/comments/{}/replies",
+                req.repo, req.number, req.root_id
+            ))
+        );
+        let out = self
+            .ssh
+            .run_with_stdin(
+                &req.host,
+                &["bash", "-lc", &quote(&script)],
+                serde_json::json!({ "body": req.body })
+                    .to_string()
+                    .into_bytes(),
+                CONNECT,
+                GH_WALL_CLOCK,
+                64 * 1024,
+            )
+            .await
+            .map_err(|e| e.message)?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(gh_error(&out))
+        }
+    }
+
+    async fn resolve_thread(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+        root_id: i64,
+    ) -> Result<(), String> {
+        let (owner, name) = repo.split_once('/').ok_or("not owner/repo")?;
+        let query = "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{databaseId}}}}}}}";
+        let pick = format!(
+            ".data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false and .comments.nodes[0].databaseId == {root_id}) | .id"
+        );
+        let script = format!(
+            "set -e\nid=$(gh api graphql -f query={} -f o={} -f r={} -F n={number} --jq {} | head -n1)\n\
+             [ -z \"$id\" ] && exit 0\n\
+             gh api graphql -f query='mutation($t:ID!){{resolveReviewThread(input:{{threadId:$t}}){{thread{{id}}}}}}' -f t=\"$id\" >/dev/null",
+            quote(query),
+            quote(owner),
+            quote(name),
+            quote(&pick)
+        );
+        let out = self.sh(host, &script).await?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(gh_error(&out))
+        }
+    }
 }
 
 /// The reviewer as the runtime registers it.
@@ -674,41 +917,61 @@ impl ReviewPoller {
         now: i64,
     ) -> (Vec<crate::store::NewAgentJob>, Option<String>) {
         let next = Some(rfc3339(now - COMMENT_SLACK_SECS));
-        let Ok(Some(trigger)) = cfg.trigger() else {
+        let trigger = cfg.trigger().ok().flatten();
+        // A debate writes, so it is never started at watch.
+        let debating = cfg.test_debate && rule.level != "watch";
+        if trigger.is_none() && !debating {
             return (Vec::new(), next);
-        };
+        }
         let Some(since) = cursor.and_then(|c| c.cursor.clone()) else {
             return (Vec::new(), next);
         };
-        let comments = match self
-            .host
-            .comments_since(&rule.host_alias, repo, &since)
-            .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(repo, error = %e, "[agents] review: reading comments failed");
-                // Keep the cursor: the next poll asks again from it.
-                return (Vec::new(), Some(since));
+        let host = rule.host_alias.as_str();
+        let comments = match &trigger {
+            None => Vec::new(),
+            Some(_) => match self.host.comments_since(host, repo, &since).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(repo, error = %e, "[agents] review: reading comments failed");
+                    // Keep the cursor: the next poll asks again from it.
+                    return (Vec::new(), Some(since));
+                }
+            },
+        };
+        let replies = if debating {
+            match self.host.review_comments_since(host, repo, &since).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(repo, error = %e, "[agents] review: reading review comments failed");
+                    return (Vec::new(), Some(since));
+                }
             }
+        } else {
+            Vec::new()
         };
         let Ok(s) = self.store.lock() else {
             return (Vec::new(), Some(since));
         };
-        let jobs = comments
+        let open_row = |number: i64| {
+            s.review_pr(repo, number)
+                .ok()
+                .flatten()
+                .filter(|r| r.is_open())
+        };
+        let mut jobs: Vec<crate::store::NewAgentJob> = comments
             .into_iter()
             .filter(|c| {
                 c.user_type != "Bot"
                     && !c.body.contains(format::MARKER)
                     && !c.body.contains(format::LEGACY_MARKER)
-                    && trigger.is_match(&c.body)
+                    && trigger.as_ref().is_some_and(|t| t.is_match(&c.body))
             })
             .filter_map(|c| {
-                let row = s.review_pr(repo, c.number).ok().flatten()?;
+                let row = open_row(c.number)?;
                 // A forced review still waits out a draft or a WIP title,
                 // as the original's did.
                 let held = matches!(row.skip_reason.as_deref(), Some("draft" | "wip_title"));
-                (row.is_open() && !held).then(|| crate::store::NewAgentJob {
+                (!held).then(|| crate::store::NewAgentJob {
                     rule_id: rule.id,
                     agent: "review".into(),
                     subject: plan::subject(repo, c.number),
@@ -723,6 +986,23 @@ impl ReviewPoller {
                 })
             })
             .collect();
+        jobs.extend(
+            replies
+                .iter()
+                .filter(|c| debate::may_trigger(c))
+                .filter_map(|c| {
+                    open_row(c.number)?;
+                    let root = c.in_reply_to?;
+                    Some(crate::store::NewAgentJob {
+                        rule_id: rule.id,
+                        agent: "review".into(),
+                        subject: plan::subject(repo, c.number),
+                        trigger: debate::TRIGGER.into(),
+                        dedup_key: debate::dedup_key(repo, c.number, root, c.id),
+                        not_before: now,
+                    })
+                }),
+        );
         (jobs, next)
     }
 }
@@ -791,12 +1071,14 @@ impl ReviewRunner {
             Ok(c) => c,
             Err(e) => return failed(ErrorKind::Permanent, e),
         };
+        let exemptions;
         let (row, previous) = {
             let Ok(s) = self.store.lock() else {
                 return failed(ErrorKind::Transient, "store lock");
             };
             let row = s.review_pr(repo, number).ok().flatten();
             let previous = s.last_review_record(repo, number).ok().flatten();
+            exemptions = s.test_exemptions(repo, number, 20).unwrap_or_default();
             (row, previous)
         };
         let Some(row) = row else {
@@ -878,6 +1160,23 @@ impl ReviewRunner {
             Err(e) => return failed(ErrorKind::Transient, e.message),
         };
 
+        // Labels and description (step 8) need the pull request's own; a
+        // failure to read them costs only those.
+        let meta = if rule.level != "watch" && (!cfg.labels.is_empty() || cfg.auto_description) {
+            match self.host.pr_meta(host, repo, number).await {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    tracing::warn!(repo, number, error = %e, "[agents] review: no labels or description");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let describe = cfg.auto_description
+            && meta.as_ref().is_some_and(|m| {
+                m.body.trim().is_empty() || (cfg.overwrite_description && previous.is_none())
+            });
         let previous = previous.and_then(|p| {
             let placed: output::PlacedReview = serde_json::from_str(&p.review).ok()?;
             Some(prompt::Previous {
@@ -902,6 +1201,8 @@ impl ReviewRunner {
             security_paths: &security,
             require_tests: cfg.require_tests,
             test_blocking_importance: &cfg.test_blocking_importance,
+            describe,
+            exemptions: &exemptions,
         });
         let run = PrintRun {
             cwd,
@@ -999,15 +1300,249 @@ impl ReviewRunner {
             Ok(p) => p,
             Err(e) => return failed(ErrorKind::Permanent, e.to_string()),
         };
+        // The review, then its labels and the description, each an action.
+        let mut extra: Vec<(&str, String)> = Vec::new();
+        if let Some(m) = &meta {
+            let findings: Vec<output::Finding> = placed
+                .inline
+                .iter()
+                .chain(&placed.orphans)
+                .cloned()
+                .collect();
+            let change = labels::decide(
+                &cfg.labels,
+                &placed.verdict,
+                &findings,
+                &diff::diff_paths(&filtered),
+                &m.labels,
+            );
+            if !change.is_empty() {
+                let r = labels::LabelsRequest {
+                    host: host.to_string(),
+                    repo: repo.to_string(),
+                    number,
+                    sha: sha.to_string(),
+                    add: change.add,
+                    remove: change.remove,
+                };
+                extra.push((
+                    labels::PR_LABELS,
+                    serde_json::to_string(&r).unwrap_or_default(),
+                ));
+            }
+        }
+        if let Some(body) = placed.description.as_ref().filter(|_| describe) {
+            let r = labels::DescriptionRequest {
+                host: host.to_string(),
+                repo: repo.to_string(),
+                number,
+                sha: sha.to_string(),
+                body: body.clone(),
+            };
+            extra.push((
+                labels::PR_DESCRIPTION,
+                serde_json::to_string(&r).unwrap_or_default(),
+            ));
+        }
+        let now = crate::store::now_unix();
+        let queued = {
+            let Ok(s) = self.store.lock() else {
+                return failed(ErrorKind::Transient, "store lock");
+            };
+            let insert = |kind: &str, payload: &str| {
+                if rule.level == "act" {
+                    s.insert_approved_agent_action(job.id, kind, payload, "rule:act", now)
+                } else {
+                    s.insert_agent_action(job.id, kind, payload, now)
+                }
+            };
+            insert(post::POST_REVIEW, &payload).and_then(|id| {
+                for (kind, p) in &extra {
+                    insert(kind, p)?;
+                }
+                Ok(id)
+            })
+        };
+        let action_id = match queued {
+            Ok(id) => id,
+            Err(e) => return failed(ErrorKind::Transient, e.to_string()),
+        };
+        if !extra.is_empty() {
+            result["also"] = extra.iter().map(|(k, _)| *k).collect::<Vec<_>>().into();
+        }
+        result["action_id"] = action_id.into();
+        if rule.level == "act" {
+            RunOutcome::Done {
+                result: Some(result.to_string()),
+                cost_micros: cost,
+            }
+        } else {
+            RunOutcome::NeedsPerson {
+                result: Some(result.to_string()),
+                reason: format!("review ready: approve action {action_id} to post it"),
+                cost_micros: cost,
+            }
+        }
+    }
+
+    /// A test debate: judge the author's reply to a missing-test finding
+    /// on the pull request's head, and answer in the thread.
+    async fn debate(&self, job: &AgentJobRow, rule: &AgentRuleRow) -> RunOutcome {
+        let Some((repo, number)) = plan::parse_subject(&job.subject) else {
+            return failed(
+                ErrorKind::Permanent,
+                format!("not a review subject: {}", job.subject),
+            );
+        };
+        let Some(root_id) = debate::root_of_key(&job.dedup_key) else {
+            return failed(ErrorKind::Permanent, "the job names no thread");
+        };
+        let cfg = match ReviewConfig::parse(&rule.config) {
+            Ok(c) => c,
+            Err(e) => return failed(ErrorKind::Permanent, e),
+        };
+        let (row, conceded) = {
+            let Ok(s) = self.store.lock() else {
+                return failed(ErrorKind::Transient, "store lock");
+            };
+            let conceded = s
+                .test_exemptions(repo, number, 500)
+                .unwrap_or_default()
+                .iter()
+                .any(|e| e.root_id == root_id);
+            (s.review_pr(repo, number).ok().flatten(), conceded)
+        };
+        let Some(row) = row.filter(|r| r.is_open()) else {
+            return skipped("the pull request is not open");
+        };
+        if conceded {
+            return skipped("already conceded");
+        }
+        let host = rule.host_alias.as_str();
+        let comments = match self.host.pr_review_comments(host, repo, number).await {
+            Ok(c) => c,
+            Err(e) => return failed(vehicle::classify_failure(&e), e),
+        };
+        let Some(root) = comments.iter().find(|c| c.id == root_id) else {
+            return skipped("the finding is gone");
+        };
+        if !debate::is_test_finding(&root.body) {
+            return skipped("not a missing-test finding");
+        }
+        let mut replies: Vec<debate::ReviewComment> = comments
+            .iter()
+            .filter(|c| c.in_reply_to == Some(root_id))
+            .cloned()
+            .collect();
+        replies.sort_by_key(|c| c.id);
+        let rounds = replies
+            .iter()
+            .filter(|r| debate::is_debate_reply(&r.body))
+            .count();
+        if rounds >= cfg.debate_max_rounds {
+            return skipped(format!(
+                "{rounds} replies already: the thread is the people's now"
+            ));
+        }
+        if replies
+            .last()
+            .is_none_or(|r| debate::is_debate_reply(&r.body))
+        {
+            return skipped("nothing new to answer");
+        }
+        let Some(project_id) = self.project_of(rule, repo) else {
+            return failed(
+                ErrorKind::Permanent,
+                format!("no project {repo} on this hub; grant the rule a project"),
+            );
+        };
+        let checkout = match self.host.checkout(host, project_id).await {
+            Ok(r) => r,
+            Err(e) => return failed(ErrorKind::Transient, e.message),
+        };
+        self.host.prune(host, &checkout).await;
+        let cwd = match self
+            .host
+            .prepare(host, &checkout, job.id, number, &row.head_sha)
+            .await
+        {
+            Ok((Prepared::Ready, cwd)) => cwd,
+            Ok((other, _)) => return failed(ErrorKind::Transient, format!("workspace: {other:?}")),
+            Err(e) => return failed(ErrorKind::Transient, e.message),
+        };
+        let run = PrintRun {
+            cwd,
+            tools: vehicle::READ_ONLY_TOOLS
+                .iter()
+                .map(|t| t.to_string())
+                .collect(),
+            allowed_tools: Vec::new(),
+            mcp_config: None,
+            system_prompt: None,
+            model: Some(cfg.model.clone()).filter(|m| !m.is_empty()),
+            max_turns: 8.min(cfg.max_turns.max(1)),
+            timeout_secs: cfg.timeout_secs,
+            output_cap: OUTPUT_CAP,
+        };
+        let prompt = debate::prompt(repo, number, &row.title, root, &replies);
+        let outcome = self.host.run(host, &run, &prompt).await;
+        self.host.cleanup(host, &checkout, job.id).await;
+        let (answer, cost) = match outcome {
+            Ok(PrintOutcome::Answered { text, cost_micros }) => (text, cost_micros),
+            Ok(PrintOutcome::Failed {
+                kind,
+                message,
+                cost_micros,
+            }) => {
+                return RunOutcome::Failed {
+                    kind,
+                    message,
+                    cost_micros,
+                }
+            }
+            Err(e) => return failed(vehicle::classify_failure(&e.message), e.message),
+        };
+        let Some(j) = debate::parse_judgement(&answer) else {
+            let head: String = answer.chars().take(300).collect();
+            return RunOutcome::Failed {
+                kind: ErrorKind::Permanent,
+                message: format!("the answer is not a judgement: {head}"),
+                cost_micros: cost,
+            };
+        };
+        let mut result = serde_json::json!({
+            "debate": root_id,
+            "decision": j.decision,
+            "confidence": j.confidence,
+            "reason": j.reason,
+        });
+        let reply = debate::DebateReply {
+            host: host.to_string(),
+            repo: repo.to_string(),
+            number,
+            root_id,
+            body: debate::reply_body(&j),
+            decision: j.decision.clone(),
+            path: root.path.clone(),
+            line: root.line,
+            reason: j.reason.clone(),
+        };
+        let payload = serde_json::to_string(&reply).unwrap_or_default();
         let now = crate::store::now_unix();
         let queued = {
             let Ok(s) = self.store.lock() else {
                 return failed(ErrorKind::Transient, "store lock");
             };
             if rule.level == "act" {
-                s.insert_approved_agent_action(job.id, post::POST_REVIEW, &payload, "rule:act", now)
+                s.insert_approved_agent_action(
+                    job.id,
+                    debate::DEBATE_REPLY,
+                    &payload,
+                    "rule:act",
+                    now,
+                )
             } else {
-                s.insert_agent_action(job.id, post::POST_REVIEW, &payload, now)
+                s.insert_agent_action(job.id, debate::DEBATE_REPLY, &payload, now)
             }
         };
         let action_id = match queued {
@@ -1023,7 +1558,10 @@ impl ReviewRunner {
         } else {
             RunOutcome::NeedsPerson {
                 result: Some(result.to_string()),
-                reason: format!("review ready: approve action {action_id} to post it"),
+                reason: format!(
+                    "debate reply ready ({}): approve action {action_id} to post it",
+                    j.decision
+                ),
                 cost_micros: cost,
             }
         }
@@ -1045,6 +1583,7 @@ impl AgentRunner for ReviewRunner {
     async fn run(&self, job: &AgentJobRow, rule: Option<&AgentRuleRow>) -> RunOutcome {
         match rule {
             None => skipped("the rule was revoked"),
+            Some(rule) if job.trigger == debate::TRIGGER => self.debate(job, rule).await,
             Some(rule) => self.review(job, rule).await,
         }
     }
@@ -1059,19 +1598,86 @@ pub struct ReviewExecutor {
     pub host: Arc<dyn ReviewHost>,
 }
 
+impl ReviewExecutor {
+    /// A debate reply: while the pull request is open, whatever its head;
+    /// a concession is kept as the location's exemption and its thread
+    /// resolved.
+    async fn post_debate_reply(
+        &self,
+        action: &crate::store::AgentActionRow,
+    ) -> super::ActionResult {
+        use super::ActionResult;
+        let req: debate::DebateReply = match serde_json::from_str(&action.payload) {
+            Ok(r) => r,
+            Err(e) => return ActionResult::Failed(format!("payload: {e}")),
+        };
+        let open = match self.store.lock() {
+            Ok(s) => s
+                .review_pr(&req.repo, req.number)
+                .ok()
+                .flatten()
+                .is_some_and(|r| r.is_open()),
+            Err(_) => return ActionResult::Failed("store lock".into()),
+        };
+        if !open {
+            return ActionResult::Expired("the pull request is not open".into());
+        }
+        if let Err(e) = self.host.reply_in_thread(&req).await {
+            return ActionResult::Failed(e);
+        }
+        if req.decision == "concede" {
+            if let Ok(s) = self.store.lock() {
+                if let Err(e) = s.add_test_exemption(
+                    &req.repo,
+                    req.number,
+                    req.root_id,
+                    &req.path,
+                    req.line,
+                    &req.reason,
+                    crate::store::now_unix(),
+                ) {
+                    tracing::warn!(repo = %req.repo, error = %e, "[agents] review: exemption not kept");
+                }
+            }
+            if let Err(e) = self
+                .host
+                .resolve_thread(&req.host, &req.repo, req.number, req.root_id)
+                .await
+            {
+                tracing::warn!(repo = %req.repo, error = %e, "[agents] review: thread not resolved");
+            }
+        }
+        ActionResult::Executed
+    }
+}
+
 #[async_trait::async_trait]
 impl super::AgentExecutor for ReviewExecutor {
     async fn execute(&self, action: &crate::store::AgentActionRow) -> super::ActionResult {
         use super::ActionResult;
-        if action.kind != post::POST_REVIEW {
-            return ActionResult::Failed(format!("the reviewer does not do {}", action.kind));
+        fn parse<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T, ActionResult> {
+            serde_json::from_str(payload).map_err(|e| ActionResult::Failed(format!("payload: {e}")))
         }
-        let req: post::ReviewRequest = match serde_json::from_str(&action.payload) {
-            Ok(r) => r,
-            Err(e) => return ActionResult::Failed(format!("payload: {e}")),
+        if action.kind == debate::DEBATE_REPLY {
+            return self.post_debate_reply(action).await;
+        }
+        let (repo, number, sha) = match action.kind.as_str() {
+            post::POST_REVIEW => match parse::<post::ReviewRequest>(&action.payload) {
+                Ok(r) => (r.repo, r.number, r.sha),
+                Err(e) => return e,
+            },
+            labels::PR_LABELS => match parse::<labels::LabelsRequest>(&action.payload) {
+                Ok(r) => (r.repo, r.number, r.sha),
+                Err(e) => return e,
+            },
+            labels::PR_DESCRIPTION => match parse::<labels::DescriptionRequest>(&action.payload) {
+                Ok(r) => (r.repo, r.number, r.sha),
+                Err(e) => return e,
+            },
+            other => return ActionResult::Failed(format!("the reviewer does not do {other}")),
         };
         let row = match self.store.lock() {
-            Ok(s) => s.review_pr(&req.repo, req.number).ok().flatten(),
+            Ok(s) => s.review_pr(&repo, number).ok().flatten(),
             Err(_) => return ActionResult::Failed("store lock".into()),
         };
         match row {
@@ -1079,11 +1685,33 @@ impl super::AgentExecutor for ReviewExecutor {
             Some(r) if !r.is_open() => {
                 return ActionResult::Expired(format!("the pull request is {}", r.status))
             }
-            Some(r) if r.head_sha != req.sha => {
+            Some(r) if r.head_sha != sha => {
                 return ActionResult::Expired("the head moved on since the review".into())
             }
             Some(_) => {}
         }
+        if action.kind == labels::PR_LABELS {
+            let Ok(req) = parse::<labels::LabelsRequest>(&action.payload) else {
+                return ActionResult::Failed("payload".into());
+            };
+            return match self.host.set_labels(&req).await {
+                Ok(()) => ActionResult::Executed,
+                Err(e) => ActionResult::Failed(e),
+            };
+        }
+        if action.kind == labels::PR_DESCRIPTION {
+            let Ok(req) = parse::<labels::DescriptionRequest>(&action.payload) else {
+                return ActionResult::Failed("payload".into());
+            };
+            return match self.host.set_description(&req).await {
+                Ok(()) => ActionResult::Executed,
+                Err(e) => ActionResult::Failed(e),
+            };
+        }
+        let req: post::ReviewRequest = match parse(&action.payload) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
         let posted = match self.host.post_review(&req, &req.event).await {
             Err(e) if req.event != "COMMENT" && post::is_self_review_refusal(&e) => {
                 self.host.post_review(&req, "COMMENT").await

@@ -786,8 +786,10 @@ reporter, a bug in the rule's `bug_project` linked to the ticket, or a
 link to the open bug its fingerprint or a search matches); `act` runs the
 comment and the link alone and a new bug only when the rule lists it in
 `auto` and the investigation is sure; the executor refuses a write
-outside the rule's projects or over `max_body_chars`. Step 8 (the
-Graylog scanner trigger, KB write-back, …) is not built.
+outside the rule's projects or over `max_body_chars`. Step 8 in part: the
+reviewer labels its pull requests (`labels`), describes an empty one
+(`auto_description`) and answers an author who argues a missing-test
+finding (test debate, migration 176), each an action like the review.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

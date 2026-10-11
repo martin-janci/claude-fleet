@@ -1,5 +1,6 @@
-//! The PR reviewer's rows (migration 174): what it knows of each pull
-//! request it watches, and the reviews it wrote. The reviewer is
+//! The PR reviewer's rows (migrations 174 and 176): what it knows of each
+//! pull request it watches, the reviews it wrote, and the missing-test
+//! findings it conceded in a test debate. The reviewer is
 //! `service::agents::review`.
 
 use super::Store;
@@ -17,6 +18,16 @@ pub const REVIEW_PR_STATUSES: [&str; 6] = [
 
 /// `review_prs.skip_reason` values.
 pub const REVIEW_SKIP_REASONS: [&str; 4] = ["draft", "wip_title", "diff_too_large", "empty_diff"];
+
+/// A missing-test finding the reviewer conceded (migration 176).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TestExemptionRow {
+    pub path: String,
+    pub line: Option<i64>,
+    pub reason: String,
+    pub root_id: i64,
+    pub conceded_at: i64,
+}
 
 /// What the reviewer knows of one pull request.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -130,6 +141,53 @@ fn record_row(r: &Row<'_>) -> rusqlite::Result<ReviewRecordRow> {
 }
 
 impl Store {
+    /// Keep a conceded missing-test finding; a second concession of the
+    /// same thread replaces the first.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_test_exemption(
+        &self,
+        repo: &str,
+        number: i64,
+        root_id: i64,
+        path: &str,
+        line: Option<i64>,
+        reason: &str,
+        now: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO review_test_exemptions \
+               (repo, number, path, line, reason, root_id, conceded_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![repo, number, path, line, reason, root_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// A pull request's exemptions, newest last, at most `limit`.
+    pub fn test_exemptions(
+        &self,
+        repo: &str,
+        number: i64,
+        limit: usize,
+    ) -> Result<Vec<TestExemptionRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, line, reason, root_id, conceded_at FROM (\
+               SELECT * FROM review_test_exemptions WHERE repo = ?1 AND number = ?2 \
+               ORDER BY conceded_at DESC, root_id DESC LIMIT ?3) \
+             ORDER BY conceded_at, root_id",
+        )?;
+        let rows = stmt.query_map(params![repo, number, limit as i64], |r| {
+            Ok(TestExemptionRow {
+                path: r.get(0)?,
+                line: r.get(1)?,
+                reason: r.get(2)?,
+                root_id: r.get(3)?,
+                conceded_at: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     /// Write a pull request's row as given, replacing the one with its
     /// repo and number.
     pub fn put_review_pr(&self, row: &ReviewPrRow) -> Result<(), rusqlite::Error> {
@@ -312,6 +370,31 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_conceded_finding_is_kept_per_thread() {
+        let s = Store::open_in_memory().unwrap();
+        s.add_test_exemption("o/r", 4, 7, "src/a.rs", Some(3), "covered", 10)
+            .unwrap();
+        s.add_test_exemption("o/r", 4, 7, "src/a.rs", Some(3), "covered by a.rs", 20)
+            .unwrap();
+        s.add_test_exemption("o/r", 4, 8, "src/b.rs", None, "tooling", 30)
+            .unwrap();
+        s.add_test_exemption("o/r", 5, 9, "x", None, "y", 40)
+            .unwrap();
+        let ex = s.test_exemptions("o/r", 4, 10).unwrap();
+        assert_eq!(
+            ex.iter()
+                .map(|e| (e.root_id, e.reason.as_str()))
+                .collect::<Vec<_>>(),
+            [(7, "covered by a.rs"), (8, "tooling")]
+        );
+        assert_eq!(
+            s.test_exemptions("o/r", 4, 1).unwrap()[0].root_id,
+            8,
+            "the newest"
+        );
+    }
 
     pub(crate) fn pr(number: i64, sha: &str) -> ReviewPrRow {
         ReviewPrRow {

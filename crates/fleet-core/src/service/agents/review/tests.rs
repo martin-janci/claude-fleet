@@ -24,6 +24,12 @@ struct FakeHost {
     review_states: StdMutex<Vec<(i64, Option<String>)>>,
     comments: StdMutex<Vec<PrComment>>,
     comments_asked: StdMutex<Vec<String>>,
+    meta: StdMutex<labels::PrMeta>,
+    labelled: StdMutex<Vec<labels::LabelsRequest>>,
+    described: StdMutex<Vec<labels::DescriptionRequest>>,
+    review_comments: StdMutex<Vec<debate::ReviewComment>>,
+    replied: StdMutex<Vec<debate::DebateReply>>,
+    resolved: StdMutex<Vec<i64>>,
 }
 
 impl Default for FakeHost {
@@ -42,6 +48,12 @@ impl Default for FakeHost {
             review_states: StdMutex::default(),
             comments: StdMutex::default(),
             comments_asked: StdMutex::default(),
+            meta: StdMutex::default(),
+            labelled: StdMutex::default(),
+            described: StdMutex::default(),
+            review_comments: StdMutex::default(),
+            replied: StdMutex::default(),
+            resolved: StdMutex::default(),
         }
     }
 }
@@ -136,6 +148,43 @@ impl ReviewHost for FakeHost {
     ) -> Result<Vec<PrComment>, String> {
         self.comments_asked.lock().unwrap().push(since.to_string());
         Ok(self.comments.lock().unwrap().clone())
+    }
+    async fn pr_meta(&self, _: &str, _: &str, _: i64) -> Result<labels::PrMeta, String> {
+        self.log("meta");
+        Ok(self.meta.lock().unwrap().clone())
+    }
+    async fn set_labels(&self, req: &labels::LabelsRequest) -> Result<(), String> {
+        self.labelled.lock().unwrap().push(req.clone());
+        Ok(())
+    }
+    async fn set_description(&self, req: &labels::DescriptionRequest) -> Result<(), String> {
+        self.described.lock().unwrap().push(req.clone());
+        Ok(())
+    }
+    async fn review_comments_since(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<Vec<debate::ReviewComment>, String> {
+        Ok(self.review_comments.lock().unwrap().clone())
+    }
+    async fn pr_review_comments(
+        &self,
+        _: &str,
+        _: &str,
+        number: i64,
+    ) -> Result<Vec<debate::ReviewComment>, String> {
+        let all = self.review_comments.lock().unwrap();
+        Ok(all.iter().filter(|c| c.number == number).cloned().collect())
+    }
+    async fn reply_in_thread(&self, req: &debate::DebateReply) -> Result<(), String> {
+        self.replied.lock().unwrap().push(req.clone());
+        Ok(())
+    }
+    async fn resolve_thread(&self, _: &str, _: &str, _: i64, root_id: i64) -> Result<(), String> {
+        self.resolved.lock().unwrap().push(root_id);
+        Ok(())
     }
 }
 
@@ -678,4 +727,270 @@ not json
         .trigger()
         .unwrap()
         .is_none());
+}
+
+// ── Step 8: labels and description ──────────────────────────────────────────
+
+#[tokio::test]
+async fn at_act_a_review_labels_its_pull_request_and_describes_an_empty_one() {
+    let f = fx_at(
+        r#"{"labels":{"verdict":{"REQUEST_CHANGES":["needs-work"],"APPROVE":["lgtm"]},
+            "paths":[{"pattern":"src/**","label":"core"}]},"auto_description":true}"#,
+        "act",
+    );
+    *f.host.open.lock().unwrap() = vec![pr(4, SHA)];
+    *f.host.meta.lock().unwrap() = labels::PrMeta {
+        body: "  ".into(),
+        labels: vec!["lgtm".into(), "bug".into()],
+    };
+    *f.host.answer.lock().unwrap() = Some(answered(
+        r#"{"verdict":"REQUEST_CHANGES","summary":"c is unused","description":"Adds b and c.","findings":[
+            {"severity":"issue","blocking":true,"path":"src/a.rs","line":3,"body":"c has no caller"}]}"#,
+    ));
+    let job = f.job().await;
+    let out = f.runner().run(&job, Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    let (_, prompt) = f.host.last.lock().unwrap().clone().unwrap();
+    assert!(prompt.contains("## PR Description"));
+    let actions: Vec<_> = f
+        .store
+        .lock()
+        .unwrap()
+        .approved_agent_actions(10)
+        .unwrap()
+        .into_iter()
+        .map(|(_, a)| a)
+        .collect();
+    let kinds: Vec<&str> = actions.iter().map(|a| a.kind.as_str()).collect();
+    assert_eq!(kinds, ["post_review", "pr_labels", "pr_description"]);
+    for a in &actions[1..] {
+        assert_eq!(
+            crate::service::agents::AgentExecutor::execute(&f.executor(), a).await,
+            crate::service::agents::ActionResult::Executed
+        );
+    }
+    let l = f.host.labelled.lock().unwrap()[0].clone();
+    assert_eq!(
+        (l.add, l.remove),
+        (
+            vec!["core".to_string(), "needs-work".into()],
+            vec!["lgtm".to_string()]
+        )
+    );
+    assert_eq!(f.host.described.lock().unwrap()[0].body, "Adds b and c.");
+}
+
+#[tokio::test]
+async fn a_described_pull_request_is_not_redescribed_and_watch_asks_nothing() {
+    let f = fx_at(r#"{"auto_description":true}"#, "propose");
+    *f.host.open.lock().unwrap() = vec![pr(4, SHA)];
+    *f.host.meta.lock().unwrap() = labels::PrMeta {
+        body: "Mine.".into(),
+        labels: vec![],
+    };
+    *f.host.answer.lock().unwrap() = Some(answered(
+        r#"{"verdict":"APPROVE","summary":"ok","description":"x","findings":[]}"#,
+    ));
+    let job = f.job().await;
+    f.runner().run(&job, Some(&f.rule)).await;
+    let (_, prompt) = f.host.last.lock().unwrap().clone().unwrap();
+    assert!(!prompt.contains("## PR Description"));
+    let pending = f
+        .store
+        .lock()
+        .unwrap()
+        .list_agent_actions(Some("pending"), 10)
+        .unwrap();
+    assert_eq!(
+        pending.iter().map(|a| a.kind.as_str()).collect::<Vec<_>>(),
+        ["post_review"]
+    );
+
+    let w = fx(r#"{"auto_description":true,"labels":{"verdict":{"APPROVE":["lgtm"]}}}"#);
+    *w.host.open.lock().unwrap() = vec![pr(4, SHA)];
+    *w.host.answer.lock().unwrap() = Some(answered(
+        r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#,
+    ));
+    let job = w.job().await;
+    w.runner().run(&job, Some(&w.rule)).await;
+    assert!(
+        !w.host.logged().contains(&"meta".to_string()),
+        "watch reads no labels"
+    );
+}
+
+#[test]
+fn a_label_is_one_path_segment() {
+    assert_eq!(url_path_segment("needs work/ok"), "needs%20work%2Fok");
+    assert_eq!(url_path_segment("a-b_c.d~"), "a-b_c.d~");
+}
+
+// ── Step 8: test debate ─────────────────────────────────────────────────────
+
+fn rc(id: i64, reply_to: Option<i64>, body: &str, user_type: &str) -> debate::ReviewComment {
+    debate::ReviewComment {
+        id,
+        number: 4,
+        in_reply_to: reply_to,
+        path: "src/a.rs".into(),
+        line: Some(3),
+        body: body.into(),
+        user: "ann".into(),
+        user_type: user_type.into(),
+        diff_hunk: String::new(),
+    }
+}
+
+fn test_finding() -> String {
+    format!(
+        "🔴 **issue 🧪:** c has no test\n\n{}",
+        format::TEST_FINDING_MARKER
+    )
+}
+
+impl Fx {
+    /// Track PR 4, then poll with a cursor so replies count, and claim the debate job.
+    async fn debate_job(&self) -> Option<AgentJobRow> {
+        *self.host.open.lock().unwrap() = vec![pr(4, SHA)];
+        self.poll(1000).await;
+        {
+            let s = self.store.lock().unwrap();
+            let mut row = s.review_pr("o/r", 4).unwrap().unwrap();
+            row.status = "reviewed".into();
+            s.put_review_pr(&row).unwrap();
+        }
+        let cursor = crate::store::AgentCursorRow {
+            rule_id: self.rule.id,
+            polled_at: 1000,
+            cursor: Some("2026-10-11T00:00:00Z".into()),
+        };
+        let polled = self
+            .poller()
+            .poll(&self.rule, Some(&cursor), 2000)
+            .await
+            .unwrap();
+        let s = self.store.lock().unwrap();
+        s.record_agent_poll(self.rule.id, 2000, None, &polled.jobs)
+            .unwrap();
+        s.claim_agent_jobs(&["review"], 9000, 10, 60)
+            .unwrap()
+            .into_iter()
+            .find(|j| j.trigger == debate::TRIGGER)
+    }
+}
+
+#[tokio::test]
+async fn an_authors_reply_to_a_test_finding_is_judged_and_answered() {
+    let f = fx_at("{}", "propose");
+    *f.host.review_comments.lock().unwrap() = vec![
+        rc(7, None, &test_finding(), "Bot"),
+        rc(9, Some(7), "tests/a.rs covers c already", "User"),
+        rc(10, Some(7), "noted", "Bot"),
+    ];
+    *f.host.answer.lock().unwrap() = Some(answered(
+        r#"{"decision":"concede","reply":"Right: tests/a.rs::c covers it.","reason":"covered by tests/a.rs","confidence":90}"#,
+    ));
+    let job = f.debate_job().await.expect("a debate job");
+    assert_eq!(debate::root_of_key(&job.dedup_key), Some(7));
+    let out = f.runner().run(&job, Some(&f.rule)).await;
+    let RunOutcome::NeedsPerson { reason, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert!(reason.contains("concede"), "{reason}");
+    let (run, prompt) = f.host.last.lock().unwrap().clone().unwrap();
+    assert_eq!((run.max_turns, run.cwd.contains("job-")), (8, true));
+    assert!(prompt.contains("@ann**: tests/a.rs covers c already"));
+    let action = f
+        .store
+        .lock()
+        .unwrap()
+        .list_agent_actions(Some("pending"), 5)
+        .unwrap()
+        .remove(0);
+    assert_eq!(action.kind, "debate_reply");
+    assert_eq!(
+        crate::service::agents::AgentExecutor::execute(&f.executor(), &action).await,
+        crate::service::agents::ActionResult::Executed
+    );
+    let posted = f.host.replied.lock().unwrap()[0].clone();
+    assert!(posted.body.contains(format::DEBATE_MARKER) && posted.body.contains("Accepted"));
+    assert_eq!(*f.host.resolved.lock().unwrap(), [7]);
+    let ex = f
+        .store
+        .lock()
+        .unwrap()
+        .test_exemptions("o/r", 4, 10)
+        .unwrap();
+    assert_eq!(
+        (ex[0].path.as_str(), ex[0].reason.as_str()),
+        ("src/a.rs", "covered by tests/a.rs")
+    );
+}
+
+#[tokio::test]
+async fn a_debate_stops_at_its_rounds_and_never_starts_at_watch() {
+    let f = fx_at(r#"{"debate_max_rounds":1}"#, "act");
+    *f.host.review_comments.lock().unwrap() = vec![
+        rc(7, None, &test_finding(), "Bot"),
+        rc(9, Some(7), "no", "User"),
+        rc(
+            10,
+            Some(7),
+            &format!("held\n{}", format::DEBATE_MARKER),
+            "User",
+        ),
+        rc(11, Some(7), "still no", "User"),
+    ];
+    let job = f.debate_job().await.expect("a debate job");
+    let out = f.runner().run(&job, Some(&f.rule)).await;
+    assert!(
+        matches!(&out, RunOutcome::Skipped { reason } if reason.contains("people's")),
+        "{out:?}"
+    );
+
+    let w = fx("{}");
+    *w.host.review_comments.lock().unwrap() = vec![
+        rc(7, None, &test_finding(), "Bot"),
+        rc(9, Some(7), "no", "User"),
+    ];
+    assert!(
+        w.debate_job().await.is_none(),
+        "watch writes nothing, so it debates nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_reply_to_another_finding_is_left_alone() {
+    let f = fx_at("{}", "act");
+    *f.host.review_comments.lock().unwrap() = vec![
+        rc(7, None, "🟡 **suggestion:** rename", "Bot"),
+        rc(9, Some(7), "no", "User"),
+    ];
+    let job = f
+        .debate_job()
+        .await
+        .expect("a job is made; the run reads the root");
+    let out = f.runner().run(&job, Some(&f.rule)).await;
+    assert!(
+        matches!(&out, RunOutcome::Skipped { reason } if reason.contains("not a missing-test")),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn a_test_finding_carries_its_marker() {
+    let mut f = output::Finding {
+        severity: "issue".into(),
+        blocking: true,
+        path: "a".into(),
+        line: 1,
+        body: "add a test".into(),
+        confidence: None,
+        security_related: None,
+        test_related: Some(true),
+        is_new: None,
+    };
+    assert!(format::inline_comment(&f).ends_with(format::TEST_FINDING_MARKER));
+    f.test_related = None;
+    assert!(!format::inline_comment(&f).contains("test-finding"));
 }

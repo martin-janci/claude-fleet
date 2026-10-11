@@ -53,7 +53,7 @@ export interface AgentJob {
 export interface AgentAction {
   id: number;
   job_id: number;
-  /** `post_review`, `jira_comment`, `jira_create_bug`, `jira_link`. */
+  /** `post_review`, `pr_labels`, `pr_description`, `debate_reply`, `jira_comment`, `jira_create_bug`, `jira_link`. */
   kind: string;
   /** Exactly what will be sent, JSON text. */
   payload: string;
@@ -148,6 +148,13 @@ export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>): string {
     const n = Array.isArray(p.comments) ? p.comments.length : 0;
     return `Post a review on ${p.repo}#${p.number}: ${event}, ${n} comment${n === 1 ? '' : 's'}`;
   }
+  if (a.kind === 'pr_labels' && p) {
+    const add = Array.isArray(p.add) ? p.add.map((l) => `+${l}`) : [];
+    const remove = Array.isArray(p.remove) ? p.remove.map((l) => `−${l}`) : [];
+    return `Label ${p.repo}#${p.number}: ${[...add, ...remove].join(' ')}`;
+  }
+  if (a.kind === 'pr_description' && p) return `Describe ${p.repo}#${p.number}`;
+  if (a.kind === 'debate_reply' && p) return `Answer the test debate on ${p.repo}#${p.number}: ${p.decision}`;
   if (a.kind === 'jira_comment' && p) return `Comment on ${p.key}`;
   if (a.kind === 'jira_create_bug' && p) return `File a bug in ${p.project} for ${p.source_key}: ${p.summary}`;
   if (a.kind === 'jira_link' && p) return `Link ${p.bug_key} to ${p.source_key} (${String(p.link_type ?? '').toLowerCase()})`;

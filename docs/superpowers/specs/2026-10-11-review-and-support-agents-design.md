@@ -1,7 +1,8 @@
 # Reviewer and Support agents: design
 
 Status: steps 1 to 7 built (the runtime, the run vehicle, the reviewer at
-every level, the desktop UI, the support agent at every level), 2026-10-11.
+every level, the desktop UI, the support agent at every level), step 8 in
+part (below), 2026-10-11.
 Asked for by the owner: bring the functionality of
 [`claude-code-reviewer`](https://github.com/martin-janci/claude-code-reviewer)
 and [`support-agent`](https://github.com/martin-janci/support-agent) into
@@ -544,6 +545,27 @@ dashboard pieces of the reviewer.
    context instead.
 8. **Later**: test-debate, auto-label, auto-description, the Graylog
    scanner trigger, KB write-back, outbound Slack/Teams with step 11.9.
+   Built so far, each an action like the review (kept at `watch`, queued
+   at `propose`, run at `act`):
+   - **auto-label** (`review/labels.rs`): the rule's `labels`
+     (`verdict` → labels, `severity` → labels, `paths`: glob → label)
+     become a `pr_labels` action adding what the review asks for and
+     removing only labels the rule names;
+   - **auto-description**: with `auto_description`, a pull request with
+     an empty body (or, with `overwrite_description`, on its first review)
+     gets the review prompt's `## PR Description` section, the answer's
+     `description` field becoming a `pr_description` action. The
+     original's second `claude` call is folded into the review run;
+   - **test debate** (`review/debate.rs`, migration 176
+     `review_test_exemptions`): an inline missing-test finding carries
+     `<!-- fleet-agent:test-finding -->`; the poller reads the repo's
+     review comments since its cursor and makes a `debate` job per
+     person's reply in such a thread (never at `watch`); the run judges it
+     on the head with read-only tools (8 turns) and its answer is a
+     `debate_reply` action. A concession keeps the location's exemption,
+     resolves the thread, and later reviews are told not to raise it
+     again; the reviewer answers at most `debate_max_rounds` (2) times a
+     thread.
 
 ## Not in scope
 

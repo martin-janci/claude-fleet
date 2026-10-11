@@ -191,7 +191,8 @@ pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
 pub use review_prs::{
-    NewReviewRecord, ReviewPrRow, ReviewRecordRow, REVIEW_PR_STATUSES, REVIEW_SKIP_REASONS,
+    NewReviewRecord, ReviewPrRow, ReviewRecordRow, TestExemptionRow, REVIEW_PR_STATUSES,
+    REVIEW_SKIP_REASONS,
 };
 pub use routines::{
     NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, ROUTINE_LEASE_SECS, ROUTINE_OVERLAPS,

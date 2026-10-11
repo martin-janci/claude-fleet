@@ -1978,6 +1978,10 @@ const MIGRATIONS: &[Migration] = &[
         175,
         include_str!("../../migrations/175_support_fingerprints.sql"),
     ),
+    Migration::plain(
+        176,
+        include_str!("../../migrations/176_review_test_exemptions.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

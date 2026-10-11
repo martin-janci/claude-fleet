@@ -61,6 +61,10 @@ pub struct PromptInput<'a> {
     pub require_tests: bool,
     /// medium | high | critical.
     pub test_blocking_importance: &'a str,
+    /// Ask for the pull request's description too (auto-description).
+    pub describe: bool,
+    /// Missing-test findings conceded in a test debate.
+    pub exemptions: &'a [crate::store::TestExemptionRow],
 }
 
 fn short(sha: &str) -> &str {
@@ -144,10 +148,32 @@ pub fn build(p: &PromptInput<'_>) -> String {
              developer exactly which tests to write.\n\n",
             p.test_blocking_importance
         ));
+        if !p.exemptions.is_empty() {
+            out.push_str(
+                "### Accepted Test Exemptions\nThe author previously justified skipping tests at \
+                 these locations and the justification was accepted. Do NOT re-flag them unless \
+                 the code there materially changed; report them as \"wont_fix\" in resolutions \
+                 if referenced:\n",
+            );
+            for e in p.exemptions {
+                let at = e.line.map(|l| format!(":{l}")).unwrap_or_default();
+                out.push_str(&format!("- `{}{at}` — {}\n", e.path, e.reason));
+            }
+            out.push('\n');
+        }
     } else {
         out.push_str(
             "## Test Coverage\nTest coverage assessment is DISABLED for this repository. Omit \
              the `testCoverage` field and do not raise missing-test findings.\n\n",
+        );
+    }
+    if p.describe {
+        out.push_str(
+            "## PR Description\nThe pull request has no description yet. Also include a \
+             `\"description\"` field in your JSON output: a Markdown description of the change \
+             for its reviewers, with a one-paragraph summary of what it does and why, a short \
+             `### Changes` list of the main changes, and a `### Testing` section saying how the \
+             diff tests it (or that it does not). Describe only what the diff shows.\n\n",
         );
     }
     out.push_str(&format!("## Diff\n```diff\n{}\n```\n\n", p.diff));
@@ -182,6 +208,8 @@ mod tests {
             security_paths: &[],
             require_tests: true,
             test_blocking_importance: "high",
+            describe: false,
+            exemptions: &[],
         }
     }
 

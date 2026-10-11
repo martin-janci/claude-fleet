@@ -14,6 +14,13 @@ pub const MARKER: &str = "<!-- fleet-agent:review -->";
 /// The marker the original service wrote; its reviews count as the
 /// reviewer's own too.
 pub const LEGACY_MARKER: &str = "<!-- claude-code-review -->";
+/// On an inline missing-test finding: a reply to it may start a test
+/// debate (`debate.rs`). The legacy one is claude-code-reviewer's.
+pub const TEST_FINDING_MARKER: &str = "<!-- fleet-agent:test-finding -->";
+pub const LEGACY_TEST_FINDING_MARKER: &str = "<!-- claude-review:test-finding -->";
+/// On the reviewer's own debate replies: never a debate's trigger.
+pub const DEBATE_MARKER: &str = "<!-- fleet-agent:test-debate -->";
+pub const LEGACY_DEBATE_MARKER: &str = "<!-- claude-review:test-debate -->";
 
 const ORDER: [&str; 5] = ["issue", "suggestion", "nitpick", "question", "praise"];
 
@@ -81,8 +88,13 @@ pub fn inline_comment(f: &Finding) -> String {
         Some(c) if c < 100 => format!(" *({c}% confidence)*"),
         _ => String::new(),
     };
+    let marker = if f.test_related == Some(true) {
+        format!("\n\n{TEST_FINDING_MARKER}")
+    } else {
+        String::new()
+    };
     format!(
-        "{} **{}{}:** {}{confidence}",
+        "{} **{}{}:** {}{confidence}{marker}",
         severity_emoji(&f.severity),
         f.severity,
         tags(f),
@@ -363,6 +375,7 @@ mod tests {
                 resolution: "wont_fix".into(),
             }],
             overall: Some("Nice.".into()),
+            description: None,
         };
         let b = review_body(&r, "REQUEST_CHANGES", "0123456789abcdef");
         assert!(b.starts_with(MARKER));

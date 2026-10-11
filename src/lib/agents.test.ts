@@ -96,6 +96,13 @@ describe('agents (design step 5)', () => {
       'Link PD-4 to L2S-7 (causes)',
     );
     expect(actionBody({ payload: '{"body":"h3. x"}' })).toBe('h3. x');
+    expect(actionTitle({ kind: 'pr_labels', payload: '{"repo":"o/r","number":4,"add":["core"],"remove":["lgtm"]}' })).toBe(
+      'Label o/r#4: +core −lgtm',
+    );
+    expect(actionTitle({ kind: 'pr_description', payload: '{"repo":"o/r","number":4,"body":"x"}' })).toBe('Describe o/r#4');
+    expect(actionTitle({ kind: 'debate_reply', payload: '{"repo":"o/r","number":4,"decision":"hold"}' })).toBe(
+      'Answer the test debate on o/r#4: hold',
+    );
   });
 
   it('says what an action will do and what it will post', () => {

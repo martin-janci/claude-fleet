@@ -68,6 +68,10 @@ pub struct Review {
     pub resolutions: Vec<Resolution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overall: Option<String>,
+    /// The pull request's description, when the prompt asked for one
+    /// (auto-description, step 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 fn text(v: &Value, key: &str) -> Option<String> {
@@ -211,6 +215,7 @@ pub fn validate(v: &Value) -> Option<Review> {
             .map(|a| a.iter().filter_map(resolution).collect())
             .unwrap_or_default(),
         overall: text(v, "overall"),
+        description: text(v, "description"),
     })
 }
 
@@ -271,6 +276,8 @@ pub struct PlacedReview {
     pub resolutions: Vec<Resolution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overall: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// PURE: place `review`'s findings on `commentable`. A finding below
@@ -305,6 +312,7 @@ pub fn place(review: Review, commentable: &Commentable, confidence_threshold: u8
         test_coverage: review.test_coverage,
         resolutions: review.resolutions,
         overall: review.overall,
+        description: review.description,
     }
 }
 
@@ -424,6 +432,7 @@ mod tests {
             ],
             resolutions: vec![],
             overall: None,
+            description: None,
         };
         let p = place(review.clone(), &c, 50);
         assert_eq!(
