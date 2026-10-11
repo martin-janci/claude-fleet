@@ -613,6 +613,19 @@ pub trait TrackerProvider: Send + Sync {
     /// and capped by [`DESCRIBE_MAX_CHARS`], with its true length (see
     /// [`FullDescription`]). `None` means this provider does not serve one;
     /// the default says so for every adapter that has not implemented it.
+    /// The issues `jql` matches (at most `max`), each with its description
+    /// and newest comments as plain text, for the support agent's poll
+    /// (`service::agents::support`). Only Jira Cloud answers; the default
+    /// refuses.
+    async fn issue_threads(
+        &self,
+        _jql: &str,
+        _max: usize,
+    ) -> Result<Vec<IssueThread>, TrackerError> {
+        Err(TrackerError::Refused(
+            "this tracker does not list issues with their comments".into(),
+        ))
+    }
     async fn describe(&self, _r: &ItemRef) -> Result<Option<FullDescription>, TrackerError> {
         Ok(None)
     }
@@ -661,6 +674,34 @@ pub enum WriteOp {
         external_id: Option<String>,
         body: String,
     },
+}
+
+/// One issue with its comments, as the support agent reads it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IssueThread {
+    pub key: String,
+    pub summary: String,
+    /// Plain text, capped at [`DESCRIBE_MAX_CHARS`].
+    pub description: String,
+    /// The assignee's account id.
+    pub assignee_id: Option<String>,
+    pub status: String,
+    /// Unix seconds.
+    pub updated: Option<i64>,
+    /// Oldest first.
+    pub comments: Vec<IssueComment>,
+}
+
+/// One comment of an [`IssueThread`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IssueComment {
+    pub id: String,
+    pub author_id: Option<String>,
+    pub author: String,
+    /// Plain text, capped at [`DESCRIPTION_MAX_CHARS`].
+    pub body: String,
+    /// Unix seconds.
+    pub created: Option<i64>,
 }
 
 /// The provider for `row`, over the transport `net` picks for it. `cred` is

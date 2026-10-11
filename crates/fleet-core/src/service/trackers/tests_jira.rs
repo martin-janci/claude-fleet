@@ -1130,3 +1130,54 @@ fn the_due_date_is_asked_for_and_read_as_a_calendar_date() {
     assert_eq!(due(json!("next Friday")), None);
     assert_eq!(due(json!("2026-02-30")), None);
 }
+
+#[tokio::test]
+async fn issue_threads_read_each_issue_with_its_comments_as_text() {
+    let f = FakeTransport::new();
+    let page = serde_json::json!({
+        "isLast": true,
+        "issues": [{
+            "key": "L2S-7",
+            "fields": {
+                "summary": "Payments fail",
+                "description": {"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Since 9:00"}]}]},
+                "assignee": {"accountId": "bot-1"},
+                "status": {"name": "Open"},
+                "updated": "2026-10-11T09:30:00.000+0200",
+                "comment": {"comments": [
+                    {"id": "100", "author": {"accountId": "ann", "displayName": "Ann"},
+                     "body": {"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Tech help!"}]}]},
+                     "created": "2026-10-11T09:31:00.000+0200"},
+                    {"author": {"displayName": "no id"}, "body": "x"}
+                ]}
+            }
+        }, {"fields": {"summary": "no key"}}]
+    });
+    f.once(Method::Post, "/search/jql", Ok(Response::json(200, &page)));
+    let threads = jira(&f).issue_threads("project = L2S", 10).await.unwrap();
+    assert_eq!(threads.len(), 1);
+    let t = &threads[0];
+    assert_eq!(
+        (t.key.as_str(), t.summary.as_str()),
+        ("L2S-7", "Payments fail")
+    );
+    assert_eq!(t.description, "Since 9:00");
+    assert_eq!(
+        (t.assignee_id.as_deref(), t.status.as_str()),
+        (Some("bot-1"), "Open")
+    );
+    assert_eq!(t.updated, Some(1_791_703_800));
+    assert_eq!(t.comments.len(), 1, "a comment without an id is dropped");
+    let c = &t.comments[0];
+    assert_eq!(
+        (c.id.as_str(), c.author_id.as_deref(), c.body.as_str()),
+        ("100", Some("ann"), "Tech help!")
+    );
+    let body = f.requests()[0].json_body().unwrap();
+    assert_eq!(body["jql"], "project = L2S");
+    assert!(body["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "comment"));
+}

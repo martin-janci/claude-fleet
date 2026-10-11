@@ -31,9 +31,9 @@ pub use super::jira_common::{
 };
 use super::jira_common::{check, current_sprint, is_key, key_in_path};
 use super::{
-    map_transport, CallKind as Call, Caps, Fetched, FullDescription, Incremental, ItemRef, Page,
-    RefCtx, StatusSnapshot, TrackerComment, TrackerError, TrackerInfo, TrackerProvider, ViewDef,
-    WorkItemSnapshot, WriteOp, WriteOutcome, NOT_FOUND_OR_NO_PERMISSION,
+    map_transport, CallKind as Call, Caps, Fetched, FullDescription, Incremental, IssueComment,
+    IssueThread, ItemRef, Page, RefCtx, StatusSnapshot, TrackerComment, TrackerError, TrackerInfo,
+    TrackerProvider, ViewDef, WorkItemSnapshot, WriteOp, WriteOutcome, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerCredential};
@@ -643,6 +643,34 @@ impl TrackerProvider for JiraCloud {
         out
     }
 
+    async fn issue_threads(&self, jql: &str, max: usize) -> Result<Vec<IssueThread>, TrackerError> {
+        let fields: Vec<String> = [
+            "summary",
+            "description",
+            "assignee",
+            "status",
+            "updated",
+            "comment",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let mut out = Vec::new();
+        let mut cursor = None;
+        while out.len() < max {
+            let (issues, next) = self
+                .search_page(jql, fields.clone(), cursor, Call::Other)
+                .await?;
+            out.extend(issues.iter().filter_map(issue_thread));
+            match next {
+                Some(n) => cursor = Some(n),
+                None => break,
+            }
+        }
+        out.truncate(max);
+        Ok(out)
+    }
+
     async fn describe(&self, r: &ItemRef) -> Result<Option<FullDescription>, TrackerError> {
         let Some(key) = self.describe_key(r) else {
             return Ok(None);
@@ -691,6 +719,39 @@ impl TrackerProvider for JiraCloud {
         }
         Ok(super::newest_comments(out, limit))
     }
+}
+
+/// One `search/jql` issue (with `comment` among its fields) as a thread.
+fn issue_thread(issue: &Value) -> Option<IssueThread> {
+    let f = &issue["fields"];
+    let text = |v: &Value, cap: usize| adf_text(v, cap).map(|d| d.text).unwrap_or_default();
+    Some(IssueThread {
+        key: issue["key"].as_str()?.to_string(),
+        summary: f["summary"].as_str().unwrap_or_default().to_string(),
+        description: text(&f["description"], super::DESCRIBE_MAX_CHARS),
+        assignee_id: f["assignee"]["accountId"].as_str().map(str::to_string),
+        status: f["status"]["name"].as_str().unwrap_or_default().to_string(),
+        updated: f["updated"].as_str().and_then(super::parse_timestamp),
+        comments: f["comment"]["comments"]
+            .as_array()
+            .map(|cs| {
+                cs.iter()
+                    .filter_map(|c| {
+                        Some(IssueComment {
+                            id: c["id"].as_str()?.to_string(),
+                            author_id: c["author"]["accountId"].as_str().map(str::to_string),
+                            author: c["author"]["displayName"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                            body: text(&c["body"], super::DESCRIPTION_MAX_CHARS),
+                            created: c["created"].as_str().and_then(super::parse_timestamp),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
 }
 
 #[cfg(test)]

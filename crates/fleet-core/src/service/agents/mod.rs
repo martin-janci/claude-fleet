@@ -33,6 +33,7 @@
 
 pub mod admin;
 pub mod review;
+pub mod support;
 #[cfg(test)]
 mod tests;
 pub mod vehicle;
@@ -173,7 +174,7 @@ impl Registry {
     /// step 6 of the design.
     pub fn live(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Self {
         Registry {
-            agents: vec![review::agent(store, ssh)],
+            agents: vec![review::agent(store, ssh), support::agent(store, ssh)],
         }
     }
 

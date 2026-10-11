@@ -750,7 +750,7 @@ Jev's `pr_triage` (`decide.jev.pr_triage`, off by default) records in
 shadow what each new episode most likely needs. Not built: the Inbox
 card, the UI.
 
-The agent runtime (reviewer and support agents, steps 1 to 4 of 8) is
+The agent runtime (reviewer and support agents, steps 1 to 6 of 8) is
 built, and the PR reviewer works end to end under a granted rule (spec
 `docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`).
 Migration 173 (`agent_rules`, `agent_cursors`, `agent_jobs`,
@@ -774,8 +774,14 @@ list (source `agent`). The UI (step 5): Automation › Agents lists the
 reviewer's and the support agent's rules, waiting actions and newest jobs,
 and the Inbox's Needs you carries the waiting actions with Approve and
 Reject (`src/lib/agents.ts`, `automation/AgentActions.svelte`, the
-desktop commands `agents_status` / `agents_decide`). Not built: the
-support agent (steps 6 and 7).
+desktop commands `agents_status` / `agents_decide`). The support agent's
+read side (step 6, `service/agents/support/`): a `support` rule on
+`jira:<tracker id>:<PROJECT>` polls the project's comments and
+assignments, and investigates a ticket with read-only tools plus the
+catalog MCP servers its rule names (the `support-agent` repo's `graylog`,
+`tenant-resolver`, `support-kb`), keeping the investigation as the job's
+result; it writes nothing to Jira at any level. Not built: its write side
+(step 7: comments, bugs, links as actions, fingerprint dedup).
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

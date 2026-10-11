@@ -163,10 +163,15 @@ export function ruleLine(r: Pick<AgentRule, 'scope' | 'level' | 'host_alias' | '
 }
 
 /** A job in one line: its subject, what it came to and, for a review, the
- *  verdict. */
+ *  verdict; for an investigation, its severity and confidence. */
 export function jobLine(j: Pick<AgentJob, 'subject' | 'state' | 'error' | 'result'>): string {
   const r = parse(j.result);
-  const verdict = typeof r?.verdict === 'string' ? ` · ${r.verdict.toLowerCase().replace('_', ' ')}` : '';
+  const verdict =
+    typeof r?.verdict === 'string'
+      ? ` · ${r.verdict.toLowerCase().replace('_', ' ')}`
+      : typeof r?.severity === 'string'
+        ? ` · ${r.severity}, ${String(r.confidence ?? '?')} confidence`
+        : '';
   const why = j.error && (j.state === 'failed' || j.state === 'skipped') ? `: ${j.error}` : '';
   return `${j.subject} · ${j.state.replace('_', ' ')}${verdict}${why}`;
 }

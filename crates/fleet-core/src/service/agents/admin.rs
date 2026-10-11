@@ -204,6 +204,9 @@ pub fn validate_grant(
     if agent == "review" {
         crate::service::agents::review::ReviewConfig::parse(&config).map_err(invalid)?;
     }
+    if agent == "support" {
+        crate::service::agents::support::SupportConfig::parse(&config).map_err(invalid)?;
+    }
     let host = args
         .host
         .as_deref()
@@ -463,6 +466,18 @@ mod tests {
         let mut a = grant_args(pid);
         a.agent = Some("support".into());
         a.scope = Some("jira:42:L2S".into());
+        assert_eq!(
+            call(&st, &a, "x", 0).unwrap_err().code,
+            codes::E_VALIDATE,
+            "a review config"
+        );
+        a.config = Some(serde_json::json!({ "phrases": [] }));
+        assert_eq!(
+            call(&st, &a, "x", 0).unwrap_err().code,
+            codes::E_VALIDATE,
+            "nothing triggers"
+        );
+        a.config = None;
         assert_eq!(call(&st, &a, "x", 0).unwrap_err().code, codes::E_NOTFOUND);
         assert!(call(&st, &args("nope"), "x", 0).is_err());
         assert!(lock(&st).unwrap().list_agent_rules().unwrap().is_empty());

@@ -477,6 +477,22 @@ impl Store {
         rows.collect()
     }
 
+    /// When the newest finished run (`done` or `needs_person`) of another
+    /// job on `subject` ended: the loop guard's per-subject cooldown.
+    pub fn last_agent_subject_run(
+        &self,
+        agent: &str,
+        subject: &str,
+        except_job: i64,
+    ) -> Result<Option<i64>, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT MAX(updated_at) FROM agent_jobs \
+             WHERE agent = ?1 AND subject = ?2 AND id <> ?3 AND state IN ('done', 'needs_person')",
+            params![agent, subject, except_job],
+            |r| r.get(0),
+        )
+    }
+
     /// One job by id.
     pub fn agent_job(&self, id: i64) -> Result<Option<AgentJobRow>, rusqlite::Error> {
         self.conn
@@ -788,6 +804,15 @@ mod tests {
         )
         .unwrap();
         let done = s.agent_job(j.id).unwrap().unwrap();
+        assert_eq!(
+            s.last_agent_subject_run("review", "gh:o/r#1", 0).unwrap(),
+            Some(1130)
+        );
+        assert_eq!(
+            s.last_agent_subject_run("review", "gh:o/r#1", j.id)
+                .unwrap(),
+            None
+        );
         assert_eq!(done.state, "done");
         assert_eq!(done.cost_micros, 12);
         assert_eq!(done.error, None);

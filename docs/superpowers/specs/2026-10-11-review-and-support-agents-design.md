@@ -1,7 +1,7 @@
 # Reviewer and Support agents: design
 
-Status: steps 1 to 5 built (the runtime, the run vehicle, the reviewer at
-every level, the desktop UI), 2026-10-11.
+Status: steps 1 to 6 built (the runtime, the run vehicle, the reviewer at
+every level, the desktop UI, the support agent's read side), 2026-10-11.
 Asked for by the owner: bring the functionality of
 [`claude-code-reviewer`](https://github.com/martin-janci/claude-code-reviewer)
 and [`support-agent`](https://github.com/martin-janci/support-agent) into
@@ -500,9 +500,27 @@ dashboard pieces of the reviewer.
    own), and the waiting actions in the Inbox's Needs you with Approve,
    Reject and Show (the body that will be posted), counted in the badge.
    fleet-mobile's Inbox shows the same actions with Approve and Reject.
-6. **Support, read side**: Jira comment and assignment poller, enrichment,
+6. **Support, read side** (built): Jira comment and assignment poller, enrichment,
    the `support-agent` repo's `graylog`, `tenant-resolver` and `support-kb`
    MCP servers in the catalog, the analyzer run at `watch`.
+   `service/agents/support/`: the poller reads the project's issues updated
+   since its last poll with their comments (`TrackerProvider::issue_threads`,
+   Jira only, the tracker's own credential; the first poll only sets the
+   cursor) and makes a job per new comment with a phrase and per issue
+   assigned to `bot_account_id`, keyed `jira:KEY#c<id>` / `#assigned`, the
+   bot's own comments and those with its `marker` dropped. The runner skips a
+   ticket investigated inside `cooldown_secs`, reads the ticket fresh, takes
+   the rule's `mcp_servers` from the host's `~/.claude.json` (only those, and
+   `--allowedTools mcp__<name>__*`) and its `skill` from
+   `~/.claude/skills/<skill>/SKILL.md` (else a generic default), runs in a
+   worktree of the rule's project at `branch` (or the host's home), and keeps
+   the parsed investigation (`output.rs`, the original's schema) as the
+   job's result. Every level behaves as `watch` until step 7. Attachments
+   are not read yet (follow-up). The `support-agent` repo's servers are
+   plain stdio servers over its plugin code (`src/mcp/`, `docs/mcp.md`
+   there) with catalog assets in its `catalog/` (the three servers, with
+   `${SUPPORT_AGENT_DIR}` naming the built checkout, and the `l2-analyzer`
+   skill).
 7. **Support, write side**: the `WriteOp` variants, `jira_comment` /
    `jira_create_bug` / `jira_link` actions, fingerprint dedup,
    `propose` and `act`.

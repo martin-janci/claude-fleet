@@ -102,6 +102,9 @@ describe('agents (design step 5)', () => {
     expect(ruleLine(rule({ active: false }))).toBe('gh:o/r at propose on mercury (expired)');
     expect(jobLine(job())).toBe('gh:o/r#4 · done · request changes');
     expect(jobLine(job({ state: 'skipped', error: 'draft', result: null }))).toBe('gh:o/r#4 · skipped: draft');
+    expect(jobLine(job({ subject: 'jira:L2S-1', result: '{"severity":"critical","confidence":"high"}' }))).toBe(
+      'jira:L2S-1 · done · critical, high confidence',
+    );
     expect(agentState('review', null)).toBe('not reported');
     expect(agentState('support', status())).toBe('off · no rule');
     expect(agentState('review', status({ jobs: [job({ state: 'running' })] }))).toBe('1 rule · 1 working · 1 waiting for you');
