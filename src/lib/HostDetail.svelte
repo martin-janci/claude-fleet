@@ -148,7 +148,7 @@
   const checklist = $derived(
     checklistRows({ host, check: lastCheck, inventory: $inventory, hubVersion, agentsAccepted: $hubStatus.remote }),
   );
-  const checkBlocked = $derived(hubBlock('check_host', $hubStatus));
+  const checkBlocked = $derived(hubActionBlocked('check_host', $hubStatus, $hubConnection));
   const provisionBlocked = $derived(hubBlock('provision_hosts', $hubStatus));
   const reprovisionAdvised = $derived(needsReprovision(checklist, host));
   // Orbit Fleet 4.13: the Hex field beside what is running, Layout: New only.
@@ -351,9 +351,10 @@
   // in the tooltip rather than left to fail at the click: the button would
   // otherwise look like a button that works.
   const adminBlocked = $derived(hubBlock('remove_host', $hubStatus));
-  // Neither has a hub tool either: the nickname lives in the hub's own
-  // database, and a usage refresh SSHes to the host from here.
-  const nicknameBlocked = $derived(hubBlock('set_account_nickname', $hubStatus));
+  // The nickname routes to the hub's set_account_nickname, so it only needs
+  // the live connection; a usage refresh SSHes to the host from here and
+  // has no hub tool.
+  const nicknameBlocked = $derived(hubActionBlocked('set_account_nickname', $hubStatus, $hubConnection));
   const refreshUsageBlocked = $derived(hubBlock('refresh_account_usage', $hubStatus));
   // probe_host routes, so it only needs the live connection to be up.
   const reprobeBlocked = $derived(hubActionBlocked('probe_host', $hubStatus, $hubConnection));

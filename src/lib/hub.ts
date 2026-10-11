@@ -144,16 +144,13 @@ export async function hubStrandedToken(): Promise<Result<boolean>> {
  */
 const REASONS = {
   // --- fleet administration: refused to a client by design -----------------
-  add_host:
-    'this desktop is a paired client, and a client is never the fleet’s administrator',
+  // (No `add_host` / `discover_hosts`: since contract 13 the hub adds a host
+  // for its owner's trusted full device, so both route — Add host reads the
+  // hub's ~/.ssh/config and the hub probes what it adds, as the phone's does.)
   remove_host:
     'this desktop is a paired client, and a client is never the fleet’s administrator',
   hide_host:
     'this desktop is a paired client, and a client is never the fleet’s administrator',
-  discover_hosts:
-    'host discovery reads this machine’s SSH config, and a paired client does not administer the fleet anyway',
-  check_host:
-    'the health checklist reads a host’s settings over this app’s own SSH, and this desktop is a paired client',
   list_host_setups:
     'the add-host wizard adds hosts from this machine’s SSH config, and a paired client does not administer the fleet',
   save_host_setup:
@@ -220,8 +217,6 @@ const REASONS = {
   account_spend:
     'this app collects no usage while a hub owns the fleet, so it has no spend per account',
   record_host_placement: 'the decision model’s runs are recorded on the hub that owns the fleet; nothing to record here',
-  set_account_nickname:
-    'the nickname lives in the hub’s database and there is no tool to set it',
 
   // --- acted out over this machine's SSH, and the hub has no tool for it ---
   repo_write:
@@ -398,6 +393,12 @@ export const ROUTED_ACTIONS = [
   'new_bg_session',
   'cancel_task',
   'probe_host',
+  // Add host on a paired desktop: the hub's add_host (contract 13).
+  'add_host',
+  // A host's health checklist, run by the hub over its own SSH.
+  'check_host',
+  // An account's nickname: the hub's set_account_nickname.
+  'set_account_nickname',
   'move_session',
   'new_session',
   'repair_session',

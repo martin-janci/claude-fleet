@@ -100,13 +100,29 @@ describe('HostDetail: health checklist', () => {
     expect(props.onnewsession).toHaveBeenCalledTimes(1);
   });
 
-  it('a paired client cannot run the checks or re-provision, and says why', () => {
+  // The checklist routes to the hub's check_host (its SSH, its hooks), so a
+  // paired client runs it while connected; re-provisioning stays the hub
+  // operator's and says why.
+  it('a paired client runs the checks through the hub but cannot re-provision', async () => {
     hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
+    hubConnection.set({ state: 'connected' });
     mount();
     const run = screen.getByTestId('detail-run-checks') as HTMLButtonElement;
     const prov = screen.getByTestId('detail-reprovision') as HTMLButtonElement;
-    expect(run.disabled && prov.disabled).toBe(true);
-    expect(run.title).toMatch(/paired client/);
+    expect(run.disabled).toBe(false);
+    expect(prov.disabled).toBe(true);
+    expect(prov.title).toMatch(/paired client/);
+    await fireEvent.click(run);
+    await waitFor(() => expect(inv.mock.calls.some(([c]) => c === 'check_host')).toBe(true));
+  });
+
+  it('a paired client cannot run the checks while the hub is unreachable', () => {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
+    hubConnection.set({ state: 'offline', attempt: 1, retry_in_secs: 5, reason: 'refused' });
+    mount();
+    const run = screen.getByTestId('detail-run-checks') as HTMLButtonElement;
+    expect(run.disabled).toBe(true);
+    expect(run.title).toMatch(/hub\.example/);
   });
 
   it('New shows the Hex field with its own step text while checking and re-provisioning', async () => {

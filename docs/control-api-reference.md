@@ -111,6 +111,12 @@ Whether starting or switching a session on host_alias under login `profile` (a p
 
 Parameters: `host_alias`, `profile`
 
+### `check_host`
+
+A host's health checklist over SSH: tmux, the agents on PATH, fleet's hooks and worker guard in ~/.claude/settings.json; base_path: whether it exists and is writable. Reads only.
+
+Parameters: `alias`, `base_path`
+
 ### `control_handoffs`
 
 What the agent handed on, newest first: prompts and tasks sent to sessions, new sessions, missions, tasks and proposed trees, each with its target's state now.
@@ -760,6 +766,12 @@ Parameters: `fresh_for`, `max_chars`, `session_id`, `since_turn`
 Revoke a person's or org's grant on your session (owner only; kept, revoked, for audit). Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
 
 Parameters: `org`, `person`, `session_id`
+
+### `set_account_nickname`
+
+Name a Claude account (≤ 32 characters; empty or null clears). Returns the account row.
+
+Parameters: `nickname`, `uuid`
 
 ### `set_client_trust`
 

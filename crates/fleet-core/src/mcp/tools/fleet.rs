@@ -270,6 +270,16 @@ impl FleetTools {
         ok_json_compact(&hosts::list_accounts(&self.store).map_err(to_mcp_err)?)
     }
 
+    #[tool(description = "Name a Claude account (≤ 32 characters; empty \
+        or null clears). Returns the account row.")]
+    pub(super) async fn set_account_nickname(
+        &self,
+        Parameters(args): Parameters<hosts::SetAccountNicknameArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("set_account_nickname", &format!("uuid={}", args.uuid));
+        ok_json(&hosts::set_account_nickname(args, &self.store).map_err(to_mcp_err)?)
+    }
+
     #[tool(description = "Each Claude account's latest plan usage: 5-hour \
         and weekly utilization with reset times, status, fetched_at. Never \
         fetches.")]
@@ -444,6 +454,42 @@ impl FleetTools {
             .await
             .map_err(to_mcp_err)?;
         ok_json(&row)
+    }
+
+    #[tool(description = "A host's health checklist over SSH: tmux, the \
+        agents on PATH, fleet's hooks and worker guard in \
+        ~/.claude/settings.json; base_path: whether it exists and is \
+        writable. Reads only.")]
+    pub(super) async fn check_host(
+        &self,
+        Parameters(args): Parameters<crate::service::host_check::CheckHostArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("check_host", &format!("alias={}", args.alias));
+        crate::validate::host_alias(&args.alias).map_err(to_mcp_err)?;
+        // Only a host of this fleet: the checklist is about one, and an
+        // arbitrary alias would make the hub SSH wherever it was told.
+        if lock(&self.store)
+            .map_err(to_mcp_err)?
+            .get_host_row(&args.alias)
+            .map_err(|e| to_mcp_err(e.into()))?
+            .is_none()
+        {
+            return Err(mcp_err(
+                codes::E_NOTFOUND,
+                format!("host {} not found", args.alias),
+                None,
+            ));
+        }
+        let now = crate::service::catalog::now_secs();
+        let check = crate::service::host_check::check_host_with(
+            &self.ssh,
+            &args.alias,
+            args.base_path.as_deref(),
+            now,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&check)
     }
 
     #[tool(description = "Remove a host; its sessions are orphaned. Returns \

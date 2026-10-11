@@ -337,13 +337,16 @@ Index by area (names only; see the reference for details):
   `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
-  `probe_host`, `hide_host`, `provision_hosts`, `wizard_state` (a wizard
+  `probe_host`, `check_host` (a host's health checklist over the hub's SSH:
+  tmux, agents on PATH, fleet's hooks; the hub owner's devices, contract
+  17), `hide_host`, `provision_hosts`, `wizard_state` (a wizard
   left half-way, Add host or Add a project, kept on the hub so it resumes
   on the person's other device; not served to a per-host token),
   `propose_host_placement` (the decision model's host for a new session of
   a project: `{host_alias, confidence_pct, run_id}` or null; a person's
   device only, never a per-host token; hub contract 17),
-  `list_accounts`, `account_usage` (each account's latest plan usage: the
+  `list_accounts`, `set_account_nickname` (an account's label on every
+  device; the hub owner's devices, contract 17), `account_usage` (each account's latest plan usage: the
   5-hour and weekly windows with their reset times, status and when it was
   fetched, as the hub's usage poll last answered; never fetches; hub
   contract 11), `check_account_headroom` (whether starting or switching a

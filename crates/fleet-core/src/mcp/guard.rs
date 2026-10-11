@@ -282,6 +282,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     },
     // Plan usage per account (hub contract 11 follow-up): the same reach as
     // `list_accounts`, read from what the hub's bus followed.
+    // An account's nickname: the label every device shows for it. The hub
+    // owner's (master or own device), like `add_account`; another person's
+    // or an org's device reads the accounts and does not rename them.
+    ToolPolicy {
+        name: "set_account_nickname",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "account_usage",
         access: Access::Client,
@@ -378,6 +388,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     ToolPolicy {
         name: "probe_host",
         access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    // The host detail's health checklist (Orbit Fleet 4.7): one SSH read of
+    // tmux, PATH and ~/.claude/settings.json on a fleet host. The hub
+    // owner's, like `add_host`: it reads a host's own configuration.
+    ToolPolicy {
+        name: "check_host",
+        access: Access::Person,
         readonly: true,
         confirm: false,
         deadline: Deadline::Lifecycle,
