@@ -1252,3 +1252,19 @@ fn a_body_is_cut_to_the_excerpt_with_its_true_length() {
     assert_eq!(s.description.as_deref(), Some("short body"));
     assert_eq!(s.description_chars, Some(10));
 }
+
+#[test]
+fn an_issues_labels_are_read_and_it_has_no_priority_or_estimate() {
+    assert!(ISSUE_FIELDS.contains("labels(first: 20) { nodes { name } }"));
+    let f = FakeTransport::new();
+    let g = github(&f);
+    let page = fixture("github", "search_mine_p1.json");
+    let s = g.snapshot(&page["data"]["search"]["nodes"][0]).unwrap();
+    assert_eq!(s.labels, vec!["bug", "auth"]);
+    assert_eq!(
+        (s.priority, s.estimate, s.estimate_unit),
+        (None, None, None)
+    );
+    let none = g.snapshot(&page["data"]["search"]["nodes"][1]).unwrap();
+    assert!(none.labels.is_empty());
+}

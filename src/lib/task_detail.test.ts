@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activityEvents, commentAuthor, deliveryOf, globMatch, hasDelivery, startRuleFor, workSpan } from './task_detail';
+import { activityEvents, commentAuthor, commentTimeline, deliveryOf, globMatch, hasDelivery, postStateLabel, startRuleFor, workSpan } from './task_detail';
 import { link, task } from './work_view_fixture';
 
 describe('task_detail', () => {
@@ -44,6 +44,26 @@ describe('task_detail', () => {
 });
 
 describe('comments and activity', () => {
+  it('merges fleet’s comments and the tracker’s by time, fleet first on a tie', () => {
+    const fleet = [
+      { id: 1, item_id: 1, author: 'desktop', body: 'a', created_at: 200 },
+      { id: 2, item_id: 1, author: 'desktop', body: 'b', created_at: 400 },
+    ];
+    const tracker = [
+      { id: '10', author: 'Ann', body: 'x', created_at: 100 },
+      { id: '11', author: 'Bob', body: 'y', created_at: 200 },
+    ];
+    expect(commentTimeline(fleet, tracker).map((e) => `${e.kind}:${e.comment.id}`)).toEqual(['tracker:10', 'fleet:1', 'tracker:11', 'fleet:2']);
+  });
+
+  it('says where a fleet comment’s post to the tracker stands', () => {
+    expect(postStateLabel(null, 'Jira')).toBeNull();
+    expect(postStateLabel({ state: 'done' }, 'Jira')).toBe('Sent to Jira');
+    expect(postStateLabel({ state: 'pending' }, 'Jira')).toBe('Sending…');
+    expect(postStateLabel({ state: 'pending', error: 'rate limited' }, 'Jira')).toBe('Sending… (retrying: rate limited)');
+    expect(postStateLabel({ state: 'failed', error: 'not permitted: 403' }, 'Jira')).toBe('Not sent: not permitted: 403');
+  });
+
   it('names a comment’s author as a person reads it', () => {
     expect(commentAuthor({ author: 'client:phone' })).toBe('phone');
     expect(commentAuthor({ author: 'host:mac' })).toBe('An agent on mac');

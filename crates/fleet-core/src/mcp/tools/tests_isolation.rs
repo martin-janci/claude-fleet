@@ -971,6 +971,50 @@ async fn run_matrix(isolate: bool) {
     )
     .await;
     same_as_unknown(&hidden, &unknown, "BB-1", "ZZ-404");
+    // `tracker_comments`: describe's fence exactly. Past the fence the
+    // fixture's tracker is asked live, which no fixture answers, so a
+    // caller who may see the ticket gets the tracker's own error — never
+    // the fence's.
+    for key in ["BB-1", "AA-1"] {
+        m.row(
+            "work",
+            "tracker_comments",
+            move |_, _| json!({ "action": "tracker_comments", "key": key }),
+            move |_, who, a| {
+                let mine = matches!(
+                    (who, key),
+                    (Who::HostA | Who::BoundA, "AA-1") | (Who::HostB | Who::BoundB, "BB-1")
+                );
+                if who.is_host() && !mine {
+                    return is_code(who, a, "E_FORBIDDEN", "another org's ticket");
+                }
+                if who.is_bound() && !mine {
+                    return is_code(who, a, "E_NOTFOUND", "another org's ticket");
+                }
+                let t = text(a);
+                assert!(
+                    !t.contains("E_FORBIDDEN") && !t.contains("E_NOTFOUND"),
+                    "{who:?} may see {key}: {t}"
+                );
+            },
+        )
+        .await;
+    }
+    let hidden = call(
+        &fx,
+        Who::HostA,
+        "work",
+        json!({ "action": "tracker_comments", "key": "BB-1" }),
+    )
+    .await;
+    let unknown = call(
+        &fx,
+        Who::HostA,
+        "work",
+        json!({ "action": "tracker_comments", "key": "ZZ-404" }),
+    )
+    .await;
+    same_as_unknown(&hidden, &unknown, "BB-1", "ZZ-404");
     // Multi-repo start (work graph M9.6), per caller. The ticket is
     // resolved once under the caller's scope, then each repo is planned:
     // on h-a, acme/api is org A and beta/web org B (the owner rules).

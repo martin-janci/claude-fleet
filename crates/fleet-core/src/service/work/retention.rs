@@ -388,6 +388,8 @@ mod tests {
                     link_id: None,
                     claude_session_id: None,
                     session_org_id: None,
+                    body: None,
+                    external_id: None,
                 })
                 .unwrap();
         }

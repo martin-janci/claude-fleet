@@ -25,8 +25,9 @@
 
 use super::{
     check_http, description_and_len, map_transport, retry_after, CallKind, Caps, Fetched,
-    FullDescription, Incremental, ItemRef, Page, RefCtx, StatusSnapshot, TrackerError, TrackerInfo,
-    TrackerProvider, ViewDef, WorkItemSnapshot, NOT_FOUND_OR_NO_PERMISSION,
+    FullDescription, Incremental, ItemRef, Page, RefCtx, StatusSnapshot, TrackerComment,
+    TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot, WriteOp, WriteOutcome,
+    NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerSettings};
@@ -45,6 +46,7 @@ const RECENT_DAYS: i64 = 14;
 const ISSUE_FIELDS: &str = "fragment I on Issue { id number title url state stateReason \
      updatedAt body repository { nameWithOwner } assignees(first: 10) { nodes { login } } \
      issueType { name } parent { id number repository { nameWithOwner } } milestone { title } \
+     labels(first: 20) { nodes { name } } \
      linkedBranches(first: 1) { totalCount } \
      closedByPullRequestsReferences(first: 1, includeClosedPrs: false) { totalCount } }";
 
@@ -285,6 +287,18 @@ impl GitHub {
             // An issue has no due date of its own (its milestone's is the
             // release's, not the issue's).
             due_at: None,
+            // No priority or estimate of its own (a project's custom field
+            // is the project's, not the issue's).
+            priority: None,
+            labels: n["labels"]["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| l["name"].as_str())
+                .map(str::to_string)
+                .collect(),
+            estimate: None,
+            estimate_unit: None,
             // A milestone is GitHub's release: a due date and a closed state.
             versions: n["milestone"]["title"]
                 .as_str()
@@ -311,6 +325,56 @@ impl GitHub {
         let repo = self.local_repo(&repo)?;
         let (o, name) = repo.split_once('/')?;
         Some((o.to_string(), name.to_string(), n))
+    }
+}
+
+/// PURE: a GitHub node id fleet may send as a GraphQL variable (`I_kwDO…`,
+/// or a legacy base64 id).
+fn node_id_ok(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 200
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'=' | b'+' | b'/'))
+}
+
+/// The comment fields fleet reads, and nothing else.
+const COMMENT_FIELDS: &str = "id body url createdAt author { login }";
+
+impl GitHub {
+    /// Where this instance shows things: the prefix a comment URL from an
+    /// answer must have to be kept.
+    fn web_prefix(&self) -> String {
+        match &self.enterprise {
+            Some((_, h)) => format!("https://{h}/"),
+            None => "https://github.com/".to_string(),
+        }
+    }
+
+    /// An issue's node id: `r` itself when it is one, else looked up by
+    /// repository and number.
+    async fn issue_node_id(&self, r: &ItemRef) -> Result<String, TrackerError> {
+        if let ItemRef::Id(id) = r {
+            return node_id_ok(id)
+                .then(|| id.clone())
+                .ok_or_else(|| TrackerError::Invalid("not a GitHub node id".into()));
+        }
+        let Some((o, name, n)) = self.repo_number(r) else {
+            return Err(TrackerError::Invalid("not an issue of this tracker".into()));
+        };
+        let data = self
+            .gql(
+                "query($o: String!, $r: String!, $n: Int!) { repository(owner: $o, name: $r) \
+                 { issue(number: $n) { id } } }",
+                json!({ "o": o, "r": name, "n": n }),
+                CallKind::Other,
+            )
+            .await?;
+        data["repository"]["issue"]["id"]
+            .as_str()
+            .filter(|id| node_id_ok(id))
+            .map(str::to_string)
+            .ok_or(TrackerError::NotFound)
     }
 }
 
@@ -359,8 +423,10 @@ impl TrackerProvider for GitHub {
             repo_relative: true,
             multi_container: false,
             incremental: Incremental::Watermark,
-            write: false,
+            write: true,
             describe: true,
+            comments: true,
+            attachments: false,
         }
     }
 
@@ -617,6 +683,108 @@ impl TrackerProvider for GitHub {
             .map(str::trim)
             .filter(|b| !b.is_empty())
             .map(FullDescription::capped))
+    }
+
+    async fn comments(
+        &self,
+        r: &ItemRef,
+        limit: usize,
+    ) -> Result<Vec<TrackerComment>, TrackerError> {
+        let limit = limit.clamp(1, super::TRACKER_COMMENTS_MAX);
+        let conn = if let ItemRef::Id(id) = r {
+            if !node_id_ok(id) {
+                return Err(TrackerError::Invalid("not a GitHub node id".into()));
+            }
+            let data = self
+                .gql(
+                    &format!(
+                        "query($id: ID!) {{ node(id: $id) {{ ... on Issue {{ \
+                         comments(last: {limit}) {{ nodes {{ {COMMENT_FIELDS} }} }} }} }} }}"
+                    ),
+                    json!({ "id": id }),
+                    CallKind::Other,
+                )
+                .await?;
+            data["node"]["comments"].clone()
+        } else if let Some((o, name, n)) = self.repo_number(r) {
+            let data = self
+                .gql(
+                    &format!(
+                        "query($o: String!, $r: String!, $n: Int!) {{ repository(owner: $o, \
+                         name: $r) {{ issue(number: $n) {{ comments(last: {limit}) {{ nodes \
+                         {{ {COMMENT_FIELDS} }} }} }} }} }}"
+                    ),
+                    json!({ "o": o, "r": name, "n": n }),
+                    CallKind::Other,
+                )
+                .await?;
+            data["repository"]["issue"]["comments"].clone()
+        } else {
+            return Err(TrackerError::Invalid("not an issue of this tracker".into()));
+        };
+        if conn.is_null() {
+            return Err(TrackerError::NotFound);
+        }
+        let prefix = self.web_prefix();
+        let out = conn["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| {
+                TrackerComment::from_parts(
+                    c["id"].as_str()?,
+                    c["author"]["login"].as_str().unwrap_or("ghost"),
+                    c["body"].as_str().unwrap_or_default(),
+                    c["createdAt"].as_str()?,
+                    c["url"].as_str(),
+                    &prefix,
+                )
+            })
+            .collect();
+        Ok(super::newest_comments(out, limit))
+    }
+
+    async fn write(&self, op: &WriteOp) -> Result<WriteOutcome, TrackerError> {
+        let WriteOp::Comment {
+            key,
+            external_id,
+            body,
+        } = op
+        else {
+            return Err(TrackerError::Refused(
+                "GitHub takes comments only from fleet".into(),
+            ));
+        };
+        let r = match external_id {
+            Some(id) => ItemRef::Id(id.clone()),
+            None => ItemRef::parse(key),
+        };
+        let subject = self.issue_node_id(&r).await?;
+        let data = self
+            .gql(
+                "mutation($id: ID!, $body: String!) { addComment(input: { subjectId: $id, \
+                 body: $body }) { commentEdge { node { id url } } } }",
+                json!({ "id": subject, "body": body }),
+                CallKind::Other,
+            )
+            .await?;
+        let node = &data["addComment"]["commentEdge"]["node"];
+        if node.is_null() {
+            return Err(TrackerError::Invalid(
+                "GitHub did not add the comment".into(),
+            ));
+        }
+        let prefix = self.web_prefix();
+        Ok(WriteOutcome {
+            remote_id: node["id"]
+                .as_str()
+                .filter(|id| node_id_ok(id))
+                .map(str::to_string),
+            url: node["url"]
+                .as_str()
+                .filter(|u| u.starts_with(&prefix) && u.len() <= 2048)
+                .map(str::to_string),
+        })
     }
 }
 

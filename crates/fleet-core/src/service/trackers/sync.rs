@@ -330,6 +330,55 @@ impl TrackerSync {
         Some(out)
     }
 
+    /// Drain every tracker's due writes now, outside a read pass (a comment
+    /// just queued, [`super::write_back::nudge`]). Single-flight with
+    /// [`Self::run_pass`]: skipped while a pass runs, which drains anyway.
+    /// The same trackers as a pass (runnable, not waiting out a rate
+    /// limit), the same credential and provider. Returns the writes sent.
+    pub async fn drain_writes(&self, store: &Mutex<Store>) -> usize {
+        if lock(store).is_ok_and(|s| crate::service::loops::paused(&s)) {
+            return 0;
+        }
+        if self.running.swap(true, Ordering::AcqRel) {
+            return 0;
+        }
+        struct Reset<'a>(&'a AtomicBool);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _reset = Reset(&self.running);
+        let now = (self.clock)();
+        let Ok(trackers) = lock(store).and_then(|s| s.list_trackers()) else {
+            return 0;
+        };
+        let mut sent = 0;
+        for t in trackers {
+            let ready = lock(store).and_then(|s| {
+                let waiting = s.tracker_not_before(t.id)?.is_some_and(|nb| nb > now);
+                let due = !s.due_tracker_writes(t.id, now, 1)?.is_empty();
+                Ok((!waiting && due).then(|| s.resolve_tracker_credential(t.id)))
+            });
+            let cred = match ready {
+                Ok(Some(Ok(cred))) => cred,
+                _ => continue,
+            };
+            if !runnable(&t.state) || (cred.is_none() && needs_credential(&t)) {
+                continue;
+            }
+            let Ok(provider) = provider_for(&t, cred, &self.net) else {
+                continue;
+            };
+            if provider.caps().write {
+                sent += super::write_back::drain(&t, provider.as_ref(), store, now)
+                    .await
+                    .sent;
+            }
+        }
+        sent
+    }
+
     /// One tracker's pass; failures are recorded on the tracker, never
     /// returned: one bad tracker must not stop the others.
     pub async fn sync_tracker(&self, t: &TrackerRow, store: &Mutex<Store>) -> TrackerPass {
@@ -894,6 +943,14 @@ fn key_or_drop(k: String) -> Option<String> {
 /// answer — controls these strings, and each one rides in every linked
 /// session's row, row event and `GET /events` frame.
 pub fn to_write(s: WorkItemSnapshot) -> TrackerItemWrite {
+    // The estimate and its unit travel together: no positive number or a
+    // unit fleet does not know drops both.
+    let estimate = s.estimate.and_then(|e| {
+        crate::store::ESTIMATE_UNITS
+            .into_iter()
+            .find(|u| s.estimate_unit.as_deref() == Some(*u))
+            .map(|u| (e, u))
+    });
     TrackerItemWrite {
         external_id: cap(s.external_id, ID_MAX_CHARS),
         key: s.key.and_then(key_or_drop),
@@ -920,6 +977,15 @@ pub fn to_write(s: WorkItemSnapshot) -> TrackerItemWrite {
         due_at: s
             .due_at
             .filter(|d| crate::store::parse_due_date(d).is_some()),
+        priority: s
+            .priority
+            .filter(|p| crate::store::PRIORITIES.contains(&p.as_str())),
+        labels: crate::store::tidy_labels(s.labels)
+            .into_iter()
+            .map(|l| cap(l, FIELD_MAX_CHARS))
+            .collect(),
+        estimate: estimate.map(|(e, _)| e),
+        estimate_unit: estimate.map(|(_, u)| u.to_string()),
         updated_ext: s.updated,
         description: s.description,
         description_chars: s.description_chars,
@@ -1000,6 +1066,15 @@ pub fn spawn_tracker_sync(
                 biased;
                 _ = token.cancelled() => break,
                 _ = ticker.tick() => {}
+                // A write was just queued (a comment to post): drain the
+                // outbox now, not at the next pass.
+                _ = super::write_back::nudged() => {
+                    let n = sync.drain_writes(&store).await;
+                    if n > 0 {
+                        tracing::debug!(sent = n, "[write-back] drained on nudge");
+                    }
+                    continue;
+                }
             }
             if !crate::service::loops::gate("trackers", &store, Some(period)) {
                 continue;

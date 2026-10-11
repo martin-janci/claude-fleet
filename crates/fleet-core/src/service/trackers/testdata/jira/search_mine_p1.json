@@ -11,6 +11,8 @@
         "assignee": { "accountId": "557058:00000000-aaaa-bbbb-cccc-000000000001", "displayName": "Dana Dev" },
         "updated": "2026-09-20T09:00:00.000+0200",
         "project": { "id": "10000", "key": "ABC" },
+        "priority": { "id": "1", "name": "Highest" },
+        "timeoriginalestimate": 28800,
         "description": null,
         "customfield_10020": null
       }
@@ -28,6 +30,10 @@
         "updated": "2026-09-20T10:15:30.123+0200",
         "project": { "id": "10000", "key": "ABC" },
         "fixVersions": [ { "id": "10200", "name": "0.3.0", "released": false } ],
+        "priority": { "id": "2", "name": "High" },
+        "labels": [ "billing", " ledger ", "billing", "" ],
+        "customfield_10016": 5,
+        "timeoriginalestimate": 7200,
         "customfield_10020": [
           { "id": 7, "name": "ABC Sprint 6", "state": "closed", "boardId": 2 },
           { "id": 8, "name": "ABC Sprint 7", "state": "active", "boardId": 2 }

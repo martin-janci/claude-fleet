@@ -24,7 +24,14 @@ import { readPref, writePref } from './prefs';
 import { uncoverWork } from './destination';
 import type { DecisionProposal } from './proposals';
 import { acceptCommandRow, formatCostMicros, sessions, type SessionEvent, type SessionRow } from './sessions';
-import { bumpWorkChanged, workChanged, type WorkChangeKind, type WorkEvidence } from './work';
+import {
+  bumpWorkChanged,
+  workChanged,
+  type EstimateUnit,
+  type WorkChangeKind,
+  type WorkEvidence,
+  type WorkPriority,
+} from './work';
 import { pickTask, selectedTaskId, taskFocused, type TaskSessionLink } from './selection';
 import { trackerStateBadge } from './trackers';
 import { knownProviderShort } from './tracker_health';
@@ -209,6 +216,12 @@ export interface WorkTask {
   assignees?: string[];
   /** The date the work is due, `YYYY-MM-DD` (absent from an older hub). */
   due_at?: string | null;
+  /** `urgent | high | medium | low` (absent from an older hub). */
+  priority?: WorkPriority | null;
+  labels?: string[];
+  /** How big the work is, in `estimate_unit`. */
+  estimate?: number | null;
+  estimate_unit?: EstimateUnit | null;
   mine?: boolean;
   org_id?: number | null;
   org_source?: OrgSource | string;
@@ -418,8 +431,16 @@ export interface TaskDetail {
   jobs?: JobView[];
   /** The steps agents took, per conversation. */
   steps?: StepGroup[];
-  /** What people and agents said about the task in fleet, oldest first. */
+  /** What people and agents said about the task in fleet, oldest first,
+   *  each with its post to the tracker when one was asked for. */
   comments?: TaskComment[];
+  /** The task's tracker by name, when fleet reads its comments
+   *  (`work_tracker_comments`). Absent: fleet's own work, or a provider that
+   *  serves none. */
+  comments_tracker?: string | null;
+  /** The reader may also post a comment to that tracker (its admin turned
+   *  "Post comments" on). */
+  can_post_to_tracker?: boolean;
   /** Files and images on the task, newest first: metadata only (the bytes
    *  are `work_attachment`'s). */
   attachments?: TaskAttachment[];
@@ -443,7 +464,7 @@ export interface TaskAttachment {
   mine?: boolean;
 }
 
-/** One comment on a task (`store::CommentRow`). Kept in fleet, never a tracker's. */
+/** One comment on a task (`store::CommentRow`), written in fleet. */
 export interface TaskComment {
   id: number;
   item_id: number;
@@ -454,6 +475,51 @@ export interface TaskComment {
   created_at: number;
   /** This reader wrote it, so may delete it. */
   mine?: boolean;
+  /** Its post to the tracker, when one was asked for. */
+  tracker_post?: TrackerPost | null;
+}
+
+/** A fleet comment's post to its tracker (`store::TrackerPost`). */
+export interface TrackerPost {
+  state: 'pending' | 'done' | 'failed';
+  /** Why the last attempt failed. */
+  error?: string | null;
+  /** Where the tracker shows it, once sent. */
+  url?: string | null;
+}
+
+/** One comment as the tracker holds it (`trackers::TrackerComment`). */
+export interface TrackerComment {
+  id: string;
+  /** The author's name at the tracker. */
+  author: string;
+  /** Plain text (Jira's rich text flattened). */
+  body: string;
+  created_at: number;
+  url?: string | null;
+}
+
+/** `work_tracker_comments`'s answer. */
+export interface TrackerComments {
+  key: string;
+  /** The tracker's name, as Settings shows it. */
+  tracker: string;
+  provider: string;
+  /** The newest 50, oldest first, without the ones fleet posted. */
+  comments: TrackerComment[];
+  /** The ticket's attachments, oldest first (Asana; absent elsewhere). */
+  attachments?: TrackerAttachment[];
+  can_post?: boolean;
+}
+
+/** One file attached to a ticket, as its tracker lists it. */
+export interface TrackerAttachment {
+  id: string;
+  name: string;
+  /** Opens in the tracker, behind its own sign-in. */
+  url?: string | null;
+  size?: number | null;
+  created_at?: number | null;
 }
 
 /** A native subtask on a task page. */

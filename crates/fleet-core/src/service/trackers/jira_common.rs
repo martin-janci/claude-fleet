@@ -24,6 +24,79 @@ pub fn pr_remote_link_body(url: &str, title: &str) -> Value {
     })
 }
 
+/// PURE: plain text as an Atlassian Document (Jira Cloud's comment body):
+/// a paragraph per blank-line-separated block, a hard break per single
+/// newline. No markup is read: the text is posted as written.
+pub fn text_to_adf(text: &str) -> Value {
+    let text = text.replace("\r\n", "\n");
+    let mut paragraphs = Vec::new();
+    for block in text.split("\n\n") {
+        let block = block.trim_matches('\n');
+        if block.trim().is_empty() {
+            continue;
+        }
+        let mut content = Vec::new();
+        for (i, line) in block.split('\n').enumerate() {
+            if i > 0 {
+                content.push(serde_json::json!({ "type": "hardBreak" }));
+            }
+            if !line.is_empty() {
+                content.push(serde_json::json!({ "type": "text", "text": line }));
+            }
+        }
+        paragraphs.push(serde_json::json!({ "type": "paragraph", "content": content }));
+    }
+    serde_json::json!({ "type": "doc", "version": 1, "content": paragraphs })
+}
+
+/// A Jira comment listing (`GET …/issue/{key}/comment`, API v2 or v3) as
+/// fleet's comments: the body is ADF (v3) or a string (v2), flattened by
+/// the same walk as a description. `key` must already be a validated key:
+/// the URL to each comment is built from it on `site`, never read from the
+/// answer.
+pub(crate) fn comments_of(v: &Value, site: &str, key: &str) -> Vec<super::TrackerComment> {
+    v["comments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let id = match &c["id"] {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                _ => return None,
+            };
+            let body = adf_capped(&c["body"], super::TRACKER_COMMENT_MAX_CHARS)
+                .map(|(t, _)| t)
+                .unwrap_or_default();
+            let url = format!("{site}/browse/{key}?focusedCommentId={id}");
+            super::TrackerComment::from_parts(
+                &id,
+                c["author"]["displayName"].as_str().unwrap_or_default(),
+                &body,
+                c["created"].as_str().unwrap_or_default(),
+                Some(&url),
+                site,
+            )
+        })
+        .collect()
+}
+
+/// The new comment's id and URL from a `POST …/comment` answer.
+pub(crate) fn posted_comment(v: &Value, site: &str, key: &str) -> super::WriteOutcome {
+    let id = match &v["id"] {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+    .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()));
+    super::WriteOutcome {
+        url: id
+            .as_ref()
+            .map(|id| format!("{site}/browse/{key}?focusedCommentId={id}")),
+        remote_id: id,
+    }
+}
+
 /// The sprint field's `schema.custom`.
 pub const SPRINT_FIELD_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-sprint";
 /// The Epic Link field's `schema.custom` (Data Center; Cloud uses `parent`).
@@ -124,6 +197,78 @@ pub(crate) fn due_date(v: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|d| crate::store::parse_due_date(d).is_some())
         .map(str::to_string)
+}
+
+/// Jira's priority (`fields.priority`, `{ "name": "High", … }`) → fleet's
+/// `urgent | high | medium | low`. The names of Jira's default schemes and
+/// of the older Data Center one; a site's own names (`P1`) are `None`
+/// rather than a guess.
+pub(crate) fn priority(v: &Value) -> Option<String> {
+    let name = v["name"].as_str()?.trim().to_ascii_lowercase();
+    let p = match name.as_str() {
+        "highest" | "blocker" | "critical" => "urgent",
+        "high" | "major" => "high",
+        "medium" => "medium",
+        "low" | "lowest" | "minor" | "trivial" => "low",
+        _ => return None,
+    };
+    Some(p.to_string())
+}
+
+/// `fields.labels` (an array of strings) → the label names, in order.
+pub(crate) fn labels(v: &Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The names a story-points field goes by: company-managed projects'
+/// "Story Points", team-managed ones' "Story point estimate".
+const STORY_POINTS_NAMES: [&str; 2] = ["story points", "story point estimate"];
+
+/// The story-points custom field's id among `/field`'s answer: a number
+/// field named as [`STORY_POINTS_NAMES`] (a `…:float` custom field, or
+/// Jira Software's own `jsw-story-points`), the first name winning when a
+/// site has both. `None` when the site has none.
+pub(crate) fn story_points_field(fields: &Value) -> Option<String> {
+    let fs = fields.as_array()?;
+    STORY_POINTS_NAMES.iter().find_map(|want| {
+        fs.iter()
+            .find(|f| {
+                let custom = f["schema"]["custom"].as_str().unwrap_or_default();
+                let number = f["schema"]["type"] == "number" || custom.ends_with(":float");
+                f["custom"] != false
+                    && number
+                    && f["name"]
+                        .as_str()
+                        .is_some_and(|n| n.trim().eq_ignore_ascii_case(want))
+            })
+            .and_then(|f| f["id"].as_str())
+            .map(str::to_string)
+    })
+}
+
+/// The estimate: the story points when the field has a number, else the
+/// original time estimate (`timeoriginalestimate`, seconds) in hours.
+/// `(None, None)` when neither is set.
+pub(crate) fn estimate(
+    points: &Value,
+    original_secs: &Value,
+) -> (Option<crate::store::Estimate>, Option<String>) {
+    use crate::store::Estimate;
+    if let Some(p) = points.as_f64().and_then(Estimate::new) {
+        return (Some(p), Some("points".into()));
+    }
+    match original_secs
+        .as_f64()
+        .and_then(|s| Estimate::new(s / 3600.0))
+    {
+        Some(h) => (Some(h), Some("hours".into())),
+        None => (None, None),
+    }
 }
 
 /// The sprint field's value → (the current sprint's name, it is active). An

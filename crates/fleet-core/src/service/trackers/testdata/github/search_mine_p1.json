@@ -14,6 +14,7 @@
           "state": "OPEN",
           "stateReason": null,
           "milestone": { "title": "v0.3" },
+          "labels": { "nodes": [ { "name": "bug" }, { "name": "auth" } ] },
           "updatedAt": "2026-09-21T09:30:00Z",
           "body": "Login fails after the token refresh.\r\n\r\nSteps: \u2026",
           "repository": {

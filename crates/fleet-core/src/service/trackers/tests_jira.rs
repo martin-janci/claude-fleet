@@ -35,6 +35,7 @@ fn config() -> TrackerConfig {
         key_prefixes: vec!["ABC".into(), "TEAM".into()],
         sprint_projects: vec!["ABC".into()],
         sprint_field: Some("customfield_10020".into()),
+        points_field: Some("customfield_10016".into()),
         ..Default::default()
     }
 }
@@ -83,6 +84,11 @@ async fn probe_learns_identity_site_prefixes_the_sprint_field_and_sprint_project
         c.sprint_field.as_deref(),
         Some("customfield_10020"),
         "found by schema.custom, not by the field named Sprint"
+    );
+    assert_eq!(
+        c.points_field.as_deref(),
+        Some("customfield_10016"),
+        "the number field, not the text one named Story Points"
     );
     assert_eq!(c.sprint_projects, vec!["ABC"], "sprints are per project");
     // Every request carried Basic auth and nothing was sent anywhere else.
@@ -1035,6 +1041,76 @@ async fn a_via_host_tracker_is_read_through_curl_on_its_host() {
         t.send(evil).await,
         Err(TransportError::Refused(_))
     ));
+}
+
+#[test]
+fn jira_priority_names_map_onto_fleets_four() {
+    for (name, want) in [
+        ("Highest", Some("urgent")),
+        ("Blocker", Some("urgent")),
+        ("Critical", Some("urgent")),
+        ("High", Some("high")),
+        ("Major", Some("high")),
+        ("Medium", Some("medium")),
+        (" medium ", Some("medium")),
+        ("Low", Some("low")),
+        ("Lowest", Some("low")),
+        ("Minor", Some("low")),
+        ("Trivial", Some("low")),
+        ("P1", None),
+        ("", None),
+    ] {
+        assert_eq!(
+            crate::service::trackers::jira_common::priority(&json!({ "name": name })).as_deref(),
+            want,
+            "{name:?}"
+        );
+    }
+    assert_eq!(
+        crate::service::trackers::jira_common::priority(&Value::Null),
+        None
+    );
+}
+
+#[test]
+fn priority_labels_and_estimate_are_asked_for_and_read() {
+    let f = FakeTransport::new();
+    let j = jira(&f);
+    for want in [
+        "priority",
+        "labels",
+        "timeoriginalestimate",
+        "customfield_10016",
+    ] {
+        assert!(j.fields().iter().any(|x| x == want), "{want}");
+    }
+    let page = fixture("search_mine_p1.json");
+    let s = |i: usize| j.snapshot(&page["issues"][i]).unwrap();
+    // ABC-101: High, its labels, and story points over its time estimate.
+    let story = s(1);
+    assert_eq!(story.priority.as_deref(), Some("high"));
+    assert_eq!(story.labels, vec!["billing", " ledger ", "billing", ""]);
+    assert_eq!(
+        (story.estimate.map(|e| e.0), story.estimate_unit.as_deref()),
+        (Some(5.0), Some("points"))
+    );
+    // Stored tidied: trimmed, each once, nothing empty.
+    let w = crate::service::trackers::sync::to_write(story);
+    assert_eq!(w.labels, vec!["billing", "ledger"]);
+    // ABC-100: Highest, no points, 28800 s of original estimate = 8 h.
+    let epic = s(0);
+    assert_eq!(epic.priority.as_deref(), Some("urgent"));
+    assert!(epic.labels.is_empty());
+    assert_eq!(
+        (epic.estimate.map(|e| e.0), epic.estimate_unit.as_deref()),
+        (Some(8.0), Some("hours"))
+    );
+    // ABC-102 has none of them.
+    let done = s(2);
+    assert_eq!(
+        (done.priority, done.estimate, done.estimate_unit),
+        (None, None, None)
+    );
 }
 
 #[test]

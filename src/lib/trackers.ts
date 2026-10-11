@@ -8,7 +8,7 @@
 import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { acceptCommandRow, type SessionRow } from './sessions';
-import { bumpWorkChanged } from './work';
+import { bumpWorkChanged, type EstimateUnit, type WorkPriority } from './work';
 import { confidenceWord } from './ai_proposal';
 import { offerRuleAfterStart } from './rule_offer_toast';
 
@@ -55,8 +55,9 @@ export interface TrackerSettings {
   /** GitHub Enterprise Server (work graph M11.4): the instance `gh
    *  --hostname` is pointed at, `host[:port]`. Absent: github.com. */
   hostname?: string | null;
-  /** Jira (work graph M13.4e, D3): what fleet may write. Absent: nothing. */
-  write_back?: { pr_remote_link?: boolean };
+  /** What fleet may write (work graph M13.4e, D3): a PR link (Jira only)
+   *  and a person's comment (every provider). Absent: nothing. */
+  write_back?: { pr_remote_link?: boolean; comments?: boolean };
 }
 
 /** A tracker as every read returns it: never a secret, only a hint. */
@@ -108,6 +109,12 @@ export interface WorkItemRow {
   assignees?: string[];
   /** The date the work is due, `YYYY-MM-DD` (absent from an older hub). */
   due_at?: string | null;
+  /** `urgent | high | medium | low` (absent from an older hub). */
+  priority?: WorkPriority | null;
+  labels?: string[];
+  /** How big the work is, in `estimate_unit`. */
+  estimate?: number | null;
+  estimate_unit?: EstimateUnit | null;
   iteration?: string | null;
   updated_ext?: number | null;
   status_changed_at?: number | null;

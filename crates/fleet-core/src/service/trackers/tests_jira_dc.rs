@@ -37,6 +37,7 @@ fn config() -> TrackerConfig {
         sprint_projects: vec!["PLAT".into()],
         sprint_field: Some("customfield_10100".into()),
         epic_field: Some("customfield_10101".into()),
+        points_field: Some("customfield_10106".into()),
         ..Default::default()
     }
 }
@@ -304,6 +305,7 @@ async fn the_probe_finds_the_epic_link_and_sprint_fields_by_schema() {
         "not the decoy"
     );
     assert_eq!(c.epic_field.as_deref(), Some("customfield_10101"));
+    assert_eq!(c.points_field.as_deref(), Some("customfield_10106"));
     assert_eq!(c.sprint_projects, vec!["PLAT"]);
     assert_eq!(c.tz.as_deref(), Some("Europe/Bratislava"));
     let views: Vec<String> = d
@@ -886,6 +888,31 @@ async fn the_admin_settings_reach_the_real_transport() {
         .await
         .unwrap_err();
     assert!(matches!(e, TransportError::Refused(_)), "{e}");
+}
+
+#[test]
+fn data_center_reads_priority_labels_and_story_points() {
+    let f = FakeTransport::new();
+    let j = dc(&f);
+    for want in [
+        "priority",
+        "labels",
+        "timeoriginalestimate",
+        "customfield_10106",
+    ] {
+        assert!(j.fields().iter().any(|x| x == want), "{want}");
+    }
+    let page = fixture("jira_dc", "search_mine_p1.json");
+    let epic = j.snapshot(&page["issues"][0]).unwrap();
+    assert_eq!(epic.priority.as_deref(), Some("urgent"), "Blocker");
+    assert_eq!(epic.estimate, None);
+    let story = j.snapshot(&page["issues"][1]).unwrap();
+    assert_eq!(story.priority.as_deref(), Some("low"), "Minor");
+    assert_eq!(story.labels, vec!["export"]);
+    assert_eq!(
+        (story.estimate.map(|e| e.0), story.estimate_unit.as_deref()),
+        (Some(3.0), Some("points"))
+    );
 }
 
 #[test]

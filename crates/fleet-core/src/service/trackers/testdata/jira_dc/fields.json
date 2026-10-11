@@ -25,6 +25,16 @@
     }
   },
   {
+    "id": "customfield_10106",
+    "name": "Story Points",
+    "custom": true,
+    "schema": {
+      "type": "number",
+      "custom": "com.atlassian.jira.plugin.system.customfieldtypes:float",
+      "customId": 10106
+    }
+  },
+  {
     "id": "customfield_10101",
     "name": "Epic Link",
     "custom": true,
