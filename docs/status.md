@@ -535,7 +535,12 @@ include_local }` adds own tasks. Link windows (P-7) need no migration:
 `work_journal.rs`'s `WINDOW_LO` / `WINDOW_HI` bound a link's journal by the
 switches around it, and a link no switch touched reads as before. The
 desktop's attach picker (`AttachPicker.svelte`, `attach.ts`) and Work on
-task… (`SessionTasks.svelte`) read them. Not yet: the new task's brief
+task… (`SessionTasks.svelte`) read them. An agent knows its own tasks
+from its pane (per-host token + `X-Fleet-Pane`, `FleetTools::own_session`):
+`whoami {}`, `work { session_tasks }` without `session_id`, and
+`list_tasks { mine | worker_session_id }`; `session_tasks`, `work { task }`
+and `list_tasks` mark the caller's own rows (`is_self`,
+`is_self_requester` / `is_self_worker`). Not yet: the new task's brief
 waiting for the next prompt (J3), own tasks in ⌘K.
 C0: the operator is born with the `fleet-brainstorm` skill
 (`skills/fleet-brainstorm/SKILL.md`, written to its directory's

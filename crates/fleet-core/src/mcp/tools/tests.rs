@@ -2101,7 +2101,10 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     );
     // Nothing was recorded.
     let s = t.store.lock().unwrap();
-    assert!(s.list_tasks(None, None, None, 10).unwrap().is_empty());
+    assert!(s
+        .list_tasks(crate::store::TaskEnd::Any, None, None, 10)
+        .unwrap()
+        .is_empty());
 }
 
 /// An existing worker that is blocked on a dialog cannot be dispatched into:
@@ -2148,7 +2151,9 @@ async fn dispatch_task_into_a_blocked_worker_fails_the_task_and_sends_nothing() 
         .expect_err("a blocked worker cannot be dispatched into");
     assert!(e.message.starts_with("E_INVALID_STATE"), "{}", e.message);
     let s = t.store.lock().unwrap();
-    let tasks = s.list_tasks(None, None, None, 10).unwrap();
+    let tasks = s
+        .list_tasks(crate::store::TaskEnd::Any, None, None, 10)
+        .unwrap();
     assert_eq!(tasks.len(), 1, "the task row is created, then failed");
     assert_eq!(tasks[0].state, "failed");
     assert!(
@@ -13191,6 +13196,8 @@ async fn list_tasks_omits_a_task_whose_ends_another_person_cannot_see() {
             Extension(caller),
             Parameters(ListTasksParams {
                 requester_session_id: None,
+                worker_session_id: None,
+                mine: None,
                 state: None,
                 limit: None,
             }),
@@ -13227,6 +13234,163 @@ async fn list_tasks_omits_a_task_whose_ends_another_person_cannot_see() {
         "an invisible task answers as an unknown one: {}",
         e.message
     );
+}
+
+/// An agent knows itself from its pane: `whoami` with no name answers the
+/// row its `X-Fleet-Pane` proves, and refuses a caller that proves none.
+#[tokio::test]
+async fn whoami_without_a_name_answers_the_callers_own_pane() {
+    let g = gate_fixture();
+    let a_row = g.a_row;
+    let t = test_tools(g.store);
+    let ask = |who: Caller| t.whoami(Extension(who), Parameters(WhoamiParams { tmux_name: None }));
+    let out = ask(pane_caller(Some("%7"))).await.expect("its own pane");
+    let row: serde_json::Value = serde_json::from_str(text_of(&out.content[0])).unwrap();
+    assert_eq!(row["id"].as_i64(), Some(a_row));
+    for who in [
+        pane_caller(None),
+        pane_caller(Some("%99")),
+        Caller::master(),
+    ] {
+        let e = ask(who).await.expect_err("no pane proven");
+        assert!(e.message.starts_with("E_NOT_A_SESSION"), "{}", e.message);
+    }
+}
+
+/// `list_tasks { mine: true }` is the agent's own tasks — dispatched or
+/// given to it — each naming which end the caller is; without a proven
+/// pane it refuses rather than listing everything.
+#[tokio::test]
+async fn list_tasks_mine_lists_the_callers_own_tasks_and_marks_its_end() {
+    let g = gate_fixture();
+    let (a_row, found) = (g.a_row, g.found);
+    let sent =
+        crate::service::tasks::create_task(&g.store, Some(a_row), Some(found), "do it").unwrap();
+    let given =
+        crate::service::tasks::create_task(&g.store, Some(found), Some(a_row), "for you").unwrap();
+    let other = crate::service::tasks::create_task(&g.store, Some(found), Some(found), "not yours")
+        .unwrap();
+    let t = test_tools(g.store);
+    let page = |caller: Caller, mine: Option<bool>, worker: Option<i64>| {
+        t.list_tasks(
+            Extension(caller),
+            Parameters(ListTasksParams {
+                requester_session_id: None,
+                worker_session_id: worker,
+                mine,
+                state: None,
+                limit: None,
+            }),
+        )
+    };
+    let rows = |out: &CallToolResult| -> Vec<serde_json::Value> {
+        serde_json::from_str(text_of(&out.content[0])).expect("an array")
+    };
+    let me = pane_caller(Some("%7"));
+
+    let mine = rows(&page(me.clone(), Some(true), None).await.unwrap());
+    let ids: Vec<i64> = mine.iter().filter_map(|r| r["id"].as_i64()).collect();
+    assert_eq!(ids, vec![given.id, sent.id], "newest first, only its own");
+    assert_eq!(mine[0]["is_self_worker"], true);
+    assert!(mine[0].get("is_self_requester").is_none());
+    assert_eq!(mine[1]["is_self_requester"], true);
+    assert!(mine[1].get("is_self_worker").is_none());
+
+    // The worker filter: what this session was given to do.
+    let given_to = rows(&page(me.clone(), None, Some(a_row)).await.unwrap());
+    assert_eq!(given_to.len(), 1);
+    assert_eq!(given_to[0]["id"].as_i64(), Some(given.id));
+
+    // The full page still marks the caller's end, and only on its rows.
+    let all = rows(&page(me.clone(), None, None).await.unwrap());
+    let o = all
+        .iter()
+        .find(|r| r["id"].as_i64() == Some(other.id))
+        .expect("an unclaimed pair is the host's to see");
+    assert!(o.get("is_self_requester").is_none() && o.get("is_self_worker").is_none());
+
+    let e = page(pane_caller(None), Some(true), None)
+        .await
+        .expect_err("no pane, no self");
+    assert!(e.message.starts_with("E_NOT_A_SESSION"), "{}", e.message);
+    let e = page(me, Some(true), Some(a_row))
+        .await
+        .expect_err("one filter at a time");
+    assert!(e.message.starts_with("E_INVALID"), "{}", e.message);
+}
+
+/// `work { session_tasks }` without `session_id` reads the caller's own
+/// session and says so (`is_self`, on the page and on every link); another
+/// session's page carries no such mark.
+#[tokio::test]
+async fn session_tasks_defaults_to_the_callers_own_session() {
+    use crate::service::work::{WorkArgs, WorkLinkArgs};
+    let g = gate_fixture();
+    let (a_row, found) = (g.a_row, g.found);
+    let t = test_tools(g.store);
+    let me = pane_caller(Some("%7"));
+    for sid in [a_row, found] {
+        t.work_link(
+            Extension(me.clone()),
+            Parameters(WorkLinkArgs {
+                session_id: Some(sid),
+                action: "link".into(),
+                key: Some("ABC-1".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("a host token drives its own and the unclaimed row");
+    }
+    let read = |who: Caller, session_id: Option<i64>| {
+        t.work(
+            Extension(who),
+            Parameters(WorkArgs {
+                action: Some("session_tasks".into()),
+                session_id,
+                ..Default::default()
+            }),
+        )
+    };
+    let own = result_json(&read(me.clone(), None).await.unwrap());
+    assert_eq!(own["session_id"].as_i64(), Some(a_row));
+    assert_eq!(own["is_self"], true);
+    let links = own["links"].as_array().expect("links");
+    assert_eq!(links.len(), 1, "{own}");
+    assert_eq!(links[0]["is_self"], true);
+    assert_eq!(links[0]["task"]["key"], "ABC-1", "{own}");
+
+    let theirs = result_json(&read(me.clone(), Some(found)).await.unwrap());
+    assert!(theirs.get("is_self").is_none(), "{theirs}");
+
+    // `work { task }` marks which of the task's sessions is the caller.
+    let task_id = links[0]["task"]["task_id"]
+        .as_str()
+        .expect("task_id")
+        .to_string();
+    let detail = result_json(
+        &t.work(
+            Extension(me),
+            Parameters(WorkArgs {
+                action: Some("task".into()),
+                task_id: Some(task_id),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap(),
+    );
+    let sessions = detail["task"]["sessions"].as_array().expect("sessions");
+    assert_eq!(sessions.len(), 2, "{detail}");
+    for l in sessions {
+        let mine = l["session_id"].as_i64() == Some(a_row);
+        assert_eq!(l.get("is_self").is_some(), mine, "{l}");
+    }
+
+    let e = read(pane_caller(None), None)
+        .await
+        .expect_err("no session named, none proven");
+    assert!(e.message.starts_with("E_INVALID"), "{}", e.message);
 }
 
 // ---- multi-user M1, T11: a long poll re-checks before it answers ----
@@ -14835,7 +14999,7 @@ async fn whoami_never_names_another_persons_same_named_session() {
         t.whoami(
             Extension(who),
             Parameters(WhoamiParams {
-                tmux_name: "dev".to_string(),
+                tmux_name: Some("dev".to_string()),
             }),
         )
     };
@@ -14902,7 +15066,7 @@ async fn a_host_tokens_whoami_finds_an_unclaimed_row_and_its_own_proven_pane() {
         t.whoami(
             Extension(who),
             Parameters(WhoamiParams {
-                tmux_name: name.to_string(),
+                tmux_name: Some(name.to_string()),
             }),
         )
     };
@@ -15072,7 +15236,7 @@ async fn dispatching_a_task_in_another_persons_name_needs_drive() {
     {
         let s = t.store.lock().unwrap();
         assert!(
-            s.list_tasks(Some(a_row), None, None, 50)
+            s.list_tasks(crate::store::TaskEnd::Requester(a_row), None, None, 50)
                 .unwrap()
                 .is_empty(),
             "no task row names Ada's session"

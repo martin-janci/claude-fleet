@@ -301,17 +301,18 @@ impl FleetTools {
         }))
     }
 
-    #[tool(description = "Find your own fleet row from your tmux session \
-        name (`tmux display-message -p '#S'`). E_NOTFOUND until fleet has \
-        reconciled it; E_AMBIGUOUS when the name exists on several hosts: \
-        pick yours from the error's {session_id, host_alias} candidates and \
-        use session_id from then on.")]
+    #[tool(description = "Find your own fleet row. From inside a fleet \
+        session call it with no argument: your pane names you. Else pass \
+        your tmux session name (`tmux display-message -p '#S'`). E_NOTFOUND \
+        until fleet has reconciled it; E_AMBIGUOUS when the name exists on \
+        several hosts: pick yours from the error's {session_id, host_alias} \
+        candidates and use session_id from then on.")]
     pub(super) async fn whoami(
         &self,
         Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<WhoamiParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("whoami", &format!("tmux={}", p.tmux_name));
+        audit("whoami", &format!("tmux={:?}", p.tmux_name));
         // Scoped so the store guard is released before
         // `stored_local_fleet_id` takes it again below — `Store` is a plain
         // (non-reentrant) `std::sync::Mutex`.
@@ -323,8 +324,27 @@ impl FleetTools {
             // `(session_id, host_alias)`, which is metadata of somebody's
             // private session (rules 1 and 6).
             let scope = caller.view_scope(&s).map_err(to_mcp_err)?;
-            let row = sessions::find_session_by_tmux_name_scoped(&s, &p.tmux_name, &scope)
-                .map_err(to_mcp_err)?;
+            let row = match p.tmux_name.as_deref() {
+                Some(name) => sessions::find_session_by_tmux_name_scoped(&s, name, &scope)
+                    .map_err(to_mcp_err)?,
+                // No name: the row the caller's pane proves it is in. Only a
+                // per-host token's pane counts (`ViewScope::proven_session`).
+                None => scope
+                    .proven_session
+                    .filter(|_| caller.host_alias.is_some())
+                    .map(|id| s.get_session_by_id(id))
+                    .transpose()
+                    .map_err(|e| to_mcp_err(IpcError::from(e)))?
+                    .flatten()
+                    .ok_or_else(|| {
+                        mcp_err(
+                            codes::E_NOT_A_SESSION,
+                            "whoami without tmux_name answers only from inside a fleet \
+                             session (its per-host token and X-Fleet-Pane); pass tmux_name",
+                            None,
+                        )
+                    })?,
+            };
             let controller = s
                 .get_controller()
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?;

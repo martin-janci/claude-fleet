@@ -786,7 +786,9 @@ impl FleetTools {
 
     #[tool(description = "Tasks, newest first. Read-only. A per-host token \
         sees only tasks it requested from its host or whose worker is on its \
-        host.")]
+        host. `mine: true` from inside a fleet session lists the tasks your \
+        own session dispatched or was given; every row names your end \
+        (`is_self_requester` / `is_self_worker`).")]
     pub(super) async fn list_tasks(
         &self,
         Extension(caller): Extension<Caller>,
@@ -795,10 +797,37 @@ impl FleetTools {
         audit(
             "list_tasks",
             &format!(
-                "requester_session_id={:?} state={:?} limit={:?}",
-                p.requester_session_id, p.state, p.limit
+                "requester_session_id={:?} worker_session_id={:?} mine={:?} state={:?} \
+                 limit={:?}",
+                p.requester_session_id, p.worker_session_id, p.mine, p.state, p.limit
             ),
         );
+        let own = self.own_session(&caller)?;
+        let end = match (
+            p.mine.unwrap_or(false),
+            p.requester_session_id,
+            p.worker_session_id,
+        ) {
+            (true, None, None) => crate::store::TaskEnd::Either(own.ok_or_else(|| {
+                mcp_err(
+                    codes::E_NOT_A_SESSION,
+                    "list_tasks mine: true answers only from inside a fleet session (its \
+                     per-host token and X-Fleet-Pane); pass requester_session_id or \
+                     worker_session_id",
+                    None,
+                )
+            })?),
+            (false, None, None) => crate::store::TaskEnd::Any,
+            (false, Some(r), None) => crate::store::TaskEnd::Requester(r),
+            (false, None, Some(w)) => crate::store::TaskEnd::Worker(w),
+            _ => {
+                return Err(mcp_err(
+                    "E_INVALID",
+                    "list_tasks takes one of requester_session_id, worker_session_id, mine",
+                    None,
+                ))
+            }
+        };
         // A `TaskRow` carries the `prompt` one session sent another and
         // the `result` that came back: session content, so the page is cut
         // against the caller's own view scope and not against its host
@@ -810,7 +839,7 @@ impl FleetTools {
         };
         let rows = tasks::list_tasks_for(
             &self.store,
-            p.requester_session_id,
+            end,
             p.state.as_deref(),
             p.limit.unwrap_or(50),
             caller.host_alias.as_deref(),
@@ -823,7 +852,25 @@ impl FleetTools {
                 .map(|t| tasks::mark_task_result(&s, t))
                 .collect()
         };
-        ok_json_compact(&rows)
+        let Some(own) = own else {
+            return ok_json_compact(&rows);
+        };
+        // From inside a session: say which end of each task is the caller.
+        let mut v = serde_json::to_value(&rows)
+            .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+        if let serde_json::Value::Array(items) = &mut v {
+            for (item, t) in items.iter_mut().zip(&rows) {
+                if let serde_json::Value::Object(map) = item {
+                    if t.requester_session_id == Some(own) {
+                        map.insert("is_self_requester".into(), true.into());
+                    }
+                    if t.worker_session_id == Some(own) {
+                        map.insert("is_self_worker".into(), true.into());
+                    }
+                }
+            }
+        }
+        ok_json_compact(&v)
     }
 
     #[tool(description = "Cancel a queued or running task (E_TASK_TERMINAL \
@@ -1153,17 +1200,36 @@ impl FleetTools {
                             .is_some_and(|row| row.written_by(view_scope.person, &label));
                     }
                 }
+                // Which of its sessions is the caller's own.
+                if let Some(own) = self.own_session(&caller)? {
+                    for l in &mut detail.task.sessions {
+                        l.is_self = l.session_id == Some(own);
+                    }
+                }
                 ok_json_compact(&detail)
             }
             WorkAction::SessionTasks => {
-                let id = args
-                    .session_id
-                    .ok_or_else(|| mcp_err("E_INVALID", "session_tasks needs session_id", None))?;
+                // Without `session_id`, the caller's own session: an agent
+                // asking "what am I working on" from its own pane.
+                let own = self.own_session(&caller)?;
+                let id = args.session_id.or(own).ok_or_else(|| {
+                    mcp_err(
+                        "E_INVALID",
+                        "session_tasks needs session_id (it defaults to your own session only \
+                         when called from inside a fleet session: its per-host token and \
+                         X-Fleet-Pane)",
+                        None,
+                    )
+                })?;
                 // `watch`: the Work view's read of one session's tasks.
                 self.resolve_target_row(&caller, Some(id), None, None, Reach::Read, "the session")?;
-                ok_json_compact(
-                    &w::view::session_tasks(self.reader(), &view_scope, id).map_err(to_mcp_err)?,
-                )
+                let mut tasks =
+                    w::view::session_tasks(self.reader(), &view_scope, id).map_err(to_mcp_err)?;
+                tasks.is_self = own == Some(id);
+                for l in &mut tasks.links {
+                    l.link.is_self = tasks.is_self;
+                }
+                ok_json_compact(&tasks)
             }
             WorkAction::Review => ok_json_compact(
                 &w::view::review(
@@ -2717,6 +2783,19 @@ impl FleetTools {
     ) -> Result<crate::service::view_scope::ViewScope, McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
         caller.view_scope(&s).map_err(to_mcp_err)
+    }
+
+    /// The caller's OWN session: the row a per-host token proves it stands
+    /// in (`X-Fleet-Pane` matched against `sessions.tmux_pane_id`, see
+    /// [`crate::service::view_scope::ViewScope::proven_session`]). `None`
+    /// for the master, a paired device, and an agent whose pane matches no
+    /// row (or several). It only ever picks a row out of what the caller
+    /// already sees; it never widens a gate.
+    pub(super) fn own_session(&self, caller: &Caller) -> Result<Option<i64>, McpError> {
+        if caller.host_alias.is_none() {
+            return Ok(None);
+        }
+        Ok(self.view_scope(caller)?.proven_session)
     }
 }
 

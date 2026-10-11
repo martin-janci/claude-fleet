@@ -8,7 +8,7 @@ use fleet_core::ipc_error::lock;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::tasks;
 use fleet_core::service::view_scope::ViewScope;
-use fleet_core::store::{Store, TaskRow};
+use fleet_core::store::{Store, TaskEnd, TaskRow};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
@@ -63,7 +63,7 @@ pub(crate) mod routed {
                 // scope of the token this desktop pairs with.
                 tasks::list_tasks_for(
                     store,
-                    requester_session_id,
+                    requester_session_id.map_or(TaskEnd::Any, TaskEnd::Requester),
                     state.as_deref(),
                     limit,
                     None,
