@@ -1,6 +1,6 @@
 # Session environment variables and secrets — design
 
-Date: 2026-10-11 · Status: design approved, spec under review
+Date: 2026-10-11 · Status: approved; amended by *Revisions after the code survey* (that section wins where they differ)
 
 ## Problem
 
@@ -222,3 +222,88 @@ One branch, landing in this order: migration and store → service and launch
 → MCP tool → Tauri commands and routing → UI page → docs (`docs/concepts.md`
 gains an *Environment* section; `docs/status.md` an entry). The desktop and
 its hub ship together (contract bump).
+
+## Revisions after the code survey
+
+A survey of the code for the implementation plan found ten places where
+the sections above do not hold. Where they differ, this section wins.
+
+1. **Error code.** Validation uses the existing `codes::E_INVALID`. There
+   is no `E_INVALID_INPUT`. `E_ENV_UNRESOLVED` is still new.
+2. **The file is keyed by a nonce, not the session id.** At create, the
+   session row is inserted by reconcile *after* `tmux.new_session`
+   (`lifecycle.rs:1154` → `:1166`), so no id exists yet. The env file is
+   `~/.claude-fleet/env/<uuid-v4>.sh`. `new_session { env }` values are
+   used in memory for the first launch, then stored as session-scope rows
+   once the row exists.
+3. **The pane does not delete the file; the tick sweep does.** The same
+   `pane_cmd` string is handed to more than one launcher on one operation:
+   - create → `repair::ensure_for_new_session` and then `new_session`;
+   - move → `ensure_target_workspace` and then `start_target`;
+   - restart → `new_session` / `respawn_pane_in` / `restart_session`.
+
+   A file that deleted itself on first read would silently drop the
+   environment on whichever launcher ran second. Instead:
+   - every launch operation writes a fresh nonce file;
+   - its host is recorded in the settings row `internal.env_files_hosts`,
+     which survives a hub restart;
+   - the tick runs `find … -mmin +10 -delete` there.
+
+   A secret therefore rests on the host in a 0600 file for at most about 10
+   minutes plus one tick. That is shorter than form secrets, which stay
+   until their form expires.
+4. **The prefix wraps the finished pane command.** It is not built into
+   `ClaudeLaunch` or the adapters. `service::env::wrap(path, pane_cmd)`
+   prepends:
+
+   ```sh
+   f="$HOME"/'.claude-fleet/env/<nonce>.sh'; if [ -r "$f" ]; then . "$f"; fi; unset f;
+   ```
+
+   - It works the same for claude, codex, agy and shell sessions. This
+     includes `recreate_pane_command`'s shell branch, which drops `launch`.
+   - `ClaudeLaunch` and its 13 struct literals are left untouched.
+   - `~` does not expand inside quotes, so the path uses the
+     `"$HOME"/'rest'` form.
+5. **Every launch site.** `prepare` runs immediately before the pane
+   command is handed to a launcher:
+   - create (`lifecycle.rs:1121`, before `ensure_for_new_session`);
+   - restart (`:2110`, before all three branches);
+   - recreate (`:2469`);
+   - explicit repair (`repair.rs:2469`);
+   - review sessions (`review.rs:102`);
+   - move's target (`move_session/mod.rs:2855`).
+   `restart_unrepaired` receives the already-wrapped command from restart.
+6. **References only from the master.** As review r04 S1 decided for
+   catalog secrets (`orchestration.rs:2650-2661`), a device may not set a
+   `credential_ref`: it would make the hub read its own files or env. Plain
+   values and secrets from a trusted device go through
+   `owner_device_admin`.
+7. **UI is a resource page.**
+   - The page is `settings.env`, a `master_detail` resource `env_var`.
+   - Its list command takes no arguments, so scope is a table filter and
+     group, not tabs.
+   - There is no session panel in v1; session scope is set through MCP and
+     forms.
+   - The create action's `value` parameter is `ParamKind::Secret`, so it is
+     masked as typed; a `secret` toggle decides whether it is ever listed.
+   - On a paired desktop, resource pages are read-only (`docs/pages.md`),
+     like every other resource page. Editing from a paired desktop goes
+     through Control's chat or MCP until resource pages gain hub writes.
+8. **Contract bounds.** `CONTRACT_REVISION` and `MAX_HUB_CONTRACT` go to 18;
+   `MIN_HUB_CONTRACT` stays at 16. Revision 17 set that precedent: a new
+   routed tool does not make older hubs unusable, it only makes that
+   command fail on them.
+9. **Host merges carry host-scope rows.** `Store::merge_host_alias` moves
+   `scope='host'` rows. The `into` host's own entry wins on a name clash.
+10. **Masking reach.** The `*_secret_literals` lists feed only the
+    diagnostics bundle (`service/diagnostics.rs`). `env_secret_literals`
+    joins them there. There is no global log masker to feed.
+
+Also:
+
+- `read_credential_ref` trims the value it reads, so leading and trailing
+  whitespace of a referenced value is lost. That is documented, not
+  changed.
+- `new_session`'s `env` is a field on `NewSessionArgs` with
+  `#[serde(default)]`, so all 21 struct literals gain `env: None`.
