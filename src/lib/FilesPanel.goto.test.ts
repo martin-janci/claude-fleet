@@ -83,6 +83,28 @@ describe('FileViewer actions (new layout)', () => {
     expect(get(destination)).toBe('session');
     expect(screen.getByTestId('viewer-copy-path')).toBeTruthy();
     expect(screen.getByTestId('viewer-open-editor')).toBeTruthy();
+    // An empty diff has nothing to ask about.
+    expect(screen.queryByTestId('viewer-ask-diff')).toBeNull();
+  });
+
+  it('Ask Claude about this drafts a message about the shown diff (G7.10)', async () => {
+    const base = invoke.getMockImplementation() as (cmd: string, payload: unknown) => Promise<unknown>;
+    invoke.mockImplementation(async (cmd: string, payload: { args: Record<string, unknown> }) =>
+      cmd === 'repo_diff'
+        ? { path: payload.args.path, diff: '@@ -1 +1 @@\n-a\n+b\n', binary: false, truncated: false }
+        : base(cmd, payload),
+    );
+    sessionView.set('terminal');
+    destination.set('files');
+    render(FilesPanel, { props: { session: { id: 8, host_alias: 'local', tmux_name: 'x' } as SessionRow } });
+    await fireEvent.click(await screen.findByText('README.md'));
+    const ask = await screen.findByTestId('viewer-ask-diff');
+    expect(ask.textContent).toBe('Ask Claude about this');
+    await fireEvent.click(ask);
+    expect(get(composerInsert)).toMatchObject({ sessionId: 8 });
+    expect(get(composerInsert)?.draft).toContain('About the diff of @README.md in the working tree: ');
+    expect(get(sessionView)).toBe('conversation');
+    expect(get(destination)).toBe('session');
   });
 
 });

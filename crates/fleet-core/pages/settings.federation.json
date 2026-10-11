@@ -20,7 +20,8 @@
         { "type": "field", "key": "state" },
         { "type": "field", "key": "role" },
         { "type": "field", "key": "url" },
-        { "type": "field", "key": "last_error" }
+        { "type": "field", "key": "last_error" },
+        { "type": "field", "key": "retry" }
       ]
     },
     {

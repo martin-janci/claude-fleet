@@ -61,7 +61,7 @@ describe('FilesPanel merged branches', () => {
     expect(within(row).getByTestId('branch-merged')).toBeTruthy();
     const main = screen.getByText('main').closest('.brow') as HTMLElement;
     expect(within(main).queryByTestId('branch-merged')).toBeNull();
-    expect(screen.getByText(/1 merged/)).toBeTruthy();
+    expect(screen.getByText(/1 merged and safe to delete/)).toBeTruthy();
   });
 
   it('the Merged filter shows only merged branches, and every row stays reachable', async () => {
@@ -90,6 +90,23 @@ describe('FilesPanel merged branches', () => {
     expect((await screen.findByTestId('delete-merged-notice')).textContent).toContain('kept claude/old');
   });
 
+  it('deletes the merged remote branches on their remote after a confirm (G7.10)', async () => {
+    await openBranches();
+    await fireEvent.click(screen.getByTestId('delete-merged-remote'));
+    const confirm = await screen.findByTestId('confirm-delete-merged');
+    expect(screen.getByRole('dialog').textContent).toContain('origin/claude/worker-guard');
+    expect(invoke.mock.calls.some((c) => c[0] === 'repo_delete_merged_branches')).toBe(false);
+    await fireEvent.click(confirm);
+    await waitFor(() => {
+      const call = invoke.mock.calls.find((c) => c[0] === 'repo_delete_merged_branches');
+      expect((call?.[1] as { args: unknown }).args).toEqual({
+        session_id: 1,
+        names: [],
+        remotes: ['origin/claude/worker-guard'],
+      });
+    });
+  });
+
   it('no Delete merged button when no local branch is merged', async () => {
     invoke.mockImplementation(async (cmd: string) =>
       cmd === 'repo_branches' ? [b('main', { isCurrent: true }), b('wip')] : cmd === 'repo_changes' ? [] : null,
@@ -98,5 +115,6 @@ describe('FilesPanel merged branches', () => {
     await fireEvent.click(await screen.findByText('Branches'));
     await screen.findByText('wip');
     expect(screen.queryByTestId('delete-merged')).toBeNull();
+    expect(screen.queryByTestId('delete-merged-remote')).toBeNull();
   });
 });

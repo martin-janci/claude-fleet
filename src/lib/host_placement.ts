@@ -2,7 +2,7 @@
 // model's host for a project's new session, asked only when the dialog keeps
 // no host for the project and two or more online hosts under their limit are
 // left. Mirrors `service::decide::host_placement`. Off by default; a hub
-// client gets `E_HUB_LOCAL_ONLY` and keeps today's default host.
+// client asks the hub (gap plan G7.3).
 import { invokeCmd, type Result } from './result';
 import type { ProposalLike } from './ai_proposal';
 

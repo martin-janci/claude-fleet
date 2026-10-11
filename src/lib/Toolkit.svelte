@@ -119,6 +119,7 @@
             </p>
           </div>
           <span class="grow"></span>
+          <Button testid="toolkit-add" onclick={() => openAssets({ newKind: TOOLKIT_KIND[tab] })}>+ Add {page.noun}</Button>
           <Button variant="primary" testid="toolkit-sync" onclick={() => openAssets({ command: 'sync' })}
             >Sync all hosts…</Button
           >

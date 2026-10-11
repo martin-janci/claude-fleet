@@ -589,6 +589,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::Routed { tool: "org_admin" },
     ),
     ("list_people", Verdict::Routed { tool: "org_admin" }),
+    ("add_person", Verdict::Routed { tool: "org_admin" }),
     ("rename_person", Verdict::Routed { tool: "org_admin" }),
     ("disable_person", Verdict::Routed { tool: "org_admin" }),
     (
@@ -823,6 +824,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "remove_download",
         },
     ),
+    (
+        "pause_download",
+        Verdict::Routed {
+            tool: "pause_download",
+        },
+    ),
     // Control's Library (9.7) is indexed on the machine that owns the
     // fleet, the hub when paired, beside the downloads; one tool by action.
     ("list_library", Verdict::Routed { tool: "library" }),
@@ -973,6 +980,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "start_rules",
         Verdict::Routed {
             tool: "start_rules",
+        },
+    ),
+    // A wizard left half-way (G7.2) is kept on the hub, so it resumes on
+    // the person's other devices.
+    (
+        "wizard_state",
+        Verdict::Routed {
+            tool: "wizard_state",
         },
     ),
     (
@@ -1347,9 +1362,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "propose_host_placement",
-        Verdict::LocalOnly {
-            instead: "the decision model and the account usage are the hub's while it owns \
-                      the fleet; pick the host as usual",
+        Verdict::Routed {
+            tool: "propose_host_placement",
         },
     ),
     (
@@ -1473,6 +1487,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "control_route_follow",
         Verdict::Routed {
             tool: "control_route",
+        },
+    ),
+    (
+        "resume_or_new_propose",
+        Verdict::Routed {
+            tool: "resume_or_new",
+        },
+    ),
+    (
+        "resume_or_new_follow",
+        Verdict::Routed {
+            tool: "resume_or_new",
         },
     ),
     // ── the pairing itself — about THIS process, either way ─────────────────

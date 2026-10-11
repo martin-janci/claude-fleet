@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import LayerChangeForm from './LayerChangeForm.svelte';
+import { orgs, type OrgDetail } from './orgs';
 
 describe('LayerChangeForm', () => {
   it('creates a context layer in the chosen catalog', async () => {
@@ -18,6 +19,23 @@ describe('LayerChangeForm', () => {
     await fireEvent.input(screen.getByTestId('layer-form-name'), { target: { value: 'ops-2' } });
     await fireEvent.click(screen.getByTestId('layer-form-submit'));
     expect(onsubmit).toHaveBeenCalledWith({ op: 'create', catalog: 'acme', layer: 'ops-2', axis: 'role' });
+  });
+  it('a layer can apply by organisation, to one org, as a context layer (G7.5)', async () => {
+    orgs.set([]);
+    const onsubmit = vi.fn();
+    const { unmount } = render(LayerChangeForm, { mode: 'create', catalogs: ['personal'], catalog: 'personal', onsubmit, oncancel: vi.fn() });
+    expect(screen.getByTestId('layer-form-by-org')).toBeDisabled();
+    unmount();
+    orgs.set([{ name: 'Papaya' }, { name: 'Acme' }] as OrgDetail[]);
+    render(LayerChangeForm, { mode: 'create', catalogs: ['personal'], catalog: 'personal', onsubmit, oncancel: vi.fn() });
+    await fireEvent.click(screen.getByTestId('layer-form-by-org'));
+    expect(screen.queryByTestId('layer-form-axis')).toBeNull();
+    await fireEvent.change(screen.getByTestId('layer-form-org'), { target: { value: 'Acme' } });
+    expect(screen.getByTestId('layer-form-org-note').textContent).toContain('every host of Acme');
+    await fireEvent.input(screen.getByTestId('layer-form-name'), { target: { value: 'acme-tools' } });
+    await fireEvent.click(screen.getByTestId('layer-form-submit'));
+    expect(onsubmit).toHaveBeenCalledWith({ op: 'create', catalog: 'personal', layer: 'acme-tools', axis: 'context', orgs: ['Acme'] });
+    orgs.set([]);
   });
   it('refuses an invalid name before submitting', async () => {
     const onsubmit = vi.fn();

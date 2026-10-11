@@ -93,7 +93,7 @@ export interface ChangesetView {
 }
 
 export type LayerChange =
-  | { op: 'create'; catalog?: string; layer: string; axis?: 'role' | 'context'; description?: string; members?: string[] }
+  | { op: 'create'; catalog?: string; layer: string; axis?: 'role' | 'context'; description?: string; members?: string[]; orgs?: string[] }
   | { op: 'rename'; catalog?: string; layer: string; to: string }
   | { op: 'move'; catalog?: string; member: string; layer: string; to: string };
 
@@ -122,7 +122,7 @@ export interface DriftDiff { host_alias: string; harness: string; files: DriftFi
 
 export interface CommitEntry { sha: string; at: number; author: string; subject: string }
 
-export interface LayerDef { name: string; axis: 'role' | 'context'; description?: string; extends?: string; members?: string[] }
+export interface LayerDef { name: string; axis: 'role' | 'context'; description?: string; extends?: string; members?: string[]; orgs?: string[] }
 export interface HostLayerRow { host_alias: string; catalog_id?: number; layer_name: string; axis: string; position: number; active: boolean }
 export interface LayerListing { layers: LayerDef[]; hosts: HostLayerRow[] }
 

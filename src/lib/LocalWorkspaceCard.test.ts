@@ -57,6 +57,23 @@ describe('LocalWorkspaceCard', () => {
     });
   });
 
+  it('sends Leave out patterns set before the first sync', async () => {
+    invoke.mockResolvedValue(link());
+    render(LocalWorkspaceCard, { session: row() });
+    await fireEvent.input(screen.getByTestId('lw-folder'), { target: { value: '/Users/me/code/app' } });
+    await fireEvent.input(screen.getByTestId('lw-leave-out'), {
+      target: { value: '*.log\n\n  fixtures/large/ \n' },
+    });
+    await fireEvent.click(screen.getByTestId('lw-enable'));
+    expect(invoke).toHaveBeenCalledWith('enable_local_workspace', {
+      args: {
+        session_id: expect.any(Number),
+        local_path: '/Users/me/code/app',
+        excludes: ['*.log', 'fixtures/large/'],
+      },
+    });
+  });
+
   it('forgets a typed folder when the card moves to another session', async () => {
     const view = render(LocalWorkspaceCard, { session: session('devbox', 'a', { id: 1, project_id: 4 }) });
     const input = screen.getByTestId('lw-folder') as HTMLInputElement;

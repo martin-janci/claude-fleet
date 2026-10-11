@@ -19,6 +19,8 @@
     RESUME_NOTE,
     STEPS,
     agentLines,
+    agentDetail,
+    agentsLead,
     canAdvance,
     checkLoader,
     checkRows,
@@ -332,13 +334,13 @@
           >Check again</button
         >
       {:else if step === 3}
-        <p class="sub">The agents fleet can start on {alias}. Fleet runs Claude Code today; the others are shown as they arrive.</p>
+        <p class="sub" data-testid="wizard-agents-lead">{agentsLead(alias)}</p>
         <ul class="checks" data-testid="wizard-agents">
           {#each agents as a (a.bin)}
             <li class="check {a.found ? 'ok' : a.required ? 'fail' : 'na'}" data-testid="wizard-agent" data-bin={a.bin}>
               <span class="glyph" aria-hidden="true">{a.found ? '✓' : a.required ? '✗' : '–'}</span>
               <span class="label">{a.name}</span>
-              <span class="detail">{a.found ? 'on PATH' : a.required ? 'not found' : 'not installed'}</span>
+              <span class="detail">{agentDetail(a)}</span>
             </li>
           {/each}
         </ul>

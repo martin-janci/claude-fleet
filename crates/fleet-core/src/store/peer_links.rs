@@ -88,6 +88,11 @@ pub struct PeerLinkSummary {
     pub messages_today: i64,
     #[serde(default)]
     pub messages_total: i64,
+    /// M15 step G7.14, while a dialer link is `retrying`: how often it tries
+    /// again, in seconds before jitter (`service::peer::backoff`). Absent
+    /// otherwise, and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_every_s: Option<u64>,
 }
 
 /// One outbound row waiting for (or handed to) a peer.
@@ -458,9 +463,14 @@ impl Store {
                 latency_ms: r.get(9)?,
                 messages_today: r.get(10)?,
                 messages_total: r.get(11)?,
+                retry_every_s: None,
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        for r in rows.iter_mut().filter(|r| r.state == LINK_RETRYING) {
+            r.retry_every_s = crate::service::peer::backoff::retry_every(r.id);
+        }
+        Ok(rows)
     }
 
     /// Live links this hub should worry about (G14c), for `fleet_health`'s

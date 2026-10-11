@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { checkAnswers, visibleSteps, stepProblems, startingValues, type FormSpec } from './form_model';
+import { checkAnswers, visibleSteps, stepProblems, startingValues, shownBecause, hostCheckWarnings, type FormSpec } from './form_model';
 
 const doc = JSON.parse(readFileSync('docs/form-examples/answers.json', 'utf8'));
 const spec = doc.spec as FormSpec;
@@ -106,5 +106,71 @@ describe('startingValues', () => {
       safe: 'stage',
       steps: ['lint', 'approve'],
     });
+  });
+});
+
+describe('shownBecause (G7.4)', () => {
+  const when = (name: string) => {
+    for (const st of spec.steps) {
+      if (st.title === name) return st.when;
+      for (const f of st.fields ?? []) if (f.name === name) return f.when;
+    }
+    throw new Error(name);
+  };
+  it('says each condition with the labels of the fields and options it names', () => {
+    expect(shownBecause(when('Database'), spec)).toBe('Shown because ‘Database’ is on');
+    expect(shownBecause(when('db_pass'), spec)).toBe('Shown because ‘Engine’ is ‘Postgres’');
+    expect(shownBecause(when('Features'), spec)).toBe('Shown because ‘Tags’ includes ‘B’');
+    expect(shownBecause(when('web_note'), spec)).toBe('Shown because ‘Kind’ is ‘Web app’');
+    expect(shownBecause(when('no_db_note'), spec)).toBe('Shown because ‘Database’ is off');
+    expect(shownBecause(when('both_note'), spec)).toBe('Shown because ‘Kind’ is ‘Web app’ and ‘Database’ is on');
+    expect(shownBecause(when('either_note'), spec)).toBe('Shown because ‘Kind’ is ‘CLI’ or ‘Port’ is 8080');
+    expect(shownBecause(when('not_note'), spec)).toBe('Shown because ‘Kind’ is not ‘Web app’');
+    expect(shownBecause(when('tag_note'), spec)).toBe('Shown because ‘Tags’ includes ‘A’ or ‘C’');
+  });
+  it('says nothing for an unconditional field or a negated group', () => {
+    expect(shownBecause(undefined, spec)).toBeNull();
+    expect(shownBecause({ not: { all: [{ field: 'db', truthy: true }, { field: 'kind', eq: 'web' }] } }, spec)).toBeNull();
+  });
+});
+
+describe('hostCheckWarnings (G7.4)', () => {
+  const GB = 1024 * 1024;
+  const form: FormSpec = {
+    spec: 'fleet.form/1',
+    title: 'New project',
+    steps: [
+      {
+        title: 'A',
+        fields: [
+          { name: 'host', type: 'select', label: 'Host', options: [['mercury', 'mercury'], ['venus', 'venus']] },
+          { name: 'db', type: 'bool', label: 'Needs a database' },
+        ],
+      },
+    ],
+    checks: [
+      { label: 'Postgres', needs: 'disk_free_gb', at_least: 2, host_field: 'host', when: { field: 'db', truthy: true } },
+      { label: 'The build', needs: 'mem_free_gb', at_least: 4 },
+    ],
+  };
+  const facts: Record<string, { disk_home_free_kb?: number | null; mem_avail_kb?: number | null }> = {
+    mercury: { disk_home_free_kb: 1.4 * GB, mem_avail_kb: 16 * GB },
+    venus: { disk_home_free_kb: 300 * GB, mem_avail_kb: 8 * GB },
+  };
+  const warn = (v: Record<string, unknown>, def: string | null = 'venus') => hostCheckWarnings(form, v, def, (a) => facts[a]);
+
+  it('names what falls short, on the host the answers picked', () => {
+    expect(warn({ host: 'mercury', db: true })).toEqual(['Postgres needs 2 GB free, mercury has 1.4 GB.']);
+  });
+  it('reads a check without a host field on the session host, and skips one whose when does not hold', () => {
+    expect(warn({ host: 'mercury', db: false })).toEqual([]);
+    expect(warn({ host: 'mercury', db: false }, 'venus')).toEqual([]);
+    expect(hostCheckWarnings({ ...form, checks: [form.checks![1]] }, {}, 'venus', () => ({ mem_avail_kb: 2.5 * GB }))).toEqual([
+      'The build needs 4 GB of memory free, venus has 2.5 GB.',
+    ]);
+  });
+  it('says nothing about a host it has no facts for', () => {
+    expect(warn({ host: 'mars', db: true })).toEqual([]);
+    expect(hostCheckWarnings(form, { host: 'mercury', db: true }, null, () => ({ disk_home_free_kb: null }))).toEqual([]);
   });
 });

@@ -17,6 +17,9 @@
   import PageActionButton from './PageActionButton.svelte';
   import Button from '../kit/Button.svelte';
   import { SettingDrafts } from './drafts.svelte';
+  import { guideChanges, guideSnapshot, type GuideChange } from './guide_changes';
+  import { guideApprovals, guideProvenance } from './guides';
+  import { pushError } from '../toasts';
   import { setFleetSetting, type SettingKey } from '../fleet_settings';
   import AccountsUsage from './usage/AccountsUsage.svelte';
   import type { SettingProposal } from './review';
@@ -113,6 +116,21 @@
       }).length,
   );
 
+  // G7.15 (Guide board): where the guide came from, and every setting it
+  // changed since it opened, each with the value before and an Undo.
+  const provenance = $derived(page.layout === 'guide' ? guideProvenance($guideApprovals.get(page.id)) : null);
+  // svelte-ignore state_referenced_locally
+  const openedWith = page.layout === 'guide' ? guideSnapshot(page, descs, values) : {};
+  const changes = $derived(page.layout === 'guide' && !readonly ? guideChanges(page, descs, openedWith, values) : []);
+  let undoing = $state<string | null>(null);
+  async function undoChange(c: GuideChange) {
+    if (undoing) return;
+    undoing = c.key;
+    const r = await setFleetSetting(c.key as SettingKey, c.before);
+    undoing = null;
+    if (!r.ok) pushError(r.error, `Could not undo ${c.label}`);
+  }
+
   const titleOf = (id: string) => pages.find((p) => p.id === id)?.title ?? id;
   const sourceOf = (id: string) => sources.find((s) => s.id === id);
 
@@ -168,6 +186,7 @@
     <h4>{only ? only.title : page.title}</h4>
     {#if modifiedCount > 0}<span class="tag" data-testid="page-modified-count">{modifiedCount} changed</span>{/if}
   </header>
+  {#if provenance}<p class="provenance" data-testid="guide-provenance">{provenance}</p>{/if}
   {#if only}
     <button type="button" class="link" data-testid="page-whole-link" onclick={() => onnavigate(page.id)}
       >All settings in {page.title} ›</button
@@ -236,6 +255,20 @@
         {@render sectionBody(current)}
       </section>
     {/if}
+    {#if changes.length > 0}
+      <section class="changes" data-testid="guide-changes" aria-label="What this guide changed">
+        <h5>Changed by this guide</h5>
+        <ul>
+          {#each changes as c (c.key)}
+            <li data-testid={`guide-change-${c.key}`}>
+              <span class="what">{c.label}</span>
+              <span class="muted">{c.words}</span>
+              <Button size="sm" variant="quiet" busy={undoing === c.key} busyLabel="Undoing" disabled={undoing !== null} testid={`guide-change-undo-${c.key}`} onclick={() => void undoChange(c)}>Undo</Button>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
     <div class="guide-nav">
       <button type="button" class="btn" data-testid="guide-back" disabled={stepAt === 0} onclick={() => (step = stepAt - 1)}>← Back</button>
       {#if lastStep}
@@ -299,7 +332,9 @@
             {readonly} />
         {/if}
       {:else if item.type === 'notice'}
-        <p class={`notice ${item.tone}`} role={item.tone === 'info' ? undefined : 'note'}>{item.text}</p>
+        <p class={`notice ${item.tone}`} role={item.tone === 'info' ? undefined : 'note'}>
+          {#if item.tone === 'later'}<span class="later-tag">Not built yet</span>{/if}{item.text}
+        </p>
       {:else if item.type === 'link'}
         <button type="button" class="link" data-testid={`page-link-${item.page}`} onclick={() => onnavigate(item.page)}
           >{item.label ?? titleOf(item.page)} →</button
@@ -338,6 +373,32 @@
   h4 {
     margin: 0;
     font-size: var(--text-md);
+  }
+  .provenance {
+    margin: 0.15rem 0 0;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
+  .changes {
+    border-top: 1px solid var(--border);
+    padding: 0.5rem 0 0.2rem;
+  }
+  .changes ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .changes li {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: var(--text-xs);
+  }
+  .changes .muted {
+    color: var(--fg-muted);
   }
   /* UX audit S2: section headings in sentence case, not uppercase labels. */
   h5 {
@@ -402,6 +463,15 @@
   }
   .notice.danger {
     border-left-color: var(--usage-crit);
+  }
+  /* M15 G7.14: what the page will offer and does not yet, greyed. */
+  .notice.later {
+    opacity: 0.55;
+    border-left-style: dashed;
+  }
+  .later-tag {
+    font-weight: 600;
+    margin-right: 0.4rem;
   }
   /* A link on its own line, not in a sentence: it keeps the 24 px target. */
   .link {

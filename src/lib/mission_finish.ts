@@ -13,6 +13,7 @@ import { checkWork, cleanUp, cleanUpBlocked, type WorkCheck } from './kill_check
 import { durationWords, wavesOf, type CondCheck, type FinishSession, type MissionDetail } from './missions';
 import type { SessionRow } from './sessions';
 import { sizeText } from './hosts_table';
+import { prChecksLabel, type PullRequestRow } from './prs';
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
@@ -187,4 +188,45 @@ export function archiveOutcomeLine(o: MissionArchiveOutcome): string {
   if (o.asked.length) parts.push(`${plural(o.asked.length, 'agent')} committing and pushing first`);
   if (o.skipped.length) parts.push(`${o.skipped.length} left as ${o.skipped.length === 1 ? 'it was' : 'they were'} (${[...new Set(o.skipped.map((x) => x.why))].join(', ')})`);
   return parts.length ? parts.join(' · ') : 'Nothing to archive';
+}
+
+/** The Finish board's pull request block (G7.7): the lead PR in full (the
+ *  newest merged, else the newest), every other one that is not merged in
+ *  full too, and the other merged ones on one "Also merged: …" line. */
+export function finishPrBlock(prs: readonly PullRequestRow[]): {
+  lead: PullRequestRow | null;
+  rest: PullRequestRow[];
+  alsoMerged: PullRequestRow[];
+} {
+  const lead = prs.find((p) => p.state === 'MERGED') ?? prs[0] ?? null;
+  const others = prs.filter((p) => p !== lead);
+  return {
+    lead,
+    rest: others.filter((p) => p.state !== 'MERGED'),
+    alsoMerged: others.filter((p) => p.state === 'MERGED'),
+  };
+}
+
+/** A PR's facts in one line: "CI passing · approved · merged 14:31". The
+ *  merge time is a clock time today, else the date. */
+export function prFactsLine(
+  pr: Pick<PullRequestRow, 'ci_status' | 'review_decision' | 'state' | 'merged_at'>,
+  now: Date = new Date(),
+): string {
+  let merged = '';
+  if (pr.state === 'MERGED' && pr.merged_at != null) {
+    const at = new Date(pr.merged_at * 1000);
+    merged =
+      at.toDateString() === now.toDateString()
+        ? `merged ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+        : `merged ${at.toLocaleDateString([], { month: 'short', day: 'numeric' })}`;
+  }
+  return [prChecksLabel(pr), merged].filter(Boolean).join(' · ');
+}
+
+/** "fleet-mobile #88 phone pair flow": a PR on the Also merged line. */
+export function alsoMergedLabel(pr: Pick<PullRequestRow, 'repo' | 'number' | 'title' | 'url'>): string {
+  const repo = pr.repo?.split('/').pop() ?? '';
+  const ref = [repo, pr.number != null ? `#${pr.number}` : ''].filter(Boolean).join(' ') || pr.url;
+  return pr.title ? `${ref} ${pr.title}` : ref;
 }

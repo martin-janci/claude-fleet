@@ -71,7 +71,11 @@ export type ItemLabel =
   | { type: 'org_account' };
 
 /** A tile's line under its value (`Sub`). */
-export type Sub = { type: 'budget'; field: string } | { type: 'count'; field: string; text: string };
+export type Sub =
+  | { type: 'budget'; field: string }
+  | { type: 'count'; field: string; text: string }
+  /** The roles of the members listed at `field` (M15 G7.14). */
+  | { type: 'roles'; field: string };
 
 export type Badge =
   | { when: 'true'; text: string }
@@ -85,6 +89,9 @@ export type FieldKind =
   | { type: 'bool'; on_off: boolean; default: boolean }
   | { type: 'inherit' }
   | { type: 'choice'; options: [string, string][] }
+  /** One of a source's values, picked in the edit form; `none` labels the
+   *  empty choice, which clears it (M15 G7.14). */
+  | { type: 'pick'; source: OptionSource; none?: string }
   | { type: 'time' }
   | { type: 'count' }
   | { type: 'money' }
@@ -421,8 +428,27 @@ export function syncLine(unit: string, s: SyncProgress, now: number): string {
   return `${head} · ${secs < 60 ? `${secs} s` : `${Math.floor(secs / 60)} min`}`;
 }
 
+/** "2 admins · 2 members · 1 viewer": a members list by role, the roles an
+ *  org has in that order, each only when someone holds it. */
+export function rolesLine(members: unknown): string {
+  if (!Array.isArray(members)) return '';
+  const count = (role: string) => members.filter((m) => (m as { role?: string } | null)?.role === role).length;
+  return (
+    [
+      ['admin', 'admins'],
+      ['member', 'members'],
+      ['viewer', 'viewers'],
+    ] as const
+  )
+    .map(([one, many]) => [count(one), one, many] as const)
+    .filter(([n]) => n > 0)
+    .map(([n, one, many]) => `${n} ${n === 1 ? one : many}`)
+    .join(' · ');
+}
+
 export function subLine(sub: Sub | undefined, value: unknown, record: ResourceRecord): string {
   if (!sub) return '';
+  if (sub.type === 'roles') return rolesLine(record[sub.field]);
   const n = record[sub.field];
   if (sub.type === 'count') return typeof n === 'number' && n > 0 ? `${n} ${sub.text}` : '';
   if (typeof n !== 'number' || n <= 0) return '';
@@ -498,13 +524,29 @@ export function itemValue(item: unknown): string {
   return itemKey(item);
 }
 
-export function badgesOf(r: ResourceType, record: ResourceRecord): string[] {
+/** A paired hub's address as a badge says it: its host ("fleet.example"),
+ *  or null standalone. */
+export function hubHost(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).host || null;
+  } catch {
+    return url.replace(/^[a-z]+:\/\//i, '').replace(/\/.*$/, '') || null;
+  }
+}
+
+/** A badge's text with `{hub}` filled: the hub's address, or nothing. */
+function badgeText(text: string, hub: string | null): string {
+  return text.replace(/\s*\{hub\}/g, hub ? ` ${hub}` : '');
+}
+
+export function badgesOf(r: ResourceType, record: ResourceRecord, hub: string | null = null): string[] {
   const out: string[] = [];
   for (const f of r.fields) {
     if (!f.badge) continue;
     const v = fieldValue(f, record);
-    if (f.badge.when === 'true' && v === true) out.push(f.badge.text);
-    else if (f.badge.when === 'false' && v === false) out.push(f.badge.text);
+    if (f.badge.when === 'true' && v === true) out.push(badgeText(f.badge.text, hub));
+    else if (f.badge.when === 'false' && v === false) out.push(badgeText(f.badge.text, hub));
     else if (f.badge.when === 'set' && v !== 'inherit') out.push(`${f.badge.text} ${v}`);
     else if (f.badge.when === 'label' && v !== '') out.push(choiceLabel(f, String(v)));
   }

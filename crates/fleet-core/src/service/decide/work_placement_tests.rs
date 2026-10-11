@@ -187,6 +187,8 @@ fn groups_are_the_used_labels_most_used_first_then_rule_groups() {
         version: 1,
         conditions: Default::default(),
         group: group.into(),
+        host_alias: None,
+        profile: None,
         created_at: 0,
         updated_at: 0,
     };

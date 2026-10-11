@@ -46,6 +46,18 @@ describe('ControlViewsPanel (step 9.4)', () => {
     expect(getByTestId('control-session-focus').textContent).toContain('Fix the login bug');
   });
 
+  it('the focus header reads host · account · PR (G7.8, MCSession board)', async () => {
+    const { accounts } = await import('./accounts');
+    const billed = { ...asking, account_uuid: 'acc-1', pr_url: 'https://github.com/o/r/pull/7' };
+    sessions.set([billed, busy]);
+    accounts.set([{ uuid: 'acc-1', email: 'me@x.com' } as never]);
+    const { getByTestId } = render(ControlViewsPanel);
+    await fireEvent.click(getByTestId('control-needs-you-row'));
+    expect(getByTestId('control-session-account').textContent).toBe('me@x.com');
+    expect(getByTestId('control-session-focus').querySelector('.row-why')!.textContent).toMatch(/mac · me@x\.com · PR #7/);
+    accounts.set([]);
+  });
+
   it('a Needs you row keeps you in Control: nothing is told to navigate (UX audit 2026-10-09, C2)', async () => {
     destination.set('control');
     const opened = vi.fn();

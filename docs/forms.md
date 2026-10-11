@@ -81,6 +81,7 @@ The JSON Schema is `docs/form-spec.schema.json`; the validator is
 | `submit` | no | The last step's button; default "Submit" |
 | `save_later` | no | Offer "Save and finish later" (hub contract 15) |
 | `steps` | yes | 1–12 steps |
+| `checks` | no | Up to 8 host checks, see below |
 
 A step has `title` (required, unique within the form), `name` (≤ 24
 chars, the word on its step chip; default the title), `intro`, `when`
@@ -127,6 +128,24 @@ Any field but a secret may carry:
 - `drafted: { "by", "from" }`: its `value` was drafted by an AI ("haiku on
   mercury", "the Jira epic PD-3012"). It needs a `value`, and shows the
   Drafted label until the person changes it.
+
+### Host checks
+
+`checks` says what the answers need from a host, so a shortfall shows
+before the person sends, above the last button: *Postgres needs 2 GB free,
+mercury has 1.4 GB.* It is a warning, never a refusal.
+
+```json
+"checks": [ { "label": "Postgres", "needs": "disk_free_gb", "at_least": 2,
+              "host_field": "host", "when": { "field": "db", "truthy": true } } ]
+```
+
+`label` (≤ 80) says what needs it; `needs` is `disk_free_gb` (free space in
+the home directory) or `mem_free_gb` (available memory), as the host's last
+health probe read it; `at_least` is in GB, above 0. `host_field` names the
+`select` whose answer is the host; without it the check reads the session's
+own host. `when` is a condition like a field's. A host never probed says
+nothing.
 
 With `save_later`, **Save and finish later** folds the card to one line
 with Resume; what was typed (never a secret, never a disabled field) is

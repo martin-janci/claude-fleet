@@ -722,10 +722,27 @@ pub struct StartPlan {
     /// did: the popover says "by rule PD-*".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<i64>,
-    /// The login it bills ([`StartArgs::profile`]). `#[serde(skip)]`: only
-    /// a mission's grant names one.
-    #[serde(skip)]
+    /// The login it bills: a mission's grant ([`StartArgs::profile`]), else
+    /// the start rule's account, else the placement rule's (gap plan G7.1).
+    /// Shown on the preview; never read back from a client.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// The start rule's model, effort and agent (G7.1). Shown on the
+    /// preview; never read back from a client.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The rule's own host, when it was unreachable and the start took the
+    /// rule's fallback host instead ("mercury, mac is offline").
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub fell_back_from: Option<String>,
+    /// The placement rule whose "its sessions start here" named the host or
+    /// the account (G7.1).
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub placement_rule_id: Option<i64>,
 }
 
 /// `slug(key + " " + title)`: lower case, `[a-z0-9-]`, runs collapsed, at
@@ -950,11 +967,15 @@ pub(crate) fn seen_place(
         Some(_) => None,
     };
     let (seen, label) = match crate::store::github_ref(key) {
-        _ if rule.is_some() => (
-            rule.as_ref()
-                .map(|r| (r.project_id, r.host_alias.clone().unwrap_or_default())),
-            String::new(),
-        ),
+        _ if rule.is_some() => {
+            let r = rule.as_ref().expect("checked above");
+            let last = s.last_host_for_project(r.project_id)?;
+            let (host, _) = crate::service::start_rules::rule_host(s, r, last.as_deref())?;
+            (
+                Some((r.project_id, host.unwrap_or_default())),
+                String::new(),
+            )
+        }
         Some((repo, _)) => (
             s.project_for_repo(repo)?.map(|pid| {
                 let host = s.last_host_for_project(pid).ok().flatten();
@@ -1060,9 +1081,39 @@ pub fn plan_resolved(
             .with_details(serde_json::json!({ "missing": "project", "candidates": candidates })));
         }
     };
+    // How the start runs (gap plan G7.1): the start rule's account, model,
+    // effort and agent; with no start rule naming a host, the placement
+    // rule's "its sessions start here" host and account.
+    let rule_names_host = seen
+        .as_ref()
+        .is_some_and(|p| rule.is_some() && p.0 == project_id && !p.1.is_empty());
+    let placement = if rule_names_host && rule.as_ref().is_some_and(|r| r.profile.is_some()) {
+        None
+    } else {
+        let repo = s
+            .get_project(project_id)?
+            .map(|p| format!("{}/{}", p.owner, p.repo));
+        crate::service::start_rules::placement_start(&s, item_id, &key, &title, repo.as_deref())?
+    };
+    let fell_back_from = match (&rule, &seen) {
+        (Some(r), Some(p)) if p.0 == project_id && r.fallback_host.as_deref() == Some(&p.1) => r
+            .host_alias
+            .clone()
+            .or(s.last_host_for_project(project_id)?)
+            .filter(|h| h != &p.1),
+        _ => None,
+    };
     let host_alias = match (&args.host_alias, scope.host()) {
         (Some(h), _) => h.clone(),
         (None, Some(h)) => h.to_string(),
+        (None, None)
+            if !rule_names_host && placement.as_ref().is_some_and(|w| w.host_alias.is_some()) =>
+        {
+            placement
+                .as_ref()
+                .and_then(|w| w.host_alias.clone())
+                .expect("checked above")
+        }
         (None, None) => match seen_host(&s, seen, project_id)? {
             Some(h) => h,
             None => {
@@ -1187,8 +1238,24 @@ pub fn plan_resolved(
         decider: args.decider,
         owner: args.owner,
         origin: args.origin.clone(),
+        profile: args
+            .profile
+            .clone()
+            .or_else(|| rule.as_ref().and_then(|r| r.profile.clone()))
+            .or_else(|| {
+                let codex = rule.as_ref().and_then(|r| r.agent.as_deref())
+                    == Some(crate::store::AGENT_CODEX);
+                placement
+                    .as_ref()
+                    .and_then(|w| w.profile.clone())
+                    .filter(|_| !codex)
+            }),
+        model: rule.as_ref().and_then(|r| r.model.clone()),
+        effort: rule.as_ref().and_then(|r| r.effort.clone()),
+        agent: rule.as_ref().and_then(|r| r.agent.clone()),
+        fell_back_from,
+        placement_rule_id: placement.as_ref().map(|w| w.id),
         rule_id: rule.map(|r| r.id),
-        profile: args.profile.clone(),
     })
 }
 
@@ -1458,10 +1525,10 @@ where
             .is_ok()
             .then(|| plan.name.clone()),
         resume_claude_session_id: None,
-        model: None,
-        effort: None,
+        model: plan.model.clone(),
+        effort: plan.effort.clone(),
         profile: plan.profile.clone(),
-        agent: None,
+        agent: plan.agent.clone(),
         // Who or what started it (migration 124); `None` = a person.
         origin: plan.origin.clone(),
         // Whose the started session is (multi-user M1, T5): the caller who

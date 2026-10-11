@@ -1,7 +1,7 @@
 // Assets M6 (R17, R18): layer footprints, "why is it on <host>?", a host's
 // role per catalog and which catalogs a host accepts — mirrors of
 // effective.rs `acceptance` and the resolver's role → context → extends chain.
-import type { CatalogStatus, LayerListing } from './assets_workspace';
+import type { CatalogStatus, ChangesetSummary, LayerDef, LayerListing } from './assets_workspace';
 
 function parentOf(l: LayerListing, name: string): string | null {
   return l.layers.find((x) => x.name === name)?.extends ?? null;
@@ -61,4 +61,34 @@ export function acceptanceOf(host: { alias: string; org_id?: number | null }, c:
   return (c.admitted ?? []).includes(host.alias)
     ? { state: 'all', locked: false, why: 'admitted' }
     : { state: 'none', locked: false, why: 'not admitted' };
+}
+
+/** The proposed cards that change layer `name` of `catalog` (M15 G7.13:
+ *  the layer inspector's Changeset tab): a layer or rollout card committing
+ *  to that catalog whose summary names the layer as a word. */
+export function layerCards(
+  cards: readonly ChangesetSummary[],
+  catalog: string,
+  name: string,
+): ChangesetSummary[] {
+  const word = new RegExp(`(^|[^\\w-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^\\w-])`);
+  return cards.filter(
+    (c) =>
+      c.state === 'proposed' &&
+      !c.withdrawn &&
+      (c.kind === 'layer' || c.kind === 'rollout') &&
+      (!c.catalogs || c.catalogs.length === 0 || c.catalogs.includes(catalog)) &&
+      word.test(c.summary),
+  );
+}
+
+/** A layer as the catalog's layer file defines it, for the Source tab. */
+export function layerSource(layer: LayerDef): string {
+  const lines = [`name: ${layer.name}`, `axis: ${layer.axis}`];
+  if (layer.extends) lines.push(`extends: ${layer.extends}`);
+  if (layer.description) lines.push(`description: ${JSON.stringify(layer.description)}`);
+  const members = layer.members ?? [];
+  lines.push(members.length === 0 ? 'members: []' : 'members:');
+  for (const m of members) lines.push(`  - ${m}`);
+  return lines.join('\n');
 }

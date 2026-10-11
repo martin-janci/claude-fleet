@@ -27,6 +27,11 @@ vi.mock('./sessions', async () => {
 
 // The device list only feeds the read-only warning (step 5.8): the tests set
 // the store themselves.
+vi.mock('./share_devices', async () => {
+  const actual = await vi.importActual<typeof import('./share_devices')>('./share_devices');
+  return { ...actual, trustDeviceForShare: vi.fn(async () => ({ ok: true, value: null })) };
+});
+
 vi.mock('./devices', async () => {
   const actual = await vi.importActual<typeof import('./devices')>('./devices');
   return { ...actual, loadDevices: vi.fn(async () => ({ ok: true, value: [] })) };
@@ -34,6 +39,7 @@ vi.mock('./devices', async () => {
 
 import ShareSheet from './ShareSheet.svelte';
 import { devices } from './devices';
+import { trustDeviceForShare } from './share_devices';
 import {
   fetchSessionAccess,
   narrowShare,
@@ -158,6 +164,38 @@ describe('ShareSheet', () => {
     expect(screen.queryByTestId('share-readonly-warning')).toBeNull();
   });
 
+  it('names the levels Read / Answer / Steer and an unshared session Private (G7.11)', async () => {
+    mockedList.mockResolvedValue({ ok: true, value: [] });
+    render(ShareSheet);
+    await settle();
+    const opts = Array.from((screen.getByTestId('share-level') as HTMLSelectElement).options, (o) => o.textContent);
+    expect(opts).toEqual(['Read — can read it', 'Answer — can answer its questions', 'Steer — can send prompts']);
+    expect(screen.getByTestId('share-private').textContent).toBe('Private · only you');
+  });
+
+  it('Trust now makes a read-only recipient device full, after a confirm (G7.11)', async () => {
+    const mockedTrust = trustDeviceForShare as unknown as ReturnType<typeof vi.fn>;
+    mockedTrust.mockClear();
+    devices.set([{ name: 'iPhone', person: 'bea', mode: 'readonly', trusted: false, created_at: 1, catalogs: [] }]);
+    mockedList.mockResolvedValue({ ok: true, value: [grant({ level: 'drive' })] });
+    render(ShareSheet);
+    await settle();
+    const limit = screen.getByTestId('share-grant-limit');
+    expect(limit.textContent).toContain('reads only until their iPhone is trusted');
+    await fireEvent.click(screen.getByTestId('share-trust-now'));
+    expect(mockedTrust).not.toHaveBeenCalled();
+    expect(screen.getByTestId('share-trust-confirm').textContent).toContain('iPhone becomes a full device');
+    await fireEvent.click(screen.getByTestId('share-trust-yes'));
+    await settle();
+    expect(mockedTrust).toHaveBeenCalledWith('iPhone');
+    // Before a share too: the compose line offers the same.
+    await fireEvent.input(screen.getByTestId('share-person'), { target: { value: 'bea' } });
+    await fireEvent.change(screen.getByTestId('share-level'), { target: { value: 'answer' } });
+    const warn = screen.getByTestId('share-readonly-warning');
+    expect(warn.textContent).toContain('bea can only read until you trust their iPhone');
+    expect(warn.querySelector('[data-testid="share-trust-now"]')?.textContent).toBe('Trust now');
+  });
+
   it('will not submit an empty recipient', async () => {
     render(ShareSheet);
     await settle();
@@ -176,7 +214,7 @@ describe('ShareSheet', () => {
     const rows = screen.getAllByTestId('share-grant');
     expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toContain('Bea');
-    expect(rows[0].textContent).toContain('watch');
+    expect(rows[0].textContent).toContain('Read');
     // A grant only ever moves downward (spec §4.3 invariant 3): the watch row
     // has no control at all that raises it, and no row anywhere offers one.
     expect(rows[0].querySelector('[data-testid="share-narrow"]')).toBeNull();
@@ -199,7 +237,7 @@ describe('ShareSheet', () => {
     mockedNarrow.mockResolvedValue({ ok: true, value: null });
     render(ShareSheet);
     await settle();
-    expect(screen.getByTestId('share-grant-level').textContent).toBe('answer');
+    expect(screen.getByTestId('share-grant-level').textContent).toBe('Answer');
     await fireEvent.click(screen.getByTestId('share-narrow'));
     await settle();
     expect(mockedNarrow).toHaveBeenCalledWith(42, 'bea');

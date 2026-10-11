@@ -265,6 +265,11 @@ export interface WorkTask {
   /** Active (primary first), suggested, ended newest first. */
   sessions?: WorkTaskLink[];
   sessions_more?: number;
+  /** Its acceptance lines, the Board's "Finishes when …" (G7.6). Absent
+   *  when none, and from an older hub. */
+  done_when?: string[];
+  /** Its mission and wave, on a read that asked (`with_missions`). */
+  mission?: TaskMission | null;
   /** The tracker's type name (Story, Bug, Epic …). */
   item_type?: string | null;
   /** 1 an epic, 0 a standard item, -1 a subtask. */
@@ -276,6 +281,13 @@ export interface WorkTask {
   in_epic?: WorkTaskRef | null;
   /** The tracker's last change (else the item's), unix seconds. */
   updated_at?: number | null;
+}
+
+/** `WorkTask.mission`: the mission and the wave the task sits in (W1 first). */
+export interface TaskMission {
+  id: number;
+  name: string;
+  wave?: number | null;
 }
 
 /** Another task named from one (its epic). */
@@ -632,6 +644,11 @@ export interface WorkRule {
   version: number;
   conditions: WorkRuleConditions;
   group: string;
+  /** "Its sessions start here" (G7.1): the host a start of a matching task
+   *  lands on when no start rule names one. */
+  host_alias?: string | null;
+  /** The account (credential profile) those sessions bill. */
+  profile?: string | null;
   created_at?: number;
   updated_at?: number;
 }
@@ -643,6 +660,8 @@ export interface WorkRuleDraft {
   enabled: boolean;
   conditions: WorkRuleConditions;
   group: string;
+  host_alias?: string | null;
+  profile?: string | null;
   expected_version?: number;
 }
 
@@ -740,6 +759,8 @@ export interface WorkTreeQuery {
   sections?: WorkTreeSectionAsk[];
   /** Add `review_total` from the same read. */
   with_review_total?: boolean;
+  /** Name each task's mission and wave (`WorkTask.mission`, the Board). */
+  with_missions?: boolean;
 }
 
 /** `archived` always goes on the wire: the hub hides archived tasks only
@@ -756,6 +777,7 @@ export function workTree(q: WorkTreeQuery = {}): Promise<Result<WorkTreePage>> {
       per_task: q.per_task,
       sections: q.sections && q.sections.length > 0 ? q.sections : undefined,
       with_review_total: q.with_review_total || undefined,
+      with_missions: q.with_missions || undefined,
     }),
   });
 }
@@ -884,6 +906,8 @@ export function ruleWire(d: WorkRuleDraft): WorkRuleDraft {
       repo: s(c.repo),
     },
     group: d.group.trim(),
+    host_alias: s(d.host_alias) ?? undefined,
+    profile: s(d.profile) ?? undefined,
     expected_version: d.expected_version,
   }) as unknown as WorkRuleDraft;
 }

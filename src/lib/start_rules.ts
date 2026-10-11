@@ -18,6 +18,15 @@ export interface StartRule {
   project_id: number;
   /** `null` = the project's last host. */
   host_alias?: string | null;
+  /** Where a start lands when the host is unreachable (G7.1). */
+  fallback_host?: string | null;
+  /** The account: a credential profile on the host. `null` = its own login. */
+  profile?: string | null;
+  /** `claude --model`; `null` = the host's default. */
+  model?: string | null;
+  effort?: string | null;
+  /** `claude` | `codex`; `null` = Claude Code. */
+  agent?: string | null;
   state: StartRuleState | string;
   confirmations?: number;
   /** Starts the rule decided. */
@@ -41,6 +50,11 @@ export interface StartRuleInput {
   host_alias?: string | null;
   /** Only on a new rule: the org whose tasks it decides for. */
   org_id?: number | null;
+  fallback_host?: string | null;
+  profile?: string | null;
+  model?: string | null;
+  effort?: string | null;
+  agent?: string | null;
 }
 
 function call<T>(args: { action: string; rule_id?: number; rule?: StartRuleInput }): Promise<Result<T>> {
@@ -49,7 +63,57 @@ function call<T>(args: { action: string; rule_id?: number; rule?: StartRuleInput
 
 export const listStartRules = () => call<StartRuleView[]>({ action: 'list' });
 export const saveStartRule = (rule: StartRuleInput, ruleId?: number) =>
-  call<StartRuleView>({ action: 'save', rule: { ...rule, host_alias: rule.host_alias || null }, ...(ruleId != null ? { rule_id: ruleId } : {}) });
+  call<StartRuleView>({ action: 'save', rule: startRuleWire(rule), ...(ruleId != null ? { rule_id: ruleId } : {}) });
+
+/** The rule as the wire takes it: every empty choice `null` (the backend
+ *  reads absent and `null` alike), a profile dropped for Codex, which keeps
+ *  its own login. */
+export function startRuleWire(rule: StartRuleInput): StartRuleInput {
+  const v = (x: string | null | undefined) => (x && x.trim() ? x.trim() : null);
+  const agent = v(rule.agent);
+  return {
+    ...rule,
+    host_alias: v(rule.host_alias),
+    fallback_host: v(rule.fallback_host),
+    profile: agent === 'codex' ? null : v(rule.profile),
+    model: v(rule.model),
+    effort: v(rule.effort),
+    agent,
+  };
+}
+
+/** The accounts a rule can name on `hostAlias` (any host when empty): each
+ *  credential profile fleet knows there, with its email when it has one.
+ *  `keep` (the rule's current account) stays a choice even when no host
+ *  lists it. */
+export function accountChoices(
+  hosts: readonly { alias: string; claude_profiles?: { name: string; email?: string | null }[] | null }[],
+  hostAlias: string | null | undefined,
+  keep?: string | null,
+): { value: string; label: string }[] {
+  const out = new Map<string, string>();
+  for (const h of hosts) {
+    if (hostAlias && h.alias !== hostAlias) continue;
+    for (const p of h.claude_profiles ?? []) {
+      if (!out.has(p.name)) out.set(p.name, p.email ? `${p.name} · ${p.email}` : p.name);
+    }
+  }
+  if (keep && !out.has(keep)) out.set(keep, keep);
+  return [...out].map(([value, label]) => ({ value, label }));
+}
+
+/** How a rule's starts run, as one line: "mac, else mercury · tech.silvester
+ *  · opus · effort high · Codex". Empty when the rule names none of it. */
+export function ruleLaunchLine(rule: Pick<StartRule, 'host_alias' | 'fallback_host' | 'profile' | 'model' | 'effort' | 'agent'>): string {
+  const parts: string[] = [];
+  if (rule.fallback_host) parts.push(`${rule.host_alias ?? 'its last host'}, else ${rule.fallback_host}`);
+  if (rule.profile) parts.push(rule.profile);
+  if (rule.model && rule.effort) parts.push(`${rule.model} · effort ${rule.effort}`);
+  else if (rule.model) parts.push(rule.model);
+  else if (rule.effort) parts.push(`effort ${rule.effort}`);
+  if (rule.agent === 'codex') parts.push('Codex');
+  return parts.join(' · ');
+}
 export const acceptStartRule = (ruleId: number) => call<StartRuleView>({ action: 'accept', rule_id: ruleId });
 export const dismissStartRule = (ruleId: number) => call<StartRuleView>({ action: 'dismiss', rule_id: ruleId });
 export const deleteStartRule = (ruleId: number) => call<{ removed: boolean }>({ action: 'delete', rule_id: ruleId });

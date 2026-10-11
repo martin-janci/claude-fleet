@@ -19,6 +19,18 @@ export interface AccountRow {
  * else the first 8 characters of its uuid, else a fallback for "no account
  * at all" (a `null`/`undefined` row — e.g. a host with no linked account).
  */
+/** The account a session bills (docs/accounts.md): under a login profile,
+ *  that profile's account, none until the host reports it logged in; any
+ *  other session the account it runs on (the host's login when reconcile
+ *  saw it, kept when the host's login changes later), and the host's only
+ *  before it has one. */
+export function sessionAccountUuid(
+  s: { claude_profile?: string | null; account_uuid?: string | null },
+  hostAccountUuid: string | null | undefined,
+): string | null {
+  return s.claude_profile ? (s.account_uuid ?? null) : (s.account_uuid ?? hostAccountUuid ?? null);
+}
+
 export function accountLabel(a: AccountRow | null | undefined): string {
   if (!a) return 'unknown account';
   const nickname = a.nickname?.trim();

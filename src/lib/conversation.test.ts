@@ -1201,6 +1201,34 @@ describe('conversation copy names the row’s agent (Codex Conversation tab)', (
   });
 });
 
+describe('daySeparator (G7.8, Control: a line per day)', () => {
+  const NOW = new Date(2026, 9, 10, 15, 0).getTime();
+  const iso = (d: Date) => d.toISOString();
+  const turn = (d: Date) => ({ kind: 'turn' as const, index: 0, turn: { prompt: 'x', at: iso(d), ended_at: null, items: [] } });
+  const ev = (d: Date) =>
+    ({ kind: 'event' as const, event: { at: Math.floor(d.getTime() / 1000), label: 'e', tone: 'info' } }) as never;
+
+  it('names the day above the first row of each day, and only there', async () => {
+    const { daySeparator } = await import('./conversation');
+    const rows = [
+      turn(new Date(2026, 9, 8, 9, 0)),
+      turn(new Date(2026, 9, 9, 10, 0)),
+      ev(new Date(2026, 9, 9, 11, 0)),
+      turn(new Date(2026, 9, 10, 8, 2)),
+      turn(new Date(2026, 9, 10, 9, 0)),
+    ];
+    const seps = rows.map((_, i) => daySeparator(rows, i, NOW));
+    expect(seps[0]).toMatch(/Thu 8 Oct/);
+    expect(seps.slice(1)).toEqual(['Yesterday', null, 'Today', null]);
+  });
+
+  it('a row with no time never starts a day', async () => {
+    const { daySeparator } = await import('./conversation');
+    const rows = [{ kind: 'turn' as const, index: 0, turn: { prompt: 'x', at: null, ended_at: null, items: [] } }];
+    expect(daySeparator(rows, 0, NOW)).toBeNull();
+  });
+});
+
 describe('Codex in the composer', () => {
   it('offers Codex its own models and efforts, switched by a relaunch', () => {
     const codex = agentModelProfile('codex');

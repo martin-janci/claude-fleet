@@ -12,7 +12,11 @@
   import { push } from './toasts';
   import {
     asksForCode,
+    deviceCode,
     endLogin,
+    expiryLine,
+    linkMinutes,
+    startLogin,
     loginCode,
     loginKey,
     loginStatus,
@@ -32,13 +36,30 @@
   } = $props();
 
   let status = $state<LoginStatus | null>(null);
+  /** When this link first showed (M15 G7.12: its expiry counts from here). */
+  let linkSeen = $state<{ url: string; at: number } | null>(null);
+  let now = $state(Date.now());
   let code = $state('');
   let sending = $state(false);
   let stepError = $state<string | null>(null);
 
   async function poll() {
     const r = await loginStatus(login.host, login.profile);
-    if (r.ok) status = r.value;
+    if (r.ok) {
+      status = r.value;
+      const url = r.value.sign_in_url;
+      if (url && linkSeen?.url !== url) linkSeen = { url, at: Date.now() };
+    }
+    now = Date.now();
+  }
+
+  async function startOver() {
+    stepError = null;
+    await endLogin(login.host, login.profile);
+    const r = await startLogin(login.host, login.profile);
+    if (!r.ok) stepError = r.error.message;
+    linkSeen = null;
+    void poll();
   }
 
   $effect(() => {
@@ -82,6 +103,8 @@
   }
 
   const choices = $derived(paneChoices(status?.pane));
+  const code_ = $derived(deviceCode(status?.pane));
+  const expiry = $derived(linkSeen ? expiryLine(linkSeen.at, linkMinutes(status?.pane), now) : null);
 </script>
 
 <Modal label="Sign in" width="560px" testid="add-account-login">
@@ -104,6 +127,23 @@
             >Copy link</button
           >
         </div>
+        {#if code_}
+          <div class="row device-code">
+            <span class="lbl">Code</span>
+            <code class="big" data-testid="add-account-device-code">{code_}</code>
+            <button type="button" class="btn" data-testid="add-account-copy-code" onclick={() => code_ && void copy(code_, 'Code')}
+              >Copy code</button
+            >
+          </div>
+        {/if}
+        {#if expiry}
+          <p class="lead" class:err={expiry.expired} data-testid="add-account-expiry">
+            {expiry.text}
+            {#if expiry.expired}<button type="button" class="btn-quiet" data-testid="add-account-start-over" onclick={() => void startOver()}
+                >Start over</button
+              >{/if}
+          </p>
+        {/if}
       {/if}
       <pre class="pane" data-testid="add-account-pane">{status?.pane ?? 'Waiting for the login pane…'}</pre>
       <div class="row keys">
@@ -219,5 +259,14 @@
   }
   .grow {
     flex: 1;
+  }
+  .device-code .lbl {
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+  }
+  .device-code .big {
+    font-family: var(--font-mono);
+    font-size: var(--text-md);
+    letter-spacing: 0.08em;
   }
 </style>

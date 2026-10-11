@@ -80,15 +80,19 @@ function route(list: OrgDetail[]) {
     if (cmd === 'remove_org_member') return { removed: true, revoked_grants: 0 };
     if (cmd === 'org_member_grants') return grants;
     if (cmd === 'pair_device') return pairing;
+    if (cmd === 'update_device') return trustAnswer();
     return null;
   });
 }
+/** What `update_device` answers (M15 G7.14: Trust device). */
+let trustAnswer: () => unknown = () => ({ name: 'x', mode: 'full', trusted: true, created_at: 1, catalogs: [] });
 let grants: { watch: number; drive: number } | null = null;
 const pairing = { url: 'https://hub/pair#M4D', code: 'M4D-82P-QX7', expires_in_s: 600, name: 'cleo-device', mode: 'full', trusted: false, person: 'cleo', qr: [] };
 const argsOf = (cmd: string) =>
   (invoke.mock.calls.filter((c) => c[0] === cmd).at(-1)![1] as { args: Record<string, unknown> }).args;
 
 beforeEach(() => {
+  trustAnswer = () => ({ name: 'x', mode: 'full', trusted: true, created_at: 1, catalogs: [] });
   grants = null;
   memberPairing.set(null);
   hubStatus.set({ ...STANDALONE });
@@ -189,6 +193,54 @@ describe('an org’s spend and its own settings', () => {
   });
 });
 
+describe('M15 G7.14: who you are in it, its members by role, and a value by key', () => {
+  it('says the org owns this hub by its address and that you are an admin, over its title', async () => {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://fleet.rlt.sk' });
+    route([{ ...acme, owns_hub: true, my_role: 'admin' }]);
+    render(ResourcePage, { props: { page, resource } });
+    expect((await screen.findByTestId('record-kicker')).textContent).toBe(
+      'Organisation · owns the hub fleet.rlt.sk · you are an admin',
+    );
+    expect(screen.getAllByTestId('resource-badge').map((b) => b.textContent)).toEqual(['owns the hub fleet.rlt.sk', 'you are an admin']);
+  });
+
+  it('standalone, the badge names no hub', async () => {
+    route([{ ...acme, owns_hub: true }]);
+    render(ResourcePage, { props: { page, resource } });
+    expect((await screen.findByTestId('record-kicker')).textContent).toBe('Organisation · owns the hub');
+  });
+
+  it('counts the members in a tile, by role', async () => {
+    const m = (person_id: number, role: string) => ({ person_id, name: `p${person_id}`, role });
+    route([{ ...acme, member_count: 5, members: [m(1, 'admin'), m(2, 'admin'), m(3, 'member'), m(4, 'member'), m(5, 'viewer')] }]);
+    render(ResourcePage, { props: { page, resource } });
+    expect((await screen.findByTestId('value-member_count')).textContent).toBe('5');
+    expect(screen.getByTestId('tile-sub-member_count').textContent).toBe('2 admins · 2 members · 1 viewer');
+  });
+
+  it('leaves the members tile out when the hub does not count them for you', async () => {
+    route([acme]);
+    render(ResourcePage, { props: { page, resource } });
+    await waitFor(() => expect(screen.getByTestId('tile-spent_today_micros')).toBeTruthy());
+    expect(screen.queryByTestId('tile-member_count')).toBeNull();
+  });
+
+  it('sets a value by its key, with the hub default beside it, and refuses a key an org may not set', async () => {
+    route([acme]);
+    render(ResourcePage, { props: { page, resource } });
+    await openTab('Settings');
+    const key = await screen.findByTestId('org-setting-set-key');
+    await fireEvent.input(key, { target: { value: 'reconcile.interval_secs' } });
+    expect(screen.getByTestId('org-setting-set-unknown').textContent).toContain('whole fleet');
+    expect((screen.getByTestId('org-setting-set-go') as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.input(key, { target: { value: 'budget.org_daily_usd' } });
+    expect(screen.getByTestId('org-setting-set-default').textContent).toContain('Hub default:');
+    await fireEvent.input(screen.getByTestId('org-setting-set-value'), { target: { value: '25' } });
+    await fireEvent.click(screen.getByTestId('org-setting-set-go'));
+    await waitFor(() => expect(argsOf('set_org_setting')).toEqual({ org_id: 1, key: 'budget.org_daily_usd', value: '25' }));
+  });
+});
+
 describe('an org’s members (phase D)', () => {
   it('lists who is in it with their role, adds one and removes one', async () => {
     route([
@@ -220,7 +272,15 @@ describe('an org’s members (phase D)', () => {
   const team = {
     ...acme,
     members: [
-      { person_id: 2, name: 'jane', role: 'admin', added_at: joined, shares_since: joined, devices: ['jane-mac', 'jane-phone'] },
+      {
+        person_id: 2,
+        name: 'jane',
+        role: 'admin',
+        added_at: joined,
+        shares_since: joined,
+        devices: ['jane-mac', 'jane-phone'],
+        untrusted_devices: ['jane-phone'],
+      },
       { person_id: 3, name: 'bob', role: 'member', added_at: joined, shares_since: joined, devices: [] },
       { person_id: 4, name: 'audit', role: 'viewer', added_at: joined, devices: ['browser'] },
     ],
@@ -232,7 +292,41 @@ describe('an org’s members (phase D)', () => {
     await openTab('Members');
     const since = await screen.findAllByTestId('member-shares-since');
     expect(since.map((s) => s.textContent)).toEqual(['2026-09-12', '2026-09-12', 'never (viewer)']);
-    expect(screen.getAllByTestId('member-devices').map((d) => d.textContent)).toEqual(['jane-mac, jane-phone', 'none', 'browser']);
+    // A device not trusted yet says so, with Trust device beside it.
+    expect(screen.getAllByTestId('member-devices').map((d) => d.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+      'jane-mac, jane-phone · not trustedTrust device',
+      'none',
+      'browser',
+    ]);
+  });
+
+  it('M15 G7.14: trusts a member’s device from their row', async () => {
+    route([team]);
+    render(ResourcePage, { props: { page, resource } });
+    await openTab('Members');
+    expect((await screen.findAllByTestId('member-device-untrusted')).length).toBe(1);
+    const reads = invoke.mock.calls.filter((c) => c[0] === 'list_orgs').length;
+    await fireEvent.click(screen.getByTestId('member-trust-jane-phone'));
+    await waitFor(() => expect(argsOf('update_device')).toEqual({ device: 'jane-phone', trusted: true }));
+    await waitFor(() => expect(invoke.mock.calls.filter((c) => c[0] === 'list_orgs').length).toBeGreaterThan(reads));
+  });
+
+  it('M15 G7.14: the Add member flow’s second step trusts the new device, waiting until it has paired', async () => {
+    route([team]);
+    render(ResourcePage, { props: { page, resource } });
+    await openTab('Members');
+    await fireEvent.click(await screen.findByTestId('member-pair-3'));
+    await fireEvent.click(screen.getByTestId('member-pair-mint'));
+    expect(await screen.findByTestId('member-trust-step')).toBeTruthy();
+    trustAnswer = () => {
+      throw { code: 'E_NOTFOUND', message: 'no device named "cleo-device"' };
+    };
+    await fireEvent.click(screen.getByTestId('member-trust-new'));
+    expect((await screen.findByTestId('member-trust-note')).textContent).toBe('Waiting for bob to pair…');
+    trustAnswer = () => ({ name: 'cleo-device', mode: 'full', trusted: true, created_at: 1, catalogs: [] });
+    await fireEvent.click(screen.getByTestId('member-trust-new'));
+    await waitFor(() => expect(screen.queryByTestId('member-pairing')).toBeNull());
+    expect(argsOf('update_device')).toEqual({ device: 'cleo-device', trusted: true });
   });
 
   it('removing a member with 6 shares offers all three choices', async () => {

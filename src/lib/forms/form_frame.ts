@@ -11,7 +11,7 @@
 //   back (`savedWithUndo`).
 import { errorText } from '../error_copy';
 import type { IpcError } from '../result';
-import { matchShortcut, type KeyEventLike } from '../shortcuts';
+import { matchShortcut, shortcutLabel, type KeyEventLike } from '../shortcuts';
 import { push } from '../toasts';
 
 /** The controls a person fills in, for "is this a one-field form". */
@@ -43,6 +43,17 @@ export function submitKey(
   if (id !== 'form.submit-one' || fields !== 1) return false;
   const t = e.target as HTMLInputElement | null;
   return t?.tagName === 'INPUT' && !NOT_TEXT.includes(t.type);
+}
+
+/** The submit key a form's verb shows beside its name ("Create ⌘↵"),
+ *  and the same chord for `aria-keyshortcuts`. Drawn by CSS from
+ *  `data-shortcut`, so the button's own name stays the verb alone. */
+export function submitHint(isMac: boolean): { label: string; aria: string } {
+  const label = shortcutLabel('form.submit', isMac);
+  return {
+    label: isMac ? label.replace(/Enter$/, '↵') : label,
+    aria: isMac ? 'Meta+Enter' : 'Control+Enter',
+  };
 }
 
 /** What a form shows for a failed call. */

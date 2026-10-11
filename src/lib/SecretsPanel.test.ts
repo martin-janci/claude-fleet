@@ -6,6 +6,8 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SecretsPanel from './SecretsPanel.svelte';
 import { hosts } from './hosts';
 import { expectAccessible } from './a11y_check';
+import { get } from 'svelte/store';
+import { clearToasts, toasts } from './toasts';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -141,5 +143,31 @@ describe('SecretsPanel: Add a secret', () => {
     expect((screen.getByTestId('secrets-add-secret') as HTMLButtonElement).disabled).toBe(false);
     await fireEvent.click(screen.getByTestId('secrets-add-global'));
     expect((screen.getByTestId('secrets-add-secret') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  describe('the saved toast (G7.4)', () => {
+    beforeEach(() => clearToasts());
+
+    it('a value set where there was none offers Undo, which deletes it there', async () => {
+      byCmd({ catalog_list_secrets: [], catalog_set_secret: null, catalog_delete_secret: true });
+      render(SecretsPanel, { names: ['GH_TOKEN'], onclose: () => {} });
+      await screen.findByTestId('secret-row-GH_TOKEN');
+      await fireEvent.input(screen.getByTestId('secret-value-GH_TOKEN'), { target: { value: 'shh' } });
+      await fireEvent.click(screen.getByTestId('secret-set-GH_TOKEN'));
+      await waitFor(() => expect(get(toasts).at(-1)?.message).toBe('GH_TOKEN set for every host.'));
+      get(toasts).at(-1)!.action!.run();
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_delete_secret', { args: { name: 'GH_TOKEN', host_alias: null } }));
+    });
+
+    it('a value that replaced another has no Undo: the old one was never read', async () => {
+      byCmd({ catalog_list_secrets: [{ name: 'GH_TOKEN', host_alias: null, updated_at: 1 }], catalog_set_secret: null });
+      render(SecretsPanel, { names: ['GH_TOKEN'], onclose: () => {} });
+      await screen.findByTestId('secret-row-GH_TOKEN');
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_list_secrets', undefined));
+      await fireEvent.input(screen.getByTestId('secret-value-GH_TOKEN'), { target: { value: 'shh' } });
+      await fireEvent.click(screen.getByTestId('secret-set-GH_TOKEN'));
+      await waitFor(() => expect(get(toasts).at(-1)?.message).toBe('GH_TOKEN set for every host.'));
+      expect(get(toasts).at(-1)!.action).toBeNull();
+    });
   });
 });

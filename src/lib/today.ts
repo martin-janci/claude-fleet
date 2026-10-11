@@ -203,11 +203,21 @@ function groupLine(g: TodayGroup, bucket: TodayBucket): string[] {
   return [`- ${groupLabel(g)}${tail ? ` — ${tail}` : ''}`];
 }
 
+/** "PR 09:12" / "done 14:05": how a shipped entry shipped, and when (Today
+ *  board, G7.9), in the device's local time. A `pr` entry is work that ended
+ *  with a PR, not a merge fleet saw, so it is not called "merged". */
+export function shippedWhen(x: Pick<TodayShipped, 'how' | 'at'>): string {
+  const d = new Date(x.at * 1000);
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return `${x.how === 'done' ? 'done' : 'PR'} ${hm}`;
+}
+
 function shippedLine(x: TodayShipped): string {
   const label = groupLabel({ key: x.key ?? null, title: x.title ?? '' });
   const what = x.how === 'done' ? 'done' : 'PR';
   const link = x.pr_url ?? x.url ?? '';
-  return `- ${x.key ? label : (x.title || 'Untitled work')} — ${what}${link ? ` ${link}` : ''}`;
+  const from = x.from ? ` · from ${x.from}` : '';
+  return `- ${x.key ? label : (x.title || 'Untitled work')} — ${what}${link ? ` ${link}` : ''}${from}`;
 }
 
 /**

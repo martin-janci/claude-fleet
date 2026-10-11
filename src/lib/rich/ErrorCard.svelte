@@ -1,15 +1,41 @@
 <script lang="ts">
   // An `error` block (docs/chat-blocks.md): what failed, its code, and the
-  // next steps the agent offers. A next step only fills the session's
-  // composer, as a choice does; the person presses Enter.
+  // next steps the agent offers. A next step fills the session's composer,
+  // as a choice does, and the person presses Enter; one with an `action`
+  // (G7.4) is run by the app instead: a login on a host the app knows,
+  // that host's page, or the accounts. The block names only which and the
+  // host, never anything the app sends.
   import Markdown from '../MarkdownView.svelte';
-  import type { UiBlock } from '../rich_blocks';
+  import AddAccountDialog from '../AddAccountDialog.svelte';
+  import { requestHostsView } from '../app_views';
+  import { goTo } from '../destination';
+  import { hosts } from '../hosts';
+  import type { UiBlock, UiNextStep } from '../rich_blocks';
 
   let {
     block,
     onfill,
     canFill,
   }: { block: Extract<UiBlock, { kind: 'error' }>; onfill: (text: string) => void; canFill: boolean } = $props();
+
+  /** The login dialog an action opened, on its host. */
+  let loginOn = $state<string | null>(null);
+
+  /** Why a next step cannot run here; null when it can. */
+  function blockedWhy(o: UiNextStep): string | null {
+    if (!o.action) return canFill ? null : 'Next steps fill the composer of a running session.';
+    if (o.host !== undefined && !$hosts.some((h) => h.alias === o.host)) return `This app has no host named ${o.host}.`;
+    return null;
+  }
+
+  function run(o: UiNextStep) {
+    if (o.action === 'login' && o.host) loginOn = o.host;
+    else if (o.action === 'open_host' && o.host) requestHostsView(o.host);
+    else if (o.action === 'open_accounts') goTo('accounts');
+    else onfill(o.prompt);
+  }
+
+  const anyFill = $derived(block.next.some((o) => !o.action));
 </script>
 
 <section class="card" data-testid="rich-error" role="alert" aria-label={block.title}>
@@ -27,20 +53,29 @@
   {#if block.next.length}
     <div class="options">
       {#each block.next as o, k (k)}
+        {@const why = blockedWhy(o)}
         <button
           type="button"
           class="option"
+          class:action={o.action !== undefined}
           data-testid="rich-error-next"
-          disabled={!canFill}
-          title={o.hint ?? o.prompt}
-          onclick={() => onfill(o.prompt)}
+          data-action={o.action}
+          disabled={why !== null}
+          title={why ?? o.hint ?? (o.action ? o.label : o.prompt)}
+          onclick={() => run(o)}
           ><span class="option-label">{o.label}</span>{#if o.hint}<span class="hint">{o.hint}</span>{/if}</button
         >
       {/each}
     </div>
-    <p class="note">{canFill ? 'A next step fills the composer; press Enter to send it.' : 'Next steps fill the composer of a running session.'}</p>
+    {#if anyFill}
+      <p class="note">{canFill ? 'A next step fills the composer; press Enter to send it.' : 'Next steps fill the composer of a running session.'}</p>
+    {/if}
   {/if}
 </section>
+
+{#if loginOn}
+  <AddAccountDialog host={loginOn} onclose={() => (loginOn = null)} />
+{/if}
 
 <style>
   .card {
@@ -103,6 +138,7 @@
   }
   .option:hover:not(:disabled) { background: var(--control-bg-hover); border-color: var(--accent); }
   .option:disabled { opacity: 0.6; cursor: default; }
+  .option.action { border-color: var(--accent); }
   .option-label { font-weight: 600; }
   .hint { font-size: var(--text-2xs); color: var(--fg-muted); }
   .note {

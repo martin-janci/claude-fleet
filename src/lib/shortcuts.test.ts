@@ -226,7 +226,8 @@ describe('shortcut registry', () => {
     expect(md).toContain(`| ${mac('open-in-editor')} | Open in VS Code (${other('open-in-editor')})`);
     expect(md).toContain(`| ${mac('inspector')} | Inspector (${other('inspector')})`);
     expect(md).toContain(`| ${mac('new-terminal')} | New terminal (${other('new-terminal')})`);
-    expect(md).toContain(`| ${mac('next-terminal')} | Next terminal`);
+    expect(md).toContain(`| ${mac('next-terminal')} | Next terminal (${other('next-terminal')})`);
+    expect(other('next-terminal')).toBe('Ctrl+Alt+`');
     expect(md).toContain(`| ${mac('go-to-file')} | Go to file, Files tab only (${other('go-to-file')})`);
     // Wired by step 5.3 (TerminalView).
     for (const id of ['new-terminal', 'next-terminal']) {

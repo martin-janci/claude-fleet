@@ -31,9 +31,12 @@ revisions 11 to 14 add tools a revision-10 hub does not serve, so the
 desktop and its hub are upgraded together; 15 widens the form spec and
 adds the attention model's two classes (a mission waiting on a person, and
 Jev's "probably waiting" kept apart from Needs you) and no tool; 16 adds
-named tokens (`api_tokens`) and + Add account (`add_account`); 17 adds
-the composer's context help on a shared session (`session_context_help`),
-so a desktop accepts only a revision-17 hub.
+named tokens (`api_tokens`) and + Add account (`add_account`), so a
+desktop needs at least a revision-16 hub; 17 adds gap plan batch 3's tools
+and the composer's context help on a shared session
+(`session_context_help`), each of which a revision-16 hub answers as
+nothing saved, nothing proposed or "the hub needs updating", so a desktop
+accepts a revision-16 or 17 hub.
 
 Search (2026-10, three phases). Every search box ignores case and accents
 through one fold (`search_text.rs`, `src/lib/text_fold.ts`, fleet-mobile's
@@ -414,8 +417,9 @@ default, guide `docs/decisions.md`): `sibling_repos`, `host_placement`,
 `quick_answer`, `adopt_target` / `restore_target`, `turn_outcome`,
 `duplicate`, `related_session`, `work_placement`, `routine_run_outcome`,
 `control_route`, `mission_triage`, `summary_check`, the PR shepherd's
-`pr_triage`, and Review's J6 `main_ticket` and J7 `tracker_duplicate`
-(6.8). Each closed-choice use case has a benchmark set, `fleet-hub decide
+`pr_triage`, Review's J6 `main_ticket` and J7 `tracker_duplicate`
+(6.8), and New session's N2 `resume_or_new` (gap plan G7.10, no
+benchmark set yet). Each other closed-choice use case has a benchmark set, `fleet-hub decide
 bench <use case>` (`bench/choice.rs`, docs/decisions.md *Benchmarking the
 closed-choice use cases*), and J2's `turn-outcome` set holds 51 `asked`
 tails; every built-in set is SYNTHETIC (no recorded data yet), so nothing

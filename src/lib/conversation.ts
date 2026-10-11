@@ -1447,6 +1447,40 @@ export type ThreadRow =
   | { kind: 'turn'; turn: ConvTurn; index: number }
   | { kind: 'event'; event: InlineEvent };
 
+/** A row's time, unix seconds, or null when it has none. */
+function rowSecs(r: ThreadRow): number | null {
+  if (r.kind === 'event') return r.event.at;
+  const ms = r.turn.at ? Date.parse(r.turn.at) : NaN;
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
+function localDay(secs: number): string {
+  const d = new Date(secs * 1000);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+/**
+ * The day separator above row `i` (gap plan G7.8, Control board: "Today"
+ * between the days of the chat): "Today", "Yesterday" or "Thu 8 Oct" when
+ * the row is the first of its local day, else null. The first row gets one
+ * too, so a chat always says which day it starts on. A row with no time
+ * never starts a day.
+ */
+export function daySeparator(rows: readonly ThreadRow[], i: number, nowMs: number = Date.now()): string | null {
+  const at = rowSecs(rows[i]);
+  if (at === null) return null;
+  for (let j = i - 1; j >= 0; j--) {
+    const prev = rowSecs(rows[j]);
+    if (prev === null) continue;
+    if (localDay(prev) === localDay(at)) return null;
+    break;
+  }
+  const now = Math.floor(nowMs / 1000);
+  if (localDay(at) === localDay(now)) return 'Today';
+  if (localDay(at) === localDay(now - 86_400)) return 'Yesterday';
+  return new Date(at * 1000).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }).replace(',', '');
+}
+
 /** Interleave turns (ISO `at`) and inline events (unix secs) by time. An
  *  event goes after the last turn that started at or before it. When the
  *  tail is truncated, events older than the first loaded turn are dropped

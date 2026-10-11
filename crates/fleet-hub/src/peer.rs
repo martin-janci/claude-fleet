@@ -140,6 +140,7 @@ mod tests {
                 latency_ms: None,
                 messages_today: 0,
                 messages_total: 0,
+                retry_every_s: None,
             }
         }
         // The fleet-id-"2" row sorts first, deliberately, so a naive
@@ -173,6 +174,7 @@ mod tests {
             latency_ms: None,
             messages_today: 0,
             messages_total: 0,
+            retry_every_s: None,
         }];
         let t = link_table(&rows);
         assert!(

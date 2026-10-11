@@ -128,6 +128,8 @@
   let pendingTicket = $state<TicketRow | null>(null);
   /** "Open a shell" (G4.5): the dialog opens on Shell. */
   let preferredKind = $state<'work' | 'shell' | null>(null);
+  /** The name the new session gets once a project is picked (G7.15). */
+  let pendingName = $state<string | null>(null);
   let toggled = $state<ReadonlySet<string>>(new Set());
   // Re-rank triggers besides the query: open, the person's own actions, folds.
   let seq = $state(0);
@@ -507,9 +509,11 @@
     host: string | null = null,
     ticket: TicketRow | null = null,
     kind: 'work' | 'shell' | null = null,
+    name: string | null = null,
   ) {
     query = '';
     preferredKind = kind;
+    pendingName = name;
     activeKey = null;
     mode = next;
     preferredHost = host;
@@ -559,7 +563,7 @@
     if (!r) return;
     switcherRequest.set(null);
     if (r.mode === 'switch') show('switch');
-    else show('new', r.host ?? null, r.ticket ?? null, r.kind ?? null);
+    else show('new', r.host ?? null, r.ticket ?? null, r.kind ?? null, r.name ?? null);
   });
   const unsubHost = newSessionHostRequest.subscribe((h) => {
     if (h === null) return;
@@ -706,6 +710,7 @@
         initialHost: preferredHost ?? undefined,
         autostart,
         ...(preferredKind ? { initialKind: preferredKind } : {}),
+        ...(pendingName ? { initialName: pendingName } : {}),
       });
     }
     hide();
@@ -758,6 +763,13 @@
           .map((g) => g.name),
       ),
     ].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })),
+  );
+  /** M15 G7.12: how many projects each of those groups holds ("3 projects"). */
+  const menuGroupCounts = $derived(
+    (newView?.entries ?? []).reduce<Record<string, number>>((m, x) => {
+      if (!x.group.key.startsWith('o:') && x.group.key !== 'f') m[x.group.name] = (m[x.group.name] ?? 0) + 1;
+      return m;
+    }, {}),
   );
 
   function pickNew(key: string) {
@@ -1119,6 +1131,7 @@
             pinned={e.pinned}
             hidden={!!e.hidden}
             groups={menuGroups}
+            counts={menuGroupCounts}
             currentGroup={e.group.name}
             manualGroup={e.manualGroup}
             startIn={menu.startIn}

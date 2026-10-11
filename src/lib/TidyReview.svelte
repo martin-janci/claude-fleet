@@ -16,9 +16,13 @@
   //   Keep 7 d and Safe kill buttons; Safe kill arms first and acts on the
   //   second click. The backend kills such a session only when its worktree
   //   is clean and pushed, and auto-tidy never does (D19).
-  // - "n reopened" (accent) lists work that came back after being done,
-  //   with its past sessions and Resume; it stays until resumed, done again
+  // - "n reopened" (accent) opens the same sheet at its Reopened group
+  //   (G7.9, Tidy board): work that came back after being done, with its
+  //   past sessions, Resume and Dismiss; it stays until resumed, done again
   //   or dismissed. A newly reopened item also toasts once.
+  // - A stopped session (about to expire) offers Expire (G7.9): it forgets
+  //   the row now, through `dismiss_ghost_session`, instead of at the time
+  //   shown.
   import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import ResumeButton from './ResumeButton.svelte';
@@ -27,6 +31,7 @@
   import {
     applyItems,
     applyTidy,
+    applyTidyChoices,
     choicesFor,
     defaultChoice,
     dismissReopened,
@@ -40,6 +45,7 @@
     newlyReopened,
     preselected,
     refreshTidy,
+    reopenedBadge,
     reopenedLoads,
     requestedOnly,
     requestedTicks,
@@ -83,6 +89,7 @@
   /** Sheet order, flattened: what j/k walk. */
   const ordered = $derived(groups.flatMap((g) => g.items));
   const blocked = $derived(hubActionBlocked('tidy_apply', $hubStatus, $hubConnection));
+  const expireBlocked = $derived(hubActionBlocked('dismiss_ghost_session', $hubStatus, $hubConnection));
   /**
    * Both halves, multi-user M1 — and the reason this sheet needed a lookup to
    * get there: a `TidyCandidate` carries a `session_id`, a host and a tmux
@@ -126,7 +133,7 @@
   const notMine = $derived(ordered.length - allowed.length);
 
   let open = $state(false);
-  let reopenedOpen = $state(false);
+  let reopenedGroup = $state<HTMLDivElement | null>(null);
   let cursor = $state(0);
   let busy = $state(false);
   let ticked = $state<Set<number>>(new Set());
@@ -204,7 +211,7 @@
   // the sheet hands focus back to it instead of dropping it on <body>.
   let opener: HTMLElement | null = null;
 
-  async function openSheet(requested: number[] = []) {
+  async function openSheet(requested: number[] = [], atReopened = false) {
     if (!open) opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     only = requestedOnly(candidates, requested);
     // Preselection never ticks a row this client may not tidy: a tick that
@@ -220,9 +227,9 @@
       ordered.findIndex((c) => requested.includes(c.session_id)),
     );
     open = true;
-    reopenedOpen = false;
     await tick();
     sheet?.focus();
+    if (atReopened) reopenedGroup?.scrollIntoView?.({ block: 'nearest' });
   }
 
   function closeSheet() {
@@ -310,10 +317,12 @@
     // Narrowed per target, never one answer for the whole sheet: ↵ applies
     // from anywhere in it, and a session shared with this client at `watch`
     // or `drive` is not this client's to safe-kill.
-    const items = applyItems(allowed, ticked, choice);
+    // Expire goes through `dismiss_ghost_session`: the hub's half of that
+    // action decides whether those rows are sent at all.
+    const items = applyItems(allowed, ticked, choice).filter((i) => i.action !== 'expire' || expireBlocked === null);
     if (items.length === 0) return;
     busy = true;
-    const r = await applyTidy(items);
+    const r = await applyTidyChoices(items);
     busy = false;
     if (!r.ok) {
       pushError(r.error, 'Tidy up failed');
@@ -398,8 +407,7 @@
 
   $effect(() => {
     if (cursor > 0 && cursor >= ordered.length) cursor = Math.max(0, ordered.length - 1);
-    if (open && ordered.length === 0) closeSheet();
-    if (reopenedOpen && $reopenedWork.length === 0) reopenedOpen = false;
+    if (open && ordered.length === 0 && $reopenedWork.length === 0) closeSheet();
   });
 
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -421,7 +429,7 @@
           push({
             kind: 'info',
             message: `${w.key ?? w.title} reopened · ${w.past_sessions} past session${w.past_sessions === 1 ? '' : 's'}`,
-            action: { label: 'Show', run: () => (reopenedOpen = true) },
+            action: { label: 'Show', run: () => void openSheet([], true) },
           });
         }
       }
@@ -450,41 +458,8 @@
     class="al-seg reopened-pill"
     data-testid="reopened-pill"
     title="Work that came back after being done"
-    onclick={() => {
-      reopenedOpen = !reopenedOpen;
-      closeSheet();
-    }}
+    onclick={() => void openSheet([], true)}
   >{$reopenedWork.length} reopened</button>
-{/if}
-
-{#if reopenedOpen}
-  <div class="tidy-sheet" data-testid="reopened-list">
-    <div class="sheet-head">
-      <span>Reopened</span>
-      <span class="hint">moved out of done in the tracker</span>
-      <button class="btn btn--quiet" onclick={() => (reopenedOpen = false)}>Close</button>
-    </div>
-    {#each $reopenedWork as w (w.item_id)}
-      <div class="tidy-row" data-testid="reopened-row">
-        <span class="key">{w.key ?? ''}</span>
-        <span class="name">{w.title}</span>
-        <span class="badge" data-testid="reopened-badge"
-          >reopened · {w.past_sessions} past session{w.past_sessions === 1 ? '' : 's'}</span
-        >
-        {#if w.status_name}<span class="meta">{w.status_name}</span>{/if}
-        {#if w.key}<ResumeButton workKey={w.key} />{/if}
-        <button
-          class="btn btn--quiet is-bounded"
-          data-testid="reopened-dismiss"
-          disabled={hubActionBlocked('dismiss_reopened', $hubStatus, $hubConnection) !== null}
-          onclick={() =>
-            void dismissReopened(w.item_id).then((r) => {
-              if (!r.ok) pushError(r.error, 'Dismiss failed');
-            })}>Dismiss</button
-        >
-      </div>
-    {/each}
-  </div>
 {/if}
 
 {#if open}
@@ -641,6 +616,35 @@
       {/each}
       </div>
     {/each}
+    {#if $reopenedWork.length > 0}
+      <!-- G7.9: Reopened is a group of this sheet, not a sheet of its own.
+           Its rows are not ticked or tidied: each has Resume and Dismiss. -->
+      <div role="group" aria-label="Reopened" data-testid="reopened-list" bind:this={reopenedGroup}>
+        <div class="group-line">
+          <div class="group-head" data-testid="tidy-group">Reopened · {$reopenedWork.length}</div>
+          <span class="hint">moved out of done in the tracker</span>
+        </div>
+        {#each $reopenedWork as w (w.item_id)}
+          <div class="tidy-row" data-testid="reopened-row">
+            <span class="key">{w.key ?? ''}</span>
+            <span class="name">{w.title}</span>
+            <span class="badge" data-testid="reopened-badge">{reopenedBadge(w)}</span>
+            {#if w.status_name}<span class="meta">{w.status_name}</span>{/if}
+            {#if w.key}<ResumeButton workKey={w.key} />{/if}
+            <button
+              class="btn btn--quiet is-bounded"
+              data-testid="reopened-dismiss"
+              disabled={hubActionBlocked('dismiss_reopened', $hubStatus, $hubConnection) !== null}
+              onkeydown={(e) => e.stopPropagation()}
+              onclick={() =>
+                void dismissReopened(w.item_id).then((r) => {
+                  if (!r.ok) pushError(r.error, 'Dismiss failed');
+                })}>Dismiss</button
+            >
+          </div>
+        {/each}
+      </div>
+    {/if}
     </div>
     {#if selected}
       <p class="tidy-detail" data-testid="tidy-detail" aria-live="polite">

@@ -729,6 +729,21 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Forget that a session was viewed, so its last finished turn reads as
+    /// unread again and lands in the Inbox (G7.9: a person sends a routine
+    /// run Jev read as "nothing to do" to the Inbox). Answers whether the row
+    /// changed; a change emits `session_updated`.
+    pub fn clear_session_viewed(&self, id: i64) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET last_viewed_at = NULL WHERE id = ?1 AND last_viewed_at IS NOT NULL",
+            [id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(n > 0)
+    }
+
     /// Set (or, with `None`, clear) what a finished turn came to (migration
     /// 129; J2, step 5.11, writes it). Refuses a value outside
     /// [`TURN_OUTCOMES`](super::TURN_OUTCOMES). Answers whether the row
@@ -1503,6 +1518,23 @@ impl Store {
                 |r| r.get::<_, i64>(0),
             )
             .map(|n| n as u32)
+    }
+
+    /// The `playbook_applied` details of session `id` since `since`, for
+    /// the week's playbook counts (`service::health::playbooks_since`).
+    /// Read through the `(session_id, at)` index.
+    pub fn playbook_details_since(
+        &self,
+        id: i64,
+        since: i64,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT detail FROM session_events \
+             WHERE session_id = ?1 AND at >= ?2 AND kind = 'playbook_applied' \
+               AND detail IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![id, since], |r| r.get::<_, String>(0))?;
+        rows.collect()
     }
 
     /// Carry the row `(host_alias, old)` over to `new` after fleet renamed its
@@ -2407,6 +2439,12 @@ impl Store {
     /// boundary (redesign step 5.13).
     pub fn bus_start_progress(&self, p: &crate::events::StartProgress) {
         self.bus.start_progress(p);
+    }
+
+    /// Emit `repair:progress` (not a store row): an explicit repair step
+    /// boundary for the caller that passed a `progress_token` (G7.3).
+    pub fn bus_repair_progress(&self, p: &crate::events::RepairProgress) {
+        self.bus.repair_progress(p);
     }
 
     /// Emit `confirm:changed` (not a store row): the confirmation queue

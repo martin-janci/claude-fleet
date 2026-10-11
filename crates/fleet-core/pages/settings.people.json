@@ -5,7 +5,7 @@
   "parent": "settings",
   "layout": "master_detail",
   "resource": "person",
-  "intro": "The people this hub knows. A person is added when a device is paired to them or handed to them. Disabling someone revokes their devices and the shares made to them.",
+  "intro": "The people this hub knows. Add one with + Person, or they are added when a device is paired or handed to them. Disabling someone revokes their devices and the shares made to them.",
   "sections": [
     {
       "title": "Person",

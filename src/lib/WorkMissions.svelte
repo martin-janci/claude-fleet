@@ -88,6 +88,10 @@
     type MissionCard,
     trailNodes,
     missionGroups,
+    filterMissions,
+    missionFilterChoices,
+    missionFilterCount,
+    type MissionFilters,
     missionsToExplain,
     missionReason,
     loopFooter,
@@ -126,10 +130,19 @@
   let finishedOpen = $state(false);
   let rowDetails = $state.raw<Map<number, MissionDetail>>(new Map());
   let explainSeq = 0;
+  // The board's Filters (G7.7): needs you, mine, organisation, repository
+  // and mode, over the list as read.
+  let filters = $state<MissionFilters>({});
+  let filtersOpen = $state(false);
+  const filterCount = $derived(missionFilterCount(filters));
+  const filterChoices = $derived(missionFilterChoices(missions));
+  const shown = $derived(filterMissions(missions, filters, $myPersonId));
+  const orgName = (id: number) => (id === 0 ? 'No organisation' : ($orgs.find((o) => o.id === id)?.name ?? `Organisation ${id}`));
+  const numOrNull = (v: string) => (v === '' ? null : Number(v));
   const groups = $derived(
     grouping === 'state'
-      ? missionGroups(missions)
-      : [{ key: 'all' as const, label: '', missions: [...missions].sort((a, b) => b.updated_at - a.updated_at || b.id - a.id) }],
+      ? missionGroups(shown)
+      : [{ key: 'all' as const, label: '', missions: [...shown].sort((a, b) => b.updated_at - a.updated_at || b.id - a.id) }],
   );
   const footer = $derived(loopFooter([...rowDetails.values()]));
 
@@ -1339,6 +1352,14 @@
       {:else}
         <button class="btn btn--primary" type="button" disabled={saveBlocked} data-testid="mission-new" onclick={() => (creating = true)}>New mission</button>
         {#if missions.length > 0}
+          <button
+            class="btn btn--quiet filters-btn"
+            type="button"
+            aria-expanded={filtersOpen}
+            data-testid="missions-filters"
+            onclick={() => (filtersOpen = !filtersOpen)}
+            >Filters{#if filterCount > 0}&nbsp;<span class="count" data-testid="missions-filters-count">{filterCount}</span>{/if}</button
+          >
           <label class="group-pick muted small"
             >Group
             <select bind:value={grouping} data-testid="missions-group">
@@ -1349,6 +1370,52 @@
         {/if}
       {/if}
     </div>
+    {#if filtersOpen && missions.length > 0}
+      <div class="filters" role="group" aria-label="Filter missions" data-testid="missions-filters-panel">
+        <label class="check"><input type="checkbox" bind:checked={filters.needsYou} data-testid="missions-filter-needs-you" /> Needs you</label>
+        {#if $myPersonId != null}
+          <label class="check"><input type="checkbox" bind:checked={filters.mine} data-testid="missions-filter-mine" /> Mine</label>
+        {/if}
+        {#if filterChoices.orgIds.length > 1}
+          <label class="muted small"
+            >Organisation
+            <select
+              data-testid="missions-filter-org"
+              value={filters.orgId ?? ''}
+              onchange={(e) => (filters.orgId = numOrNull((e.currentTarget as HTMLSelectElement).value))}
+            >
+              <option value="">Any</option>
+              {#each filterChoices.orgIds as id (id)}<option value={id}>{orgName(id)}</option>{/each}
+            </select></label
+          >
+        {/if}
+        {#if filterChoices.repos.length > 0}
+          <label class="muted small"
+            >Repository
+            <select
+              data-testid="missions-filter-repo"
+              value={filters.projectId ?? ''}
+              onchange={(e) => (filters.projectId = numOrNull((e.currentTarget as HTMLSelectElement).value))}
+            >
+              <option value="">Any</option>
+              {#each filterChoices.repos as r (r.project_id)}<option value={r.project_id}>{r.name}</option>{/each}
+            </select></label
+          >
+        {/if}
+        {#if filterChoices.modes.length > 1}
+          <label class="muted small"
+            >Mode
+            <select data-testid="missions-filter-mode" bind:value={filters.mode}>
+              <option value={null}>Any</option>
+              {#each filterChoices.modes as mode (mode)}<option value={mode}>{mode === 'continuous' ? 'Continuous' : mode === 'finite' ? 'Finite' : mode}</option>{/each}
+            </select></label
+          >
+        {/if}
+        {#if filterCount > 0}
+          <button class="btn btn--quiet" type="button" data-testid="missions-filters-clear" onclick={() => (filters = {})}>Clear</button>
+        {/if}
+      </div>
+    {/if}
     {#if error}
       <div class="state error" role="alert" data-testid="missions-error">
         <p>{error}</p>
@@ -1397,6 +1464,12 @@
           </ul>
         {/if}
       {/each}
+      {#if shown.length < missions.length}
+        <p class="muted small" data-testid="missions-hidden">
+          {missions.length - shown.length} hidden by filters ·
+          <button class="link" type="button" data-testid="missions-hidden-show" onclick={() => (filters = {})}>Show all</button>
+        </p>
+      {/if}
       {#if footer || missions.some((m) => m.state === 'active')}
         <div class="row list-foot" data-testid="missions-footer">
           {#if footer}<span class="muted small" data-testid="missions-loop">{footer}</span>{/if}
@@ -1500,7 +1573,11 @@
   .reason { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tnum { font-variant-numeric: tabular-nums; }
   .list-foot { justify-content: space-between; border-top: 1px solid var(--border); padding-top: 0.3rem; }
-  .group-pick { display: inline-flex; gap: 0.3rem; align-items: center; margin-left: auto; }
+  .group-pick { display: inline-flex; gap: 0.3rem; align-items: center; }
+  .filters-btn { margin-left: auto; }
+  .link { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
+  .filters { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; padding: 0.3rem 0.5rem; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+  .filters label { display: inline-flex; gap: 0.3rem; align-items: center; }
   .kv { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: 0.2rem 0.6rem; margin: 0.3rem 0 0; font-size: var(--text-2xs); }
   .kv dt { color: var(--fg-muted); }
   .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }

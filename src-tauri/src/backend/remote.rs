@@ -913,6 +913,18 @@ impl HubBackend {
         Ok(v.get("removed").and_then(Value::as_bool).unwrap_or(false))
     }
 
+    /// `commands::downloads::pause_download`.
+    pub async fn pause_download(
+        &self,
+        args: &fleet_core::service::downloads::PauseDownloadArgs,
+    ) -> Result<fleet_core::store::DownloadRow, IpcError> {
+        self.route(
+            "pause_download",
+            &json!({ "id": args.id, "paused": args.paused }),
+        )
+        .await
+    }
+
     /// `commands::downloads::remove_download`.
     pub async fn remove_download(&self, id: i64) -> Result<bool, IpcError> {
         let v: Value = self.route("remove_download", &json!({ "id": id })).await?;

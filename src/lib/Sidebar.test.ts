@@ -3691,6 +3691,45 @@ describe('Sidebar empty states (review r13)', () => {
     expect(get(sidebarView)).toBe('sessions');
   });
 
+  it('a calm Inbox names the next routine (G7.15)', async () => {
+    const next = Math.floor(Date.now() / 1000) + 3600;
+    mockBackend(fakeProjects, [sessionFor(1)]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, x?: { args?: { action?: string } }) =>
+      cmd === 'routines' && x?.args?.action === 'list'
+        ? [{ id: 1, name: 'Morning PR sweep', enabled: true, trigger: 'cron', skip_next: false, next_run_at: next }]
+        : base(cmd, x),
+    );
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await waitFor(() => expect(screen.getByTestId('inbox-calm').textContent).toContain('The next routine is Morning PR sweep'));
+  });
+
+  it('a search with no results starts a session named after it (G7.15)', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'receipt totals' } });
+    await waitFor(() => expect(screen.getByTestId('sidebar-empty-new').textContent).toBe('Start new session “receipt totals”…'));
+    await fireEvent.click(screen.getByTestId('sidebar-empty-new'));
+    expect(get(switcherRequest)).toMatchObject({ mode: 'new', name: 'receipt totals' });
+  });
+
+  it('a first run offers this machine when its host is hidden (G7.15)', async () => {
+    mockBackend([], []);
+    hosts.set([
+      { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: true, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
+    ]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('sidebar-empty').textContent).toMatch(/This (Mac|computer) counts\./);
+    expect(screen.getByTestId('sidebar-empty-add-host').textContent).toContain('Add a remote host');
+    await fireEvent.click(screen.getByTestId('sidebar-empty-use-local'));
+    await waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith('hide_host', { args: { alias: 'local', hidden: false } }));
+    // The host is back on the list, so the first run has done its job.
+    await waitFor(() => expect(screen.queryByTestId('sidebar-empty-use-local')).toBeNull());
+  });
+
   it('a first run starts with one host', async () => {
     mockBackend([], []);
     render(Sidebar);
@@ -3699,6 +3738,8 @@ describe('Sidebar empty states (review r13)', () => {
     expect(empty.dataset.kind).toBe('first');
     expect(screen.getByTestId('sidebar-empty-add-host')).toBeTruthy();
     expect(screen.getByTestId('sidebar-empty-pair')).toBeTruthy();
+    // No local host to offer: nothing says this machine counts.
+    expect(screen.queryByTestId('sidebar-empty-use-local')).toBeNull();
   });
 });
 

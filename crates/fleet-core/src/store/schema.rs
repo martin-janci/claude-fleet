@@ -358,6 +358,39 @@ fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 166: `routine_runs` already has its
+/// `routine_name` column (the rebuild ran). See [`Migration`].
+fn routine_runs_has_routine_name(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'routine_name'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 165: `wizard_state` exists (and
+/// `host_setups`, which it replaced, is gone). See [`Migration`].
+fn has_wizard_state(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wizard_state'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 164: `start_rules` already has its
+/// `agent` column. See [`Migration`].
+fn start_rules_has_agent(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('start_rules') WHERE name = 'agent'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 052: `work_links` already has its
 /// `archived_at` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
@@ -1846,6 +1879,28 @@ const MIGRATIONS: &[Migration] = &[
     // `search_fts`) and the triggers that keep it in step. `IF NOT EXISTS`
     // and an upsert backfill, then a rebuild: safe to re-run.
     Migration::plain(163, include_str!("../../migrations/163_search_index.sql")),
+    // M15 step G7.1: start and placement rules name how a start runs (host
+    // fallback, account, model, effort, agent) — ADD COLUMNs, so a guard.
+    Migration {
+        version: 164,
+        sql: include_str!("../../migrations/164_rule_start_targets.sql"),
+        already_applied: Some(start_rules_has_agent),
+    },
+    // M15 step G7.2: `wizard_state`, the add-host wizard's drafts
+    // generalised so any wizard resumes on another device. It moves the
+    // `host_setups` rows and drops that table, so a guard.
+    Migration {
+        version: 165,
+        sql: include_str!("../../migrations/165_wizard_state.sql"),
+        already_applied: Some(has_wizard_state),
+    },
+    // M15 step G7.4: a routine's runs outlive it (`routine_id` nullable, ON
+    // DELETE SET NULL, plus `routine_name`). A table rebuild, so guarded.
+    Migration {
+        version: 166,
+        sql: include_str!("../../migrations/166_routine_runs_outlive_routine.sql"),
+        already_applied: Some(routine_runs_has_routine_name),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2002,6 +2057,7 @@ impl Store {
             restored?;
         }
         self.repair_skipped_main_migrations()?;
+        self.ensure_work_rules_start_columns()?;
         self.backfill_stale_demoted()?;
         self.backfill_session_owner()?;
         self.reap_orphan_session_events()?;
@@ -2115,6 +2171,33 @@ impl Store {
     /// ADD COLUMN plus `IF NOT EXISTS` / `DROP … IF EXISTS` DDL, and 065's
     /// trigger rebuild is still the latest one, so running them late is
     /// what running them in order would have left.
+    /// Migration 164's `work_rules` half (gap plan G7.1): `host_alias` and
+    /// `profile`, "its sessions start here". In Rust, after the repair of a
+    /// skipped 066 (which creates `work_rules`), so a database that met 164
+    /// before it had the table still gets them. Idempotent.
+    fn ensure_work_rules_start_columns(&self) -> Result<()> {
+        let has_table: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'work_rules'",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_table == 0 {
+            return Ok(());
+        }
+        for column in ["host_alias", "profile"] {
+            let n: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('work_rules') WHERE name = ?1",
+                [column],
+                |r| r.get(0),
+            )?;
+            if n == 0 {
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE work_rules ADD COLUMN {column} TEXT;"))?;
+            }
+        }
+        Ok(())
+    }
+
     fn repair_skipped_main_migrations(&self) -> Result<()> {
         /// `(table, column, column definition)` added by `main`'s 034 and 036.
         const COLUMNS: &[(&str, &str, &str)] = &[
@@ -6198,6 +6281,73 @@ mod tests {
         s.migrate().unwrap();
         assert_eq!(row(wid).name, "feat-imports", "a re-run changes nothing");
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// 166 (gap plan G7.4): the runs keep their ids, rows and routine's
+    /// name through the rebuild, and from then on deleting a routine leaves
+    /// its runs with the name and no routine.
+    #[test]
+    fn migration_166_keeps_a_deleted_routines_runs() {
+        let s = store_at_version(165);
+        s.conn
+            .execute_batch(
+                "INSERT INTO routines (id, name, trigger, cron, host_alias, project_id, prompt, created_at, updated_at)
+                 VALUES (7, 'Nightly triage', 'cron', '0 3 * * *', 'local', 1, 'go', 1, 1);
+                 INSERT INTO routine_runs (id, routine_id, trigger, state, started_at, finished_at, outcome, outcome_source, host_alias)
+                 VALUES (41, 7, 'cron', 'done', 10, 20, 'did_work', 'rule', 'local');",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        type Row = (Option<i64>, Option<String>, String, Option<String>);
+        let row = |id: i64| -> Row {
+            s.conn
+                .query_row(
+                    "SELECT routine_id, routine_name, state, outcome FROM routine_runs WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            row(41),
+            (
+                Some(7),
+                Some("Nightly triage".into()),
+                "done".into(),
+                Some("did_work".into())
+            )
+        );
+        assert!(s.delete_routine(7).unwrap());
+        assert_eq!(row(41).0, None, "the run stays, without its routine");
+        assert_eq!(row(41).1.as_deref(), Some("Nightly triage"));
+        // A re-run only records the version.
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 166;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(row(41).1.as_deref(), Some("Nightly triage"));
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// 165 (gap plan G7.2): the add-host wizard's drafts move from
+    /// `host_setups` into `wizard_state` as `add_host` rows, and the old
+    /// table goes; the store still reads them as drafts.
+    #[test]
+    fn migration_165_moves_the_add_host_drafts_into_wizard_state() {
+        let s = store_at_version(164);
+        s.conn
+            .execute_batch(
+                "INSERT INTO host_setups (ssh_alias, alias, step, checks, answers, created_at, updated_at)
+                 VALUES ('mercury', 'merc', 3, '[{\"key\":\"ssh\",\"state\":\"ok\",\"label\":\"SSH\",\"detail\":\"18 ms\"}]',
+                         '{\"install_agent\":true}', 5, 6);",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        assert!(!s.has_table("host_setups").unwrap());
+        let d = s.host_setup("mercury").unwrap().expect("the draft moved");
+        assert_eq!((d.alias.as_str(), d.step, d.created_at), ("merc", 3, 5));
+        assert_eq!(d.checks[0].detail, "18 ms");
+        assert_eq!(d.answers["install_agent"], true);
     }
 
     /// The hub-ops-accounting branch numbered its `usage_daily` rebuild

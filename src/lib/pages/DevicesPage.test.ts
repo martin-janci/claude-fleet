@@ -11,7 +11,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import ResourcePage from './ResourcePage.svelte';
 import { hubStatus, STANDALONE } from '../hub';
 import { orgs, type OrgDetail } from '../orgs';
-import { devices, qrRects, type DeviceSummary } from '../devices';
+import { devices, people, qrRects, type DeviceSummary } from '../devices';
 import { catalogStatuses } from '../assets_workspace';
 import { toasts } from '../toasts';
 import { bundle, openRecordTab } from './testing';
@@ -69,6 +69,10 @@ beforeEach(() => {
   toasts.set([]);
   orgs.set([acme]);
   devices.set([laptop, phone]);
+  people.set([
+    { id: 1, name: 'owner', owner: true, created_at: 1, devices: ['laptop'] },
+    { id: 2, name: 'ada', owner: false, created_at: 2, devices: ['ada-phone'] },
+  ]);
   catalogStatuses.set([{ name: 'personal' }, { name: 'acme' }] as never);
   route();
 });
@@ -99,7 +103,7 @@ describe('Settings → Devices', () => {
       'Trusted',
       'Last seen',
     ]);
-    const cells = (r: HTMLElement) => Array.from(r.querySelectorAll('td')).map((c) => c.textContent);
+    const cells = (r: HTMLElement) => Array.from(r.querySelectorAll('td')).map((c) => c.textContent?.trim());
     expect(cells(within(table).getAllByTestId('table-row')[2])).toEqual(['ada', 'ada-tablet', 'Acme', 'Answer only', 'Yes', 'never']);
 
     await fireEvent.change(within(table).getByTestId('table-filter-org'), { target: { value: 'Acme' } });
@@ -117,16 +121,23 @@ describe('Settings → Devices', () => {
     expect(await screen.findByTestId('record-device-ada-phone')).toBeTruthy();
   });
 
-  it('binds to an org picked from the orgs, and grants and takes back a catalog', async () => {
+  it('M15 G7.14: picks its org and its person in the edit form, and grants and takes back a catalog', async () => {
     show();
     await fireEvent.click((await screen.findAllByTestId('resource-row'))[1]);
-    await fireEvent.click(screen.getByTestId('record-action-device.bind'));
-    const select = screen.getByTestId('param-device.bind-org') as HTMLSelectElement;
-    expect(Array.from(select.options).map((o) => o.value)).toEqual(['', 'Acme']);
-    await fireEvent.change(select, { target: { value: 'Acme' } });
-    await fireEvent.click(screen.getByTestId('run-device.bind'));
+    expect(screen.queryByTestId('record-action-device.bind')).toBeNull();
+    const org = screen.getByTestId('edit-org') as HTMLSelectElement;
+    expect(Array.from(org.options).map((o) => [o.value, o.textContent])).toEqual([
+      ['', 'No org — every org'],
+      ['Acme', 'Acme'],
+    ]);
+    const person = screen.getByTestId('edit-person') as HTMLSelectElement;
+    expect(person.value).toBe('ada');
+    expect(Array.from(person.options).map((o) => o.value)).toEqual(['owner', 'ada']);
+    await fireEvent.change(org, { target: { value: 'Acme' } });
+    await fireEvent.change(person, { target: { value: 'owner' } });
+    await fireEvent.click(screen.getByTestId('record-apply'));
     await fireEvent.click(screen.getByTestId('record-confirm'));
-    await waitFor(() => expect(argsOf('bind_device_org')).toEqual({ device: 'ada-phone', org: 'Acme' }));
+    await waitFor(() => expect(argsOf('update_device')).toEqual({ device: 'ada-phone', org: 'Acme', person: 'owner' }));
 
     // The catalog it holds is left out of the grant select.
     const grant = screen.getByTestId('param-device.grant_catalog-catalog') as HTMLSelectElement;
@@ -148,6 +159,19 @@ describe('Settings → Devices', () => {
     await fireEvent.click(screen.getByTestId('record-delete'));
     await fireEvent.click(screen.getByTestId('record-confirm'));
     await waitFor(() => expect(argsOf('revoke_device')).toEqual({ device: 'ada-phone' }));
+  });
+});
+
+describe('Settings → Devices: what each one runs (M15 G7.14)', () => {
+  it('says the app under the name in the table, and its kind and app in the record', async () => {
+    const pixel: DeviceSummary = { ...phone, kind: 'phone', app: 'phone · fleet-mobile 0.5.4' };
+    route({ list_devices: [laptop, pixel] });
+    render(ResourcePage, { props: { page: pageOf('settings.devices'), resource: resourceOf('device') } });
+    const table = await screen.findByTestId('resource-table');
+    await waitFor(() => expect(within(table).getAllByTestId('table-subtitle').map((s) => s.textContent)).toEqual(['phone · fleet-mobile 0.5.4']));
+    await fireEvent.click(within(table).getAllByTestId('table-row')[1]);
+    expect(screen.getByTestId('value-kind').textContent).toBe('Phone');
+    expect(screen.getByTestId('value-app').textContent).toBe('phone · fleet-mobile 0.5.4');
   });
 });
 
@@ -217,6 +241,15 @@ describe('Settings → Devices: Pair a device is a wizard (10.12)', () => {
 
 describe('Settings → People', () => {
   const show = () => render(ResourcePage, { props: { page: pageOf('settings.people'), resource: resourceOf('person') } });
+
+  it('M15 G7.14: + Person adds someone before any device is paired to them', async () => {
+    show();
+    await fireEvent.click(await screen.findByTestId('resource-add'));
+    await fireEvent.input(screen.getByTestId('param-person.add-name'), { target: { value: 'jana' } });
+    await fireEvent.input(screen.getByTestId('param-person.add-display_name'), { target: { value: 'Jana N.' } });
+    await fireEvent.click(screen.getByTestId('run-person.add'));
+    await waitFor(() => expect(argsOf('add_person')).toEqual({ name: 'jana', display_name: 'Jana N.' }));
+  });
 
   it('renames a person and disables one after asking', async () => {
     show();

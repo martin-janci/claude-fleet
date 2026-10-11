@@ -56,6 +56,13 @@ pub struct UpdateDeviceArgs {
     pub mode: Option<String>,
     #[serde(default)]
     pub trusted: Option<bool>,
+    /// M15 step G7.14: the org it is bound to, picked in the edit form; ""
+    /// unbinds.
+    #[serde(default)]
+    pub org: Option<String>,
+    /// G7.14: whose device it is, picked in the edit form.
+    #[serde(default)]
+    pub person: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -92,6 +99,14 @@ pub struct RenamePersonArgs {
     pub person_id: i64,
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+/// M15 step G7.14: "+ Person".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AddPersonArgs {
+    pub name: String,
     #[serde(default)]
     pub display_name: Option<String>,
 }
@@ -188,10 +203,10 @@ pub async fn set_device_trust(
     )
 }
 
-/// Trust, then mode, then the name, each through its own `org_admin`
-/// action, so a hub that predates `rename_device` / `set_device_mode` still
-/// takes a trust change. The rename goes last: the others address the
-/// device by the name it has now.
+/// Trust, then mode, then the org and the person (M15 step G7.14), then the
+/// name, each through its own `org_admin` action, so a hub that predates
+/// `rename_device` / `set_device_mode` still takes a trust change. The
+/// rename goes last: the others address the device by the name it has now.
 #[tauri::command]
 pub async fn update_device(
     backend: State<'_, Arc<FleetBackend>>,
@@ -269,6 +284,24 @@ pub async fn list_people(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<PersonSummary>, IpcError> {
     decode(routed::list_people(&backend, &store, OrgAdminArgs::new("list_people")).await?)
+}
+
+#[tauri::command]
+pub async fn add_person(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: AddPersonArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::add_person(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            name: Some(args.name),
+            display_name: args.display_name,
+            ..OrgAdminArgs::new("add_person")
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -374,6 +407,21 @@ pub(crate) mod routed {
                 ..OrgAdminArgs::new("set_device_mode")
             });
         }
+        if let Some(org) = args.org {
+            let org = org.trim();
+            steps.push(OrgAdminArgs {
+                device: Some(args.device.clone()),
+                org: (!org.is_empty()).then(|| org.to_string()),
+                ..OrgAdminArgs::new("bind_device")
+            });
+        }
+        if let Some(person) = args.person.filter(|p| !p.trim().is_empty()) {
+            steps.push(OrgAdminArgs {
+                device: Some(args.device.clone()),
+                person: Some(person.trim().to_string()),
+                ..OrgAdminArgs::new("set_device_person")
+            });
+        }
         if let Some(name) = args.name.filter(|n| n.trim() != args.device.trim()) {
             steps.push(OrgAdminArgs {
                 device: Some(args.device.clone()),
@@ -384,7 +432,7 @@ pub(crate) mod routed {
         if steps.is_empty() {
             return Err(IpcError::new(
                 fleet_core::ipc_error::codes::E_INVALID,
-                "update_device needs name, mode or trusted",
+                "update_device needs name, mode, trusted, org or person",
             ));
         }
         let mut last = serde_json::Value::Null;
@@ -437,6 +485,17 @@ pub(crate) mod routed {
     ) -> Result<serde_json::Value, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("list_people", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn add_person(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("add_person", &args).await,
             None => local(&args, store),
         }
     }

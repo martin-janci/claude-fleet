@@ -1167,16 +1167,19 @@ Pass 1 — correctness: does the code do what it should? Any bugs?
 Pass 2 — code quality: clarity, structure, test coverage.
 Pass 3 — risk: anything dangerous, security-sensitive, or destructive?
 
-Cite file:line for every point. End with an overall verdict: approve / approve-with-fixes / needs-rework.`;
+Cite file:line for every point. End with one line in this form: \`Verdict: approve | approve-with-fixes | needs-rework · <N> blocking · <M> nits\`.`;
 
 export async function spawnReview(
   sourceSessionId: number,
   prompt: string,
   signal?: AbortSignal,
+  agent: 'claude' | 'codex' = 'claude',
 ): Promise<Result<SessionRow>> {
   const r = await invokeCmdAbortable<SessionRow>(
     'spawn_review',
-    { args: { source_session_id: sourceSessionId, prompt } },
+    // M15 G7.12: Codex as the reviewer; Claude Code stays the default and
+    // is not named, so an older hub reads the same call.
+    { args: agent === 'claude' ? { source_session_id: sourceSessionId, prompt } : { source_session_id: sourceSessionId, prompt, agent } },
     signal,
   );
   if (r.ok) mergeSession(r.value);

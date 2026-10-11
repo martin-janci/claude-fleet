@@ -11,6 +11,9 @@ pub struct SpawnReviewArgs {
     pub source_session_id: i64,
     /// The review prompt.
     pub prompt: String,
+    /// Who reviews: `claude` (the default) or `codex` (M15 G7.12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     // Reserved for future cancellation wiring. The frontend's
     // invokeCmdAbortable injects a call_id; v1 spawn_review doesn't register a
     // CancellationToken under it (the spawn is short — tmux create + reconcile
@@ -30,11 +33,29 @@ pub struct SpawnReviewArgs {
     pub origin: Option<crate::store::SessionOrigin>,
 }
 
+/// The reviewer agent a [`SpawnReviewArgs::agent`] names: Claude Code when
+/// none, Codex on request. Anything else (a shell, agy, which is not
+/// validated yet, an unknown name) is `E_INVALID`.
+pub(crate) fn reviewer_agent(
+    agent: Option<&str>,
+) -> Result<&'static dyn crate::agent_adapter::AgentAdapter, IpcError> {
+    match agent.map(str::trim).filter(|a| !a.is_empty()) {
+        None | Some(crate::store::AGENT_CLAUDE) => Ok(crate::agent_adapter::claude()),
+        Some(crate::store::AGENT_CODEX) => crate::agent_adapter::by_id(crate::store::AGENT_CODEX)
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "no Codex adapter")),
+        Some(other) => Err(IpcError::new(
+            codes::E_INVALID,
+            format!("a review runs claude or codex, not {other}"),
+        )),
+    }
+}
+
 pub async fn spawn_review(
     args: SpawnReviewArgs,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<crate::store::SessionRow, IpcError> {
+    let agent = reviewer_agent(args.agent.as_deref())?;
     // 1. Snapshot source + capture cwd-resolution inputs under a brief lock.
     //    For remote hosts the cwd is finalized off-lock via `ssh.remote_home`.
     let (source, cwd_src) = {
@@ -66,25 +87,20 @@ pub async fn spawn_review(
     };
 
     // 2. Spawn the review tmux session (off-lock).
-    //    A review runs Claude Code — same pane command as any "work" session.
+    //    A review runs its agent's plain pane command, as a "work" session
+    //    of that agent would: Claude Code under a minted conversation id,
+    //    Codex fresh (it picks its own id).
     let short = format!("{:x}", now_unix() & 0xfffff);
     let review_name = format!("{}--review-{}", source.tmux_name, short);
-    let agent = crate::agent_adapter::claude();
-    // Claude Code always mints one; the fallback is the same mint.
-    let claude_id = agent
-        .mint_conversation_id()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let launch = crate::tmux::ClaudeLaunch::default();
+    let claude_id = agent.mint_conversation_id();
+    let pane = match claude_id.as_deref() {
+        Some(id) => agent.launch_command(Some(id), &review_name, &launch),
+        None => agent.start_command(&review_name, &launch),
+    };
     let tmux = exec_for(&source.host_alias, ssh);
-    tmux.new_session(
-        &review_name,
-        std::path::Path::new(&cwd),
-        &agent.launch_command(
-            Some(&claude_id),
-            &review_name,
-            &crate::tmux::ClaudeLaunch::default(),
-        ),
-    )
-    .await?;
+    tmux.new_session(&review_name, std::path::Path::new(&cwd), &pane)
+        .await?;
 
     // The review name is live now; clear any kill of it so step 3 may
     // insert the row (the suffix makes a collision unlikely, not impossible).
@@ -106,6 +122,11 @@ pub async fn spawn_review(
                 IpcError::new(codes::E_INTERNAL, "review session vanished after spawn")
             })?;
         s.set_session_kind(row.id, "review", Some(source.id))?;
+        // Not soft, as in `new_session`: a Codex pane on a row that says
+        // Claude would be resumed, read and answered as Claude's.
+        if agent.id() != crate::store::AGENT_CLAUDE {
+            s.set_session_agent(row.id, agent.id())?;
+        }
         // Ownership (multi-user M1, T5 / spec §4.3 invariant 6): a review
         // inherits the SOURCE row's owner and visibility, never the caller's.
         // A review runs Claude in the owner's worktree, on the owner's host,
@@ -128,7 +149,9 @@ pub async fn spawn_review(
                 .clone()
                 .unwrap_or_else(|| crate::store::SessionOrigin::person(source.owner_person_id)),
         )?;
-        let _ = s.set_claude_session_id(row.id, &claude_id);
+        if let Some(id) = claude_id.as_deref() {
+            let _ = s.set_claude_session_id(row.id, id);
+        }
         let _ = s.set_started_at(row.id, now_unix());
         row.id
     };
@@ -161,4 +184,21 @@ pub async fn spawn_review(
     let s = lock(store)?;
     s.get_session_by_id(review_id)?
         .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "review row missing after tag"))
+}
+
+#[cfg(test)]
+mod reviewer_tests {
+    use super::reviewer_agent;
+
+    #[test]
+    fn a_review_runs_claude_unless_codex_is_asked_for() {
+        assert_eq!(reviewer_agent(None).unwrap().id(), "claude");
+        assert_eq!(reviewer_agent(Some("")).unwrap().id(), "claude");
+        assert_eq!(reviewer_agent(Some("claude")).unwrap().id(), "claude");
+        assert_eq!(reviewer_agent(Some("codex")).unwrap().id(), "codex");
+        for bad in ["shell", "agy", "gemini"] {
+            let e = reviewer_agent(Some(bad)).err().expect(bad);
+            assert_eq!(e.code, crate::ipc_error::codes::E_INVALID);
+        }
+    }
 }

@@ -66,6 +66,19 @@ describe('Toolkit (step 3.16)', () => {
     ]);
   });
 
+  it('+ Add skill opens New asset on that kind in the Assets tab (M15 G7.13)', async () => {
+    const asked: unknown[] = [];
+    const stop = assetsViewRequest.subscribe((r) => r && asked.push(r));
+    toolkitTab.set('mcp');
+    const { getByTestId } = render(Toolkit, { visible: true });
+    expect(getByTestId('toolkit-add').textContent).toContain('+ Add MCP server');
+    await fireEvent.click(getByTestId('toolkit-add'));
+    expect(get(toolkitTab)).toBe('assets');
+    stop();
+    expect(asked).toEqual([expect.objectContaining({ newKind: 'mcp_server' })]);
+    toolkitTab.set('skills');
+  });
+
   it('says where to set up a catalog when none is loaded', async () => {
     catalog.set(null);
     const { getByTestId, getByRole } = render(Toolkit, { visible: true });

@@ -10,12 +10,13 @@
   import { sessions as sessionRows } from './sessions';
   import { bulkTargets, sessionBlocked } from './share';
   import { sizeText } from './hosts_table';
-  import { prChecksLabel, prRef, prStateLabel } from './prs';
+  import { prRef, prStateLabel } from './prs';
   import { push } from './toasts';
   import { checkGlyph, dollars, type MissionDetail } from './missions';
   import type { WorkCheck } from './kill_check';
   import {
     afterArchiveLine,
+    alsoMergedLabel,
     archiveLabel,
     archiveMissionSessions,
     archiveOutcomeLine,
@@ -26,6 +27,8 @@
     finishFreedKb,
     finishSessions,
     finishSummary,
+    finishPrBlock,
+    prFactsLine,
     waveSummary,
   } from './mission_finish';
 
@@ -51,6 +54,7 @@
   const live = $derived(finishSessions(detail));
   const checks = $derived(finishChecks(detail));
   const prs = $derived(detail.finish?.prs ?? []);
+  const prBlock = $derived(finishPrBlock(prs));
   const waves = $derived(waveSummary(detail));
   const freed = $derived(finishFreedKb(live));
   const titleOf = $derived(new Map((detail.items ?? []).map((i) => [i.id, i.title] as const)));
@@ -153,20 +157,27 @@
     </div>
   {/if}
 
-  {#if prs.length > 0}
+  {#if prBlock.lead}
     <div class="card" data-testid="mission-finish-prs">
       <h4>Pull request{prs.length === 1 ? '' : 's'}</h4>
       <ul>
-        {#each prs as pr (pr.url)}
+        {#each [prBlock.lead, ...prBlock.rest] as pr (pr.url)}
           <li data-testid="mission-finish-pr">
             <span class="badge">{prStateLabel(pr)}</span>
             <a href={pr.url} target="_blank" rel="noreferrer noopener">{prRef(pr)}</a>
             {#if pr.title}<span class="title">{pr.title}</span>{/if}
             {#if pr.head_ref}<span class="muted small">{pr.head_ref}</span>{/if}
-            {#if prChecksLabel(pr)}<span class="muted small">{prChecksLabel(pr)}</span>{/if}
+            {#if prFactsLine(pr)}<span class="muted small" data-testid="mission-finish-pr-facts">{prFactsLine(pr)}</span>{/if}
           </li>
         {/each}
       </ul>
+      {#if prBlock.alsoMerged.length > 0}
+        <p class="muted small" data-testid="mission-finish-also-merged">
+          Also merged:
+          {#each prBlock.alsoMerged as pr, i (pr.url)}{#if i > 0},{/if}
+            <a href={pr.url} target="_blank" rel="noreferrer noopener">{alsoMergedLabel(pr)}</a>{/each}
+        </p>
+      {/if}
     </div>
   {/if}
 

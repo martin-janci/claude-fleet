@@ -3,6 +3,13 @@
   "title": "FormSpec",
   "type": "object",
   "properties": {
+    "checks": {
+      "description": "What the answers need from a host, checked before the form is sent:\na shortfall is a warning above the last button (\"Postgres needs\n2 GB free, mercury has 1.4 GB\"), never a refusal (G7.4).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/HostCheck"
+      }
+    },
     "intro": {
       "type": [
         "string",
@@ -318,6 +325,63 @@
       "additionalProperties": false,
       "required": [
         "title"
+      ]
+    },
+    "HostCheck": {
+      "description": "One thing the answers need from a host.",
+      "type": "object",
+      "properties": {
+        "at_least": {
+          "description": "The least it needs, in GB.",
+          "type": "number",
+          "format": "double"
+        },
+        "host_field": {
+          "description": "The select field whose answer is the host. Absent: the session's host.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "description": "What needs it, in words: \"Postgres\".",
+          "type": "string"
+        },
+        "needs": {
+          "$ref": "#/$defs/HostFact"
+        },
+        "when": {
+          "description": "Checked only while this holds, like a field's `when`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FieldCondition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "needs",
+        "at_least"
+      ]
+    },
+    "HostFact": {
+      "description": "A host fact a [`HostCheck`] reads, from the host's last health probe.",
+      "oneOf": [
+        {
+          "description": "Free space in the home directory, GB.",
+          "type": "string",
+          "const": "disk_free_gb"
+        },
+        {
+          "description": "Available memory, GB.",
+          "type": "string",
+          "const": "mem_free_gb"
+        }
       ]
     },
     "OptionProposal": {

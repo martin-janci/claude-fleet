@@ -16,6 +16,7 @@
     refreshComposerPresetsIfIdle,
     presetsConflict,
   } from './composer_presets';
+  import ConfirmDialog from './ConfirmDialog.svelte';
 
   // The editor starts from the fleet's current list, not the one read at
   // launch: no event announces a chip saved on the phone, and an edit made
@@ -70,6 +71,17 @@
     presetRowIds = presetRowIds.filter((_, k) => k !== i);
     removePreset(i);
   }
+
+  // Toolkit forms board: Remove asks first, naming the chip, because a
+  // removed chip is gone from every device. A chip with nothing in it goes
+  // at once; there is nothing to lose.
+  let removing = $state<number | null>(null);
+  function askRemove(i: number) {
+    const p = $composerPresets[i];
+    if (p.label.trim() === '' && p.text.trim() === '') onRemovePreset(i);
+    else removing = i;
+  }
+  const removingLabel = $derived(removing === null ? '' : $composerPresets[removing]?.label.trim() || 'this chip');
 
   function onAddPreset() {
     presetRowIds = [...presetRowIds, nextRowId++];
@@ -140,7 +152,7 @@
           disabled={i === $composerPresets.length - 1}
           onclick={() => void onMovePreset(i, 1)}>↓</button
         >
-        <button class="row-btn" data-testid="preset-remove" title="Remove" onclick={() => onRemovePreset(i)}>×</button>
+        <button class="row-btn" data-testid="preset-remove" title="Remove" aria-label="Remove" onclick={() => askRemove(i)}>×</button>
       </div>
     {/each}
   </div>
@@ -149,6 +161,21 @@
     <button class="row-btn" data-testid="preset-reset" onclick={resetComposerPresets}>Reset to defaults</button>
   </div>
 </div>
+
+{#if removing !== null}
+  <ConfirmDialog
+    title={`Remove ${removingLabel === 'this chip' ? removingLabel : `“${removingLabel}”`}?`}
+    message="It goes from the prompt box here and on the phone."
+    confirmLabel="Remove"
+    danger
+    confirmTestId="preset-remove-confirm"
+    onconfirm={() => {
+      if (removing !== null) onRemovePreset(removing);
+      removing = null;
+    }}
+    oncancel={() => (removing = null)}
+  />
+{/if}
 
 <style>
   .prompts {

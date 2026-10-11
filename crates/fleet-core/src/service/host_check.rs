@@ -47,15 +47,84 @@ pub struct HostCheck {
     /// `true`: the worker guard (`PreToolUse(Bash)`) is installed.
     /// `None`: no readable settings file.
     pub guard_hook: Option<bool>,
+    /// The projects base path asked about ([`CheckHostArgs::base_path`],
+    /// M15 G7.12: Settings › Projects checks a base path on its host before
+    /// it is saved). Absent when none was asked about or the answer was cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_path: Option<BasePathCheck>,
+}
+
+/// `check_host`'s arguments: the host, and optionally a projects base path
+/// to check there.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CheckHostArgs {
+    pub alias: String,
+    /// A projects base path (absolute, or `~/…`) to check on the host:
+    /// whether it exists, and whether the login user may write there.
+    #[serde(default)]
+    pub base_path: Option<String>,
+}
+
+/// What the host said about a projects base path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BasePathCheck {
+    /// The path as asked.
+    pub path: String,
+    /// `ok` (a directory the user may write), `creatable` (missing, and its
+    /// nearest existing parent is writable), `unwritable` (the directory or
+    /// that parent is not writable), `not_dir` (something else is there).
+    pub state: String,
+    /// The login user on the host, for "not writable by user dev".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+}
+
+/// The base path states [`BasePathCheck::state`] takes.
+pub const BASE_PATH_STATES: [&str; 4] = ["ok", "creatable", "unwritable", "not_dir"];
+
+/// Refuse a base path that is not absolute, `~` or `~/…`, or carries a control
+/// character; the shell only ever sees it quoted.
+pub fn base_path_problem(path: &str) -> Option<&'static str> {
+    if !(path.starts_with('/') || path == "~" || path.starts_with("~/")) {
+        return Some("a base path must be absolute or start with ~/");
+    }
+    if path.chars().any(|c| c.is_control()) {
+        return Some("a base path cannot hold a control character");
+    }
+    None
+}
+
+/// The shell that checks `path` (already passed [`base_path_problem`]).
+/// `~/` becomes `$HOME/`; the rest is quoted with [`crate::shell::quote`].
+fn base_path_script(path: &str) -> String {
+    let target = match path.strip_prefix("~/") {
+        Some(rest) => format!("\"$HOME\"/{}", crate::shell::quote(rest)),
+        None if path == "~" => "\"$HOME\"".to_string(),
+        None => crate::shell::quote(path),
+    };
+    format!(
+        "p={target}; d=\"$p\"; \
+         while [ ! -e \"$d\" ] && [ \"$d\" != / ]; do d=$(dirname \"$d\"); done; \
+         printf 'baseuser=%s\\n' \"$(id -un 2>/dev/null)\"; \
+         if [ -d \"$p\" ]; then if [ -w \"$p\" ]; then echo basew=ok; else echo basew=unwritable; fi; \
+         elif [ -e \"$p\" ]; then echo basew=not_dir; \
+         elif [ -d \"$d\" ] && [ -w \"$d\" ]; then echo basew=creatable; else echo basew=unwritable; fi; "
+    )
 }
 
 /// The one script a check runs: tmux, each agent found on `PATH`, then the
 /// settings file behind [`SETTINGS_MARK`]. Nothing is interpolated.
 pub fn check_script() -> String {
+    check_script_with(None)
+}
+
+/// [`check_script`], checking a projects base path first when one is given.
+pub fn check_script_with(base_path: Option<&str>) -> String {
     format!(
-        "printf 'tmuxv=%s\\n' \"$(tmux -V 2>/dev/null)\"; \
+        "{}printf 'tmuxv=%s\\n' \"$(tmux -V 2>/dev/null)\"; \
          for a in {}; do command -v \"$a\" >/dev/null 2>&1 && printf 'agent=%s\\n' \"$a\"; done; \
          printf '%s\\n' '{SETTINGS_MARK}'; cat \"$HOME/.claude/settings.json\" 2>/dev/null; true",
+        base_path.map(base_path_script).unwrap_or_default(),
         AGENT_BINARIES.join(" ")
     )
 }
@@ -70,8 +139,20 @@ pub fn parse_check(stdout: &str) -> HostCheck {
     };
     let mut c = HostCheck::default();
     let mut agents = Vec::new();
+    let mut base_user = None;
     for line in head.lines() {
-        if let Some(v) = line.strip_prefix("tmuxv=") {
+        if let Some(v) = line.strip_prefix("baseuser=") {
+            base_user = Some(v.trim().to_string()).filter(|u| !u.is_empty());
+        } else if let Some(v) = line.strip_prefix("basew=") {
+            let v = v.trim();
+            if BASE_PATH_STATES.contains(&v) {
+                c.base_path = Some(BasePathCheck {
+                    path: String::new(),
+                    state: v.to_string(),
+                    user: None,
+                });
+            }
+        } else if let Some(v) = line.strip_prefix("tmuxv=") {
             c.tmux_version = crate::service::hosts::parse_tmux_version(v.trim());
         } else if let Some(a) = line.strip_prefix("agent=") {
             let a = a.trim();
@@ -79,6 +160,9 @@ pub fn parse_check(stdout: &str) -> HostCheck {
                 agents.push(a.to_string());
             }
         }
+    }
+    if let Some(b) = c.base_path.as_mut() {
+        b.user = base_user;
     }
     if let Some(settings) = settings {
         c.agents_on_path = Some(agents);
@@ -140,15 +224,38 @@ pub fn guard_hook_installed(settings: &serde_json::Value) -> bool {
 
 /// Run the checklist's read on `alias` (`local` or over SSH).
 pub async fn check_host(ssh: &Arc<SshClient>, alias: &str, now: i64) -> HostCheck {
+    // No base path: nothing to refuse.
+    check_host_with(ssh, alias, None, now)
+        .await
+        .unwrap_or_else(|e| finish(alias, now, Err(e)))
+}
+
+/// [`check_host`], also checking a projects base path there (M15 G7.12).
+/// A base path [`base_path_problem`] refuses is `E_INVALID` before anything
+/// runs.
+pub async fn check_host_with(
+    ssh: &Arc<SshClient>,
+    alias: &str,
+    base_path: Option<&str>,
+    now: i64,
+) -> Result<HostCheck, IpcError> {
+    let base_path = base_path.map(str::trim).filter(|p| !p.is_empty());
+    if let Some(problem) = base_path.and_then(base_path_problem) {
+        return Err(IpcError::new(crate::ipc_error::codes::E_INVALID, problem));
+    }
     let res = crate::service::catalog::inventory::run_host_script_with(
         ssh,
         alias,
-        &check_script(),
+        &check_script_with(base_path),
         CHECK_TIMEOUT,
         &tokio_util::sync::CancellationToken::new(),
     )
     .await;
-    finish(alias, now, res)
+    let mut c = finish(alias, now, res);
+    if let (Some(b), Some(path)) = (c.base_path.as_mut(), base_path) {
+        b.path = path.to_string();
+    }
+    Ok(c)
 }
 
 fn finish(alias: &str, now: i64, res: Result<String, IpcError>) -> HostCheck {
@@ -230,6 +337,70 @@ mod tests {
         assert_eq!(c.error.as_deref(), Some("timed out"));
         assert_eq!((c.alias.as_str(), c.checked_at), ("mercury", 7));
         assert_eq!(c.agents_on_path, None);
+    }
+
+    #[test]
+    fn a_base_path_must_be_absolute_or_home_relative() {
+        assert!(base_path_problem("/srv/work").is_none());
+        assert!(base_path_problem("~/projects").is_none());
+        assert!(base_path_problem("~").is_none());
+        assert!(base_path_problem("projects").is_some());
+        assert!(base_path_problem("~projects").is_some());
+        assert!(base_path_problem("/srv/a\nb").is_some());
+    }
+
+    #[test]
+    fn the_base_path_answer_reads_its_state_and_user() {
+        let c = parse_check(&format!(
+            "baseuser=dev\nbasew=unwritable\ntmuxv=tmux 3.4\n{SETTINGS_MARK}\n"
+        ));
+        let b = c.base_path.expect("asked");
+        assert_eq!(
+            (b.state.as_str(), b.user.as_deref()),
+            ("unwritable", Some("dev"))
+        );
+        assert_eq!(
+            parse_check("basew=maybe\n").base_path,
+            None,
+            "only known states"
+        );
+        assert_eq!(parse_check("tmuxv=\n").base_path, None, "not asked");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_script_checks_a_base_path_quoted_on_the_host() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let run = |path: &str| {
+            let out = std::process::Command::new("sh")
+                .args(["-c", &check_script_with(Some(path))])
+                .env("HOME", home.path())
+                .output()
+                .unwrap();
+            parse_check(&String::from_utf8_lossy(&out.stdout))
+                .base_path
+                .map(|b| b.state)
+        };
+        std::fs::create_dir(home.path().join("work")).unwrap();
+        assert_eq!(run("~/work").as_deref(), Some("ok"));
+        assert_eq!(run("~").as_deref(), Some("ok"));
+        assert_eq!(run("~/new place/projects").as_deref(), Some("creatable"));
+        std::fs::write(home.path().join("file"), "x").unwrap();
+        assert_eq!(run("~/file").as_deref(), Some("not_dir"));
+        // A quote or `$(…)` in the path stays a path.
+        assert_eq!(run("~/it's $(touch pwned)").as_deref(), Some("creatable"));
+        assert!(!home.path().join("pwned").exists());
+        let ro = home.path().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // root writes anywhere, so only an ordinary user sees "unwritable".
+        let root = std::process::Command::new("id").arg("-u").output().unwrap();
+        if String::from_utf8_lossy(&root.stdout).trim() != "0" {
+            assert_eq!(run("~/ro").as_deref(), Some("unwritable"));
+            assert_eq!(run("~/ro/sub").as_deref(), Some("unwritable"));
+        }
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[cfg(unix)]

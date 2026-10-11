@@ -1285,3 +1285,107 @@ fn what_belongs_lists_the_accounts_its_hosts_use() {
         ("ops@acme.dev", Some("max"), vec!["ha".to_string()])
     );
 }
+
+// ---- M15 step G7.14: + Person, a device's app, a member's untrusted devices ----
+
+#[test]
+fn a_person_is_added_before_any_device_and_a_live_name_is_taken_once() {
+    let st = store();
+    let mut add = args("add_person");
+    add.name = Some("jana".into());
+    add.display_name = Some("Jana Nováková".into());
+    let p = run(&add, &st, Me::LOCAL).unwrap();
+    assert_eq!(
+        (p["name"].as_str(), p["display_name"].as_str()),
+        (Some("jana"), Some("Jana Nováková"))
+    );
+    let people = run(&args("list_people"), &st, Me::LOCAL).unwrap();
+    assert!(
+        people
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["name"] == "jana"),
+        "{people}"
+    );
+    assert_eq!(err_code(run(&add, &st, Me::LOCAL)), "E_EXISTS");
+    // An empty "Shown as" is no display name.
+    add.name = Some("peter".into());
+    add.display_name = Some(" ".into());
+    assert!(run(&add, &st, Me::LOCAL)
+        .unwrap()
+        .get("display_name")
+        .is_none());
+    assert_eq!(
+        err_code(run(&args("add_person"), &st, Me::LOCAL)),
+        "E_INVALID"
+    );
+}
+
+#[test]
+fn a_device_says_what_app_it_runs_once_it_has_called_the_hub() {
+    let st = store();
+    device(&st, "pixel", "full");
+    device(&st, "laptop", "full");
+    {
+        let s = st.lock().unwrap();
+        let pixel = s
+            .active_client_tokens()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.name == "pixel")
+            .unwrap();
+        s.upsert_update_observed(&crate::store::UpdateObservedRow {
+            target: format!("client:{}", pixel.id),
+            component: "android".into(),
+            platform: None,
+            version: "0.5.4".into(),
+            commit_sha: None,
+            build_id: None,
+            digest: None,
+            speaks: None,
+            phase: "idle".into(),
+            attempt: None,
+            last_error: None,
+            reported_at: 1,
+            last_checked_at: None,
+        })
+        .unwrap();
+    }
+    let got = list_devices(&st.lock().unwrap(), Me::LOCAL).unwrap();
+    let pixel = got.iter().find(|d| d.name == "pixel").unwrap();
+    assert_eq!(pixel.kind.as_deref(), Some("phone"));
+    assert_eq!(pixel.app.as_deref(), Some("phone · fleet-mobile 0.5.4"));
+    let laptop = got.iter().find(|d| d.name == "laptop").unwrap();
+    assert_eq!(
+        (laptop.kind.as_deref(), laptop.app.as_deref()),
+        (None, None)
+    );
+    assert_eq!(
+        device_app("desktop", "0.6.1"),
+        Some(("desktop".into(), "desktop · fleet desktop 0.6.1".into()))
+    );
+    assert_eq!(device_app("agent", "0.6.1"), None, "an agent is no device");
+}
+
+#[test]
+fn a_members_row_names_the_devices_not_trusted_yet_and_the_org_counts_them() {
+    let st = store();
+    device(&st, "ada-phone", "full");
+    device(&st, "ada-laptop", "full");
+    {
+        let s = st.lock().unwrap();
+        let org = s.add_org("Acme", None, false).unwrap();
+        let ada = s.create_person("ada", None).unwrap();
+        s.set_client_person("ada-phone", Some(ada.id)).unwrap();
+        s.set_client_person("ada-laptop", Some(ada.id)).unwrap();
+        s.set_client_trust("ada-laptop", true).unwrap();
+        s.set_org_member(org.id, ada.id, "member", None).unwrap();
+    }
+    let orgs = run(&args("list_orgs"), &st, Me::LOCAL).unwrap();
+    let acme = &orgs[0];
+    assert_eq!(acme["member_count"], 1);
+    let ada = &acme["members"][0];
+    assert_eq!(ada["untrusted_devices"], serde_json::json!(["ada-phone"]));
+    assert_eq!(ada["devices"].as_array().unwrap().len(), 2);
+}

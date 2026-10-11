@@ -129,6 +129,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.resume_or_new",
+          "hint": "In New session, proposes resuming a past session of the same work or starting fresh; you still press Resume or Create."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
         },
         {

@@ -15,12 +15,15 @@ export interface SwitcherRequest {
   /** Preselect what the session runs (gap plan G4.5: the Hosts view's
    *  "Open a shell"). */
   kind?: 'work' | 'shell';
+  /** Name the new session this (G7.15: the sidebar's no-results "Start new
+   *  session “receipt totals”…" carries the search). */
+  name?: string;
 }
 
 export const switcherRequest = writable<SwitcherRequest | null>(null);
 
-export function openNewSessionPicker(host?: string, ticket?: TicketRow, kind?: 'work' | 'shell'): void {
-  switcherRequest.set({ mode: 'new', host, ticket, kind });
+export function openNewSessionPicker(host?: string, ticket?: TicketRow, kind?: 'work' | 'shell', name?: string): void {
+  switcherRequest.set({ mode: 'new', host, ticket, kind, ...(name ? { name } : {}) });
 }
 
 /** Open the plain switcher, as ⌘K does (the header's command field). */

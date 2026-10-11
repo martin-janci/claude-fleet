@@ -128,7 +128,15 @@ pub mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<HelpAnswer, IpcError> {
         if let Some(hub) = backend.hub() {
-            return hub.route("session_context_help", &args).await;
+            // A revision-16 hub has no such tool (contract 17); the desktop
+            // keeps working against it, and says what the help needs.
+            return match hub.route("session_context_help", &args).await {
+                Err(e) if e.code == codes::E_HUB_PROTOCOL => Err(IpcError::new(
+                    codes::E_HUB_PROTOCOL,
+                    "Context help needs the hub updated first (hub contract 17)",
+                )),
+                other => other,
+            };
         }
         let row = {
             let s = fleet_core::ipc_error::lock(store)?;

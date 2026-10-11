@@ -24,14 +24,14 @@
   import { projectById } from './projects';
   import { selectSession, selectSessionExplicitly, clearSelection } from './selection';
   import { hostByAlias } from './hosts';
-  import { accountByUuid, accountEmailTier, type AccountRow } from './accounts';
+  import { accountByUuid, accountEmailTier, sessionAccountUuid, type AccountRow } from './accounts';
   import { timeAgo } from './session_status';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import PromptComposer from './PromptComposer.svelte';
   import WatchSummary from './WatchSummary.svelte';
   import ReviewDialog from './ReviewDialog.svelte';
   import { reviewerOf } from './review_scope';
-  import { reviewDecisionWords } from './prs';
+  import { prEvidenceLine, reviewDecisionWords } from './prs';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import DialogSheet from './DialogSheet.svelte';
@@ -78,7 +78,14 @@
   import ForkSheet from './ForkSheet.svelte';
   import RewindSheet from './RewindSheet.svelte';
   import { suggestedForkName } from './reply_actions';
-  import { agentModelProfile, agentLabel, modelShortLabel } from './conversation';
+  import { agentModelProfile, agentLabel, modelShortLabel, sessionConversation } from './conversation';
+  import {
+    lastReplyText,
+    parseReviewVerdict,
+    reviewVerdictLine,
+    reviewVerdictTone,
+    type ReviewVerdict,
+  } from './review_verdict';
   import { switchTarget } from './account_limits';
   import { archiveBlocked } from './kill_check';
   import Meter from './kit/Meter.svelte';
@@ -249,14 +256,7 @@
   );
 
   const hostRow = $derived($hostByAlias.get(session.host_alias) ?? null);
-  // A session under a login profile bills that profile's account, not the
-  // host's (docs/accounts.md); it has none until the host reports the
-  // profile logged in. Any other session shows the account it runs on (the
-  // host's login when reconcile saw it; reconcile keeps it when the host's
-  // login changes later), and the host's only before it has one.
-  const accountUuid = $derived(
-    session.claude_profile ? session.account_uuid : (session.account_uuid ?? hostRow?.account_uuid ?? null),
-  );
+  const accountUuid = $derived(sessionAccountUuid(session, hostRow?.account_uuid));
   const accountRow = $derived(accountUuid ? ($accountByUuid.get(accountUuid) ?? null) : null);
 
   const worktree = $derived(parentProject?.worktrees.find((w) => w.id === session.worktree_id) ?? null);
@@ -581,7 +581,28 @@
   const reviewsOfThis = $derived(
     $sessions.filter((s) => s.kind === 'review' && s.reviews_session_id === session.id),
   );
+  // G7.10: each finished review run's verdict line, read from the
+  // reviewer's last reply (only what it wrote; no line when it wrote none).
+  // Read again when the run ends another turn.
+  let reviewVerdicts = $state<Record<number, ReviewVerdict | null>>({});
+  const verdictReadAt = new Map<number, number>();
+  $effect(() => {
+    for (const r of reviewsOfThis) {
+      if (r.claude_status === 'working') continue;
+      const at = r.last_turn_at ?? r.last_activity_at;
+      if (verdictReadAt.get(r.id) === at) continue;
+      verdictReadAt.set(r.id, at);
+      void sessionConversation(r.id, 1).then((c) => {
+        if (verdictReadAt.get(r.id) !== at) return;
+        const text = c.ok ? lastReplyText(c.value) : null;
+        reviewVerdicts = { ...reviewVerdicts, [r.id]: text ? parseReviewVerdict(text) : null };
+      });
+    }
+  });
+
   /** GitHub's review decision on this session's PR, in words. */
+  // G7.9: "15/15 checks · no reviews" beside the PR in the inspector.
+  const prLine = $derived(session.pr_url ? prEvidenceLine(session.pr_evidence) : '');
   const prReview = $derived(session.pr_url ? reviewDecisionWords(session.pr_evidence?.review_decision) : null);
   const reviewsShown = $derived(session.kind !== 'external' || reviewsOfThis.length > 0 || prReview !== null);
 
@@ -884,6 +905,9 @@
         style="color: {ciStatusColor(session.ci_status)}; border-color: color-mix(in srgb, {ciStatusColor(session.ci_status)} 33%, transparent);"
         title="CI checks: {session.ci_status}"
       >{ciStatusLabel(session.ci_status)}</span>
+    {/if}
+    {#if prLine}
+      <span class="pr-line" data-testid="details-pr-line">{prLine}</span>
     {/if}
   {/if}
 {/snippet}
@@ -1199,8 +1223,9 @@
 
     <!-- Reviews (SessionDetails board): the PR's review decision GitHub
          reports, each review run of this session with who ran it, and Start
-         a review run. Only what is recorded: a run's verdict is its
-         session's state, never a findings count nobody measured. -->
+         a review run. Only what is recorded: a finished run's verdict line
+         is the reviewer's own closing `Verdict:` line (review_verdict.ts),
+         never a findings count Fleet made up. -->
     {#if reviewsShown}
       <section class="block related reviews" data-testid="reviews-panel">
         <h3>Reviews{#if reviewsOfThis.length > 0} <span class="count">{reviewsOfThis.length}</span>{/if}</h3>
@@ -1214,6 +1239,12 @@
             {#each reviewsOfThis as r (r.id)}
               <li>
                 {@render relatedRow(r, 'reviews-row', reviewerOf(r))}
+                {#if reviewVerdicts[r.id]}
+                  {@const v = reviewVerdicts[r.id]!}
+                  <p class="review-verdict tone-{reviewVerdictTone(v)}" data-testid="reviews-verdict">
+                    {reviewVerdictLine(v)}
+                  </p>
+                {/if}
               </li>
             {/each}
           </ul>
@@ -1746,6 +1777,7 @@
     overflow: auto;
   }
   .pr-link { color: var(--accent); font-size: var(--text-xs); overflow-wrap: anywhere; }
+  .pr-line { color: var(--fg-muted); font-size: var(--text-xs); margin-left: 6px; }
   .host {
     color: var(--fg-muted);
     border: 1px solid var(--border);
@@ -1935,6 +1967,13 @@
     font-size: var(--text-xs);
   }
   .reviews .btn-row { margin-top: 0.4rem; }
+  .review-verdict {
+    margin: 0.1rem 0 0.3rem 1rem;
+    font-size: var(--text-xs);
+  }
+  .review-verdict.tone-ok { color: var(--status-done); }
+  .review-verdict.tone-warn { color: var(--status-waiting); }
+  .review-verdict.tone-bad { color: var(--status-failed); }
   .related-decide { display: flex; gap: 0.4rem; margin-top: 0.3rem; }
   .related {
     border-top: 1px solid var(--border);

@@ -57,6 +57,15 @@ pub struct RuleInput {
     /// The group label.
     #[serde(default)]
     pub group: String,
+    /// "Its sessions start here" (gap plan G7.1): the host a start of a
+    /// matching task lands on when no start rule names one. Absent or empty
+    /// = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_alias: Option<String>,
+    /// The account (credential profile on the host) those sessions bill.
+    /// Absent or empty = the host's own login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_version: Option<i64>,
 }
@@ -372,6 +381,8 @@ pub fn rule_preview(
         version: 0,
         conditions,
         group,
+        host_alias: None,
+        profile: None,
         created_at: 0,
         updated_at: 0,
     };
@@ -437,6 +448,11 @@ pub fn rule_save(
     unbound_only(scope, "rule_save")?;
     let (name, conditions, group) = clean_rule(rule)?;
     let s = lock(store)?;
+    let (host, profile) = crate::service::start_rules::check_host_and_profile(
+        &s,
+        rule.host_alias.as_deref(),
+        rule.profile.as_deref(),
+    )?;
     if let Some(t) = conditions.tracker_id {
         if s.get_tracker(t)?.is_none() {
             return Err(IpcError::new(
@@ -451,6 +467,7 @@ pub fn rule_save(
         rule.enabled.unwrap_or(true),
         &conditions,
         &group,
+        (host.as_deref(), profile.as_deref()),
         rule.expected_version,
     )
 }

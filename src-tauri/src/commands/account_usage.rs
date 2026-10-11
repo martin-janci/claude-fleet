@@ -119,7 +119,8 @@ pub fn account_spend(
 /// The decision model's host for a new session of a project (redesign step
 /// 4.11, Jev N5 `host_placement`): `Some` only in `assist` when two or more
 /// hosts are left after the limits and the offline ones. Off by default.
-/// Refused in remote mode: the hub owns the decision model and the usage.
+/// Paired, the hub's `propose_host_placement` answers (gap plan G7.3): the
+/// hub owns the decision model and the usage.
 #[tauri::command]
 pub async fn propose_host_placement(
     args: ProposeHostArgs,
@@ -127,9 +128,7 @@ pub async fn propose_host_placement(
     store: State<'_, Arc<Mutex<Store>>>,
     cache: State<'_, Arc<Mutex<UsageCache>>>,
 ) -> Result<Option<SuggestedHost>, IpcError> {
-    backend.refuse_local_only("propose_host_placement")?;
-    let ctx = DecideCtx::jev(Arc::clone(&store));
-    host_placement::propose(&ctx, &cache, &args).await
+    routed::propose_host_placement(&backend, &store, &cache, args).await
 }
 
 /// After a person's start of a project landed on a host: marks the decision
@@ -153,6 +152,25 @@ pub fn record_host_placement(
 
 pub(crate) mod routed {
     use super::*;
+
+    pub async fn propose_host_placement(
+        backend: &FleetBackend,
+        store: &Arc<Mutex<Store>>,
+        cache: &Mutex<UsageCache>,
+        args: ProposeHostArgs,
+    ) -> Result<Option<SuggestedHost>, IpcError> {
+        match backend.hub() {
+            // A hub before contract 17 has no such tool: propose nothing.
+            Some(hub) => match hub.route("propose_host_placement", &args).await {
+                Err(e) if e.code == fleet_core::ipc_error::codes::E_HUB_PROTOCOL => Ok(None),
+                r => r,
+            },
+            None => {
+                let ctx = DecideCtx::jev(Arc::clone(store));
+                host_placement::propose(&ctx, cache, &args).await
+            }
+        }
+    }
 
     pub async fn list_account_usage(
         backend: &FleetBackend,

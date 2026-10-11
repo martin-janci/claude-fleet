@@ -31,6 +31,8 @@
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
+use fleet_core::service::decide::resume_or_new::{self, ResumeOrNew};
+use fleet_core::service::decide::DecideCtx;
 use fleet_core::service::work::card::TicketCard;
 use fleet_core::service::work::resume::ResumePlan;
 use fleet_core::service::work::summary::SummaryOutcome;
@@ -528,6 +530,37 @@ pub async fn unlink_session_work(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<SessionRow, IpcError> {
     routed::unlink_session_work(&backend, args, &store).await
+}
+
+/// Gap plan G7.10 (Jev N2): the New session dialog's "Resume or start
+/// fresh" for a work key with past work. `chosen` (`new` or `l<link id>`)
+/// is the follow-up's only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResumeOrNewArgs {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<String>,
+}
+
+/// The proposal for `key`: a rule's (the only recent past session), else
+/// Jev's at assist (`decide.jev.resume_or_new`, off by default), else none.
+#[tauri::command]
+pub async fn resume_or_new_propose(
+    args: ResumeOrNewArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<ResumeOrNew, IpcError> {
+    routed::resume_or_new_propose(&backend, args, &store).await
+}
+
+/// The person resumed or started fresh: records the follow-up.
+#[tauri::command]
+pub async fn resume_or_new_follow(
+    args: ResumeOrNewArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<bool, IpcError> {
+    routed::resume_or_new_follow(&backend, args, &store).await
 }
 
 pub(crate) mod routed {
@@ -1108,6 +1141,56 @@ pub(crate) mod routed {
             None => {
                 work::work_purge_impact(&args, store, &fleet_core::service::orgs::OrgScope::All)
             }
+        }
+    }
+
+    pub async fn resume_or_new_propose(
+        backend: &FleetBackend,
+        args: ResumeOrNewArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<ResumeOrNew, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                let wire = serde_json::json!({ "action": "propose", "key": args.key });
+                // A hub from before N2 has no such tool: propose nothing.
+                match hub.route("resume_or_new_propose", &wire).await {
+                    Err(e) if e.code == fleet_core::ipc_error::codes::E_HUB_PROTOCOL => {
+                        Ok(ResumeOrNew::default())
+                    }
+                    r => r,
+                }
+            }
+            None => {
+                let ctx = DecideCtx::jev(Arc::clone(store));
+                resume_or_new::propose_for_key(
+                    &ctx,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
+                    &args.key,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn resume_or_new_follow(
+        backend: &FleetBackend,
+        args: ResumeOrNewArgs,
+        store: &Mutex<Store>,
+    ) -> Result<bool, IpcError> {
+        let chosen = args.chosen.unwrap_or_default();
+        match backend.hub() {
+            Some(hub) => {
+                let wire =
+                    serde_json::json!({ "action": "follow", "key": args.key, "chosen": chosen });
+                hub.route("resume_or_new_follow", &wire).await
+            }
+            None => resume_or_new::follow_for_key(
+                store,
+                &fleet_core::service::view_scope::ViewScope::internal(),
+                &args.key,
+                &chosen,
+                fleet_core::store::now_unix(),
+            ),
         }
     }
 }

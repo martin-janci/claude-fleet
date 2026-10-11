@@ -70,6 +70,7 @@ async function flush() {
 describe('WorkReview', () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
+    localStorage.removeItem('cf:pref:work.review.today');
     pending = [...items];
     sessionLinks = {};
     // Session 7 has a primary already; 8 has none.
@@ -219,6 +220,68 @@ describe('WorkReview', () => {
     render(WorkReview);
     await flush();
     expect(screen.queryByTestId('work-review-proposed-by')).toBeNull();
+  });
+
+  it("Jev's unsure case asks Which ticket?, pre-selects nothing, and offers Pick a ticket… and No ticket (G7.7)", async () => {
+    pending = [
+      item({
+        rule: 'R12',
+        task: { task_id: 'item:70', key: 'PD-2970', title: 'Retries' },
+        alternatives: [{ link_id: 43, task_id: 'item:74', key: 'PD-2974', title: 'Spikes' }],
+        proposed_by: { source: 'jev', reason: 'from the first prompt', confidence_pct: 30 },
+      }),
+    ];
+    render(WorkReview);
+    await flush();
+    const row = screen.getByTestId('work-review-item');
+    expect(within(row).getByTestId('work-review-which').textContent).toBe('Which ticket?');
+    expect(within(row).getByTestId('work-review-unsure').textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      'Jev is unsure: PD-2970 and PD-2974 both fit · nothing pre-selected',
+    );
+    expect(within(row).queryByTestId('work-review-confirm')).toBeNull();
+    // y does not confirm it: it opens the pick.
+    await fireEvent.keyDown(screen.getByRole('list', { name: /Review items/ }), { key: 'y' });
+    await flush();
+    expect(calls('confirm_session_work')).toHaveLength(0);
+    expect(within(row).getByTestId('work-review-change-panel')).toBeTruthy();
+    // Picking Jev's own candidate confirms it, a person's click.
+    await fireEvent.click(within(row).getByTestId('work-review-pick-own'));
+    await flush();
+    expect(calls('confirm_session_work')[0]).toMatchObject({ session_id: 7, link_id: 42 });
+  });
+
+  it('No ticket rejects the guess (G7.7)', async () => {
+    pending = [item({ alternatives: [{ link_id: 43, task_id: 'ref:ABC-13', key: 'ABC-13' }], proposed_by: { source: 'jev', reason: 'r', confidence_pct: 40 } })];
+    render(WorkReview);
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-review-no-ticket'));
+    await flush();
+    expect(calls('reject_session_work')[0]).toMatchObject({ session_id: 7, link_id: 42 });
+  });
+
+  it('a sure Jev suggestion is not the unsure case', async () => {
+    pending = [item({ proposed_by: { source: 'jev', reason: 'r', confidence_pct: 82 } })];
+    render(WorkReview);
+    await flush();
+    expect(screen.queryByTestId('work-review-unsure')).toBeNull();
+    expect(screen.getByTestId('work-review-confirm')).toBeTruthy();
+  });
+
+  it('keeps a Done today tally of confirms and rejects, and Undo last takes one back (G7.7)', async () => {
+    render(WorkReview);
+    await flush();
+    expect(screen.queryByTestId('work-review-today')).toBeNull();
+    await fireEvent.click(within(screen.getAllByTestId('work-review-item')[0]).getByTestId('work-review-confirm'));
+    await flush();
+    sessionLinks[8] = [sl(50, 'rejected', 2, 'PAY-2')];
+    await fireEvent.click(within(screen.getAllByTestId('work-review-item')[0]).getByTestId('work-review-reject'));
+    await flush();
+    expect(screen.getByTestId('work-review-today').textContent).toContain('Done today: 1 confirmed · 1 rejected');
+    await fireEvent.click(screen.getByTestId('work-review-undo-last'));
+    await flush();
+    expect(screen.getByTestId('work-review-today').textContent).toContain('Done today: 1 confirmed · 0 rejected');
+    // Kept on this device for the day.
+    expect(JSON.parse(localStorage.getItem('cf:pref:work.review.today') ?? '{}')).toMatchObject({ confirmed: 1, rejected: 0 });
   });
 
   it('lists every item with its kind and why', async () => {

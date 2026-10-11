@@ -32,7 +32,8 @@
   import LimitActions from './LimitActions.svelte';
   import { classify } from './attention';
   import { attentionFacts } from './attention_facts';
-  import { accountByUuid, accountLabel } from './accounts';
+  import { accountByUuid, accountLabel, sessionAccountUuid } from './accounts';
+  import { hostByAlias } from './hosts';
   import { openRoutines } from './routines';
   import {
     CONTROL_VIEWS,
@@ -54,6 +55,15 @@
   const shown = $derived(shownViews($controlViews));
   const active = $derived($controlViews.active);
   const activeDef = $derived(CONTROL_VIEWS.find((v) => v.id === active)!);
+  /** The focus header's account (G7.8, MCSession board: "host · account ·
+   *  PR"): the one the session in focus bills, by its label. */
+  const focusAccount = $derived.by(() => {
+    const s = $selectedSession;
+    if (!s) return null;
+    const uuid = sessionAccountUuid(s, $hostByAlias.get(s.host_alias)?.account_uuid);
+    const a = uuid ? $accountByUuid.get(uuid) : undefined;
+    return a ? accountLabel(a) : null;
+  });
   let menuOpen = $state(false);
   /** The view a session was opened from (9.5): "‹" and Esc go back to it. */
   let from = $state<ControlViewId | null>(null);
@@ -270,7 +280,7 @@
             {/if}
             <p class="row-name">{displayName($selectedSession, true)}</p>
             <p class="row-why">
-              {claudeStatusLabel($selectedSession.claude_status)} · {$selectedSession.host_alias}{#if $selectedSession.pr_url}{' '}· {$selectedSession.pr_url.replace(/^.*\/pull\//, 'PR #')}{/if}
+              {claudeStatusLabel($selectedSession.claude_status)} · {$selectedSession.host_alias}{#if focusAccount}{' '}· <span data-testid="control-session-account">{focusAccount}</span>{/if}{#if $selectedSession.pr_url}{' '}· {$selectedSession.pr_url.replace(/^.*\/pull\//, 'PR #')}{/if}
             </p>
             {#if $selectedSession.last_prompt}<p class="prompt">{promptPreview($selectedSession.last_prompt, 160)}</p>{/if}
           </div>

@@ -25,6 +25,7 @@
     type SessionRow,
   } from './sessions';
   import { selectSessionExplicitly } from './selection';
+  import Modal from './Modal.svelte';
   import { claudeStatusLabel, stuckStatus } from './attention';
   import { formatAge, hookHealthLabel, type HookHealth } from './hook_health';
   import { shortAge } from './session_status';
@@ -67,6 +68,7 @@
   import { requestAssetsView } from './app_views';
   import { savedWithUndo } from './forms/form_frame';
   import { linkSessionWork } from './work';
+  import { tablistKeys } from './tablist_keys';
 
   let {
     host,
@@ -129,7 +131,13 @@
   let checking = $state(false);
   // Show sessions (step 3.14's offline host): to this pane's own list.
   let sessionsBlock = $state<HTMLElement | null>(null);
+  // M15 G7.12: the detail's tabs (HostDetail board). Every panel stays
+  // mounted and hides, so a draft or a running find survives a look at
+  // another tab.
+  type DetailTab = 'overview' | 'sessions' | 'lost' | 'provisioning';
+  let tab = $state<DetailTab>('overview');
   function showSessions() {
+    tab = 'sessions';
     sessionsBlock?.scrollIntoView?.({ block: 'start' });
     sessionsBlock?.querySelector<HTMLElement>('[data-testid="detail-session"]')?.focus();
   }
@@ -285,11 +293,13 @@
 
   async function findAnother(s: SessionRow) {
     findingFor = s;
+    tab = 'lost';
     await runDiscover();
   }
 
   async function onDiscoverClick() {
     findingFor = null;
+    tab = 'lost';
     await runDiscover();
   }
 
@@ -357,11 +367,36 @@
   // catalog_admin, so a paired desktop only needs the live link.
   const harnessBlocked = $derived(hubActionBlocked('catalog_set_host_harnesses', $hubStatus, $hubConnection));
 
-  async function onCodexMode(mode: HarnessMode) {
+  // M15 G7.12: the integrations are one form (Accounts forms board, Host
+  // integrations): a pick is a draft until Save, and Discard drops it. A
+  // draft belongs to its host; another host's detail starts clean.
+  let codexDraft = $state<{ alias: string; mode: HarnessMode } | null>(null);
+  let tokenDraft = $state<{ alias: string; mode: TokenMode } | null>(null);
+  const codexValue = $derived(codexDraft?.alias === host.alias ? codexDraft.mode : codexModeOf(host));
+  const tokenValue = $derived(tokenDraft?.alias === host.alias ? tokenDraft.mode : token?.mode);
+  const integrationDirty = $derived(
+    (codexDraft?.alias === host.alias && codexDraft.mode !== codexModeOf(host)) ||
+      (tokenDraft?.alias === host.alias && !!token && tokenDraft.mode !== token.mode),
+  );
+
+  function discardIntegrations() {
+    codexDraft = null;
+    tokenDraft = null;
+  }
+
+  async function saveIntegrations() {
     busy = true;
-    const r = await setHostHarnesses(host.alias, harnessesFor(mode));
+    if (codexDraft?.alias === host.alias && codexDraft.mode !== codexModeOf(host)) {
+      const r = await setHostHarnesses(host.alias, harnessesFor(codexDraft.mode));
+      if (!r.ok) pushError(r.error, 'Codex setting not changed');
+      else codexDraft = null;
+    }
+    if (tokenDraft?.alias === host.alias && token && tokenDraft.mode !== token.mode) {
+      const r = await setTokenMode(host.alias, tokenDraft.mode);
+      if (!r.ok) pushError(r.error, 'Token mode not changed');
+      else tokenDraft = null;
+    }
     busy = false;
-    if (!r.ok) pushError(r.error, 'Codex setting not changed');
   }
 
   // Resume is a `new_session` carrying `resume_claude_session_id`, and
@@ -411,6 +446,13 @@
     paneIgnored = ignoredPanes(host.alias);
   });
   const outsidePanes = $derived(showIgnoredPanes ? outsideAll : outsideAll.filter((p) => !paneIgnored.has(p.tmux_name)));
+  /** The Lost & found tab's count: panes fleet did not start, lost sessions
+   *  it can restore, and conversations a find turned up that fleet has not. */
+  const lostCount = $derived(
+    outsideAll.filter((p) => !paneIgnored.has(p.tmux_name)).length +
+      restorable.length +
+      (discoverList ?? []).filter((c) => c.existing_session_id === null && !ignored.has(c.claude_session_id)).length,
+  );
   const ignoredPaneCount = $derived(outsideAll.filter((p) => paneIgnored.has(p.tmux_name)).length);
   function setPaneIgnoredHere(p: SessionRow, on: boolean) {
     setPaneIgnored(host.alias, p.tmux_name, on);
@@ -420,6 +462,16 @@
     if (adoptingId === p.id) adoptingId = null;
     setPaneIgnoredHere(p, true);
     savedWithUndo(`Ignored ${p.tmux_name} on this device`, () => setPaneIgnoredHere(p, false));
+  }
+
+  // Attach… (G7.10, Session forms board): the tmux sessions running on this
+  // host outside fleet, with their age; "Switch to it" opens one as it is,
+  // "Add it to the list" adopts it (the same form as Adopt… below).
+  let attaching = $state(false);
+  let attachAdoptingId = $state<number | null>(null);
+  function switchTo(p: SessionRow) {
+    attaching = false;
+    selectSessionExplicitly(p);
   }
 
   // + Add account… (G2.9 from the host, G4.5): the wizard with this host picked.
@@ -489,13 +541,6 @@
     if (s.stuck_kind) return stuckStatus(s.stuck_kind);
     if (s.status === 'ghost') return 'ghost';
     return claudeStatusLabel(s.claude_status) || s.status;
-  }
-
-  async function onTokenMode(mode: TokenMode) {
-    busy = true;
-    const r = await setTokenMode(host.alias, mode);
-    busy = false;
-    if (!r.ok) pushError(r.error, 'Token mode not changed');
   }
 
   async function onHideToggle() {
@@ -666,8 +711,22 @@
     {/if}
   </header>
 
+  <div class="tabs" role="tablist" aria-label="{host.alias} sections" data-testid="detail-tabs" use:tablistKeys>
+    {#each [['overview', 'Overview', null], ['sessions', 'Sessions', hostSessions.length], ['lost', 'Lost & found', lostCount], ['provisioning', 'Provisioning', null]] as const as [id, label, count] (id)}
+      <button
+        type="button"
+        role="tab"
+        class="tab"
+        aria-selected={tab === id}
+        tabindex={tab === id ? 0 : -1}
+        data-testid="detail-tab-{id}"
+        onclick={() => (tab = id)}>{label}{#if count != null} <span class="muted">{count}</span>{/if}</button
+      >
+    {/each}
+  </div>
+
   <!-- Orbit Fleet 4.7: health checklist, re-provision, new session here -->
-  <section class="block" aria-label="Health checklist" data-testid="detail-checklist">
+  <section class="block" aria-label="Health checklist" data-testid="detail-checklist" hidden={tab !== 'overview'}>
     <div class="check-head">
       <h3>Health checklist</h3>
       <span class="muted" data-testid="detail-checked-at"
@@ -744,7 +803,7 @@
   </section>
 
   <!-- 2. Usage -->
-  <section class="block">
+  <section class="block" hidden={tab !== 'overview'}>
     {#if account}
       <div class="account-line" data-testid="detail-account">
         <span class="label">Account</span>
@@ -789,9 +848,9 @@
   </section>
 
   <!-- 3. Sessions -->
-  <section class="block" aria-label="Sessions on {host.alias}" bind:this={sessionsBlock}>
+  <section class="block" aria-label="Sessions on {host.alias}" bind:this={sessionsBlock} hidden={tab !== 'sessions' && tab !== 'lost'}>
     <div class="section-head">
-      <h3>Sessions <span class="muted">{hostSessions.length}</span></h3>
+      <h3>{#if tab === 'lost'}Lost &amp; found <span class="muted">{lostCount}</span>{:else}Sessions <span class="muted">{hostSessions.length}</span>{/if}</h3>
       <div class="actions">
         {#if restorable.length > 0}
           <button
@@ -814,6 +873,13 @@
           <button
             type="button"
             class="small"
+            data-testid="host-attach"
+            title="Attach to a tmux session running on {host.alias} outside fleet"
+            onclick={() => (attaching = true)}>Attach…</button
+          >
+          <button
+            type="button"
+            class="small"
             disabled={discoverBusy}
             data-testid="discover-lost"
             onclick={onDiscoverClick}
@@ -822,6 +888,7 @@
         {/if}
       </div>
     </div>
+    <div class="tab-part" hidden={tab !== 'sessions'}>
     {#if tidyHint && onreviewtidy}
       <p class="muted" data-testid="detail-tidy-hint">
         {tidyHint.text}
@@ -838,6 +905,11 @@
         Restored {restoreSummary.ok} of {restoreSummary.total}
         {#each restoreSummary.failures as f (f.name)}<br />{f.name}: {f.error}{/each}
       </p>
+    {/if}
+    </div>
+    <div class="tab-part" hidden={tab !== 'lost'}>
+    {#if lostCount === 0 && !discoverList && !discoverError}
+      <p class="muted" data-testid="detail-lost-empty">Nothing found yet. Find lost conversations looks on {host.alias} for ones fleet could bring back.</p>
     {/if}
     {#if discoverError}
       <p class="error" data-testid="discover-error">{discoverError}</p>
@@ -985,6 +1057,8 @@
         >
       </p>
     {/if}
+    </div>
+    <div class="tab-part" hidden={tab !== 'sessions'}>
     {#if hostSessions.length === 0}
       <p class="muted">No sessions on this host. Press <kbd>n</kbd> to start one.</p>
     {:else}
@@ -1015,10 +1089,11 @@
         {/each}
       </ul>
     {/if}
+    </div>
   </section>
 
   <!-- 5. Integration -->
-  <section class="block" aria-label="Integration">
+  <section class="block" aria-label="Integration" hidden={tab !== 'provisioning'}>
     <h3>Integration</h3>
     <div class="kv">
       <span
@@ -1027,12 +1102,12 @@
         >Codex</span
       >
       <select
-        value={codexModeOf(host)}
+        value={codexValue}
         disabled={busy || harnessBlocked !== null}
         title={harnessBlocked ?? ''}
         aria-label="Codex assets"
         data-testid="detail-codex"
-        onchange={(e) => onCodexMode((e.currentTarget as HTMLSelectElement).value as HarnessMode)}
+        onchange={(e) => (codexDraft = { alias: host.alias, mode: (e.currentTarget as HTMLSelectElement).value as HarnessMode })}
       >
         <option value="auto">auto</option>
         <option value="on">on</option>
@@ -1043,12 +1118,12 @@
       <span class="label" title="Control-API token: full = every tool, readonly = observe only">Token</span>
       {#if token}
         <select
-          value={token.mode}
+          value={tokenValue}
           disabled={busy || adminBlocked !== null}
           title={adminBlocked ?? ''}
           aria-label="Token mode"
           data-testid="detail-token-mode"
-          onchange={(e) => onTokenMode((e.currentTarget as HTMLSelectElement).value as TokenMode)}
+          onchange={(e) => (tokenDraft = { alias: host.alias, mode: (e.currentTarget as HTMLSelectElement).value as TokenMode })}
         >
           <option value="full">full</option>
           <option value="readonly">readonly</option>
@@ -1063,6 +1138,22 @@
       <span class="label" title="Installed with the host's token; last event = newest Stop hook from a session on this host">Hooks</span>
       <span data-testid="detail-hooks" data-state={hook.state}>{hookHealthLabel(hook, now)}</span>
     </div>
+    <div class="actions" data-testid="detail-integrations-bar">
+      <button
+        type="button"
+        class="small"
+        disabled={busy || !integrationDirty}
+        data-testid="detail-integrations-discard"
+        onclick={discardIntegrations}>Discard</button
+      >
+      <button
+        type="button"
+        class="small primary"
+        disabled={busy || !integrationDirty}
+        data-testid="detail-integrations-save"
+        onclick={() => void saveIntegrations()}>Save</button
+      >
+    </div>
     {#if token}
       <button
         type="button"
@@ -1076,7 +1167,7 @@
   </section>
 
   <!-- 6. Danger -->
-  <section class="block danger-zone" aria-label="Danger">
+  <section class="block danger-zone" aria-label="Danger" hidden={tab !== 'provisioning'}>
     <h3>Danger</h3>
     {#if isLocal}
       <p class="muted">The local host can't be hidden or removed.</p>
@@ -1161,6 +1252,59 @@
   </ConfirmDialog>
 {/if}
 
+{#if attaching}
+  <Modal
+    title="Attach to a running session"
+    onclose={() => {
+      attaching = false;
+      attachAdoptingId = null;
+    }} width="560px" testid="host-attach-sheet">
+    {#if outsideAll.length === 0}
+      <p class="muted" data-testid="host-attach-empty">Nothing is running on {host.alias} outside fleet.</p>
+    {:else}
+      <p class="muted">tmux sessions on {host.alias} that fleet did not start.</p>
+      <ul class="discover-items" data-testid="host-attach-list">
+        {#each outsideAll as p (p.id)}
+          <li class="discover-item" data-testid="host-attach-item">
+            <div class="d-main">
+              <span class="d-cwd">{p.tmux_name}</span>
+              <span class="muted">running {shortAge(p.created_at, now)}</span>
+            </div>
+            {#if attachAdoptingId === p.id}
+              <LostTargetForm
+                action="Adopt"
+                entry={p.tmux_name}
+                args={{ session_id: p.id }}
+                onsubmit={async (pid) => {
+                  const err = await adoptInto(p, pid);
+                  if (err === null) {
+                    attachAdoptingId = null;
+                    attaching = false;
+                  }
+                  return err;
+                }}
+                oncancel={() => (attachAdoptingId = null)}
+              />
+            {:else}
+              <button type="button" class="small" data-testid="host-attach-switch" onclick={() => switchTo(p)}
+                >Switch to it</button
+              >
+              <button
+                type="button"
+                class="small"
+                disabled={adoptBlocked(p) !== null}
+                title={adoptBlocked(p) ?? 'Fleet runs it from now on; the pane stays as it is'}
+                data-testid="host-attach-add"
+                onclick={() => (attachAdoptingId = p.id)}>Add it to the list</button
+              >
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </Modal>
+{/if}
+
 <style>
   .host-detail {
     display: flex;
@@ -1190,6 +1334,19 @@
   .disk { width: 6rem; flex-shrink: 0; }
   .attention { margin: 0.4rem 0 0; color: var(--usage-warn); }
   .block { border-top: 1px solid var(--border); padding-top: 0.6rem; }
+  .block[hidden], .tab-part[hidden] { display: none; }
+  .tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid var(--border); }
+  .tab {
+    padding: 0.35rem 0.6rem;
+    border: none;
+    border-bottom: 2px solid transparent;
+    background: none;
+    color: var(--fg-muted);
+    font: inherit;
+    font-size: var(--text-xs);
+    cursor: pointer;
+  }
+  .tab[aria-selected='true'] { color: var(--fg); border-bottom-color: var(--accent); }
   .account-line { display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.4rem; min-width: 0; }
   .label { color: var(--fg-muted); min-width: 3.5rem; }
   .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; }

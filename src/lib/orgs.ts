@@ -93,6 +93,8 @@ export interface OrgDetail extends OrgRow {
   members?: OrgMember[];
   /** Phase D: the caller's own role in it. */
   my_role?: 'admin' | 'member' | 'viewer';
+  /** M15 G7.14, with `members`: how many there are. */
+  member_count?: number;
   /** Phase D: this company owns the hub. */
   owns_hub?: boolean;
   /** Phase D: its admins see the unclaimed count on its hosts. */
@@ -120,6 +122,8 @@ export interface OrgMember {
   shares_since?: number;
   /** Redesign 11.2, for whoever administers the org: their devices. */
   devices?: string[];
+  /** M15 G7.14, with `devices`: the ones not trusted yet. */
+  untrusted_devices?: string[];
   /** Redesign 11.7c: their live sessions in this org (absent when none, or
    *  from an older hub). */
   live_sessions?: number;

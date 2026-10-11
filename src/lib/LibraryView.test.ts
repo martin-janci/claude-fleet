@@ -146,6 +146,28 @@ describe('LibraryView table (G3.10)', () => {
   });
 });
 
+// Gap plan G7.8 (board MCViews): folders, each row naming its host.
+describe('LibraryView folders (G7.8)', () => {
+  it('puts outputs and uploads in their own folders, counts today, and folds one shut', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    backend.downloads = [
+      { id: 7, at: now, host_alias: 'mac', session_id: focus.id, session_name: 'fix-login', path: '/w/out/r.pdf', name: 'r.pdf', size: 2, state: 'ready', source: 'agent' },
+      { id: 8, at: 100, host_alias: 'nas', session_id: focus.id, session_name: 'fix-login', path: '/w/out/old.pdf', name: 'old.pdf', size: 2, state: 'ready', source: 'agent' },
+    ];
+    backend.items = [{ id: 3, at: 200, kind: 'upload', host_alias: 'mac', session_name: 'fix-login', path: '/w/a.md', name: 'a.md' }];
+    const { getAllByTestId } = render(LibraryView);
+    await waitFor(() => expect(getAllByTestId('library-row')).toHaveLength(3));
+    const folders = getAllByTestId('library-folder');
+    expect(folders.map((f) => f.getAttribute('data-folder'))).toEqual(['outputs', 'uploads']);
+    expect(getAllByTestId('library-folder-count').map((c) => c.textContent)).toEqual(['today 1 of 2', '1']);
+    expect(folders[0].querySelectorAll('.host-of')[1]?.textContent).toBe('nas');
+    const toggle = getAllByTestId('library-folder-toggle')[0];
+    await fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(getAllByTestId('library-row')).toHaveLength(1);
+  });
+});
+
 // Review round 13: a failed read is never shown as an empty Library.
 describe('LibraryView when the read fails (review r13)', () => {
   it('says it could not load, not "Nothing here yet", and Retry reads again', async () => {
