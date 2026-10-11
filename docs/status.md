@@ -25,14 +25,15 @@ account usage history (122), the Hosts page's probe facts (123), token use
 (126), the cost of fleet's own `claude -p` runs (127), every PR a session's
 branch has had (`pull_requests`, 128), cost per account (130), prompts
 queued for a busy session (133), the agent CLIs a host has (134) and the
-add-host wizard's state (135). The hub contract is revision 16
+add-host wizard's state (135). The hub contract is revision 17
 (`CONTRACT_REVISION`, `crates/fleet-core/src/wire_contract.rs`):
 revisions 11 to 14 add tools a revision-10 hub does not serve, so the
 desktop and its hub are upgraded together; 15 widens the form spec and
 adds the attention model's two classes (a mission waiting on a person, and
 Jev's "probably waiting" kept apart from Needs you) and no tool; 16 adds
-named tokens (`api_tokens`) and + Add account (`add_account`), so a
-desktop accepts only a revision-16 hub.
+named tokens (`api_tokens`) and + Add account (`add_account`); 17 adds
+the composer's context help on a shared session (`session_context_help`),
+so a desktop accepts only a revision-17 hub.
 
 Search (2026-10, three phases). Every search box ignores case and accents
 through one fold (`search_text.rs`, `src/lib/text_fold.ts`, fleet-mobile's

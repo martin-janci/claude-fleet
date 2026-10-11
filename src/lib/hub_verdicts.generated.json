@@ -275,6 +275,7 @@
     "session_access",
     "session_activity",
     "session_ask_access",
+    "session_context_help",
     "session_conversation",
     "session_conversations",
     "session_history",

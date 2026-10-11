@@ -375,6 +375,53 @@ impl FleetTools {
         ok_json_compact(&summary)
     }
 
+    #[tool(description = "Context help at a session's composer: a question \
+        about the draft (empty asks about the draft alone), with the earlier \
+        prompts and the commands the composer accepts as context. Returns { \
+        answer, command?, model, host_alias, history_items, at }: a few lines \
+        and at most one proposal for the composer, never run. Runs one claude \
+        -p on the session's host under its account, on work.help_model \
+        (booked as context_help), for the owner or an answer/drive grant. \
+        Errors: E_INVALID_STATE (work.context_help off), E_FORBIDDEN \
+        (a watch grant), E_INVALID (nothing to ask about), E_CLAUDE_CLI, E_TIMEOUT, as \
+        session_conversation.")]
+    pub(super) async fn session_context_help(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionContextHelpParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // The draft and the question are the person's text: not logged.
+        audit(
+            "session_context_help",
+            &format!("session_id={}", p.session_id),
+        );
+        // `answer`: the answer is text for the composer, which a watcher
+        // has no way to send, and it spends the owner's account.
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Answer,
+            "the session",
+        )?;
+        let request = crate::service::context_help::HelpRequest {
+            question: p.question,
+            line: p.line,
+            history: p.history,
+            commands: p.commands,
+        };
+        let answer = crate::service::context_help::ask_for_session(
+            &self.store,
+            self.ssh.as_ref(),
+            &row,
+            &request,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json_compact(&answer)
+    }
+
     #[tool(description = "send_prompt + wait_for_session(turn_gt) + \
         session_transcript in one call. Returns { turn_seq, status: \
         satisfied | timeout, transcript } (the reply as plain text; null \

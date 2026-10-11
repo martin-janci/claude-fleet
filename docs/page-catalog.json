@@ -3573,6 +3573,18 @@
       ]
     },
     {
+      "default_widget": "switch",
+      "key": "work.context_help",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Context help",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "select",
       "key": "work.help_model",
       "kind": {

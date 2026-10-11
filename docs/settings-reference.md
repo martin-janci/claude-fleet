@@ -169,6 +169,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `work.classify_nudge` | `false` | on / off | fleet, per org | After three prompts with no ticket, ask Claude once which of your few open tickets it is on. Its answer is only ever a suggestion. Experimental. |
 | `work.members_plan_sprints` | `false` | on / off | fleet, per org | Let an organisation's members, not only its admins, create and change its sprints and releases. Viewers never can; anyone can keep personal ones. |
 | `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet, per org | The model Summarise runs on for a past session, on that session's own host and account. |
+| `work.context_help` | `false` | on / off | fleet | Terminal and composer: Ask asks a model about the line you are typing, with its history as context, on the session's host. A proposed command is put on the line, never run. |
 | `work.help_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet | The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account. |
 | `work.draft_commit_messages` | `false` | on / off | fleet | Files tab: Draft writes a commit message from the staged diff with claude -p on the session's host. A draft is text you edit and commit yourself. |
 | `work.draft_briefs` | `false` | on / off | fleet | Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host. |

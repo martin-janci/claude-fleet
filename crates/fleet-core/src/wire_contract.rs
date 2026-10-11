@@ -239,4 +239,7 @@
 //!   org's project catalog, a rule's live impact and the Sharing tab's
 //!   revoke and narrow actions, which a revision-15 hub refuses as unknown.
 //!   Every row change is additive.
-pub const CONTRACT_REVISION: u32 = 16;
+//! - **17** — *a new tool*. The composer's context help asks
+//!   `session_context_help`, so a person a session is shared with at
+//!   `answer` or `drive` gets it too; a revision-16 hub has no such tool.
+pub const CONTRACT_REVISION: u32 = 17;

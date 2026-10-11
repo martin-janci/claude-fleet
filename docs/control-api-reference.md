@@ -677,6 +677,12 @@ Claim the unclaimed session THIS pane is in for a person: it becomes theirs and 
 
 Parameters: `person`, `session_id`
 
+### `session_context_help`
+
+Context help at a session's composer: a question about the draft (empty asks about the draft alone), with the earlier prompts and the commands the composer accepts as context. Returns { answer, command?, model, host_alias, history_items, at }: a few lines and at most one proposal for the composer, never run. Runs one claude -p on the session's host under its account, on work.help_model (booked as context_help), for the owner or an answer/drive grant. Errors: E_INVALID_STATE (work.context_help off), E_FORBIDDEN (a watch grant), E_INVALID (nothing to ask about), E_CLAUDE_CLI, E_TIMEOUT, as session_conversation.
+
+Parameters: `commands`, `history`, `line`, `question`, `session_id`
+
 ### `session_conversation`
 
 Read a session conversation as structured turns (session_transcript is one flat blob): each turn's prompt, timestamps and items by kind (text, tool, subagent, compact, command, interrupt; tool inputs and results are never included), plus events (the conversation timeline) and context (context-window usage, or null). Read-only. Errors: E_INVALID, E_INVALID_STATE, E_NO_TRANSCRIPT.
@@ -1292,6 +1298,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::editor::open_session_in_editor`
 - `commands::windows::open_terminal_window`
 - `commands::context_help::context_help`
+- `commands::context_help::session_context_help`
 - `commands::voice::voice_claim`
 - `commands::voice::voice_release`
 - `cancel_command`

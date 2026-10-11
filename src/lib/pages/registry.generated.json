@@ -1501,6 +1501,27 @@
       "danger": {
         "level": "none"
       },
+      "default": "false",
+      "help": "Terminal and composer: Ask asks a model about the line you are typing, with its history as context, on the session's host. A proposed command is put on the line, never run.",
+      "key": "work.context_help",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Context help",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "haiku",
       "help": "The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account.",
       "key": "work.help_model",
@@ -3988,6 +4009,10 @@
               "items": [
                 {
                   "key": "work.summary_model",
+                  "type": "field"
+                },
+                {
+                  "key": "work.context_help",
                   "type": "field"
                 },
                 {

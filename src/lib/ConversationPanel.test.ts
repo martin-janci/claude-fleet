@@ -57,6 +57,7 @@ import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { myGrants, myPersonId, type GrantLevel } from './access';
 import { hubConnection } from './hub_connection';
 import { invoke } from '@tauri-apps/api/core';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import type { PickedFile } from './attachments';
 import { outbox } from './outbox';
 import { toasts, clearToasts } from './toasts';
@@ -2413,14 +2414,20 @@ describe('ConversationPanel prompt recall', () => {
     expect(box.value).toBe('second edited');
   });
 
+  it('offers no ? while Writing help\'s Context help is off', async () => {
+    await mountWithHistory();
+    expect(screen.queryByTestId('conv-help-button')).toBeNull();
+  });
+
   it('? asks Haiku about the draft with the earlier prompts, and the proposal only fills the box', async () => {
     const mocked = invoke as unknown as ReturnType<typeof vi.fn>;
     const base = mocked.getMockImplementation() as ((cmd: string, payload?: unknown) => unknown) | undefined;
     mocked.mockImplementation(async (cmd: string, payload?: unknown) =>
-      cmd === 'context_help'
+      cmd === 'session_context_help'
         ? { answer: 'Plan it first.', command: '/plan #FLEET-3', model: 'haiku', host_alias: 'local', history_items: 2, at: 1 }
         : base?.(cmd, payload),
     );
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.context_help': 'true' });
     try {
       const box = await mountWithHistory();
       await fireEvent.input(box, { target: { value: 'split the parser' } });
@@ -2428,12 +2435,10 @@ describe('ConversationPanel prompt recall', () => {
       await settle();
       await fireEvent.keyDown(screen.getByTestId('conv-help-question'), { key: 'Enter' });
       await settle();
-      const asked = mocked.mock.calls.filter((c) => c[0] === 'context_help');
+      const asked = mocked.mock.calls.filter((c) => c[0] === 'session_context_help');
       expect(asked).toHaveLength(1);
       expect((asked[0][1] as { args: Record<string, unknown> }).args).toMatchObject({
-        surface: 'composer',
-        host_alias: 'local',
-        session_name: 'ctl',
+        session_id: 1,
         line: 'split the parser',
         history: ['first', 'second'],
         question: '',
@@ -2444,6 +2449,7 @@ describe('ConversationPanel prompt recall', () => {
       expect(mockedSend).not.toHaveBeenCalled();
     } finally {
       mocked.mockImplementation(base ?? (() => undefined));
+      fleetSettings.set({ ...SETTING_DEFAULTS });
     }
   });
 
@@ -4882,6 +4888,51 @@ describe('ConversationPanel composer access (multi-user M1)', () => {
   const sendBtn = () => screen.getByTestId('conv-composer-send') as HTMLButtonElement;
   const attachBtn = () => screen.getByTestId('conv-attach-button') as HTMLButtonElement;
   const names = () => mockedInvoke.mock.calls.map((c) => c[0] as string);
+
+  // Context help on a shared session: the hub runs it (`session_context_help`),
+  // for a grant that can answer; a watcher's ? says what it lacks.
+  for (const level of ['answer', 'drive'] as const) {
+    it(`a ${level} grantee asks context help through the hub`, async () => {
+      fleetSettings.set({ ...SETTING_DEFAULTS, 'work.context_help': 'true' });
+      mockedInvoke.mockImplementation(async (cmd: string, payload?: unknown) =>
+        cmd === 'session_context_help'
+          ? { answer: 'Say yes.', model: 'haiku', host_alias: 'h', history_items: 0, at: 1 }
+          : baseInvoke(cmd, payload as Record<string, unknown> | undefined),
+      );
+      mockedInvoke.mockClear();
+      try {
+        await renderShared(level);
+        const help = screen.getByTestId('conv-help-button') as HTMLButtonElement;
+        expect(help.disabled).toBe(false);
+        await fireEvent.click(help);
+        await settle();
+        await fireEvent.input(screen.getByTestId('conv-help-question'), { target: { value: 'what now?' } });
+        await fireEvent.keyDown(screen.getByTestId('conv-help-question'), { key: 'Enter' });
+        await settle();
+        const asked = mockedInvoke.mock.calls.filter((c) => c[0] === 'session_context_help');
+        expect(asked).toHaveLength(1);
+        expect((asked[0][1] as { args: Record<string, unknown> }).args).toMatchObject({
+          session_id: 1,
+          question: 'what now?',
+        });
+        expect(names()).not.toContain('context_help');
+      } finally {
+        fleetSettings.set({ ...SETTING_DEFAULTS });
+      }
+    });
+  }
+
+  it('a watch grantee’s ? is disabled and names the level it needs', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.context_help': 'true' });
+    try {
+      await renderShared('watch');
+      const help = screen.getByTestId('conv-help-button') as HTMLButtonElement;
+      expect(help.disabled).toBe(true);
+      expect(help.title).toMatch(/answer/i);
+    } finally {
+      fleetSettings.set({ ...SETTING_DEFAULTS });
+    }
+  });
 
   it('a watch grantee gets no composer: every control is disabled and says why', async () => {
     await renderShared('watch');

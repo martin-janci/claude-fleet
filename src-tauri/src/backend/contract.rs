@@ -155,7 +155,10 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 ///
 /// Raised to 16 for revision 16: named tokens and + Add account route to
 /// the `api_tokens` and `add_account` tools a revision-15 hub lacks.
-pub const MIN_HUB_CONTRACT: u32 = 16;
+///
+/// Raised to 17 for revision 17: the composer's context help routes to the
+/// `session_context_help` tool a revision-16 hub lacks.
+pub const MIN_HUB_CONTRACT: u32 = 17;
 
 /// The highest hub wire-contract revision this build understands. A hub
 /// ahead of this is running row shapes compiled after this build was —
@@ -186,7 +189,9 @@ pub const MIN_HUB_CONTRACT: u32 = 16;
 /// revision-14 hub's forms are in the older shape this build still reads.
 ///
 /// Raised to 16 with revision 16 (gap plan M15 batch 2).
-pub const MAX_HUB_CONTRACT: u32 = 16;
+///
+/// Raised to 17 with revision 17 (`session_context_help`).
+pub const MAX_HUB_CONTRACT: u32 = 17;
 
 /// Where a hub's wire-contract revision stands against what this build
 /// accepts. A pure function of the three numbers on purpose: the real bounds
