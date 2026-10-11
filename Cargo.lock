@@ -1594,6 +1594,7 @@ dependencies = [
  "qrcode",
  "rand 0.10.1",
  "regex",
+ "ring",
  "rmcp",
  "rusqlite",
  "rustls-native-certs",
