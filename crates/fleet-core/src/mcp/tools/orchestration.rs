@@ -1807,7 +1807,14 @@ impl FleetTools {
             // a stranger permanently marking somebody else's live work done.
             // The same gate and the same level as the rename half above —
             // the status is what the owner's own sidebar shows for their row.
-            self.require_drive_on_item_sessions(&caller, item_id)?;
+            //
+            // One exception: an agent whose OWN session is on the task (a
+            // confirmed, live link, proven by its pane) sets the status of
+            // its own work even when the task is shared with sessions it
+            // cannot drive. Its own link is the evidence the task is its.
+            if !self.own_session_works_on(&caller, item_id)? {
+                self.require_drive_on_item_sessions(&caller, item_id)?;
+            }
             return ok_json(
                 &crate::service::work::status::set_status(&self.store, &scope, item_id, status)
                     .map_err(to_mcp_err)?,

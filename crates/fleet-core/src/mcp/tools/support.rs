@@ -2236,6 +2236,27 @@ impl FleetTools {
         Ok(())
     }
 
+    /// True when the caller's OWN session (proven by its pane, see
+    /// `FleetTools::own_session`) is on `item_id` through a confirmed, live
+    /// link. What it lets through is narrow: `work_link { set_status }` on a
+    /// task the agent itself works on, even when the task is shared with
+    /// sessions it may not drive. The org fence inside `set_status` still
+    /// runs, and nothing else (edit, comment, rename) reads this.
+    pub(super) fn own_session_works_on(
+        &self,
+        caller: &Caller,
+        item_id: i64,
+    ) -> Result<bool, McpError> {
+        let Some(own) = self.own_session(caller)? else {
+            return Ok(false);
+        };
+        let s = lock(self.reader()).map_err(to_mcp_err)?;
+        Ok(s.local_item_links(Some(item_id))
+            .map_err(to_mcp_err)?
+            .iter()
+            .any(|l| l.session_id == Some(own)))
+    }
+
     /// [`Self::resolve_target`] returning the whole row.
     pub(super) fn resolve_target_row(
         &self,
