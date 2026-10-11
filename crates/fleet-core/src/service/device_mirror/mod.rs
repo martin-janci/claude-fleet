@@ -132,6 +132,33 @@ pub fn scrcpy_command(
 struct Running {
     info: MirrorInfo,
     stop: Option<oneshot::Sender<()>>,
+    /// scrcpy's pid while it runs, for [`Mirrors::kill_all`]. The watcher
+    /// clears it once the child has exited, so a reused pid is not hit.
+    pid: Option<u32>,
+    /// The host-side forward port (ssh route), kept so a concurrent start
+    /// on the same host does not pick it again.
+    forward: Option<u16>,
+}
+
+/// Why a start failed: a refusal because the device is already mirrored
+/// keeps the caller's lease (claims are re-entrant per holder, so that
+/// lease IS the running mirror's claim); any other failure releases it.
+enum Failure {
+    Refused(IpcError),
+    Failed(IpcError),
+}
+
+impl From<IpcError> for Failure {
+    fn from(e: IpcError) -> Self {
+        Failure::Failed(e)
+    }
+}
+
+fn already_mirrored(d: &DebugDevice) -> Failure {
+    Failure::Refused(IpcError::new(
+        codes::E_EXISTS,
+        format!("{} is already mirrored", d.title),
+    ))
 }
 
 #[derive(Default, Clone)]
@@ -154,7 +181,14 @@ struct Relays {
     forward: u16,
 }
 
-async fn prepare_remote(host: &str, tools: &Tools, remote: &Remote) -> Result<Relays, IpcError> {
+/// `taken`: forward ports this machine's own live mirrors hold on `host`,
+/// excluded on top of what the host's adb server lists.
+async fn prepare_remote(
+    host: &str,
+    tools: &Tools,
+    remote: &Remote,
+    taken: &[u16],
+) -> Result<Relays, IpcError> {
     let version = match server_version(remote, host).await {
         Ok(v) => v,
         Err(_) => {
@@ -182,7 +216,8 @@ async fn prepare_remote(host: &str, tools: &Tools, remote: &Remote) -> Result<Re
     };
     adb::check_versions(adb::local_version(&tools.adb).await?, version)?;
     let mut s = remote.dialer.dial(host, ADB_SERVER_PORT).await?;
-    let used = adb::forwarded_ports(&mut s).await?;
+    let mut used = adb::forwarded_ports(&mut s).await?;
+    used.extend_from_slice(taken);
     let forward = adb::free_forward_port(&used).ok_or_else(|| {
         IpcError::new(
             codes::E_LIMIT,
@@ -232,6 +267,24 @@ impl Mirrors {
         v
     }
 
+    /// Whether `device_id` has a mirror (running or tearing down). The
+    /// desktop command checks it before it claims the device.
+    pub fn is_mirrored(&self, device_id: i64) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains_key(&device_id)
+    }
+
+    /// Forward ports this machine's live mirrors hold on `host`.
+    fn forwards_on(&self, host: &str) -> Vec<u16> {
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        g.values()
+            .filter(|r| r.info.host == host)
+            .filter_map(|r| r.forward)
+            .collect()
+    }
+
     pub async fn stop(&self, device_id: i64) -> Result<(), IpcError> {
         let tx = {
             let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
@@ -249,11 +302,18 @@ impl Mirrors {
         }
     }
 
-    /// App exit: ask every watcher to kill its scrcpy. Claims lapse on
-    /// their own (no await is possible here).
+    /// App exit: kill every scrcpy NOW, synchronously, because the app
+    /// leaves through `std::process::exit` and neither the watchers nor
+    /// `kill_on_drop` get to run. The watchers are signalled too, for the
+    /// case where the runtime lives on. Claims lapse on their own (no
+    /// await is possible here).
     pub fn kill_all(&self) {
+        let killer = crate::service::tunnel::signal_killer();
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         for r in g.values_mut() {
+            if let Some(pid) = r.pid.take() {
+                killer(pid);
+            }
             if let Some(tx) = r.stop.take() {
                 let _ = tx.send(());
             }
@@ -273,7 +333,8 @@ impl Mirrors {
             .await
         {
             Ok(info) => Ok(info),
-            Err(e) => {
+            Err(Failure::Refused(e)) => Err(e),
+            Err(Failure::Failed(e)) => {
                 lease.release().await;
                 Err(e)
             }
@@ -287,23 +348,18 @@ impl Mirrors {
         tools: Tools,
         remote: Remote,
         lease: Arc<dyn Lease>,
-    ) -> Result<MirrorInfo, IpcError> {
+    ) -> Result<MirrorInfo, Failure> {
         let serial = validate(d)?;
         let route = choose_route(&d.host, standalone)?;
-        if self
-            .inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .contains_key(&d.id)
-        {
-            return Err(IpcError::new(
-                codes::E_EXISTS,
-                format!("{} is already mirrored", d.title),
-            ));
+        if self.is_mirrored(d.id) {
+            return Err(already_mirrored(d));
         }
         let relays = match route {
             Route::Local => None,
-            Route::Ssh => Some(prepare_remote(&d.host, &tools, &remote).await?),
+            Route::Ssh => {
+                let taken = self.forwards_on(&d.host);
+                Some(prepare_remote(&d.host, &tools, &remote, &taken).await?)
+            }
         };
         let ports = relays.as_ref().map(|r| SpawnPorts {
             adb: r.adb.local_port(),
@@ -336,14 +392,14 @@ impl Mirrors {
         if let Ok(status) = early {
             // Give the tail readers a moment to drain the pipes.
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let status = status?;
+            let status = status.map_err(IpcError::from)?;
             if !status.success() {
                 let t = String::from_utf8_lossy(&tail.lock().unwrap_or_else(|p| p.into_inner()))
                     .into_owned();
-                return Err(IpcError::new(
+                return Err(Failure::Failed(IpcError::new(
                     codes::E_MIRROR_FAILED,
                     format!("scrcpy exited ({status}): {}", t.trim()),
-                ));
+                )));
             }
         }
 
@@ -364,15 +420,15 @@ impl Mirrors {
             let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             match g.entry(d.id) {
                 std::collections::hash_map::Entry::Occupied(_) => {
-                    return Err(IpcError::new(
-                        codes::E_EXISTS,
-                        format!("{} is already mirrored", d.title),
-                    ));
+                    return Err(already_mirrored(d));
                 }
                 std::collections::hash_map::Entry::Vacant(v) => {
                     v.insert(Running {
                         info: info.clone(),
                         stop: Some(tx),
+                        // An exited child has no pid left to kill.
+                        pid: if exited { None } else { child.id() },
+                        forward: relays.as_ref().map(|r| r.forward),
                     });
                 }
             }
@@ -400,8 +456,19 @@ impl Mirrors {
                     }
                 }
                 if kill {
+                    // Harmless when `kill_all` already signalled the pid:
+                    // the child is not reaped yet, so the pid is still ours.
                     let _ = child.start_kill();
                     let _ = child.wait().await;
+                }
+                // Reaped: the pid may be reused from here on.
+                if let Some(r) = this
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get_mut(&id)
+                {
+                    r.pid = None;
                 }
             }
             if let Some(r) = relays {

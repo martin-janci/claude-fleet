@@ -214,15 +214,26 @@ mod lifecycle {
         (addr, conns, seen)
     }
 
-    fn remote(addr: std::net::SocketAddr) -> Remote {
-        Remote {
+    /// The remote, and a clone of its fake ssh: the fake adb server
+    /// answers, so a test asserts nothing ran over ssh (no start-server
+    /// fallback).
+    fn remote(addr: std::net::SocketAddr) -> (Remote, crate::ssh_fake::FakeSsh) {
+        let ssh = crate::ssh_fake::FakeSsh::new();
+        let r = Remote {
             dialer: Arc::new(crate::relay::tests::FixedDialer {
                 addr,
                 asked: Default::default(),
             }),
-            // The fake adb server answers, so nothing runs over ssh.
-            ssh: Arc::new(crate::ssh_fake::FakeSsh::new()),
-        }
+            ssh: Arc::new(ssh.clone()),
+        };
+        (r, ssh)
+    }
+
+    fn assert_no_ssh(ssh: &crate::ssh_fake::FakeSsh) {
+        assert!(
+            ssh.calls().is_empty(),
+            "the adb server answered; nothing may run over ssh"
+        );
     }
 
     #[tokio::test]
@@ -235,12 +246,13 @@ mod lifecycle {
         let (addr, _conns, seen) = fake_adb_server(41).await;
         let lease = Arc::new(CountingLease::default());
         let mirrors = Mirrors::new();
+        let (r, ssh) = remote(addr);
         let info = mirrors
             .start(
                 &device("android", "physical", true, "mefistos"),
                 true,
                 tools,
-                remote(addr),
+                r,
                 lease.clone(),
             )
             .await
@@ -268,6 +280,7 @@ mod lifecycle {
             .unwrap()
             .iter()
             .any(|r| r == "host-serial:R5CT1:killforward:tcp:27184"));
+        assert_no_ssh(&ssh);
     }
 
     #[tokio::test]
@@ -280,27 +293,33 @@ mod lifecycle {
         let (addr, _, _) = fake_adb_server(41).await;
         let mirrors = Mirrors::new();
         let d = device("android", "physical", true, "mefistos");
+        assert!(!mirrors.is_mirrored(7));
+        let (r1, ssh1) = remote(addr);
         mirrors
             .start(
                 &d,
                 true,
                 tools.clone(),
-                remote(addr),
+                r1,
                 Arc::new(CountingLease::default()),
             )
             .await
             .unwrap();
+        assert!(mirrors.is_mirrored(7));
         let lease = Arc::new(CountingLease::default());
+        let (r2, ssh2) = remote(addr);
         let e = mirrors
-            .start(&d, true, tools, remote(addr), lease.clone())
+            .start(&d, true, tools, r2, lease.clone())
             .await
             .unwrap_err();
         assert_eq!(e.code, codes::E_EXISTS);
         assert_eq!(
             lease.released.load(Ordering::SeqCst),
-            1,
-            "a refused start releases its lease"
+            0,
+            "claims are re-entrant per holder: the refused start's lease is the running mirror's claim"
         );
+        assert_no_ssh(&ssh1);
+        assert_no_ssh(&ssh2);
         mirrors.kill_all();
     }
 
@@ -313,12 +332,13 @@ mod lifecycle {
         };
         let (addr, _, _) = fake_adb_server(40).await;
         let lease = Arc::new(CountingLease::default());
+        let (r, ssh) = remote(addr);
         let e = Mirrors::new()
             .start(
                 &device("android", "physical", true, "mefistos"),
                 true,
                 tools,
-                remote(addr),
+                r,
                 lease.clone(),
             )
             .await
@@ -326,6 +346,7 @@ mod lifecycle {
         assert_eq!(e.code, codes::E_ADB_VERSION_MISMATCH);
         assert!(!dir.path().join("scrcpy.log").exists());
         assert_eq!(lease.released.load(Ordering::SeqCst), 1);
+        assert_no_ssh(&ssh);
     }
 
     #[tokio::test]
@@ -338,12 +359,13 @@ mod lifecycle {
         let (addr, _, _) = fake_adb_server(41).await;
         let lease = Arc::new(CountingLease::default());
         let mirrors = Mirrors::new();
+        let (r, ssh) = remote(addr);
         let e = mirrors
             .start(
                 &device("android", "physical", true, "mefistos"),
                 true,
                 tools,
-                remote(addr),
+                r,
                 lease.clone(),
             )
             .await
@@ -356,6 +378,7 @@ mod lifecycle {
         );
         assert!(mirrors.list().is_empty());
         assert_eq!(lease.released.load(Ordering::SeqCst), 1);
+        assert_no_ssh(&ssh);
     }
 
     #[tokio::test]
@@ -366,7 +389,7 @@ mod lifecycle {
             adb: stub_adb(dir.path(), 41),
         };
         // A dead address: any dial would fail the test.
-        let dead = remote("127.0.0.1:9".parse().unwrap());
+        let (dead, ssh) = remote("127.0.0.1:9".parse().unwrap());
         let mirrors = Mirrors::new();
         let info = mirrors
             .start(
@@ -382,5 +405,112 @@ mod lifecycle {
         let log = std::fs::read_to_string(dir.path().join("scrcpy.log")).unwrap();
         assert!(!log.contains("--tunnel-port"), "{log}");
         mirrors.kill_all();
+        assert_no_ssh(&ssh);
     }
+
+    /// A stub scrcpy that records a SIGTERM in `<dir>/term` and exits.
+    /// It waits on a background `sleep` (stopped in the trap) so the trap
+    /// runs as soon as the signal lands.
+    fn stub_scrcpy_recording_term(dir: &std::path::Path) -> std::path::PathBuf {
+        let marker = crate::shell::quote(&dir.join("term").display().to_string());
+        write_exec(
+            dir,
+            "scrcpy",
+            &format!(
+                "#!/bin/sh\n{PROBE_GUARD}sleep 600 &\ns=$!\ntrap \"kill $s; echo TERM > {marker}; exit 0\" TERM\nwait $s\n"
+            ),
+        )
+    }
+
+    fn pid_alive(pid: u32) -> bool {
+        crate::proc::std_command("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn kill_all_kills_scrcpy_synchronously() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = tools::Tools {
+            scrcpy: stub_scrcpy_recording_term(dir.path()),
+            adb: stub_adb(dir.path(), 41),
+        };
+        let (dead, ssh) = remote("127.0.0.1:9".parse().unwrap());
+        let mirrors = Mirrors::new();
+        mirrors
+            .start(
+                &device("android", "emulator", true, "local"),
+                true,
+                tools,
+                dead,
+                Arc::new(CountingLease::default()),
+            )
+            .await
+            .unwrap();
+        let pid = {
+            let g = mirrors.inner.lock().unwrap();
+            g.get(&7)
+                .and_then(|r| r.pid)
+                .expect("a running mirror records its pid")
+        };
+        assert!(pid_alive(pid));
+
+        mirrors.kill_all();
+        // Block this (current-thread) runtime: the watcher cannot run, so
+        // only `kill_all` itself can have delivered the signal, as on an
+        // app exit through `std::process::exit`.
+        let term = dir.path().join("term");
+        for _ in 0..50 {
+            if term.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            term.exists(),
+            "kill_all did not signal scrcpy synchronously"
+        );
+
+        // Let the watcher reap it: the pid is then gone.
+        for _ in 0..50 {
+            if !pid_alive(pid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(!pid_alive(pid), "scrcpy (pid {pid}) outlived kill_all");
+        assert_no_ssh(&ssh);
+    }
+}
+
+#[test]
+fn a_hosts_live_forward_ports_are_excluded_from_the_next_pick() {
+    let mirrors = Mirrors::new();
+    let running = |id: i64, host: &str, forward: Option<u16>| Running {
+        info: MirrorInfo {
+            device_id: id,
+            host: host.into(),
+            serial: format!("s{id}"),
+            title: format!("d{id}"),
+            route: Route::Ssh,
+            started_at: 0,
+        },
+        stop: None,
+        pid: None,
+        forward,
+    };
+    {
+        let mut g = mirrors.inner.lock().unwrap();
+        g.insert(1, running(1, "mefistos", Some(27183)));
+        g.insert(2, running(2, "mefistos", Some(27184)));
+        g.insert(3, running(3, "hetzner", Some(27185)));
+        g.insert(4, running(4, "mefistos", None));
+    }
+    let mut taken = mirrors.forwards_on("mefistos");
+    taken.sort_unstable();
+    assert_eq!(taken, [27183, 27184]);
+    assert_eq!(adb::free_forward_port(&taken), Some(27185));
 }
