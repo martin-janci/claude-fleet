@@ -506,7 +506,15 @@ include_local }` adds own tasks. Link windows (P-7) need no migration:
 `work_journal.rs`'s `WINDOW_LO` / `WINDOW_HI` bound a link's journal by the
 switches around it, and a link no switch touched reads as before. The
 desktop's attach picker (`AttachPicker.svelte`, `attach.ts`) and Work on
-task… (`SessionTasks.svelte`) read them. Not yet: the new task's brief
+task… (`SessionTasks.svelte`) read them. An agent knows its own tasks
+from its pane (per-host token + `X-Fleet-Pane`, `FleetTools::own_session`):
+`whoami {}`, `work { session_tasks }` without `session_id`, and
+`list_tasks { mine | worker_session_id }`; `session_tasks`, `work { task }`
+and `list_tasks` mark the caller's own rows (`is_self`,
+`is_self_requester` / `is_self_worker`). An agent sets the status of,
+edits and comments on a local task its own session is on (a confirmed, live
+link) even when the task is shared with sessions it cannot drive
+(`own_session_works_on`); rename keeps the full gate. Not yet: the new task's brief
 waiting for the next prompt (J3), own tasks in ⌘K.
 C0: the operator is born with the `fleet-brainstorm` skill
 (`skills/fleet-brainstorm/SKILL.md`, written to its directory's
@@ -545,7 +553,10 @@ mission), a repo allow-list and a capped event log (`store/orchestration.rs`).
 `work { missions | mission }` and `work_link { mission_save | mission_state |
 mission_repo | mission_item | mission_delete }` (`service/work/missions.rs`)
 fence by the mission's org first, then its owner or the org's members (only
-an org admin changes one); per-host and peer tokens are refused. Seven routed
+an org admin changes one); per-host and peer tokens are refused. The operator
+may `mission_save` (create or change) for the hub's owner, each save approved
+by a person, and reads the owner's missions; every other `mission_*` action
+refuses it. Seven routed
 desktop commands (`commands/missions.rs`) back the Work view's Missions tab.
 Projects carry no org, so the repo allow-list is not org-checked yet. O2 is built: `work_item_deps` and
 `work_items.held_at` (migration 116), drawn by `work_link { dep | hold }`
@@ -609,6 +620,22 @@ run when the hub does not answer. Hosts get it on re-provisioning
 In the New layout, Jev K3 (off) proposes a stuck mission's outcome and next
 step, and Control shows a "Sent to a mission" receipt for what the operator
 handed over (`control_handoffs`, migration 140, redesign 9.3).
+Built but OFF by default: `orchestrator.headless_checks` runs a member's
+`review` and `test` steps as one `claude -p` run in the implementer's
+finished checkout (`orchestrate/checks.rs`, F3) instead of a session of
+their own: a review gets Read/Grep/Glob and the diff, a test also exactly
+its `test:<command>` lines as `Bash(<command>)`, everything else denied
+(`--permission-mode dontAsk`). The result is the same task and report, so
+`done_when` reads it unchanged; its cost is booked as `headless_check` on
+the mission. A checkout that moved or is dirty, a command with shell syntax,
+or a host outside the grant takes the session path.
+Control's chat goes on by itself (ON by default, `control.auto_continue`):
+when the agent's reply ends on a `choices` card with an option marked
+`recommended`, the desktop sends it after `control.auto_continue_minutes`
+(10) of nobody answering, with a countdown, *Send now* and *Cancel* above
+the box (`src/lib/auto_continue.ts`). Never a risky option, never a card
+more than a day old, only while the app is open; fleet-mobile does not do
+it.
 
 Routines are landed (`service/routines/`, migrations 131 and 139, redesign
 8.5 to 8.10): a saved prompt that starts a session on a cron schedule, on a
@@ -689,7 +716,7 @@ card, the UI.
 The agent runtime (reviewer and support agents, steps 1 to 4 of 8) is
 built, and the PR reviewer works end to end under a granted rule (spec
 `docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`).
-Migration 170 (`agent_rules`, `agent_cursors`, `agent_jobs`,
+Migration 171 (`agent_rules`, `agent_cursors`, `agent_jobs`,
 `agent_actions`), `service/agents/` with the loops `agents_poll` and
 `agents_run` (stopped by `automation.paused`), the settings
 `agents.poll_interval_secs`, `agents.max_concurrent` and
@@ -700,7 +727,7 @@ owner's own paired device. The run vehicle (step 2): a locked-down
 `service/agents/vehicle.rs`), its MCP config and system prompt carried on
 stdin, in a detached worktree beside the checkout
 (`service/agents/workspace.rs`). The reviewer (steps 3 and 4, migration
-171, `service/agents/review/`): polls a granted repo's open PRs, reviews
+172, `service/agents/review/`): polls a granted repo's open PRs, reviews
 each new head with read-only tools, records the placed review in
 `review_records`, and by the rule's level keeps it (`watch`), queues it
 for a person (`propose`, an action the `agents` tool or `fleet-hub agents

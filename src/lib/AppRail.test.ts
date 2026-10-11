@@ -5,8 +5,12 @@ import { destination } from './destination';
 import { settingsOpen } from './app_views';
 import { sidebarView } from './work_view';
 import { expectAccessible } from './a11y_check';
+import { workspace, workspaceLanding } from './workspace';
+import { tick } from 'svelte';
 
 afterEach(() => {
+  workspace.set('developer');
+  workspaceLanding.set(null);
   destination.set('session');
   settingsOpen.set(false);
   sidebarView.set('sessions');
@@ -58,5 +62,21 @@ describe('AppRail accessibility (7.2)', () => {
   it('passes the axe and audit checks', async () => {
     const { container } = render(AppRail, { isMac: true, onselect: () => {} });
     await expectAccessible(container);
+  });
+
+  it('the workspace tile switches workspace and reorders the rail, hiding nothing', async () => {
+    const r = render(AppRail, { isMac: true, onselect: () => {} });
+    const order = () => Array.from(r.container.querySelectorAll('[data-rail]')).map((a) => a.getAttribute('data-rail'));
+    expect(order()[0]).toBe('control');
+    expect(r.getByTestId('workspace-tile').textContent).toContain('Dev');
+    await fireEvent.click(r.getByTestId('workspace-tile'));
+    expect(r.getByTestId('workspace-menu')).toBeTruthy();
+    await expectAccessible(r.container);
+    await fireEvent.click(r.getByTestId('workspace-po'));
+    await tick();
+    expect(r.queryByTestId('workspace-menu')).toBeNull();
+    expect(r.getByTestId('workspace-tile').textContent).toContain('PO');
+    expect(order().slice(0, 3)).toEqual(['inbox', 'dashboards', 'work']);
+    expect(order()).toHaveLength(9);
   });
 });

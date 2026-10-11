@@ -346,6 +346,11 @@ mod tests {
     }
 
     #[test]
+    fn the_read_only_set_is_claude_prints() {
+        assert_eq!(READ_ONLY_TOOLS.join(","), claude_print::READ_ONLY_TOOLS);
+    }
+
+    #[test]
     fn the_mcp_config_travels_on_stdin_never_in_the_command() {
         let mut r = run();
         let cfg = r#"{"mcpServers":{"graylog":{"command":"npx","env":{"TOKEN":"s3cret"}}}}"#;

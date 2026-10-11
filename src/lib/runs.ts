@@ -22,6 +22,7 @@ export type RunKind =
   | 'watch_summary'
   | 'triage'
   | 'context_help'
+  | 'headless_check'
   | 'routine'
   | 'review'
   | 'support';

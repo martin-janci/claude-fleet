@@ -253,6 +253,94 @@
         "level": "none"
       },
       "default": "false",
+      "help": "Run a mission's review and its test commands as one Claude run in the implementer's checkout, with read-only tools and only those commands, instead of opening a session for each. Falls back to a session when the checkout moved or a command is not a plain one.",
+      "key": "orchestrator.headless_checks",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Headless reviews and tests",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "sonnet",
+      "help": "The Claude model headless reviews and tests run.",
+      "key": "orchestrator.headless_model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Headless check model",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "advanced"
+      ],
+      "unit": "none",
+      "value": "sonnet"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo, and only while the app is open.",
+      "key": "control.auto_continue",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Go on with the recommended option",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "10",
+      "help": "How long Control's chat waits for your answer before it sends the recommended option.",
+      "key": "control.auto_continue_minutes",
+      "kind": {
+        "max": 1440,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Wait before going on",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "minutes",
+      "value": "10"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
       "help": "Press Enter for sessions stuck on a \"Press Enter\" prompt. Auth menus, trust prompts and reconnects are always notify-only.",
       "key": "playbooks.press_enter",
       "kind": {
@@ -3041,6 +3129,103 @@
       "value": "jev-1.13.0"
     },
     {
+      "ai": "never",
+      "danger": {
+        "level": "confirm",
+        "message": "Each question's redacted state goes over SSH to the host below and on to Anthropic through that host's Claude account."
+      },
+      "default": "false",
+      "help": "Also ask Claude every question a Jev use case in shadow or assist asks, on the host below, and record its answer beside Jev's to compare them. Nothing acts on it.",
+      "key": "decide.haiku.shadow",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Second opinion from Claude",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "network"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "",
+      "help": "The host whose Claude account answers. Only questions about its own organisation are sent to it.",
+      "key": "decide.haiku.host",
+      "kind": {
+        "max": 64,
+        "type": "text"
+      },
+      "label": "Second opinion: host",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental"
+      ],
+      "unit": "none",
+      "value": ""
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "haiku",
+      "help": "The Claude model the second opinion asks.",
+      "key": "decide.haiku.model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Second opinion: model",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "advanced"
+      ],
+      "unit": "none",
+      "value": "haiku"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "200",
+      "help": "Questions the second opinion may ask per UTC day. One at a time; a question that comes while one is running is not asked.",
+      "key": "decide.haiku.daily_calls",
+      "kind": {
+        "max": 10000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Second opinion: calls a day",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "advanced"
+      ],
+      "unit": "count",
+      "value": "200",
+      "zero": "none"
+    },
+    {
       "ai": "suggest",
       "danger": {
         "level": "none"
@@ -4321,6 +4506,22 @@
                     "key": "orchestrator.enabled",
                     "truthy": true
                   }
+                },
+                {
+                  "key": "orchestrator.headless_checks",
+                  "type": "field",
+                  "when": {
+                    "key": "orchestrator.enabled",
+                    "truthy": true
+                  }
+                },
+                {
+                  "key": "orchestrator.headless_model",
+                  "type": "field",
+                  "when": {
+                    "key": "orchestrator.headless_checks",
+                    "truthy": true
+                  }
                 }
               ],
               "title": "Mission loop"
@@ -4474,6 +4675,46 @@
           }
         },
         {
+          "advanced": true,
+          "collapsible": true,
+          "items": [
+            {
+              "text": "Asks Claude the same questions as the use cases that are on, on one of your hosts, and records its answer beside Jev's to compare them. Nothing acts on it.",
+              "tone": "info",
+              "type": "notice"
+            },
+            {
+              "key": "decide.haiku.shadow",
+              "type": "field"
+            },
+            {
+              "key": "decide.haiku.host",
+              "type": "field",
+              "when": {
+                "key": "decide.haiku.shadow",
+                "truthy": true
+              }
+            },
+            {
+              "key": "decide.haiku.model",
+              "type": "field",
+              "when": {
+                "key": "decide.haiku.shadow",
+                "truthy": true
+              }
+            },
+            {
+              "key": "decide.haiku.daily_calls",
+              "type": "field",
+              "when": {
+                "key": "decide.haiku.shadow",
+                "truthy": true
+              }
+            }
+          ],
+          "title": "Second opinion"
+        },
+        {
           "items": [
             {
               "source": {
@@ -4578,7 +4819,7 @@
     },
     {
       "id": "settings.control_api",
-      "intro": "The embedded MCP server an AI assistant drives the fleet through. Read-only here.",
+      "intro": "The embedded MCP server an AI assistant drives the fleet through (read-only here), and how Control's chat goes on when you do not answer.",
       "layout": "category",
       "parent": "settings",
       "sections": [
@@ -4602,6 +4843,19 @@
             }
           ],
           "title": "Server"
+        },
+        {
+          "items": [
+            {
+              "key": "control.auto_continue",
+              "type": "field"
+            },
+            {
+              "key": "control.auto_continue_minutes",
+              "type": "field"
+            }
+          ],
+          "title": "Chat"
         }
       ],
       "spec": "fleet.page/1",

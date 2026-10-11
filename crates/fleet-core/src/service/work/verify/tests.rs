@@ -298,3 +298,52 @@ fn a_review_or_test_before_the_latest_implementation_is_pending() {
     let v = now_check(&st, item, 0);
     assert_eq!(check_of(&v, "review").state, "pass");
 }
+
+#[test]
+fn two_test_lines_answered_by_two_runs_both_pass() {
+    let (st, me, item) = fixture();
+    set(&st, &me, item, &["test:cargo test", "test:pnpm test"]);
+    run(&st, item, "implement", "done", &[]);
+    run(&st, item, "test", "done", &["cargo test --workspace"]);
+    let v = now_check(&st, item, 0);
+    assert_eq!(check_of(&v, "test:cargo test").state, "pass");
+    let pnpm = check_of(&v, "test:pnpm test");
+    assert_eq!(pnpm.state, "pending");
+    assert!(
+        pnpm.by.is_none(),
+        "no `by`, so the loop starts a run for it instead of waiting forever"
+    );
+    // The second run answers only the line still waiting; the first
+    // line keeps the verdict of the run that ran it.
+    run(&st, item, "test", "done", &["pnpm test"]);
+    let v = now_check(&st, item, 0);
+    assert_eq!(check_of(&v, "test:cargo test").state, "pass");
+    assert_eq!(check_of(&v, "test:pnpm test").state, "pass");
+    assert_eq!(v.state, "verified");
+}
+
+#[test]
+fn a_test_command_no_run_reports_fails_instead_of_waiting_forever() {
+    let (st, me, item) = fixture();
+    set(&st, &me, item, &["test:pnpm test"]);
+    run(&st, item, "test", "done", &["cargo test"]);
+    let v = now_check(&st, item, 0);
+    assert_eq!(check_of(&v, "test:pnpm test").state, "pending");
+    run(&st, item, "test", "done", &["echo done"]);
+    let v = now_check(&st, item, 0);
+    let c = check_of(&v, "test:pnpm test");
+    assert_eq!(c.state, "fail", "{}", c.detail);
+    assert!(c.by.is_some());
+    assert_eq!(v.state, "failed");
+}
+
+#[test]
+fn a_failed_test_run_fails_the_command_it_ran() {
+    let (st, me, item) = fixture();
+    set(&st, &me, item, &["test:cargo test", "test:pnpm test"]);
+    run(&st, item, "test", "done", &["pnpm test"]);
+    run(&st, item, "test", "failed", &["cargo test"]);
+    let v = now_check(&st, item, 0);
+    assert_eq!(check_of(&v, "test:cargo test").state, "fail");
+    assert_eq!(check_of(&v, "test:pnpm test").state, "pass");
+}

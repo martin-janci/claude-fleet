@@ -152,6 +152,9 @@ unless `force: true`), and excludes you from `broadcast_prompt`.
 `host_alias` is configuration (whatever the user named the host in the picker)
 and is not derivable from `hostname`. Look it up:
 
+From inside a fleet session, `whoami {}` with no argument is enough: your pane
+(the `X-Fleet-Pane` header your MCP entry sends) names your row. Otherwise:
+
 1. `tmux display-message -p '#S'` — your `tmux_name`.
 2. `whoami { tmux_name: "<#S>" }` — returns your fleet row (`session_id`,
    `host_alias`, …). `E_NOTFOUND`: fleet has not reconciled you yet (retry after
@@ -272,12 +275,41 @@ own forms: `add_host`, `add_project`, `get_started`, `new_session`,
 broken one shows as code with the reason. Format: `docs/chat-blocks.md`.
 Use `ask` instead when you need the answers before you continue.
 
+In `choices`, mark the option you would pick `"recommended": true` (one
+per card). In Control's chat, when the person does not answer for the
+minutes `control.auto_continue_minutes` sets, the app sends that option for
+them, so recommend only what you would do anyway; it is never sent for an
+option or question naming a push, a delete or another step hard to undo.
+
 When the person asks in their own words for what a wizard does ("set up a
 new project for acme/pos on mercury"), answer with its `wizard` block and
 put what their message already says in `values`, by the wizard's field
 names (`{"repo": "acme/pos", "host": "mercury"}`). The form opens with
 those answers marked Drafted; the person checks them and presses its last
 button. Never guess a value the message does not say.
+
+## Your own tasks
+
+From inside a fleet session you can find and manage what is assigned to you
+without knowing your `session_id`:
+
+- `work { action: "session_tasks" }` — every task linked to YOUR session
+  (active, suggested, rejected, ended) with `is_self: true` on the page and on
+  each link; `primary_link_id` is the one you are on.
+- `work { action: "task", task_id }` — the task's `sessions[]`; the one with
+  `is_self: true` is you, the others are other sessions on the same task.
+- `list_tasks { mine: true }` — the delegated jobs you dispatched or were given;
+  each row says `is_self_requester` or `is_self_worker`.
+  `list_tasks { worker_session_id }` lists what one session was given.
+
+Change which task you are on with `work_link { session_id: <yours>, action:
+"link" | "switch" | "unlink", … }`. A local task (no tracker ticket) you work
+on also takes `work_link { action: "set_status", item_id, status }`, `edit`
+and `comment` by `item_id`; a tracker ticket's status changes in the tracker.
+`set_status`, `edit` and `comment` work on any local task your own session is
+on, even one shared with other people's sessions; renaming it (`name` with
+`item_id`) is refused when the task is also linked to a session you cannot
+drive.
 
 ## Tasks, subtasks and proposals (shared work context)
 
@@ -305,7 +337,7 @@ back, dispatch a task instead of hand-rolling send / poll / capture:
 3. The result also lands in your `inbox` as `kind: task_result`, so a
    controller that is not blocked on `wait_for_task` still sees it.
 
-`list_tasks { requester_session_id?, state? }` shows what is outstanding
+`list_tasks { requester_session_id?, worker_session_id?, mine?, state? }` shows what is outstanding
 (`queued | running | done | failed | cancelled`). A worker's row carries
 `parent_session_id` = the requester. If **you** are the worker: when a prompt
 ends with the `FLEET_TASK_DONE_…` instruction, finish the work, then print

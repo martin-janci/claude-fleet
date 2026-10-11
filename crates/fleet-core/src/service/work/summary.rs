@@ -115,18 +115,18 @@ pub fn summary_script(
     model: &str,
 ) -> Result<String, String> {
     use crate::service::claude_print;
-    use crate::shell::quote;
     if !settings::SUMMARY_MODELS.contains(&model) {
         return Err(format!("refusing summary model {model:?}"));
     }
     let candidates = super::resume::transcript_candidates(stored_path, claude_session_id)?;
-    let claude = format!(
-        "claude -p --resume {} --fork-session --model {} --output-format json {} {}",
-        quote(claude_session_id),
-        quote(model),
-        claude_print::isolation_flags(),
-        quote(SUMMARY_PROMPT),
-    );
+    let agent = crate::service::headless::default_agent();
+    let claude = agent.command(&crate::service::headless::HeadlessJob {
+        model,
+        prompt: Some(SUMMARY_PROMPT),
+        stdin_file: None,
+        fork_of: Some(claude_session_id),
+        ..Default::default()
+    });
     let t = SUMMARY_TAG;
     Ok(format!(
         "set -o pipefail; f=''; \
@@ -137,7 +137,7 @@ pub fn summary_script(
          {noclaude} \
          {run}",
         cands = candidates.join(" "),
-        noclaude = claude_print::noclaude_check(t),
+        noclaude = agent.missing_check(t),
         run = claude_print::run_capped(t, &claude, HOST_TIMEOUT_SECS, OUTPUT_CAP_BYTES, true),
     ))
 }

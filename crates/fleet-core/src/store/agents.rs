@@ -1,4 +1,4 @@
-//! Agent runtime rows (migration 170): the rules a person grants the
+//! Agent runtime rows (migration 171): the rules a person grants the
 //! built-in agents, each rule's poll cursor, the jobs the pollers found and
 //! the writes a job proposes. The runtime is `service::agents`; the design
 //! is `docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`.

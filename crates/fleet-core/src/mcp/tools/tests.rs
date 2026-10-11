@@ -2101,7 +2101,10 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     );
     // Nothing was recorded.
     let s = t.store.lock().unwrap();
-    assert!(s.list_tasks(None, None, None, 10).unwrap().is_empty());
+    assert!(s
+        .list_tasks(crate::store::TaskEnd::Any, None, None, 10)
+        .unwrap()
+        .is_empty());
 }
 
 /// An existing worker that is blocked on a dialog cannot be dispatched into:
@@ -2148,7 +2151,9 @@ async fn dispatch_task_into_a_blocked_worker_fails_the_task_and_sends_nothing() 
         .expect_err("a blocked worker cannot be dispatched into");
     assert!(e.message.starts_with("E_INVALID_STATE"), "{}", e.message);
     let s = t.store.lock().unwrap();
-    let tasks = s.list_tasks(None, None, None, 10).unwrap();
+    let tasks = s
+        .list_tasks(crate::store::TaskEnd::Any, None, None, 10)
+        .unwrap();
     assert_eq!(tasks.len(), 1, "the task row is created, then failed");
     assert_eq!(tasks[0].state, "failed");
     assert!(
@@ -9022,6 +9027,121 @@ async fn the_operator_never_makes_start_rules_or_routines() {
     .expect("the operator may list routines");
 }
 
+/// The operator saves a mission for the hub's owner — created rooted at a
+/// task, with its policy, or changed — only once a person approves the exact
+/// save, and reads the owner's missions; every other `mission_*` action stays
+/// a person's, and a hub with no approver refuses the save. Its own client
+/// proves no person, which used to refuse the save outright ("a mission is a
+/// person's; this caller proves no person", 2026-10-11).
+#[tokio::test]
+async fn the_operator_saves_a_mission_for_the_owner_with_their_approval() {
+    let s = Store::open_in_memory().unwrap();
+    let owner = s
+        .personal_owner_id()
+        .unwrap()
+        .expect("a fresh hub has an owner");
+    let root = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "Planner test",
+            ..Default::default()
+        })
+        .unwrap();
+    let t = guarded_tools(s, true);
+    let call = async |args: serde_json::Value| {
+        t.work_link(
+            Extension(production_operator()),
+            Parameters(serde_json::from_value(args).unwrap()),
+        )
+        .await
+    };
+    let create = serde_json::json!({
+        "action": "mission_save",
+        "item_id": root.id,
+        "mission": {
+            "name": "Planner test",
+            "goal": "Test the mission planner end to end.",
+            "policy": { "planner_host": "mefistos" },
+        },
+    });
+    let asked = call(create.clone()).await.unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let mut approved = create.clone();
+    approved["confirm_nonce"] = nonce.clone().into();
+    let saved = result_json(&call(approved.clone()).await.unwrap());
+    assert_eq!(saved["owner_person_id"], owner, "{saved}");
+    assert_eq!(saved["root_item_id"], root.id, "{saved}");
+    assert_eq!(saved["policy"]["planner_host"], "mefistos", "{saved}");
+    let id = saved["id"].as_i64().unwrap();
+    // The approval was for that save, once.
+    assert_ne!(confirm_nonce_of(&call(approved).await.unwrap_err()), nonce);
+
+    // It reads the owner's missions, so it can check what it saved.
+    let listed = t
+        .work(
+            Extension(production_operator()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({ "action": "missions" })).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    let listed = result_json(&listed).to_string();
+    assert!(listed.contains("Planner test"), "{listed}");
+
+    // A change is approved the same way.
+    let change = serde_json::json!({
+        "action": "mission_save",
+        "mission_id": id,
+        "mission": { "policy": { "planner_host": "hostb" } },
+    });
+    let nonce = confirm_nonce_of(&call(change.clone()).await.unwrap_err());
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let mut approved = change;
+    approved["confirm_nonce"] = nonce.into();
+    let changed = result_json(&call(approved).await.unwrap());
+    assert_eq!(changed["policy"]["planner_host"], "hostb", "{changed}");
+
+    // Starting, planning, granting, the state and deleting are a person's.
+    for action in [
+        "mission_start",
+        "mission_plan",
+        "mission_grant",
+        "mission_state",
+        "mission_delete",
+    ] {
+        let e = call(serde_json::json!({ "action": action, "mission_id": id }))
+            .await
+            .unwrap_err();
+        assert!(
+            e.message.starts_with("E_FORBIDDEN") && e.message.contains("may only save"),
+            "{action}: {}",
+            e.message
+        );
+    }
+
+    // A hub, with no one to approve, refuses the save.
+    let hub = guarded_tools(Store::open_in_memory().unwrap(), false);
+    let e = hub
+        .work_link(
+            Extension(production_operator()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action": "mission_save",
+                    "mission": { "name": "N", "goal": "g" },
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        e.message.starts_with("E_FORBIDDEN") && e.message.contains("no approver"),
+        "{}",
+        e.message
+    );
+}
+
 fn operator() -> Caller {
     client_caller(
         crate::service::operator::OPERATOR_CLIENT_NAME,
@@ -11819,6 +11939,8 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // writes" — so another person's shipped PRs were in your digest (T9b).
     ("work", "today", &["ViewScope"]),
     ("work", "tree", &["ViewScope"]),
+    // The tree's own tasks, counted (persona dashboards).
+    ("work", "stats", &["ViewScope"]),
     ("work", "task", &["ViewScope"]),
     ("work", "review", &["ViewScope"]),
     ("work", "context", &["ViewScope"]),
@@ -12020,6 +12142,12 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
     (
         "work",
         "tree",
+        "every_view_scope_page_hides_another_persons_live_session",
+        "every_view_scope_page_hides_another_persons_ended_link",
+    ),
+    (
+        "work",
+        "stats",
         "every_view_scope_page_hides_another_persons_live_session",
         "every_view_scope_page_hides_another_persons_ended_link",
     ),
@@ -13194,6 +13322,8 @@ async fn list_tasks_omits_a_task_whose_ends_another_person_cannot_see() {
             Extension(caller),
             Parameters(ListTasksParams {
                 requester_session_id: None,
+                worker_session_id: None,
+                mine: None,
                 state: None,
                 limit: None,
             }),
@@ -13230,6 +13360,163 @@ async fn list_tasks_omits_a_task_whose_ends_another_person_cannot_see() {
         "an invisible task answers as an unknown one: {}",
         e.message
     );
+}
+
+/// An agent knows itself from its pane: `whoami` with no name answers the
+/// row its `X-Fleet-Pane` proves, and refuses a caller that proves none.
+#[tokio::test]
+async fn whoami_without_a_name_answers_the_callers_own_pane() {
+    let g = gate_fixture();
+    let a_row = g.a_row;
+    let t = test_tools(g.store);
+    let ask = |who: Caller| t.whoami(Extension(who), Parameters(WhoamiParams { tmux_name: None }));
+    let out = ask(pane_caller(Some("%7"))).await.expect("its own pane");
+    let row: serde_json::Value = serde_json::from_str(text_of(&out.content[0])).unwrap();
+    assert_eq!(row["id"].as_i64(), Some(a_row));
+    for who in [
+        pane_caller(None),
+        pane_caller(Some("%99")),
+        Caller::master(),
+    ] {
+        let e = ask(who).await.expect_err("no pane proven");
+        assert!(e.message.starts_with("E_NOT_A_SESSION"), "{}", e.message);
+    }
+}
+
+/// `list_tasks { mine: true }` is the agent's own tasks — dispatched or
+/// given to it — each naming which end the caller is; without a proven
+/// pane it refuses rather than listing everything.
+#[tokio::test]
+async fn list_tasks_mine_lists_the_callers_own_tasks_and_marks_its_end() {
+    let g = gate_fixture();
+    let (a_row, found) = (g.a_row, g.found);
+    let sent =
+        crate::service::tasks::create_task(&g.store, Some(a_row), Some(found), "do it").unwrap();
+    let given =
+        crate::service::tasks::create_task(&g.store, Some(found), Some(a_row), "for you").unwrap();
+    let other = crate::service::tasks::create_task(&g.store, Some(found), Some(found), "not yours")
+        .unwrap();
+    let t = test_tools(g.store);
+    let page = |caller: Caller, mine: Option<bool>, worker: Option<i64>| {
+        t.list_tasks(
+            Extension(caller),
+            Parameters(ListTasksParams {
+                requester_session_id: None,
+                worker_session_id: worker,
+                mine,
+                state: None,
+                limit: None,
+            }),
+        )
+    };
+    let rows = |out: &CallToolResult| -> Vec<serde_json::Value> {
+        serde_json::from_str(text_of(&out.content[0])).expect("an array")
+    };
+    let me = pane_caller(Some("%7"));
+
+    let mine = rows(&page(me.clone(), Some(true), None).await.unwrap());
+    let ids: Vec<i64> = mine.iter().filter_map(|r| r["id"].as_i64()).collect();
+    assert_eq!(ids, vec![given.id, sent.id], "newest first, only its own");
+    assert_eq!(mine[0]["is_self_worker"], true);
+    assert!(mine[0].get("is_self_requester").is_none());
+    assert_eq!(mine[1]["is_self_requester"], true);
+    assert!(mine[1].get("is_self_worker").is_none());
+
+    // The worker filter: what this session was given to do.
+    let given_to = rows(&page(me.clone(), None, Some(a_row)).await.unwrap());
+    assert_eq!(given_to.len(), 1);
+    assert_eq!(given_to[0]["id"].as_i64(), Some(given.id));
+
+    // The full page still marks the caller's end, and only on its rows.
+    let all = rows(&page(me.clone(), None, None).await.unwrap());
+    let o = all
+        .iter()
+        .find(|r| r["id"].as_i64() == Some(other.id))
+        .expect("an unclaimed pair is the host's to see");
+    assert!(o.get("is_self_requester").is_none() && o.get("is_self_worker").is_none());
+
+    let e = page(pane_caller(None), Some(true), None)
+        .await
+        .expect_err("no pane, no self");
+    assert!(e.message.starts_with("E_NOT_A_SESSION"), "{}", e.message);
+    let e = page(me, Some(true), Some(a_row))
+        .await
+        .expect_err("one filter at a time");
+    assert!(e.message.starts_with("E_INVALID"), "{}", e.message);
+}
+
+/// `work { session_tasks }` without `session_id` reads the caller's own
+/// session and says so (`is_self`, on the page and on every link); another
+/// session's page carries no such mark.
+#[tokio::test]
+async fn session_tasks_defaults_to_the_callers_own_session() {
+    use crate::service::work::{WorkArgs, WorkLinkArgs};
+    let g = gate_fixture();
+    let (a_row, found) = (g.a_row, g.found);
+    let t = test_tools(g.store);
+    let me = pane_caller(Some("%7"));
+    for sid in [a_row, found] {
+        t.work_link(
+            Extension(me.clone()),
+            Parameters(WorkLinkArgs {
+                session_id: Some(sid),
+                action: "link".into(),
+                key: Some("ABC-1".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("a host token drives its own and the unclaimed row");
+    }
+    let read = |who: Caller, session_id: Option<i64>| {
+        t.work(
+            Extension(who),
+            Parameters(WorkArgs {
+                action: Some("session_tasks".into()),
+                session_id,
+                ..Default::default()
+            }),
+        )
+    };
+    let own = result_json(&read(me.clone(), None).await.unwrap());
+    assert_eq!(own["session_id"].as_i64(), Some(a_row));
+    assert_eq!(own["is_self"], true);
+    let links = own["links"].as_array().expect("links");
+    assert_eq!(links.len(), 1, "{own}");
+    assert_eq!(links[0]["is_self"], true);
+    assert_eq!(links[0]["task"]["key"], "ABC-1", "{own}");
+
+    let theirs = result_json(&read(me.clone(), Some(found)).await.unwrap());
+    assert!(theirs.get("is_self").is_none(), "{theirs}");
+
+    // `work { task }` marks which of the task's sessions is the caller.
+    let task_id = links[0]["task"]["task_id"]
+        .as_str()
+        .expect("task_id")
+        .to_string();
+    let detail = result_json(
+        &t.work(
+            Extension(me),
+            Parameters(WorkArgs {
+                action: Some("task".into()),
+                task_id: Some(task_id),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap(),
+    );
+    let sessions = detail["task"]["sessions"].as_array().expect("sessions");
+    assert_eq!(sessions.len(), 2, "{detail}");
+    for l in sessions {
+        let mine = l["session_id"].as_i64() == Some(a_row);
+        assert_eq!(l.get("is_self").is_some(), mine, "{l}");
+    }
+
+    let e = read(pane_caller(None), None)
+        .await
+        .expect_err("no session named, none proven");
+    assert!(e.message.starts_with("E_INVALID"), "{}", e.message);
 }
 
 // ---- multi-user M1, T11: a long poll re-checks before it answers ----
@@ -14838,7 +15125,7 @@ async fn whoami_never_names_another_persons_same_named_session() {
         t.whoami(
             Extension(who),
             Parameters(WhoamiParams {
-                tmux_name: "dev".to_string(),
+                tmux_name: Some("dev".to_string()),
             }),
         )
     };
@@ -14905,7 +15192,7 @@ async fn a_host_tokens_whoami_finds_an_unclaimed_row_and_its_own_proven_pane() {
         t.whoami(
             Extension(who),
             Parameters(WhoamiParams {
-                tmux_name: name.to_string(),
+                tmux_name: Some(name.to_string()),
             }),
         )
     };
@@ -15075,7 +15362,7 @@ async fn dispatching_a_task_in_another_persons_name_needs_drive() {
     {
         let s = t.store.lock().unwrap();
         assert!(
-            s.list_tasks(Some(a_row), None, None, 50)
+            s.list_tasks(crate::store::TaskEnd::Requester(a_row), None, None, 50)
                 .unwrap()
                 .is_empty(),
             "no task row names Ada's session"
@@ -16445,6 +16732,11 @@ fn view_scope_sweep_calls() -> Vec<(&'static str, &'static str, serde_json::Valu
         ("work", "tree", serde_json::json!({ "action": "tree" })),
         (
             "work",
+            "stats",
+            serde_json::json!({ "action": "stats", "filters": { "group_by": "repo" } }),
+        ),
+        (
+            "work",
             "task",
             serde_json::json!({ "action": "task", "task_id": task }),
         ),
@@ -17751,6 +18043,76 @@ async fn a_local_items_status_is_not_another_persons_to_set() {
             .await
             .unwrap_or_else(|e| panic!("ended={ended}: her own item: {e:?}"));
     }
+}
+
+/// An agent sets the status of, edits and comments on a task its OWN
+/// session is on, even when the task is shared with a session it cannot
+/// drive (another person's). The exception is that narrow: without its own
+/// link it is refused as before, and rename keeps the full gate.
+#[tokio::test]
+async fn an_agent_writes_its_own_shared_task() {
+    let g = gate_fixture();
+    let (a_row, b_row) = (g.a_row, g.b_row);
+    let shared = g
+        .store
+        .name_session_work(a_row, Some("LOC-1"), "Shared work")
+        .unwrap()
+        .0
+        .id;
+    let bobs = g
+        .store
+        .name_session_work(b_row, Some("LOC-2"), "Bob's alone")
+        .unwrap()
+        .0
+        .id;
+    let t = test_tools(g.store);
+    let call = |who: Caller, args: serde_json::Value| {
+        t.work_link(
+            Extension(who),
+            Parameters(serde_json::from_value(args).unwrap()),
+        )
+    };
+    // Bob's session works on the shared task too.
+    call(
+        device_of(g.bob, g.ada),
+        serde_json::json!({
+            "action": "link", "session_id": b_row, "item_id": shared, "primary": false,
+        }),
+    )
+    .await
+    .expect("Bob links his own session");
+    let write = |who: Caller, action: &str, item: i64| {
+        let args = match action {
+            "set_status" => {
+                serde_json::json!({ "action": action, "item_id": item, "status": "done" })
+            }
+            "edit" => serde_json::json!({ "action": action, "item_id": item, "title": "Renamed" }),
+            "comment" => {
+                serde_json::json!({ "action": action, "item_id": item, "notes": "progress" })
+            }
+            _ => serde_json::json!({ "action": action, "item_id": item, "title": "Renamed" }),
+        };
+        call(who, args)
+    };
+    let me = pane_caller(Some("%7"));
+
+    for action in ["set_status", "edit", "comment"] {
+        write(me.clone(), action, shared)
+            .await
+            .unwrap_or_else(|e| panic!("{action}: its own task, shared with Bob's: {e:?}"));
+        for (who, item, what) in [
+            (pane_caller(None), shared, "no pane proven"),
+            (me.clone(), bobs, "a task its session is not on"),
+        ] {
+            let e = format!("{:?}", write(who, action, item).await.expect_err(what));
+            assert!(e.contains("E_NOTFOUND"), "{action}, {what}: {e}");
+        }
+    }
+    // Rename keeps the full gate.
+    let e = write(me, "name", shared)
+        .await
+        .expect_err("rename keeps the full gate");
+    assert!(format!("{e:?}").contains("E_NOTFOUND"), "{e:?}");
 }
 
 /// **A local item whose only link was UNLINKED is nobody's to write**

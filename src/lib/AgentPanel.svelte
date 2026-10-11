@@ -258,6 +258,7 @@
       visible={true}
       promptPrefix={ctx?.prefix ?? null}
       blockWhileBusy={true}
+      autoContinue={true}
       composerAbove={chip}
       composerTools={tools}
       thinkingAs={controlThinking}

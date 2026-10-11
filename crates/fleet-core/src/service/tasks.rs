@@ -756,6 +756,26 @@ pub fn task_visible_in_scope(
         Some(id) => s.get_session_by_id(id)?,
         None => None,
     };
+    // A mission's headless check (`work::orchestrate::checks`) names no
+    // session: it ran in the checkout of the item's implementation and read
+    // its code, so it is shown to whoever sees that implementation's worker,
+    // and to nobody else (no implementation, or one whose worker is gone:
+    // fail closed, as the pure check does).
+    if task.requester_session_id.is_none()
+        && task.worker_session_id.is_none()
+        && task.detached_at.is_none()
+        && !scope.is_unrestricted()
+    {
+        if let Some(item) = task.work_item_id {
+            let implementer = s
+                .latest_item_task(item, "implement")?
+                .and_then(|t| t.worker_session_id)
+                .map(|w| s.get_session_by_id(w))
+                .transpose()?
+                .flatten();
+            return Ok(implementer.is_some_and(|r| scope.sees_session_row(&r).is_visible()));
+        }
+    }
     Ok(task_visible_in_scope_pure(
         task,
         requester.as_ref(),
@@ -780,7 +800,7 @@ pub fn task_visible_in_scope(
 /// and result fleet-wide.
 pub fn list_tasks_for(
     store: &Mutex<Store>,
-    requester_session_id: Option<i64>,
+    end: crate::store::TaskEnd,
     state: Option<&str>,
     limit: i64,
     host: Option<&str>,
@@ -800,7 +820,7 @@ pub fn list_tasks_for(
     let s = lock(store)?;
     // Converge stale tasks before reporting them (cheap; see sweep_open_tasks).
     let _ = sweep_open_tasks(&s, now_unix());
-    let rows = s.list_tasks(requester_session_id, state, host, clamp_task_limit(limit))?;
+    let rows = s.list_tasks(end, state, host, clamp_task_limit(limit))?;
     let mut kept = Vec::with_capacity(rows.len());
     for t in rows {
         if task_visible_in_scope(&s, &t, scope)? {
@@ -902,6 +922,15 @@ pub fn liveness_verdict(
     // `None` and leave the task open for ever.
     if task.detached_at.is_some() && task.worker_session_id.is_none() {
         return Some("the worker session is gone (killed or dismissed)".to_string());
+    }
+    // A mission's headless check (`orchestrate::checks`) has no worker
+    // session: its own task closes it, and one a restart lost is failed once
+    // it outlived the longest run.
+    if task.worker_session_id.is_none()
+        && task.work_item_id.is_some()
+        && now - since > crate::service::work::orchestrate::checks::DEADLINE_SECS
+    {
+        return Some("the headless check never finished".to_string());
     }
     let wid = task.worker_session_id?;
     let Some(w) = worker else {
@@ -1139,6 +1168,7 @@ async fn capture_worker_pane(
 mod tests {
     use super::*;
     use crate::store::StartSource;
+    use crate::store::TaskEnd;
 
     fn seed(s: &Store, host: &str, name: &str) -> i64 {
         s.upsert_host(host).unwrap();
@@ -1998,7 +2028,7 @@ mod tests {
         // (multi-user M1's person half has its own test below).
         let view = crate::service::view_scope::ViewScope::internal();
         let ids = |host: Option<&str>| -> Vec<i64> {
-            let mut v: Vec<i64> = list_tasks_for(&store, None, None, 50, host, &view)
+            let mut v: Vec<i64> = list_tasks_for(&store, TaskEnd::Any, None, 50, host, &view)
                 .unwrap()
                 .iter()
                 .map(|t| t.id)
@@ -2016,19 +2046,26 @@ mod tests {
         assert!(task_visible_to(&s, &orphan, None).unwrap());
         drop(s);
         assert_eq!(
-            list_tasks_for(&store, Some(ctl_b), None, 50, Some("hosta"), &view)
-                .unwrap()
-                .len(),
+            list_tasks_for(
+                &store,
+                TaskEnd::Requester(ctl_b),
+                None,
+                50,
+                Some("hosta"),
+                &view
+            )
+            .unwrap()
+            .len(),
             1
         );
         assert_eq!(
-            list_tasks_for(&store, None, Some("bogus"), 50, None, &view)
+            list_tasks_for(&store, TaskEnd::Any, Some("bogus"), 50, None, &view)
                 .unwrap_err()
                 .code,
             "E_INVALID"
         );
         assert_eq!(
-            list_tasks_for(&store, None, Some("queued"), 50, None, &view)
+            list_tasks_for(&store, TaskEnd::Any, Some("queued"), 50, None, &view)
                 .unwrap()
                 .len(),
             4

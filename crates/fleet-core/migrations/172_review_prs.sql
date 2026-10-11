@@ -1,6 +1,6 @@
 -- The PR reviewer (docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md,
 -- step 3): what the reviewer knows of each pull request it watches, and the
--- reviews it wrote. The jobs themselves are agent_jobs (170).
+-- reviews it wrote. The jobs themselves are agent_jobs (171).
 --
 -- review_prs: one row per pull request of a watched repo, keyed by repo
 -- and number, so a rule granted again finds its history.
@@ -60,4 +60,4 @@ CREATE TABLE IF NOT EXISTS review_records (
 );
 CREATE INDEX IF NOT EXISTS review_records_pr ON review_records (repo, number, created_at);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (171);
+INSERT OR IGNORE INTO schema_version (version) VALUES (172);

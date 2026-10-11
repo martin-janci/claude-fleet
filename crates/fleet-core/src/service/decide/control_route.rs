@@ -215,6 +215,7 @@ pub fn question_for(text: &str, targets: &[Target]) -> JevRequest {
     JevRequest {
         state: json!({ "message": message }),
         question: question(targets),
+        order_salt: None,
     }
 }
 

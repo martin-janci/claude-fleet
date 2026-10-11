@@ -3,7 +3,7 @@
 //! `docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`.
 //!
 //! **Nothing happens without a person's rule.** A rule (`agent_rules`,
-//! migration 170) names an agent, what it watches (a repo, a Jira project),
+//! migration 171) names an agent, what it watches (a repo, a Jira project),
 //! where its runs happen and how far it may go:
 //!
 //! | level     | what the agent does                                        |

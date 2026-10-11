@@ -233,20 +233,22 @@ pub fn draft_prompt(template: &str, notes: &[ContextEntry]) -> String {
 /// of [`settings::SUMMARY_MODELS`]; the prompt is one quoted word.
 pub fn draft_script(model: &str, prompt: &str) -> Result<String, String> {
     use crate::service::claude_print;
-    use crate::shell::quote;
+    use crate::service::headless::{self, HeadlessJob};
     if !settings::SUMMARY_MODELS.contains(&model) {
         return Err(format!("refusing brief model {model:?}"));
     }
-    let claude = format!(
-        "claude -p --model {} --output-format json {} {}",
-        quote(model),
-        claude_print::isolation_flags(),
-        quote(prompt),
-    );
+    let agent = headless::default_agent();
+    let claude = agent.command(&HeadlessJob {
+        model,
+        prompt: Some(prompt),
+        stdin_file: None,
+        fork_of: None,
+        ..Default::default()
+    });
     let t = DRAFT_TAG;
     Ok(format!(
         "set -o pipefail; cd -- \"$HOME\" 2>/dev/null || cd /; {noclaude} {run}",
-        noclaude = claude_print::noclaude_check(t),
+        noclaude = agent.missing_check(t),
         run = claude_print::run_capped(t, &claude, HOST_TIMEOUT_SECS, OUTPUT_CAP_BYTES, true),
     ))
 }
@@ -415,34 +417,17 @@ pub async fn draft_into(
             ))
         }
     };
-    let text = match crate::service::claude_print::parse_envelope(&text) {
-        Some(env) => {
-            book(store, &plan, &model, org_id, Some(&env));
-            if crate::service::claude_print::run_signed_out(Some(&env), &env.result, &out.stderr) {
-                return Err(crate::service::claude_print::signed_out_error(
-                    &plan.host_alias,
-                    None,
-                ));
-            }
-            if env.is_error || env.result.trim().is_empty() {
-                return Err(IpcError::new(
-                    codes::E_CLAUDE_CLI,
-                    "the draft run failed: claude answered with an error",
-                ));
-            }
-            env.result
-        }
-        None => {
-            book(store, &plan, &model, org_id, None);
-            if crate::service::claude_print::run_signed_out(None, &text, &out.stderr) {
-                return Err(crate::service::claude_print::signed_out_error(
-                    &plan.host_alias,
-                    None,
-                ));
-            }
-            text
-        }
-    };
+    let (text, _) = crate::service::headless::read_reply(
+        crate::service::headless::default_agent(),
+        text,
+        &out.stderr,
+        crate::service::headless::RunAt {
+            host: &plan.host_alias,
+            profile: None,
+            what: "the draft run",
+        },
+        |usage| book(store, &plan, &model, org_id, usage),
+    )?;
     let (brief, truncated) = clean_draft(&text);
     preview.brief = Some(brief);
     preview.brief_draft = Some(BriefDraft {

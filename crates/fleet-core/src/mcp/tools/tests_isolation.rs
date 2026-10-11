@@ -2879,6 +2879,32 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Persona dashboards (step 3): the board's tasks counted under the
+    // caller's scope. B's sprint is a group only to whoever sees B's work,
+    // and its health (dates, scope change) comes with it.
+    m.row(
+        "work",
+        "stats",
+        |_, _| json!({ "action": "stats", "filters": { "group_by": "sprint", "archived": true } }),
+        move |_, who, a| {
+            is_ok(who, a, "stats");
+            let t = text(a);
+            let b_group = t.contains(&format!("\"id\":\"sprint:{bucket_b}\""));
+            match who {
+                Who::HostA | Who::HostNone | Who::BoundA => {
+                    assert!(!b_group, "{who:?}: B's sprint leaked: {t}")
+                }
+                _ => {
+                    assert!(b_group, "{who:?}: B's sprint is a group: {t}");
+                    assert!(
+                        t.contains(&format!("\"bucket_id\":{bucket_b}")),
+                        "{who:?}: with its health: {t}"
+                    );
+                }
+            }
+        },
+    )
+    .await;
     for action in ["bucket_add", "bucket_remove"] {
         m.row(
             "work_link",

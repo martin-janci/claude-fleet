@@ -3,6 +3,21 @@
 use super::*;
 use crate::ipc_error::codes;
 
+/// Which session end of a task a listing is narrowed to
+/// ([`Store::list_tasks`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TaskEnd {
+    /// Every task.
+    #[default]
+    Any,
+    /// Tasks this session dispatched.
+    Requester(i64),
+    /// Tasks this session was given to do (its worker).
+    Worker(i64),
+    /// Tasks this session dispatched OR works on: "mine".
+    Either(i64),
+}
+
 impl Store {
     /// Create a task in state `queued`. Returns the row. Emits `task_updated`.
     pub fn insert_task(
@@ -47,30 +62,39 @@ impl Store {
             .map_err(crate::ipc_error::IpcError::from)
     }
 
-    /// Tasks newest-first, optionally narrowed by requester and/or state,
-    /// capped at `limit`.
+    /// Tasks newest-first, optionally narrowed by one session end (see
+    /// [`TaskEnd`]) and/or state, capped at `limit`.
     ///
     /// `host` scopes the result for a per-host caller IN SQL: only tasks
     /// whose requester or worker session lives on that host.
     pub fn list_tasks(
         &self,
-        requester_session_id: Option<i64>,
+        end: TaskEnd,
         state: Option<&str>,
         host: Option<&str>,
         limit: i64,
     ) -> Result<Vec<TaskRow>, crate::ipc_error::IpcError> {
+        let (requester, worker, either) = match end {
+            TaskEnd::Any => (None, None, None),
+            TaskEnd::Requester(id) => (Some(id), None, None),
+            TaskEnd::Worker(id) => (None, Some(id), None),
+            TaskEnd::Either(id) => (None, None, Some(id)),
+        };
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {cols} FROM tasks t \
                  LEFT JOIN sessions r ON r.id = t.requester_session_id \
                  LEFT JOIN sessions w ON w.id = t.worker_session_id \
                  WHERE (?1 IS NULL OR t.requester_session_id = ?1) \
+                   AND (?5 IS NULL OR t.worker_session_id = ?5) \
+                   AND (?6 IS NULL OR t.requester_session_id = ?6 \
+                        OR t.worker_session_id = ?6) \
                    AND (?2 IS NULL OR t.state = ?2) \
                    AND (?3 IS NULL OR r.host_alias = ?3 OR w.host_alias = ?3) \
                  ORDER BY t.created_at DESC, t.id DESC LIMIT ?4",
             cols = task_columns_t()
         ))?;
         let rows = stmt.query_map(
-            rusqlite::params![requester_session_id, state, host, limit],
+            rusqlite::params![requester, state, host, limit, worker, either],
             map_task_row,
         )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -256,14 +280,21 @@ mod tests {
         assert!(s.get_task(999).unwrap().is_none());
         let t2 = s.insert_task(None, Some(2), "later", "ffff0000").unwrap();
         // Listing: newest first, filters.
-        let all = s.list_tasks(None, None, None, 50).unwrap();
+        let all = s.list_tasks(TaskEnd::Any, None, None, 50).unwrap();
         assert_eq!(
             all.iter().map(|t| t.id).collect::<Vec<_>>(),
             vec![t2.id, t.id]
         );
-        assert_eq!(s.list_tasks(Some(1), None, None, 50).unwrap().len(), 1);
         assert_eq!(
-            s.list_tasks(None, Some("queued"), None, 1).unwrap().len(),
+            s.list_tasks(TaskEnd::Requester(1), None, None, 50)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            s.list_tasks(TaskEnd::Any, Some("queued"), None, 1)
+                .unwrap()
+                .len(),
             1
         );
         assert_eq!(s.open_tasks_for_worker(2).unwrap().len(), 2);
@@ -315,7 +346,7 @@ mod tests {
         let _orphan = s.insert_task(None, None, "z", "n3").unwrap();
         let ids = |h: Option<&str>| -> Vec<i64> {
             let mut v: Vec<i64> = s
-                .list_tasks(None, None, h, 50)
+                .list_tasks(TaskEnd::Any, None, h, 50)
                 .unwrap()
                 .iter()
                 .map(|t| t.id)

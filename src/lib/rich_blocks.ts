@@ -64,6 +64,9 @@ export interface UiChoice {
   label: string;
   prompt: string;
   hint?: string;
+  /** The option the agent would pick (at most one per block): Control's
+   *  chat sends it when nobody answers in time (`auto_continue.ts`). */
+  recommended?: boolean;
 }
 
 export const PROGRESS_STATES = ['running', 'waiting', 'done', 'failed'] as const;
@@ -490,7 +493,16 @@ function choice(o: Record<string, unknown>, p: Problems, at: string): UiChoice {
     label: str(o, 'label', p, at, { required: true, max: 80 }) ?? '',
     prompt: str(o, 'prompt', p, at, { required: true, max: 4000 }) ?? '',
     hint: str(o, 'hint', p, at, { max: 200 }),
+    ...recommendedFlag(o, p, at),
   };
+}
+
+function recommendedFlag(o: Record<string, unknown>, p: Problems, at: string): { recommended?: true } {
+  const v = o.recommended;
+  if (v === undefined || v === null || v === false) return {};
+  if (v === true) return { recommended: true };
+  p.add(at, '`recommended` must be true or false');
+  return {};
 }
 
 /** A `wizard` block's drafted answers (G7.4; chat_blocks.rs `drafted_values`). */
@@ -706,6 +718,7 @@ export function checkUiBlock(raw: string): Check {
     }
     case 'choices': {
       const options = each(arr(v, 'options', p, '', 1, 8), p, 'option', (o, at) => choice(o, p, at));
+      if (options.filter((o) => o.recommended).length > 1) p.add('', 'only one option may be `recommended`');
       block = { kind: 'choices', title: str(v, 'title', p, '', { max: 120 }), question: str(v, 'question', p, '', { max: 500 }), options };
       break;
     }

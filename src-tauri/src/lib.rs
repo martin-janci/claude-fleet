@@ -476,6 +476,7 @@ pub fn run() {
             commands::work_view::delete_work_attachment,
             commands::work_view::work_attachment,
             commands::work_view::work_buckets,
+            commands::work_view::work_stats,
             commands::work_view::work_bucket,
             commands::work_view::add_work_to_bucket,
             commands::work_view::remove_work_from_bucket,

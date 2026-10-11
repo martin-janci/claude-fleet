@@ -207,6 +207,7 @@ pub fn outcome_request(m: &MissionRow, s: &Stuck) -> JevRequest {
     JevRequest {
         state: state(m, s),
         question: choice(OUTCOME_INSTRUCTIONS, &OUTCOMES, outcome_means),
+        order_salt: None,
     }
 }
 
@@ -215,6 +216,7 @@ pub fn next_request(m: &MissionRow, s: &Stuck) -> JevRequest {
     JevRequest {
         state: state(m, s),
         question: choice(NEXT_INSTRUCTIONS, &NEXT_STEPS, next_means),
+        order_salt: None,
     }
 }
 

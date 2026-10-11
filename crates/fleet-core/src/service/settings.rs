@@ -361,6 +361,17 @@ pub const ORCHESTRATOR_ENABLED: &str = "orchestrator.enabled";
 /// Orchestration O6: the highest autonomy any mission's loop may take,
 /// whatever a mission asks and a grant signs (design §7.1).
 pub const ORCHESTRATOR_MAX_LEVEL: &str = "orchestrator.max_level";
+/// F3: a mission's review and test runs as one headless `claude -p` run in
+/// the implementer's checkout (read-only tools, the test commands only)
+/// instead of an interactive session. Off by default.
+pub const ORCHESTRATOR_HEADLESS_CHECKS: &str = "orchestrator.headless_checks";
+/// The model [`ORCHESTRATOR_HEADLESS_CHECKS`] runs (one of [`SUMMARY_MODELS`]).
+pub const ORCHESTRATOR_HEADLESS_MODEL: &str = "orchestrator.headless_model";
+/// Control's chat sends the option an agent's `choices` card marks
+/// `recommended` once nobody has answered for
+/// [`CONTROL_AUTO_CONTINUE_MINUTES`] (`src/lib/auto_continue.ts`).
+pub const CONTROL_AUTO_CONTINUE: &str = "control.auto_continue";
+pub const CONTROL_AUTO_CONTINUE_MINUTES: &str = "control.auto_continue_minutes";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
 /// Recreates the `oom` playbook may run on one session per 24 h
 /// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
@@ -760,6 +771,18 @@ pub const DECIDE_JEV_MODEL: &str = "decide.jev.model";
 pub const DECIDE_JEV_MODELS: &[&str] = &["jev-1.13.0", "jev-latest"];
 /// Days a `decision_runs` row is kept (`0` = forever).
 pub const DECIDE_RETENTION_DAYS: &str = "decide.retention_days";
+/// A second opinion: every question a use case in `shadow` or `assist`
+/// asks Jev is also asked of Claude in print mode on
+/// [`DECIDE_HAIKU_HOST`], and its answer recorded beside Jev's (provider
+/// `haiku`, mode `shadow`). Nothing acts on it. Off by default.
+pub const DECIDE_HAIKU_SHADOW: &str = "decide.haiku.shadow";
+/// The host whose Claude account answers the second opinion (`""`: none,
+/// so nothing is asked).
+pub const DECIDE_HAIKU_HOST: &str = "decide.haiku.host";
+/// The model the second opinion asks (one of [`SUMMARY_MODELS`]).
+pub const DECIDE_HAIKU_MODEL: &str = "decide.haiku.model";
+/// Second-opinion calls per UTC day (`0` = none).
+pub const DECIDE_HAIKU_DAILY_CALLS: &str = "decide.haiku.daily_calls";
 /// Per-feature confidence floors fitted from person-labelled runs
 /// (`service::decide::floor`), as JSON; `""` = none. Written by `fleet-hub
 /// decide floor fit --apply`; a value `decide::floor::parse` refuses is
@@ -862,6 +885,37 @@ pub const SPECS: &[Spec] = &[
         "The most any mission's loop may do on its own, whatever the mission asks and its grant signs. 0: the loop only keeps the cards; 1: it also asks the planner, and a person presses every step; 2: runs, retries, reviews and closes within a grant; 3: also creates the planner's tasks.",
     )
     .unit(Unit::Count),
+    Spec::new(
+        ORCHESTRATOR_HEADLESS_CHECKS,
+        "false",
+        Kind::Bool,
+        "Headless reviews and tests",
+        "Run a mission's review and its test commands as one Claude run in the implementer's checkout, with read-only tools and only those commands, instead of opening a session for each. Falls back to a session when the checkout moved or a command is not a plain one.",
+    )
+    .tags(&[Tag::Experimental]),
+    Spec::new(
+        ORCHESTRATOR_HEADLESS_MODEL,
+        "sonnet",
+        Kind::Choice(SUMMARY_MODELS),
+        "Headless check model",
+        "The Claude model headless reviews and tests run.",
+    )
+    .tags(&[Tag::Experimental, Tag::Advanced]),
+    Spec::new(
+        CONTROL_AUTO_CONTINUE,
+        "true",
+        Kind::Bool,
+        "Go on with the recommended option",
+        "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo, and only while the app is open.",
+    ),
+    Spec::new(
+        CONTROL_AUTO_CONTINUE_MINUTES,
+        "10",
+        Kind::Int { min: 1, max: 1440 },
+        "Wait before going on",
+        "How long Control's chat waits for your answer before it sends the recommended option.",
+    )
+    .unit(Unit::Minutes),
     Spec::new(
         PLAYBOOK_PRESS_ENTER,
         "false",
@@ -1824,6 +1878,44 @@ pub const SPECS: &[Spec] = &[
         "The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe.",
     )
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        DECIDE_HAIKU_SHADOW,
+        "false",
+        Kind::Bool,
+        "Second opinion from Claude",
+        "Also ask Claude every question a Jev use case in shadow or assist asks, on the host below, and record its answer beside Jev's to compare them. Nothing acts on it.",
+    )
+    .tags(&[Tag::Experimental, Tag::Network])
+    .danger("Each question's redacted state goes over SSH to the host below and on to Anthropic through that host's Claude account."),
+    Spec::new(
+        DECIDE_HAIKU_HOST,
+        "",
+        Kind::Text { max: 64 },
+        "Second opinion: host",
+        "The host whose Claude account answers. Only questions about its own organisation are sent to it.",
+    )
+    .tags(&[Tag::Experimental]),
+    Spec::new(
+        DECIDE_HAIKU_MODEL,
+        "haiku",
+        Kind::Choice(SUMMARY_MODELS),
+        "Second opinion: model",
+        "The Claude model the second opinion asks.",
+    )
+    .tags(&[Tag::Experimental, Tag::Advanced]),
+    Spec::new(
+        DECIDE_HAIKU_DAILY_CALLS,
+        "200",
+        Kind::Int {
+            min: 0,
+            max: 10_000,
+        },
+        "Second opinion: calls a day",
+        "Questions the second opinion may ask per UTC day. One at a time; a question that comes while one is running is not asked.",
+    )
+    .unit(Unit::Count)
+    .tags(&[Tag::Experimental, Tag::Advanced])
+    .zero("none"),
     Spec::new(
         DECIDE_RETENTION_DAYS,
         "90",

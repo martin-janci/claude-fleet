@@ -1,4 +1,4 @@
-//! The PR reviewer's rows (migration 171): what it knows of each pull
+//! The PR reviewer's rows (migration 172): what it knows of each pull
 //! request it watches, and the reviews it wrote. The reviewer is
 //! `service::agents::review`.
 

@@ -210,6 +210,13 @@ and adds:
   the command line a host's `ps` shows: the script copies it by its byte
   length into a private temp directory (`umask 077`, removed on exit).
 
+The agents' run builds its `claude -p` words itself
+(`service/agents/vehicle.rs`), with the same lock-down as main's
+`headless::ToolPolicy::ReadOnly` (`--disallowedTools`, `--permission-mode
+dontAsk`): `service::headless` has no MCP config, system prompt file or
+turn cap yet. Moving the vehicle under `HeadlessAgent` once it does is
+follow-up work.
+
 The skill text goes in with `--append-system-prompt-file` (copied off
 stdin the same way), the job's input on the rest of stdin, `--output-format json`, `--max-turns` and `--model` from the
 rule's config. The existing test that asserts `--tools` appears once keeps
@@ -451,7 +458,7 @@ dashboard pieces of the reviewer.
 
 ## Steps
 
-1. **Runtime core** (built): migration 170 (`agent_rules`,
+1. **Runtime core** (built): migration 171 (`agent_rules`,
    `agent_cursors`, `agent_jobs`, `agent_actions`), `fleet-hub agents
    grant | revoke | pause-all | approve | reject | status`, the
    `agents_poll` / `agents_run` loops with an empty registry, the
@@ -464,7 +471,7 @@ dashboard pieces of the reviewer.
    `service/agents/workspace.rs` (prepare, cleanup, prune; tested against a
    real repository). The prune is wired into the run pass with the first
    agent, step 3, which knows each rule's checkout.
-3. **Reviewer, read side** (built): migration 171 (`review_prs`,
+3. **Reviewer, read side** (built): migration 172 (`review_prs`,
    `review_records`), `service/agents/review/` (`plan.rs`, `diff.rs`,
    `output.rs`, `prompt.rs` with the original's tests ported, the skill as
    `skill.md`, the poller and runner behind a `ReviewHost` trait tested

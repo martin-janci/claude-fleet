@@ -4,6 +4,7 @@
 //! paired desktop and served by `service::work::{view, structure}` here.
 //! Thin wrappers, as `commands::work` is: the rules live in fleet-core.
 //!
+//! Persona dashboards: `work_stats`, the Work view's tasks counted.
 //! Sprints and releases (design 2026-09-28 §6a/§6b): `work_buckets` /
 //! `work_bucket` read `work`, `add_work_to_bucket` /
 //! `remove_work_from_bucket` write `work_link`, and `work_bucket_admin`
@@ -19,6 +20,7 @@ use fleet_core::service::orgs::OrgScope;
 use fleet_core::service::trackers::admin::{self as tracker_admin, WorkAdminArgs};
 use fleet_core::service::work::attachments::AttachmentData;
 use fleet_core::service::work::buckets::{self, BucketAction, BucketDetail};
+use fleet_core::service::work::stats::{self, WorkStats};
 use fleet_core::service::work::structure::{
     self, BatchResult, Deleted, LinkDecision, OrgImpact, RuleInput, RulePreview, ViewInput,
 };
@@ -198,6 +200,13 @@ pub struct WorkBucketsArgs {
     pub kind: Option<String>,
 }
 
+/// `work_stats`: the Work view's tasks counted (persona dashboards).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkStatsArgs {
+    #[serde(default)]
+    pub filters: Option<WorkTreeFilters>,
+}
+
 /// `work_bucket`: one bucket with its members, past ones too.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkBucketArgs {
@@ -311,6 +320,15 @@ pub async fn work_buckets(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<BucketRow>, IpcError> {
     routed::work_buckets(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn work_stats(
+    args: WorkStatsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkStats, IpcError> {
+    routed::work_stats(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -903,6 +921,21 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("work_buckets", &wire).await,
             None => buckets::buckets(store, &internal_view(), args.kind.as_deref()),
+        }
+    }
+
+    pub async fn work_stats(
+        backend: &FleetBackend,
+        args: WorkStatsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorkStats, IpcError> {
+        let wire = WorkArgs {
+            filters: args.filters.clone(),
+            ..read("stats")
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("work_stats", &wire).await,
+            None => stats::stats(store, &internal_view(), args.filters.as_ref()),
         }
     }
 

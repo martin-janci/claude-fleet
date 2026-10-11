@@ -1930,12 +1930,18 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/169_ticket_keys.sql"),
         already_applied: Some(work_items_has_display_key),
     },
+    // Status history for persona dashboards (`work_status_log`), written by
+    // triggers on `work_items`. All `IF NOT EXISTS`, so idempotent.
+    Migration::plain(
+        170,
+        include_str!("../../migrations/170_work_status_log.sql"),
+    ),
     // Agent runtime (reviewer and support agents, step 1): `agent_rules`,
     // `agent_cursors`, `agent_jobs`, `agent_actions`. New tables, idempotent.
-    Migration::plain(170, include_str!("../../migrations/170_agents.sql")),
+    Migration::plain(171, include_str!("../../migrations/171_agents.sql")),
     // The PR reviewer (agents step 3): `review_prs`, `review_records`. New
     // tables, idempotent.
-    Migration::plain(171, include_str!("../../migrations/171_review_prs.sql")),
+    Migration::plain(172, include_str!("../../migrations/172_review_prs.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

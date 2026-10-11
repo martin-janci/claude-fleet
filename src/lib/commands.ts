@@ -36,6 +36,7 @@ import type { SessionRow } from './sessions';
 import { shortcutLabel } from './shortcuts';
 import { requestSessionAction, sessionMenuItems, type SessionActionId } from './session_actions';
 import type { SwitcherEntry } from './quick_switcher';
+import { WORKSPACES, switchWorkspace, workspace, type WorkspaceId } from './workspace';
 
 export type PrefixMode = 'all' | 'commands' | 'work' | 'hosts';
 
@@ -178,7 +179,16 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
           synonyms: ['pause', 'pause all', 'automation', 'stop', 'loops'] },
     { id: 'app.automation', label: 'Open Automation', section: 'Commands', description: 'Routines, runs, agents',
       synonyms: ['automation', 'routines', 'runs', 'agents', 'loops'] },
+    { id: 'app.dashboard', label: 'Open dashboard', section: 'Commands', description: 'This workspace’s numbers',
+      synonyms: ['dashboard', 'dashboards', 'stats', 'sprint', 'health', 'charts'] },
   );
+  // Workspaces (persona design 2026-10-11): one row per workspace not active.
+  const active = get(workspace);
+  for (const w of WORKSPACES) {
+    if (w.id === active) continue;
+    out.push({ id: `${WORKSPACE}${w.id}`, label: `Switch to ${w.name} workspace`, section: 'Commands',
+      description: w.need, synonyms: ['workspace', 'persona', 'role', 'switch', w.name.toLowerCase(), w.short.toLowerCase()] });
+  }
   return out;
 }
 
@@ -223,6 +233,9 @@ export function settingRow(rest: string, descs: Iterable<Descriptor>, canWrite: 
   };
 }
 
+/** A palette id that switches workspace: `app.workspace.<id>`. */
+const WORKSPACE = 'app.workspace.';
+
 /** A palette id that runs a session action: `session.action.<id>`. */
 const SESSION_ACTION = 'session.action.';
 
@@ -233,6 +246,11 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
     // Details runs it, with its own gate, confirm and dialog, as it does for
     // the row menu; the request opens the inspector or the Details tab.
     if (s && s.status !== 'ghost') requestSessionAction(s, id.slice(SESSION_ACTION.length) as SessionActionId);
+    return;
+  }
+  if (id.startsWith(WORKSPACE)) {
+    const to = WORKSPACES.find((w) => `${WORKSPACE}${w.id}` === id);
+    if (to && switchWorkspace(to.id as WorkspaceId)) push({ kind: 'success', message: `${to.name} workspace` });
     return;
   }
   switch (id) {
@@ -302,6 +320,9 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
       return;
     case 'app.automation':
       goTo('automation');
+      return;
+    case 'app.dashboard':
+      goTo('dashboard');
       return;
     case 'app.automation-pause': {
       const on = !settingBool(get(fleetSettings), SETTING_KEYS.automationPaused);

@@ -185,6 +185,13 @@ pub(super) fn map_value(v: &Value, f: &dyn Fn(&str) -> String) -> Value {
 pub struct JevRequest {
     pub state: Value,
     pub question: Question,
+    /// Mixed into [`Self::option_order`]'s key: the same request with its
+    /// options in another order. Only a benchmark sets it (the
+    /// `option-order` perturbation, which measures how much the order moves
+    /// an answer); nothing else of the request changes, and it is never
+    /// sent or fingerprinted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_salt: Option<String>,
 }
 
 impl JevRequest {
@@ -195,6 +202,7 @@ impl JevRequest {
         JevRequest {
             state: map_value(&self.state, &f),
             question: self.question.map_text(&f),
+            order_salt: self.order_salt.clone(),
         }
     }
 
@@ -235,7 +243,13 @@ impl JevRequest {
             return Vec::new();
         };
         let v = serde_json::json!({ "state": self.state, "question": self.question });
-        let seed = Sha256::digest(super::canonical_json(&v).as_bytes());
+        let mut seed = Sha256::new();
+        seed.update(super::canonical_json(&v).as_bytes());
+        if let Some(salt) = &self.order_salt {
+            seed.update(b"\n");
+            seed.update(salt.as_bytes());
+        }
+        let seed = seed.finalize();
         let mut keyed: Vec<([u8; 32], &String)> = criteria
             .keys()
             .map(|k| {

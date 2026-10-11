@@ -41,6 +41,15 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 |---|---|---|---|---|
 | `orchestrator.enabled` | `true` | on / off | fleet | Let active missions take their next steps: keep their cards and brakes current and, under a person's grant, run what is ready. Off stops every mission's loop at once. |
 | `orchestrator.max_level` | `1` | 0–3 | fleet | The most any mission's loop may do on its own, whatever the mission asks and its grant signs. 0: the loop only keeps the cards; 1: it also asks the planner, and a person presses every step; 2: runs, retries, reviews and closes within a grant; 3: also creates the planner's tasks. |
+| `orchestrator.headless_checks` | `false` | on / off | fleet | Run a mission's review and its test commands as one Claude run in the implementer's checkout, with read-only tools and only those commands, instead of opening a session for each. Falls back to a session when the checkout moved or a command is not a plain one. Experimental. |
+| `orchestrator.headless_model` | `sonnet` | `haiku` / `sonnet` / `opus` | fleet | The Claude model headless reviews and tests run. Experimental. |
+
+## control
+
+| Setting | Default | Range | Scope | What it does |
+|---|---|---|---|---|
+| `control.auto_continue` | `true` | on / off | fleet | Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo, and only while the app is open. |
+| `control.auto_continue_minutes` | `10` | 1–1440 minutes | fleet | How long Control's chat waits for your answer before it sends the recommended option. |
 
 ## Playbooks
 
@@ -245,6 +254,10 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `decide.jev.breaker_open_secs` | `300` | 10–86400 seconds | fleet | How long an open breaker refuses calls. |
 | `decide.jev.daily_token_budget` | `2000000` | 0–1000000000 tokens, `0` = none | fleet | Input tokens the decision model may be sent per UTC day. At $0.042 per million, the default is under $0.09 a day. |
 | `decide.jev.model` | `jev-1.13.0` | `jev-1.13.0` / `jev-latest` | fleet | The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe. |
+| `decide.haiku.shadow` | `false` | on / off | fleet | Also ask Claude every question a Jev use case in shadow or assist asks, on the host below, and record its answer beside Jev's to compare them. Nothing acts on it. Experimental. Asks to confirm. |
+| `decide.haiku.host` | `` | text, up to 64 characters | fleet | The host whose Claude account answers. Only questions about its own organisation are sent to it. Experimental. |
+| `decide.haiku.model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet | The Claude model the second opinion asks. Experimental. |
+| `decide.haiku.daily_calls` | `200` | 0–10000, `0` = none | fleet | Questions the second opinion may ask per UTC day. One at a time; a question that comes while one is running is not asked. Experimental. |
 | `decide.retention_days` | `90` | 0–3650 days, `0` = forever | fleet | Days a decision record (ids and numbers, never text) is kept. |
 | `decide.jev.floors` | `` | text, up to 8192 characters | fleet | Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against. |
 

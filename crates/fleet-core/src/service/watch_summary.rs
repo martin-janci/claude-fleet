@@ -29,6 +29,7 @@ use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::claude_print;
 use crate::service::decide::summary_check::{self, Check};
 use crate::service::decide::DecideCtx;
+use crate::service::headless::{self, HeadlessJob, RunAt};
 use crate::service::settings;
 use crate::service::transcript::{ConvItem, ConvTurn};
 use crate::shell::quote;
@@ -200,32 +201,31 @@ pub fn since_script(model: &str, profile: Option<&str>, excerpt: &str) -> Result
     if !settings::SUMMARY_MODELS.contains(&model) {
         return Err(format!("refusing summary model {model:?}"));
     }
+    let agent = headless::default_agent();
     let env = match profile {
-        Some(p) => {
-            crate::validate::claude_profile(p).map_err(|e| e.message)?;
-            format!(
-                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; {}",
-                quote(p),
-                crate::tmux::PROFILE_API_KEY
-            )
-        }
+        Some(_) => format!(
+            "{}{}",
+            agent.login_env(profile)?,
+            crate::tmux::PROFILE_API_KEY
+        ),
         None => String::new(),
     };
     let b64 = base64::engine::general_purpose::STANDARD
         .encode(summary_check::tail_bytes(excerpt, EXCERPT_MAX_BYTES));
-    let claude = format!(
-        "claude -p --model {} --output-format json {} {} <\"$d\"",
-        quote(model),
-        claude_print::isolation_flags(),
-        quote(SINCE_PROMPT),
-    );
+    let claude = agent.command(&HeadlessJob {
+        model,
+        prompt: Some(SINCE_PROMPT),
+        stdin_file: Some("d"),
+        fork_of: None,
+        ..Default::default()
+    });
     let t = SINCE_TAG;
     Ok(format!(
         "{noclaude} \
          d=$(mktemp); trap 'rm -f \"$d\"' EXIT; \
          printf %s {b64} | {{ base64 -d 2>/dev/null || base64 -D; }} >\"$d\"; \
          {env}{run}",
-        noclaude = claude_print::noclaude_check(t),
+        noclaude = agent.missing_check(t),
         b64 = quote(&b64),
         run = claude_print::run_capped(t, &claude, HOST_TIMEOUT_SECS, OUTPUT_CAP_BYTES, false),
     ))
@@ -313,34 +313,17 @@ pub async fn summarize_excerpt(
             ))
         }
     };
-    let text = match claude_print::parse_envelope(&text) {
-        Some(env) => {
-            book(store, p, Some(&env));
-            if claude_print::run_signed_out(Some(&env), &env.result, &run.stderr) {
-                return Err(claude_print::signed_out_error(
-                    &p.host,
-                    p.profile.as_deref(),
-                ));
-            }
-            if env.is_error || env.result.trim().is_empty() {
-                return Err(IpcError::new(
-                    codes::E_CLAUDE_CLI,
-                    "the summary run failed: claude answered with an error",
-                ));
-            }
-            env.result
-        }
-        None => {
-            book(store, p, None);
-            if claude_print::run_signed_out(None, &text, &run.stderr) {
-                return Err(claude_print::signed_out_error(
-                    &p.host,
-                    p.profile.as_deref(),
-                ));
-            }
-            text
-        }
-    };
+    let (text, _) = headless::read_reply(
+        headless::default_agent(),
+        text,
+        &run.stderr,
+        RunAt {
+            host: &p.host,
+            profile: p.profile.as_deref(),
+            what: "the summary run",
+        },
+        |usage| book(store, p, usage),
+    )?;
     let summary = clean_summary(&text);
     out.check = summary_check::check(decide, p.session_id, p.org_id, &summary, excerpt).await;
     out.text = out.check.shows().then_some(summary);

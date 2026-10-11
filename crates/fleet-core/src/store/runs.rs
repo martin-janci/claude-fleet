@@ -10,7 +10,7 @@
 //! | `jev`           | `decision_runs`        | one decision Jev was asked for (069)              |
 //! | `aux`           | `aux_usage`            | one of fleet's own `claude -p` runs (127)         |
 //! | `routine`       | `routine_runs`         | one fire of a routine, skipped ones included (131)|
-//! | `agent`         | `agent_jobs`           | one job of a built-in agent (reviewer, support; 170)|
+//! | `agent`         | `agent_jobs`           | one job of a built-in agent (reviewer, support; 171)|
 //!
 //! How each table's columns map onto a [`RunRow`] is written next to its
 //! branch below ([`TASKS_BRANCH`], [`ORCH_BRANCH`], [`JEV_BRANCH`],
@@ -55,6 +55,7 @@ pub const RUN_KINDS: &[&str] = &[
     "watch_summary",
     "triage",
     "context_help",
+    "headless_check",
     "routine",
     "review",
     "support",
@@ -406,7 +407,7 @@ pub const ROUTINE_BRANCH: &str = "SELECT 'routine' AS src, rr.id AS rid, 'routin
      FROM routine_runs rr \
      LEFT JOIN routines r ON r.id = rr.routine_id";
 
-/// `agent_jobs` (alias `j`, its rule `ar`, migration 170): one job of a
+/// `agent_jobs` (alias `j`, its rule `ar`, migration 171): one job of a
 /// built-in agent.
 ///
 /// - started_at: `created_at`, when its poll found it; ended_at: the last

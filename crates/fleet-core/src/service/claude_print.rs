@@ -1,7 +1,8 @@
-//! The one locked-down `claude -p` run fleet starts on a host, shared by the
-//! dead-session summary ([`super::work::summary`]), the Jev `claude -p
-//! haiku` baseline ([`super::decide::haiku`]) and the agents' runs
-//! ([`super::agents::vehicle`], which give a run read-only tools).
+//! The script around the one locked-down `claude -p` run fleet starts on a
+//! host, shared by every headless run (the summaries, the drafts, the
+//! planner, context help, the Jev `claude -p haiku` baseline and the
+//! agents' runs, [`super::agents::vehicle`]). Which CLI runs and its command
+//! words are [`super::headless`]'s.
 //!
 //! * [`isolation_flags`] are the words that take everything away from the
 //!   run: no hooks, no built-in tool, no MCP server, no transcript left.
@@ -25,16 +26,28 @@ use serde_json::Value;
 /// built-in tool; `--strict-mcp-config` with no `--mcp-config` loads no MCP
 /// server; `--no-session-persistence` leaves no transcript.
 pub fn isolation_flags() -> String {
-    isolation_flags_with(&[], &[]).expect("no tools is always valid")
+    [
+        "--settings",
+        &quote(r#"{"disableAllHooks":true}"#),
+        "--tools",
+        &quote(""),
+        "--strict-mcp-config",
+        "--no-session-persistence",
+    ]
+    .join(" ")
 }
 
 /// PURE: [`isolation_flags`] with the built-in `tools` the run may use
 /// (`Read`, `Grep`, `Glob` …) and the extra tools it may call without a
 /// prompt (`allowed`, for MCP tools: `mcp__<server>__<tool>`, `*` allowed
-/// as the tool). Everything else stays taken away: no hooks, no MCP server
-/// unless the caller adds its own `--mcp-config` after these words (with
-/// `--strict-mcp-config` nothing else loads), no transcript. A name outside
-/// those shapes is refused, so no caller can smuggle a flag or `Bash(…)` in.
+/// as the tool), for the agents' runs. Everything else stays taken away: no
+/// hooks, no MCP server unless the caller adds its own `--mcp-config` after
+/// these words (with `--strict-mcp-config` nothing else loads), no
+/// transcript; as in [`tool_flags`], [`NEVER_TOOLS`] are denied and
+/// `--permission-mode dontAsk` denies whatever would ask, so a run with no
+/// person never waits on a prompt. A name outside those shapes is refused,
+/// so no caller can smuggle a flag or `Bash(…)` in. No tools and none
+/// allowed is exactly [`isolation_flags`].
 pub fn isolation_flags_with(tools: &[&str], allowed: &[&str]) -> Result<String, String> {
     fn word(s: &str) -> bool {
         !s.is_empty()
@@ -57,15 +70,73 @@ pub fn isolation_flags_with(tools: &[&str], allowed: &[&str]) -> Result<String, 
             ));
         }
     }
+    if tools.is_empty() && allowed.is_empty() {
+        return Ok(isolation_flags());
+    }
     let settings = quote(r#"{"disableAllHooks":true}"#);
     let tools = quote(&tools.join(","));
-    let mut words = vec!["--settings", &settings, "--tools", &tools];
+    let never = quote(NEVER_TOOLS);
+    let mut words = vec![
+        "--settings",
+        &settings,
+        "--tools",
+        &tools,
+        "--disallowedTools",
+        &never,
+    ];
     let allowed_list = quote(&allowed.join(","));
     if !allowed.is_empty() {
         words.extend(["--allowedTools", &allowed_list]);
     }
-    words.extend(["--strict-mcp-config", "--no-session-persistence"]);
+    words.extend([
+        "--permission-mode",
+        "dontAsk",
+        "--strict-mcp-config",
+        "--no-session-persistence",
+    ]);
     Ok(words.join(" "))
+}
+
+/// The built-in tools a read-only run has: reading inside its working
+/// directory, nothing that writes, runs or reaches the network.
+pub const READ_ONLY_TOOLS: &str = "Read,Grep,Glob";
+/// The built-in tools a run may never have, whatever its policy says.
+pub const NEVER_TOOLS: &str = "Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task";
+
+/// PURE: the flag words of a run that may use some tools, each value quoted
+/// with [`crate::shell::quote`]. The same hooks, MCP and transcript lock-down
+/// as [`isolation_flags`]; `--tools` names only [`READ_ONLY_TOOLS`] (plus
+/// `Bash` when `bash` names commands), `--allowedTools` pre-approves exactly
+/// `Bash(<command>)` for each of `bash` and nothing else, and
+/// `--permission-mode dontAsk` denies whatever would have asked, so a run
+/// without a person never waits on a prompt nor widens: a read outside the
+/// working directory, another command, any write. [`NEVER_TOOLS`] are denied
+/// on top. Checked against Claude Code 2.1.296's `--help`.
+pub fn tool_flags(bash: &[&str]) -> String {
+    let tools = if bash.is_empty() {
+        READ_ONLY_TOOLS.to_string()
+    } else {
+        format!("{READ_ONLY_TOOLS},Bash")
+    };
+    let mut words = vec![
+        "--settings".to_string(),
+        quote(r#"{"disableAllHooks":true}"#),
+        "--tools".into(),
+        quote(&tools),
+        "--disallowedTools".into(),
+        quote(NEVER_TOOLS),
+    ];
+    if !bash.is_empty() {
+        words.push("--allowedTools".into());
+        words.extend(bash.iter().map(|c| quote(&format!("Bash({c})"))));
+    }
+    words.extend([
+        "--permission-mode".into(),
+        "dontAsk".into(),
+        "--strict-mcp-config".into(),
+        "--no-session-persistence".into(),
+    ]);
+    words.join(" ")
 }
 
 /// PURE: the script line that ends with `<tag>noclaude` when `claude` is not
@@ -273,9 +344,10 @@ mod tests {
     fn tools_and_mcp_tools_are_named_or_refused() {
         assert_eq!(
             isolation_flags_with(&["Read", "Grep", "Glob"], &["mcp__graylog__search"]).unwrap(),
-            r#"--settings '{"disableAllHooks":true}' --tools 'Read,Grep,Glob' --allowedTools 'mcp__graylog__search' --strict-mcp-config --no-session-persistence"#
+            r#"--settings '{"disableAllHooks":true}' --tools 'Read,Grep,Glob' --disallowedTools 'Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task' --allowedTools 'mcp__graylog__search' --permission-mode dontAsk --strict-mcp-config --no-session-persistence"#
         );
         assert!(isolation_flags_with(&["Read"], &["mcp__kb__*"]).is_ok());
+        assert_eq!(isolation_flags_with(&[], &[]).unwrap(), isolation_flags());
         for bad in [
             "Bash(rm:*)",
             "read",
@@ -293,6 +365,27 @@ mod tests {
             "mcp__x__y,Bash",
         ] {
             assert!(isolation_flags_with(&[], &[bad]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_tool_policy_reads_or_runs_exactly_what_it_names() {
+        let read = tool_flags(&[]);
+        assert_eq!(
+            read,
+            r#"--settings '{"disableAllHooks":true}' --tools 'Read,Grep,Glob' --disallowedTools 'Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task' --permission-mode dontAsk --strict-mcp-config --no-session-persistence"#
+        );
+        assert!(!read.contains("Bash") && !read.contains("--allowedTools"));
+        let test = tool_flags(&["cargo test -p x", "pnpm test"]);
+        assert!(test.contains("--tools 'Read,Grep,Glob,Bash'"), "{test}");
+        assert!(
+            test.contains("--allowedTools 'Bash(cargo test -p x)' 'Bash(pnpm test)' --permission-mode dontAsk"),
+            "{test}"
+        );
+        for f in [&read, &test] {
+            for gone in ["bypass", "dangerously", "acceptEdits", "auto"] {
+                assert!(!f.contains(gone), "{gone} in {f}");
+            }
         }
     }
 

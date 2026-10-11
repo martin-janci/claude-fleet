@@ -181,6 +181,8 @@ pub fn spawn_reconcile_tick(
     ssh: std::sync::Arc<ssh::SshClient>,
     token: CancellationToken,
 ) -> Option<tokio::task::JoinHandle<()>> {
+    // The decision envelope's second opinion runs over the same SSH client.
+    service::decide::haiku_shadow::install(Arc::clone(&ssh) as Arc<dyn SshExec>);
     let interval_secs = {
         let raw = store
             .lock()

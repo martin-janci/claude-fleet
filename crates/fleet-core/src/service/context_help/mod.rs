@@ -39,6 +39,7 @@
 use crate::ipc_error::{codes, IpcError};
 use crate::service::claude_print;
 use crate::service::decide::summary_check::tail_bytes;
+use crate::service::headless::{self, HeadlessJob, RunAt};
 use crate::service::settings;
 use crate::shell::quote;
 use crate::ssh::SshExec;
@@ -394,31 +395,24 @@ pub fn help_script(
     if !settings::SUMMARY_MODELS.contains(&model) {
         return Err(format!("refusing help model {model:?}"));
     }
-    let env = match profile {
-        Some(p) => {
-            crate::validate::claude_profile(p).map_err(|e| e.message)?;
-            format!(
-                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; ",
-                quote(p)
-            )
-        }
-        None => String::new(),
-    };
+    let agent = headless::default_agent();
+    let env = agent.login_env(profile)?;
     let b64 =
         base64::engine::general_purpose::STANDARD.encode(tail_bytes(context, CONTEXT_MAX_BYTES));
-    let claude = format!(
-        "claude -p --model {} --output-format json {} {} <\"$d\"",
-        quote(model),
-        claude_print::isolation_flags(),
-        quote(instruction),
-    );
+    let claude = agent.command(&HeadlessJob {
+        model,
+        prompt: Some(instruction),
+        stdin_file: Some("d"),
+        fork_of: None,
+        ..Default::default()
+    });
     let t = HELP_TAG;
     Ok(format!(
         "{noclaude} \
          d=$(mktemp); trap 'rm -f \"$d\"' EXIT; \
          printf %s {b64} | {{ base64 -d 2>/dev/null || base64 -D; }} >\"$d\"; \
          {env}{run}",
-        noclaude = claude_print::noclaude_check(t),
+        noclaude = agent.missing_check(t),
         b64 = quote(&b64),
         run = claude_print::run_capped(t, &claude, HOST_TIMEOUT_SECS, OUTPUT_CAP_BYTES, false),
     ))
@@ -479,27 +473,18 @@ impl HelpModel for ClaudeOnHost<'_> {
                 ))
             }
         };
-        match claude_print::parse_envelope(&text) {
-            Some(env) => {
-                if claude_print::run_signed_out(Some(&env), &env.result, &run.stderr) {
-                    return Err(claude_print::signed_out_error(&self.host, profile));
-                }
-                if env.is_error || env.result.trim().is_empty() {
-                    return Err(IpcError::new(
-                        codes::E_CLAUDE_CLI,
-                        "the help run failed: claude answered with an error",
-                    ));
-                }
-                Ok(Completion {
-                    text: env.result.clone(),
-                    usage: Some(env),
-                })
-            }
-            None if claude_print::run_signed_out(None, &text, &run.stderr) => {
-                Err(claude_print::signed_out_error(&self.host, profile))
-            }
-            None => Ok(Completion { text, usage: None }),
-        }
+        let (text, usage) = headless::read_reply(
+            headless::default_agent(),
+            text,
+            &run.stderr,
+            RunAt {
+                host: &self.host,
+                profile,
+                what: "the help run",
+            },
+            |_| {},
+        )?;
+        Ok(Completion { text, usage })
     }
 }
 

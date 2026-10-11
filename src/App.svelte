@@ -45,6 +45,7 @@
   import AppRail from './lib/AppRail.svelte';
   import { toggleControl, toggleToday } from './lib/control';
   import type { RailId } from './lib/rail';
+  import { workspaceLanding } from './lib/workspace';
   import { loadProjects, applyProjectEvents } from './lib/projects';
   import { loadSessions, applySessionEvents, applyStartProgress, sessions, sessionsAnswered, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
   import { bootstrapError as bootstrapFailure } from './lib/bootstrap_state';
@@ -551,6 +552,7 @@
     // Automation is a fleet page like Control: an opened session replaces
     // it (review r07).
     leave('automation');
+    leave('dashboard');
   });
   // "View sessions" (host_actions.ts, called from anywhere: the `s` key,
   // HostDetail's header button) can't reach `closeHosts` directly — it asks
@@ -664,7 +666,8 @@
       $destination === 'assets' ||
       $destination === 'accounts' ||
       $destination === 'control' ||
-      $destination === 'automation',
+      $destination === 'automation' ||
+      $destination === 'dashboard',
   );
   // What covers the session's own view (the terminal or the conversation):
   // a fleet page, which needs no selected session.
@@ -673,7 +676,8 @@
       $destination === 'assets' ||
       $destination === 'accounts' ||
       $destination === 'control' ||
-      $destination === 'automation',
+      $destination === 'automation' ||
+      $destination === 'dashboard',
   );
   const effectiveView = $derived(
     resolveSessionView($sessionView, selNoPane, selHasClaudeId, selOwned),
@@ -788,6 +792,9 @@
     } else if (id === 'control') {
       closeHosts();
       goTo('control');
+    } else if (id === 'dashboards') {
+      closeHosts();
+      goTo('dashboard');
     } else if (id === 'automation') {
       closeHosts();
       goTo('automation');
@@ -795,6 +802,16 @@
     else if (id === 'toolkit') showToolkit();
     else if (id === 'settings') settingsOpen.set(true);
   }
+  // A workspace switch (the rail's tile or ⌘K) lands where that workspace
+  // starts, as a click on that rail item would; the request is taken once.
+  $effect(() => {
+    const l = $workspaceLanding;
+    if (!l) return;
+    untrack(() => {
+      workspaceLanding.set(null);
+      onRailSelect(l.rail);
+    });
+  });
   // The task board (sprints design 2026-09-28 §6c) is an overlay over the
   // terminal like Assets, opened from the Work view's Board button
   // (`workBoardOpen`, a view of the same destination store); it keeps the
@@ -1040,6 +1057,11 @@
       leave('automation');
       return;
     }
+    if ($destination === 'dashboard') {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      leave('dashboard');
+      return;
+    }
     // Inside the Hosts view, HostsView owns Esc (back to the list, clear the
     // filter, close from the list). This catches only an Esc with focus lost
     // to the page or left on the right column's chrome; a dialog, an input
@@ -1264,6 +1286,11 @@
       {#if $destination === 'automation'}
         <div class="view-slot overlay" data-testid="automation-overlay">
           <Lazy load={lazyViews.automation} />
+        </div>
+      {/if}
+      {#if $destination === 'dashboard'}
+        <div class="view-slot overlay" data-testid="dashboard-overlay">
+          <Lazy load={lazyViews.dashboard} />
         </div>
       {/if}
       {#if boardShown}

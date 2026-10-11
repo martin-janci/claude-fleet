@@ -18,8 +18,8 @@
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::claude_print;
+use crate::service::headless::{self, HeadlessJob, RunAt};
 use crate::service::settings;
-use crate::shell::quote;
 use crate::ssh::SshExec;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -91,23 +91,22 @@ pub fn commit_body(model: &str, profile: Option<&str>) -> Result<String, String>
     if !settings::SUMMARY_MODELS.contains(&model) {
         return Err(format!("refusing draft model {model:?}"));
     }
+    let agent = headless::default_agent();
     let env = match profile {
-        Some(p) => {
-            crate::validate::claude_profile(p).map_err(|e| e.message)?;
-            format!(
-                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; {}",
-                quote(p),
-                crate::tmux::PROFILE_API_KEY
-            )
-        }
+        Some(_) => format!(
+            "{}{}",
+            agent.login_env(profile)?,
+            crate::tmux::PROFILE_API_KEY
+        ),
         None => String::new(),
     };
-    let claude = format!(
-        "claude -p --model {} --output-format json {} {} <\"$d\"",
-        quote(model),
-        claude_print::isolation_flags(),
-        quote(COMMIT_PROMPT),
-    );
+    let claude = agent.command(&HeadlessJob {
+        model,
+        prompt: Some(COMMIT_PROMPT),
+        stdin_file: Some("d"),
+        fork_of: None,
+        ..Default::default()
+    });
     let t = DRAFT_TAG;
     Ok(format!(
         "cd \"$root\"; \
@@ -118,7 +117,7 @@ pub fn commit_body(model: &str, profile: Option<&str>) -> Result<String, String>
          {{ git diff --cached --stat; echo; git diff --cached | head -c {DIFF_CAP_BYTES}; }} >\"$d\" || true; \
          echo {t}files=$n; \
          {env}{run}",
-        noclaude = claude_print::noclaude_check(t),
+        noclaude = agent.missing_check(t),
         run = claude_print::run_capped(t, &claude, HOST_TIMEOUT_SECS, OUTPUT_CAP_BYTES, false),
     ))
 }
@@ -186,6 +185,7 @@ pub async fn draft_commit_message(
         return Err(crate::service::repo::repo_err(&out));
     }
     let files = files_of(&stdout);
+    let agent = headless::default_agent();
     let text = match claude_print::parse_tagged(&stdout, DRAFT_TAG, &["empty", "noclaude", "run"]) {
         Some(("empty", _)) => {
             return Err(IpcError::new(
@@ -222,34 +222,17 @@ pub async fn draft_commit_message(
             ))
         }
     };
-    let text = match claude_print::parse_envelope(&text) {
-        Some(env) => {
-            book(store, &p, Some(&env));
-            if claude_print::run_signed_out(Some(&env), &env.result, &out.stderr) {
-                return Err(claude_print::signed_out_error(
-                    &p.host,
-                    p.profile.as_deref(),
-                ));
-            }
-            if env.is_error || env.result.trim().is_empty() {
-                return Err(IpcError::new(
-                    codes::E_CLAUDE_CLI,
-                    "the draft run failed: claude answered with an error",
-                ));
-            }
-            env.result
-        }
-        None => {
-            book(store, &p, None);
-            if claude_print::run_signed_out(None, &text, &out.stderr) {
-                return Err(claude_print::signed_out_error(
-                    &p.host,
-                    p.profile.as_deref(),
-                ));
-            }
-            text
-        }
-    };
+    let (text, _) = headless::read_reply(
+        agent,
+        text,
+        &out.stderr,
+        RunAt {
+            host: &p.host,
+            profile: p.profile.as_deref(),
+            what: "the draft run",
+        },
+        |usage| book(store, &p, usage),
+    )?;
     Ok(CommitDraft {
         message: clean_message(&text),
         model: p.model,

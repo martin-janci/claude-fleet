@@ -96,4 +96,4 @@ CREATE TABLE IF NOT EXISTS agent_actions (
 );
 CREATE INDEX IF NOT EXISTS agent_actions_state ON agent_actions (state, created_at);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (170);
+INSERT OR IGNORE INTO schema_version (version) VALUES (171);

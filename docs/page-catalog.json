@@ -2835,6 +2835,62 @@
     },
     {
       "default_widget": "switch",
+      "key": "orchestrator.headless_checks",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Headless reviews and tests",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "orchestrator.headless_model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Headless check model",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "control.auto_continue",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Go on with the recommended option",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "control.auto_continue_minutes",
+      "kind": {
+        "max": 1440,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Wait before going on",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "playbooks.press_enter",
       "kind": {
         "type": "bool"
@@ -4438,6 +4494,63 @@
       "widgets": [
         "select",
         "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "decide.haiku.shadow",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Second opinion from Claude",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "text",
+      "key": "decide.haiku.host",
+      "kind": {
+        "max": 64,
+        "type": "text"
+      },
+      "label": "Second opinion: host",
+      "widgets": [
+        "text",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.haiku.model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Second opinion: model",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "decide.haiku.daily_calls",
+      "kind": {
+        "max": 10000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Second opinion: calls a day",
+      "widgets": [
+        "number",
         "readonly"
       ]
     },

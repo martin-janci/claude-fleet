@@ -786,7 +786,9 @@ impl FleetTools {
 
     #[tool(description = "Tasks, newest first. Read-only. A per-host token \
         sees only tasks it requested from its host or whose worker is on its \
-        host.")]
+        host. `mine: true` from inside a fleet session lists the tasks your \
+        own session dispatched or was given; every row names your end \
+        (`is_self_requester` / `is_self_worker`).")]
     pub(super) async fn list_tasks(
         &self,
         Extension(caller): Extension<Caller>,
@@ -795,10 +797,37 @@ impl FleetTools {
         audit(
             "list_tasks",
             &format!(
-                "requester_session_id={:?} state={:?} limit={:?}",
-                p.requester_session_id, p.state, p.limit
+                "requester_session_id={:?} worker_session_id={:?} mine={:?} state={:?} \
+                 limit={:?}",
+                p.requester_session_id, p.worker_session_id, p.mine, p.state, p.limit
             ),
         );
+        let own = self.own_session(&caller)?;
+        let end = match (
+            p.mine.unwrap_or(false),
+            p.requester_session_id,
+            p.worker_session_id,
+        ) {
+            (true, None, None) => crate::store::TaskEnd::Either(own.ok_or_else(|| {
+                mcp_err(
+                    codes::E_NOT_A_SESSION,
+                    "list_tasks mine: true answers only from inside a fleet session (its \
+                     per-host token and X-Fleet-Pane); pass requester_session_id or \
+                     worker_session_id",
+                    None,
+                )
+            })?),
+            (false, None, None) => crate::store::TaskEnd::Any,
+            (false, Some(r), None) => crate::store::TaskEnd::Requester(r),
+            (false, None, Some(w)) => crate::store::TaskEnd::Worker(w),
+            _ => {
+                return Err(mcp_err(
+                    "E_INVALID",
+                    "list_tasks takes one of requester_session_id, worker_session_id, mine",
+                    None,
+                ))
+            }
+        };
         // A `TaskRow` carries the `prompt` one session sent another and
         // the `result` that came back: session content, so the page is cut
         // against the caller's own view scope and not against its host
@@ -810,7 +839,7 @@ impl FleetTools {
         };
         let rows = tasks::list_tasks_for(
             &self.store,
-            p.requester_session_id,
+            end,
             p.state.as_deref(),
             p.limit.unwrap_or(50),
             caller.host_alias.as_deref(),
@@ -823,7 +852,25 @@ impl FleetTools {
                 .map(|t| tasks::mark_task_result(&s, t))
                 .collect()
         };
-        ok_json_compact(&rows)
+        let Some(own) = own else {
+            return ok_json_compact(&rows);
+        };
+        // From inside a session: say which end of each task is the caller.
+        let mut v = serde_json::to_value(&rows)
+            .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+        if let serde_json::Value::Array(items) = &mut v {
+            for (item, t) in items.iter_mut().zip(&rows) {
+                if let serde_json::Value::Object(map) = item {
+                    if t.requester_session_id == Some(own) {
+                        map.insert("is_self_requester".into(), true.into());
+                    }
+                    if t.worker_session_id == Some(own) {
+                        map.insert("is_self_worker".into(), true.into());
+                    }
+                }
+            }
+        }
+        ok_json_compact(&v)
     }
 
     #[tool(description = "Cancel a queued or running task (E_TASK_TERMINAL \
@@ -1134,17 +1181,36 @@ impl FleetTools {
                             .is_some_and(|row| row.written_by(view_scope.person, &label));
                     }
                 }
+                // Which of its sessions is the caller's own.
+                if let Some(own) = self.own_session(&caller)? {
+                    for l in &mut detail.task.sessions {
+                        l.is_self = l.session_id == Some(own);
+                    }
+                }
                 ok_json_compact(&detail)
             }
             WorkAction::SessionTasks => {
-                let id = args
-                    .session_id
-                    .ok_or_else(|| mcp_err("E_INVALID", "session_tasks needs session_id", None))?;
+                // Without `session_id`, the caller's own session: an agent
+                // asking "what am I working on" from its own pane.
+                let own = self.own_session(&caller)?;
+                let id = args.session_id.or(own).ok_or_else(|| {
+                    mcp_err(
+                        "E_INVALID",
+                        "session_tasks needs session_id (it defaults to your own session only \
+                         when called from inside a fleet session: its per-host token and \
+                         X-Fleet-Pane)",
+                        None,
+                    )
+                })?;
                 // `watch`: the Work view's read of one session's tasks.
                 self.resolve_target_row(&caller, Some(id), None, None, Reach::Read, "the session")?;
-                ok_json_compact(
-                    &w::view::session_tasks(self.reader(), &view_scope, id).map_err(to_mcp_err)?,
-                )
+                let mut tasks =
+                    w::view::session_tasks(self.reader(), &view_scope, id).map_err(to_mcp_err)?;
+                tasks.is_self = own == Some(id);
+                for l in &mut tasks.links {
+                    l.link.is_self = tasks.is_self;
+                }
+                ok_json_compact(&tasks)
             }
             WorkAction::Review => ok_json_compact(
                 &w::view::review(
@@ -1184,19 +1250,35 @@ impl FleetTools {
                     &w::buckets::bucket(&self.store, &view_scope, id).map_err(to_mcp_err)?,
                 )
             }
+            // Persona dashboards: the tree's own filtering, counted.
+            WorkAction::Stats => ok_json_compact(
+                &w::stats::stats(self.reader(), &view_scope, args.filters.as_ref())
+                    .map_err(to_mcp_err)?,
+            ),
             // Missions (orchestration O1): a mission is a PERSON's, so the
             // whole `view_scope` — its owner, its org's members, the org
             // boundary first (`missions::sees_mission`).
+            // The operator reads them as the hub's owner, whose missions it
+            // saves (`operator_owner_scope`).
             WorkAction::Missions => ok_json_compact(
-                &w::missions::missions(&self.store, &view_scope).map_err(to_mcp_err)?,
+                &w::missions::missions(
+                    &self.store,
+                    &self.mission_read_scope(&caller, &view_scope)?,
+                )
+                .map_err(to_mcp_err)?,
             ),
             WorkAction::Mission => {
                 let id = args
                     .mission_id
                     .ok_or_else(|| mcp_err("E_INVALID", "mission needs mission_id", None))?;
                 ok_json_compact(
-                    &w::missions::mission(&self.store, &view_scope, id, args.before_event)
-                        .map_err(to_mcp_err)?,
+                    &w::missions::mission(
+                        &self.store,
+                        &self.mission_read_scope(&caller, &view_scope)?,
+                        id,
+                        args.before_event,
+                    )
+                    .map_err(to_mcp_err)?,
                 )
             }
             // A task attachment's bytes: its item's org fence (outside it,
@@ -1730,7 +1812,14 @@ impl FleetTools {
             // a stranger permanently marking somebody else's live work done.
             // The same gate and the same level as the rename half above —
             // the status is what the owner's own sidebar shows for their row.
-            self.require_drive_on_item_sessions(&caller, item_id)?;
+            //
+            // One exception: an agent whose OWN session is on the task (a
+            // confirmed, live link, proven by its pane) sets the status of
+            // its own work even when the task is shared with sessions it
+            // cannot drive. Its own link is the evidence the task is its.
+            if !self.own_session_works_on(&caller, item_id)? {
+                self.require_drive_on_item_sessions(&caller, item_id)?;
+            }
             return ok_json(
                 &crate::service::work::status::set_status(&self.store, &scope, item_id, status)
                     .map_err(to_mcp_err)?,
@@ -1746,7 +1835,10 @@ impl FleetTools {
             let item_id = args
                 .item_id
                 .ok_or_else(|| mcp_err("E_INVALID", "edit needs item_id", None))?;
-            self.require_drive_on_item_sessions(&caller, item_id)?;
+            // `set_status`'s exception: an agent edits its own task.
+            if !self.own_session_works_on(&caller, item_id)? {
+                self.require_drive_on_item_sessions(&caller, item_id)?;
+            }
             return ok_json(
                 &crate::service::work::local::edit_local_item(&args, &self.store, &scope)
                     .map_err(to_mcp_err)?,
@@ -1760,7 +1852,10 @@ impl FleetTools {
             let item_id = args
                 .item_id
                 .ok_or_else(|| mcp_err("E_INVALID", "comment needs item_id", None))?;
-            self.require_drive_on_item_sessions(&caller, item_id)?;
+            // `set_status`'s exception: an agent comments on its own task.
+            if !self.own_session_works_on(&caller, item_id)? {
+                self.require_drive_on_item_sessions(&caller, item_id)?;
+            }
             let person = self.view_scope(&caller)?.person;
             return ok_json(
                 &crate::service::work::local::comment(
@@ -1896,9 +1991,17 @@ impl FleetTools {
         // The org and person fences are inside (`missions::changeable`), on
         // the whole `view_scope`; adding an item also passes the item's own
         // sessions' person gate, as a sprint does.
+        //
+        // The operator is the one agent that may write here, and only a
+        // mission's definition: it saves one for the hub's owner, with that
+        // person's approval (`operator_mission_scope`).
         if args.action.starts_with("mission_") {
-            mission_caller(&caller)?;
-            let view_scope = self.view_scope(&caller)?;
+            let view_scope = if caller.is_operator() {
+                self.operator_mission_scope(&caller, &args)?
+            } else {
+                mission_caller(&caller)?;
+                self.view_scope(&caller)?
+            };
             use crate::service::work::missions as ms;
             use crate::service::work::orchestrate as orch;
             return match args.action.as_str() {
@@ -2699,6 +2802,74 @@ impl FleetTools {
         let s = lock(&self.store).map_err(to_mcp_err)?;
         caller.view_scope(&s).map_err(to_mcp_err)
     }
+
+    /// The caller's OWN session: the row a per-host token proves it stands
+    /// in (`X-Fleet-Pane` matched against `sessions.tmux_pane_id`, see
+    /// [`crate::service::view_scope::ViewScope::proven_session`]). `None`
+    /// for the master, a paired device, and an agent whose pane matches no
+    /// row (or several). It only ever picks a row out of what the caller
+    /// already sees; it never widens a gate.
+    pub(super) fn own_session(&self, caller: &Caller) -> Result<Option<i64>, McpError> {
+        if caller.host_alias.is_none() {
+            return Ok(None);
+        }
+        Ok(self.view_scope(caller)?.proven_session)
+    }
+
+    /// The scope the operator reads missions with: the hub's owner's
+    /// (`operator_owner_scope`). Everyone else keeps their own.
+    fn mission_read_scope(
+        &self,
+        caller: &Caller,
+        own: &crate::service::view_scope::ViewScope,
+    ) -> Result<crate::service::view_scope::ViewScope, McpError> {
+        if caller.is_operator() {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            operator_owner_scope(&s).map_err(to_mcp_err)
+        } else {
+            Ok(own.clone())
+        }
+    }
+
+    /// The operator's `mission_*` call: `mission_save` only, approved by a
+    /// person, then run as the hub's owner.
+    ///
+    /// The operator's own client proves no person, so without this it could
+    /// not save the mission it had just talked through with its person — and
+    /// every other `mission_*` action stays theirs: starting, planning,
+    /// granting, the state and deleting run sessions or decide for the loop,
+    /// which the operator never does ("Where AI never decides"). A save
+    /// spends nothing and starts nothing; the approval is what makes it the
+    /// person's act, as it is for the operator's starts (D12).
+    fn operator_mission_scope(
+        &self,
+        caller: &Caller,
+        args: &crate::service::work::WorkLinkArgs,
+    ) -> Result<crate::service::view_scope::ViewScope, McpError> {
+        if args.action != "mission_save" {
+            return Err(mcp_err(
+                "E_FORBIDDEN",
+                format!(
+                    "{} is a person's, from the desktop or the phone; the operator \
+                     may only save a mission (mission_save), with their approval",
+                    args.action
+                ),
+                None,
+            ));
+        }
+        let input = args
+            .mission
+            .as_ref()
+            .ok_or_else(|| mcp_err("E_INVALID", "mission_save needs mission", None))?;
+        self.confirm_gate(
+            "work_link",
+            args.confirm_nonce.as_deref(),
+            &operator_mission_summary(args.mission_id, args.item_id, input),
+            caller,
+        )?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        operator_owner_scope(&s).map_err(to_mcp_err)
+    }
 }
 
 /// A coded [`McpError`] (built by `mcp_err` / `to_mcp_err`) back as the
@@ -2744,6 +2915,40 @@ impl super::FleetTools {
 /// Refuse a `work_link { mission_* }` from a per-host or peer token: a
 /// mission is a person's plan, and a session or another hub does not run
 /// one (orchestration O1).
+/// The scope the operator acts in for missions: the hub's personal owner's,
+/// built as the master's is (`Caller::view_scope`).
+///
+/// One operator serves the hub, born from its owner's Control, so the owner
+/// is the person it speaks for. Only the mission paths ask for this —
+/// everywhere else the operator stays the person-less client it is — and a
+/// hub that cannot name its owner answers a refusing scope, so the save is
+/// refused as before (T1's fail-closed rule).
+fn operator_owner_scope(
+    s: &crate::store::Store,
+) -> Result<crate::service::view_scope::ViewScope, crate::ipc_error::IpcError> {
+    Caller::master().view_scope(s)
+}
+
+/// What the person approves when the operator saves a mission: every field
+/// it sets, so the approval covers the whole change (the nonce is bound to
+/// this text).
+fn operator_mission_summary(
+    mission_id: Option<i64>,
+    item_id: Option<i64>,
+    m: &crate::service::work::missions::MissionInput,
+) -> String {
+    let head = match (mission_id, m.name.as_deref()) {
+        (Some(id), _) => format!("Change mission {id}"),
+        (None, Some(name)) => format!("Create mission {:?}", name),
+        (None, None) => "Create a mission".to_string(),
+    };
+    let fields = serde_json::to_string(m).unwrap_or_default();
+    match (mission_id, item_id) {
+        (None, Some(item)) => format!("{head} rooted at task {item}: {fields}"),
+        _ => format!("{head}: {fields}"),
+    }
+}
+
 fn mission_caller(caller: &Caller) -> Result<(), McpError> {
     if caller.host_alias.is_some() || caller.mode == crate::mcp::auth::TokenMode::Peer {
         return Err(mcp_err(
