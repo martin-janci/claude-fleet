@@ -188,11 +188,7 @@ impl FleetTools {
     /// The session a form (or its draft) opens in: the caller's own, proven
     /// by its per-host token and `X-Fleet-Pane`.
     fn asking_session(&self, caller: &Caller) -> Result<i64, McpError> {
-        let scope = self.view_scope(caller)?;
-        scope
-            .proven_session
-            .filter(|_| caller.host_alias.is_some())
-            .ok_or_else(|| {
+        self.own_session(caller)?.ok_or_else(|| {
                 mcp_err(
                     codes::E_NOT_A_SESSION,
                     "a form opens in the asking session's chat: call ask from inside a fleet session (its per-host token and X-Fleet-Pane)",

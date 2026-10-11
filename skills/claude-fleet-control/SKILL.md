@@ -152,6 +152,9 @@ unless `force: true`), and excludes you from `broadcast_prompt`.
 `host_alias` is configuration (whatever the user named the host in the picker)
 and is not derivable from `hostname`. Look it up:
 
+From inside a fleet session, `whoami {}` with no argument is enough: your pane
+(the `X-Fleet-Pane` header your MCP entry sends) names your row. Otherwise:
+
 1. `tmux display-message -p '#S'` — your `tmux_name`.
 2. `whoami { tmux_name: "<#S>" }` — returns your fleet row (`session_id`,
    `host_alias`, …). `E_NOTFOUND`: fleet has not reconciled you yet (retry after
@@ -279,6 +282,26 @@ names (`{"repo": "acme/pos", "host": "mercury"}`). The form opens with
 those answers marked Drafted; the person checks them and presses its last
 button. Never guess a value the message does not say.
 
+## Your own tasks
+
+From inside a fleet session you can find and manage what is assigned to you
+without knowing your `session_id`:
+
+- `work { action: "session_tasks" }` — every task linked to YOUR session
+  (active, suggested, rejected, ended) with `is_self: true` on the page and on
+  each link; `primary_link_id` is the one you are on.
+- `work { action: "task", task_id }` — the task's `sessions[]`; the one with
+  `is_self: true` is you, the others are other sessions on the same task.
+- `list_tasks { mine: true }` — the delegated jobs you dispatched or were given;
+  each row says `is_self_requester` or `is_self_worker`.
+  `list_tasks { worker_session_id }` lists what one session was given.
+
+Change which task you are on with `work_link { session_id: <yours>, action:
+"link" | "switch" | "unlink", … }`. A local task (no tracker ticket) you work
+on also takes `work_link { action: "set_status", item_id, status }`, `edit`
+and `comment` by `item_id`; a tracker ticket's status changes in the tracker.
+A write is refused when the task is also linked to a session you cannot drive.
+
 ## Tasks, subtasks and proposals (shared work context)
 
 - `work_link { action: "create", title, parent?: "item:<id>", project_id?, notes? }` — a native task `TASK-<id>`, or a subtask under `parent`. A standalone task needs the desktop or the master token; a per-host token may add subtasks under a task its own sessions work on.
@@ -305,7 +328,7 @@ back, dispatch a task instead of hand-rolling send / poll / capture:
 3. The result also lands in your `inbox` as `kind: task_result`, so a
    controller that is not blocked on `wait_for_task` still sees it.
 
-`list_tasks { requester_session_id?, state? }` shows what is outstanding
+`list_tasks { requester_session_id?, worker_session_id?, mine?, state? }` shows what is outstanding
 (`queued | running | done | failed | cancelled`). A worker's row carries
 `parent_session_id` = the requester. If **you** are the worker: when a prompt
 ends with the `FLEET_TASK_DONE_…` instruction, finish the work, then print

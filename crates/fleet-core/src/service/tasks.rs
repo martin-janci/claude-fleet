@@ -780,7 +780,7 @@ pub fn task_visible_in_scope(
 /// and result fleet-wide.
 pub fn list_tasks_for(
     store: &Mutex<Store>,
-    requester_session_id: Option<i64>,
+    end: crate::store::TaskEnd,
     state: Option<&str>,
     limit: i64,
     host: Option<&str>,
@@ -800,7 +800,7 @@ pub fn list_tasks_for(
     let s = lock(store)?;
     // Converge stale tasks before reporting them (cheap; see sweep_open_tasks).
     let _ = sweep_open_tasks(&s, now_unix());
-    let rows = s.list_tasks(requester_session_id, state, host, clamp_task_limit(limit))?;
+    let rows = s.list_tasks(end, state, host, clamp_task_limit(limit))?;
     let mut kept = Vec::with_capacity(rows.len());
     for t in rows {
         if task_visible_in_scope(&s, &t, scope)? {
@@ -1148,6 +1148,7 @@ async fn capture_worker_pane(
 mod tests {
     use super::*;
     use crate::store::StartSource;
+    use crate::store::TaskEnd;
 
     fn seed(s: &Store, host: &str, name: &str) -> i64 {
         s.upsert_host(host).unwrap();
@@ -2007,7 +2008,7 @@ mod tests {
         // (multi-user M1's person half has its own test below).
         let view = crate::service::view_scope::ViewScope::internal();
         let ids = |host: Option<&str>| -> Vec<i64> {
-            let mut v: Vec<i64> = list_tasks_for(&store, None, None, 50, host, &view)
+            let mut v: Vec<i64> = list_tasks_for(&store, TaskEnd::Any, None, 50, host, &view)
                 .unwrap()
                 .iter()
                 .map(|t| t.id)
@@ -2025,19 +2026,26 @@ mod tests {
         assert!(task_visible_to(&s, &orphan, None).unwrap());
         drop(s);
         assert_eq!(
-            list_tasks_for(&store, Some(ctl_b), None, 50, Some("hosta"), &view)
-                .unwrap()
-                .len(),
+            list_tasks_for(
+                &store,
+                TaskEnd::Requester(ctl_b),
+                None,
+                50,
+                Some("hosta"),
+                &view
+            )
+            .unwrap()
+            .len(),
             1
         );
         assert_eq!(
-            list_tasks_for(&store, None, Some("bogus"), 50, None, &view)
+            list_tasks_for(&store, TaskEnd::Any, Some("bogus"), 50, None, &view)
                 .unwrap_err()
                 .code,
             "E_INVALID"
         );
         assert_eq!(
-            list_tasks_for(&store, None, Some("queued"), 50, None, &view)
+            list_tasks_for(&store, TaskEnd::Any, Some("queued"), 50, None, &view)
                 .unwrap()
                 .len(),
             4
