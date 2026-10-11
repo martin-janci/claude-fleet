@@ -457,9 +457,52 @@ fn mark_provisioned(store: &Mutex<Store>, host: &str, warning: Option<&str>, owe
 /// How often a reprovision started under Pause all looks again.
 const PAUSED_RECHECK: Duration = Duration::from_secs(60);
 
-/// Refresh every reachable, non-hidden host whose stored fingerprint is
-/// not this build's, `delay` after start (the first reconcile pass has
-/// refreshed `reachable` by then). Content only: unattended and secret-free.
+/// How often the stale-host refresh looks again after its first pass.
+///
+/// It used to be a one-shot a minute after start, so a host that was offline
+/// then — or whose fleet-agent had not said hello yet, or whose refresh
+/// failed once — kept "provisioned with an older fleet" until the next hub
+/// restart, and a paired desktop could only show a disabled button
+/// (mefistos, 2026-10-11). A pass that finds nothing stale costs one store
+/// read.
+pub const REPROVISION_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// The longest a host whose refresh keeps failing waits between attempts.
+const REPROVISION_BACKOFF_MAX: Duration = Duration::from_secs(6 * 3600);
+
+/// Per host, the refreshes that failed in a row and the unix second before
+/// which the next pass leaves it alone: a host that fails waits
+/// [`REPROVISION_EVERY`], then twice that, up to
+/// [`REPROVISION_BACKOFF_MAX`]. In memory only — a hub restart retries
+/// every stale host at once, which is what an upgrade wants.
+#[derive(Debug, Default)]
+pub struct RetryBook(std::collections::HashMap<String, (u32, i64)>);
+
+impl RetryBook {
+    fn due(&self, host: &str, now: i64) -> bool {
+        self.0.get(host).is_none_or(|&(_, at)| now >= at)
+    }
+
+    fn failed(&mut self, host: &str, now: i64) {
+        let entry = self.0.entry(host.to_string()).or_insert((0, 0));
+        entry.0 = entry.0.saturating_add(1);
+        let wait = REPROVISION_EVERY
+            .as_secs()
+            .saturating_mul(1 << (entry.0 - 1).min(16))
+            .min(REPROVISION_BACKOFF_MAX.as_secs());
+        entry.1 = now.saturating_add(i64::try_from(wait).unwrap_or(i64::MAX));
+    }
+
+    fn succeeded(&mut self, host: &str) {
+        self.0.remove(host);
+    }
+}
+
+/// Keep every reachable, non-hidden host's content at this build's: the
+/// first pass `delay` after start (the first reconcile pass has refreshed
+/// `reachable` by then), then one every [`REPROVISION_EVERY`], so a host
+/// that comes back online, or whose agent reconnects, is refreshed without
+/// anybody asking. Content only: unattended and secret-free.
 pub fn spawn_reprovision_stale(
     store: Arc<Mutex<Store>>,
     ssh: Arc<crate::ssh::SshClient>,
@@ -468,53 +511,81 @@ pub fn spawn_reprovision_stale(
 ) -> tokio::task::JoinHandle<()> {
     crate::rt::spawn(async move {
         tokio::time::sleep(delay).await;
-        // A one-shot: started under Pause all, it waits for the resume
-        // rather than giving up until the next restart.
-        while !crate::service::loops::gate("reprovision", &store, Some(PAUSED_RECHECK)) {
-            tokio::time::sleep(PAUSED_RECHECK).await;
+        let mut book = RetryBook::default();
+        loop {
+            // Under Pause all a pass touches nothing and the next look is a
+            // minute away, so the resume is not missed by a whole period.
+            let next = match reprovision_stale_pass(&store, &*ssh, &base, &mut book).await {
+                Some(_) => REPROVISION_EVERY,
+                None => PAUSED_RECHECK,
+            };
+            tokio::time::sleep(next).await;
         }
-        reprovision_stale_pass(&store, &*ssh, &base).await;
     })
 }
 
-/// One refresh of every stale host; the hosts it tried, or `None` when
-/// Pause all (redesign 8.1) or an unreadable store stopped it.
+/// One refresh of every stale host that is due; the hosts it tried, or
+/// `None` when Pause all (redesign 8.1) or an unreadable store stopped it.
+///
+/// A refresh that fails is recorded as the host's `provision_warning`
+/// (owed a retry), so Attention names the real reason instead of "an older
+/// fleet", and the next pass after its backoff tries again.
 async fn reprovision_stale_pass(
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
     base: &HubBase,
+    book: &mut RetryBook,
 ) -> Option<Vec<String>> {
-    if !crate::service::loops::gate("reprovision", store, None) {
+    if !crate::service::loops::gate("reprovision", store, Some(PAUSED_RECHECK)) {
         return None;
     }
+    let now = crate::store::now_unix();
     let stale: Vec<String> = match store.lock() {
         Ok(s) => crate::service::hosts::active_hosts(
             s.list_hosts().unwrap_or_default(),
             crate::service::hub::local_host_enabled(),
         )
         .into_iter()
-        .filter(|h| h.provisioned && h.reachable && h.provision_stale)
+        .filter(|h| h.provisioned && h.reachable && h.provision_stale && book.due(&h.alias, now))
         .map(|h| h.alias)
         .collect(),
         Err(_) => return None,
     };
     for host in &stale {
         match provision_content_only(store, ssh, host, base).await {
-            Ok(None) => tracing::info!(host, "[provision] refreshed stale content"),
-            Ok(Some(w)) => tracing::warn!(
-                host,
-                warning = %w,
-                "[provision] refreshed stale content with a warning"
-            ),
-            Err(e) => tracing::warn!(
-                host,
-                code = %e.code,
-                error = %e.message,
-                "[provision] stale content not refreshed"
-            ),
+            Ok(None) => {
+                book.succeeded(host);
+                tracing::info!(host, "[provision] refreshed stale content");
+            }
+            Ok(Some(w)) => {
+                // `mark_provisioned` already kept the warning and, when the
+                // step is retryable, left the host stale for a later pass.
+                book.failed(host, now);
+                tracing::warn!(
+                    host,
+                    warning = %w,
+                    "[provision] refreshed stale content with a warning"
+                );
+            }
+            Err(e) => {
+                book.failed(host, now);
+                if let Ok(s) = store.lock() {
+                    let _ = s.record_host_provision_outcome(
+                        host,
+                        Some(&format!("refreshing its content failed: {}", e.message)),
+                        true,
+                    );
+                }
+                tracing::warn!(
+                    host,
+                    code = %e.code,
+                    error = %e.message,
+                    "[provision] stale content not refreshed"
+                );
+            }
         }
     }
-    crate::service::loops::report("reprovision", Ok::<_, String>(()), None);
+    crate::service::loops::report("reprovision", Ok::<_, String>(()), Some(REPROVISION_EVERY));
     Some(stale)
 }
 
@@ -985,12 +1056,16 @@ fn has_tmux_clipboard_setting(content: &str) -> bool {
     false
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// Deserialize too: a paired desktop reads it back from the hub's
+/// `provision_hosts` (one host's content refresh, from its page).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostProvisionResult {
     pub host: String,
     /// "provisioned" | "skipped" | "failed"
     pub status: String,
+    /// The hub's `ok_json_compact` strips a null, hence the default.
+    #[serde(default)]
     pub detail: Option<String>,
 }
 
@@ -2730,7 +2805,10 @@ mod tests {
                 .unwrap();
         }
         let fake = fresh_host();
-        assert_eq!(reprovision_stale_pass(&store, &fake, &base()).await, None);
+        assert_eq!(
+            reprovision_stale_pass(&store, &fake, &base(), &mut RetryBook::default()).await,
+            None
+        );
         assert!(fake.calls().is_empty(), "no host touched while paused");
         assert!(
             store
@@ -2748,9 +2826,87 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            reprovision_stale_pass(&store, &fake, &base()).await,
+            reprovision_stale_pass(&store, &fake, &base(), &mut RetryBook::default()).await,
             Some(vec!["h1".to_string()])
         );
+    }
+
+    /// mefistos, 2026-10-11: a refresh that fails is not forgotten until
+    /// the next hub restart. The reason becomes the host's warning, the
+    /// host waits out its backoff, and a later pass retries and clears both.
+    #[tokio::test]
+    async fn a_failed_stale_refresh_is_recorded_backed_off_and_retried() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("h1", Some("h1")).unwrap();
+            s.update_host_probe("h1", true, None, None, 1).unwrap();
+            s.upsert_host_token("h1", TOKEN).unwrap();
+            s.set_host_provisioned("h1", true).unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE hosts SET provision_fingerprint='old' WHERE alias='h1'",
+                    [],
+                )
+                .unwrap();
+        }
+        let down = fresh_host();
+        down.on_host(
+            "h1",
+            Match::Any,
+            Reply::SpawnError {
+                message: "agent not connected".into(),
+            },
+        );
+        let mut book = RetryBook::default();
+        assert_eq!(
+            reprovision_stale_pass(&store, &down, &base(), &mut book).await,
+            Some(vec!["h1".to_string()])
+        );
+        let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
+        assert!(row.provision_stale, "still owed the refresh");
+        let warning = row.provision_warning.expect("the reason is kept");
+        assert!(warning.contains("agent not connected"), "{warning}");
+
+        // Backed off: the very next pass leaves it alone.
+        let calls = down.calls().len();
+        assert_eq!(
+            reprovision_stale_pass(&store, &down, &base(), &mut book).await,
+            Some(vec![])
+        );
+        assert_eq!(
+            down.calls().len(),
+            calls,
+            "no host touched while backing off"
+        );
+
+        // Once due, a healthy host is refreshed and both marks clear.
+        book.0.get_mut("h1").unwrap().1 = 0;
+        assert_eq!(
+            reprovision_stale_pass(&store, &fresh_host(), &base(), &mut book).await,
+            Some(vec!["h1".to_string()])
+        );
+        let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
+        assert!(!row.provision_stale);
+        assert_eq!(row.provision_warning, None);
+        assert!(book.0.is_empty());
+    }
+
+    #[test]
+    fn the_refresh_backoff_doubles_up_to_its_cap() {
+        let mut book = RetryBook::default();
+        let every = REPROVISION_EVERY.as_secs() as i64;
+        book.failed("h", 0);
+        assert_eq!(book.0["h"], (1, every));
+        assert!(!book.due("h", every - 1) && book.due("h", every));
+        book.failed("h", 0);
+        assert_eq!(book.0["h"].1, 2 * every);
+        for _ in 0..40 {
+            book.failed("h", 0);
+        }
+        assert_eq!(book.0["h"].1, REPROVISION_BACKOFF_MAX.as_secs() as i64);
+        book.succeeded("h");
+        assert!(book.due("h", 0));
     }
 
     /// hosts F1: the unattended refresh writes skills and hooks with the

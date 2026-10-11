@@ -580,11 +580,17 @@ MCP server entry (the skill files and hooks are picked up live).
 **Stale content, and `fleet-hub provision`.** Every provisioning records a
 fingerprint of what it shipped (both skills, the managed CLAUDE.md block and
 the hook shape); `list_hosts` reports `provision_stale: true` for a host whose
-fingerprint is not this build's. A minute after start the hub refreshes every
-reachable stale host *content only* — skills, the CLAUDE.md block and hooks,
-with the host's existing token; no new token, no `~/.claude.json` rewrite, no
-Claude restart. By hand: `fleet-hub provision [--host <alias>]
-[--content-only]` (the `provision_hosts {host, content_only}` tool).
+fingerprint is not this build's. A minute after start, and then every five
+minutes, the hub refreshes every reachable stale host *content only* —
+skills, the CLAUDE.md block and hooks, with the host's existing token; no new
+token, no `~/.claude.json` rewrite, no Claude restart. A host that was offline
+(or whose agent had not reconnected) is picked up by a later pass; a refresh
+that fails is kept as the host's `provision_warning` and retried with a
+backoff (5 min, doubling, at most 6 h). By hand: `fleet-hub provision [--host
+<alias>] [--content-only]` (the `provision_hosts {host, content_only}` tool),
+or **Re-provision this host** on the host's page in a paired desktop — the
+hub owner's own device may run `provision_hosts` for one host with
+`content_only` (never every host, a token or a rotation).
 
 **The pane header, and why `--content-only` cannot add it.** Provisioning also
 writes `"X-Fleet-Pane": "${TMUX_PANE:-}"` into each host's
@@ -3346,7 +3352,7 @@ Every command below refuses in hub client mode; the full table, with the command
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
 | `merge_host` | merging one host's rows into another is fleet administration, which the hub reserves for its own operator — run it there with `fleet-hub host merge <from> <into>` |
 | `probe_ssh_alias` | it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it |
-| `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub provision [--host <alias>] [--content-only]` |
+| `provision_hosts` | Refuses when no host, or rotate: true — a full provisioning (otherwise routes to `provision_hosts`): it rewrites every host's hook block and tokens to report to this app; provision from the hub with `fleet-hub provision [--host <alias>] [--rotate]` (one host's content is refreshed from its page, and the hub refreshes stale hosts by itself) |
 | `purge_project` | it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub |
 | `record_host_placement` | the decision model's runs are recorded on the hub that owns the fleet; nothing to record here |
 | `refresh_account_usage` | it reads the account's usage over this machine's SSH connection to the host; refresh it on the hub |

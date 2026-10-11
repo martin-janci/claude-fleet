@@ -1316,6 +1316,39 @@ impl HubBackend {
         self.route("repair_session", &json!({ "session_id": session_id }))
             .await
     }
+
+    /// `commands::mcp::provision_hosts` for one host, without a rotation:
+    /// the hub's content-only refresh, the one provisioning its owner's
+    /// device may ask for (`routed::provision_hosts` refuses the rest before
+    /// this is called). A hub older than that answers `E_FORBIDDEN`, which
+    /// is turned into what to do about it rather than "a fleet-admin tool".
+    pub async fn reprovision_host(
+        &self,
+        host: &str,
+    ) -> Result<Vec<fleet_core::service::provision::HostProvisionResult>, IpcError> {
+        self.route(
+            "provision_hosts",
+            &json!({ "host": host, "content_only": true }),
+        )
+        .await
+        .map_err(|e| {
+            if e.code == codes::E_FORBIDDEN {
+                IpcError::new(
+                    codes::E_FORBIDDEN,
+                    format!(
+                        "the hub did not let this device re-provision {host} — it is older \
+                         than this app, or this device is not the hub owner's. An up-to-date \
+                         hub refreshes a stale host by itself within a few minutes; to do it \
+                         now, run `fleet-hub provision --host {host} --content-only` on the hub \
+                         ({})",
+                        e.message
+                    ),
+                )
+            } else {
+                e
+            }
+        })
+    }
 }
 
 /// Added to the hub's own per-tool deadline ([`fleet_core::mcp::tool_deadline`])

@@ -4317,6 +4317,25 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // One host without a rotation — "Re-provision this host" — routes as
+        // the hub's content-only refresh of that host (mefistos, 2026-10-11).
+        (
+            "provision_hosts",
+            "provision_hosts",
+            json!({ "host": "mefistos", "content_only": true }),
+            r#"[{"host":"mefistos","status":"provisioned"}]"#,
+            Box::new(|b, s, h| {
+                block_on(commands::mcp::routed::provision_hosts(
+                    b,
+                    false,
+                    Some("mefistos".into()),
+                    s,
+                    h,
+                    &Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new()),
+                ))
+                .map(|_| ())
+            }),
+        ),
         // `ensure_operator` needs `ssh` and `reg` the way `move_session` and
         // `new_session` do, so it copies their entry shape rather than the
         // simpler `(b, s, _)` one `operator_status` below uses. Its service
@@ -6303,6 +6322,32 @@ fn a_command_the_table_cannot_answer_is_still_refused() {
             .is_ok(),
         "standalone owns its own fleet; a missing row is not its problem"
     );
+}
+
+/// A full provisioning — every host, or a rotation — mints tokens and
+/// rewrites `~/.claude.json`, so a paired desktop refuses it rather than
+/// route it; only one host's content refresh reaches the hub.
+#[test]
+fn provision_hosts_routes_one_hosts_refresh_and_refuses_a_full_run() {
+    for (rotate, host) in [(false, None), (true, Some("mefistos".to_string()))] {
+        let fake = Fake::answering("[]");
+        let (_dir, st) = store();
+        let err = block_on(commands::mcp::routed::provision_hosts(
+            &remote_backend(&fake),
+            rotate,
+            host.clone(),
+            &st,
+            &ssh(),
+            &Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new()),
+        ))
+        .expect_err("a full provisioning stays the hub operator's");
+        assert_eq!(
+            err.code,
+            codes::E_LOCAL_ONLY,
+            "rotate={rotate} host={host:?}: {err:?}"
+        );
+        fake.was_not_called();
+    }
 }
 
 /// #146: `repair_session` routes only

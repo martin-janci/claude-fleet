@@ -149,7 +149,9 @@
     checklistRows({ host, check: lastCheck, inventory: $inventory, hubVersion, agentsAccepted: $hubStatus.remote }),
   );
   const checkBlocked = $derived(hubBlock('check_host', $hubStatus));
-  const provisionBlocked = $derived(hubBlock('provision_hosts', $hubStatus));
+  // Paired with a hub this asks the hub to refresh this one host's content;
+  // blocked only while the hub is unusable or the link is down.
+  const provisionBlocked = $derived(hubActionBlocked('provision_hosts', $hubStatus, $hubConnection));
   const reprovisionAdvised = $derived(needsReprovision(checklist, host));
   // Orbit Fleet 4.13: the Hex field beside what is running, Layout: New only.
   const liveText = $derived(checklistLoaderText(host.alias, checking, provisioning));

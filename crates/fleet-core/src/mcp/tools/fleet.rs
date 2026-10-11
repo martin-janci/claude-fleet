@@ -500,9 +500,11 @@ impl FleetTools {
         (per-host bearer token) into every reachable host's ~/.claude.json \
         (a reverse SSH tunnel when the hub is loopback-only). Returns \
         per-host status; each host must restart Claude to load it. host: \
-        one alias; content_only: skills, CLAUDE.md and hooks only, no token.")]
+        one alias; content_only: skills, CLAUDE.md and hooks only, no token. \
+        The hub owner's device may run content_only for one host only.")]
     pub(super) async fn provision_hosts(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ProvisionHostsParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
@@ -512,6 +514,7 @@ impl FleetTools {
                 p.rotate, p.host, p.content_only
             ),
         );
+        provision_scope_allowed(&caller, &p)?;
         let base = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?
@@ -1488,6 +1491,26 @@ pub(super) fn org_admin_writer(caller: &Caller) -> Result<(), McpError> {
              the hub's operator trusts it (a full device): fleet-hub client trust {}",
             caller.client.as_ref().map_or("<name>", |c| c.name.as_str())
         ),
+        None,
+    ))
+}
+
+/// `provision_hosts` reaches the hub owner's own device (`Access::Person`)
+/// for one thing: refreshing ONE host's content, the secret-free pass the hub
+/// also runs by itself for every stale host. A provisioning of every host,
+/// or one that mints tokens (a full run, or `rotate`), stays the master's.
+pub(super) fn provision_scope_allowed(
+    caller: &Caller,
+    p: &ProvisionHostsParams,
+) -> Result<(), McpError> {
+    if caller.is_master() || (p.content_only && !p.rotate && p.host.is_some()) {
+        return Ok(());
+    }
+    Err(mcp_err(
+        "E_FORBIDDEN",
+        "a device may only refresh one host's content (host + content_only); provisioning \
+         every host, minting tokens or rotating them is the hub operator's: fleet-hub \
+         provision [--host <alias>] [--rotate]",
         None,
     ))
 }
