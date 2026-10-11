@@ -55,7 +55,7 @@ pub struct AgentInstallRow {
 const INSTALL_COLS: &str = "id, host_alias, version, state, step, detail, started_at, finished_at";
 
 /// The add-host wizard's drafts are the `add_host` rows of `wizard_state`
-/// (migration 165), fleet's own (no person): the desktop wizard runs over
+/// (migration 166), fleet's own (no person): the desktop wizard runs over
 /// this app's own SSH.
 const ADD_HOST: &str = "add_host";
 

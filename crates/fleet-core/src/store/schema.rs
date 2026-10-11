@@ -358,7 +358,7 @@ fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 165: `wizard_state` exists (and
+/// `already_applied` guard of migration 166: `wizard_state` exists (and
 /// `host_setups`, which it replaced, is gone). See [`Migration`].
 fn has_wizard_state(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1883,6 +1883,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/165_wizard_state.sql"),
         already_applied: Some(has_wizard_state),
     },
+    // Task attachments and their content-addressed blobs: new tables,
+    // idempotent.
+    Migration::plain(
+        166,
+        include_str!("../../migrations/166_work_item_attachments.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -6269,7 +6275,7 @@ mod tests {
     /// `host_setups` into `wizard_state` as `add_host` rows, and the old
     /// table goes; the store still reads them as drafts.
     #[test]
-    fn migration_165_moves_the_add_host_drafts_into_wizard_state() {
+    fn migration_166_moves_the_add_host_drafts_into_wizard_state() {
         let s = store_at_version(164);
         s.conn
             .execute_batch(

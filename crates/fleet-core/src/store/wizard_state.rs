@@ -1,4 +1,4 @@
-//! Wizards left half-way (migration 165, gap plan G7.2): one row per kind,
+//! Wizards left half-way (migration 166, gap plan G7.2): one row per kind,
 //! key and person, so a wizard resumes on another device. Who may read and
 //! write a row and what a row may hold are in `service::wizard_state`; this
 //! is the rows. The add-host wizard's drafts (`store::host_setup`) are the

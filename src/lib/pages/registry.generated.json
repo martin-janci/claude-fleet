@@ -1611,6 +1611,27 @@
       "danger": {
         "level": "none"
       },
+      "default": "10",
+      "help": "The largest file or image a task takes. At most 16 MiB: what one call between the desktop and the hub carries.",
+      "key": "work.attachment_max_mb",
+      "kind": {
+        "max": 16,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Largest attachment",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "mib",
+      "value": "10"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "2",
       "help": "Days a linked ticket must be done before Tidy up suggests its session.",
       "key": "work.tidy_done_days",
@@ -4139,6 +4160,15 @@
                 }
               ],
               "title": "How long work history is kept"
+            },
+            {
+              "items": [
+                {
+                  "key": "work.attachment_max_mb",
+                  "type": "field"
+                }
+              ],
+              "title": "Attachments"
             }
           ],
           "title": "Retention"

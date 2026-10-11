@@ -866,6 +866,11 @@ pub struct TaskDetail {
     /// (the newest `COMMENTS_SERVED_MAX`). Never a tracker's comments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<crate::store::CommentRow>,
+    /// Files and images on the task in fleet, newest first (at most
+    /// `ATTACHMENTS_SERVED_MAX`): metadata only, the bytes are
+    /// `work { attachment }`'s.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::store::AttachmentRow>,
 }
 
 /// The task one of a session's links points at, briefly.
@@ -3506,7 +3511,7 @@ pub fn task(
     // that journal; its native children, their jobs, live sessions and
     // the steps of every conversation of the task and its subtasks: a
     // second, short lock.
-    let (meta, journal, work, comments) = {
+    let (meta, journal, work, comments, attachments) = {
         let s = lock(store)?;
         let meta = item
             .map(|i| s.work_item_meta(i.item.id))
@@ -3526,7 +3531,11 @@ pub fn task(
             Some(i) => s.item_comments(i.item.id)?,
             None => Vec::new(),
         };
-        (meta, journal, work, comments)
+        let attachments = match item {
+            Some(i) => s.item_attachments(i.item.id)?,
+            None => Vec::new(),
+        };
+        (meta, journal, work, comments, attachments)
     };
     // The tracker that might serve the whole description, and the key to name
     // it by — flattened as every other `fence_ticket` call site flattens it
@@ -3674,6 +3683,19 @@ pub fn task(
             c
         })
         .collect();
+    // An attachment's author is the same device label, withheld the same
+    // way; the bytes are never in this answer.
+    let attachments = attachments
+        .into_iter()
+        .map(|mut a| {
+            let own = matches!((a.author_person_id, view.person), (Some(x), Some(p)) if x == p);
+            if !(sees_any_device || own) {
+                a.author = String::new();
+                a.author_person_id = None;
+            }
+            a
+        })
+        .collect();
     Ok(TaskDetail {
         task,
         aliases,
@@ -3691,6 +3713,7 @@ pub fn task(
         jobs,
         steps,
         comments,
+        attachments,
     })
 }
 

@@ -1418,6 +1418,58 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Task attachments.
+        (
+            "attach_to_work",
+            "work_link",
+            json!({ "session_id": null, "action": "attach", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "name": "a.png", "mime": "image/png",
+                    "data_base64": "iVBORw0KGgo=" }),
+            r#"{"id":4,"item_id":9,"name":"a.png","mime":"image/png","size":8,"sha256":"ab","author":"client:desk","source":"fleet","created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::attach_to_work(
+                    b,
+                    commands::work_view::AttachToWorkArgs {
+                        item_id: 9,
+                        name: "a.png".into(),
+                        mime: "image/png".into(),
+                        data_base64: "iVBORw0KGgo=".into(),
+                        comment_id: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "delete_work_attachment",
+            "work_link",
+            json!({ "session_id": null, "action": "attachment_delete", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "attachment_id": 4 }),
+            r#"{"id":4,"item_id":9,"name":"a.png","mime":"image/png","size":8,"sha256":"ab","author":"client:desk","source":"fleet","created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::delete_work_attachment(
+                    b,
+                    commands::work_view::WorkAttachmentArgs { attachment_id: 4 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_attachment",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "attachment", "attachment_id": 4 }),
+            r#"{"attachment":{"id":4,"item_id":9,"name":"a.png","mime":"image/png","size":8,"sha256":"ab","author":"","source":"fleet","created_at":1},"data_base64":"iVBORw0KGgo="}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_attachment(
+                    b,
+                    commands::work_view::WorkAttachmentArgs { attachment_id: 4 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // Epics (sprints design 2026-09-28 §3).
         (
             "set_work_parent",

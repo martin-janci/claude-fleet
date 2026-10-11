@@ -9,7 +9,9 @@ import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('./open_external', () => ({ openExternal: vi.fn(async () => true) }));
+vi.mock('./clipboard', async (orig) => ({ ...(await orig<typeof import('./clipboard')>()), copyText: vi.fn(async () => true) }));
 import { invoke } from '@tauri-apps/api/core';
+import { copyText } from './clipboard';
 import { openExternal } from './open_external';
 import WorkTaskDetail from './WorkTaskDetail.svelte';
 import { expectAccessible } from './a11y_check';
@@ -857,7 +859,7 @@ describe('WorkTaskDetail', () => {
     expect(get(selectedTaskId)).toBe('item:12');
   });
 
-  it('placement and rules sit behind a disclosure; the work sections are Overview’s, the steps Activity’s', async () => {
+  it('placement sits in the rail with its why behind a disclosure; the work sections are Overview’s, the steps Activity’s', async () => {
     handlers.work_task = () => ({
       ...trackerTask,
       subtasks: [{ task_id: 'item:41', item_id: 41, key: 'TASK-41', title: 'SELECT stats', origin: 'manual', status: 'todo', live_sessions: 0 }],
@@ -865,17 +867,64 @@ describe('WorkTaskDetail', () => {
     });
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    const more = screen.getByTestId('work-task-more') as HTMLDetailsElement;
+    const rail = screen.getByRole('complementary', { name: 'Properties' });
+    expect(within(rail).getByTestId('work-task-place')).toBeTruthy();
+    expect(within(rail).getByTestId('work-task-org')).toBeTruthy();
+    const more = within(rail).getByTestId('work-task-more') as HTMLDetailsElement;
     expect(more.open).toBe(false);
-    expect(within(more).getByTestId('work-task-place')).toBeTruthy();
-    expect(within(more).getByTestId('work-task-org')).toBeTruthy();
-    await fireEvent.click(screen.getByText('Placement & rules'));
+    expect(within(more).getByTestId('work-task-group-note')).toBeTruthy();
+    await fireEvent.click(screen.getByText('Why here'));
     expect(screen.getByTestId('task-subtasks')).toBeTruthy();
     expect(screen.queryByTestId('task-steps')).toBeNull();
     await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
     expect(screen.queryByTestId('task-subtasks')).toBeNull();
     expect(screen.getByTestId('task-step').textContent).toContain('Read ABC-12');
   });
+  describe('the redesigned page: header, Markdown, rail', () => {
+    it('names where the task lives, copies its key, and keeps Start in the header', async () => {
+      render(WorkTaskDetail, { taskId: 'item:12' });
+      await flush();
+      const crumbs = screen.getByTestId('work-task-crumbs');
+      expect(crumbs.textContent).toContain('Acme');
+      expect(screen.getByTestId('work-task-key').textContent).toBe('ABC-12');
+      await fireEvent.click(screen.getByTestId('work-task-copy-key'));
+      await flush();
+      expect(vi.mocked(copyText)).toHaveBeenCalledWith('ABC-12');
+      expect(screen.getByRole('banner').querySelector('.wb--bar')).not.toBeNull();
+    });
+
+    it('renders the description and the brief as Markdown, never as HTML', async () => {
+      handlers.work_task = () => ({
+        ...trackerTask,
+        description: '**Map** keyed by `(org, group)`:\n\n- org 2, count 7\n- <img src=x onerror=alert(1)>',
+        notes: 'Reproduce with `work tree`.\n\n1. merge\n2. badge',
+      });
+      render(WorkTaskDetail, { taskId: 'item:12' });
+      await flush();
+      const d = screen.getByTestId('work-task-description');
+      expect(d.querySelector('strong')?.textContent).toBe('Map');
+      expect(d.querySelectorAll('li')).toHaveLength(2);
+      expect(d.querySelector('img')).toBeNull();
+      expect(d.textContent).toContain('<img src=x onerror=alert(1)>');
+      const brief = screen.getByTestId('task-notes');
+      expect(brief.querySelector('code')?.textContent).toBe('work tree');
+      expect(brief.querySelectorAll('ol li')).toHaveLength(2);
+    });
+
+    it('shows a native task’s subtask progress among the header chips', async () => {
+      handlers.work_task = () => ({
+        ...localTask,
+        subtasks: [
+          { task_id: 'item:41', item_id: 41, title: 'a', origin: 'manual', status: 'done', live_sessions: 0 },
+          { task_id: 'item:42', item_id: 42, title: 'b', origin: 'manual', status: 'todo', live_sessions: 0 },
+        ],
+      });
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      expect(screen.getByTestId('work-task-subtask-chip').textContent).toBe('✓ 1 / 2');
+    });
+  });
+
   describe('G3.4: tabs, Delivery, inline status, the start rule', () => {
     it('Sessions counts its links; Activity says when nothing happened', async () => {
       handlers.work_task = () => ({ ...localTask, last_outcome: null, task: { ...localTask.task, sessions: [] } });
@@ -933,6 +982,40 @@ describe('WorkTaskDetail', () => {
       expect(calls('delete_work_comment')).toEqual([{ comment_id: 2 }]);
     });
 
+    it('Attachments: a local task shows the section in Overview; a ticket key with no item does not', async () => {
+      handlers.work_task = (a) =>
+        a.task_id === 'item:77'
+          ? { ...localTask, attachments: [{ id: 5, item_id: 77, name: 'log.txt', mime: 'text/plain', size: 2048, sha256: 'ab', author: 'desktop', created_at: 1_790_000_000, mine: true }] }
+          : { ...trackerTask, task: { ...trackerTask.task, item_id: null } };
+      const { unmount } = render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      expect(screen.getByTestId('task-attachments-count').textContent).toBe('1');
+      expect(screen.getByTestId('task-attachment').textContent).toContain('log.txt');
+      expectOnePrimary(screen.getByTestId('work-task-detail'));
+      unmount();
+      render(WorkTaskDetail, { taskId: 'ABC-12' });
+      await flush();
+      expect(screen.queryByTestId('task-attachments')).toBeNull();
+    });
+
+    it('an image pasted into the comment composer is attached, not typed', async () => {
+      handlers.attach_to_work = (a) => ({ id: 9, item_id: a.item_id, name: a.name, mime: a.mime, size: 8, sha256: 'x', author: 'desktop', created_at: 1_790_000_300 });
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      await fireEvent.click(screen.getByTestId('work-task-tab-comments'));
+      const file = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'image.png', { type: 'image/png' });
+      const paste = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+      Object.defineProperty(paste, 'clipboardData', { value: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] } });
+      screen.getByTestId('work-task-comment-input').dispatchEvent(paste);
+      await flush();
+      await flush();
+      const sent = calls('attach_to_work');
+      expect(sent).toHaveLength(1);
+      expect(sent[0].item_id).toBe(77);
+      expect(String(sent[0].name)).toMatch(/^pasted-\d{8}-\d{6}\.png$/);
+      expect(screen.getByTestId('work-task-comment-attached').textContent).toContain('Attached pasted-');
+    });
+
     it('sets a native task’s status from the header, without the edit dialog', async () => {
       handlers.set_work_status = (a) => ({ id: a.item_id, status_category: a.status });
       render(WorkTaskDetail, { taskId: 'item:77' });
@@ -984,7 +1067,8 @@ describe('WorkTaskDetail', () => {
       expect(screen.getByTestId('work-task-delivery-pr').textContent).toContain('PR #9');
       // The most specific active rule wins; a dismissed one never.
       const rule = screen.getByTestId('work-task-start-rule').textContent?.replace(/\s+/g, ' ');
-      expect(rule).toContain('Starts in acme/web on mac');
+      expect(rule).toContain('acme/web on mac');
+      expect(screen.getByRole('region', { name: 'Starts in' })).toBeTruthy();
       expect(rule).toContain('rule PD-1*');
     });
 

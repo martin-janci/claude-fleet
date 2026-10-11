@@ -4384,8 +4384,11 @@ fn the_served_definition_budget_stays_bounded() {
     /// failure prints, and say in the commit message what was measured and
     /// when. Raised to 809 on 2026-10-11: merging main's `search` tool into
     /// gap plan batch 3 (`wizard_state`, `resume_or_new`) measured 111,954
-    /// bytes for 140 tools (799 a tool).
-    const BYTES_PER_TOOL: usize = 809;
+    /// bytes for 140 tools (799 a tool). Raised to 814 on 2026-10-11 when
+    /// work_link gained task attachments (`attach`, `attachment_delete`,
+    /// `mime`, `data_base64`, `attachment_id`) and `work` its `attachment`
+    /// read: measured 113,486 bytes for 141 tools (804 a tool).
+    const BYTES_PER_TOOL: usize = 814;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -11839,6 +11842,8 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     ("work_link", "set_parent", &["Drive"]),
     // A comment is written into the owner's task: `edit`'s gate.
     ("work_link", "comment", &["Drive"]),
+    // So is an attachment: `edit`'s gate, as a comment.
+    ("work_link", "attach", &["Drive"]),
     // Sprint and release membership: `set_status`'s person gate, on the
     // item planned.
     ("work_link", "bucket_add", &["Drive"]),
@@ -12070,6 +12075,19 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
 /// a reviewer can check, not an exemption: each says what the arm acts on
 /// INSTEAD of a session.
 const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
+    (
+        "work_link",
+        "attachment_delete",
+        "an attachment, by id: its item's org fence first (outside it, \
+         unknown), then its author's alone; no session is named or answered",
+    ),
+    (
+        "work",
+        "attachment",
+        "an attachment's bytes, by id: its item's org fence (outside it, \
+         unknown), its author withheld as `task` withholds a comment's; no \
+         session is named or answered",
+    ),
     (
         "work_link",
         "comment_delete",
