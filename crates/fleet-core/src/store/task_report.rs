@@ -146,6 +146,18 @@ impl Store {
             .optional()?)
     }
 
+    /// Every attempt at `item_id` in `role`, newest first, open or not.
+    pub fn item_tasks(&self, item_id: i64, role: &str) -> Result<Vec<super::TaskRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM tasks WHERE work_item_id = ?1 \
+               AND (role = ?2 OR (?2 = 'implement' AND role IS NULL)) \
+             ORDER BY created_at DESC, id DESC",
+            super::rows::TASK_COLUMNS
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![item_id, role], super::rows::map_task_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// The freshest PR reading among the sessions that worked on `item_id`:
     /// its runs' workers and every session linked to it. `None` when none
     /// of them has a PR reading.
