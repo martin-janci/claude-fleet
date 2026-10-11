@@ -45,6 +45,8 @@
   } from './inbox';
   import RoutineFailures from './automation/RoutineFailures.svelte';
   import MissionWaits from './MissionWaits.svelte';
+  import AgentActions from './automation/AgentActions.svelte';
+  import { loadAgents, pendingAgentCount } from './agents';
   import ProposedBy from './ProposedBy.svelte';
   import { failingCount, loadFailing, loadNextRoutine, nextRoutine, nextRoutineLine } from './routines';
   import { loadWaitingMissions, waitingMissionCount } from './mission_waits';
@@ -1024,7 +1026,7 @@
       : [],
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
-  const inboxNeeding = $derived(inboxList.length + $failingCount + $waitingMissionCount);
+  const inboxNeeding = $derived(inboxList.length + $failingCount + $waitingMissionCount + $pendingAgentCount);
   // G1.6: Jev's "probably waiting" rows, listed apart and never counted.
   const inboxProposed = $derived(proposedRows(inboxPool, attentionOpts, $notWaitingSaid));
   // G3.1: the model's sections ("Group: state"), each carrying the model's
@@ -1035,6 +1037,7 @@
       missions: $waitingMissionCount,
       failingRoutines: $failingCount,
       proposed: inboxProposed.length,
+      agentActions: $pendingAgentCount,
     }),
   );
   // Opening the Inbox reads the failed routines and the waiting missions
@@ -1046,6 +1049,7 @@
         void loadFailing();
         void loadWaitingMissions();
         void loadNextRoutine();
+        void loadAgents();
       });
   });
   // The footer's row count (UX audit L4): what this list holds right now.
@@ -1637,6 +1641,7 @@
         {#if sec.routines}<RoutineFailures />{/if}
         <!-- G1.6: missions waiting on a person (a grant to sign, a question). -->
         {#if sec.missions}<MissionWaits />{/if}
+        {#if sec.agents}<AgentActions />{/if}
         {#if sec.proposed && inboxProposed.length > 0}
           <!-- G1.6/G3.1: Jev's "probably waiting", at the foot of Needs you,
                never in its count; "Not waiting" sets the reading aside. -->

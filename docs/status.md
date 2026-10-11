@@ -733,8 +733,12 @@ each new head with read-only tools, records the placed review in
 for a person (`propose`, an action the `agents` tool or `fleet-hub agents
 approve` answers) or posts it (`act`); it re-reviews a posted review
 GitHub lost and answers a `/review` comment. Its jobs are in the Runs
-list (source `agent`). Not built: the UI (step 5), the support agent
-(steps 6 and 7).
+list (source `agent`). The UI (step 5): Automation › Agents lists the
+reviewer's and the support agent's rules, waiting actions and newest jobs,
+and the Inbox's Needs you carries the waiting actions with Approve and
+Reject (`src/lib/agents.ts`, `automation/AgentActions.svelte`, the
+desktop commands `agents_status` / `agents_decide`). Not built: the
+support agent (steps 6 and 7).
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

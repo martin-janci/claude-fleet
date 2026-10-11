@@ -1,7 +1,7 @@
 # Reviewer and Support agents: design
 
-Status: steps 1 to 4 built (the runtime, the run vehicle, the reviewer at
-every level), 2026-10-11.
+Status: steps 1 to 5 built (the runtime, the run vehicle, the reviewer at
+every level, the desktop UI), 2026-10-11.
 Asked for by the owner: bring the functionality of
 [`claude-code-reviewer`](https://github.com/martin-janci/claude-code-reviewer)
 and [`support-agent`](https://github.com/martin-janci/support-agent) into
@@ -492,8 +492,14 @@ dashboard pieces of the reviewer.
    `/review` overrides (`--max-turns=`, `--focus=`). The
    `tools/code-reviewer` subtree was never added, so there is nothing to
    delete; the original repo is archived once a rule has run on `act`.
-5. **UI**: Automation › Agents rows, the agent page, Inbox actions;
-   fleet-mobile's Inbox approve / reject.
+5. **UI** (built): the desktop commands `agents_status` / `agents_decide`
+   (routed to the hub's `agents` tool on a paired desktop), `src/lib/agents.ts`
+   (kept fresh by `trackAgents`), the PR reviewer and Support rows in
+   Automation › Agents with each agent's rules, waiting actions and newest
+   jobs under them (in the tab rather than a declarative page of their
+   own), and the waiting actions in the Inbox's Needs you with Approve,
+   Reject and Show (the body that will be posted), counted in the badge.
+   fleet-mobile's Inbox shows the same actions with Approve and Reject.
 6. **Support, read side**: Jira comment and assignment poller, enrichment,
    the `support-agent` repo's `graylog`, `tenant-resolver` and `support-kb`
    MCP servers in the catalog, the analyzer run at `watch`.

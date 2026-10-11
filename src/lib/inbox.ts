@@ -31,6 +31,7 @@ import { sessions, showBgAgents, type SessionRow } from './sessions';
 import { sessionVisible } from './sidebar_index';
 import { attentionFacts } from './attention_facts';
 import { failingCount } from './routines';
+import { pendingAgentCount } from './agents';
 import { waitingMissionCount } from './mission_waits';
 import { groupRows } from './row_groups';
 import { localMidnight } from './today';
@@ -140,12 +141,16 @@ export interface InboxSection {
   missions: boolean;
   routines: boolean;
   proposed: boolean;
+  /** Carries the actions the built-in agents wait on a person for. */
+  agents: boolean;
 }
 
 export interface InboxExtras {
   missions: number;
   failingRoutines: number;
   proposed: number;
+  /** Agent actions waiting for a person (`pendingAgentCount`); absent is 0. */
+  agentActions?: number;
 }
 
 /**
@@ -161,24 +166,26 @@ export function inboxSections(
   extra: InboxExtras,
 ): InboxSection[] {
   const queue = inboxRows(rows, opts);
+  const agentActions = extra.agentActions ?? 0;
   if (by === 'none') {
-    const count = queue.length + extra.missions + extra.failingRoutines;
+    const count = queue.length + extra.missions + extra.failingRoutines + agentActions;
     if (count === 0 && extra.proposed === 0) return [];
-    return [{ key: 'all', label: null, rows: queue, count, missions: true, routines: true, proposed: true }];
+    return [{ key: 'all', label: null, rows: queue, count, missions: true, routines: true, proposed: true, agents: true }];
   }
   const groups = groupRows(queue, 'state', opts, new Set());
   const of = (state: string) => groups.find((g) => g.key === `state:${state}`)?.rows ?? [];
   const out: InboxSection[] = [];
   const needs = of('action_required');
-  if (needs.length + extra.missions + extra.proposed > 0) {
+  if (needs.length + extra.missions + extra.proposed + agentActions > 0) {
     out.push({
       key: 'needs_you',
       label: 'Needs you',
       rows: needs,
-      count: needs.length + extra.missions,
+      count: needs.length + extra.missions + agentActions,
       missions: true,
       routines: false,
       proposed: true,
+      agents: true,
     });
   }
   const failed = of('failed');
@@ -191,6 +198,7 @@ export function inboxSections(
       missions: false,
       routines: true,
       proposed: false,
+      agents: false,
     });
   }
   return out;
@@ -210,11 +218,17 @@ export const inboxCount = derived(
     attentionIdleMinutes,
     failingCount,
     waitingMissionCount,
+    pendingAgentCount,
   ],
-  ([$sessions, $host, $bg, $scope, $of, $idle, $failing, $missions]) => {
+  ([$sessions, $host, $bg, $scope, $of, $idle, $failing, $missions, $agentActions]) => {
     const scope = $scope === 'all' ? null : { id: $scope, of: $of };
     const visible = $sessions.filter((s) => sessionVisible(s, $host, $bg, null, scope));
-    return countNeedsYou(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000) }) + $failing + $missions;
+    return (
+      countNeedsYou(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000) }) +
+      $failing +
+      $missions +
+      $agentActions
+    );
   },
 );
 

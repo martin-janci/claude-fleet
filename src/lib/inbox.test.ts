@@ -124,6 +124,13 @@ describe('G3.1: the Inbox by state, from the attention model', () => {
     expect(inboxSections([rows[2]], opts, 'state', none)).toEqual([]);
   });
 
+  it('puts the agents’ waiting actions in Needs you and counts them', () => {
+    const secs = inboxSections([], opts, 'state', { ...none, agentActions: 2 });
+    expect(secs.map((s) => [s.key, s.count, s.agents])).toEqual([['needs_you', 2, true]]);
+    const one = inboxSections([], opts, 'none', { ...none, agentActions: 1 });
+    expect(one.map((s) => [s.key, s.count, s.agents])).toEqual([['all', 1, true]]);
+  });
+
   it('as one queue: every row worst first, under no header', () => {
     const secs = inboxSections(rows, opts, 'none', { ...none, missions: 1 });
     expect(secs).toHaveLength(1);
