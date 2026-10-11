@@ -805,6 +805,33 @@ fn dev_and_nightly_read_the_channel_every_fifteen_minutes_at_most() {
     assert_eq!(channel_poll_secs(&s), 7200);
 }
 
+#[tokio::test]
+async fn on_dev_every_target_asks_again_when_the_hub_next_reads_the_channel() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    let asked = |store: &std::sync::Mutex<Store>| {
+        check(
+            store,
+            &client(1, TokenMode::Full, None),
+            &desktop_req("0.3.3"),
+            &k,
+            NOW,
+        )
+        .unwrap()
+        .next_check_secs
+    };
+    // Stable: the operator's interval.
+    assert_eq!(asked(&store), check_interval_secs(&lock(&store).unwrap()));
+    // Dev: no later than the hub's next channel read, so `fleet-updater`
+    // (asking as `hub:self`) installs a new dev build within it.
+    lock(&store)
+        .unwrap()
+        .set_setting(settings::UPDATE_TRACK, "dev")
+        .unwrap();
+    assert!(asked(&store) <= FAST_TRACK_POLL_SECS);
+}
+
 #[test]
 fn an_asked_for_refresh_runs_once_a_minute() {
     assert!(asked_refresh_due(i64::MIN, NOW));

@@ -259,7 +259,8 @@ opt in; `deploy/hub/upgrade.sh` stays the manual path.
 ### What it installs, and when
 
 It asks `/update/check` as `hub:self` (an `updater` token) on start and then
-every `next_check_secs` the hub names (`update.check_interval_secs`). It
+every `next_check_secs` the hub names (`update.check_interval_secs`, at most
+15 minutes on `dev` and `nightly`). It
 installs when the decision is:
 
 - `update_required`: below the signed or the policy minimum, withdrawn, or
