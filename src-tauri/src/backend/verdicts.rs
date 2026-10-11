@@ -27,11 +27,13 @@ pub enum Verdict {
     /// part of what the command does has a counterpart on the hub. `unless`
     /// names the shape that refuses; `instead` is that refusal's sentence.
     ///
-    /// One command has this verdict, and the honest thing is to say so rather
-    /// than to file it under whichever half is more convenient: `repair_session`
+    /// Two commands have this verdict, and the honest thing is to say so rather
+    /// than to file them under whichever half is more convenient: `repair_session`
     /// routes the explicit repair (the Repair workspace button, which maps
     /// one-to-one onto the tool's always-explicit repair) and refuses the
-    /// automatic pre-attach check, which would become destructive by surprise.
+    /// automatic pre-attach check, which would become destructive by surprise;
+    /// `provision_hosts` routes one host's content-only refresh and refuses a
+    /// full provisioning, which mints tokens.
     RoutedUnless {
         tool: &'static str,
         unless: &'static str,
@@ -1388,11 +1390,19 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       running; install it from the hub",
         },
     ),
+    // "Re-provision this host" routes as the hub's content-only refresh of
+    // that one host (`Access::Person`: the hub owner's own device); every
+    // host at once, or a rotation, mints tokens and rewrites
+    // `~/.claude.json`, which stays the hub operator's.
     (
         "provision_hosts",
-        Verdict::LocalOnly {
-            instead: "it rewrites every host's hook block to report to this app; provision \
-                      from the hub with `fleet-hub provision [--host <alias>] [--content-only]`",
+        Verdict::RoutedUnless {
+            tool: "provision_hosts",
+            unless: "no host, or rotate: true — a full provisioning",
+            instead: "it rewrites every host's hook block and tokens to report to this app; \
+                      provision from the hub with `fleet-hub provision [--host <alias>] \
+                      [--rotate]` (one host's content is refreshed from its page, and the hub \
+                      refreshes stale hosts by itself)",
         },
     ),
     (

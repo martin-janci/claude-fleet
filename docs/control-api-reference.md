@@ -441,7 +441,7 @@ Propose a layer split from the last scan, grouping assets by the exact set of ho
 
 ### `provision_hosts`
 
-Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it. host: one alias; content_only: skills, CLAUDE.md and hooks only, no token.
+Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it. host: one alias; content_only: skills, CLAUDE.md and hooks only, no token. The hub owner's device may run content_only for one host only.
 
 Parameters: `content_only`, `host`, `rotate`
 

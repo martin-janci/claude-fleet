@@ -23,6 +23,9 @@ enum Answer {
     Silent,
     /// Announce fewer bytes than are sent.
     Overlong(&'static str),
+    /// `204 No Content` with no `Content-Length`, as hyper sends it,
+    /// connection left open.
+    NoContent,
 }
 
 struct Server {
@@ -86,6 +89,7 @@ async fn server(script: Vec<Answer>) -> Server {
                             "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{b}",
                             b.len()
                         ),
+                        Answer::NoContent => "HTTP/1.1 204 No Content\r\n\r\n".to_string(),
                         Answer::Silent => return,
                         Answer::Overlong(b) => {
                             format!("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{b}")
@@ -192,6 +196,22 @@ async fn an_overlong_answer_is_not_kept() {
     let s = server(vec![Answer::Overlong("okEXTRA")]).await;
     assert_eq!(call(s.port).await.unwrap().body, "ok");
     assert_eq!(keep_alive::idle(&key(s.port)), 0);
+}
+
+/// A 204 has no body even without a `Content-Length` (hyper sends none):
+/// it answers at once instead of waiting for a close that never comes, and
+/// the connection is kept. `POST /report` timed out on every flush before.
+#[tokio::test]
+async fn a_no_content_answer_returns_at_once_and_is_kept() {
+    let s = server(vec![Answer::NoContent, Answer::Sized("next")]).await;
+    let r = tokio::time::timeout(std::time::Duration::from_secs(5), call(s.port))
+        .await
+        .expect("a 204 must not wait for the connection to close")
+        .unwrap();
+    assert_eq!((r.status, r.body.as_str()), (204, ""));
+    assert_eq!(keep_alive::idle(&key(s.port)), 1);
+    assert_eq!(call(s.port).await.unwrap().body, "next");
+    assert_eq!(s.accepted.load(Ordering::SeqCst), 1);
 }
 
 /// Against the real `/mcp` server (axum + rmcp, as the hub and the desktop

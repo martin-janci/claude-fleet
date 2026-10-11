@@ -96,7 +96,7 @@ describe('hubBlock', () => {
   });
 
   it('the fleet-administration actions say a client is not the administrator', () => {
-    for (const action of ['remove_host', 'hide_host', 'provision_hosts'] as const) {
+    for (const action of ['remove_host', 'hide_host'] as const) {
       expect(hubBlock(action, remote)!.toLowerCase(), action).toContain('client');
     }
   });

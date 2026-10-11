@@ -17,6 +17,7 @@ pub mod guard;
 pub mod hooks;
 mod listener;
 pub mod metrics;
+pub mod oidc;
 pub mod pairing;
 pub mod report_route;
 pub mod settings;
@@ -130,6 +131,10 @@ pub struct McpGuards {
     /// the operator's starts and kills (work graph M9.7) — outright rather
     /// than handing out a nonce nobody can approve.
     pub approver: bool,
+    /// Single sign-on (`oidc`): pairing a device by signing in with Keycloak
+    /// or another OpenID Connect provider. `None` (the default) leaves
+    /// `/auth/oidc/*` answering 404.
+    pub oidc: Option<Arc<oidc::OidcProvider>>,
 }
 
 impl McpGuards {
@@ -141,7 +146,14 @@ impl McpGuards {
             notify,
             pairings: Arc::new(PendingPairings::new()),
             approver: true,
+            oidc: None,
         }
+    }
+
+    /// The same guards with single sign-on through `oidc`.
+    pub fn with_oidc(mut self, oidc: Option<Arc<oidc::OidcProvider>>) -> Self {
+        self.oidc = oidc;
+        self
     }
 
     /// The same guards for a server with no one to approve a confirmation.
@@ -678,7 +690,20 @@ fn build_app(
             // never sends); POST is the exchange itself.
             axum::routing::get(pairing::handle_pair_page)
                 .post(pairing::handle_pair)
-                .with_state(pair_state),
+                .with_state(pair_state.clone()),
+        )
+        // Single sign-on (`oidc`) ends in a pairing code, so it stands where
+        // `/pair` stands and for the same reason: whoever signs in has no
+        // credential yet. What authorizes the exchange is the provider's
+        // ID token, taken straight from its token endpoint; without a
+        // configured provider both answer 404.
+        .route(
+            "/auth/oidc/start",
+            axum::routing::get(oidc::handle_start).with_state(pair_state.clone()),
+        )
+        .route(
+            "/auth/oidc/callback",
+            axum::routing::get(oidc::handle_callback).with_state(pair_state),
         )
         .merge(authorized)
 }
@@ -980,7 +1005,8 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             Arc::clone(&guards.pairings),
             Arc::clone(&guards.rate),
             base_url,
-        );
+        )
+        .with_oidc(guards.oidc.clone());
         // Cloned before `guards` moves into `FleetTools`: the route and the
         // tool router must write and read the same counters.
         let metrics_for_route = Arc::clone(&guards.metrics);

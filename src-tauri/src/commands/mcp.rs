@@ -202,20 +202,13 @@ pub async fn provision_hosts(
     ssh: State<'_, Arc<SshClient>>,
     tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
 ) -> Result<Vec<fleet_core::service::provision::HostProvisionResult>, IpcError> {
-    // Master-only on the hub too (`enforce_admin`), and provisioning from
-    // here would point every host's hooks at THIS app instead of the hub.
-    backend.refuse_local_only("provision_hosts")?;
-    let base = HubBase::read(&*lock(&store)?)?;
-    fleet_core::service::provision::provision_hosts(
+    routed::provision_hosts(
+        &backend,
+        rotate.unwrap_or(false),
+        host,
         &store,
-        &*ssh,
+        &ssh,
         &tunnels,
-        &base,
-        fleet_core::service::provision::ProvisionScope {
-            rotate: rotate.unwrap_or(false),
-            only_host: host,
-            ..Default::default()
-        },
     )
     .await
 }
@@ -376,6 +369,41 @@ pub async fn control_handoffs(
 pub(crate) mod routed {
     use super::*;
     use serde_json::json;
+
+    /// Paired with a hub, "Re-provision this host" asks the hub to refresh
+    /// that one host's content (skills, CLAUDE.md block, hooks), which the
+    /// hub's owner's device may do. Anything wider — every host, or a token
+    /// rotation — rewrites tokens and `~/.claude.json`, which stays the
+    /// hub operator's; so does any provisioning that would run from here and
+    /// point the hooks at this app instead of the hub.
+    pub async fn provision_hosts(
+        backend: &FleetBackend,
+        rotate: bool,
+        host: Option<String>,
+        store: &Mutex<Store>,
+        ssh: &SshClient,
+        tunnels: &Arc<fleet_core::service::tunnel::TunnelSupervisor>,
+    ) -> Result<Vec<fleet_core::service::provision::HostProvisionResult>, IpcError> {
+        if let Some(hub) = backend.hub() {
+            if let (Some(host), false) = (&host, rotate) {
+                return hub.reprovision_host(host).await;
+            }
+            backend.refuse_local_only("provision_hosts")?;
+        }
+        let base = HubBase::read(&*lock(store)?)?;
+        fleet_core::service::provision::provision_hosts(
+            store,
+            ssh,
+            tunnels,
+            &base,
+            fleet_core::service::provision::ProvisionScope {
+                rotate,
+                only_host: host,
+                ..Default::default()
+            },
+        )
+        .await
+    }
 
     /// A hub from before the receipts (contract < 14) refuses the tool as a
     /// protocol error, and it never wrote one: nothing to show.

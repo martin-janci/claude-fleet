@@ -167,7 +167,14 @@ where
     };
     let mut body = Vec::new();
     let reusable;
-    if http1::head_is_chunked(&head) {
+    // A 204 or 304 carries no body whatever its head says (RFC 9112
+    // §6.3), and hyper sends a 204 with no `Content-Length` at all. Read
+    // "until the peer closes" below, a kept-alive 204 (`POST /report`,
+    // `POST /update/report`) waited on a connection the hub keeps open, and
+    // every report timed out although the hub had taken it.
+    if matches!(status, 204 | 304) {
+        reusable = rest.is_empty() && !closes && !http10;
+    } else if http1::head_is_chunked(&head) {
         let mut chunks = http1::Dechunker::new(true);
         loop {
             body.extend(chunks.take(&mut rest).map_err(Failure::Other)?);

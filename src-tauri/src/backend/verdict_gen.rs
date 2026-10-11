@@ -88,8 +88,8 @@ pub struct VerdictLists {
 /// [`VERDICTS`] read into [`VerdictLists`], every list sorted. `VERDICTS`
 /// itself is in `generate_handler!` order (deliberately — see its header), so
 /// the generated file needs its own sort to stay stable regardless of how
-/// that table gets reordered. `repair_session`, the one [`Verdict::RoutedUnless`]
-/// row, lands in `routed_unless` ONLY — not also in `routed`, which would
+/// that table gets reordered. `repair_session` and `provision_hosts`, the
+/// [`Verdict::RoutedUnless`] rows, land in `routed_unless` ONLY — not also in `routed`, which would
 /// claim the hub always accepts it.
 pub fn verdict_lists() -> VerdictLists {
     let mut lists = VerdictLists::default();

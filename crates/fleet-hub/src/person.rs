@@ -93,6 +93,51 @@ pub enum PersonCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Link a single-sign-on account (Keycloak, or any OpenID Connect
+    /// provider) to a live person, so signing in at `/auth/oidc/start`
+    /// pairs a device as THEM.
+    ///
+    /// This is how an account becomes an EXISTING person — this hub's own
+    /// owner above all: a sign-in never links itself to a person by name,
+    /// since anybody who can set their username at the provider could then
+    /// become a colleague. The subject is the account's `sub` claim; the
+    /// refusal page a sign-in lands on prints this command with it filled
+    /// in. An account is one person: linking it to a second is refused
+    /// until `unlink-sso`.
+    LinkSso {
+        /// The live person, by name (`person list`).
+        person: String,
+        /// The account's `sub` claim (a UUID on Keycloak).
+        #[arg(long)]
+        subject: String,
+        /// The provider's issuer URL. Defaults to FLEET_HUB_OIDC_ISSUER.
+        #[arg(long)]
+        issuer: Option<String>,
+    },
+    /// Remove a single-sign-on link. The person and their devices are
+    /// untouched; a device already paired keeps working until `client
+    /// revoke`.
+    UnlinkSso {
+        /// The account's `sub` claim.
+        #[arg(long)]
+        subject: String,
+        /// The provider's issuer URL. Defaults to FLEET_HUB_OIDC_ISSUER.
+        #[arg(long)]
+        issuer: Option<String>,
+    },
+}
+
+/// `--issuer`, else the hub's configured one.
+fn sso_issuer(flag: Option<String>, env: &HashMap<String, String>) -> Result<String, String> {
+    flag.or_else(|| env.get(fleet_core::mcp::oidc::ENV_ISSUER).cloned())
+        .map(|i| fleet_core::store::normalize_issuer(&i))
+        .filter(|i| !i.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "no issuer: pass --issuer <url> or set {}",
+                fleet_core::mcp::oidc::ENV_ISSUER
+            )
+        })
 }
 
 /// The live person holding `name`.
@@ -254,6 +299,39 @@ pub fn run(
                  owner. There is no re-enable in this release.",
             );
         }
+        PersonCmd::LinkSso {
+            person,
+            subject,
+            issuer,
+        } => {
+            let issuer = sso_issuer(issuer, env)?;
+            let row = live_person(&store, &person)?;
+            store
+                .link_identity(&issuer, &subject, row.id)
+                .map_err(|e| e.message)?;
+            out::line(&format!(
+                "linked {issuer} account {} to {} (person {}): signing in with it pairs a                  device as them",
+                subject.trim(),
+                row.name,
+                row.id
+            ));
+        }
+        PersonCmd::UnlinkSso { subject, issuer } => {
+            let issuer = sso_issuer(issuer, env)?;
+            if !store
+                .unlink_identity(&issuer, &subject)
+                .map_err(|e| e.message)?
+            {
+                return Err(format!(
+                    "no {issuer} account {} is linked to anybody",
+                    subject.trim()
+                ));
+            }
+            out::line(&format!(
+                "unlinked {issuer} account {}; devices already paired with it stay paired                  until `fleet-hub client revoke`",
+                subject.trim()
+            ));
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -359,6 +437,48 @@ mod tests {
                 .expect("grant");
             id
         }
+    }
+
+    #[test]
+    fn link_sso_links_a_live_person_and_unlink_sso_frees_the_account() {
+        let hub = Hub::new();
+        let ada = hub.person("ada");
+        let iss = "https://sso.example.com/realms/acme";
+        assert!(
+            hub.run(PersonCmd::LinkSso {
+                person: "ada".into(),
+                subject: "sub-1".into(),
+                issuer: None,
+            })
+            .unwrap_err()
+            .contains("FLEET_HUB_OIDC_ISSUER"),
+            "no issuer anywhere is refused"
+        );
+        hub.run(PersonCmd::LinkSso {
+            person: "ada".into(),
+            subject: "sub-1".into(),
+            issuer: Some(format!("{iss}/")),
+        })
+        .expect("link");
+        assert_eq!(
+            hub.store()
+                .get_identity(iss, "sub-1")
+                .expect("read")
+                .expect("linked")
+                .person_id,
+            ada
+        );
+        hub.run(PersonCmd::UnlinkSso {
+            subject: "sub-1".into(),
+            issuer: Some(iss.into()),
+        })
+        .expect("unlink");
+        assert!(hub
+            .run(PersonCmd::UnlinkSso {
+                subject: "sub-1".into(),
+                issuer: Some(iss.into()),
+            })
+            .is_err());
     }
 
     /// The listing is how an operator reading `person 3` finds out who 3 is,

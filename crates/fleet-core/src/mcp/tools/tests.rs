@@ -420,7 +420,6 @@ fn fleet_admin_tools_are_master_only() {
     let phone = client_caller("phone", TokenMode::Full);
     assert!(!phone.is_master());
     for t in [
-        "provision_hosts",
         "remove_host",
         "merge_host",
         "forget_project",
@@ -468,6 +467,56 @@ fn fleet_admin_tools_are_master_only() {
 
 // ---- client-token gating (Task 3: prove the gates hold for the new
 // caller kind — a paired client such as a phone) ----
+
+/// mefistos (2026-10-11): the hub owner's paired desktop showed "Re-provision
+/// this host" disabled forever. Its device may now refresh ONE host's
+/// content — the secret-free pass the hub runs by itself — and nothing that
+/// mints or rotates a token, or touches every host.
+#[test]
+fn the_owners_device_may_refresh_one_hosts_content_and_nothing_wider() {
+    use super::params::ProvisionHostsParams;
+    let desktop = client_caller("mac-desktop", TokenMode::Full);
+    assert!(guard::access_allows(&desktop, "provision_hosts"));
+    let params = |host: Option<&str>, content_only: bool, rotate: bool| ProvisionHostsParams {
+        rotate,
+        host: host.map(str::to_string),
+        content_only,
+    };
+    assert!(super::fleet::provision_scope_allowed(
+        &desktop,
+        &params(Some("mefistos"), true, false)
+    )
+    .is_ok());
+    for (p, what) in [
+        (params(None, true, false), "every host"),
+        (
+            params(Some("mefistos"), false, false),
+            "a full run mints a token",
+        ),
+        (params(Some("mefistos"), true, true), "a rotation"),
+    ] {
+        let e = super::fleet::provision_scope_allowed(&desktop, &p).expect_err(what);
+        assert!(
+            e.message.starts_with("E_FORBIDDEN"),
+            "{what}: {}",
+            e.message
+        );
+    }
+    assert!(
+        super::fleet::provision_scope_allowed(&Caller::master(), &params(None, false, true))
+            .is_ok()
+    );
+    // Never a host's own Claude, nor a readonly device.
+    assert!(!guard::access_allows(
+        &host_caller("mefistos", TokenMode::Full),
+        "provision_hosts"
+    ));
+    assert!(enforce_mode(
+        &client_caller("phone", TokenMode::Readonly),
+        "provision_hosts"
+    )
+    .is_err());
+}
 
 /// Martin's "Owner's phone" and trackers "Allow on phone" (contract 13):
 /// the hub owner's trusted `full` phone adds hosts, installs fleet-agent and
@@ -3942,7 +3991,9 @@ fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
         !client.iter().any(|n| guard::is_admin_tool(n)),
         "a paired client must not be served the fleet-admin tools"
     );
-    assert!(!client.iter().any(|n| n == "provision_hosts"));
+    // The hub owner's device is served `provision_hosts` for one host's
+    // content refresh only (`provision_scope_allowed`).
+    assert!(client.iter().any(|n| n == "provision_hosts"));
 }
 
 /// The phone gates its work UI on `tools/list` rather than on the contract

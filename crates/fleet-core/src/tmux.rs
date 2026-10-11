@@ -1671,6 +1671,14 @@ pub async fn list_local_sessions() -> Result<Vec<TmuxSession>, IpcError> {
     }
 }
 
+/// True for a tmux error that means the target session is already gone:
+/// "can't find session: NAME", or no tmux server on the host at all (tmux
+/// exits with its last session). A kill that gets this has nothing left to
+/// kill, so it is done, not failed.
+pub fn session_already_gone(stderr: &str) -> bool {
+    stderr.to_lowercase().contains("can't find session") || is_no_server_running(stderr)
+}
+
 /// True for any tmux stderr that means "no server is running on this socket"
 /// — i.e. an empty `list_local_sessions()` return rather than an error.
 ///
@@ -2420,6 +2428,13 @@ mod tests {
     #[test]
     fn does_not_swallow_unrelated_errors() {
         assert!(!is_no_server_running("can't find session: dev-foo"));
+        assert!(session_already_gone("can't find session: dev-foo"));
+        assert!(session_already_gone(
+            "no server running on /tmp/tmux-1000/default"
+        ));
+        assert!(!session_already_gone(
+            "ssh: connect to host x port 22: Connection refused"
+        ));
         assert!(!is_no_server_running("ambiguous option"));
         assert!(!is_no_server_running(""));
     }

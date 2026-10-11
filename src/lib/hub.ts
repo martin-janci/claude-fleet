@@ -159,8 +159,11 @@ const REASONS = {
     'the add-host wizard adds hosts from this machine’s SSH config, and a paired client does not administer the fleet',
   run_host_setup_check:
     'the add-host wizard checks a host over this app’s own SSH, and a paired client does not administer the fleet',
-  provision_hosts:
-    'provisioning rewrites every host’s hook block to report to whichever app ran it, and this desktop is a paired client',
+  // Not a command: `provision_hosts` for every host (Settings → Control
+  // API). One host's content refresh routes — HostDetail's "Re-provision this
+  // host" is `ROUTED_ACTIONS`' `provision_hosts`.
+  provision_all:
+    'provisioning every host mints tokens and rewrites each host’s hook block, which is the hub operator’s. The hub refreshes a stale host’s skills and hooks by itself, and one host’s page can ask for it now',
   install_fleet_hook:
     'the hook points at a control API this app is not running, because a paired client runs none',
   host_tokens:
@@ -402,6 +405,9 @@ export const ROUTED_ACTIONS = [
   'move_session',
   'new_session',
   'repair_session',
+  // One host's content refresh, from its page (the hub owner's device may ask
+  // for it; every host at once is `REASONS.provision_all`).
+  'provision_hosts',
   'link_session_work',
   'reject_session_work',
   'unlink_session_work',

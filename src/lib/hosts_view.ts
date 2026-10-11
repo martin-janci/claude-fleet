@@ -240,7 +240,7 @@ export function hostAttention(args: {
     return {
       kind: 'provision_warning',
       icon: 'warning',
-      title: `${host.alias}: the last provisioning did not finish cleanly — ${host.provision_warning}. Fleet will retry it; to retry now, fleet-hub provision --host ${host.alias} --content-only.`,
+      title: `${host.alias}: the last provisioning did not finish cleanly — ${host.provision_warning}. Fleet retries it by itself; to retry now, press Re-provision this host on its page.`,
     };
   }
   // hosts F1: every host ran skills from 15 hub upgrades ago and nothing said so.
@@ -248,7 +248,7 @@ export function hostAttention(args: {
     return {
       kind: 'provision_stale',
       icon: 'recreate',
-      title: `${host.alias} was provisioned with an older fleet (content differs from this build): re-provision it — fleet-hub provision --host ${host.alias} --content-only.`,
+      title: `${host.alias} was provisioned with an older fleet (content differs from this build). Fleet refreshes it by itself while it is reachable; to do it now, press Re-provision this host on its page.`,
     };
   }
   // Multi-account groundwork: a credential variable in the host's shell or tmux

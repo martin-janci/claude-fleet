@@ -101,17 +101,13 @@ describe('HostDetail: health checklist', () => {
   });
 
   // The checklist routes to the hub's check_host (its SSH, its hooks), so a
-  // paired client runs it while connected; re-provisioning stays the hub
-  // operator's and says why.
-  it('a paired client runs the checks through the hub but cannot re-provision', async () => {
+  // paired client runs it while connected.
+  it('a paired client runs the checks through the hub', async () => {
     hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
     hubConnection.set({ state: 'connected' });
     mount();
     const run = screen.getByTestId('detail-run-checks') as HTMLButtonElement;
-    const prov = screen.getByTestId('detail-reprovision') as HTMLButtonElement;
     expect(run.disabled).toBe(false);
-    expect(prov.disabled).toBe(true);
-    expect(prov.title).toMatch(/paired client/);
     await fireEvent.click(run);
     await waitFor(() => expect(inv.mock.calls.some(([c]) => c === 'check_host')).toBe(true));
   });
@@ -123,6 +119,26 @@ describe('HostDetail: health checklist', () => {
     const run = screen.getByTestId('detail-run-checks') as HTMLButtonElement;
     expect(run.disabled).toBe(true);
     expect(run.title).toMatch(/hub\.example/);
+  });
+
+  // mefistos (2026-10-11): the button sat disabled on every paired desktop.
+  // It now asks the hub to refresh this one host; only a dropped link blocks it.
+  it('a paired client re-provisions through the hub while connected', async () => {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
+    hubConnection.set({ state: 'connected' });
+    mount();
+    const prov = screen.getByTestId('detail-reprovision') as HTMLButtonElement;
+    expect(prov.disabled).toBe(false);
+    await fireEvent.click(prov);
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'provision_hosts')).toBe(true));
+    const call = inv.mock.calls.find((c) => c[0] === 'provision_hosts')!;
+    expect(call[1]).toEqual({ rotate: false, host: 'mercury' });
+    // The checklist routes to the hub too, so it re-reads the host after the
+    // refresh, as a standalone desktop does.
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'check_host')).toBe(true));
+
+    hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 1, reason: 'test' });
+    await waitFor(() => expect(prov.disabled).toBe(true));
   });
 
   it('New shows the Hex field with its own step text while checking and re-provisioning', async () => {

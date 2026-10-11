@@ -1630,7 +1630,11 @@
   .tab-main,
   .tab-side { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
   .tab-side .actions { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: var(--space-3); }
-  .tab-side .cmd { display: block; width: 100%; box-sizing: border-box; overflow-wrap: anywhere; white-space: normal; }
+  /* The attach command takes a line of its own under the Share buttons. With
+     the base `.cmd { flex: 1 }` (basis 0) it shared the buttons' line and,
+     wrapping anywhere, shrank to a one-character column. */
+  .btn-row > .cmd { flex: 1 1 100%; min-width: 0; box-sizing: border-box; }
+  .tab-side .cmd { display: block; width: 100%; overflow-wrap: anywhere; white-space: normal; }
   @container (min-width: 820px) {
     .tab-grid { grid-template-columns: minmax(0, 1fr) minmax(260px, 360px); }
     .tab-side { position: sticky; top: 0; align-self: start; }

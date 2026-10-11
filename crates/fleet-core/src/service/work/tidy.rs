@@ -493,8 +493,16 @@ async fn apply_one(
     } = ctx;
     let action = item.action.as_str();
     let destructive = matches!(action, "safe_kill" | "kill" | "archive");
+    // A person archiving a ghost (its tmux is gone) is filing away a dead
+    // row: the live-work protections (an in-progress item, open tasks, a
+    // recent touch) guard a pane that no longer exists and left the ghost
+    // with no way out of the list. Auto-tidy still honours them.
+    let ghost_archive =
+        action == "archive" && s.row.status != "running" && !source.starts_with("auto");
     if destructive {
-        if let Some(why) = planner::protection(s, &snap.ctx(now)) {
+        if let Some(why) = planner::protection(s, &snap.ctx(now))
+            .filter(|why| !ghost_archive || *why == "external")
+        {
             return Err(IpcError::new(
                 codes::E_INVALID,
                 format!("protected ({why}): tidy-up never acts on it"),
