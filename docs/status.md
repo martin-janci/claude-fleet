@@ -750,7 +750,7 @@ Jev's `pr_triage` (`decide.jev.pr_triage`, off by default) records in
 shadow what each new episode most likely needs. Not built: the Inbox
 card, the UI.
 
-The agent runtime (reviewer and support agents, steps 1 to 6 of 8) is
+The agent runtime (reviewer and support agents, steps 1 to 7 of 8) is
 built, and the PR reviewer works end to end under a granted rule (spec
 `docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`).
 Migration 173 (`agent_rules`, `agent_cursors`, `agent_jobs`,
@@ -780,8 +780,14 @@ read side (step 6, `service/agents/support/`): a `support` rule on
 assignments, and investigates a ticket with read-only tools plus the
 catalog MCP servers its rule names (the `support-agent` repo's `graylog`,
 `tenant-resolver`, `support-kb`), keeping the investigation as the job's
-result; it writes nothing to Jira at any level. Not built: its write side
-(step 7: comments, bugs, links as actions, fingerprint dedup).
+result. Its write side (step 7, migration 175): at `propose` or `act` the
+investigation becomes actions (the comment or the question for the
+reporter, a bug in the rule's `bug_project` linked to the ticket, or a
+link to the open bug its fingerprint or a search matches); `act` runs the
+comment and the link alone and a new bug only when the rule lists it in
+`auto` and the investigation is sure; the executor refuses a write
+outside the rule's projects or over `max_body_chars`. Step 8 (the
+Graylog scanner trigger, KB write-back, …) is not built.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

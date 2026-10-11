@@ -87,6 +87,17 @@ beforeEach(() => {
 });
 
 describe('agents (design step 5)', () => {
+  it('names the support agent\'s Jira writes', () => {
+    expect(actionTitle({ kind: 'jira_comment', payload: '{"key":"L2S-7","body":"h3. x"}' })).toBe('Comment on L2S-7');
+    expect(
+      actionTitle({ kind: 'jira_create_bug', payload: '{"project":"PD","source_key":"L2S-7","summary":"[pay] NPE"}' }),
+    ).toBe('File a bug in PD for L2S-7: [pay] NPE');
+    expect(actionTitle({ kind: 'jira_link', payload: '{"bug_key":"PD-4","source_key":"L2S-7","link_type":"Causes"}' })).toBe(
+      'Link PD-4 to L2S-7 (causes)',
+    );
+    expect(actionBody({ payload: '{"body":"h3. x"}' })).toBe('h3. x');
+  });
+
   it('says what an action will do and what it will post', () => {
     expect(actionTitle(action())).toBe('Post a review on o/r#4: request changes, 2 comments');
     expect(actionTitle(action({ payload: JSON.stringify({ repo: 'o/r', number: 4, event: 'APPROVE', comments: [{}] }) }))).toBe(

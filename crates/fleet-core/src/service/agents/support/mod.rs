@@ -23,17 +23,28 @@
 //!    read-only tools plus those servers' tools, and keep the parsed
 //!    investigation ([`output`]) as the job's result.
 //!
-//! Writing back to Jira (the comment, a bug, a link) is step 7.
+//! 3. **write** (step 7, `writes`): at `propose` or `act`, the
+//!    investigation becomes actions: the comment on the ticket (or the
+//!    question when it needs more), and when it found an exception and the
+//!    rule names a `bug_project`, a link to the open bug it matches (its
+//!    fingerprint's record inside `incident_window_mins`, else a search's
+//!    summary scoring 80 or more) or a new bug linked to the ticket. At
+//!    `act` the kinds in `auto` run without a person (a new bug only at
+//!    high confidence with a fingerprint); the rest wait in the Inbox.
+//!    `SupportExecutor` sends an approved one, refusing a write outside the
+//!    rule's projects or over `max_body_chars`.
 
+pub mod fingerprint;
 pub mod output;
 #[cfg(test)]
 mod tests;
+pub mod writes;
 
 use super::vehicle::{self, PrintOutcome, PrintRun};
 use super::workspace::{self, Prepared, Source};
 use super::{AgentCursorRow, AgentImpl, AgentPoller, AgentRunner, ErrorKind, Polled, RunOutcome};
 use crate::ipc_error::{lock, IpcError};
-use crate::service::trackers::{self, IssueThread};
+use crate::service::trackers::{self, IssueThread, WriteOp, WriteOutcome};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::{AgentJobRow, AgentRuleRow, NewAgentJob, Store};
@@ -69,6 +80,21 @@ pub struct SupportConfig {
     pub model: String,
     /// The newest comments the prompt quotes.
     pub comments_in_prompt: usize,
+    /// Projects the agent may write in besides the rule's own.
+    pub write_projects: Vec<String>,
+    /// Where a bug is filed; none files no bug. Must be in `write_projects`.
+    pub bug_project: Option<String>,
+    pub bug_type: String,
+    /// The link from a bug to the ticket (`<bug> <link_type> <ticket>`).
+    pub link_type: String,
+    /// The action kinds `act` runs without a person.
+    pub auto: Vec<String>,
+    /// A write's text longer than this is refused.
+    pub max_body_chars: usize,
+    /// The stack frames that are the application's (`com.example.`); empty: every `at` line.
+    pub app_frame_prefix: String,
+    /// Minutes in which a repeated fingerprint is linked to its bug.
+    pub incident_window_mins: i64,
 }
 
 impl Default for SupportConfig {
@@ -88,6 +114,14 @@ impl Default for SupportConfig {
             timeout_secs: 900,
             model: String::new(),
             comments_in_prompt: 5,
+            write_projects: Vec::new(),
+            bug_project: None,
+            bug_type: "Bug".into(),
+            link_type: "Causes".into(),
+            auto: vec![writes::JIRA_COMMENT.into(), writes::JIRA_LINK.into()],
+            max_body_chars: 5000,
+            app_frame_prefix: String::new(),
+            incident_window_mins: 120,
         }
     }
 }
@@ -123,6 +157,34 @@ impl SupportConfig {
         }
         if c.marker.trim().is_empty() || c.cooldown_secs < 0 || c.comments_in_prompt > 50 {
             return Err("marker, cooldown_secs or comments_in_prompt is out of range".into());
+        }
+        if let Some(p) = c
+            .write_projects
+            .iter()
+            .find(|p| !trackers::is_project_key(p))
+        {
+            return Err(format!("write project {p:?} is not a Jira project key"));
+        }
+        if let Some(p) = &c.bug_project {
+            if !c.write_projects.contains(p) {
+                return Err(format!("bug_project {p} must be in write_projects"));
+            }
+        }
+        if let Some(k) = c.auto.iter().find(|k| !writes::KINDS.contains(&k.as_str())) {
+            return Err(format!(
+                "auto names {k:?}, not one of {}",
+                writes::KINDS.join(", ")
+            ));
+        }
+        let plain =
+            |t: &str| !t.trim().is_empty() && t.len() <= 64 && !t.contains(['"', '\\', '\n']);
+        if !plain(&c.bug_type) || !plain(&c.link_type) || c.app_frame_prefix.len() > 128 {
+            return Err("bug_type, link_type or app_frame_prefix is not plain text".into());
+        }
+        if !(500..=30_000).contains(&c.max_body_chars)
+            || !(0..=10_080).contains(&c.incident_window_mins)
+        {
+            return Err("max_body_chars or incident_window_mins is out of range".into());
         }
         Ok(c)
     }
@@ -268,6 +330,8 @@ pub trait SupportHost: Send + Sync {
         -> Result<PrintOutcome, IpcError>;
     async fn cleanup(&self, host: &str, root: &str, job_id: i64);
     async fn prune(&self, host: &str, root: &str);
+    /// A write to the tracker, with its own credential.
+    async fn write(&self, tracker_id: i64, op: &WriteOp) -> Result<WriteOutcome, String>;
 }
 
 /// The production host: the tracker through its provider, the rest over
@@ -280,14 +344,9 @@ pub struct LiveSupportHost {
 const CONNECT: Duration = Duration::from_secs(15);
 const READ_WALL_CLOCK: Duration = Duration::from_secs(60);
 
-#[async_trait::async_trait]
-impl SupportHost for LiveSupportHost {
-    async fn threads(
-        &self,
-        tracker_id: i64,
-        jql: &str,
-        max: usize,
-    ) -> Result<Vec<IssueThread>, String> {
+impl LiveSupportHost {
+    /// The tracker's client, with its own credential.
+    fn provider(&self, tracker_id: i64) -> Result<Box<dyn trackers::TrackerProvider>, String> {
         let (row, cred) = {
             let s = lock(&self.store).map_err(|e| e.message)?;
             let row = s
@@ -301,8 +360,27 @@ impl SupportHost for LiveSupportHost {
         };
         let provider = trackers::provider_for(&row, cred, &trackers::default_net())
             .map_err(|e| e.to_ipc().message)?;
-        provider
+        Ok(provider)
+    }
+}
+
+#[async_trait::async_trait]
+impl SupportHost for LiveSupportHost {
+    async fn threads(
+        &self,
+        tracker_id: i64,
+        jql: &str,
+        max: usize,
+    ) -> Result<Vec<IssueThread>, String> {
+        self.provider(tracker_id)?
             .issue_threads(jql, max)
+            .await
+            .map_err(|e| e.to_ipc().message)
+    }
+
+    async fn write(&self, tracker_id: i64, op: &WriteOp) -> Result<WriteOutcome, String> {
+        self.provider(tracker_id)?
+            .write(op)
             .await
             .map_err(|e| e.to_ipc().message)
     }
@@ -372,8 +450,7 @@ impl SupportHost for LiveSupportHost {
     }
 }
 
-/// The support agent as the runtime registers it. It writes nothing yet
-/// (step 7), so it has no executor.
+/// The support agent as the runtime registers it.
 pub fn agent(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> AgentImpl {
     let host: Arc<dyn SupportHost> = Arc::new(LiveSupportHost {
         store: Arc::clone(store),
@@ -386,9 +463,12 @@ pub fn agent(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> AgentImpl {
         })),
         runner: Some(Box::new(SupportRunner {
             store: Arc::clone(store),
+            host: Arc::clone(&host),
+        })),
+        executor: Some(Box::new(SupportExecutor {
+            store: Arc::clone(store),
             host,
         })),
-        executor: None,
     }
 }
 
@@ -609,9 +689,126 @@ impl SupportRunner {
             Err(e) => return failed(ErrorKind::Permanent, e.to_string()),
         };
         result["key"] = key.into();
-        RunOutcome::Done {
-            result: Some(result.to_string()),
-            cost_micros: cost,
+        if rule.level == "watch" {
+            return RunOutcome::Done {
+                result: Some(result.to_string()),
+                cost_micros: cost,
+            };
+        }
+        self.propose_writes(job, rule, &cfg, tracker_id, key, &inv, result, cost)
+            .await
+    }
+
+    /// The investigation's writes, queued as actions: the ones `act` runs
+    /// approved, the rest for a person.
+    #[allow(clippy::too_many_arguments)]
+    async fn propose_writes(
+        &self,
+        job: &AgentJobRow,
+        rule: &AgentRuleRow,
+        cfg: &SupportConfig,
+        tracker_id: i64,
+        key: &str,
+        inv: &output::Investigation,
+        mut result: serde_json::Value,
+        cost: i64,
+    ) -> RunOutcome {
+        let fp = fingerprint::fingerprint(
+            &inv.exception_class,
+            &inv.error_message,
+            &inv.stack_trace,
+            &cfg.app_frame_prefix,
+        );
+        let now = crate::store::now_unix();
+        let known_bug = match &fp {
+            None => None,
+            Some(fp) => {
+                let before = {
+                    let Ok(s) = self.store.lock() else {
+                        return failed(ErrorKind::Transient, "store lock");
+                    };
+                    s.see_support_fingerprint(&rule.scope, fp, &inv.exception_class, job.id, now)
+                };
+                match before {
+                    Ok(b) => b
+                        .filter(|r| r.last_seen + cfg.incident_window_mins * 60 >= now)
+                        .and_then(|r| r.bug_key),
+                    Err(e) => return failed(ErrorKind::Transient, e.to_string()),
+                }
+            }
+        };
+        let mut candidates = Vec::new();
+        let jql = cfg
+            .bug_project
+            .as_deref()
+            .filter(|_| known_bug.is_none() && inv.needs_more_info.is_empty())
+            .and_then(|p| writes::candidates_jql(p, &cfg.bug_type, &inv.exception_class));
+        if let Some(jql) = jql {
+            match self.host.threads(tracker_id, &jql, 5).await {
+                Ok(found) => {
+                    candidates = found
+                        .into_iter()
+                        .map(|t| writes::Candidate {
+                            key: t.key,
+                            summary: t.summary,
+                        })
+                        .collect()
+                }
+                // A new bug is never filed without a person unless the rule
+                // says so; the search failing only loses the match.
+                Err(e) => result["bug_search_error"] = e.into(),
+            }
+        }
+        let planned = writes::plan(&writes::PlanInput {
+            inv,
+            cfg,
+            level: &rule.level,
+            tracker_id,
+            key,
+            job_id: job.id,
+            fingerprint: fp.as_deref(),
+            known_bug: known_bug.as_deref(),
+            candidates: &candidates,
+        });
+        let mut ids = Vec::new();
+        let mut waiting = Vec::new();
+        {
+            let Ok(s) = self.store.lock() else {
+                return failed(ErrorKind::Transient, "store lock");
+            };
+            for p in &planned {
+                let id = if p.auto {
+                    s.insert_approved_agent_action(job.id, p.kind, &p.payload, "rule:act", now)
+                } else {
+                    s.insert_agent_action(job.id, p.kind, &p.payload, now)
+                };
+                match id {
+                    Ok(id) => {
+                        ids.push(serde_json::json!({ "id": id, "kind": p.kind, "auto": p.auto }));
+                        if !p.auto {
+                            waiting.push(id.to_string());
+                        }
+                    }
+                    Err(e) => return failed(ErrorKind::Transient, e.to_string()),
+                }
+            }
+        }
+        result["fingerprint"] = fp.into();
+        result["actions"] = ids.into();
+        if waiting.is_empty() {
+            RunOutcome::Done {
+                result: Some(result.to_string()),
+                cost_micros: cost,
+            }
+        } else {
+            RunOutcome::NeedsPerson {
+                result: Some(result.to_string()),
+                reason: format!(
+                    "investigation ready: approve action {} to write it to Jira",
+                    waiting.join(", ")
+                ),
+                cost_micros: cost,
+            }
         }
     }
 }
@@ -622,6 +819,172 @@ impl AgentRunner for SupportRunner {
         match rule {
             None => skipped("the rule was revoked"),
             Some(rule) => self.investigate(job, rule).await,
+        }
+    }
+}
+
+/// Sends an approved Jira write: refused when the rule is gone or back at
+/// `watch`, the write leaves the rule's projects or its text is over
+/// `max_body_chars`.
+pub struct SupportExecutor {
+    pub store: Arc<Mutex<Store>>,
+    pub host: Arc<dyn SupportHost>,
+}
+
+/// PURE: the project of an issue key.
+fn project_of(key: &str) -> &str {
+    key.split_once('-').map(|(p, _)| p).unwrap_or(key)
+}
+
+impl SupportExecutor {
+    fn rule_of(
+        &self,
+        action: &crate::store::AgentActionRow,
+    ) -> Result<Option<AgentRuleRow>, String> {
+        let s = self.store.lock().map_err(|_| "store lock".to_string())?;
+        let job = s
+            .agent_job(action.job_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("the job is gone")?;
+        match job.rule_id {
+            None => Ok(None),
+            Some(id) => s.agent_rule(id).map_err(|e| e.to_string()),
+        }
+    }
+
+    fn record_bug(&self, scope: &str, fp: Option<&str>, bug_key: &str) {
+        let Some(fp) = fp else { return };
+        if let Ok(s) = self.store.lock() {
+            if let Err(e) =
+                s.set_support_fingerprint_bug(scope, fp, bug_key, crate::store::now_unix())
+            {
+                tracing::warn!(scope, bug_key, error = %e, "[agents] support: the bug is not recorded");
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl super::AgentExecutor for SupportExecutor {
+    async fn execute(&self, action: &crate::store::AgentActionRow) -> super::ActionResult {
+        use super::ActionResult;
+        let rule = match self.rule_of(action) {
+            Ok(Some(r)) => r,
+            Ok(None) => return ActionResult::Expired("the rule was revoked".into()),
+            Err(e) => return ActionResult::Failed(e),
+        };
+        if rule.level == "watch" {
+            return ActionResult::Expired("the rule is at watch now".into());
+        }
+        let cfg = match SupportConfig::parse(&rule.config) {
+            Ok(c) => c,
+            Err(e) => return ActionResult::Failed(e),
+        };
+        let Some((tracker_id, project)) = parse_scope(&rule.scope) else {
+            return ActionResult::Failed("not a support scope".into());
+        };
+        let allowed = |key_or_project: &str| {
+            let p = project_of(key_or_project);
+            p == project || cfg.write_projects.iter().any(|w| w == p)
+        };
+        let fits = |body: &str| body.chars().count() <= cfg.max_body_chars;
+        let refuse = |what: String| ActionResult::Failed(format!("refused: {what}"));
+        macro_rules! payload {
+            ($t:ty) => {
+                match serde_json::from_str::<$t>(&action.payload) {
+                    Ok(p) if p.tracker_id == tracker_id => p,
+                    Ok(_) => return refuse("another tracker than the rule's".into()),
+                    Err(e) => return ActionResult::Failed(format!("payload: {e}")),
+                }
+            };
+        }
+        match action.kind.as_str() {
+            writes::JIRA_COMMENT => {
+                let c = payload!(writes::CommentPayload);
+                if !allowed(&c.key) {
+                    return refuse(format!("{} is outside the rule's projects", c.key));
+                }
+                if !fits(&c.body) {
+                    return refuse(format!(
+                        "the comment is over {} characters",
+                        cfg.max_body_chars
+                    ));
+                }
+                let op = WriteOp::RichComment {
+                    key: c.key,
+                    adf: c.adf,
+                    wiki: c.body,
+                };
+                match self.host.write(tracker_id, &op).await {
+                    Ok(_) => ActionResult::Executed,
+                    Err(e) => ActionResult::Failed(e),
+                }
+            }
+            writes::JIRA_LINK => {
+                let l = payload!(writes::LinkPayload);
+                if !allowed(&l.bug_key) || !allowed(&l.source_key) {
+                    return refuse(format!(
+                        "{} or {} is outside the rule's projects",
+                        l.bug_key, l.source_key
+                    ));
+                }
+                let op = WriteOp::LinkIssues {
+                    link_type: l.link_type.clone(),
+                    inward: l.bug_key.clone(),
+                    outward: l.source_key.clone(),
+                };
+                match self.host.write(tracker_id, &op).await {
+                    Ok(_) => {
+                        self.record_bug(&rule.scope, l.fingerprint.as_deref(), &l.bug_key);
+                        ActionResult::Executed
+                    }
+                    Err(e) => ActionResult::Failed(e),
+                }
+            }
+            writes::JIRA_CREATE_BUG => {
+                let b = payload!(writes::CreateBugPayload);
+                if !allowed(&b.project) || !allowed(&b.source_key) {
+                    return refuse(format!(
+                        "{} or {} is outside the rule's projects",
+                        b.project, b.source_key
+                    ));
+                }
+                if !fits(&b.body) {
+                    return refuse(format!(
+                        "the description is over {} characters",
+                        cfg.max_body_chars
+                    ));
+                }
+                let op = WriteOp::CreateIssue {
+                    project: b.project.clone(),
+                    issue_type: b.issue_type.clone(),
+                    summary: b.summary.clone(),
+                    adf: b.adf.clone(),
+                    wiki: b.body.clone(),
+                    labels: b.labels.clone(),
+                };
+                let bug_key = match self.host.write(tracker_id, &op).await {
+                    Ok(WriteOutcome {
+                        remote_id: Some(k), ..
+                    }) => k,
+                    Ok(_) => {
+                        return ActionResult::Failed("Jira created the bug without a key".into())
+                    }
+                    Err(e) => return ActionResult::Failed(e),
+                };
+                self.record_bug(&rule.scope, b.fingerprint.as_deref(), &bug_key);
+                let link = WriteOp::LinkIssues {
+                    link_type: b.link_type.clone(),
+                    inward: bug_key.clone(),
+                    outward: b.source_key.clone(),
+                };
+                // The bug exists either way; a failed link is said, not retried.
+                if let Err(e) = self.host.write(tracker_id, &link).await {
+                    tracing::warn!(bug = %bug_key, source = %b.source_key, error = %e, "[agents] support: bug filed, not linked");
+                }
+                ActionResult::Executed
+            }
+            other => ActionResult::Failed(format!("the support agent does not do {other}")),
         }
     }
 }

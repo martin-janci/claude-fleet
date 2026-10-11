@@ -26,6 +26,15 @@ pub struct Investigation {
     pub steps_to_reproduce: String,
     /// The question for the reporter; empty when the investigation has enough.
     pub needs_more_info: String,
+    /// The bug's exception class, message and stack trace, when the
+    /// investigation found one: the fingerprint's input (step 7). Empty
+    /// otherwise.
+    #[serde(default)]
+    pub exception_class: String,
+    #[serde(default)]
+    pub error_message: String,
+    #[serde(default)]
+    pub stack_trace: String,
 }
 
 fn text(v: &Value, k: &str) -> String {
@@ -61,6 +70,9 @@ pub fn validate(v: &Value) -> Option<Investigation> {
         diff: text(v, "diff"),
         steps_to_reproduce: text(v, "stepsToReproduce"),
         needs_more_info: text(v, "needsMoreInfo"),
+        exception_class: text(v, "exceptionClass"),
+        error_message: text(v, "errorMessage"),
+        stack_trace: text(v, "stackTrace").chars().take(8000).collect(),
     })
 }
 

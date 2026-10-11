@@ -24,9 +24,13 @@ Return ONLY one JSON object, no prose before or after:
   "suggestedFix": "what should change, or \"\"",
   "diff": "a unified diff of the fix when you are sure of it, else \"\"",
   "stepsToReproduce": "if known, else \"\"",
-  "needsMoreInfo": "the question for the reporter, or \"\" when you have enough"
+  "needsMoreInfo": "the question for the reporter, or \"\" when you have enough",
+  "exceptionClass": "the bug's exception class (e.g. java.lang.NullPointerException) when you found one, else \"\"",
+  "errorMessage": "that exception's message, else \"\"",
+  "stackTrace": "its stack trace as logged, the first 40 lines at most, else \"\""
 }
 ```
 
+- Fill `exceptionClass`, `errorMessage` and `stackTrace` only from a stack trace you actually saw: they identify the bug across tickets.
 - `confidence` is `high` only when the evidence shows the cause, not when it merely fits.
 - Keep `rootCause` concise but complete; quote at most a few log lines or code lines.

@@ -1,8 +1,9 @@
 //! The support agent's planning, poller and runner against a fake host.
 
+use super::super::{ActionResult, AgentExecutor};
 use super::*;
 use crate::service::trackers::IssueComment;
-use crate::store::{AgentJobEnd, NewAgentRule};
+use crate::store::{AgentActionRow, AgentJobEnd, NewAgentRule};
 use std::sync::Mutex as StdMutex;
 
 fn comment(id: &str, author_id: &str, body: &str, created: i64) -> IssueComment {
@@ -156,6 +157,10 @@ struct FakeHost {
     answer: StdMutex<Option<PrintOutcome>>,
     log: StdMutex<Vec<String>>,
     last: StdMutex<Option<(PrintRun, String)>>,
+    /// Writes sent, in order.
+    writes: StdMutex<Vec<WriteOp>>,
+    /// What writing answers, in turn (default: ok, a created issue is PD-9).
+    write_answers: StdMutex<Vec<Result<WriteOutcome, String>>>,
 }
 
 impl FakeHost {
@@ -217,6 +222,18 @@ impl SupportHost for FakeHost {
     async fn prune(&self, _: &str, _: &str) {
         self.log("prune");
     }
+    async fn write(&self, _: i64, op: &WriteOp) -> Result<WriteOutcome, String> {
+        self.writes.lock().unwrap().push(op.clone());
+        let mut answers = self.write_answers.lock().unwrap();
+        if answers.is_empty() {
+            Ok(WriteOutcome {
+                remote_id: Some("PD-9".into()),
+                url: None,
+            })
+        } else {
+            answers.remove(0)
+        }
+    }
 }
 
 const ANSWER: &str = r#"{"summary":"Card payments declined","rootCause":"The gateway key expired","confidence":"high","severity":"critical","affectedComponent":"payments"}"#;
@@ -228,13 +245,17 @@ struct Fx {
 }
 
 fn fx(config: &str, project: bool) -> Fx {
+    fx_at(config, project, "watch")
+}
+
+fn fx_at(config: &str, project: bool, level: &str) -> Fx {
     let s = Store::open_in_memory().unwrap();
     let project_id = project.then(|| s.upsert_project("o", "r", "/p/o/r").unwrap());
     let id = s
         .grant_agent_rule(&NewAgentRule {
             agent: "support".into(),
             scope: "jira:3:L2S".into(),
-            level: "watch".into(),
+            level: level.into(),
             host_alias: "box".into(),
             project_id,
             config: config.into(),
@@ -479,5 +500,391 @@ async fn a_revoked_rule_skips_its_jobs() {
     assert!(matches!(
         f.runner().run(&job, None).await,
         RunOutcome::Skipped { .. }
+    ));
+}
+
+// ── Step 7: the writes ──────────────────────────────────────────────────────
+
+const BUG_CFG: &str = r#"{"write_projects":["PD"],"bug_project":"PD"}"#;
+
+fn inv(confidence: &str, exception: &str) -> output::Investigation {
+    output::Investigation {
+        summary: "Card payments declined".into(),
+        root_cause: "The gateway key expired".into(),
+        confidence: confidence.into(),
+        severity: "critical".into(),
+        affected_component: "payments".into(),
+        affected_version: "4.0.2.8".into(),
+        suggested_fix: "Rotate the key".into(),
+        diff: String::new(),
+        steps_to_reproduce: String::new(),
+        needs_more_info: String::new(),
+        exception_class: exception.into(),
+        error_message: "key is null".into(),
+        stack_trace: "at com.p.Gateway.charge(Gateway.java:1)".into(),
+    }
+}
+
+fn plan_with(
+    cfg: &SupportConfig,
+    i: &output::Investigation,
+    level: &str,
+    known_bug: Option<&str>,
+    candidates: &[writes::Candidate],
+) -> Vec<writes::Planned> {
+    writes::plan(&writes::PlanInput {
+        inv: i,
+        cfg,
+        level,
+        tracker_id: 3,
+        key: "L2S-1",
+        job_id: 11,
+        fingerprint: Some("f00d"),
+        known_bug,
+        candidates,
+    })
+}
+
+fn kinds(p: &[writes::Planned]) -> Vec<(&str, bool)> {
+    p.iter().map(|p| (p.kind, p.auto)).collect()
+}
+
+#[test]
+fn the_write_options_are_checked() {
+    for bad in [
+        r#"{"bug_project":"PD"}"#,
+        r#"{"write_projects":["pd"]}"#,
+        r#"{"auto":["jira_delete"]}"#,
+        r#"{"link_type":"Ca\"uses"}"#,
+        r#"{"max_body_chars":10}"#,
+    ] {
+        assert!(SupportConfig::parse(bad).is_err(), "{bad}");
+    }
+    let c = SupportConfig::parse(BUG_CFG).unwrap();
+    assert_eq!(c.auto, ["jira_comment", "jira_link"]);
+}
+
+#[test]
+fn a_question_is_the_only_write_and_carries_the_marker() {
+    let cfg = SupportConfig::parse(BUG_CFG).unwrap();
+    let mut i = inv("low", "NPE");
+    i.needs_more_info = "Aký je sériový kód zariadenia?".into();
+    let p = plan_with(&cfg, &i, "act", None, &[]);
+    assert_eq!(kinds(&p), [("jira_comment", true)]);
+    let c: writes::CommentPayload = serde_json::from_str(&p[0].payload).unwrap();
+    assert!(
+        c.body.contains("[Investigation Complete]") && c.body.contains("sériový"),
+        "{}",
+        c.body
+    );
+}
+
+#[test]
+fn a_new_exception_proposes_a_bug_that_act_files_only_when_sure() {
+    let cfg = SupportConfig::parse(BUG_CFG).unwrap();
+    let p = plan_with(
+        &cfg,
+        &inv("medium", "NullPointerException"),
+        "act",
+        None,
+        &[],
+    );
+    assert_eq!(
+        kinds(&p),
+        [("jira_comment", true), ("jira_create_bug", false)]
+    );
+    let auto = SupportConfig::parse(
+        r#"{"write_projects":["PD"],"bug_project":"PD","auto":["jira_comment","jira_create_bug"]}"#,
+    )
+    .unwrap();
+    let p = plan_with(
+        &auto,
+        &inv("high", "NullPointerException"),
+        "act",
+        None,
+        &[],
+    );
+    assert_eq!(
+        kinds(&p),
+        [("jira_comment", true), ("jira_create_bug", true)]
+    );
+    let b: writes::CreateBugPayload = serde_json::from_str(&p[1].payload).unwrap();
+    assert_eq!(
+        (
+            b.project.as_str(),
+            b.summary.as_str(),
+            b.source_key.as_str()
+        ),
+        (
+            "PD",
+            "[payments] NullPointerException: key is null",
+            "L2S-1"
+        )
+    );
+    assert_eq!(b.labels, ["payments", "v4.0.2.8"]);
+    assert!(b.body.contains("{code:text}") && b.body.contains("Fingerprint: f00d"));
+    let c: writes::CommentPayload = serde_json::from_str(&p[0].payload).unwrap();
+    assert!(c.body.contains("A bug is proposed in PD"));
+    assert_eq!(c.adf["content"][0]["type"], "heading");
+    let propose = plan_with(
+        &auto,
+        &inv("high", "NullPointerException"),
+        "propose",
+        None,
+        &[],
+    );
+    assert!(
+        propose.iter().all(|p| !p.auto),
+        "propose runs nothing alone"
+    );
+}
+
+#[test]
+fn a_known_or_matching_bug_is_linked_and_a_related_one_named() {
+    let cfg = SupportConfig::parse(BUG_CFG).unwrap();
+    let i = inv("high", "NullPointerException");
+    let p = plan_with(&cfg, &i, "act", Some("PD-4"), &[]);
+    assert_eq!(kinds(&p), [("jira_comment", true), ("jira_link", true)]);
+    let l: writes::LinkPayload = serde_json::from_str(&p[1].payload).unwrap();
+    assert_eq!(
+        (l.bug_key.as_str(), l.source_key.as_str()),
+        ("PD-4", "L2S-1")
+    );
+    let same = writes::Candidate {
+        key: "PD-7".into(),
+        summary: "[payments] NullPointerException: key is null".into(),
+    };
+    let p = plan_with(&cfg, &i, "act", None, &[same]);
+    assert_eq!(p[1].kind, "jira_link");
+    let related = writes::Candidate {
+        key: "PD-8".into(),
+        summary: "NullPointerException in key is null handling".into(),
+    };
+    let p = plan_with(&cfg, &i, "act", None, &[related]);
+    assert_eq!(p[1].kind, "jira_create_bug");
+    assert!(p[1].payload.contains("Possibly related: PD-8"));
+    let no_bugs = SupportConfig::default();
+    assert_eq!(
+        kinds(&plan_with(&no_bugs, &i, "act", None, &[])),
+        [("jira_comment", true)]
+    );
+}
+
+#[test]
+fn a_long_investigation_still_fits_the_cap() {
+    let cfg = SupportConfig::parse(r#"{"max_body_chars":1500}"#).unwrap();
+    let mut i = inv("high", "");
+    i.diff = "+x\n".repeat(3000);
+    i.root_cause = "why ".repeat(2000);
+    let (body, adf) = writes::investigation_comment(&i, &cfg, 1, None, writes::BugNote::None);
+    assert!(body.chars().count() <= 1500, "{}", body.chars().count());
+    assert!(!body.contains("{code:diff}"), "the diff goes first");
+    assert_eq!(adf["type"], "doc");
+}
+
+#[test]
+fn the_bug_search_is_an_exact_phrase_in_open_bugs() {
+    assert_eq!(
+        writes::candidates_jql("PD", "Bug", "java.lang.\"NPE\"").unwrap(),
+        "project = \"PD\" AND issuetype = \"Bug\" AND statusCategory != Done AND text ~ \"\\\"java.lang.NPE\\\"\" ORDER BY updated DESC"
+    );
+    assert_eq!(writes::candidates_jql("PD", "Bug", " "), None);
+}
+
+const BUG_ANSWER: &str = r#"{"summary":"Card payments declined","rootCause":"The gateway key expired","confidence":"high","severity":"critical","affectedComponent":"payments","exceptionClass":"NullPointerException","errorMessage":"key 42 is null","stackTrace":"at com.p.Gateway.charge(Gateway.java:1)"}"#;
+
+impl Fx {
+    fn answer(&self, text: &str) {
+        *self.host.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+            text: text.into(),
+            cost_micros: 1200,
+        });
+    }
+    fn actions(&self) -> Vec<AgentActionRow> {
+        let mut a = self
+            .store
+            .lock()
+            .unwrap()
+            .list_agent_actions(None, 20)
+            .unwrap();
+        a.sort_by_key(|a| a.id);
+        a
+    }
+    fn executor(&self) -> SupportExecutor {
+        SupportExecutor {
+            store: Arc::clone(&self.store),
+            host: self.host.clone(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn at_propose_the_writes_wait_for_a_person() {
+    let f = fx_at(BUG_CFG, false, "propose");
+    f.answer(BUG_ANSWER);
+    let job = f.job().await;
+    let out = f.runner().run(&job, Some(&f.rule)).await;
+    let RunOutcome::NeedsPerson { result, reason, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert!(reason.contains("approve action"), "{reason}");
+    let r: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(r["fingerprint"].as_str().map(str::len), Some(64));
+    let jql = f.host.jql.lock().unwrap().clone();
+    assert!(
+        jql.last()
+            .unwrap()
+            .starts_with("3 5 project = \"PD\" AND issuetype = \"Bug\""),
+        "{jql:?}"
+    );
+    let a = f.actions();
+    assert_eq!(
+        a.iter()
+            .map(|a| (a.kind.as_str(), a.state.as_str()))
+            .collect::<Vec<_>>(),
+        [("jira_comment", "pending"), ("jira_create_bug", "pending")]
+    );
+    assert!(
+        f.host.writes.lock().unwrap().is_empty(),
+        "nothing is written by the run"
+    );
+}
+
+#[tokio::test]
+async fn a_repeat_inside_the_window_is_linked_to_its_bug_at_act() {
+    let f = fx_at(BUG_CFG, false, "act");
+    f.answer(BUG_ANSWER);
+    let fp = fingerprint::fingerprint(
+        "NullPointerException",
+        "key 7 is null",
+        "at com.p.Gateway.charge(Gateway.java:1)",
+        "",
+    )
+    .unwrap();
+    {
+        let s = f.store.lock().unwrap();
+        let now = crate::store::now_unix();
+        s.see_support_fingerprint("jira:3:L2S", &fp, "NullPointerException", 1, now)
+            .unwrap();
+        s.set_support_fingerprint_bug("jira:3:L2S", &fp, "PD-4", now)
+            .unwrap();
+    }
+    let job = f.job().await;
+    let out = f.runner().run(&job, Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    let a = f.actions();
+    assert_eq!(
+        a.iter()
+            .map(|a| (a.kind.as_str(), a.state.as_str()))
+            .collect::<Vec<_>>(),
+        [("jira_comment", "approved"), ("jira_link", "approved")]
+    );
+    assert_eq!(
+        f.host.jql.lock().unwrap().len(),
+        2,
+        "no bug search: the fingerprint knew it"
+    );
+    let row = f
+        .store
+        .lock()
+        .unwrap()
+        .support_fingerprint("jira:3:L2S", &fp)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.seen, 2);
+
+    for action in &a {
+        assert_eq!(f.executor().execute(action).await, ActionResult::Executed);
+    }
+    let sent = f.host.writes.lock().unwrap().clone();
+    assert!(
+        matches!(&sent[0], WriteOp::RichComment { key, wiki, .. } if key == "L2S-1" && wiki.contains("Matches the open bug PD-4"))
+    );
+    assert_eq!(
+        sent[1],
+        WriteOp::LinkIssues {
+            link_type: "Causes".into(),
+            inward: "PD-4".into(),
+            outward: "L2S-1".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn an_approved_bug_is_filed_linked_and_remembered() {
+    let f = fx_at(BUG_CFG, false, "propose");
+    f.answer(BUG_ANSWER);
+    let job = f.job().await;
+    f.runner().run(&job, Some(&f.rule)).await;
+    let bug = f
+        .actions()
+        .into_iter()
+        .find(|a| a.kind == "jira_create_bug")
+        .unwrap();
+    assert_eq!(f.executor().execute(&bug).await, ActionResult::Executed);
+    let sent = f.host.writes.lock().unwrap().clone();
+    assert!(matches!(&sent[0], WriteOp::CreateIssue { project, .. } if project == "PD"));
+    assert_eq!(
+        sent[1],
+        WriteOp::LinkIssues {
+            link_type: "Causes".into(),
+            inward: "PD-9".into(),
+            outward: "L2S-1".into()
+        }
+    );
+    let b: writes::CreateBugPayload = serde_json::from_str(&bug.payload).unwrap();
+    let row = f
+        .store
+        .lock()
+        .unwrap()
+        .support_fingerprint("jira:3:L2S", b.fingerprint.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.bug_key.as_deref(), Some("PD-9"));
+}
+
+#[tokio::test]
+async fn the_executor_refuses_what_the_rule_does_not_allow() {
+    let f = fx_at(BUG_CFG, false, "propose");
+    f.answer(BUG_ANSWER);
+    let job = f.job().await;
+    f.runner().run(&job, Some(&f.rule)).await;
+    let mut comment = f
+        .actions()
+        .into_iter()
+        .find(|a| a.kind == "jira_comment")
+        .unwrap();
+    let mut c: writes::CommentPayload = serde_json::from_str(&comment.payload).unwrap();
+    c.key = "HR-1".into();
+    comment.payload = serde_json::to_string(&c).unwrap();
+    let ActionResult::Failed(why) = f.executor().execute(&comment).await else {
+        panic!()
+    };
+    assert!(why.contains("outside the rule's projects"), "{why}");
+    c.key = "L2S-1".into();
+    c.body = "x".repeat(5001);
+    comment.payload = serde_json::to_string(&c).unwrap();
+    let ActionResult::Failed(why) = f.executor().execute(&comment).await else {
+        panic!()
+    };
+    assert!(why.contains("over 5000"), "{why}");
+    c.body = "ok".into();
+    c.tracker_id = 4;
+    comment.payload = serde_json::to_string(&c).unwrap();
+    assert!(matches!(
+        f.executor().execute(&comment).await,
+        ActionResult::Failed(_)
+    ));
+    assert!(f.host.writes.lock().unwrap().is_empty());
+
+    // Back at watch, or revoked: nothing is sent.
+    f.store
+        .lock()
+        .unwrap()
+        .revoke_agent_rule(f.rule.id)
+        .unwrap();
+    assert!(matches!(
+        f.executor().execute(&comment).await,
+        ActionResult::Expired(_)
     ));
 }

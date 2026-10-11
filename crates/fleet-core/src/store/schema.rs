@@ -1974,6 +1974,10 @@ const MIGRATIONS: &[Migration] = &[
     // The PR reviewer (agents step 3): `review_prs`, `review_records`. New
     // tables, idempotent.
     Migration::plain(174, include_str!("../../migrations/174_review_prs.sql")),
+    Migration::plain(
+        175,
+        include_str!("../../migrations/175_support_fingerprints.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

@@ -433,6 +433,54 @@ impl TrackerProvider for JiraDc {
                     .await?;
                 Ok(super::jira_common::posted_comment(&v, &self.site, &key))
             }
+            WriteOp::RichComment { key, wiki, .. } => {
+                if !super::jira_common::is_key(key) {
+                    return Err(TrackerError::Invalid(format!("{key:?} is not a Jira key")));
+                }
+                let key = key.to_ascii_uppercase();
+                let v = self
+                    .call(
+                        Request::post_json(
+                            self.url(&format!("/rest/api/2/issue/{key}/comment")),
+                            &json!({ "body": Value::String(wiki.clone()) }),
+                        ),
+                        CallKind::Other,
+                    )
+                    .await?;
+                Ok(super::jira_common::posted_comment(&v, &self.site, &key))
+            }
+            WriteOp::CreateIssue { .. } => {
+                let body = super::create_issue_body(op, false)?;
+                let v = self
+                    .call(
+                        Request::post_json(self.url("/rest/api/2/issue"), &body),
+                        CallKind::Other,
+                    )
+                    .await?;
+                let key = v["key"]
+                    .as_str()
+                    .filter(|k| super::jira_common::is_key(k))
+                    .ok_or_else(|| TrackerError::Invalid("the created issue has no key".into()))?
+                    .to_string();
+                Ok(WriteOutcome {
+                    url: Some(format!("{}/browse/{key}", self.site)),
+                    remote_id: Some(key),
+                })
+            }
+            WriteOp::LinkIssues {
+                link_type,
+                inward,
+                outward,
+            } => {
+                let body = super::link_issues_body(link_type, inward, outward)?;
+                let cred = self.cred.as_ref().ok_or(TrackerError::Unconfigured)?;
+                let req = Request::post_json(self.url("/rest/api/2/issueLink"), &body)
+                    .header("Authorization", cred.authorization().expose());
+                let resp = self.transport.send(req).await.map_err(map_transport)?;
+                // 201 with an empty body.
+                check(&resp, CallKind::Other)?;
+                Ok(WriteOutcome::default())
+            }
         }
     }
 

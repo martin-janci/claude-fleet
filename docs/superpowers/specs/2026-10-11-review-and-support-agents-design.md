@@ -1,7 +1,7 @@
 # Reviewer and Support agents: design
 
-Status: steps 1 to 6 built (the runtime, the run vehicle, the reviewer at
-every level, the desktop UI, the support agent's read side), 2026-10-11.
+Status: steps 1 to 7 built (the runtime, the run vehicle, the reviewer at
+every level, the desktop UI, the support agent at every level), 2026-10-11.
 Asked for by the owner: bring the functionality of
 [`claude-code-reviewer`](https://github.com/martin-janci/claude-code-reviewer)
 and [`support-agent`](https://github.com/martin-janci/support-agent) into
@@ -393,9 +393,13 @@ The Jira link in the review body uses fleet's tracker link
     JQL + similarity score, ≥ 80 reuse, ≥ 60 follow-up);
   - `jira_link` to an existing bug.
 
-  These are new `WriteOp` variants (`service/trackers/mod.rs`, which today
-  has only `PrRemoteLink`) on the tracker outbox (`tracker_writes`), so a
-  failed write is retried by the existing drain. A write outside the
+  These are new `WriteOp` variants (`service/trackers/mod.rs`:
+  `RichComment`, `CreateIssue`, `LinkIssues`), sent by the support
+  agent's executor through the tracker's provider. As built they do not go
+  through the work graph's outbox (`tracker_writes`): that outbox is keyed
+  to a work item and gated by the tracker's `write_back.*` toggles, while
+  the agent's own `agent_actions` row is already the durable queue a
+  person answers; a failed write is a failed action, shown with its error. A write outside the
   rule's `write_projects`, or a body over `max_body_chars` (5000), is
   refused by the executor, which is the guardrail the original never
   applied.
@@ -521,9 +525,23 @@ dashboard pieces of the reviewer.
    there) with catalog assets in its `catalog/` (the three servers, with
    `${SUPPORT_AGENT_DIR}` naming the built checkout, and the `l2-analyzer`
    skill).
-7. **Support, write side**: the `WriteOp` variants, `jira_comment` /
+7. **Support, write side** (built): the `WriteOp` variants, `jira_comment` /
    `jira_create_bug` / `jira_link` actions, fingerprint dedup,
-   `propose` and `act`.
+   `propose` and `act`. Migration 175 (`support_fingerprints`, per rule
+   scope: the bug each fingerprint was filed as or linked to);
+   `support/fingerprint.rs` (the original's hash and similarity score, the
+   app-frame prefix the rule's `app_frame_prefix`), `support/writes.rs`
+   (the payloads, each carrying the ADF Jira Cloud gets and the same text
+   as wiki markup Data Center gets and a person reads; the plan), and
+   `SupportExecutor`. The analyzer reports `exceptionClass`,
+   `errorMessage` and `stackTrace` for the fingerprint. Rule options:
+   `write_projects`, `bug_project` (in `write_projects`), `bug_type`,
+   `link_type` (`Causes`), `auto` (default `jira_comment`, `jira_link`),
+   `max_body_chars` (5000; the comment shortens its long fields, then
+   drops its diff, to fit), `incident_window_mins` (120). The original's
+   L3S escalation ticket and its "follow-up" second ticket are not
+   ported: a related bug (score 60 to 79) is named in the new bug's
+   context instead.
 8. **Later**: test-debate, auto-label, auto-description, the Graylog
    scanner trigger, KB write-back, outbound Slack/Teams with step 11.9.
 
