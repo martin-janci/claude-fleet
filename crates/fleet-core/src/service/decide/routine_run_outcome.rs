@@ -105,6 +105,7 @@ pub fn request(screen: &str) -> JevRequest {
     JevRequest {
         state: json!({ "screen": screen }),
         question: question(),
+        order_salt: None,
     }
 }
 

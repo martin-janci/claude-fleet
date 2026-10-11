@@ -354,6 +354,7 @@ pub fn question_for(input: &QuickInput) -> JevRequest {
     JevRequest {
         state: json!({ "question": text }),
         question: question(&input.choices),
+        order_salt: None,
     }
 }
 

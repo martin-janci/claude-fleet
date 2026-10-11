@@ -162,6 +162,7 @@ pub fn request(local: &WorkItemRow, tickets: &[WorkItemRow]) -> JevRequest {
     JevRequest {
         state: json!({ "local": { "title": local.title, "why": why } }),
         question: question(tickets),
+        order_salt: None,
     }
 }
 

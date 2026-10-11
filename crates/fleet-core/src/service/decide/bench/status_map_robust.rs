@@ -139,6 +139,14 @@ pub fn question_lines(rows: &[QuestionRow]) -> Vec<String> {
 /// `<id>.<perturbation>`, the label, language and org stay, and the keyword
 /// rule is read again on the new name (what it would decide in real life).
 pub fn variant(c: &SectionCase, p: Perturbation) -> Option<SectionCase> {
+    if p == Perturbation::OptionOrder {
+        let v = SectionCase {
+            id: p.case_id(&c.id),
+            ..c.clone()
+        };
+        let order = |x: &SectionCase| super::status_map::request_for(x, None).option_order();
+        return (order(&v) != order(c)).then_some(v);
+    }
     let seed = |part: &str| perturb::seed_of(&[p.as_str(), part]);
     let (key, board): (String, Vec<String>) = match p {
         Perturbation::Fold => (
@@ -166,7 +174,7 @@ pub fn variant(c: &SectionCase, p: Perturbation) -> Option<SectionCase> {
             c.key.clone(),
             perturb::shuffle(&c.board, seed(&board_key(c))),
         ),
-        Perturbation::Code => return None,
+        Perturbation::Code | Perturbation::OptionOrder => return None,
     };
     let key = section_key(&key)?;
     let mut kept: Vec<String> = Vec::new();
