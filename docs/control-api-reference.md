@@ -51,6 +51,12 @@ Parameters: `alias`
 
 Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
 
+### `agents`
+
+The built-in agents (PR reviewer, support): status {agent?, limit?} (rules, newest jobs, actions waiting for a person), grant {agent: review | support, scope: gh:<owner>/<repo> | jira:<tracker id>:<PROJECT>, host, level: watch | propose | act, project_id?, config?, hours?}, revoke {id}, pause_all, approve {id}, reject {id}. The owner's own device; writes need a trusted full device.
+
+Parameters: `action`, `agent`, `config`, `host`, `hours`, `id`, `level`, `limit`, `project_id`, `scope`
+
 ### `answer_mcp_confirm`
 
 Approve or deny one waiting call by nonce; false if already answered or expired.

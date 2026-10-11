@@ -686,6 +686,19 @@ Jev's `pr_triage` (`decide.jev.pr_triage`, off by default) records in
 shadow what each new episode most likely needs. Not built: the Inbox
 card, the UI.
 
+The agent runtime (reviewer and support agents, step 1 of 8) is built and
+does nothing yet: no agent is registered, so its loops find no work (spec
+`docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`).
+Migration 170 (`agent_rules`, `agent_cursors`, `agent_jobs`,
+`agent_actions`), `service/agents/` with the loops `agents_poll` and
+`agents_run` (stopped by `automation.paused`), the settings
+`agents.poll_interval_secs`, `agents.max_concurrent` and
+`agents.max_retries`, `fleet-hub agents grant | revoke | pause-all |
+approve | reject | status`, and the `agents` tool, served only to the
+owner's own paired device. Not built: the reviewer (steps 2 to 4), the UI
+(step 5), the support agent (steps 6 and 7); until an agent's executor
+lands an approved action stays `approved`.
+
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with
 `stale_working_at` (migration 065); a StopFailure reads as failed; one

@@ -1,6 +1,6 @@
 # Reviewer and Support agents: design
 
-Status: design only, nothing built (2026-10-11).
+Status: step 1 built (the runtime, no agent registered yet), 2026-10-11.
 Asked for by the owner: bring the functionality of
 [`claude-code-reviewer`](https://github.com/martin-janci/claude-code-reviewer)
 and [`support-agent`](https://github.com/martin-janci/support-agent) into
@@ -446,11 +446,13 @@ dashboard pieces of the reviewer.
 
 ## Steps
 
-1. **Runtime core**: migration (`agent_rules`, `agent_cursors`,
-   `agent_jobs`, `agent_actions`), `fleet-hub agents grant | revoke |
-   pause-all | status`, the `agents_poll` / `agents_run` loops (empty
-   pollers), settings rows, `runs` kinds, the `agents` tool (list rules,
-   jobs, actions; approve / reject). `REGEN_SETTINGS_DOCS`, `REGEN_DOCS`.
+1. **Runtime core** (built): migration 170 (`agent_rules`,
+   `agent_cursors`, `agent_jobs`, `agent_actions`), `fleet-hub agents
+   grant | revoke | pause-all | approve | reject | status`, the
+   `agents_poll` / `agents_run` loops with an empty registry, the
+   `agents.*` settings, the `agents` tool (status; grant, revoke,
+   pause_all; approve / reject). The `runs` kinds move to step 3, with the
+   first job that runs.
 2. **Run vehicle**: `claude_print::isolation_flags_with`, the detached
    review worktree script, the MCP-config temp file; tests on the rendered
    scripts.

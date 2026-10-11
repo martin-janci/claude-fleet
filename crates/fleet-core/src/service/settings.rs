@@ -366,6 +366,13 @@ pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
 /// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
 /// recreate while keeping the refusals on the timeline.
 pub const PLAYBOOK_OOM_MAX_ATTEMPTS: &str = "playbooks.oom_max_attempts";
+/// Agents (`service::agents`): seconds between two polls of one rule;
+/// `0` stops every agent's polling.
+pub const AGENTS_POLL_INTERVAL_SECS: &str = "agents.poll_interval_secs";
+/// Agents: jobs that run at once, every agent together.
+pub const AGENTS_MAX_CONCURRENT: &str = "agents.max_concurrent";
+/// Agents: runs one job may get before a failure is final.
+pub const AGENTS_MAX_RETRIES: &str = "agents.max_retries";
 pub const GC_ENABLED: &str = "gc.enabled";
 pub const GC_BG_IDLE_SECS: &str = "gc.bg_idle_secs";
 pub const GC_SHELL_IDLE_SECS: &str = "gc.shell_idle_secs";
@@ -878,6 +885,31 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Count)
     .zero("never"),
+    Spec::new(
+        AGENTS_POLL_INTERVAL_SECS,
+        "300",
+        Kind::Secs,
+        "Agents poll interval",
+        "Seconds between two looks of one agent rule at what it watches (a repo's pull requests, a Jira project). An agent works only under a rule a person granted.",
+    )
+    .unit(Unit::Seconds)
+    .zero("off"),
+    Spec::new(
+        AGENTS_MAX_CONCURRENT,
+        "3",
+        Kind::Int { min: 1, max: 10 },
+        "Agents running at once",
+        "Agent jobs that run at the same time, every agent together. A pull request or a ticket never has two at once.",
+    )
+    .unit(Unit::Count),
+    Spec::new(
+        AGENTS_MAX_RETRIES,
+        "3",
+        Kind::Int { min: 1, max: 10 },
+        "Agent job attempts",
+        "Runs one agent job may get. A failure worth retrying waits 1, 2, 4 … minutes; one that would fail the same way again ends the job at once.",
+    )
+    .unit(Unit::Count),
     Spec::new(
         GC_ENABLED,
         "false",

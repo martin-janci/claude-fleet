@@ -51,6 +51,28 @@
       ]
     },
     {
+      "title": "Agents",
+      "items": [
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "The PR reviewer and the support agent work only under a rule a person grants: fleet-hub agents grant."
+        },
+        {
+          "type": "field",
+          "key": "agents.poll_interval_secs"
+        },
+        {
+          "type": "field",
+          "key": "agents.max_concurrent"
+        },
+        {
+          "type": "field",
+          "key": "agents.max_retries"
+        }
+      ]
+    },
+    {
       "title": "Garbage collection",
       "items": [
         {

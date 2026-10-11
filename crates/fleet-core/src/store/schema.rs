@@ -1930,6 +1930,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/169_ticket_keys.sql"),
         already_applied: Some(work_items_has_display_key),
     },
+    // Agent runtime (reviewer and support agents, step 1): `agent_rules`,
+    // `agent_cursors`, `agent_jobs`, `agent_actions`. New tables, idempotent.
+    Migration::plain(170, include_str!("../../migrations/170_agents.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

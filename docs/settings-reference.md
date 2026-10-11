@@ -50,6 +50,14 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `playbooks.oom_recreate` | `false` | on / off | fleet | Recreate a session that ran out of memory, within the budget below. |
 | `playbooks.oom_max_attempts` | `2` | 0–20, `0` = never | fleet | Recreates one session may get per 24 hours. A session that is working, or finished a turn after the flag, is never recreated. |
 
+## agents
+
+| Setting | Default | Range | Scope | What it does |
+|---|---|---|---|---|
+| `agents.poll_interval_secs` | `300` | seconds, `0` = off | fleet | Seconds between two looks of one agent rule at what it watches (a repo's pull requests, a Jira project). An agent works only under a rule a person granted. |
+| `agents.max_concurrent` | `3` | 1–10 | fleet | Agent jobs that run at the same time, every agent together. A pull request or a ticket never has two at once. |
+| `agents.max_retries` | `3` | 1–10 | fleet | Runs one agent job may get. A failure worth retrying waits 1, 2, 4 … minutes; one that would fail the same way again ends the job at once. |
+
 ## Garbage collection
 
 | Setting | Default | Range | Scope | What it does |
