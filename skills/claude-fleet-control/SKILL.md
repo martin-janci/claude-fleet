@@ -271,7 +271,8 @@ propose it first with `set_setting { key, value, why, propose: true }`, then
 write `{"kind": "setting", "proposal": <its id>, "note"?}`; the person
 confirms Apply, you never apply it yourself) or `wizard` (one of the app's
 own forms: `add_host`, `add_project`, `get_started`, `new_session`,
-`pair_device`). Each is one JSON object, `{"spec": "fleet.ui/1", "kind": …}`; a
+`pair_device`) or `dashboard` (widgets over `work { stats }` the person can
+pin; see below). Each is one JSON object, `{"spec": "fleet.ui/1", "kind": …}`; a
 broken one shows as code with the reason. Format: `docs/chat-blocks.md`.
 Use `ask` instead when you need the answers before you continue.
 
@@ -280,6 +281,19 @@ per card). In Control's chat, when the person does not answer for the
 minutes `control.auto_continue_minutes` sets, the app sends that option for
 them, so recommend only what you would do anyway; it is never sent for an
 option or question naming a push, a delete or another step hard to undo.
+
+When the person asks for a dashboard, or for a view they will come back
+to ("how is release 4.2 doing, every morning"), answer with a `dashboard`
+block: `id` (letters, digits, `. _ : -`), `title`, `intro`, `why`, and 1–12
+`widgets`, each `stat` (`value`: total, open, needs_you, pct_done, cost or
+a stage), `groups` (`query.group_by`; `show`: stages or done) or
+`buckets` (`query.group_by`: sprint or release; `states`). A widget's
+`query` takes the Work view's filters (`status`, `mine`, `stages`,
+`group_by`, `epic`, `iteration`, `assignee`, …). Never write a number: the
+app counts each query itself under the person's access. Check the filters
+with `work { stats }` first. When their message starts with a dashboard
+block they pinned ("My pinned dashboard …"), answer with the changed block
+under the **same** `id`: the card offers it as a replacement.
 
 When the person asks in their own words for what a wizard does ("set up a
 new project for acme/pos on mercury"), answer with its `wizard` block and
@@ -308,7 +322,10 @@ on also takes `work_link { action: "set_status", item_id, status }`, `edit`
 and `comment` by `item_id`; a tracker ticket's status changes in the tracker.
 `set_status`, `edit`, `comment` and renaming it (`name` with `item_id`) work
 on any local task your own session is on, even one shared with other people's
-sessions.
+sessions. So does planning it: `set_parent { item_id, parent }` files it under
+an epic or task, and `bucket_add` / `bucket_remove { bucket_id, item_id }` puts
+it in or takes it out of a sprint or release. A task your session is not on is
+the team's plan: a person sprints it.
 
 ## Tasks, subtasks and proposals (shared work context)
 

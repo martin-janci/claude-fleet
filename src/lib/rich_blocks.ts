@@ -21,6 +21,8 @@ import type { FormField, FormSpec } from './forms/forms';
 import { CHAT_WIZARD_IDS, type ChatWizardId } from './forms/chat_wizard_ids';
 import { fenceOpen, isClosingFence } from './markdown';
 import { HANDOVER_BEGIN, handoverMarker, parseHandover, type Handover } from './handover';
+import type { Dashboard, Widget } from './dashboards';
+import { HAS_FILTERS, STATUS_FILTERS, WORK_GROUP_BY, WORK_STAGES } from './work_view';
 
 export const UI_SPEC = 'fleet.ui/1';
 /** The fence language that marks a block as a card. */
@@ -142,10 +144,14 @@ export type UiBlock =
   | { kind: 'setting'; proposal: number; note?: string }
   /** One of the app's own wizards as a form in the chat (step 10.12): the
    *  spec is the app's, never the block's (`forms/WizardChatCard.svelte`). */
-  | { kind: 'wizard'; wizard: ChatWizardId; why?: string; values?: Record<string, string | number | boolean> };
+  | { kind: 'wizard'; wizard: ChatWizardId; why?: string; values?: Record<string, string | number | boolean> }
+  /** A dashboard the agent proposes (persona design, step 5): widgets over
+   *  `work_stats`, drawn live by the app, pinned only by the person
+   *  (`rich/DashboardCard.svelte`). The block names filters, never numbers. */
+  | ({ kind: 'dashboard'; why?: string } & Dashboard);
 
 export type UiKind = UiBlock['kind'];
-export const UI_KINDS: UiKind[] = ['report', 'steps', 'guide', 'callout', 'facts', 'choices', 'form', 'progress', 'results', 'error', 'setting', 'wizard'];
+export const UI_KINDS: UiKind[] = ['report', 'steps', 'guide', 'callout', 'facts', 'choices', 'form', 'progress', 'results', 'error', 'setting', 'wizard', 'dashboard'];
 /** A progress `id`, an error `code` and a guide's `page`: a key, never prose. */
 const KEY_RE = /^[A-Za-z0-9_.:-]+$/;
 const KEY_MAX = 64;
@@ -647,6 +653,119 @@ function checkForm(v: unknown, p: Problems): FormSpec | null {
   return p.list.length === 0 ? (v as unknown as FormSpec) : null;
 }
 
+// ── A dashboard's widgets (persona design, step 5; chat_blocks.rs `widget`) ─
+
+export const DASH_WIDGET_KINDS = ['stat', 'groups', 'buckets'] as const;
+export const DASH_STAT_VALUES = ['total', 'open', 'needs_you', 'pct_done', 'cost', ...WORK_STAGES] as const;
+export const DASH_GROUP_SHOWS = ['stages', 'done'] as const;
+export const DASH_BUCKET_STATES = ['planned', 'active', 'closed', 'released'] as const;
+const DASH_BUCKET_GROUPS = ['sprint', 'release'] as const;
+/** The filters a widget's query may name: the Work view's, less the ones
+ *  that only page or order it. */
+const DASH_TEXT_FILTERS = ['query', 'assignee', 'status_name', 'iteration', 'epic', 'item_type'] as const;
+
+function bool(o: Record<string, unknown>, k: string, p: Problems, where: string): boolean | undefined {
+  const v = o[k];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'boolean') {
+    p.add(where, `\`${k}\` must be true or false`);
+    return undefined;
+  }
+  return v;
+}
+
+function dashQuery(v: unknown, p: Problems, at: string): Record<string, unknown> {
+  if (v === undefined || v === null) return {};
+  if (!isObject(v) || Array.isArray(v)) {
+    p.add(at, '`query` must be an object');
+    return {};
+  }
+  const where = `${at} › query`;
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(v).sort()) {
+    const x = v[k];
+    switch (k) {
+      case 'org':
+        if (x === 'none' || (typeof x === 'number' && Number.isInteger(x) && x >= 1)) out.org = x;
+        else p.add(where, '`org` must be an org id or none');
+        break;
+      case 'status':
+        out.status = oneOf(v, k, p, where, STATUS_FILTERS);
+        break;
+      case 'has':
+        out.has = oneOf(v, k, p, where, HAS_FILTERS);
+        break;
+      case 'group_by':
+        out.group_by = oneOf(v, k, p, where, WORK_GROUP_BY);
+        break;
+      case 'mine':
+      case 'review':
+        out[k] = bool(v, k, p, where);
+        break;
+      case 'stages': {
+        const list = arr(v, k, p, where, 1, WORK_STAGES.length);
+        out.stages = list.filter((st, j) => {
+          const ok = typeof st === 'string' && (WORK_STAGES as readonly string[]).includes(st);
+          if (!ok) p.add(`${where} › stage ${j + 1}`, `must be one of ${WORK_STAGES.join(', ')}`);
+          return ok;
+        });
+        break;
+      }
+      default:
+        if ((DASH_TEXT_FILTERS as readonly string[]).includes(k)) out[k] = str(v, k, p, where, { required: true, max: 200 });
+        else p.add(where, `\`${k}\` is not a filter`);
+    }
+  }
+  return out;
+}
+
+function dashWidget(o: Record<string, unknown>, p: Problems, at: string): Widget | null {
+  const kind = oneOf(o, 'kind', p, at, DASH_WIDGET_KINDS);
+  const title = str(o, 'title', p, at, { required: true, max: 80 }) ?? '';
+  const query = dashQuery(o.query, p, at);
+  // As written, not as checked: a bad `group_by` is one problem, not two.
+  const by = isObject(o.query) ? o.query.group_by : undefined;
+  switch (kind) {
+    case 'stat': {
+      const value = oneOf(o, 'value', p, at, DASH_STAT_VALUES) ?? 'total';
+      const warn = bool(o, 'warn', p, at);
+      return { kind, title, query, value, ...(warn ? { warn } : {}) };
+    }
+    case 'groups': {
+      if (typeof by !== 'string') p.add(at, 'a groups widget needs `query.group_by`');
+      const show = oneOf(o, 'show', p, at, DASH_GROUP_SHOWS, 'stages') ?? 'stages';
+      const limit = num(o, 'limit', p, at, { min: 1 });
+      if (limit !== undefined && limit > 20) p.add(at, '`limit` must be at most 20');
+      const hide_none = bool(o, 'hide_none', p, at);
+      return {
+        kind,
+        title,
+        query: query as unknown as Extract<Widget, { kind: 'groups' }>['query'],
+        show,
+        ...(limit !== undefined ? { limit } : {}),
+        ...(hide_none ? { hide_none } : {}),
+      };
+    }
+    case 'buckets': {
+      if (!(DASH_BUCKET_GROUPS as readonly unknown[]).includes(by)) p.add(at, 'a buckets widget needs `query.group_by` sprint or release');
+      const list = optArr(o, 'states', p, at, 1, DASH_BUCKET_STATES.length);
+      const states = list?.filter((st, j) => {
+        const ok = typeof st === 'string' && (DASH_BUCKET_STATES as readonly string[]).includes(st);
+        if (!ok) p.add(`${at} › state ${j + 1}`, `must be one of ${DASH_BUCKET_STATES.join(', ')}`);
+        return ok;
+      }) as string[] | undefined;
+      return {
+        kind,
+        title,
+        query: query as unknown as Extract<Widget, { kind: 'buckets' }>['query'],
+        ...(states ? { states } : {}),
+      };
+    }
+    default:
+      return null;
+  }
+}
+
 /** A fleet.ui/1 block from its JSON text, or every problem with it. */
 export function checkUiBlock(raw: string): Check {
   const p = new Problems();
@@ -776,6 +895,17 @@ export function checkUiBlock(raw: string): Check {
       const why = str(v, 'why', p, '', { max: 500 });
       const values = draftedValues(v.values, p);
       if (wizard) block = { kind: 'wizard', wizard, why, ...(values ? { values } : {}) };
+      break;
+    }
+    case 'dashboard': {
+      const id = key(v, 'id', p, '');
+      const title = str(v, 'title', p, '', { required: true, max: 80 }) ?? '';
+      const intro = str(v, 'intro', p, '', { max: 300 }) ?? '';
+      const why = str(v, 'why', p, '', { max: 500 });
+      const widgets = each(arr(v, 'widgets', p, '', 1, 12), p, 'widget', (o, at) => dashWidget(o, p, at)).filter(
+        (w): w is Widget => w !== null,
+      );
+      block = { kind: 'dashboard', id, title, intro, widgets, ...(why ? { why } : {}) };
       break;
     }
   }

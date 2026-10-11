@@ -38,7 +38,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
 /// The question's version: bump it when the question below changes.
-pub const QUESTION_VERSION: &str = "main_ticket.v1";
+pub const QUESTION_VERSION: &str = "main_ticket.v2";
 /// What a run is about: one session (its row's id), so the row's
 /// proposals carry the answer.
 pub const SUBJECT_KIND: &str = PROPOSAL_SUBJECT_SESSION;
@@ -52,12 +52,15 @@ pub const MAX_KEYS: usize = 8;
 pub const PROMPT_CHARS: usize = 1_000;
 
 /// The instruction, read literally.
-pub const INSTRUCTIONS: &str = "state.prompt is the first prompt a person typed into a coding \
+pub const INSTRUCTIONS: &str = concat!(
+    "state.prompt is the first prompt a person typed into a coding \
      session. It names several tickets, each replaced by a placeholder such as [K1] or [K2]; \
      each option except unsure is one of those tickets, with its title. Decide which ONE ticket \
      the session works on: the one the person asks to be done, not one named only for context, \
      as an earlier attempt, a duplicate, a reference or a follow-up. Choose unsure when the \
-     prompt does not show one main ticket.";
+     prompt does not show one main ticket.",
+    super::quoted_data!()
+);
 
 /// One key the prompt names: its option word, the key and its title.
 #[derive(Debug, Clone, PartialEq, Eq)]

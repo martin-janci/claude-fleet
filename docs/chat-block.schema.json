@@ -449,6 +449,49 @@
         "kind",
         "wizard"
       ]
+    },
+    {
+      "description": "A dashboard the agent proposes (persona design, step 5): widgets over\n`work { stats }`, which the app reads and draws itself under the\nperson's access. The block names filters and what to show, never a\nnumber. The person pins it; a block with the id of a pinned\ndashboard is offered as its replacement.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Letters, digits and `. _ : -`; the same id again is a new version.",
+          "type": "string"
+        },
+        "intro": {
+          "description": "One line under the title: what it answers.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "const": "dashboard"
+        },
+        "title": {
+          "type": "string"
+        },
+        "why": {
+          "description": "Why the agent proposes it, in one sentence.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "widgets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DashWidget"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "title",
+        "widgets"
+      ]
     }
   ],
   "required": [
@@ -490,6 +533,214 @@
       "required": [
         "label",
         "prompt"
+      ]
+    },
+    "DashQuery": {
+      "description": "A widget's filters: the Work view's (`work { tree }`'s `filters`), less\nthe ones that only page or order it. Any other key is refused, so a\nmisspelt filter never counts the wrong tasks.",
+      "type": "object",
+      "properties": {
+        "assignee": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "epic": {
+          "description": "Under one epic: its key or item:<id>.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "group_by": {
+          "description": "group, org, person, mission, account, repo, sprint, release or epic.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "has": {
+          "description": "any, active, past_only, none or suggested: its sessions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "item_type": {
+          "description": "The tracker's type name (Story, Bug …).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "iteration": {
+          "description": "The sprint: current, none or its name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mine": {
+          "description": "Assigned to the person in its tracker.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "org": {
+          "description": "An org id, or \"none\"."
+        },
+        "query": {
+          "description": "Words of the key or title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "review": {
+          "description": "Only tasks with something to review.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "stages": {
+          "description": "Any of these stages.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "description": "any, open, todo, in_progress or done.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status_name": {
+          "description": "One tracker column, by its own name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "DashWidget": {
+      "description": "One widget of a `dashboard` block.",
+      "oneOf": [
+        {
+          "description": "One number of the query's answer.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "stat"
+            },
+            "query": {
+              "$ref": "#/$defs/DashQuery",
+              "default": {}
+            },
+            "title": {
+              "type": "string"
+            },
+            "value": {
+              "description": "total, open, needs_you, pct_done, cost, or a stage's count.",
+              "type": "string"
+            },
+            "warn": {
+              "description": "Drawn in the warning colour when above zero.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "title",
+            "value"
+          ]
+        },
+        {
+          "description": "One row per group of `query.group_by`: a bar split by stage, or the\ndone share.",
+          "type": "object",
+          "properties": {
+            "hide_none": {
+              "description": "Leave the \"No …\" group out.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "groups"
+            },
+            "limit": {
+              "description": "At most this many groups, 1–20 (default 10).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "query": {
+              "$ref": "#/$defs/DashQuery"
+            },
+            "show": {
+              "description": "stages (default) or done.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "title",
+            "query"
+          ]
+        },
+        {
+          "description": "Sprints or releases (`query.group_by`) with their health.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "buckets"
+            },
+            "query": {
+              "$ref": "#/$defs/DashQuery"
+            },
+            "states": {
+              "description": "Only buckets in these states: planned, active, closed, released.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "title",
+            "query"
+          ]
+        }
       ]
     },
     "Drafted": {

@@ -41,7 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// The question's version: bump it when the question below changes.
-pub const QUESTION_VERSION: &str = "routine_run_outcome.v1";
+pub const QUESTION_VERSION: &str = "routine_run_outcome.v2";
 /// What a decision run is about: one routine run (its id as text).
 pub const SUBJECT_KIND: &str = "routine_run";
 /// Below this confidence an answer is recorded, not applied.
@@ -61,14 +61,17 @@ pub const PER_PASS: i64 = 5;
 const SCAN_CAP: i64 = 200;
 
 /// The instruction, read literally: the exact condition and what to use.
-pub const INSTRUCTIONS: &str = "state.screen is the end of a terminal screen of Claude Code, an \
+pub const INSTRUCTIONS: &str = concat!(
+    "state.screen is the end of a terminal screen of Claude Code, an \
      AI coding assistant, captured after it finished a scheduled task nobody was watching: its \
      last reply and what is below it. Code is replaced by [code: ...] placeholders. Decide what \
      the task came to, using only the screen. Choose did_work when the reply reports something \
      it changed, made, found or reported that a person should read; nothing when it reports \
      there was nothing to do or nothing new (no matching items, no changes, all clear); \
      needs_person when it asks the person a question or for a decision, or says it could not \
-     go on without one. Choose unsure when the screen does not show which.";
+     go on without one. Choose unsure when the screen does not show which.",
+    super::quoted_data!()
+);
 
 /// PURE: the question: one Choice over what a run came to.
 pub fn question() -> Question {

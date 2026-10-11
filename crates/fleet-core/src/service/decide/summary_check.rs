@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// The question's version: bump it when the question below changes.
-pub const QUESTION_VERSION: &str = "summary_check.v1";
+pub const QUESTION_VERSION: &str = "summary_check.v2";
 /// What a run is about: the session (its id as text).
 pub const SUBJECT_KIND: &str = "session";
 /// At or above this a summary is supported.
@@ -28,10 +28,13 @@ pub const PASS_FLOOR: f64 = 0.5;
 pub const TRANSCRIPT_MAX_BYTES: usize = 80_000;
 
 /// The instruction, read literally.
-pub const INSTRUCTIONS: &str = "state.summary is a short summary of state.transcript, written \
+pub const INSTRUCTIONS: &str = concat!(
+    "state.summary is a short summary of state.transcript, written \
     by another model for a person who is watching the session. Decide whether every statement \
     in state.summary is supported by state.transcript: nothing invented, nothing contradicted, \
-    nothing claimed finished that the transcript does not show finished.";
+    nothing claimed finished that the transcript does not show finished.",
+    super::quoted_data!()
+);
 
 const SUPPORTED: &str = "Every statement in the summary is supported by the transcript.";
 const UNSUPPORTED: &str = "The summary states something the transcript does not support.";

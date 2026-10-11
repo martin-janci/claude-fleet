@@ -23,8 +23,19 @@ const MAX_PROBLEMS: usize = 20;
 const KEY_MAX: usize = 64;
 
 pub const KINDS: &[&str] = &[
-    "report", "steps", "guide", "callout", "facts", "choices", "form", "progress", "results",
-    "error", "setting", "wizard",
+    "report",
+    "steps",
+    "guide",
+    "callout",
+    "facts",
+    "choices",
+    "form",
+    "progress",
+    "results",
+    "error",
+    "setting",
+    "wizard",
+    "dashboard",
 ];
 /// The app's wizards a `wizard` block may open in the chat (redesign 10.12):
 /// the ones in `src/lib/forms/wizards/` whose last button runs in the chat
@@ -49,6 +60,41 @@ const NEXT_ACTIONS_ON_HOST: &[&str] = &["login", "open_host"];
 pub const RESULT_TYPES: &[&str] = &["text", "int", "tokens", "usd_micros", "day", "time"];
 pub const RESULT_CHARTS: &[&str] = &["line", "bar", "sparkline"];
 const RESULT_ITEM_TYPES: &[&str] = &["stat", "chart", "table"];
+/// What a `dashboard` block's widgets are (persona design, step 5): the
+/// widgets of `src/lib/dashboards.ts`, drawn from `work { stats }`.
+pub const DASH_WIDGET_KINDS: &[&str] = &["stat", "groups", "buckets"];
+/// The Work view's stages (`WORK_STAGES` in work_view.ts).
+pub const WORK_STAGES: &[&str] = &["backlog", "in_progress", "in_review", "blocked", "done"];
+pub const DASH_STAT_VALUES: &[&str] = &[
+    "total",
+    "open",
+    "needs_you",
+    "pct_done",
+    "cost",
+    "backlog",
+    "in_progress",
+    "in_review",
+    "blocked",
+    "done",
+];
+pub const DASH_GROUP_SHOWS: &[&str] = &["stages", "done"];
+/// A sprint's or a release's states (`store/work_buckets.rs`).
+pub const DASH_BUCKET_STATES: &[&str] = &["planned", "active", "closed", "released"];
+/// `filters.status`, `filters.has` and `filters.group_by` of the Work view.
+const WORK_STATUS_FILTERS: &[&str] = &["any", "open", "todo", "in_progress", "done"];
+const WORK_HAS_FILTERS: &[&str] = &["any", "active", "past_only", "none", "suggested"];
+const WORK_GROUP_BY: &[&str] = &[
+    "group", "org", "person", "mission", "account", "repo", "sprint", "release", "epic",
+];
+/// The filters a widget's query may name as text.
+const DASH_TEXT_FILTERS: &[&str] = &[
+    "query",
+    "assignee",
+    "status_name",
+    "iteration",
+    "epic",
+    "item_type",
+];
 const FIELD_TYPES_SHOWN: &[&str] = &[
     "text",
     "textarea",
@@ -209,6 +255,110 @@ pub enum BlockKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         values: Option<Map<String, Value>>,
     },
+    /// A dashboard the agent proposes (persona design, step 5): widgets over
+    /// `work { stats }`, which the app reads and draws itself under the
+    /// person's access. The block names filters and what to show, never a
+    /// number. The person pins it; a block with the id of a pinned
+    /// dashboard is offered as its replacement.
+    Dashboard {
+        /// Letters, digits and `. _ : -`; the same id again is a new version.
+        id: String,
+        title: String,
+        /// One line under the title: what it answers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intro: Option<String>,
+        /// Why the agent proposes it, in one sentence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
+        widgets: Vec<DashWidget>,
+    },
+}
+
+/// One widget of a `dashboard` block.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DashWidget {
+    /// One number of the query's answer.
+    Stat {
+        title: String,
+        #[serde(default)]
+        query: DashQuery,
+        /// total, open, needs_you, pct_done, cost, or a stage's count.
+        value: String,
+        /// Drawn in the warning colour when above zero.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        warn: Option<bool>,
+    },
+    /// One row per group of `query.group_by`: a bar split by stage, or the
+    /// done share.
+    Groups {
+        title: String,
+        query: DashQuery,
+        /// stages (default) or done.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        show: Option<String>,
+        /// At most this many groups, 1–20 (default 10).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        /// Leave the "No …" group out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hide_none: Option<bool>,
+    },
+    /// Sprints or releases (`query.group_by`) with their health.
+    Buckets {
+        title: String,
+        query: DashQuery,
+        /// Only buckets in these states: planned, active, closed, released.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        states: Option<Vec<String>>,
+    },
+}
+
+/// A widget's filters: the Work view's (`work { tree }`'s `filters`), less
+/// the ones that only page or order it. Any other key is refused, so a
+/// misspelt filter never counts the wrong tasks.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DashQuery {
+    /// An org id, or "none".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<Value>,
+    /// any, open, todo, in_progress or done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Assigned to the person in its tracker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mine: Option<bool>,
+    /// any, active, past_only, none or suggested: its sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has: Option<String>,
+    /// Only tasks with something to review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<bool>,
+    /// Words of the key or title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// One tracker column, by its own name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_name: Option<String>,
+    /// group, org, person, mission, account, repo, sprint, release or epic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<String>,
+    /// Any of these stages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stages: Option<Vec<String>>,
+    /// The sprint: current, none or its name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<String>,
+    /// Under one epic: its key or item:<id>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic: Option<String>,
+    /// The tracker's type name (Story, Bug …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_type: Option<String>,
 }
 
 /// A wizard a `wizard` block opens ([`CHAT_WIZARDS`]).
@@ -500,6 +650,14 @@ pub fn check(v: &Value) -> Result<(), Vec<String>> {
             p.str(o, "why", "", false, 500);
             drafted_values(&mut p, o.get("values"));
         }
+        "dashboard" => {
+            p.key(o, "id", "");
+            p.str(o, "title", "", true, 80);
+            p.str(o, "intro", "", false, 300);
+            p.str(o, "why", "", false, 500);
+            let widgets = p.arr(o, "widgets", "", 1, 12);
+            p.each(&widgets, "widget", dash_widget);
+        }
         _ => unreachable!("kind is one of KINDS"),
     }
     if p.0.is_empty() {
@@ -507,6 +665,86 @@ pub fn check(v: &Value) -> Result<(), Vec<String>> {
     } else {
         Err(p.0)
     }
+}
+
+/// A dashboard widget (`dashWidget` in rich_blocks.ts).
+fn dash_widget(p: &mut Problems, o: &Map<String, Value>, at: &str) {
+    p.one_of(o, "kind", at, DASH_WIDGET_KINDS, true);
+    p.str(o, "title", at, true, 80);
+    let group_by = dash_query(p, o.get("query"), at);
+    match o.get("kind").and_then(Value::as_str) {
+        Some("stat") => {
+            p.one_of(o, "value", at, DASH_STAT_VALUES, true);
+            p.bool(o, "warn", at);
+        }
+        Some("groups") => {
+            if group_by.is_none() {
+                p.add(at, "a groups widget needs `query.group_by`");
+            }
+            p.one_of(o, "show", at, DASH_GROUP_SHOWS, false);
+            if p.num(o, "limit", at, 1).is_some_and(|l| l > 20.0) {
+                p.add(at, "`limit` must be at most 20");
+            }
+            p.bool(o, "hide_none", at);
+        }
+        Some("buckets") => {
+            if !matches!(group_by.as_deref(), Some("sprint" | "release")) {
+                p.add(
+                    at,
+                    "a buckets widget needs `query.group_by` sprint or release",
+                );
+            }
+            if let Some(states) = p.opt_arr(o, "states", at, 1, DASH_BUCKET_STATES.len()) {
+                p.one_of_each(&states, &format!("{at} › state"), DASH_BUCKET_STATES);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A widget's query (`dashQuery` in rich_blocks.ts), keys in sorted order;
+/// its `group_by` when that is a text.
+fn dash_query(p: &mut Problems, v: Option<&Value>, at: &str) -> Option<String> {
+    let o = match v {
+        None | Some(Value::Null) => return None,
+        Some(Value::Object(o)) => o,
+        Some(_) => {
+            p.add(at, "`query` must be an object");
+            return None;
+        }
+    };
+    let where_ = format!("{at} › query");
+    let mut keys: Vec<&String> = o.keys().collect();
+    keys.sort();
+    for k in keys {
+        match k.as_str() {
+            "org" => {
+                let ok = match &o[k] {
+                    Value::String(s) => s == "none",
+                    Value::Number(n) => n.as_f64().is_some_and(|x| x.fract() == 0.0 && x >= 1.0),
+                    _ => false,
+                };
+                if !ok {
+                    p.add(&where_, "`org` must be an org id or none");
+                }
+            }
+            "status" => p.one_of(o, k, &where_, WORK_STATUS_FILTERS, true),
+            "has" => p.one_of(o, k, &where_, WORK_HAS_FILTERS, true),
+            "group_by" => p.one_of(o, k, &where_, WORK_GROUP_BY, true),
+            "mine" | "review" => p.bool(o, k, &where_),
+            "stages" => {
+                let list = p.arr(o, k, &where_, 1, WORK_STAGES.len());
+                p.one_of_each(&list, &format!("{where_} › stage"), WORK_STAGES);
+            }
+            t if DASH_TEXT_FILTERS.contains(&t) => {
+                p.str(o, k, &where_, true, 200);
+            }
+            other => p.add(&where_, format!("`{other}` is not a filter")),
+        }
+    }
+    o.get("group_by")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn choice(p: &mut Problems, o: &Map<String, Value>, at: &str) {
@@ -883,6 +1121,26 @@ impl Problems {
             None | Some(Value::Null) => {}
             Some(Value::String(s)) if allowed.contains(&s.as_str()) => {}
             Some(_) => self.add(at, format!("`{key}` must be one of {}", allowed.join(", "))),
+        }
+    }
+
+    /// true or false, when present.
+    fn bool(&mut self, o: &Map<String, Value>, key: &str, at: &str) {
+        if !matches!(o.get(key), None | Some(Value::Null) | Some(Value::Bool(_))) {
+            self.add(at, format!("`{key}` must be true or false"));
+        }
+    }
+
+    /// Each entry of a list one of `allowed`; a problem names it
+    /// `{at} {k}` ("widget 1 › query › stage 2").
+    fn one_of_each(&mut self, list: &[Value], at: &str, allowed: &[&str]) {
+        for (k, x) in list.iter().enumerate() {
+            if !x.as_str().is_some_and(|s| allowed.contains(&s)) {
+                self.add(
+                    &format!("{at} {}", k + 1),
+                    format!("must be one of {}", allowed.join(", ")),
+                );
+            }
         }
     }
 

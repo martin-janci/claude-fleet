@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// The question's version: bump it when the question below changes.
-pub const QUESTION_VERSION: &str = "control_route.v1";
+pub const QUESTION_VERSION: &str = "control_route.v2";
 /// What a run is about: one message typed in Control.
 pub const SUBJECT_KIND: &str = "control_message";
 /// Below this confidence an answer is recorded, not suggested.
@@ -55,13 +55,16 @@ pub const MAX_TARGETS: usize = 8;
 pub const MIN_WORDS: usize = 4;
 
 /// The instruction, read literally: the exact condition and what to use.
-pub const INSTRUCTIONS: &str = "state.message is one message a person typed to the Control \
+pub const INSTRUCTIONS: &str = concat!(
+    "state.message is one message a person typed to the Control \
      agent, which coordinates their missions and coding sessions. Each option m<id> is one \
      mission (a goal several sessions work toward) and each option s<id> is one running coding \
      session. Decide which one mission or session the message is about, using only the \
      message's text and the option descriptions. Choose control when the message is a request \
      for the Control agent itself and is not about one listed mission or session. Choose unsure \
-     when the message does not clearly point to one option.";
+     when the message does not clearly point to one option.",
+    super::quoted_data!()
+);
 
 /// What a target is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

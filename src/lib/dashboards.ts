@@ -2,11 +2,20 @@
 // view of `work_stats` — the Work view's own tasks, counted under the
 // person's access (`service/work/stats.rs`). The numbers are the app's,
 // never a model's: a spec only names filters and what to show of the
-// answer, which is the shape an agent will later write (step 5).
+// answer.
 //
 // Every workspace has a built-in dashboard. A widget reads one query; the
 // queries of one dashboard are deduplicated, so two widgets over the same
 // filters cost one read.
+//
+// Step 5: an agent proposes a dashboard as a `dashboard` chat block
+// (docs/chat-blocks.md), the card draws it live, and the person pins it.
+// Pinned dashboards are kept on this device, as the workspace is. A change
+// goes back through the agent: "Change" puts the dashboard as it is into
+// the agent's composer, and its answer is a new block with the same id.
+import { get, writable } from 'svelte/store';
+import { readPref, writePref } from './prefs';
+import { checkUiBlock, UI_SPEC } from './rich_blocks';
 import { invokeCmd, type Result } from './result';
 import type { WorkTreeFilters, WorkGroupBy } from './work_view';
 import type { WorkspaceId } from './workspace';
@@ -88,7 +97,7 @@ export type Widget =
       show: 'stages' | 'done';
       limit?: number;
       /** Leave the "No …" group out. */
-      hideNone?: boolean;
+      hide_none?: boolean;
     }
   | {
       /** Sprints or releases with their health. */
@@ -147,7 +156,7 @@ export const BUILTIN_DASHBOARDS: Record<WorkspaceId, Dashboard> = {
       { kind: 'stat', title: 'Needs a person', query: OPEN, value: 'needs_you', warn: true },
       { kind: 'stat', title: 'Spent', query: {}, value: 'cost' },
       { kind: 'buckets', title: 'Releases', query: { group_by: 'release' }, states: ['planned'] },
-      { kind: 'groups', title: 'Missions', query: { group_by: 'mission' }, show: 'done', limit: 8, hideNone: true },
+      { kind: 'groups', title: 'Missions', query: { group_by: 'mission' }, show: 'done', limit: 8, hide_none: true },
     ],
   },
   scrum: {
@@ -172,7 +181,7 @@ export const BUILTIN_DASHBOARDS: Record<WorkspaceId, Dashboard> = {
       { kind: 'stat', title: 'Backlog', query: OPEN, value: 'backlog' },
       { kind: 'stat', title: 'Waiting on other work', query: OPEN, value: 'blocked', warn: true },
       { kind: 'stat', title: 'Done', query: {}, value: 'pct_done' },
-      { kind: 'groups', title: 'Epics', query: { group_by: 'epic' }, show: 'done', limit: 10, hideNone: true },
+      { kind: 'groups', title: 'Epics', query: { group_by: 'epic' }, show: 'done', limit: 10, hide_none: true },
       { kind: 'buckets', title: 'Releases', query: { group_by: 'release' }, states: ['planned'] },
     ],
   },
@@ -240,7 +249,7 @@ export function segmentsOf(g: Pick<StatsGroup, 'total' | 'stages'>): Segment[] {
 
 /** The groups a `groups` widget draws. */
 export function groupsShown(s: WorkStats, w: Extract<Widget, { kind: 'groups' }>): StatsGroup[] {
-  const rows = w.hideNone ? s.groups.filter((g) => g.group.id !== 'none') : s.groups;
+  const rows = w.hide_none ? s.groups.filter((g) => g.group.id !== 'none') : s.groups;
   return rows.slice(0, w.limit ?? 10);
 }
 
@@ -273,3 +282,120 @@ export function shortDate(unix: number | null | undefined): string {
   if (unix == null) return '—';
   return new Date(unix * 1000).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
 }
+
+// ---------------------------------------------------------------------------
+// Pinned dashboards (step 5)
+
+/** A dashboard the person pinned from an agent's proposal. */
+export type PinnedDashboard = Dashboard & {
+  /** When it was pinned or last replaced, unix seconds. */
+  pinned_at: number;
+  /** The agent's one sentence on why, as the block gave it. */
+  why?: string;
+};
+
+const PINNED_KEY = 'ui.dashboards.pinned';
+/** The most dashboards one device keeps pinned. */
+export const MAX_PINNED = 20;
+
+/** The block a dashboard is written as: the agent's own format. */
+export function dashboardBlock(d: Dashboard): Record<string, unknown> {
+  return { spec: UI_SPEC, kind: 'dashboard', id: d.id, title: d.title, intro: d.intro, widgets: d.widgets };
+}
+
+/** A stored list, each entry checked again as a block: a pref edited by
+ *  hand, or written by an older app, never reaches the page unchecked. */
+function isList(v: unknown): v is unknown[] {
+  return Array.isArray(v);
+}
+
+function readPinned(): PinnedDashboard[] {
+  return readPref<unknown[]>(PINNED_KEY, [], isList).flatMap((raw) => {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return [];
+    const x = raw as PinnedDashboard;
+    const c = checkUiBlock(JSON.stringify(dashboardBlock(x)));
+    if (!c.ok || c.block.kind !== 'dashboard') return [];
+    const { kind: _k, why: _w, ...d } = c.block;
+    const pinned_at = typeof x.pinned_at === 'number' ? x.pinned_at : 0;
+    return [{ ...d, pinned_at, ...(typeof x.why === 'string' && x.why ? { why: x.why } : {}) }];
+  });
+}
+
+export const pinnedDashboards = writable<PinnedDashboard[]>(readPinned());
+pinnedDashboards.subscribe((list) => writePref(PINNED_KEY, list));
+
+/** The id of every built-in: a proposal may not take one over. */
+export const BUILTIN_IDS: ReadonlySet<string> = new Set(Object.values(BUILTIN_DASHBOARDS).map((d) => d.id));
+
+/** Same widgets, title and intro: pinning it again would change nothing. */
+export function sameDashboard(a: Dashboard, b: Dashboard): boolean {
+  return JSON.stringify(dashboardBlock(a)) === JSON.stringify(dashboardBlock(b));
+}
+
+/** What pinning `d` would do: add it, replace the pinned one of its id, or
+ *  nothing (`same`). `full` when the device already keeps MAX_PINNED. */
+export type PinState = 'new' | 'replace' | 'same' | 'full' | 'builtin';
+
+export function pinStateOf(d: Dashboard, pinned: readonly PinnedDashboard[]): PinState {
+  if (BUILTIN_IDS.has(d.id)) return 'builtin';
+  const had = pinned.find((p) => p.id === d.id);
+  if (had) return sameDashboard(had, d) ? 'same' : 'replace';
+  return pinned.length >= MAX_PINNED ? 'full' : 'new';
+}
+
+/** Pin `d`, or replace the pinned one of its id in place. False when it
+ *  cannot be pinned (a built-in's id, or the device is full). */
+export function pinDashboard(d: Dashboard, why?: string, now = Math.floor(Date.now() / 1000)): boolean {
+  const list = get(pinnedDashboards);
+  const state = pinStateOf(d, list);
+  if (state === 'builtin' || state === 'full') return false;
+  const entry: PinnedDashboard = {
+    id: d.id,
+    title: d.title,
+    intro: d.intro,
+    widgets: d.widgets,
+    pinned_at: now,
+    ...(why ? { why } : {}),
+  };
+  const at = list.findIndex((p) => p.id === d.id);
+  pinnedDashboards.set(at >= 0 ? list.map((p, k) => (k === at ? entry : p)) : [...list, entry]);
+  return true;
+}
+
+export function unpinDashboard(id: string): void {
+  pinnedDashboards.update((list) => list.filter((p) => p.id !== id));
+}
+
+/** In words, what a replacement changes: widgets added, removed and
+ *  changed, by title. Empty when only the title or intro moved. */
+export function dashboardChanges(from: Dashboard, to: Dashboard): string[] {
+  const before = new Map(from.widgets.map((w) => [w.title, JSON.stringify(w)]));
+  const after = new Map(to.widgets.map((w) => [w.title, JSON.stringify(w)]));
+  const out: string[] = [];
+  for (const [t, w] of after) {
+    if (!before.has(t)) out.push(`adds “${t}”`);
+    else if (before.get(t) !== w) out.push(`changes “${t}”`);
+  }
+  for (const t of before.keys()) if (!after.has(t)) out.push(`removes “${t}”`);
+  if (out.length === 0 && (from.title !== to.title || from.intro !== to.intro)) out.push('renames it');
+  return out;
+}
+
+/** What "Change" puts in the agent's composer: the dashboard as it is, as
+ *  the block the agent answers with, then the start of the person's ask.
+ *  A built-in is offered as a copy, under an id of its own. */
+export function changePrompt(d: Dashboard, widget?: string): string {
+  const builtin = BUILTIN_IDS.has(d.id);
+  const base = builtin ? { ...d, id: `${d.id}.mine` } : d;
+  const json = JSON.stringify(dashboardBlock(base), null, 2);
+  const head = builtin
+    ? `The built-in dashboard "${d.title}", to make my own copy of (keep the id ${base.id}):`
+    : `My pinned dashboard "${d.title}", as it is now:`;
+  const ask = widget ? `Change the widget "${widget}": ` : 'Change it: ';
+  return `${head}\n\n\`\`\`fleet-ui\n${json}\n\`\`\`\n\nAnswer with a \`dashboard\` block with the same id. ${ask}`;
+}
+
+/** The dashboard the page shows instead of the workspace's own, and the
+ *  workspace it was picked in: a pick holds only while that workspace is
+ *  active, so switching workspace lands on the new one's dashboard. */
+export const shownDashboard = writable<{ id: string; workspace: WorkspaceId } | null>(null);

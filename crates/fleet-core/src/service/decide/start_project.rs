@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// The question's version: bump it when the question below changes.
-pub const QUESTION_VERSION: &str = "start_project.v1";
+pub const QUESTION_VERSION: &str = "start_project.v2";
 /// What a run is about: one task's start.
 pub const SUBJECT_KIND: &str = "work_start";
 /// Below this confidence an answer is recorded, not suggested.
@@ -52,12 +52,15 @@ pub const DESCRIPTION_CHARS: usize = 1000;
 pub const REASK_DAYS: i64 = 14;
 
 /// The instruction, read literally: the exact condition and what to use.
-pub const INSTRUCTIONS: &str = "state.task is one task (a ticket) a person is about to start \
+pub const INSTRUCTIONS: &str = concat!(
+    "state.task is one task (a ticket) a person is about to start \
      working on: its key, its title and the start of its description. Each option except unsure \
      is one git repository, named owner/repo, that the work could be done in. Decide which \
      repository the task's code changes belong in, using only the task's text and the \
      repository names. Choose unsure when the text does not name or clearly point to one of the \
-     repositories.";
+     repositories.",
+    super::quoted_data!()
+);
 
 /// One candidate repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
