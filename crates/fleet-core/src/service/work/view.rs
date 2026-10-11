@@ -245,6 +245,10 @@ pub struct WorkTask {
     pub item_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The item's fleet ticket key (`FLT-12`, migration 169), shown in
+    /// place of `key`; absent when it drew none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_key: Option<String>,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -879,6 +883,9 @@ pub struct TaskBrief {
     pub task_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The item's fleet ticket key (`FLT-12`), shown in place of `key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_key: Option<String>,
     pub title: String,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1027,6 +1034,9 @@ pub struct ReviewAlternative {
     pub task_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The item's fleet ticket key (`FLT-12`), shown in place of `key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_key: Option<String>,
     pub title: String,
 }
 
@@ -2489,6 +2499,7 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         task_id: b.task_id.clone(),
         item_id: item.map(|i| i.item.id),
         key,
+        display_key: item.and_then(|i| i.item.display_key.clone()),
         title,
         url: item.and_then(|i| i.item.url.clone()),
         kind: task_kind(item).into(),
@@ -4090,6 +4101,7 @@ fn brief_of(g: &Graph, task_id: &str, item: Option<&ViewItem>, ref_key: Option<&
         key: item
             .and_then(|i| i.item.key.clone())
             .or_else(|| ref_key.map(str::to_string)),
+        display_key: item.and_then(|i| i.item.display_key.clone()),
         title: item.map(|i| i.item.title.clone()).unwrap_or_default(),
         kind: task_kind(item).into(),
         // The same live precedence `to_task` projects (§2, fix round 1):
@@ -4368,6 +4380,7 @@ pub(crate) fn review_of(
                                 .item
                                 .and_then(|i| i.item.key.clone())
                                 .or_else(|| b.ref_key.clone()),
+                            display_key: b.item.and_then(|i| i.item.display_key.clone()),
                             title: b.item.map(|i| i.item.title.clone()).unwrap_or_default(),
                         })
                     })

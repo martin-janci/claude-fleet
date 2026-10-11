@@ -65,7 +65,10 @@
   /** The chip is drawing a status dot: exactly the condition the dot itself
    *  renders under, so the tooltip and the dot can never disagree. */
   const ownStatus = $derived(!!workKey.status && !workKey.status.unavailable);
-  const unbound = $derived(!suggested && !workKey.trackerBacked && ticketShaped && !tracker);
+  // A ticket key fleet itself issued (`FLT-12`) needs no tracker.
+  const unbound = $derived(
+    !suggested && !workKey.trackerBacked && ticketShaped && !tracker && !workKey.display,
+  );
   // Work graph M6: which tracker, once there is more than one kind.
   const prov = $derived(
     tracker && showProviderBadges($trackers) ? providerInfo(tracker.provider) : null,
@@ -113,7 +116,7 @@
     ></span>
   {/if}
   {#if prov}<span class="prov" data-testid="{testid}-provider" aria-label={prov.label}>{prov.icon}</span>{/if}
-  {displayKey(workKey.key)}{#if suggested && proposed}<span class="ai" data-testid="{testid}-proposed" aria-label={proposedByLabel('jev')}>&#x2726;</span>{:else if suggested}<span class="q" aria-label="suggested">?</span>{/if}
+  {displayKey(workKey.key, workKey.display)}{#if suggested && proposed}<span class="ai" data-testid="{testid}-proposed" aria-label={proposedByLabel('jev')}>&#x2726;</span>{:else if suggested}<span class="q" aria-label="suggested">?</span>{/if}
   {#if workKey.auto && !suggested}<span class="auto" data-testid="{testid}-auto" aria-label="linked automatically"></span>{/if}
   {#if stale}<span class="stale" data-testid="{testid}-stale" aria-label="stale">◷</span>{/if}
 </span>

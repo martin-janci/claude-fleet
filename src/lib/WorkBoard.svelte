@@ -54,7 +54,7 @@
     type WorkTask,
   } from './work_view';
   import { facetSentence, workFacets } from './filter_facets';
-  import { providerInfo } from './trackers';
+  import { providerInfo, shownKey } from './trackers';
   import { hintAnchor } from './hints';
   import EditTaskDialog from './EditTaskDialog.svelte';
   import WorkBuckets from './WorkBuckets.svelte';
@@ -615,7 +615,7 @@
     >
       <span class="top">
         <span class="tb" title={t.tracker_name ?? t.kind}>{badge(t)}</span>
-        {#if t.key}<span class="key">{t.key}</span>{/if}
+        {#if t.key}<span class="key" title={t.key}>{shownKey(t)}</span>{/if}
         {#if refusal}<span class="lock" role="img" aria-label="status set elsewhere"><Icon name="lock" size={12} /></span>{/if}
         {#if t.needs_you}<span class="needs" title="A session needs you" aria-label="needs you">●</span>{/if}
       </span>

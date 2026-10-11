@@ -20,7 +20,7 @@ use std::sync::Mutex;
 #[derive(Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "WorkAdminParams")]
 pub struct WorkAdminArgs {
-    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|assign_client|sweep_now|usage|bucket_create|bucket_update|bucket_close|bucket_delete|bucket_adopt|bucket_unadopt
+    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|assign_client|sweep_now|usage|bucket_create|bucket_update|bucket_close|bucket_delete|bucket_adopt|bucket_unadopt|ticket_prefixes|set_ticket_prefix
     pub action: String,
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,6 +127,15 @@ pub struct WorkAdminArgs {
     /// Tracker's sprint/version name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_id: Option<String>,
+    /// Ticket space (set_ticket_prefix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<i64>,
+    /// Project (set_ticket_prefix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
+    /// Ticket key prefix, e.g. FLT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
 }
 
 impl fmt::Debug for WorkAdminArgs {
@@ -164,6 +173,9 @@ impl fmt::Debug for WorkAdminArgs {
             .field("state", &self.state)
             .field("carry_to", &self.carry_to)
             .field("external_id", &self.external_id)
+            .field("space_id", &self.space_id)
+            .field("project_id", &self.project_id)
+            .field("prefix", &self.prefix)
             .finish()
     }
 }
@@ -176,7 +188,8 @@ impl WorkAdminArgs {
              credential_ref={:?} transport={:?} settings={} secret={} org_id={:?} \
              rule_id={:?} host_alias={:?} owner={:?} repo={:?} path_prefix={:?} \
              isolate_sessions={:?} auto_tidy={:?} jev={:?} jev_reply={:?} bound_sees_unassigned={:?} days={:?} \
-             bucket_id={:?} kind={:?} state={:?} carry_to={:?} external_id={:?}",
+             bucket_id={:?} kind={:?} state={:?} carry_to={:?} external_id={:?} \
+             space_id={:?} project_id={:?} prefix={:?}",
             self.action,
             self.tracker_id,
             self.provider,
@@ -211,6 +224,9 @@ impl WorkAdminArgs {
             self.state,
             self.carry_to,
             self.external_id,
+            self.space_id,
+            self.project_id,
+            self.prefix,
         )
     }
 
@@ -247,6 +263,11 @@ pub enum AdminAction {
     /// Sprints and releases (design 2026-09-28 §7,
     /// `service::work::buckets`).
     Bucket(crate::service::work::buckets::BucketAction),
+    /// Fleet's ticket keys (`store::ticket_keys`): every space and project
+    /// with its prefix. Read-only.
+    TicketPrefixes,
+    /// Set or rename a space's (or a project's) prefix, Jira-like.
+    SetTicketPrefix,
 }
 
 impl AdminAction {
@@ -288,6 +309,8 @@ impl AdminAction {
         "bucket_delete",
         "bucket_adopt",
         "bucket_unadopt",
+        "ticket_prefixes",
+        "set_ticket_prefix",
     ];
 
     /// Actions that destroy something and pass the confirmation gate.
@@ -318,6 +341,8 @@ impl AdminAction {
             "status" | "sync_status" => AdminAction::Status,
             "sweep_now" => AdminAction::SweepNow,
             "usage" => AdminAction::Usage,
+            "ticket_prefixes" => AdminAction::TicketPrefixes,
+            "set_ticket_prefix" => AdminAction::SetTicketPrefix,
             other => {
                 return Err(IpcError::new(
                     codes::E_INVALID,
@@ -615,6 +640,15 @@ pub fn admin_sync(
             codes::E_INTERNAL,
             "test is asynchronous; use test_tracker",
         )),
+        AdminAction::TicketPrefixes => json(&s.ticket_prefix_overview()?),
+        AdminAction::SetTicketPrefix => {
+            let prefix = args
+                .prefix
+                .as_deref()
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "set_ticket_prefix needs prefix"))?;
+            s.set_ticket_prefix(args.space_id, args.project_id, prefix)?;
+            json(&s.ticket_prefix_overview()?)
+        }
         // One short lock per batch, never this whole function's.
         AdminAction::SweepNow => Err(IpcError::new(
             codes::E_INTERNAL,

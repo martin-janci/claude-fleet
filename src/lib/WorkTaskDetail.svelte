@@ -23,7 +23,7 @@
   import { assessRow, hasReading, verdictLabel, verdictState } from './evidence';
   import StatusDot from './kit/StatusDot.svelte';
   import { changedAny, describeEvidence, onWorkChangedDebounced } from './work';
-  import { providerInfo, unavailableLabel } from './trackers';
+  import { providerInfo, unavailableLabel, shownKey } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import WorkPlaceDialog from './WorkPlaceDialog.svelte';
@@ -388,7 +388,8 @@
   // The header's key Copy: a check for a moment.
   let keyCopied = $state(false);
   async function copyKey() {
-    const k = task?.key;
+    // The ticket key a person reads (`CF-12`); every key lookup answers to it.
+    const k = task?.display_key || task?.key;
     if (!k || !(await copyText(k))) return;
     keyCopied = true;
     setTimeout(() => (keyCopied = false), 1500);
@@ -437,8 +438,8 @@
         {#if task}
           <div class="keyline">
             {#if task.key}
-              <span class="key" data-testid="work-task-key">{task.key}</span>
-              <button class="icon-btn" type="button" data-testid="work-task-copy-key" title="Copy {task.key}" onclick={() => void copyKey()}
+              <span class="key" data-testid="work-task-key" title={task.key}>{shownKey(task)}</span>
+              <button class="icon-btn" type="button" data-testid="work-task-copy-key" title="Copy {task.display_key || task.key}" onclick={() => void copyKey()}
                 >{#if keyCopied}<Icon name="check" size={12} label="Copied" />{:else}<Icon name="copy" size={12} label="Copy key" />{/if}</button
               >
             {/if}

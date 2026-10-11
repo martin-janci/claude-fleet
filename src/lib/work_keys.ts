@@ -27,6 +27,9 @@ export type WorkKeySource = 'link' | 'tag' | 'branch' | 'worktree';
 export interface WorkKey {
   /** Normalised upper-case key, e.g. `ABC-123`. */
   key: string;
+  /** The linked item's fleet ticket key (`FLT-12`), which the chip shows in
+   *  place of `key`; matching always uses `key`. */
+  display?: string;
   source: WorkKeySource;
   /** The text the key was found in (a tag, branch or worktree name); for a
    *  link, the work item's title (may be empty). */
@@ -359,6 +362,7 @@ export function workKeyFor(
           }
         : undefined;
     const out: WorkKey = { key: linked, source: 'link', from: w.title };
+    if (w.key && w.display_key) out.display = w.display_key;
     if (status) out.status = status;
     if (trackerBacked) out.trackerBacked = true;
     if (w.strength && AUTO_LINK_SOURCES.includes(w.source)) out.auto = true;
