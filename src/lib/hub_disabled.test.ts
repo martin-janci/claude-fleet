@@ -344,14 +344,38 @@ describe('the asset catalog on a hub client', () => {
   });
 });
 
+// Since contract 13 the hub adds a host for its owner's trusted full device
+// (the phone's Add host), so a paired desktop routes add_host too: the button
+// waits only on the live connection, and opens the hub's Add host form —
+// the HUB's ~/.ssh/config, the hub's probe — not this machine's wizard.
 describe('adding a host on a hub client', () => {
-  it('+ Add host is disabled with the reason', async () => {
+  it('+ Add host is disabled with the reason while the hub is unreachable', async () => {
     hubStatus.set(remote);
+    hubConnection.set({ state: 'offline', attempt: 3, retry_in_secs: 8, reason: 'connection refused' });
     hosts.set(fleetHosts());
     render(HostsView, { props: { onClose: vi.fn(), onFilterSidebar: vi.fn(), onNewSession: vi.fn() } });
     const btn = (await screen.findByTestId('hosts-add')) as HTMLButtonElement;
     expect(btn).toBeDisabled();
     expect(btn.title).toContain('fleet.example.com');
+  });
+
+  it('connected, + Add host opens the hub form over the hub’s SSH config', async () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'connected' });
+    hosts.set(fleetHosts());
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'discover_hosts') return [{ alias: 'pine', hostname: 'pine.lan', user: null, port: null }];
+      if (cmd === 'tunnel_status') return [];
+      return null;
+    });
+    render(HostsView, { props: { onClose: vi.fn(), onFilterSidebar: vi.fn(), onNewSession: vi.fn() } });
+    const btn = (await screen.findByTestId('hosts-add')) as HTMLButtonElement;
+    expect(btn).not.toBeDisabled();
+    await fireEvent.click(btn);
+    expect(await screen.findByTestId('wizard-add_host')).toBeInTheDocument();
+    await waitFor(() => expect(inv().mock.calls.some(([c]) => c === 'discover_hosts')).toBe(true));
+    // This machine's wizard (drafts, local SSH checks) never starts.
+    expect(inv().mock.calls.some(([c]) => c === 'list_host_setups')).toBe(false);
   });
 
   it('standalone is untouched', async () => {

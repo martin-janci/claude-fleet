@@ -1230,9 +1230,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── hosts and accounts ──────────────────────────────────────────────────
     (
         "discover_hosts",
-        Verdict::LocalOnly {
-            instead: "it reads this machine's ~/.ssh/config, not the hub's — register hosts \
-                      on the hub itself with `fleet-hub` or a standalone app",
+        Verdict::Routed {
+            tool: "discover_hosts",
         },
     ),
     ("list_hosts", Verdict::Routed { tool: "list_hosts" }),
@@ -1242,13 +1241,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "list_accounts",
         },
     ),
-    (
-        "add_host",
-        Verdict::LocalOnly {
-            instead: "registering a host is fleet administration, which the hub reserves for \
-                      its own operator — add it there with `fleet-hub`",
-        },
-    ),
+    ("add_host", Verdict::Routed { tool: "add_host" }),
     ("probe_host", Verdict::Routed { tool: "probe_host" }),
     // Orbit Fleet 4.9: only a hub accepts agents, so the job runs there; a
     // standalone desktop answers with the service's own refusal.
@@ -1290,13 +1283,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       <from> <into>`",
         },
     ),
-    (
-        "check_host",
-        Verdict::LocalOnly {
-            instead: "the health checklist reads a host's settings over this app's own SSH; \
-                      repair a host's hooks from the hub with `fleet-hub provision --host <alias>`",
-        },
-    ),
+    ("check_host", Verdict::Routed { tool: "check_host" }),
     (
         "list_host_setups",
         Verdict::LocalOnly {
@@ -1338,9 +1325,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "set_account_nickname",
-        Verdict::LocalOnly {
-            instead: "the nickname lives in the hub's database and there is no tool to set \
-                      it; rename the account on the hub",
+        Verdict::Routed {
+            tool: "set_account_nickname",
         },
     ),
     // ── account usage ───────────────────────────────────────────────────────

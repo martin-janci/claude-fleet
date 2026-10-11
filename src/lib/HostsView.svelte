@@ -37,6 +37,7 @@
     type HostRowInfo,
   } from './hosts_view';
   import AddHostWizard from './AddHostWizard.svelte';
+  import HubAddHostDialog from './HubAddHostDialog.svelte';
   import HostsList from './HostsList.svelte';
   import HostDetail from './HostDetail.svelte';
   import HostsTable from './HostsTable.svelte';
@@ -287,7 +288,7 @@
     // The `e` shortcut (below) reaches this directly, bypassing the
     // nickname button's own `disabled={blocked !== null}` — the same
     // non-button-path gap `r`/`u` had.
-    if (hubBlock('set_account_nickname', $hubStatus)) return;
+    if (hubActionBlocked('set_account_nickname', $hubStatus, $hubConnection)) return;
     if (uuid && $accountByUuid.has(uuid)) editing = { uuid, where };
   }
 
@@ -403,10 +404,11 @@
     if (handled) e.preventDefault();
   }
 
-  // Adding a host is fleet administration: the hub refuses it to a paired
-  // client, and this app guards it with `E_LOCAL_ONLY`. Say so on the button
-  // rather than after the dialog has been filled in.
-  const addHostBlocked = $derived(hubBlock('add_host', $hubStatus));
+  // Adding a host routes to the hub's add_host on a paired desktop (contract
+  // 13: the hub owner's trusted full device), so the button is off only
+  // while the hub cannot be reached; the hub's own refusal names the trust
+  // step to any other device.
+  const addHostBlocked = $derived(hubActionBlocked('add_host', $hubStatus, $hubConnection));
   const usageRefreshBlocked = $derived(hubBlock('refresh_account_usage', $hubStatus));
 
   // Same honest-empty-state fix as HostsList's own list: while the hub's
@@ -588,8 +590,13 @@
 </section>
 
 {#if showAddPicker}
-  <!-- The add-host wizard (4.9). -->
-  <AddHostWizard onClose={() => (showAddPicker = false)} {onNewSession} />
+  {#if $hubStatus.remote}
+    <!-- Paired: the hub discovers, probes and adds (HubAddHostDialog). -->
+    <HubAddHostDialog onClose={() => (showAddPicker = false)} />
+  {:else}
+    <!-- The add-host wizard (4.9). -->
+    <AddHostWizard onClose={() => (showAddPicker = false)} {onNewSession} />
+  {/if}
 {/if}
 
 <style>

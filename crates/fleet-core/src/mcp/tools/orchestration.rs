@@ -1269,7 +1269,9 @@ impl FleetTools {
         proposed outcome and next step (never applied), and with refresh its \
         drafted words. \
         Work view: \
-        primary:false links a secondary; expected_* guard (E_CONFLICT).")]
+        primary:false links a secondary; expected_* guard (E_CONFLICT). \
+        place {task_id|item_id, group, note?, expected_version}: group a \
+        task; unplace clears it.")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -2340,9 +2342,32 @@ impl FleetTools {
                         &st::place(
                             &self.store,
                             &view_scope,
-                            need_task()?,
+                            args.task_id.as_deref(),
+                            args.item_id,
                             args.group.as_deref(),
                             args.note.as_deref(),
+                            args.expected_version,
+                            &caller.label(),
+                        )
+                        .map_err(to_mcp_err)?,
+                    );
+                }
+                // `unplace` is `place` with nothing to place the task in:
+                // one write, the same gate, the same answer. It has a name
+                // of its own because "send an empty group" is not something
+                // a caller guesses, and whoever has to guess it is looking
+                // at a task in the wrong group. An arm of its own because
+                // the session gate reads these arms one literal at a time.
+                "unplace" => {
+                    let view_scope = self.view_scope(&caller)?;
+                    return ok_json(
+                        &st::place(
+                            &self.store,
+                            &view_scope,
+                            args.task_id.as_deref(),
+                            args.item_id,
+                            None,
+                            None,
                             args.expected_version,
                             &caller.label(),
                         )

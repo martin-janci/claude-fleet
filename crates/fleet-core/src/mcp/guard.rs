@@ -282,6 +282,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     },
     // Plan usage per account (hub contract 11 follow-up): the same reach as
     // `list_accounts`, read from what the hub's bus followed.
+    // An account's nickname: the label every device shows for it. The hub
+    // owner's (master or own device), like `add_account`; another person's
+    // or an org's device reads the accounts and does not rename them.
+    ToolPolicy {
+        name: "set_account_nickname",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "account_usage",
         access: Access::Client,
@@ -378,6 +388,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     ToolPolicy {
         name: "probe_host",
         access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    // The host detail's health checklist (Orbit Fleet 4.7): one SSH read of
+    // tmux, PATH and ~/.claude/settings.json on a fleet host. The hub
+    // owner's, like `add_host`: it reads a host's own configuration.
+    ToolPolicy {
+        name: "check_host",
+        access: Access::Person,
         readonly: true,
         confirm: false,
         deadline: Deadline::Lifecycle,
@@ -1700,6 +1720,30 @@ pub fn operator_must_confirm(is_operator: bool, name: &str) -> bool {
     is_operator && (needs_confirmation(name) || OPERATOR_CONFIRMS.contains(&name))
 }
 
+/// WHY the operator's call needs a person, in the words of the rule that
+/// caught it — the parenthetical of its `E_CONFIRM_REQUIRED`.
+///
+/// It is a `match` rather than one sentence because the one sentence used to
+/// be "the operator's starts and kills always do", which `send_prompt` was
+/// told as well: a prompt into a running session is neither, so the error
+/// denied being the rule that had just fired and the reader went looking for
+/// a toggle that could not turn it off (`mcp.confirm_destructive` is not
+/// consulted here — see [`operator_must_confirm`]).
+pub fn operator_confirm_reason(tool: &str) -> &'static str {
+    match tool {
+        // Review round 15, F21.
+        "send_prompt" | "run_prompt" | "queue_prompt" | "dispatch_task" => {
+            "nothing the operator writes reaches a session without a person, \
+             whatever mcp.confirm_destructive says"
+        }
+        // D12.
+        _ => {
+            "the operator's starts, kills and work decisions always do, \
+             whatever mcp.confirm_destructive says"
+        }
+    }
+}
+
 /// Fleet-administration tools: reachable with the master token only — see
 /// [`Access::Master`].
 pub fn is_admin_tool(name: &str) -> bool {
@@ -2605,6 +2649,38 @@ mod tests {
         assert_eq!(CONFIRM_TOOLS.len(), 12);
         assert!(!needs_confirmation("send_prompt"));
         assert!(!needs_confirmation("dispatch_task"));
+    }
+
+    /// The operator's refusal says which rule caught the call. A prompt is
+    /// not a start and not a kill, and saying so sent the reader after
+    /// `mcp.confirm_destructive`, which cannot turn any of this off.
+    #[test]
+    fn the_operators_refusal_never_calls_a_prompt_a_start_or_a_kill() {
+        for t in ["send_prompt", "run_prompt", "queue_prompt", "dispatch_task"] {
+            assert!(
+                operator_must_confirm(true, t),
+                "{t} is gated for the operator"
+            );
+            let why = operator_confirm_reason(t);
+            assert!(why.contains("writes"), "{t}: {why}");
+            assert!(!why.contains("starts"), "{t} is not a start: {why}");
+        }
+        for t in ["new_session", "safe_kill_session", "work_link"] {
+            assert!(operator_confirm_reason(t).contains("starts"), "{t}");
+        }
+        // Whichever rule fires, it names the toggle that does NOT apply,
+        // because that is where the reader goes next.
+        for t in OPERATOR_CONFIRMS {
+            assert!(
+                operator_confirm_reason(t).contains("mcp.confirm_destructive"),
+                "{t} must say the toggle is not the answer"
+            );
+            assert!(operator_must_confirm(true, t), "{t}");
+            assert!(
+                !operator_must_confirm(false, t) || needs_confirmation(t),
+                "{t} must be ungated for a master caller unless it is confirm: true"
+            );
+        }
     }
 
     #[test]
