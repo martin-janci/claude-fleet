@@ -1181,7 +1181,7 @@ fleet-hub decide bench work-link [--split dev|test|all] [--provider none|bm25|je
                                  [--haiku-host ALIAS] [--haiku-model haiku] [--haiku-timeout 120]
                                  [--days 365] [--org ID] [--max-cases N] [--max-calls 500]
                                  [--labels FILE] [--db FILE] [--json]
-                                 [--perturb fold|typo|code ...]
+                                 [--perturb fold|typo|code|option-order ...]
 fleet-hub decide bench work-link --export-unlinked 150 --out FILE
 ```
 
@@ -1237,7 +1237,7 @@ chosen on dev and applied to what is reported.
 |---|---|
 | `none` | Always abstains: what fleet does today when nothing links a session. |
 | `bm25` | BM25 over each candidate's title (counted twice) and cached description, against the redacted prompt; lower-cased, diacritics folded (`č` → `c`, `ß` → `ss`), split on anything not a letter or digit, cut to a 6-character stem. Abstains under a score threshold chosen on dev (the one that maximises right answers plus right abstentions); the report names it. |
-| `jev` | One Choice over the candidates (option keys are item ids like `i123`, each described by its title) plus `none`, through the envelope: question version `work_link.bench.v1`, subject `bench:<case>`, recorded in `decision_runs` like any call. A case whose org the gate refuses — flag off, no consent, no key, breaker, budget (the feature's live mode is not needed) — is **skipped with that fallback** and nothing is sent for it. At most `--max-calls` calls a run. |
+| `jev` | One Choice over the candidates (option keys are item ids like `i123`, each described by its title) plus `none`, through the envelope: question version `work_link.bench.v2` (v1 before the prompt was framed as quoted data), subject `bench:<case>`, recorded in `decision_runs` like any call. A case whose org the gate refuses — flag off, no consent, no key, breaker, budget (the feature's live mode is not needed) — is **skipped with that fallback** and nothing is sent for it. At most `--max-calls` calls a run. |
 | `haiku` | The same Choice — the same redacted first prompt, candidate ids and titles, and `none` — asked of `claude -p` on `--haiku-host` (below, *The `claude -p haiku` baseline*), on the same cases as Jev. Its pick is the answer (`none` abstains) at its own operating point, its stated confidence the score; an answer outside the options is an abstention counted as `invalid`; a failed call (timeout, SSH, `claude`) is skipped with its reason. A case whose org is not the host's is skipped as `other_org` and nothing is sent for it. Not gated by the envelope and never recorded in `decision_runs`. At most `--max-calls` calls. |
 
 **Question shape** (`--shape`, Jev only). `choice` (the default) is the one
@@ -1256,7 +1256,10 @@ cost are both calls together.
 coverage, coverage at precision 0.9 (the lowest threshold whose dev
 accuracy reaches 0.9 over at least 5 answers, applied to the reported
 cases), abstention quality on none-cases, p50/p95 latency, input tokens and
-cost (Jev, haiku), `invalid` answers (haiku), and what was skipped and why.
+cost (Jev, haiku), the **cost per right answer** (`cost/right`: every
+call's spend over the right answers at the threshold, shown from 5 right
+answers — a cheaper model that abstains or errs more is not cheaper per
+decision), `invalid` answers (haiku), and what was skipped and why.
 Differences in accuracy on answered between two providers come with a
 bootstrap 95% interval (1000
 resamples, fixed seed); an interval across 0 is "no difference". The
@@ -1306,9 +1309,12 @@ cell — is NOT JUDGED. The thresholds of 1–2 need Jev's dev answers: run
 **Robustness (dataset C, `--perturb`).** Each case a model would be
 asked (the reported side of A, and H) is asked once more with its first
 prompt perturbed — `fold` (diacritics removed, case kept), `typo` (one
-deterministic typo in one word of four letters or more) or `code` (every
+deterministic typo in one word of four letters or more), `code` (every
 fenced code block replaced by `[code: <lang>, N lines]`, decision D42's
-A/B) — only when the perturbation changes it, as `<case>.<perturbation>`.
+A/B) or `option-order` (the same request with its options in another
+order: nothing else changes, so the "answer changed" rate is how much the
+order moves the answer) — only when the perturbation changes it, as
+`<case>.<perturbation>`.
 Each variant is compared with its original at the provider's **raw pick**
 (before any threshold chosen on dev; a "none of these" case is right when
 it abstains): each side's accuracy on answered and coverage, how often the
@@ -1346,7 +1352,9 @@ fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provi
 fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host ALIAS \
     [--split dev|test|all] [--question FILE ...] [--floor-sweep]
 fleet-hub decide bench status-map --fixture --provider rule --provider jev \
-    --perturb fold --perturb typo --perturb emoji --perturb no-board --perturb shuffle-board
+    --perturb fold --perturb typo --perturb emoji --perturb no-board --perturb shuffle-board \
+    --perturb option-order
+fleet-hub decide bench status-map --fixture --provider jev --provider jev-split   # one Choice vs four Nouls
 fleet-hub decide bench status-map --paired-fixture --provider rule --provider jev   # en / sk / cs / de
 fleet-hub decide bench status-map --fixture --split dev --provider jev --question-set --floor-sweep
 ```
@@ -1398,6 +1406,7 @@ section and at most 30 board names), so the benchmark measures what
 | `rule` | The keyword rule `infer_section` (progress / doing / review / wip / started / active / testing / qa → in progress; done / shipped / complete / released / closed → done); abstains where it says nothing. |
 | `jev` | One Choice through the envelope — question version `status_map.bench.v1` (`status_map.bench.q.<version>` with `--question`, below), subject `bench:<case>`, baseline the rule's answer or `none`, the adapter's confidence floor 0.5. `unsure` and an answer under the floor are **abstentions**; a failed call (timeout, HTTP error, invalid answer) is skipped with its fallback. A case whose org the gate refuses is skipped and nothing is sent; `decide.jev.status_map` may stay `off` (in `shadow` or `assist` it would also start the daily live runs). At most `--max-calls` calls. |
 | `haiku` | The adapter's own request — the same redacted section, board and options — asked of `claude -p` on `--haiku-host` (below), at the same floor: `unsure`, an answer under 0.5 and an answer outside the options (counted as `invalid`) are abstentions; an answer that states no confidence stands and is left out of calibration. A failed call is skipped with its reason. A row whose org is not the host's is skipped as `other_org` (the built-in set has no org: it needs a host with no org). Not gated by the envelope; the database is opened read-only for the host's org; nothing is recorded. At most `--max-calls` calls. |
+| `jev-split` | The same task as four narrow Nouls through the envelope instead of the one Choice — "is the following true of the tasks placed in state.section?" with each category's criterion (`todo`, `in_progress`, `done`, `not_planned`) — over the same state, question version `status_map.bench.split.v1`, subject `bench:<case>.<category>`. Combined in code: the category whose Noul is highest is the answer when it reaches 0.5 and no other category does (two "yes" is a conflict and abstains, as does no "yes"); its Noul is the confidence. Four calls a case: a case is asked only when all four fit under `--max-calls`, and one failed call skips the case with its fallback. `--question` rewords the Choice only. Independent tests found a broad question far weaker than narrow ones combined in code; this measures whether J3's is one. |
 
 Without `--provider jev` or `--provider haiku` no database is opened at
 all (`haiku` opens it read-only, for the host's org). With `jev`, the hub's
@@ -1457,7 +1466,8 @@ map stores it); **`done` precision** — of the answers that apply as done
 headline, since a wrong `done` hides live work (a strict column counts
 `done` alone); the confusion matrix (label → answer or abstain); ECE (10
 bins) and Brier over every category answer Jev gave with a confidence
-(under the floor included, `unsure` not); latency, tokens and cost.
+(under the floor included, `unsure` not); latency, tokens and cost, and
+the cost per right answer (`cost/right`, model providers).
 Differences in accuracy on answered between providers come with the same
 bootstrap interval as J1's, over all cases and (between providers that
 answer there) where the rule abstains. The breakdown is by language and by
@@ -1493,8 +1503,10 @@ once more as a person or a board might have written it: `fold`
 `typo` (one deterministic typo in the section's name, and in its entry on
 the board), `emoji` (a neutral emoji — 📌 🔹 ⭐ 🟣 📁 🌀, none of them a
 status — before every name of the board), `no-board` (the section's name
-alone) or `shuffle-board` (the board in another order: what is left
-without the position). A variant exists only when the perturbation changes
+alone), `shuffle-board` (the board in another order: what is left
+without the position) or `option-order` (the same section and board, the
+options in another order: the "answer changed" rate is the order's pull,
+the bias TypeSafe's jaggedness notes name). A variant exists only when the perturbation changes
 what is sent; its keyword rule is read again on the new name. Each is
 compared with its original over the pairs both answered usably: accuracy on
 answered and coverage on both sides, `done` precision on both sides, how

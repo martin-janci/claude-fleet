@@ -93,6 +93,7 @@ fn choice_request() -> JevRequest {
                 ("ACME-2".to_string(), Some(json!("Billing export"))),
             ]),
         },
+        order_salt: None,
     }
 }
 
@@ -1326,6 +1327,7 @@ fn many_options(n: usize, salt: &str) -> JevRequest {
             instructions: json!("Pick one."),
             criteria: (0..n).map(|i| (format!("o{i:02}"), None)).collect(),
         },
+        order_salt: None,
     }
 }
 
@@ -1403,6 +1405,7 @@ fn no_option_holds_the_first_place_across_requests() {
             instructions: json!("Is it?"),
             criteria: None,
         },
+        order_salt: None,
     };
     assert!(noul.option_order().is_empty());
     let wire: serde_json::Value = serde_json::from_slice(&noul.wire_body("jev-1.13.0")).unwrap();
