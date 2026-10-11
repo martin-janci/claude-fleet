@@ -3212,6 +3212,32 @@
       ]
     },
     {
+      "default_widget": "switch",
+      "key": "search.index_transcripts",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Search conversation text",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "search.transcript_days",
+      "kind": {
+        "max": 365,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Conversation text kept",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "duration",
       "key": "usage.interval_secs",
       "kind": {

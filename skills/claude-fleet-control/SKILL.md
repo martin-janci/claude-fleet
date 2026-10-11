@@ -61,7 +61,7 @@ equal to the server's):
 ```text
 orient     fleet_health list_hosts list_projects list_worktrees list_sessions
            whoami peer_status related_sessions usage_report agent_status
-           account_usage check_account_headroom session_activity
+           account_usage check_account_headroom session_activity search
 spawn      new_session new_shell_session new_bg_session spawn_review
            shell_terminals adopt_session
 steer      send_prompt run_prompt queue_prompt queued_prompts wait_for_session

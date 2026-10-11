@@ -111,9 +111,9 @@ describe('the filter schema', () => {
     for (const f of all) expect(SESSION_FILTER_SCHEMA[f.id], f.id).toBeTruthy();
     const work = workFacets({
       org: 1, orgs: [1, 'none'], tracker: 1, status: 'open', stages: ['blocked'], status_name: 'QA Review', mine: true,
-      assignee: 'Ana', has: 'active', review: true, query: 'x',
+      assignee: 'Ana', has: 'active', review: true, query: 'x', iteration: 'current', epic: 'PAY-10', item_type: 'Bug',
     });
-    expect(work.length).toBe(11);
+    expect(work.length).toBe(14);
     for (const f of work) expect(WORK_FILTER_SCHEMA[f.id], f.id).toBeTruthy();
   });
 
@@ -216,7 +216,17 @@ describe('Work: the Filters section (board “Work · tasks with filters open”
     { id: 2, name: 'Beta', color: null },
   ];
   const wTrackers = [{ id: 1, name: 'Jira (acme)', provider: 'jira', state: 'ok', org_id: 1 }];
-  const props = { orgs: wOrgs, trackers: wTrackers, people: ['Ana Novak', 'Ben'], columns: ['QA Review'] };
+  const props = {
+    orgs: wOrgs,
+    trackers: wTrackers,
+    people: ['Ana Novak', 'Ben'],
+    columns: ['QA Review'],
+    facets: {
+      iterations: [{ name: 'Sprint 42', active: true, count: 3 }],
+      epics: [{ task_id: 'item:10', key: 'PAY-10', title: 'Checkout', count: 2 }],
+      item_types: ['Bug', 'Story'],
+    },
+  };
 
   it('is search, then Filters and Group, while closed', async () => {
     render(WorkFiltersBar, props);
@@ -235,6 +245,45 @@ describe('Work: the Filters section (board “Work · tasks with filters open”
       if (c.place === 'row') expect(screen.getByTestId(c.testid), id).toBeTruthy();
       else expectUnderHeading(panel, c.testid, c.place);
     }
+  });
+
+  it('picks a sprint, an epic and a type, and sorts', async () => {
+    render(WorkFiltersBar, props);
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-filters-open'));
+    await fireEvent.change(screen.getByTestId('work-filter-sprint'), { target: { value: 'current' } });
+    await fireEvent.change(screen.getByTestId('work-filter-epic'), { target: { value: 'PAY-10' } });
+    await fireEvent.change(screen.getByTestId('work-filter-type'), { target: { value: 'Bug' } });
+    await fireEvent.change(screen.getByTestId('work-sort-select'), { target: { value: 'key' } });
+    expect(get(workViewFilters)).toEqual({ iteration: 'current', epic: 'PAY-10', item_type: 'Bug', sort: 'key' });
+    await fireEvent.click(screen.getByTestId('work-filters-open'));
+    const strip = screen.getByTestId('work-active-filters').textContent ?? '';
+    expect(strip).toContain('Current sprint');
+    expect(strip).toContain('Epic: PAY-10 Checkout');
+    expect(strip).toContain('Type: Bug');
+  });
+
+  it('the search box turns sprint: and epic: into filters and completes them', async () => {
+    render(WorkFiltersBar, { ...props, searchDebounceMs: 0 });
+    await flush();
+    const input = screen.getByTestId('work-search') as HTMLInputElement;
+    await fireEvent.focus(input);
+    await fireEvent.input(input, { target: { value: 'spr' } });
+    await flush();
+    expect(screen.getAllByTestId('work-search-suggestion').map((el) => el.textContent)).toEqual([
+      'sprint:current, none or a sprint',
+    ]);
+    await fireEvent.keyDown(input, { key: 'ArrowDown' });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    expect(input.value).toBe('sprint:');
+    await fireEvent.input(input, { target: { value: 'sprint:current checkout ' } });
+    await new Promise((r) => setTimeout(r, 5));
+    await flush();
+    expect(get(workViewFilters)).toEqual({ iteration: 'current', query: 'checkout' });
+    expect(input.value).toBe('checkout ');
+    await fireEvent.input(input, { target: { value: 'checkout epic:pay-10' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    expect(get(workViewFilters)).toEqual({ iteration: 'current', epic: 'PAY-10', query: 'checkout' });
   });
 
   it('picks several organisations and statuses at once, and Clear drops them', async () => {

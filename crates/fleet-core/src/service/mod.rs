@@ -83,6 +83,8 @@ pub mod rewind;
 pub mod routines;
 pub mod runs;
 pub mod safe_kill;
+pub mod search;
+pub mod search_index;
 pub mod sessions;
 pub mod settings;
 #[cfg(test)]

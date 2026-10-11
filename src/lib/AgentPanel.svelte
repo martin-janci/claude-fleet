@@ -185,9 +185,15 @@
   <ControlCommandReceipts />
   <!-- G3.9: suggestions read from the fleet's rows; a press runs them. -->
   {#if session}<ControlSuggestions sessionId={session.id} />{/if}
+{/snippet}
+
+{#snippet tools()}
+  <!-- Control chat UX (2026-10-10): these join the quick-prompt row
+       (Clear, Compact, Status), so one row of chips sits above the box. -->
   {#if ctx}
     <button
-      class="chip"
+      type="button"
+      class="btn btn--chip"
       data-testid="agent-context-chip"
       onclick={() => (droppedLabel = ctx!.chipLabel)}
       title="Send without this context"
@@ -200,7 +206,8 @@
        runs until its last button. -->
   {#if session}
     <button
-      class="chip command"
+      type="button"
+      class="btn btn--chip command"
       data-testid="agent-add-project"
       title="Add a repository to the fleet with a form in this chat"
       onclick={() => session && openChatWizard(session.id, 'add_project', { from: 'Control' })}>Add project</button
@@ -208,7 +215,8 @@
   {/if}
   {#each OPERATOR_COMMANDS as c (c.label)}
     <button
-      class="chip command"
+      type="button"
+      class="btn btn--chip command"
       data-testid="agent-command"
       title="Put this request in the box; nothing is sent until you press Enter"
       onclick={() => session && insertIntoComposer(session.id, c.text)}>{c.label}</button
@@ -251,6 +259,7 @@
       promptPrefix={ctx?.prefix ?? null}
       blockWhileBusy={true}
       composerAbove={chip}
+      composerTools={tools}
       thinkingAs={controlThinking}
       runCommand={takeControlCommand}
       composerHint={CONTROL_HINT}
@@ -336,7 +345,7 @@
     padding: 0.15rem 0.6rem;
     cursor: pointer;
   }
-  .chip.command {
+  .command {
     border-style: dashed;
   }
   .chip:hover {

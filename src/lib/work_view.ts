@@ -45,7 +45,8 @@ export interface WorkTreeFilters {
   has?: WorkHasFilter;
   /** Only tasks with something to review. */
   review?: boolean;
-  /** Case-insensitive substring of key or title. */
+  /** Words of the key or title: every one, in any order, case and
+   *  accents ignored. */
   query?: string;
   /** One group only (a section being expanded). */
   group?: string;
@@ -66,7 +67,28 @@ export interface WorkTreeFilters {
   /** Any of these stages (`WorkTask.stage`): the panel's status chips,
    *  several at once. An older hub ignores it. */
   stages?: WorkStage[];
+  /** The sprint (iteration, cycle): `current`, `none` or a sprint's name.
+   *  An older hub ignores it (search phase 2). */
+  iteration?: string;
+  /** Under one epic: its key or `item:<id>`; the epic itself too. */
+  epic?: string;
+  /** The tracker's type name (Story, Bug …). */
+  item_type?: string;
+  /** The order inside each section; absent is `activity`. */
+  sort?: WorkSort;
 }
+
+/** `filters.sort`: needing you then the latest activity (the default), the
+ *  tracker's last change, the key's number, the title or the due date. */
+export const WORK_SORTS = ['activity', 'updated', 'key', 'title', 'due'] as const;
+export type WorkSort = (typeof WORK_SORTS)[number];
+export const WORK_SORT_LABELS: Record<WorkSort, string> = {
+  activity: 'Activity',
+  updated: 'Last updated',
+  key: 'Key',
+  title: 'Title',
+  due: 'Due date',
+};
 
 /** `WorkTask.stage`, in board order (the Work board's status chips). */
 export const WORK_STAGES = ['backlog', 'in_progress', 'in_review', 'blocked', 'done'] as const;
@@ -248,6 +270,17 @@ export interface WorkTask {
   done_when?: string[];
   /** Its mission and wave, on a read that asked (`with_missions`). */
   mission?: TaskMission | null;
+  /** The tracker's type name (Story, Bug, Epic …). */
+  item_type?: string | null;
+  /** 1 an epic, 0 a standard item, -1 a subtask. */
+  hierarchy_level?: number | null;
+  /** The sprint it is in, and whether that is the active one. */
+  iteration?: string | null;
+  iteration_active?: boolean;
+  /** Its nearest epic-level ancestor, else its top-most one. */
+  in_epic?: WorkTaskRef | null;
+  /** The tracker's last change (else the item's), unix seconds. */
+  updated_at?: number | null;
 }
 
 /** `WorkTask.mission`: the mission and the wave the task sits in (W1 first). */
@@ -255,6 +288,21 @@ export interface TaskMission {
   id: number;
   name: string;
   wave?: number | null;
+}
+
+/** Another task named from one (its epic). */
+export interface WorkTaskRef {
+  task_id: string;
+  key?: string | null;
+  title: string;
+}
+
+/** `WorkTreePage.facets`: what the sprint, epic and type pickers offer,
+ *  over every task the caller sees (absent from an older hub). */
+export interface WorkTreeFacets {
+  iterations?: { name: string; active?: boolean; count: number }[];
+  epics?: (WorkTaskRef & { count: number })[];
+  item_types?: string[];
 }
 
 /** A section header: every group of the whole filtered result. */
@@ -300,6 +348,7 @@ export interface WorkTreePage {
   sections?: WorkTreeSection[];
   /** The review inbox's total, when asked (absent from an older hub). */
   review_total?: number;
+  facets?: WorkTreeFacets;
 }
 
 /** A section to page in the same read: exactly what a read of that
@@ -1025,6 +1074,13 @@ export function normalizeFilters(v: unknown): WorkTreeFilters {
     const stages = WORK_STAGES.filter((st) => (v.stages as unknown[]).includes(st));
     if (stages.length > 0) out.stages = stages;
   }
+  for (const k of ['iteration', 'epic', 'item_type'] as const) {
+    const x = v[k];
+    if (typeof x === 'string' && x.trim() !== '') out[k] = x.trim();
+  }
+  if (typeof v.sort === 'string' && (WORK_SORTS as readonly string[]).includes(v.sort) && v.sort !== 'activity') {
+    out.sort = v.sort as WorkSort;
+  }
   return out;
 }
 
@@ -1039,10 +1095,14 @@ const FILTER_ORDER: (keyof WorkTreeFilters)[] = [
   'assignee',
   'has',
   'review',
+  'iteration',
+  'epic',
+  'item_type',
   'query',
   'group',
   'archived',
   'group_by',
+  'sort',
 ];
 
 /** A stable string for a filters object (equal filters, equal keys). */
@@ -1056,11 +1116,12 @@ export function sameFilters(a: WorkTreeFilters, b: WorkTreeFilters): boolean {
 }
 
 /** How many filters are on (the chip's count); `group` is navigation,
- *  `group_by` arranges rather than narrows, and showing archived tasks
+ *  `group_by` and `sort` arrange rather than narrow, and showing archived tasks
  *  widens the view. */
 export function activeFilterCount(f: WorkTreeFilters): number {
   const n = normalizeFilters(f);
-  return FILTER_ORDER.filter((k) => k !== 'group' && k !== 'archived' && k !== 'group_by' && n[k] !== undefined).length;
+  return FILTER_ORDER.filter((k) => k !== 'group' && k !== 'archived' && k !== 'group_by' && k !== 'sort' && n[k] !== undefined)
+    .length;
 }
 
 // ---------------------------------------------------------------------------
@@ -1440,6 +1501,10 @@ export function groupSessionLinks<T extends Pick<WorkTaskLink, 'state' | 'primar
  *  what needs you. */
 export type SidebarView = 'sessions' | 'work' | 'inbox';
 const isSidebarView = (v: unknown): v is SidebarView => v === 'sessions' || v === 'work' || v === 'inbox';
+/** The sprints, epics and types of the last tree read that carried them
+ *  (`WorkTreePage.facets`): ⌘K's Planning rows. */
+export const knownWorkFacets = writable<WorkTreeFacets | null>(null);
+
 export const sidebarView = writable<SidebarView>(readPref('sidebar.view', 'sessions', isSidebarView));
 sidebarView.subscribe((v) => writePref('sidebar.view', v));
 

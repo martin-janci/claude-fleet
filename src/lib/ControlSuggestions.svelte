@@ -27,8 +27,8 @@
     {#each cards as s (s.id)}
       <div class="card" data-testid="control-suggestion" data-kind={s.kind}>
         <div class="text">
-          <span class="title">{s.title}</span>
-          <span class="why">{s.why}</span>
+          <span class="title" title={s.title}>{s.title}</span>
+          <span class="why" title={s.why}>{s.why}</span>
         </div>
         <div class="acts">
           {#if s.kind === 'ci'}
@@ -69,31 +69,41 @@
     font-weight: 500;
     color: var(--fg-muted);
   }
+  /* One compact row per suggestion (Control chat UX, 2026-10-10): the
+     tray above the composer is shared with the task group. */
   .card {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-1) var(--space-2);
     border: 1px solid var(--border);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     background: var(--bg);
   }
   .text {
+    flex: 1;
     display: flex;
     flex-direction: column;
     min-width: 0;
   }
+  .title,
+  .why {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .title {
     color: var(--fg);
-    font-size: var(--text-sm);
+    font-size: var(--text-xs);
   }
   .why {
     color: var(--fg-muted);
     font-size: var(--text-2xs);
   }
   .acts {
+    flex-shrink: 0;
     display: flex;
     gap: var(--space-1);
     align-items: center;

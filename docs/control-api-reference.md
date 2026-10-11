@@ -579,7 +579,7 @@ Parameters: `host_alias`
 
 Restart a tmux session in place (kill and recreate): for a wedged Claude REPL whose tmux and worktree are fine; cheaper than recreate_session. Returns the updated row.
 
-Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `profile`, `session_id`
+Parameters: `confirm_nonce`, `effort`, `force`, `host_alias`, `model`, `name`, `profile`, `session_id`
 
 ### `restore_host_sessions`
 
@@ -634,6 +634,12 @@ Parameters: `confirm_nonce`, `host_alias`, `session_id`, `tmux_name`
 Scan hosts for installed skills/agents/hooks/MCP servers/plugins and recompute each catalog asset's state (in_sync | drifted | missing | unmanaged | unsupported | orphan). Read-only on hosts.
 
 Parameters: `host_alias`
+
+### `search`
+
+Search everything the hub indexes: tasks and tickets (key, title, brief, description), sessions (name, host, branch, tags, last prompt, notes), conversations (first prompt), pull requests, the work journal, and conversation text when the hub indexes transcripts (setting search.index_transcripts, off by default). Every word must match, in any order; case and accents are ignored and each word matches as a prefix. Only what you may see is returned. Returns { hits: [{ kind, ref, title, title_marks?, snippet, snippet_marks?, at, session_id?, session_name?, host_alias?, claude_session_id?, task_id?, key? }], transcripts_indexed }; marks are [start, end) in UTF-16 units.
+
+Parameters: `kinds`, `limit`, `query`
 
 ### `send_file`
 
@@ -1039,6 +1045,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::trackers::work_retention_sweep`
 - `commands::trackers::list_trackers`
 - `commands::trackers::work_tickets`
+- `commands::search::search`
 - `commands::trackers::work_lookup`
 - `commands::trackers::start_work_multi`
 - `commands::trackers::start_work`

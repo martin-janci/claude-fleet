@@ -840,6 +840,51 @@
       "value": "true"
     },
     {
+      "ai": "never",
+      "danger": {
+        "level": "confirm",
+        "message": "Conversation text, which may hold secrets, will be stored in the hub's database."
+      },
+      "default": "false",
+      "help": "Copy what is said in each session into the hub's search index, so a search finds it in any conversation. Turning it off deletes the copied text.",
+      "key": "search.index_transcripts",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Search conversation text",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "30",
+      "help": "Days of conversation text the search index keeps.",
+      "key": "search.transcript_days",
+      "kind": {
+        "max": 365,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Conversation text kept",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "days",
+      "value": "30"
+    },
+    {
       "ai": "suggest",
       "danger": {
         "level": "none"
@@ -1737,7 +1782,7 @@
       "danger": {
         "level": "none"
       },
-      "default": "notify",
+      "default": "automatic",
       "help": "The same choice for fleet-agent on hosts the hub cannot reach.",
       "key": "update.agent.mode",
       "kind": {
@@ -1754,7 +1799,7 @@
       "scope": "fleet",
       "tags": [],
       "unit": "none",
-      "value": "notify"
+      "value": "automatic"
     },
     {
       "ai": "suggest",
@@ -3849,6 +3894,23 @@
             }
           ],
           "title": "Usage"
+        },
+        {
+          "items": [
+            {
+              "key": "search.index_transcripts",
+              "type": "field"
+            },
+            {
+              "key": "search.transcript_days",
+              "type": "field",
+              "when": {
+                "key": "search.index_transcripts",
+                "truthy": true
+              }
+            }
+          ],
+          "title": "Search"
         },
         {
           "items": [

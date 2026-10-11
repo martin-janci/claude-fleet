@@ -3,7 +3,9 @@
 //! presses Run now. Every run lands in a session whose origin is the
 //! routine (migration 124), owned by the routine's owner, on the routine's
 //! host and project, billing its profile; the prompt is queued as the
-//! session's handover and delivered once the agent is ready.
+//! session's handover and typed into it once Claude's REPL is ready
+//! (`sessions::seed::seed_routine`), and a run whose prompt could not be
+//! typed fails with `E_PROMPT_NOT_DELIVERED`.
 //!
 //! **Who may read a routine:** its org's boundary first
 //! (`OrgScope::sees_org`), then its owner, the hub's own reader and the one

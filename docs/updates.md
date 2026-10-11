@@ -507,7 +507,7 @@ being validated are lost, as with `fleet-updater`. `fleet-hub update apply
 |-----|---------|--------------|
 | `update.track` | `stable` | the release track the hub follows for its fleet (a standalone desktop's own) |
 | `update.hub.mode` | `notify` | the hub: `manual` (pins only), `notify` (offer), `automatic` (needs `fleet-updater`) |
-| `update.agent.mode` | `notify` | the agents: `manual`, `notify` or `automatic` |
+| `update.agent.mode` | `automatic` | the agents: `manual`, `notify` or `automatic` (an agent installs on its own; nobody is there to press a button) |
 | `update.desktop.mode` | `notify` | the desktops: `manual`, `notify` or `automatic` |
 | `update.mobile.mode` | `notify` | the phones: `manual` or `notify` (a phone never installs silently) |
 | `update.check_interval_secs` | `21600` | seconds between reading the release channel, at least 900 |

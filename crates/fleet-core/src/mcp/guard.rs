@@ -620,6 +620,18 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     },
     // Presence (redesign 11.7b): reports into the hub's in-memory board and
     // reads it back; touches no row. A person's tool, not a host token's.
+    // Search phase 3: one query over the full-text index. Every hit is
+    // fenced for the caller in `service::search` (a session's through
+    // `sees_session_row`, a gone one's through `sees_past_conversation`, an
+    // item through the org), so a host's token finds what it may already
+    // read and nothing more.
+    ToolPolicy {
+        name: "search",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "session_presence",
         access: Access::Client,

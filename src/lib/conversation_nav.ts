@@ -3,6 +3,7 @@
 import { get } from 'svelte/store';
 import { sessions, sessionsLoaded } from './sessions';
 import type { ConvItem, ThreadRow } from './conversation';
+import { fold, foldedIncludes } from './text_fold';
 
 /** The key the panel's `{#each thread}` uses for a row. */
 export function rowKey(row: ThreadRow): string {
@@ -42,15 +43,15 @@ function rowTexts(row: ThreadRow): (string | null)[] {
 }
 
 /** Row keys (`t<index>` / `e<id>`) whose searchable text contains `query`
- *  (case-insensitive, trimmed; empty → []). Searchable text: prompt, text
+ *  (case and accents ignored, trimmed; empty → []). Searchable text: prompt, text
  *  items, tool summaries/targets, command name/args/output, subagent
  *  description/result, compaction summary, event label/detail. In document
  *  order. */
 export function findMatches(rows: ThreadRow[], query: string): Match[] {
-  const q = query.trim().toLowerCase();
+  const q = fold(query.trim());
   if (q === '') return [];
   return rows
-    .filter((row) => rowTexts(row).some((t) => t !== null && t.toLowerCase().includes(q)))
+    .filter((row) => rowTexts(row).some((t) => foldedIncludes(t, q)))
     .map((row) => ({ rowKey: rowKey(row) }));
 }
 

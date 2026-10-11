@@ -158,6 +158,10 @@ pub(super) struct LivePane<'a> {
     tmux_name: String,
     origin: Origin,
     events: Option<SeedEvents>,
+    /// Handover rows the typed prompt itself carries: stamped delivered
+    /// once the REPL is ready, so the UserPromptSubmit hook the prompt
+    /// fires does not hand them to Claude a second time.
+    carries: Vec<i64>,
     tmux: Box<dyn crate::tmux::TmuxExec>,
 }
 
@@ -185,6 +189,7 @@ impl<'a> LivePane<'a> {
             tmux_name: row.tmux_name.clone(),
             origin,
             events,
+            carries: Vec::new(),
             tmux,
         }
     }
@@ -236,10 +241,24 @@ impl SeedPane for LivePane<'_> {
         }
     }
     fn ready(&self) {
-        let Some(kind) = self.events.and_then(|e| e.ready) else {
+        let kind = self.events.and_then(|e| e.ready);
+        if kind.is_none() && self.carries.is_empty() {
+            return;
+        }
+        let Ok(s) = self.store.lock() else {
             return;
         };
-        if let Ok(s) = self.store.lock() {
+        if !self.carries.is_empty() {
+            let current = s
+                .get_session_by_id(self.session_id)
+                .ok()
+                .flatten()
+                .and_then(|r| r.claude_session_id);
+            if let Err(e) = s.mark_handovers_delivered(&self.carries, current.as_deref()) {
+                tracing::warn!(error = %e.message, "[seed] stamping the typed handover failed");
+            }
+        }
+        if let Some(kind) = kind {
             let _ = s.insert_session_event(self.session_id, kind, None);
         }
     }
@@ -286,6 +305,25 @@ pub(super) async fn seed_now_as(
     seed(&pane, prompt, &FOREGROUND).await
 }
 
+/// Seed a routine run's session with its whole prompt ([`BACKGROUND`]), as
+/// fleet's own words. The prompt is typed, not left for a hook to carry:
+/// a fresh session takes no turn until something is typed into it, and
+/// the typed prompt does not depend on the hook's delivery. `handover` is
+/// the row the run queued with the same text, stamped delivered when the
+/// REPL is ready so the hook does not repeat it. `Err` says why nothing
+/// was typed; the session is live either way.
+pub async fn seed_routine(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    row: &SessionRow,
+    prompt: &str,
+    handover: i64,
+) -> Result<(), String> {
+    let mut pane = LivePane::new(store, ssh, row, Origin::Fleet, Some(HANDOVER));
+    pane.carries = vec![handover];
+    seed_outcome(&pane, prompt, &BACKGROUND).await
+}
+
 /// Wait ([`FOREGROUND`]) for `row`'s REPL before the caller types into it
 /// itself.
 pub async fn wait_for_repl(
@@ -300,17 +338,30 @@ pub async fn wait_for_repl(
 /// Wait for a settled REPL, type, then make sure the prompt was submitted.
 /// `true` when it was typed.
 pub(crate) async fn seed(pane: &dyn SeedPane, prompt: &str, t: &SeedTimings) -> bool {
-    if await_repl(pane, t).await != ReplWait::Ready {
-        return false;
+    seed_outcome(pane, prompt, t).await.is_ok()
+}
+
+/// [`seed`], with why the prompt was not typed.
+pub(crate) async fn seed_outcome(
+    pane: &dyn SeedPane,
+    prompt: &str,
+    t: &SeedTimings,
+) -> Result<(), String> {
+    match await_repl(pane, t).await {
+        ReplWait::Ready => {}
+        ReplWait::Dialog(why) => return Err(format!("a dialog is up in its session ({why})")),
+        ReplWait::NotReady => {
+            return Err("Claude's prompt did not come up in its session".to_string())
+        }
     }
     pane.ready();
     let before = pane.ack_state();
     if let Err(e) = pane.type_prompt(prompt).await {
         pane.event(false, Some(&format!("send failed: {}", e.code)));
-        return false;
+        return Err(format!("typing it failed: {}", e.message));
     }
     await_ack(pane, prompt, before, t).await;
-    true
+    Ok(())
 }
 
 /// Poll until the REPL has shown ready [`SETTLE`] times in a row. A dialog
@@ -725,6 +776,24 @@ mod tests {
             await_repl(&Scripted::new(&[TRUST], &[], &[]), &FOREGROUND).await,
             ReplWait::Dialog("trust_prompt")
         );
+    }
+
+    /// A routine run fails with why its prompt was not typed (the
+    /// scheduler writes it as the run's reason).
+    #[tokio::test(start_paused = true)]
+    async fn an_untyped_seed_says_why() {
+        let dialog = Scripted::new(&[TRUST], &[], &[]);
+        assert_eq!(
+            seed_outcome(&dialog, PROMPT, &FOREGROUND).await,
+            Err("a dialog is up in its session (trust_prompt)".to_string())
+        );
+        let never = Scripted::new(&[""], &[], &[]);
+        assert_eq!(
+            seed_outcome(&never, PROMPT, &FOREGROUND).await,
+            Err("Claude's prompt did not come up in its session".to_string())
+        );
+        let pane = Scripted::new(&[READY], &[IN_INPUT, READY], &[1]);
+        assert_eq!(seed_outcome(&pane, PROMPT, &FOREGROUND).await, Ok(()));
     }
 
     /// The pre-2.x readiness check (`>` or `│` anywhere) never matched a

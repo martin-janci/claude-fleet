@@ -121,6 +121,36 @@ fn claude_lists_mirror_the_composer() {
     );
 }
 
+/// The composer's Codex lists (`src/lib/conversation.ts` CODEX_*) are the
+/// Codex adapter's, so a session's pickers offer what `codex -m` takes.
+#[test]
+fn codex_lists_mirror_the_composer() {
+    let ts = crate::repo_files::read("src/lib/conversation.ts");
+    let a = by_id(crate::store::AGENT_CODEX).expect("codex adapter");
+    let pick = |opts: &[PickerOption]| -> Vec<(String, String, bool)> {
+        opts.iter()
+            .map(|o| (o.value.to_string(), o.label.to_string(), false))
+            .collect()
+    };
+    assert_eq!(
+        ts_entries(&ts, "CODEX_MODEL_OPTIONS", ("value", "label")),
+        pick(a.models())
+    );
+    assert_eq!(
+        ts_entries(&ts, "CODEX_EFFORT_OPTIONS", ("value", "label")),
+        pick(a.effort_levels())
+    );
+    let slash: Vec<(String, String, bool)> = a
+        .slash_commands()
+        .iter()
+        .map(|c| (c.name.to_string(), c.description.to_string(), c.args))
+        .collect();
+    assert_eq!(
+        ts_entries(&ts, "CODEX_SLASH_COMMANDS", ("name", "description")),
+        slash
+    );
+}
+
 // Agy (12.3). PROVISIONAL: no machine fleet runs on has agy, so the panes
 // and the stream below are transcribed from agy's documentation, not
 // captured. Replace them with `tmux capture-pane -p` output from a real agy.

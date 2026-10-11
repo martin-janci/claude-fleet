@@ -81,6 +81,11 @@ pub const LOOPS: &[LoopSpec] = &[
     acts("gc", "Garbage collection"),
     keeps("usage", "Session usage", "Only reads token usage."),
     keeps(
+        "search_index",
+        "Search index",
+        "Only copies conversation text into the search index, when search.index_transcripts is on.",
+    ),
+    keeps(
         "tasks",
         "Task sweep",
         "Only bookkeeping: a task whose worker is gone reads Failed.",

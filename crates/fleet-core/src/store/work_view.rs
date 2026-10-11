@@ -30,6 +30,8 @@ pub struct ViewItem {
     /// `work_items.org_id`: a LOCAL item's own org; never read for a
     /// tracker item (its org is its tracker's).
     pub own_org: Option<i64>,
+    /// `meta.iteration_active`: the item's sprint is the tracker's active one.
+    pub iteration_active: bool,
 }
 
 /// One link as the Work view reads it: the row (its `org_id` still the
@@ -101,7 +103,7 @@ pub struct WorkRule {
     pub version: i64,
     pub conditions: RuleConditions,
     pub group: String,
-    /// "Its sessions start here" (migration 163): the host a start of a
+    /// "Its sessions start here" (migration 164): the host a start of a
     /// task it matches lands on when no start rule names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_alias: Option<String>,
@@ -149,7 +151,10 @@ fn json_list(raw: Option<String>) -> Vec<String> {
 /// The columns after `ITEM_COLUMNS` that make a [`ViewItem`].
 const VIEW_ITEM_EXTRA: &str = "CASE WHEN json_valid(w.meta) \
           AND json_type(w.meta, '$.assignee_id') = 'text' \
-         THEN json_extract(w.meta, '$.assignee_id') END, containers, org_id";
+         THEN json_extract(w.meta, '$.assignee_id') END, containers, org_id, \
+     CASE WHEN json_valid(w.meta) \
+          AND json_extract(w.meta, '$.iteration_active') = 1 \
+         THEN 1 ELSE 0 END";
 
 fn map_view_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<ViewItem> {
     Ok(ViewItem {
@@ -157,6 +162,7 @@ fn map_view_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<ViewItem> {
         assignee_id: r.get(ITEM_COLUMN_COUNT)?,
         containers: json_list(r.get(ITEM_COLUMN_COUNT + 1)?),
         own_org: r.get(ITEM_COLUMN_COUNT + 2)?,
+        iteration_active: r.get::<_, i64>(ITEM_COLUMN_COUNT + 3)? == 1,
     })
 }
 

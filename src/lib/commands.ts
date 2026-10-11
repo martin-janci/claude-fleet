@@ -56,7 +56,7 @@ export function keepsKind(mode: PrefixMode, kind: SwitcherEntry['kind']): boolea
     case 'commands':
       return kind === 'command' || kind === 'setting';
     case 'work':
-      return kind === 'ticket' || kind === 'lookup';
+      return kind === 'ticket' || kind === 'lookup' || kind === 'planning';
     case 'hosts':
       return kind === 'host';
   }

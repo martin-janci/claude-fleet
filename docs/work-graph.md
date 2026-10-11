@@ -264,6 +264,22 @@ including tasks with no session at all — as reads of the `work` tool
   `review_total`, the review inbox's total — so one refresh is one read.
   Neither is in the tool's schema (an assistant pages a section by its
   filters), and an older hub answers without them.
+  Search phase 2 (2026-10) adds `iteration` (`current` for the tracker's
+  active sprint or cycle, `none`, or a sprint's name, any case), `epic`
+  (an epic's key or `item:<id>`: the epic and everything under it, through
+  any depth of parents), `item_type` (the tracker's type name, any case)
+  and `sort` (`activity`, the default: needing you first then the latest
+  activity; `updated`, the tracker's last change; `key`, by number so
+  TK-9 comes before TK-10; `title`; `due`), which orders the tasks inside
+  each section; an unknown `sort` is refused. `query` matches every word
+  of it in the key or title, in any order, case and accents ignored. Each
+  task carries `item_type`, `hierarchy_level`, `iteration`,
+  `iteration_active`, `in_epic` (`{task_id, key, title}`: its nearest
+  epic-level ancestor, else its top-most one) and `updated_at`; the page
+  carries `facets` (`iterations` with `active` and `count`, `epics` with
+  `count`, `item_types`), every value among the tasks the caller sees
+  whatever the filters, so a picker is not limited to the loaded page
+  (absent on a section's read). An older hub ignores all four filters.
 - `work { action: task, task_id }` (`item:<id>` or `ref:<KEY>`): one task
   with every session and why it is linked, its tracker description (at
   most 600 characters, with `description_chars`, the full length fleet
@@ -523,7 +539,9 @@ Trackers give you:
 
 - titles and statuses on the chips and group headers;
 - **⌘K → My work** (and *Current sprint* / *Current cycle* where there is
-  one, *Recent*, and favourite filters), which searches the cache;
+  one, *Recent*, and favourite filters); a query of two or more letters
+  also searches the whole cache (key, title and assignees, every word,
+  accents ignored), so an older ticket is found by its title;
 - starting work from a ticket in one step;
 - ticket cards with acceptance criteria;
 - the "done" signal that tidy-up uses.
@@ -659,8 +677,10 @@ put in a session's event history. Disconnecting a tracker deletes it.
 
 ## Starting work
 
-- **From ⌘K:** type a key or paste a ticket URL, or pick a ticket from
-  *My work*, then ↵. Fleet starts it with a brief at once and selects the
+- **From ⌘K:** type a key, words of its title or paste a ticket URL, or
+  pick a ticket from *My work* or one of your own tasks from *My tasks*
+  (listed with or without a tracker; `#` narrows ⌘K to tasks and
+  tickets), then ↵. Fleet starts it with a brief at once and selects the
   new session; when the project is ambiguous it opens the New session
   dialog on that ticket instead, and when a session is already on it, it
   jumps there.

@@ -55,7 +55,7 @@ the host's detail in the **Hosts** view (⌘I):
   `E_FORBIDDEN`; fleet-wide listings (`list_sessions`, …) still see every
   host.
 - `readonly` — only tools that observe the fleet (`list_*`, `capture_session`,
-  `session_history`, `session_conversations`, `inbox`, `peer_status`,
+  `session_history`, `session_conversations`, `search`, `inbox`, `peer_status`,
   `session_transcript`, `repo_*`,
   `get_clipboard`, `wait_for_session`, `wait_for_reply`, `wait_for_task`, `list_tasks`, …).
   Anything that sends, kills, deletes, provisions, dispatches, writes the
@@ -334,7 +334,9 @@ Index by area (names only; see the reference for details):
   `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
-  `probe_host`, `hide_host`, `provision_hosts`,
+  `probe_host`, `hide_host`, `provision_hosts`, `wizard_state` (a wizard
+  left half-way, Add host or Add a project, kept on the hub so it resumes
+  on the person's other device; not served to a per-host token),
   `list_accounts`, `account_usage` (each account's latest plan usage: the
   5-hour and weekly windows with their reset times, status and when it was
   fetched, as the hub's usage poll last answered; never fetches; hub
@@ -422,6 +424,18 @@ Index by area (names only; see the reference for details):
   one), `send_message`, `inbox`. Rows with
   `kind: external` are interactive Claude sessions running outside tmux:
   fleet can read them (`session_transcript`) but not control them.
+- **Search** — `search { query, kinds?, limit? }` finds anything the hub
+  indexes, without knowing where to look: tasks and tickets (key, title,
+  brief, description), sessions (name, host, branch, tags, last prompt,
+  notes), a conversation's first prompt, pull requests, the work journal,
+  and — when an owner has turned on `search.index_transcripts` (off by
+  default; `transcripts_indexed` in the answer says) — what was said in
+  every conversation. Every word must match, in any order, case and accents
+  ignored, each as a prefix. Only what the caller may see comes back; a
+  hit names its `session_id` or `task_id`, so the next call reads it
+  (`session_conversation`, `work { action: task }`). The Work view's
+  `filters` (`work { action: tree }`, including `iteration`, `epic`,
+  `item_type` and `sort`) are described in `docs/work-graph.md`.
 - **Lifecycle & recovery** — `restart_session`, `rewind_conversation`
   (truncate a session's Claude transcript into a new conversation: mode
   `fork` starts a new session from that point — in this worktree, or with
@@ -948,7 +962,9 @@ Index by area (names only; see the reference for details):
   `needs_person` clears the session's `last_viewed_at` so its turn lands in
   the Inbox. Each run's session has
   origin `routine` and is the routine's owner's; the prompt is its
-  handover. A run is `done` when its session's first turn finishes,
+  handover, typed into the session once Claude's REPL is ready (a run
+  whose prompt could not be typed fails with `E_PROMPT_NOT_DELIVERED`,
+  fix: open its session). A run is `done` when its session's first turn finishes,
   `failed` on an error, a lost or removed session, six quiet hours, or a
   session past the run budget (which also turns the routine off with
   `paused_reason`), and `skipped` when the last run is still going under

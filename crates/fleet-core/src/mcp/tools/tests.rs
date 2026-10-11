@@ -2787,6 +2787,7 @@ fn router_sum_serves_every_tool() {
         include_str!("presence.rs"),
         include_str!("library.rs"),
         include_str!("runs.rs"),
+        include_str!("search.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -4381,8 +4382,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// (`present::drop_optional_null`) measured 106,006 bytes for 135 tools
     /// (785 a tool), down from 110,022. Raise it only from a measurement the
     /// failure prints, and say in the commit message what was measured and
-    /// when.
-    const BYTES_PER_TOOL: usize = 795;
+    /// when. Raised to 809 on 2026-10-11: merging main's `search` tool into
+    /// gap plan batch 3 (`wizard_state`, `resume_or_new`) measured 111,954
+    /// bytes for 140 tools (799 a tool).
+    const BYTES_PER_TOOL: usize = 809;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

@@ -34,6 +34,21 @@ Jev's "probably waiting" kept apart from Needs you) and no tool; 16 adds
 named tokens (`api_tokens`) and + Add account (`add_account`), so a
 desktop accepts only a revision-16 hub.
 
+Search (2026-10, three phases). Every search box ignores case and accents
+through one fold (`search_text.rs`, `src/lib/text_fold.ts`, fleet-mobile's
+`TextFold.kt`: one table); ⌘K finds the person's own tasks and searches the
+whole ticket cache, and a query matches every word in any order. The Work
+view filters by sprint (`iteration`), epic and type and sorts (`sort`), with
+pickers fed by the tree page's `facets` and a query language in its search
+box (`src/lib/work_query.ts`). Phase 3 adds a full-text index (FTS5,
+migration 163: `search_docs`, `search_fts`, kept in step by triggers) over
+tasks, sessions, first prompts, pull requests and the work journal, served
+by the `search` tool and ⌘K's Everywhere rows. Copying conversation text
+into it (`service/search_index.rs`) is built but OFF by default
+(`search.index_transcripts`, Settings → Limits → Search): it is the one
+place the hub would store transcript text. No contract revision: a desktop
+paired with an older hub gets no Everywhere rows.
+
 The canvas gap plan (M15, steps G0.1 to G6.2; transition plan section M15)
 landed in #779, #812 and #814 and fleet-mobile #192 to #198: the form spec's
 contract-15 fields and the form kit, settings with one Save bar, mission asks
