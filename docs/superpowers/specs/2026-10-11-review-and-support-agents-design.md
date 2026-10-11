@@ -458,7 +458,7 @@ dashboard pieces of the reviewer.
 
 ## Steps
 
-1. **Runtime core** (built): migration 171 (`agent_rules`,
+1. **Runtime core** (built): migration 173 (`agent_rules`,
    `agent_cursors`, `agent_jobs`, `agent_actions`), `fleet-hub agents
    grant | revoke | pause-all | approve | reject | status`, the
    `agents_poll` / `agents_run` loops with an empty registry, the
@@ -471,7 +471,7 @@ dashboard pieces of the reviewer.
    `service/agents/workspace.rs` (prepare, cleanup, prune; tested against a
    real repository). The prune is wired into the run pass with the first
    agent, step 3, which knows each rule's checkout.
-3. **Reviewer, read side** (built): migration 172 (`review_prs`,
+3. **Reviewer, read side** (built): migration 174 (`review_prs`,
    `review_records`), `service/agents/review/` (`plan.rs`, `diff.rs`,
    `output.rs`, `prompt.rs` with the original's tests ported, the skill as
    `skill.md`, the poller and runner behind a `ReviewHost` trait tested

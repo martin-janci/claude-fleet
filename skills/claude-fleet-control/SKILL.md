@@ -306,10 +306,9 @@ Change which task you are on with `work_link { session_id: <yours>, action:
 "link" | "switch" | "unlink", … }`. A local task (no tracker ticket) you work
 on also takes `work_link { action: "set_status", item_id, status }`, `edit`
 and `comment` by `item_id`; a tracker ticket's status changes in the tracker.
-`set_status`, `edit` and `comment` work on any local task your own session is
-on, even one shared with other people's sessions; renaming it (`name` with
-`item_id`) is refused when the task is also linked to a session you cannot
-drive.
+`set_status`, `edit`, `comment` and renaming it (`name` with `item_id`) work
+on any local task your own session is on, even one shared with other people's
+sessions.
 
 ## Tasks, subtasks and proposals (shared work context)
 

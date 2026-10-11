@@ -115,6 +115,68 @@ pub fn check_interval_secs(store: &Store) -> u64 {
     settings::get_secs(store, settings::UPDATE_CHECK_INTERVAL_SECS)
 }
 
+/// The longest the refresh tick sleeps on `dev` and `nightly`.
+pub const FAST_TRACK_POLL_SECS: u64 = 900;
+
+/// How long the refresh tick sleeps: `update.check_interval_secs`, but at
+/// most [`FAST_TRACK_POLL_SECS`] on `dev` and `nightly`, whose channels move
+/// with every green push to main. A read is one small signed document;
+/// manifests are fetched only for releases the cache lacks.
+pub fn channel_poll_secs(store: &Store) -> u64 {
+    let every = check_interval_secs(store);
+    match track(store) {
+        Track::Dev | Track::Nightly => every.min(FAST_TRACK_POLL_SECS),
+        Track::Stable | Track::Beta => every,
+    }
+}
+
+/// How often a person's "Check for updates" (`refresh` on `/update/check`)
+/// may make the hub re-read the channel.
+pub const ASKED_REFRESH_EVERY_SECS: i64 = 60;
+
+/// When an asked-for refresh last ran, unix seconds.
+static ASKED_REFRESH_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MIN);
+
+/// Whether an asked-for refresh may run at `now`, the last one at `last`.
+fn asked_refresh_due(last: i64, now: i64) -> bool {
+    now.saturating_sub(last) >= ASKED_REFRESH_EVERY_SECS
+}
+
+/// A person's "Check for updates": re-read the channel before the decision,
+/// so a release published minutes ago is seen now rather than at the next
+/// tick. Once a minute across every caller, bounded in time; a failure keeps
+/// the last good cache, as the tick's does.
+pub async fn refresh_asked(store: &Mutex<Store>, now: i64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let last = ASKED_REFRESH_AT.load(Relaxed);
+    if !asked_refresh_due(last, now)
+        || ASKED_REFRESH_AT
+            .compare_exchange(last, now, Relaxed, Relaxed)
+            .is_err()
+    {
+        return;
+    }
+    let base = channel_base_url();
+    let fetch = HttpsFetch::new(Some(&base));
+    let keys = trusted_keys();
+    let bounded = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        refresh(store, &fetch, &base, &keys, now),
+    );
+    match bounded.await {
+        Ok(Ok(o)) => tracing::info!(
+            track = o.track.as_str(),
+            sequence = o.sequence,
+            fetched = o.fetched,
+            "update channel refreshed on request"
+        ),
+        Ok(Err(e)) => {
+            tracing::warn!(code = %e.code, error = %e.message, "update channel refresh on request failed")
+        }
+        Err(_) => tracing::warn!("update channel refresh on request timed out"),
+    }
+}
+
 /// Wakes the refresh tick early: a new track has no cached channel (every
 /// target would read `unknown` until the next tick), and a new interval
 /// should not wait out the old one's sleep.
@@ -1471,6 +1533,7 @@ pub fn hub_self_request(installed: Installed) -> CheckRequest {
         speaks: Speaks::default(),
         phase: UpdatePhase::Idle,
         attempt: None,
+        refresh: false,
     }
 }
 
@@ -1819,7 +1882,7 @@ pub fn spawn_refresh_tick(
                 }
             }
             let interval = lock(&store)
-                .map(|s| check_interval_secs(&s))
+                .map(|s| channel_poll_secs(&s))
                 .unwrap_or(21_600);
             crate::service::loops::report(
                 "updates",

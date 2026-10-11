@@ -23,6 +23,8 @@ import { doneWhenWords, finishesWhen, resetHandoffsForTests, sessionState, split
 import { sessions, type SessionRow } from './sessions';
 import { sessionFocus } from './session_focus';
 import { missionOpenRequest } from './missions';
+import { destination } from './destination';
+import { selectedTaskId, sidebarView } from './work_view';
 import { get } from 'svelte/store';
 import { motionPref } from './motion';
 import { fliesIn } from './handoff_flight';
@@ -88,8 +90,22 @@ describe('handoff chips', () => {
     expect(chip.textContent).toContain('Sent to a mission');
     expect(chip.textContent).toContain('Ship 9.x');
     expect(chip.textContent).toContain('Working');
+    destination.set('control');
     await fireEvent.click(chip);
     expect(get(missionOpenRequest)).toEqual({ id: 5 });
+    // Control covers Work: the chip leaves it, or nothing shows.
+    expect(get(destination)).toBe('session');
+    expect(get(sidebarView)).toBe('work');
+  });
+
+  it("a task card's Open in Work leaves Control for the task in Work", async () => {
+    receipts = [{ id: 6, at: now, kind: 'task', tool: 'work_link', item: { id: 20, title: 'Write docs', status: 'todo' } }];
+    destination.set('control');
+    render(HandoffCards);
+    await fireEvent.click(await screen.findByTestId('handoff-task-open'));
+    expect(get(selectedTaskId)).toBe('item:20');
+    expect(get(sidebarView)).toBe('work');
+    expect(get(destination)).toBe('session');
   });
 
   it('a new receipt shows up on handoff:changed', async () => {

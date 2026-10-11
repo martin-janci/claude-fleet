@@ -18,8 +18,17 @@ use crate::ipc_error::IpcError;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
-/// The one op today: a PR as a remote link on the item.
+/// A PR as a remote link on the item.
 pub const WRITE_OP_PR_REMOTE_LINK: &str = "pr_remote_link";
+/// A fleet comment posted to the item (migration 172): `url` is
+/// [`comment_write_url`], `body` the text posted.
+pub const WRITE_OP_COMMENT: &str = "comment";
+
+/// A comment write's `url`: which fleet comment it posts, which keeps the
+/// outbox's unique key meaningful (one post per comment per tracker).
+pub fn comment_write_url(comment_id: i64) -> String {
+    format!("fleet-comment:{comment_id}")
+}
 
 /// Attempts before a write is given up (`failed`).
 pub const WRITE_MAX_ATTEMPTS: i64 = 5;
@@ -43,6 +52,18 @@ pub struct TrackerWriteRow {
     pub created_at: i64,
     pub updated_at: i64,
     pub done_at: Option<i64>,
+    /// The text a `comment` write posts (migration 172).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// The item's tracker id, for a provider that addresses an item by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    /// The id the tracker gave what was written, once sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_id: Option<String>,
+    /// Where the tracker shows it, when it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
 }
 
 /// What [`Store::enqueue_tracker_write`] needs.
@@ -56,10 +77,15 @@ pub struct NewTrackerWrite<'a> {
     pub link_id: Option<i64>,
     pub claude_session_id: Option<&'a str>,
     pub session_org_id: Option<i64>,
+    /// A `comment` write's text.
+    pub body: Option<&'a str>,
+    /// The item's tracker id (see [`TrackerWriteRow::external_id`]).
+    pub external_id: Option<&'a str>,
 }
 
 const COLUMNS: &str = "id, tracker_id, item_key, op, url, title, link_id, claude_session_id, \
-     session_org_id, state, attempts, last_error, next_at, created_at, updated_at, done_at";
+     session_org_id, state, attempts, last_error, next_at, created_at, updated_at, done_at, \
+     body, external_id, remote_id, remote_url";
 
 fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerWriteRow> {
     Ok(TrackerWriteRow {
@@ -79,6 +105,10 @@ fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerWriteRow> {
         created_at: r.get(13)?,
         updated_at: r.get(14)?,
         done_at: r.get(15)?,
+        body: r.get(16)?,
+        external_id: r.get(17)?,
+        remote_id: r.get(18)?,
+        remote_url: r.get(19)?,
     })
 }
 
@@ -90,8 +120,9 @@ impl Store {
         let n = self.conn.execute(
             "INSERT OR IGNORE INTO tracker_writes \
                (tracker_id, item_key, op, url, title, link_id, claude_session_id, \
-                session_org_id, state, attempts, next_at, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 0, ?9, ?9, ?9)",
+                session_org_id, state, attempts, next_at, created_at, updated_at, body, \
+                external_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 0, ?9, ?9, ?9, ?10, ?11)",
             rusqlite::params![
                 w.tracker_id,
                 w.item_key,
@@ -101,7 +132,9 @@ impl Store {
                 w.link_id,
                 w.claude_session_id,
                 w.session_org_id,
-                now
+                now,
+                w.body,
+                w.external_id
             ],
         )?;
         Ok(n > 0)
@@ -137,14 +170,74 @@ impl Store {
 
     /// The write landed.
     pub fn finish_tracker_write(&self, id: i64) -> Result<(), IpcError> {
+        self.finish_tracker_write_as(id, None, None)
+    }
+
+    /// The write landed, as `remote_id` (the tracker's id for what was
+    /// written: a comment's) shown at `remote_url`, when the tracker said.
+    /// An id or URL past 512 characters is not kept.
+    pub fn finish_tracker_write_as(
+        &self,
+        id: i64,
+        remote_id: Option<&str>,
+        remote_url: Option<&str>,
+    ) -> Result<(), IpcError> {
         let now = now_unix();
+        fn short(v: Option<&str>) -> Option<&str> {
+            v.filter(|v| !v.is_empty() && v.len() <= 512)
+        }
         self.conn.execute(
             "UPDATE tracker_writes SET state = 'done', attempts = attempts + 1, \
-               last_error = NULL, done_at = ?2, updated_at = ?2 \
+               last_error = NULL, done_at = ?2, updated_at = ?2, remote_id = ?3, \
+               remote_url = ?4 \
              WHERE id = ?1 AND state = 'pending'",
-            rusqlite::params![id, now],
+            rusqlite::params![id, now, short(remote_id), short(remote_url)],
         )?;
         Ok(())
+    }
+
+    /// A comment write settled: the task its fleet comment is on re-reads,
+    /// so the comment's post state shows. Nothing for any other write.
+    pub fn emit_comment_write(&self, url: &str) -> Result<(), IpcError> {
+        let Some(id) = url
+            .strip_prefix("fleet-comment:")
+            .and_then(|n| n.parse::<i64>().ok())
+        else {
+            return Ok(());
+        };
+        let item: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT item_id FROM work_item_comments WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(item) = item {
+            self.emit_work_item(item, Default::default())?;
+        }
+        Ok(())
+    }
+
+    /// The tracker's ids of the comments fleet posted to `item_key` whose
+    /// fleet comment is still live: what the tracker's own comment list
+    /// leaves out, since fleet already shows each as its own. A comment
+    /// deleted in fleet stays at the tracker, so it shows from there again.
+    pub fn posted_comment_ids(
+        &self,
+        tracker_id: i64,
+        item_key: &str,
+    ) -> Result<std::collections::HashSet<String>, IpcError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT w.remote_id FROM tracker_writes w \
+               JOIN work_item_comments c ON w.url = 'fleet-comment:' || c.id \
+             WHERE w.tracker_id = ?1 AND w.item_key = ?2 AND w.op = 'comment' \
+               AND w.state = 'done' AND w.remote_id IS NOT NULL AND c.deleted_at IS NULL",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![tracker_id, item_key], |r| {
+            r.get::<_, String>(0)
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// The write failed with `error`. `next_at` is when to try again, or
@@ -250,6 +343,8 @@ mod tests {
             link_id: Some(1),
             claude_session_id: None,
             session_org_id: None,
+            body: None,
+            external_id: None,
         }
     }
 

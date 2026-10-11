@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import { bannerFor, nextCheckMs, type DesktopUpdate } from './updates';
+import { describe, expect, it, vi } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
+import { bannerFor, checkForUpdate, checkedLine, nextCheckMs, type DesktopUpdate } from './updates';
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 function u(over: Partial<DesktopUpdate> = {}): DesktopUpdate {
   return {
@@ -70,5 +73,25 @@ describe('nextCheckMs', () => {
     expect(nextCheckMs(u({ next_check_secs: 60 }))).toBe(3_600_000);
     expect(nextCheckMs(u({ next_check_secs: 10_000_000 }))).toBe(86_400_000);
     expect(nextCheckMs(null)).toBe(21_600_000);
+  });
+});
+
+describe('checkedLine', () => {
+  it('says what a person\'s check came back with', () => {
+    expect(checkedLine(null)).toBeNull();
+    expect(checkedLine(u({ status: 'up_to_date', version: null }))).toBe('Up to date (0.5.4).');
+    expect(checkedLine(u())).toBe('claude-fleet 0.5.5 is available.');
+    expect(checkedLine(u({ status: 'hold', reason: 'Held: manual mode.' }))).toBe('Held: manual mode.');
+  });
+});
+
+describe('checkForUpdate', () => {
+  it('asks the hub to re-read its channel only when a person asked', async () => {
+    const call = vi.mocked(invoke);
+    call.mockResolvedValue(u());
+    await checkForUpdate();
+    expect(call).toHaveBeenLastCalledWith('update_check', undefined);
+    await checkForUpdate(true);
+    expect(call).toHaveBeenLastCalledWith('update_check', { force: true });
   });
 });

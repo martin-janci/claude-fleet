@@ -12426,6 +12426,12 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "describe",
         "one tracker item's own description, cached or fetched",
     ),
+    (
+        "work",
+        "tracker_comments",
+        "one tracker item's own comments, fetched live; no session is named \
+         or answered",
+    ),
     ("work", "trackers", "the trackers, without secrets"),
     (
         "work",
@@ -18045,10 +18051,10 @@ async fn a_local_items_status_is_not_another_persons_to_set() {
     }
 }
 
-/// An agent sets the status of, edits and comments on a task its OWN
-/// session is on, even when the task is shared with a session it cannot
+/// An agent sets the status of, edits, comments on and renames a task its
+/// OWN session is on, even when the task is shared with a session it cannot
 /// drive (another person's). The exception is that narrow: without its own
-/// link it is refused as before, and rename keeps the full gate.
+/// link it is refused as before.
 #[tokio::test]
 async fn an_agent_writes_its_own_shared_task() {
     let g = gate_fixture();
@@ -18096,7 +18102,7 @@ async fn an_agent_writes_its_own_shared_task() {
     };
     let me = pane_caller(Some("%7"));
 
-    for action in ["set_status", "edit", "comment"] {
+    for action in ["set_status", "edit", "comment", "name"] {
         write(me.clone(), action, shared)
             .await
             .unwrap_or_else(|e| panic!("{action}: its own task, shared with Bob's: {e:?}"));
@@ -18108,11 +18114,6 @@ async fn an_agent_writes_its_own_shared_task() {
             assert!(e.contains("E_NOTFOUND"), "{action}, {what}: {e}");
         }
     }
-    // Rename keeps the full gate.
-    let e = write(me, "name", shared)
-        .await
-        .expect_err("rename keeps the full gate");
-    assert!(format!("{e:?}").contains("E_NOTFOUND"), "{e:?}");
 }
 
 /// **A local item whose only link was UNLINKED is nobody's to write**

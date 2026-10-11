@@ -40,6 +40,7 @@
   import McpSettings from './McpSettings.svelte';
   import TicketKeys from './TicketKeys.svelte';
   import AppearanceSettings from './AppearanceSettings.svelte';
+  import UpdateCheck from './UpdateCheck.svelte';
   import { loadHostTokens } from './host_actions';
   import { hostsChordLabel, requestHostsView, settingsKey, settingsOpen, settingsSection } from './app_views';
   import { detectMac } from './terminal_keys';
@@ -1007,6 +1008,7 @@
     <section class="block about" data-testid="about-section">
       <Loader name="wordmark-reveal" size={184} delay={0} label="Orbit Fleet" testid="about-wordmark" />
       <p class="hook-desc" data-testid="about-version">Orbit Fleet {$appVersion ?? ''}</p>
+      <UpdateCheck />
     </section>
     <section class="block" data-testid="diagnostics-section">
       <div class="section-header">

@@ -1638,6 +1638,8 @@ mod tests {
                 link_id: None,
                 claude_session_id: None,
                 session_org_id: None,
+                body: None,
+                external_id: None,
             })
             .unwrap();
             let id = s
@@ -2550,6 +2552,8 @@ mod tests {
             link_id: None,
             claude_session_id: None,
             session_org_id: None,
+            body: None,
+            external_id: None,
         })
         .unwrap();
         let id = s.due_tracker_writes(t.id, i64::MAX, 1).unwrap()[0].id;

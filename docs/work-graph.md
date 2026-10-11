@@ -85,6 +85,23 @@ The Work tab opens in **List** layout; the header, filters and saved views are u
 - Tracker items stay read-only: nothing here writes to Jira, Asana or GitHub.
 - Hosts pick up step capture after re-provisioning (they read `provision_stale` until then); meanwhile the Stop hook backfills steps from the transcript.
 
+### Priority, labels and estimate
+
+A task carries a **priority** (`urgent`, `high`, `medium` or `low`, or none), up to 20 **labels** and an **estimate** in story **points** or **hours** (`work_items.priority`, `labels`, `estimate`, `estimate_unit`; migration 171). The task page's rail shows them under *Details* (a row only when it is set: the priority as a coloured dot and its word, the labels as chips, the estimate as "3 pts" or "4 h"), and its header adds a chip for an urgent or high one.
+
+On a task written in fleet a person sets them in **Edit task** or with `work_link { action: edit, item_id, priority?, labels?, estimate?, estimate_unit? }`: a priority from the four, labels of at most 40 characters each (trimmed, each once), an estimate from 0 to 1000. `priority: ""`, `labels: []` and `estimate: 0` clear them, the unit going with the estimate; `estimate_unit` alone re-units the estimate the task has, and a first estimate without one is in points. A bad value refuses the whole edit.
+
+A ticket's come from its tracker on every sync and are read-only in fleet (nothing is written back); a change to any of them is a change readers see:
+
+| Tracker | Priority | Labels | Estimate |
+|---|---|---|---|
+| Jira Cloud and Data Center | the priority's name: Highest / Blocker / Critical → urgent, High / Major → high, Medium → medium, Low / Lowest / Minor / Trivial → low, any other name → none | `labels` | the story-points field the tracker test finds (a number field named *Story Points* or *Story point estimate*) in points, else the original time estimate in hours |
+| Linear | `priority` 1–4 → urgent … low, 0 → none | its labels | `estimate`, in points |
+| GitHub | none | the issue's labels | none |
+| Asana | none | the task's tags | none |
+
+A Jira tracker connected before this release learns its story-points field at its next **Test**.
+
 ## The Work view
 
 The sidebar has two ways into the same work: **Sessions** (host / project →
@@ -621,8 +638,9 @@ write is queued when the PR probe sees the PR (or its state change), when a
 person links or confirms work on a session that already has a PR (also when
 the sync binds a key typed before the tracker was connected), and when you
 turn the setting on, for every PR already open on a session linked to one of
-the tracker's tickets. Nothing else is ever written: no transition, no
-worklog, no comment (D29), and nothing a transcript or a tracker wrote.
+the tracker's tickets. Besides this link, fleet writes only a comment a
+person chose to post (next section): no transition, no worklog (D29), and
+nothing a transcript or a tracker wrote.
 
 - **Only work a person linked.** The link must be confirmed and made by
   hand or by *Start* (`manual` / `started`). A detection guess, an agent's
@@ -647,6 +665,49 @@ worklog, no comment (D29), and nothing a transcript or a tracker wrote.
 Turning it off stops sending at once; writes already queued wait, and go
 out if you turn it on again. Settled writes are dropped after the journal's
 retention window (`work.retention.journal_days`).
+
+### Comments: the tracker's, and posting one back (off by default)
+
+A ticket's **Comments** tab shows the tracker's own comments beside fleet's,
+in one timeline: each with the tracker's name as a badge, its author, when,
+and **Open in …** where the tracker gives a link. They are read live when the
+tab opens (`work { action: "tracker_comments", key }`, desktop
+`work_tracker_comments`): the newest 50, nothing cached or stored, every
+provider (Jira Cloud and Data Center, GitHub, Linear, Asana's comment
+stories). If the tracker cannot be reached the tab says so and still shows
+fleet's own comments. An agent (a per-host token) reads each body fenced as
+untrusted text, like a description.
+
+With **Post comments** on (Settings → Trackers → Write-back, any provider,
+off by default, behind a confirm: it is the tracker admin's call), the
+composer on a ticket has **Also post to <tracker>**, ticked by default. The
+comment is saved in fleet and queued for the tracker in one step, then sent
+as the tracker credential's account with the text, a blank line and
+`— <your name> via fleet` (your display name when the hub knows who you
+are, otherwise just `— via fleet`; never a device name). Jira Cloud gets it
+as rich text (paragraphs and line breaks, no markup read), Data Center as
+plain text, GitHub through `gh` (`addComment`), Linear (`commentCreate`)
+and Asana (a story). Under the comment fleet shows *Sending…*, *Sent to
+<tracker>* (a link to it) or *Not sent: <why>*. Only a person posts: an
+agent's `post_to_tracker` is refused, and so is a post where the setting is
+off or the task has no ticket — then nothing is saved at all.
+
+- **When it goes.** Queuing wakes the tracker sync, which sends it within
+  seconds on the desktop or hub that owns the trackers (not at the next
+  pass), on the tracker's own credential. Failures retry like a PR link's
+  and give up after five tries, or at once on a refusal (403, 404).
+- **Once.** A tracker comment is not idempotent, so each fleet comment is
+  posted at most once; fleet keeps the tracker's id for it and leaves that
+  comment out of the tracker's list while the fleet comment is live.
+- **Deleting.** Deleting a fleet comment whose post is still waiting cancels
+  the post. Once sent, deleting it in fleet does not delete it at the
+  tracker; it then shows there as the tracker's own.
+- **The token needs permission to comment** (Jira: *Add comments*; GitHub:
+  `gh` logged in with `repo` scope; Linear and Asana: a key that may
+  comment).
+
+This changes D29 on the owner's word (2026-10-11): comments a person posts
+are written back; transitions and worklogs still are not.
 
 ### Sync
 

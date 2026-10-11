@@ -20,6 +20,9 @@ pub mod jira_dc;
 pub mod linear;
 pub mod sync;
 #[cfg(test)]
+#[path = "tests_comments.rs"]
+mod tests_comments;
+#[cfg(test)]
 #[path = "tests_e2e_override.rs"]
 mod tests_e2e_override;
 #[cfg(test)]
@@ -80,7 +83,9 @@ pub struct Caps {
     /// one, and nothing offers "adopt from tracker".
     #[serde(default)]
     pub versions: bool,
-    /// Always false in M3–M6: read-only.
+    /// The provider implements [`TrackerProvider::write`] for some op: the
+    /// sync pass drains its outbox. Which ops is the provider's own (a PR
+    /// remote link is Jira's alone; a comment, every provider's).
     #[serde(default)]
     pub write: bool,
     /// The provider can serve one item's WHOLE description on demand
@@ -88,6 +93,187 @@ pub struct Caps {
     /// pointed at the ticket instead.
     #[serde(default)]
     pub describe: bool,
+    /// The provider reads an item's comments on demand
+    /// ([`TrackerProvider::comments`], `work { action: tracker_comments }`)
+    /// and posts one ([`WriteOp::Comment`]).
+    #[serde(default)]
+    pub comments: bool,
+    /// The provider lists an item's attachments on demand
+    /// ([`TrackerProvider::attachments`]): the task page's Comments tab and
+    /// a start's brief name them with their links.
+    #[serde(default)]
+    pub attachments: bool,
+}
+
+/// Most attachments one read answers with.
+pub const TRACKER_ATTACHMENTS_MAX: usize = 50;
+/// Longest attachment name kept, in characters.
+pub const TRACKER_ATTACHMENT_NAME_MAX_CHARS: usize = 200;
+
+/// One file attached to a ticket, as the tracker lists it. Third-party
+/// text: `name` is flattened and capped, and `url` is kept only when it is a
+/// plain `https` link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerAttachment {
+    /// The tracker's own id for it.
+    pub id: String,
+    pub name: String,
+    /// Where the tracker opens it (behind the tracker's own sign-in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Bytes, when the tracker says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// Unix seconds, when the tracker says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
+}
+
+impl TrackerAttachment {
+    /// An attachment from an answer's fields, capped and checked: `None`
+    /// for an id that is empty, long or not printable, or an empty name.
+    pub fn from_parts(
+        id: &str,
+        name: &str,
+        url: Option<&str>,
+        size: Option<u64>,
+        created: Option<&str>,
+    ) -> Option<TrackerAttachment> {
+        let id = id.trim();
+        if id.is_empty()
+            || id.len() > 200
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'=' | b':'))
+        {
+            return None;
+        }
+        let name: String = name
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(TRACKER_ATTACHMENT_NAME_MAX_CHARS)
+            .collect();
+        if name.is_empty() {
+            return None;
+        }
+        let url = url
+            .map(str::trim)
+            .filter(|u| {
+                u.starts_with("https://")
+                    && u.len() <= 2048
+                    && !u.chars().any(|c| c.is_control() || c.is_whitespace())
+            })
+            .map(str::to_string);
+        Some(TrackerAttachment {
+            id: id.to_string(),
+            name,
+            url,
+            size,
+            created_at: created.and_then(parse_timestamp),
+        })
+    }
+}
+
+/// Most tracker comments one read answers with: the newest.
+pub const TRACKER_COMMENTS_MAX: usize = 50;
+/// Longest tracker comment body kept, in characters.
+pub const TRACKER_COMMENT_MAX_CHARS: usize = 8000;
+/// Longest tracker comment author name kept, in characters.
+pub const TRACKER_COMMENT_AUTHOR_MAX_CHARS: usize = 120;
+
+/// One comment as the tracker holds it, normalised. Third-party text: the
+/// service fences `body` for an agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerComment {
+    /// The tracker's own id for it.
+    pub id: String,
+    /// Its author's display name at the tracker.
+    pub author: String,
+    /// Plain text (Jira's ADF flattened), at most
+    /// [`TRACKER_COMMENT_MAX_CHARS`].
+    pub body: String,
+    /// Unix seconds.
+    pub created_at: i64,
+    /// Where the tracker shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl TrackerComment {
+    /// A comment from an answer's fields, capped and checked: `None` for an
+    /// id that is empty, long or not printable, or a time that does not
+    /// parse. A URL is kept only under `url_prefix` (the tracker's own
+    /// site), whatever the answer says.
+    pub fn from_parts(
+        id: &str,
+        author: &str,
+        body: &str,
+        created: &str,
+        url: Option<&str>,
+        url_prefix: &str,
+    ) -> Option<TrackerComment> {
+        let id = id.trim();
+        if id.is_empty()
+            || id.len() > 200
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'=' | b':'))
+        {
+            return None;
+        }
+        let created_at = parse_timestamp(created)?;
+        let author: String = author
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(TRACKER_COMMENT_AUTHOR_MAX_CHARS)
+            .collect();
+        let url = url
+            .map(str::trim)
+            .filter(|u| {
+                !url_prefix.is_empty()
+                    && u.starts_with(url_prefix)
+                    && u.len() <= 2048
+                    && !u.chars().any(|c| c.is_control() || c.is_whitespace())
+            })
+            .map(str::to_string);
+        Some(TrackerComment {
+            id: id.to_string(),
+            author: if author.is_empty() {
+                "Someone".into()
+            } else {
+                author
+            },
+            body: body
+                .trim()
+                .chars()
+                .take(TRACKER_COMMENT_MAX_CHARS)
+                .collect(),
+            created_at,
+            url,
+        })
+    }
+}
+
+/// PURE: the newest `limit` of `comments`, oldest first.
+pub fn newest_comments(mut comments: Vec<TrackerComment>, limit: usize) -> Vec<TrackerComment> {
+    comments.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+    let cut = comments.len().saturating_sub(limit);
+    comments.split_off(cut)
+}
+
+/// What a write left at the tracker, when it says: the id and the URL of
+/// what was written (a comment's). A PR remote link needs neither.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WriteOutcome {
+    pub remote_id: Option<String>,
+    pub url: Option<String>,
 }
 
 /// What a probe learned: the site's instance id and the config to store.
@@ -148,6 +334,17 @@ pub struct WorkItemSnapshot {
     /// The due date, `YYYY-MM-DD` (Jira `duedate`); `None` where the
     /// tracker has none or the adapter does not read it.
     pub due_at: Option<String>,
+    /// `urgent | high | medium | low`, normalised from the tracker's own
+    /// scale (Jira's priority name, Linear's 1-4); `None` where it has none.
+    pub priority: Option<String>,
+    /// Label names, in the tracker's order (Jira `labels`, GitHub and
+    /// Linear labels, Asana tags).
+    pub labels: Vec<String>,
+    /// The estimate, in `estimate_unit`: story points (Linear, a Jira
+    /// story-points field) or hours (Jira's original time estimate).
+    pub estimate: Option<crate::store::Estimate>,
+    /// `points | hours`.
+    pub estimate_unit: Option<String>,
     /// The tracker's `updated`, unix seconds.
     pub updated: Option<i64>,
     /// The first [`DESCRIPTION_MAX_CHARS`] of the description as plain text.
@@ -405,8 +602,9 @@ pub trait TrackerProvider: Send + Sync {
     }
     /// Write `op` to the tracker (work graph M13.4e, decision D3 / D29).
     /// Only a provider whose `caps.write` is true implements it; the default
-    /// refuses, so a write can never reach a read-only provider.
-    async fn write(&self, _op: &WriteOp) -> Result<(), TrackerError> {
+    /// refuses, so a write can never reach a read-only provider, and an op a
+    /// provider does not take is refused the same way.
+    async fn write(&self, _op: &WriteOp) -> Result<WriteOutcome, TrackerError> {
         Err(TrackerError::Refused(
             "this tracker does not accept writes".into(),
         ))
@@ -418,17 +616,50 @@ pub trait TrackerProvider: Send + Sync {
     async fn describe(&self, _r: &ItemRef) -> Result<Option<FullDescription>, TrackerError> {
         Ok(None)
     }
+    /// One item's comments, the newest `limit` (at most
+    /// [`TRACKER_COMMENTS_MAX`]), oldest first. Only a provider whose
+    /// `caps.comments` is true implements it; the default refuses.
+    async fn comments(
+        &self,
+        _r: &ItemRef,
+        _limit: usize,
+    ) -> Result<Vec<TrackerComment>, TrackerError> {
+        Err(TrackerError::Refused(
+            "this tracker does not serve comments".into(),
+        ))
+    }
+    /// One item's attachments, at most `limit` (at most
+    /// [`TRACKER_ATTACHMENTS_MAX`]), oldest first. Only a provider whose
+    /// `caps.attachments` is true implements it; the default refuses.
+    async fn attachments(
+        &self,
+        _r: &ItemRef,
+        _limit: usize,
+    ) -> Result<Vec<TrackerAttachment>, TrackerError> {
+        Err(TrackerError::Refused(
+            "this tracker does not list attachments".into(),
+        ))
+    }
 }
 
-/// A write fleet may make to a tracker (work graph M13.4e). Only one today.
+/// A write fleet may make to a tracker (work graph M13.4e).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteOp {
     /// Add `url` to item `key` as a remote link titled `title`, idempotent
-    /// by a global id derived from the URL.
+    /// by a global id derived from the URL. Jira only.
     PrRemoteLink {
         key: String,
         url: String,
         title: String,
+    },
+    /// Post `body` (plain text) as a comment on the item: `key` is its key
+    /// (or reference), `external_id` its tracker id where the provider
+    /// addresses an item by it (GitHub, Linear, Asana). Not idempotent at
+    /// the tracker: the outbox sends it once.
+    Comment {
+        key: String,
+        external_id: Option<String>,
+        body: String,
     },
 }
 
@@ -505,6 +736,8 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             incremental: Incremental::Watermark,
             write: true,
             describe: true,
+            comments: true,
+            attachments: false,
         },
         "jira_dc" => Caps {
             query_lang: Some("jql".into()),
@@ -517,6 +750,8 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             incremental: Incremental::Watermark,
             write: true,
             describe: true,
+            comments: true,
+            attachments: false,
         },
         "asana" => Caps {
             query_lang: None,
@@ -527,8 +762,10 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             repo_relative: false,
             multi_container: true,
             incremental: Incremental::SyncToken,
-            write: false,
+            write: true,
             describe: false,
+            comments: true,
+            attachments: true,
         },
         "linear" => Caps {
             query_lang: Some("gql".into()),
@@ -539,8 +776,10 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             repo_relative: false,
             multi_container: false,
             incremental: Incremental::Watermark,
-            write: false,
+            write: true,
             describe: false,
+            comments: true,
+            attachments: false,
         },
         "github" => Caps {
             query_lang: Some("gql".into()),
@@ -551,8 +790,10 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             repo_relative: true,
             multi_container: false,
             incremental: Incremental::Watermark,
-            write: false,
+            write: true,
             describe: true,
+            comments: true,
+            attachments: false,
         },
         _ => Caps::default(),
     }

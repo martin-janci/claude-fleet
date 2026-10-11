@@ -378,6 +378,34 @@ task page's Activity tab also lists each session that started, was
 suggested, turned down or stopped, and each comment. Not yet: comments on
 the phone.
 
+Tracker attachments and a start's comments (owner report 2026-10-11, an
+Asana session briefed with the key alone): `tracker_comments` also answers
+an Asana ticket's attachments (`TrackerProvider::attachments`,
+`caps.attachments`, Asana only so far), listed above the Comments tab; and
+a ticket start's brief ends with the ticket's attachments and newest 10
+comments, read live by the hub (`work::tracker_comments::brief_extras`), so
+the session's Claude needs no tracker access of its own.
+
+Tracker comments (owner decision 2026-10-11, changing D29; migration 172):
+the Comments tab shows the ticket's own comments beside fleet's, read live
+when the tab opens (`work { tracker_comments, key }`, routed desktop
+`work_tracker_comments`; newest 50, no cache, bodies fenced for a per-host
+token; the ones fleet posted from a live comment left out) for Jira Cloud,
+Jira DC, GitHub, Linear and Asana. `work_link { comment, post_to_tracker }`
+(`comment_on_work`) also queues the comment for the tracker, in the same
+transaction, as the outbox's `comment` op (`url` `fleet-comment:<id>`,
+`body`, `external_id`; the tracker's id and URL kept as `remote_id` /
+`remote_url`). Per tracker `settings.write_back.comments`, **off by
+default** (Settings → Trackers → Write-back → *Post comments*, confirm-gated,
+every provider; the PR link stays Jira-only). Refused with nothing written
+for a per-host token (`E_FORBIDDEN`), fleet's own work (`E_UNSUPPORTED`) or
+the setting off (`E_INVALID_STATE`). Queuing nudges the sync tick, which
+drains at once. Deleting a comment cancels a pending post; a sent one stays
+at the tracker. `CommentRow.tracker_post` carries the post's state, error
+and URL; `TaskDetail.comments_tracker` / `can_post_to_tracker` say whose
+comments the tab reads and whether the reader may post. Not yet: the phone,
+editing a posted comment, attachments from trackers other than Asana.
+
 Task attachments (migration 168, `work_item_attachments` and the
 content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept
 in SQLite so a hub backup carries them; a blob goes with the last live
@@ -400,6 +428,15 @@ Attachments section (add, drop, or paste an image anywhere on the page;
 images open in a lightbox, other files download); an image pasted into the
 comment composer is attached there. Not yet: attachments on the phone, a
 tracker's own attachments (`source`/`external_id` are reserved for them).
+
+A task's priority, labels and estimate (migration 171, `work_items.priority`
+/ `labels` / `estimate` / `estimate_unit`): set on a native task through
+`work_link { edit }` and Edit task, read from every tracker on sync (Jira's
+priority name and story-points field or original estimate, Linear's
+priority, estimate and labels, GitHub labels, Asana tags) and shown in the
+task page's rail and header ([work-graph.md](work-graph.md#priority-labels-and-estimate)).
+Not yet: writing them back to a tracker, filtering or sorting by them, the
+Board card and the phone.
 
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
@@ -512,9 +549,9 @@ from its pane (per-host token + `X-Fleet-Pane`, `FleetTools::own_session`):
 `list_tasks { mine | worker_session_id }`; `session_tasks`, `work { task }`
 and `list_tasks` mark the caller's own rows (`is_self`,
 `is_self_requester` / `is_self_worker`). An agent sets the status of,
-edits and comments on a local task its own session is on (a confirmed, live
-link) even when the task is shared with sessions it cannot drive
-(`own_session_works_on`); rename keeps the full gate. Not yet: the new task's brief
+edits, comments on and renames a local task its own session is on (a
+confirmed, live link) even when the task is shared with sessions it cannot
+drive (`own_session_works_on`). Not yet: the new task's brief
 waiting for the next prompt (J3), own tasks in ⌘K.
 C0: the operator is born with the `fleet-brainstorm` skill
 (`skills/fleet-brainstorm/SKILL.md`, written to its directory's
@@ -716,7 +753,7 @@ card, the UI.
 The agent runtime (reviewer and support agents, steps 1 to 4 of 8) is
 built, and the PR reviewer works end to end under a granted rule (spec
 `docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`).
-Migration 171 (`agent_rules`, `agent_cursors`, `agent_jobs`,
+Migration 173 (`agent_rules`, `agent_cursors`, `agent_jobs`,
 `agent_actions`), `service/agents/` with the loops `agents_poll` and
 `agents_run` (stopped by `automation.paused`), the settings
 `agents.poll_interval_secs`, `agents.max_concurrent` and
@@ -727,7 +764,7 @@ owner's own paired device. The run vehicle (step 2): a locked-down
 `service/agents/vehicle.rs`), its MCP config and system prompt carried on
 stdin, in a detached worktree beside the checkout
 (`service/agents/workspace.rs`). The reviewer (steps 3 and 4, migration
-172, `service/agents/review/`): polls a granted repo's open PRs, reviews
+174, `service/agents/review/`): polls a granted repo's open PRs, reviews
 each new head with read-only tools, records the placed review in
 `review_records`, and by the rule's level keeps it (`watch`), queues it
 for a person (`propose`, an action the `agents` tool or `fleet-hub agents

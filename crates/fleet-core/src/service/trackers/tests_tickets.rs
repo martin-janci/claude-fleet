@@ -938,6 +938,7 @@ async fn an_agents_start_is_recorded_as_the_agents_and_never_writes_back() {
                 &TrackerSettings {
                     write_back: WriteBack {
                         pr_remote_link: true,
+                        comments: false,
                     },
                     ..Default::default()
                 },
@@ -2666,6 +2667,66 @@ fn a_subtask_starts_in_its_project_with_the_ticket_brief_then_its_own() {
         (mine.project_id, mine.brief.as_deref()),
         (Some(7), Some("mine"))
     );
+}
+
+/// A fleet task started by its key (the new-session dialog sends the key
+/// of a row with no tracker) is the task: linked to it and briefed with its
+/// title and notes, not a bare key no tracker knows.
+#[tokio::test]
+async fn a_task_started_by_its_key_is_briefed_with_its_notes() {
+    let fx = Fx::new();
+    let task = fx
+        .store
+        .lock()
+        .unwrap()
+        .create_native_item(&crate::store::NativeItem {
+            title: "Polish the start dialog",
+            parent_id: None,
+            project_id: Some(fx.pid),
+            notes: Some("the brief toggle, the preview"),
+        })
+        .unwrap();
+    let key = task.key.clone().expect("a task has a key");
+    let args = StartArgs {
+        reference: Some(key.clone()),
+        host_alias: Some("hosta".into()),
+        with_brief: true,
+        ..Default::default()
+    };
+    let got = with_native_defaults(&fx.store, &args, &OrgScope::All).unwrap();
+    assert_eq!(
+        (got.item_id, got.reference.as_deref()),
+        (Some(task.id), None)
+    );
+    assert_eq!(
+        got.brief.as_deref(),
+        Some("Polish the start dialog\n\nthe brief toggle, the preview")
+    );
+    let plan = plan_start(&fx.store, &got, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    assert_eq!(
+        (plan.item_id, plan.key.as_str()),
+        (Some(task.id), key.as_str())
+    );
+    assert_eq!(plan.project_id, fx.pid);
+}
+
+/// A key a tracker holds stays the tracker's ticket.
+#[test]
+fn a_tracker_key_is_not_taken_for_a_task() {
+    let fx = Fx::new();
+    let args = StartArgs {
+        reference: Some("ABC-3".into()),
+        with_brief: true,
+        ..Default::default()
+    };
+    let got = with_native_defaults(&fx.store, &args, &OrgScope::All).unwrap();
+    assert_eq!(
+        (got.item_id, got.reference.as_deref()),
+        (None, Some("ABC-3"))
+    );
+    assert_eq!(got.brief, None);
 }
 
 #[tokio::test]

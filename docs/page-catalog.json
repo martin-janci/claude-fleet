@@ -1363,6 +1363,20 @@
           ],
           "on_off": false,
           "type": "bool"
+        },
+        {
+          "confirm": "Fleet will write to this tracker: a comment a person posts from fleet appears on the ticket under this credential's account.",
+          "default": false,
+          "edit": "settings",
+          "help": "Let a person who comments on a ticket in fleet also post the comment to it, signed with their name. Only when they tick it; agents never post. The token needs permission to comment.",
+          "id": "post_comments",
+          "label": "Post comments",
+          "merge_path": [
+            "write_back",
+            "comments"
+          ],
+          "on_off": false,
+          "type": "bool"
         }
       ],
       "help": "Trackers add a ticket's title and status to the sessions working on it, and list your tickets in ⌘K. Nothing needs one: keys in branch names group sessions without any tracker.",

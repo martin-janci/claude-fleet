@@ -6,6 +6,7 @@ import { invokeCmd } from './result';
 import { killSession, restartSession, sessions, type SessionRow } from './sessions';
 import { sessionActionBlocked } from './share';
 import { pushError } from './toasts';
+import { pushRestartError } from './restart';
 
 export type OperatorBlocked =
   | 'absent'
@@ -251,7 +252,7 @@ async function openAgentOnce(): Promise<void> {
  * shows under the button; a failed restart also raises the sticky error
  * toast every other restart does (Sidebar, SessionDetails).
  */
-export async function restartOperator(): Promise<void> {
+export async function restartOperator(opts: { force?: boolean } = {}): Promise<void> {
   operatorError.set(null);
   const session = get(operatorSession);
   if (!session) {
@@ -268,10 +269,12 @@ export async function restartOperator(): Promise<void> {
     operatorError.set(blocked);
     return;
   }
-  const r = await restartSession(session.host_alias, session.tmux_name);
+  const r = await restartSession(session.host_alias, session.tmux_name, undefined, {}, { force: opts.force });
   if (!r.ok) {
     operatorError.set(`Restart failed: ${r.error.message}`);
-    pushError(r.error, 'Restart failed');
+    // `E_SELF_TARGET` (a hub where the agent was once registered as the
+    // fleet controller) offers "Restart anyway": this funnel again, forced.
+    pushRestartError(r.error, session.host_alias, session.tmux_name, () => void restartOperator({ force: true }));
     return;
   }
   await refreshOperator();

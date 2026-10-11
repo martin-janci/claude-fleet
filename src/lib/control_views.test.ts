@@ -20,6 +20,7 @@ import {
 } from './control_views';
 import { inboxQueue } from './inbox';
 import { destination } from './destination';
+import { missionOpenRequest } from './missions';
 import { sidebarView, type WorkTask } from './work_view';
 import { automationTab } from './automation';
 import { session } from './hosts_fixture';
@@ -82,6 +83,13 @@ describe('control views layout', () => {
     openElsewhere('tasks');
     expect(get(sidebarView)).toBe('work');
     expect(get(destination)).toBe('session');
+    // Missions in Work is the Missions tab, not the Tasks one.
+    missionOpenRequest.set(null);
+    destination.set('control');
+    openElsewhere('missions');
+    expect(get(destination)).toBe('session');
+    expect(get(missionOpenRequest)).toEqual({ id: null });
+    missionOpenRequest.set(null);
     destination.set('control');
     openElsewhere('hosts');
     expect(get(destination)).toBe('accounts');

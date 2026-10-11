@@ -61,6 +61,11 @@ pub struct CheckRequest {
     pub phase: UpdatePhase,
     #[serde(default)]
     pub attempt: Option<String>,
+    /// A person asked ("Check for updates"): re-read the release channel
+    /// before deciding. The hub takes it at most once a minute; a hub older
+    /// than the field ignores it and answers from its cache.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refresh: bool,
 }
 
 /// The closed set a decision's `status` is drawn from (design §6.2).

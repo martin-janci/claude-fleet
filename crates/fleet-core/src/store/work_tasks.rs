@@ -82,8 +82,9 @@ pub const ASSIGNEES_MAX: usize = 10;
 pub const ASSIGNEE_MAX_CHARS: usize = 80;
 
 /// A person's edit of a local item: each field `None` is left as it is.
-/// `notes: Some("")`, `assignees: Some(&[])` and `due_at: Some("")` clear
-/// them.
+/// `notes: Some("")`, `assignees: Some(&[])`, `due_at: Some("")`,
+/// `priority: Some("")`, `labels: Some(&[])` and `estimate: Some(0.0)`
+/// clear them.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ItemEdit<'a> {
     pub title: Option<&'a str>,
@@ -91,6 +92,119 @@ pub struct ItemEdit<'a> {
     pub assignees: Option<&'a [String]>,
     /// `YYYY-MM-DD` ([`validate_due_date`]).
     pub due_at: Option<&'a str>,
+    /// One of [`PRIORITIES`] ([`validate_priority`]).
+    pub priority: Option<&'a str>,
+    /// [`validate_labels`].
+    pub labels: Option<&'a [String]>,
+    /// 0 to [`ESTIMATE_MAX`] ([`validate_estimate`]); 0 clears it and its
+    /// unit.
+    pub estimate: Option<f64>,
+    /// One of [`ESTIMATE_UNITS`]. Without `estimate` it re-units the one the
+    /// item has; with a new estimate and no unit, the item's unit stays (a
+    /// first estimate is in points).
+    pub estimate_unit: Option<&'a str>,
+}
+
+/// A task's priorities, most pressing first (migration 171).
+pub const PRIORITIES: [&str; 4] = ["urgent", "high", "medium", "low"];
+/// Most labels one item keeps.
+pub const LABELS_MAX: usize = 20;
+/// Longest label a person types, in characters.
+pub const LABEL_MAX_CHARS: usize = 40;
+/// Largest estimate a person types, in either unit.
+pub const ESTIMATE_MAX: f64 = 1000.0;
+/// What an estimate counts: story points or hours.
+pub const ESTIMATE_UNITS: [&str; 2] = ["points", "hours"];
+
+/// A priority a person chose: one of [`PRIORITIES`], trimmed and
+/// lowercased. `""` is no priority (`None`).
+pub fn validate_priority(raw: &str) -> Result<Option<String>, IpcError> {
+    let p = raw.trim().to_lowercase();
+    if p.is_empty() {
+        return Ok(None);
+    }
+    if PRIORITIES.contains(&p.as_str()) {
+        Ok(Some(p))
+    } else {
+        Err(IpcError::new(
+            codes::E_INVALID,
+            format!("priority {raw:?} is not one of urgent, high, medium, low"),
+        ))
+    }
+}
+
+/// Labels a person typed: trimmed, empty ones dropped, each once (first
+/// spelling wins, compared case-insensitively), at most [`LABELS_MAX`] of
+/// at most [`LABEL_MAX_CHARS`] characters, no control character.
+pub fn validate_labels(raw: &[String]) -> Result<Vec<String>, IpcError> {
+    let mut out: Vec<String> = Vec::new();
+    for l in raw.iter().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+        if l.chars().count() > LABEL_MAX_CHARS {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("a label is longer than {LABEL_MAX_CHARS} characters"),
+            ));
+        }
+        if l.chars().any(char::is_control) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "a label must not contain control characters",
+            ));
+        }
+        if !out.iter().any(|o| o.to_lowercase() == l.to_lowercase()) {
+            out.push(l.to_string());
+        }
+    }
+    if out.len() > LABELS_MAX {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("at most {LABELS_MAX} labels"),
+        ));
+    }
+    Ok(out)
+}
+
+/// A tracker's labels as fleet keeps them: trimmed, empty ones and repeats
+/// dropped, in order, the first [`LABELS_MAX`]. Never refused: the
+/// tracker's word is stored as far as it fits.
+pub fn tidy_labels(raw: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in raw {
+        let l = l.trim();
+        if l.is_empty() || out.iter().any(|o| o.to_lowercase() == l.to_lowercase()) {
+            continue;
+        }
+        out.push(l.to_string());
+        if out.len() == LABELS_MAX {
+            break;
+        }
+    }
+    out
+}
+
+/// An estimate a person typed: 0 to [`ESTIMATE_MAX`], rounded to two
+/// decimals. 0 is no estimate (`None`).
+pub fn validate_estimate(v: f64) -> Result<Option<super::Estimate>, IpcError> {
+    if !v.is_finite() || !(0.0..=ESTIMATE_MAX).contains(&v) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("an estimate is a number from 0 to {ESTIMATE_MAX} (0 clears it)"),
+        ));
+    }
+    Ok(super::Estimate::new(v))
+}
+
+/// An estimate's unit a person chose: one of [`ESTIMATE_UNITS`].
+pub fn validate_estimate_unit(raw: &str) -> Result<String, IpcError> {
+    let u = raw.trim().to_lowercase();
+    if ESTIMATE_UNITS.contains(&u.as_str()) {
+        Ok(u)
+    } else {
+        Err(IpcError::new(
+            codes::E_INVALID,
+            format!("estimate_unit {raw:?} is not points or hours"),
+        ))
+    }
 }
 
 /// A due date a person typed: `YYYY-MM-DD`, a real calendar day in years
@@ -692,8 +806,8 @@ impl Store {
         ))
     }
 
-    /// A person edits a LOCAL item's title, notes, assignees and due date
-    /// (task editing). `None` when `item_id` is not a local item: a tracker's
+    /// A person edits a LOCAL item's title, notes, assignees, due date,
+    /// priority, labels and estimate (task editing). `None` when `item_id` is not a local item: a tracker's
     /// ticket is its tracker's to edit. A job mirror's notes are its
     /// dispatch prompt ([`Self::create_agent_task_item`]), so editing them
     /// is `E_INVALID`. Nothing changed answers the row as it is, unwritten.
@@ -705,6 +819,10 @@ impl Store {
         let title = edit.title.map(validate_local_work_title).transpose()?;
         let assignees = edit.assignees.map(validate_assignees).transpose()?;
         let due_at = edit.due_at.map(validate_due_date).transpose()?;
+        let priority = edit.priority.map(validate_priority).transpose()?;
+        let labels = edit.labels.map(validate_labels).transpose()?;
+        let estimate_in = edit.estimate.map(validate_estimate).transpose()?;
+        let unit_in = edit.estimate_unit.map(validate_estimate_unit).transpose()?;
         let Some(before) = self.get_work_item(item_id)? else {
             return Ok(None);
         };
@@ -725,7 +843,35 @@ impl Store {
         let notes = notes.filter(|n| *n != before.notes);
         let assignees = assignees.filter(|a| *a != before.assignees);
         let due_at = due_at.filter(|d| *d != before.due_at);
-        if title.is_none() && notes.is_none() && assignees.is_none() && due_at.is_none() {
+        let priority = priority.filter(|p| *p != before.priority);
+        let labels = labels.filter(|l| *l != before.labels);
+        // The estimate and its unit move together: set exactly when the
+        // estimate is.
+        let estimate = match (estimate_in, unit_in) {
+            (None, None) => None,
+            (None, Some(_)) if before.estimate.is_none() => {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "estimate_unit needs an estimate: give both",
+                ));
+            }
+            (None, Some(u)) => Some((before.estimate, Some(u))),
+            (Some(None), _) => Some((None, None)),
+            (Some(Some(e)), u) => Some((
+                Some(e),
+                u.or_else(|| before.estimate_unit.clone())
+                    .or_else(|| Some(ESTIMATE_UNITS[0].to_string())),
+            )),
+        }
+        .filter(|(e, u)| *e != before.estimate || *u != before.estimate_unit);
+        if title.is_none()
+            && notes.is_none()
+            && assignees.is_none()
+            && due_at.is_none()
+            && priority.is_none()
+            && labels.is_none()
+            && estimate.is_none()
+        {
             return Ok(Some(before));
         }
         self.conn.execute(
@@ -733,6 +879,10 @@ impl Store {
                     notes = CASE WHEN ?2 THEN ?3 ELSE notes END, \
                     assignees = CASE WHEN ?4 THEN ?5 ELSE assignees END, \
                     due_at = CASE WHEN ?8 THEN ?9 ELSE due_at END, \
+                    priority = CASE WHEN ?10 THEN ?11 ELSE priority END, \
+                    labels = CASE WHEN ?12 THEN ?13 ELSE labels END, \
+                    estimate = CASE WHEN ?14 THEN ?15 ELSE estimate END, \
+                    estimate_unit = CASE WHEN ?14 THEN ?16 ELSE estimate_unit END, \
                     updated_at = ?6 \
               WHERE id = ?7 AND source = 'local'",
             rusqlite::params![
@@ -747,12 +897,22 @@ impl Store {
                 now_unix(),
                 item_id,
                 due_at.is_some(),
-                due_at.clone().flatten()
+                due_at.clone().flatten(),
+                priority.is_some(),
+                priority.clone().flatten(),
+                labels.is_some(),
+                labels
+                    .as_ref()
+                    .filter(|l| !l.is_empty())
+                    .and_then(|l| serde_json::to_string(l).ok()),
+                estimate.is_some(),
+                estimate.as_ref().and_then(|(e, _)| e.map(|e| e.0)),
+                estimate.as_ref().and_then(|(_, u)| u.clone())
             ],
         )?;
         // A title shows as a row's primary work and as its top suggestion,
-        // as for a rename; notes, assignees and the due date show on the
-        // item alone.
+        // as for a rename; notes, assignees, the due date, priority, labels
+        // and estimate show on the item alone.
         self.emit_work_item(
             item_id,
             super::tracker_items::SessionChange {

@@ -799,6 +799,26 @@ fn work_items_has_due_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// already_applied guard of migration 171.
+fn work_items_has_estimate_unit(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'estimate_unit'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// already_applied guard of migration 172.
+fn tracker_writes_has_remote_url(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('tracker_writes') WHERE name = 'remote_url'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// already_applied guard of migration 162.
 fn work_buckets_has_owner(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1936,12 +1956,24 @@ const MIGRATIONS: &[Migration] = &[
         170,
         include_str!("../../migrations/170_work_status_log.sql"),
     ),
+    // A task's priority, labels and estimate: ADD COLUMNs, so a guard.
+    Migration {
+        version: 171,
+        sql: include_str!("../../migrations/171_work_item_priority_labels_estimate.sql"),
+        already_applied: Some(work_items_has_estimate_unit),
+    },
+    // Tracker comments posted back: ADD COLUMNs on the outbox, so a guard.
+    Migration {
+        version: 172,
+        sql: include_str!("../../migrations/172_tracker_comment_writes.sql"),
+        already_applied: Some(tracker_writes_has_remote_url),
+    },
     // Agent runtime (reviewer and support agents, step 1): `agent_rules`,
     // `agent_cursors`, `agent_jobs`, `agent_actions`. New tables, idempotent.
-    Migration::plain(171, include_str!("../../migrations/171_agents.sql")),
+    Migration::plain(173, include_str!("../../migrations/173_agents.sql")),
     // The PR reviewer (agents step 3): `review_prs`, `review_records`. New
     // tables, idempotent.
-    Migration::plain(172, include_str!("../../migrations/172_review_prs.sql")),
+    Migration::plain(174, include_str!("../../migrations/174_review_prs.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

@@ -235,6 +235,40 @@ pub struct WorkItemRow {
     /// (a Jira key is human; a native item outside a project is `TASK-<id>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_key: Option<String>,
+    /// `urgent | high | medium | low` (migration 171): a person's on a
+    /// native item, the tracker's normalised on a ticket. `None` = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    /// Its labels, in order, each once (migration 171).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// How big the work is, in [`Self::estimate_unit`] (migration 171).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<Estimate>,
+    /// `points | hours`; set exactly when `estimate` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_unit: Option<String>,
+}
+
+/// A task's estimate (migration 171): a finite, positive number, rounded to
+/// two decimals by every writer ([`Estimate::new`]). A newtype so the rows
+/// that carry it stay `Eq`: a NaN never gets in, so equality is total.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Estimate(pub f64);
+
+impl Eq for Estimate {}
+
+impl Estimate {
+    /// `v` rounded to two decimals; `None` for zero, a negative number or
+    /// anything not finite (no estimate).
+    pub fn new(v: f64) -> Option<Estimate> {
+        if !v.is_finite() {
+            return None;
+        }
+        let r = (v * 100.0).round() / 100.0;
+        (r > 0.0).then_some(Estimate(r))
+    }
 }
 
 /// One session ↔ work link. `participant_id` is `None` once the retired
@@ -581,12 +615,13 @@ pub(super) const ITEM_COLUMNS: &str =
      tracker_id, external_id, aliases, kind, hierarchy_level, status_name, resolution, parent_id, \
      assignees, iteration, updated_ext, status_changed_at, fetched_at, unavailable_at, \
      unavailable_reason, status_set_by, status_set_at, origin, project_id, notes, task_id, \
-     proposal_state, proposed_by, proposal_why, held_at, done_when, due_at, display_key";
+     proposal_state, proposed_by, proposal_why, held_at, done_when, due_at, display_key, priority, \
+     labels, estimate, estimate_unit";
 
 /// How many columns [`ITEM_COLUMNS`] names. A query that appends its own
 /// columns after the list indexes them as `ITEM_COLUMN_COUNT + n` — never a
 /// literal, because a literal silently shifts when a column is added here.
-pub(super) const ITEM_COLUMN_COUNT: usize = 36;
+pub(super) const ITEM_COLUMN_COUNT: usize = 40;
 
 /// A JSON array column as a list; anything unreadable is empty.
 fn json_list(raw: Option<String>) -> Vec<String> {
@@ -632,6 +667,10 @@ pub(super) fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
         done_when: json_list(r.get(33)?),
         due_at: r.get(34)?,
         display_key: r.get(35)?,
+        priority: r.get(36)?,
+        labels: json_list(r.get(37)?),
+        estimate: r.get::<_, Option<f64>>(38)?.and_then(Estimate::new),
+        estimate_unit: r.get(39)?,
     })
 }
 

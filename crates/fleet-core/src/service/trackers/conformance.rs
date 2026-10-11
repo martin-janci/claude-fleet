@@ -175,6 +175,10 @@ pub fn snapshot_json(s: &WorkItemSnapshot) -> Value {
         "iteration": s.iteration,
         "iteration_active": s.iteration_active,
         "versions": s.versions,
+        "priority": s.priority,
+        "labels": s.labels,
+        "estimate": s.estimate.map(|e| e.0),
+        "estimate_unit": s.estimate_unit,
         "updated": s.updated,
         "description": s.description,
     })
@@ -573,8 +577,9 @@ pub async fn no_secret<H: Harness>(h: &H) {
     }
 }
 
-/// Row 11 (work graph M13.4e, decision D3): the only write is the PR remote
-/// link. A provider without `caps.write` refuses it without sending a byte.
+/// Row 11 (work graph M13.4e, decision D3): the PR remote link is Jira's
+/// write. A provider that does not take it (every other one, whatever its
+/// `caps.write` says for comments) refuses it without sending a byte.
 /// One with it sends exactly one request, to the issue's remote links, with
 /// the `globalId` Jira upserts by (so a repeat changes nothing) and no
 /// secret in the body; maps 429 to a rate limit with its `Retry-After` and
@@ -599,10 +604,10 @@ pub async fn write<H: Harness>(h: &H) {
     );
     let p = h.provider(&f);
     let got = p.write(&op(&key)).await;
-    if !p.caps().write {
+    if !p.caps().write || !matches!(h.name(), "jira" | "jira_dc") {
         assert!(
             matches!(got, Err(TrackerError::Refused(_))),
-            "{}: a read-only provider refuses every write: {got:?}",
+            "{}: a provider without the PR link refuses it: {got:?}",
             h.name()
         );
         assert!(f.requests().is_empty(), "{}: nothing sent", h.name());

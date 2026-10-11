@@ -4,6 +4,10 @@
   workspaces. A workspace is named by its two letters and its word, never
   by a colour (amber is Needs you, the org colours are organisations).
   Switching is `switchWorkspace` (workspace.ts); the menu only picks.
+
+  The menu is `position: fixed`, placed from the tile's rect: the rail host
+  clips its overflow, so an absolute menu was cut to the rail's width, and
+  focusing its checked item scrolled the rail sideways under it.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -12,15 +16,22 @@
   let open = $state(false);
   let root: HTMLElement | undefined = $state();
   let button: HTMLButtonElement | undefined = $state();
+  let pos = $state({ top: 0, left: 0 });
 
   const current = $derived(workspacePreset($workspace));
 
   async function toggle() {
     open = !open;
     if (open) {
+      place();
       await tick();
-      root?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus();
+      root?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus({ preventScroll: true });
     }
+  }
+
+  function place() {
+    const r = button?.getBoundingClientRect();
+    if (r) pos = { top: r.top - 2, left: r.right + 10 };
   }
 
   function close(refocus = true) {
@@ -46,7 +57,7 @@
     e.preventDefault();
     const i = items.indexOf(document.activeElement as HTMLElement);
     const n = e.key === 'ArrowDown' ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
-    items[n].focus();
+    items[n].focus({ preventScroll: true });
   }
 
   function onOutside(e: MouseEvent) {
@@ -54,7 +65,7 @@
   }
 </script>
 
-<svelte:window onmousedown={onOutside} />
+<svelte:window onmousedown={onOutside} onresize={() => open && close(false)} />
 
 <div class="ws">
   <button
@@ -74,7 +85,16 @@
   </button>
   {#if open}
     <!-- svelte-ignore a11y_interactive_supports_focus -->
-    <div class="menu" role="menu" aria-label="Workspaces" bind:this={root} onkeydown={onKey} data-testid="workspace-menu">
+    <div
+      class="menu"
+      role="menu"
+      aria-label="Workspaces"
+      bind:this={root}
+      onkeydown={onKey}
+      style:top="{pos.top}px"
+      style:left="{pos.left}px"
+      data-testid="workspace-menu"
+    >
       <div class="title" role="presentation">Workspace</div>
       {#each WORKSPACES as w (w.id)}
         <button
@@ -157,10 +177,8 @@
     white-space: nowrap;
   }
   .menu {
-    position: absolute;
-    left: calc(var(--rail-w) - 4px);
-    top: 6px;
-    z-index: 20;
+    position: fixed;
+    z-index: 50;
     width: 17rem;
     padding: 0.35rem;
     background: var(--bg-pane);

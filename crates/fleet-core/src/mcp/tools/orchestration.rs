@@ -976,6 +976,7 @@ impl FleetTools {
         context|resume_plan {key}; purge_impact; tickets (cached); lookup \
         {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; \
         describe {key} (the tracker's whole description, cached); \
+        tracker_comments {key} (the ticket's own comments, live); \
         tidy; reopened. Work view: tree {filters, cursor} (archived: false hides \
         archived tasks); task {task_id}; \
         session_tasks; review; rules; rule_preview {rule}; views; org_impact. \
@@ -1102,6 +1103,24 @@ impl FleetTools {
                     .ok_or_else(|| mcp_err("E_INVALID", "describe needs key", None))?;
                 ok_json(
                     &w::describe::describe(
+                        &self.store,
+                        &scope,
+                        key,
+                        &crate::service::trackers::default_net(),
+                    )
+                    .await
+                    .map_err(to_mcp_err)?,
+                )
+            }
+            // A ticket's comments at its tracker: describe's fence, one
+            // live read, bodies fenced for an agent inside.
+            WorkAction::TrackerComments => {
+                let key = args
+                    .key
+                    .as_deref()
+                    .ok_or_else(|| mcp_err("E_INVALID", "tracker_comments needs key", None))?;
+                ok_json_compact(
+                    &w::tracker_comments::tracker_comments(
                         &self.store,
                         &scope,
                         key,
@@ -1327,7 +1346,7 @@ impl FleetTools {
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
         kill when dirty). set_status {item_id, status}: a person's status for \
         work with no ticket. edit {item_id, title?, notes?, assignees?, \
-        due_at?}: a person edits work with no ticket. attach {item_id, name, \
+        due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, \
         mime, data_base64, comment_id?}: a file on a task; attachment_delete \
         {attachment_id}. create {title, parent?, \
         notes?, assignees?, due_at?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts \
@@ -1775,8 +1794,11 @@ impl FleetTools {
                     // sessions linked to it, so every live one of them must be
                     // this caller's to drive — the same level as the naming
                     // half, since the title it rewrites is what the owner's
-                    // sidebar shows for their own row.
-                    self.require_drive_on_item_sessions(&caller, item_id)?;
+                    // sidebar shows for their own row. `set_status`'s
+                    // exception applies: an agent renames its own task.
+                    if !self.own_session_works_on(&caller, item_id)? {
+                        self.require_drive_on_item_sessions(&caller, item_id)?;
+                    }
                     ok_json(
                         &local::rename_local_item(&args, &self.store, &scope)
                             .map_err(to_mcp_err)?,

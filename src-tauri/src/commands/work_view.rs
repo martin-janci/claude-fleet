@@ -24,6 +24,7 @@ use fleet_core::service::work::stats::{self, WorkStats};
 use fleet_core::service::work::structure::{
     self, BatchResult, Deleted, LinkDecision, OrgImpact, RuleInput, RulePreview, ViewInput,
 };
+use fleet_core::service::work::tracker_comments::TrackerComments;
 use fleet_core::service::work::view::{
     self, ReviewPage, SectionAsk, SessionTasks, TaskDetail, TreeArgs, TreePage, WorkTask,
     WorkTreeFilters,
@@ -218,6 +219,15 @@ pub struct WorkBucketArgs {
 pub struct CommentOnWorkArgs {
     pub item_id: i64,
     pub body: String,
+    /// Also post it to the ticket's tracker (its admin turned that on).
+    #[serde(default)]
+    pub post_to_tracker: Option<bool>,
+}
+
+/// `work_tracker_comments`: a ticket's comments at its tracker, by key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkTrackerCommentsArgs {
+    pub key: String,
 }
 
 /// `delete_work_comment`: the author's own comment.
@@ -275,6 +285,15 @@ pub async fn comment_on_work(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<CommentRow, IpcError> {
     routed::comment_on_work(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn work_tracker_comments(
+    args: WorkTrackerCommentsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<TrackerComments, IpcError> {
+    routed::work_tracker_comments(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -1027,11 +1046,35 @@ pub(crate) mod routed {
             action: "comment".into(),
             item_id: Some(args.item_id),
             notes: Some(args.body),
+            post_to_tracker: args.post_to_tracker,
             ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("comment_on_work", &wire).await,
             None => work::local::comment(&wire, store, &OrgScope::All, LOCAL_ACTOR, None),
+        }
+    }
+
+    pub async fn work_tracker_comments(
+        backend: &FleetBackend,
+        args: WorkTrackerCommentsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<TrackerComments, IpcError> {
+        let wire = WorkArgs {
+            key: Some(args.key.clone()),
+            ..read("tracker_comments")
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("work_tracker_comments", &wire).await,
+            None => {
+                work::tracker_comments::tracker_comments(
+                    store,
+                    &OrgScope::All,
+                    &args.key,
+                    &fleet_core::service::trackers::default_net(),
+                )
+                .await
+            }
         }
     }
 

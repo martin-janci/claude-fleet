@@ -60,4 +60,4 @@ CREATE TABLE IF NOT EXISTS review_records (
 );
 CREATE INDEX IF NOT EXISTS review_records_pr ON review_records (repo, number, created_at);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (172);
+INSERT OR IGNORE INTO schema_version (version) VALUES (174);
