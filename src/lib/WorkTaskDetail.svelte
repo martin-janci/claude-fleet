@@ -31,6 +31,8 @@
   import WorkOrgDialog from './WorkOrgDialog.svelte';
   import WorkRuleEditor from './WorkRuleEditor.svelte';
   import TaskWorkSections from './TaskWorkSections.svelte';
+  import TaskAttachments from './TaskAttachments.svelte';
+  import { attachToWork, pastedImages } from './task_attachments';
   import TaskBlockedSpend from './TaskBlockedSpend.svelte';
   import ProposedBy from './ProposedBy.svelte';
   import AiChangeLine from './AiChangeLine.svelte';
@@ -316,8 +318,35 @@
       return;
     }
     draft = '';
+    attachedNote = null;
     // Shown at once; the write's bump re-reads the whole detail.
     if (detail) detail = { ...detail, comments: [...(detail.comments ?? []), { ...r.value, mine: true }] };
+  }
+  // An image pasted into the composer goes to the task's Attachments; the
+  // comment itself stays text.
+  let pageEl = $state<HTMLElement | null>(null);
+  const attachBlocked = $derived(hubActionBlocked('attach_to_work', $hubStatus, $hubConnection));
+  let attachedNote = $state<string | null>(null);
+  async function pasteIntoComposer(e: ClipboardEvent) {
+    const itemId = detail?.task.item_id;
+    const files = pastedImages(e);
+    if (itemId == null || files.length === 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (attachBlocked) {
+      commentError = attachBlocked;
+      return;
+    }
+    commentError = null;
+    for (const f of files) {
+      const r = await attachToWork(itemId, f);
+      if (!r.ok) {
+        commentError = readErrorText(r.error);
+        continue;
+      }
+      attachedNote = `Attached ${r.value.name}`;
+      if (detail) detail = { ...detail, attachments: [{ ...r.value, mine: true }, ...(detail.attachments ?? [])] };
+    }
   }
   async function removeComment(id: number) {
     confirmDelete = null;
@@ -384,7 +413,7 @@
      Start button), the tabs, then a reading column (what to do) beside a
      properties rail (where it stands: details, delivery, where it starts,
      placement). The rail drops under the column in a narrow pane. -->
-<section class="task-detail" data-testid="work-task-detail" aria-label="Task">
+<section class="task-detail" data-testid="work-task-detail" aria-label="Task" bind:this={pageEl}>
   <header class="head">
     {#if task}
       <nav class="crumbs" aria-label="Where this task lives" data-testid="work-task-crumbs">
@@ -554,6 +583,13 @@
             </section>
           {/if}
           {#if detail}<TaskWorkSections {detail} part="work" />{/if}
+          {#if detail && task.item_id != null}
+            <TaskAttachments
+              itemId={task.item_id}
+              attachments={detail.attachments ?? []}
+              pasteTarget={pageEl}
+            />
+          {/if}
         </div>
 
         <aside class="rail" aria-label="Properties">
@@ -873,6 +909,7 @@
               placeholder="Add a comment: kept in fleet, never sent to the tracker"
               aria-label="Comment"
               data-testid="work-task-comment-input"
+              onpaste={(e) => void pasteIntoComposer(e)}
               onkeydown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                   e.preventDefault();
@@ -882,6 +919,7 @@
             ></textarea>
             <div class="composer-row">
               {#if commentError}<span class="err" role="alert" data-testid="work-task-comment-error">{commentError}</span>{/if}
+              {#if attachedNote}<span class="muted small" role="status" data-testid="work-task-comment-attached">{attachedNote} · in Overview → Attachments</span>{/if}
               <span class="muted small hint-keys">Markdown · ⌘↵ to post</span>
               <button
                 class="btn"

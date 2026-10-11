@@ -982,6 +982,40 @@ describe('WorkTaskDetail', () => {
       expect(calls('delete_work_comment')).toEqual([{ comment_id: 2 }]);
     });
 
+    it('Attachments: a local task shows the section in Overview; a ticket key with no item does not', async () => {
+      handlers.work_task = (a) =>
+        a.task_id === 'item:77'
+          ? { ...localTask, attachments: [{ id: 5, item_id: 77, name: 'log.txt', mime: 'text/plain', size: 2048, sha256: 'ab', author: 'desktop', created_at: 1_790_000_000, mine: true }] }
+          : { ...trackerTask, task: { ...trackerTask.task, item_id: null } };
+      const { unmount } = render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      expect(screen.getByTestId('task-attachments-count').textContent).toBe('1');
+      expect(screen.getByTestId('task-attachment').textContent).toContain('log.txt');
+      expectOnePrimary(screen.getByTestId('work-task-detail'));
+      unmount();
+      render(WorkTaskDetail, { taskId: 'ABC-12' });
+      await flush();
+      expect(screen.queryByTestId('task-attachments')).toBeNull();
+    });
+
+    it('an image pasted into the comment composer is attached, not typed', async () => {
+      handlers.attach_to_work = (a) => ({ id: 9, item_id: a.item_id, name: a.name, mime: a.mime, size: 8, sha256: 'x', author: 'desktop', created_at: 1_790_000_300 });
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      await fireEvent.click(screen.getByTestId('work-task-tab-comments'));
+      const file = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'image.png', { type: 'image/png' });
+      const paste = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+      Object.defineProperty(paste, 'clipboardData', { value: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] } });
+      screen.getByTestId('work-task-comment-input').dispatchEvent(paste);
+      await flush();
+      await flush();
+      const sent = calls('attach_to_work');
+      expect(sent).toHaveLength(1);
+      expect(sent[0].item_id).toBe(77);
+      expect(String(sent[0].name)).toMatch(/^pasted-\d{8}-\d{6}\.png$/);
+      expect(screen.getByTestId('work-task-comment-attached').textContent).toContain('Attached pasted-');
+    });
+
     it('sets a native task’s status from the header, without the edit dialog', async () => {
       handlers.set_work_status = (a) => ({ id: a.item_id, status_category: a.status });
       render(WorkTaskDetail, { taskId: 'item:77' });

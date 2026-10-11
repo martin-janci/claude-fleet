@@ -5,6 +5,7 @@
 
 pub mod abandon;
 pub mod agent_handover;
+pub mod attachments;
 pub mod brief_draft;
 pub mod buckets;
 pub mod card;
@@ -140,6 +141,9 @@ pub struct WorkArgs {
     /// mission: older events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_event: Option<i64>,
+    /// attachment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -190,6 +194,15 @@ pub struct WorkLinkArgs {
     /// Start: session name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// attach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    /// attach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
+    /// attachment_delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_id: Option<i64>,
     /// Start: worktree name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
@@ -471,6 +484,8 @@ pub enum WorkAction {
     Missions,
     /// One mission with its items and latest events.
     Mission,
+    /// One task attachment with its bytes.
+    Attachment,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -505,6 +520,7 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("bucket", WorkAction::Bucket),
     ("missions", WorkAction::Missions),
     ("mission", WorkAction::Mission),
+    ("attachment", WorkAction::Attachment),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -538,6 +554,8 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "set_parent",
     "comment",
     "comment_delete",
+    "attach",
+    "attachment_delete",
     "summarize",
     "set_primary",
     "reconsider",
@@ -616,6 +634,9 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("set_work_parent", "work_link", "set_parent"),
     ("comment_on_work", "work_link", "comment"),
     ("delete_work_comment", "work_link", "comment_delete"),
+    ("attach_to_work", "work_link", "attach"),
+    ("delete_work_attachment", "work_link", "attachment_delete"),
+    ("work_attachment", "work", "attachment"),
     ("accept_work_proposal", "work_link", "accept"),
     ("reject_work_proposal", "work_link", "reject"),
     ("summarize_past_work", "work_link", "summarize"),

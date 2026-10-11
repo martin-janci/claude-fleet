@@ -4379,10 +4379,13 @@ fn the_served_definition_budget_stays_bounded() {
     /// surface). Lowered from 815 on 2026-10-10: dropping `null` from
     /// optional parameters' types and `"minimum": 0` from unsigned ones
     /// (`present::drop_optional_null`) measured 106,006 bytes for 135 tools
-    /// (785 a tool), down from 110,022. Raise it only from a measurement the
-    /// failure prints, and say in the commit message what was measured and
-    /// when.
-    const BYTES_PER_TOOL: usize = 795;
+    /// (785 a tool), down from 110,022. Raised to 807 from 110,870 bytes for
+    /// 139 tools (798 a tool) on 2026-10-11, when work_link gained task
+    /// attachments (`attach`, `attachment_delete`, `mime`, `data_base64`,
+    /// `attachment_id`) and `work` its `attachment` read. Raise it only from
+    /// a measurement the failure prints, and say in the commit message what
+    /// was measured and when.
+    const BYTES_PER_TOOL: usize = 807;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -11836,6 +11839,8 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     ("work_link", "set_parent", &["Drive"]),
     // A comment is written into the owner's task: `edit`'s gate.
     ("work_link", "comment", &["Drive"]),
+    // So is an attachment: `edit`'s gate, as a comment.
+    ("work_link", "attach", &["Drive"]),
     // Sprint and release membership: `set_status`'s person gate, on the
     // item planned.
     ("work_link", "bucket_add", &["Drive"]),
@@ -12067,6 +12072,19 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
 /// a reviewer can check, not an exemption: each says what the arm acts on
 /// INSTEAD of a session.
 const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
+    (
+        "work_link",
+        "attachment_delete",
+        "an attachment, by id: its item's org fence first (outside it, \
+         unknown), then its author's alone; no session is named or answered",
+    ),
+    (
+        "work",
+        "attachment",
+        "an attachment's bytes, by id: its item's org fence (outside it, \
+         unknown), its author withheld as `task` withholds a comment's; no \
+         session is named or answered",
+    ),
     (
         "work_link",
         "comment_delete",

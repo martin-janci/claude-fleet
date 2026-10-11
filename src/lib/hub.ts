@@ -423,6 +423,9 @@ export const ROUTED_ACTIONS = [
   // Task comments: kept in fleet; deleting is the author's own.
   'comment_on_work',
   'delete_work_comment',
+  // Task attachments: kept in fleet; deleting is the author's own.
+  'attach_to_work',
+  'delete_work_attachment',
   // Sprints and releases: the hub decides who plans (a person's own; an
   // org's as its admin, or member when the org allows it).
   'work_bucket_admin',

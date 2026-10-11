@@ -336,6 +336,29 @@ task page's Activity tab also lists each session that started, was
 suggested, turned down or stopped, and each comment. Not yet: comments on
 the phone.
 
+Task attachments (migration 165, `work_item_attachments` and the
+content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept
+in SQLite so a hub backup carries them; a blob goes with the last live
+attachment naming it): `work_link { attach, item_id, name, mime,
+data_base64, comment_id? }` (`attach_to_work`), `{ attachment_delete,
+attachment_id }` (`delete_work_attachment`) and `work { attachment,
+attachment_id }` (`work_attachment`, the bytes as base64), all routed. The
+fences are a comment's: the item's org fence (outside it, unknown), `edit`'s
+person gate for adding, its author alone for deleting; `work { task }`
+serves `attachments` (metadata only, newest first, with `mine`), the author
+withheld as a comment's. At most `work.attachment_max_mb` (default 10,
+1–16): the ceiling is the transport — a routed attachment crosses as base64
+in one `/mcp` request or answer, so the hub's request cap (`MCP_BODY_MAX`)
+and the desktop's response cap (`http_client::MAX_RESPONSE`) went from 8 MiB
+to ~23.4 MiB (`store::ATTACHMENT_WIRE_BYTES`). Names are a file name (no
+path, no control characters, ≤ 200 chars); types come from a short
+allowlist, an image's only when its bytes prove it, anything else stored as
+`application/octet-stream`; SVG is refused. The task page's Overview has an
+Attachments section (add, drop, or paste an image anywhere on the page;
+images open in a lightbox, other files download); an image pasted into the
+comment composer is attached there. Not yet: attachments on the phone, a
+tracker's own attachments (`source`/`external_id` are reserved for them).
+
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
 census languages` over `service::nl` (cargo feature `nl-detect`, lingua, ON

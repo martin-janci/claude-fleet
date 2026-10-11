@@ -552,6 +552,20 @@ pub const WORK_DRAFT_RELEASE_NOTES: &str = "work.draft_release_notes";
 /// (`service::watch_summary`).
 pub const WORK_CATCH_UP_SUMMARIES: &str = "work.catch_up_summaries";
 
+/// Task attachments: the largest file a task takes, in MiB (at most
+/// [`crate::store::ATTACHMENT_MAX_MB_CEILING`], what the desktop↔hub
+/// transport carries).
+pub const WORK_ATTACHMENT_MAX_MB: &str = "work.attachment_max_mb";
+
+/// [`WORK_ATTACHMENT_MAX_MB`] in bytes.
+pub fn attachment_max_bytes(s: &Store) -> usize {
+    let mb = get_string(s, WORK_ATTACHMENT_MAX_MB)
+        .parse::<u64>()
+        .unwrap_or(10)
+        .clamp(1, crate::store::ATTACHMENT_MAX_MB_CEILING);
+    (mb as usize) * 1024 * 1024
+}
+
 /// Tidy-up (work graph M7): a session whose linked item has been done at
 /// least this many days (and that is idle, below) is suggested for tidying.
 pub const WORK_TIDY_DONE_DAYS: &str = "work.tidy_done_days";
@@ -1360,6 +1374,17 @@ pub const SPECS: &[Spec] = &[
         "A watched session offers \"Since 13:20\": what it did since you last looked, summarised on its own host and account.",
     )
     .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_ATTACHMENT_MAX_MB,
+        "10",
+        Kind::Int {
+            min: 1,
+            max: crate::store::ATTACHMENT_MAX_MB_CEILING,
+        },
+        "Largest attachment",
+        "The largest file or image a task takes. At most 16 MiB: what one call between the desktop and the hub carries.",
+    )
+    .unit(Unit::Mib),
     Spec::new(
         WORK_TIDY_DONE_DAYS,
         "2",

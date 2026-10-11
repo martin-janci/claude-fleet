@@ -2198,10 +2198,14 @@ curl -s --compressed https://fleet.example.com/mcp/json \
 (The `Accept` header still offers both types — rmcp requires the pair on
 either mount.)
 
-Both mounts read a request body of at most 8 MiB and answer `413` past it (a
-declared `Content-Length` over the cap is refused before a byte is read). No
-tool call comes near it; the cap is what stops one oversized POST from any
-valid token buffering until the hub runs out of memory.
+Both mounts read a request body of at most ~23.4 MiB and answer `413` past
+it (a declared `Content-Length` over the cap is refused before a byte is
+read). The one tool call that comes near it is `work_link { attach }`, a task
+attachment as base64 at its 16 MiB ceiling (`store::ATTACHMENT_WIRE_BYTES`;
+`work.attachment_max_mb` defaults to 10); the desktop reads a hub answer up
+to the same size, for `work { attachment }`. The cap is what stops one
+oversized POST from any valid token buffering until the hub runs out of
+memory.
 
 What it is worth, measured on a 44-session fleet: `list_sessions`
 `{summary:false}` is 51 968 B unframed and 7 767 B gzipped, `list_projects`

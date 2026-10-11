@@ -886,7 +886,8 @@ impl FleetTools {
         archived tasks); task {task_id}; \
         session_tasks; review; rules; rule_preview {rule}; views; org_impact. \
         buckets {kind?}: sprints, releases; bucket {bucket_id}. missions; \
-        mission {mission_id, before_event?}.")]
+        mission {mission_id, before_event?}. attachment {attachment_id}: a \
+        file's bytes.")]
     pub(super) async fn work(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1075,6 +1076,17 @@ impl FleetTools {
                             .is_some_and(|row| row.written_by(view_scope.person, &label));
                     }
                 }
+                // And which attachments, the same way.
+                if !detail.attachments.is_empty() {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    let label = caller.label();
+                    for a in &mut detail.attachments {
+                        a.mine = s
+                            .get_attachment(a.id)
+                            .map_err(to_mcp_err)?
+                            .is_some_and(|row| row.written_by(view_scope.person, &label));
+                    }
+                }
                 ok_json_compact(&detail)
             }
             WorkAction::SessionTasks => {
@@ -1140,6 +1152,20 @@ impl FleetTools {
                         .map_err(to_mcp_err)?,
                 )
             }
+            // A task attachment's bytes: its item's org fence (outside it,
+            // unknown), the author withheld as `task` withholds it.
+            WorkAction::Attachment => {
+                let mut data = w::attachments::attachment(&args, &self.store, &view_scope)
+                    .map_err(to_mcp_err)?;
+                {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    data.attachment.mine = s
+                        .get_attachment(data.attachment.id)
+                        .map_err(to_mcp_err)?
+                        .is_some_and(|row| row.written_by(view_scope.person, &caller.label()));
+                }
+                ok_json_compact(&data)
+            }
             WorkAction::OrgImpact => {
                 let task_id = args
                     .task_id
@@ -1172,7 +1198,9 @@ impl FleetTools {
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
         kill when dirty). set_status {item_id, status}: a person's status for \
         work with no ticket. edit {item_id, title?, notes?, assignees?, \
-        due_at?}: a person edits work with no ticket. create {title, parent?, \
+        due_at?}: a person edits work with no ticket. attach {item_id, name, \
+        mime, data_base64, comment_id?}: a file on a task; attachment_delete \
+        {attachment_id}. create {title, parent?, \
         notes?, assignees?, due_at?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts \
         or rejects {item_id, no session_id}. bucket_add|bucket_remove \
         {bucket_id, item_id}: sprint/release. mission_save {mission, \
@@ -1700,6 +1728,39 @@ impl FleetTools {
             let person = self.view_scope(&caller)?.person;
             return ok_json(
                 &crate::service::work::local::comment_delete(
+                    &args,
+                    &self.store,
+                    &scope,
+                    &caller.label(),
+                    person,
+                )
+                .map_err(to_mcp_err)?,
+            );
+        }
+        // Task attachments: a comment's fences — the item's org fence
+        // inside, `edit`'s person gate for adding, the author's alone for
+        // deleting.
+        if args.action == "attach" {
+            let item_id = args
+                .item_id
+                .ok_or_else(|| mcp_err("E_INVALID", "attach needs item_id", None))?;
+            self.require_drive_on_item_sessions(&caller, item_id)?;
+            let person = self.view_scope(&caller)?.person;
+            return ok_json(
+                &crate::service::work::attachments::attach(
+                    &args,
+                    &self.store,
+                    &scope,
+                    &caller.label(),
+                    person,
+                )
+                .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "attachment_delete" {
+            let person = self.view_scope(&caller)?.person;
+            return ok_json(
+                &crate::service::work::attachments::attachment_delete(
                     &args,
                     &self.store,
                     &scope,

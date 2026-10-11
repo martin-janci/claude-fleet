@@ -371,6 +371,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // Task comments: a note on a task, kept in fleet; deleting is the author's.
     ("comment_on_work", Verdict::Routed { tool: "work_link" }),
     ("delete_work_comment", Verdict::Routed { tool: "work_link" }),
+    // Task attachments: files on a task, kept in fleet; the bytes are read
+    // through `work`; deleting is the author's.
+    ("attach_to_work", Verdict::Routed { tool: "work_link" }),
+    (
+        "delete_work_attachment",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("work_attachment", Verdict::Routed { tool: "work" }),
     // Sprints and releases (design 2026-09-28 §6a/§6b): reads and
     // membership route; so do the buckets themselves, as work_link's
     // bucket_admin (owner decision 2026-10-10: the hub decides who plans).

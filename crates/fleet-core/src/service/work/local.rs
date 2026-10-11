@@ -453,7 +453,7 @@ fn parent_id(args: &WorkLinkArgs) -> Result<Option<i64>, IpcError> {
 
 /// The parent a scoped caller may add under: an item it can see. One it
 /// cannot answers exactly as an id that does not exist.
-fn visible_parent(s: &Store, scope: &OrgScope, id: i64) -> Result<(), IpcError> {
+pub(super) fn visible_parent(s: &Store, scope: &OrgScope, id: i64) -> Result<(), IpcError> {
     let Some(item) = s.get_work_item(id)? else {
         return Err(orgs::not_found("work item", id));
     };

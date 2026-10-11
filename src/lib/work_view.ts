@@ -368,6 +368,27 @@ export interface TaskDetail {
   steps?: StepGroup[];
   /** What people and agents said about the task in fleet, oldest first. */
   comments?: TaskComment[];
+  /** Files and images on the task, newest first: metadata only (the bytes
+   *  are `work_attachment`'s). */
+  attachments?: TaskAttachment[];
+}
+
+/** One file on a task (`store::AttachmentRow`). Kept in fleet, never a tracker's. */
+export interface TaskAttachment {
+  id: number;
+  item_id: number;
+  name: string;
+  mime: string;
+  /** Bytes. */
+  size: number;
+  sha256: string;
+  /** Who added it (`client:<name>`, `host:<alias>`, `desktop`); empty when withheld. */
+  author: string;
+  comment_id?: number | null;
+  source?: string;
+  created_at: number;
+  /** This reader added it, so may delete it. */
+  mine?: boolean;
 }
 
 /** One comment on a task (`store::CommentRow`). Kept in fleet, never a tracker's. */

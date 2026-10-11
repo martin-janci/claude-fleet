@@ -3664,6 +3664,20 @@
     },
     {
       "default_widget": "number",
+      "key": "work.attachment_max_mb",
+      "kind": {
+        "max": 16,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Largest attachment",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
       "key": "work.tidy_done_days",
       "kind": {
         "max": 365,

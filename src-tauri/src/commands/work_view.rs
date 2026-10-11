@@ -17,6 +17,7 @@ use fleet_core::ipc_error::codes;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::orgs::OrgScope;
 use fleet_core::service::trackers::admin::{self as tracker_admin, WorkAdminArgs};
+use fleet_core::service::work::attachments::AttachmentData;
 use fleet_core::service::work::buckets::{self, BucketAction, BucketDetail};
 use fleet_core::service::work::structure::{
     self, BatchResult, Deleted, LinkDecision, OrgImpact, RuleInput, RulePreview, ViewInput,
@@ -26,7 +27,9 @@ use fleet_core::service::work::view::{
     WorkTreeFilters,
 };
 use fleet_core::service::work::{self, WorkArgs, WorkLinkArgs};
-use fleet_core::store::{BucketRow, CommentRow, Decider, SessionRow, Store, WorkRule, WorkView};
+use fleet_core::store::{
+    AttachmentRow, BucketRow, CommentRow, Decider, SessionRow, Store, WorkRule, WorkView,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -214,6 +217,23 @@ pub struct DeleteWorkCommentArgs {
     pub comment_id: i64,
 }
 
+/// `attach_to_work`: a file on a task (a work item), as base64.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AttachToWorkArgs {
+    pub item_id: i64,
+    pub name: String,
+    pub mime: String,
+    pub data_base64: String,
+    #[serde(default)]
+    pub comment_id: Option<i64>,
+}
+
+/// `delete_work_attachment` / `work_attachment`: one attachment.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkAttachmentArgs {
+    pub attachment_id: i64,
+}
+
 /// `add_work_to_bucket` / `remove_work_from_bucket`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BucketMemberArgs {
@@ -255,6 +275,33 @@ pub async fn delete_work_comment(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<CommentRow, IpcError> {
     routed::delete_work_comment(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn attach_to_work(
+    args: AttachToWorkArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<AttachmentRow, IpcError> {
+    routed::attach_to_work(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn delete_work_attachment(
+    args: WorkAttachmentArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<AttachmentRow, IpcError> {
+    routed::delete_work_attachment(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn work_attachment(
+    args: WorkAttachmentArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<AttachmentData, IpcError> {
+    routed::work_attachment(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -538,6 +585,9 @@ pub(crate) mod routed {
                 // are the ones it may delete.
                 for c in &mut detail.comments {
                     c.mark_mine(None, LOCAL_ACTOR);
+                }
+                for a in &mut detail.attachments {
+                    a.mark_mine(None, LOCAL_ACTOR);
                 }
                 Ok(detail)
             }
@@ -964,6 +1014,67 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("delete_work_comment", &wire).await,
             None => work::local::comment_delete(&wire, store, &OrgScope::All, LOCAL_ACTOR, None),
+        }
+    }
+
+    pub async fn attach_to_work(
+        backend: &FleetBackend,
+        args: AttachToWorkArgs,
+        store: &Mutex<Store>,
+    ) -> Result<AttachmentRow, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "attach".into(),
+            item_id: Some(args.item_id),
+            name: Some(args.name),
+            mime: Some(args.mime),
+            data_base64: Some(args.data_base64),
+            comment_id: args.comment_id,
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("attach_to_work", &wire).await,
+            None => work::attachments::attach(&wire, store, &OrgScope::All, LOCAL_ACTOR, None),
+        }
+    }
+
+    pub async fn delete_work_attachment(
+        backend: &FleetBackend,
+        args: WorkAttachmentArgs,
+        store: &Mutex<Store>,
+    ) -> Result<AttachmentRow, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "attachment_delete".into(),
+            attachment_id: Some(args.attachment_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("delete_work_attachment", &wire).await,
+            None => work::attachments::attachment_delete(
+                &wire,
+                store,
+                &OrgScope::All,
+                LOCAL_ACTOR,
+                None,
+            ),
+        }
+    }
+
+    pub async fn work_attachment(
+        backend: &FleetBackend,
+        args: WorkAttachmentArgs,
+        store: &Mutex<Store>,
+    ) -> Result<AttachmentData, IpcError> {
+        let wire = WorkArgs {
+            attachment_id: Some(args.attachment_id),
+            ..read("attachment")
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("work_attachment", &wire).await,
+            None => {
+                let mut data = work::attachments::attachment(&wire, store, &internal_view())?;
+                data.attachment.mark_mine(None, LOCAL_ACTOR);
+                Ok(data)
+            }
         }
     }
 }

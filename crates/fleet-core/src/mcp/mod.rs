@@ -487,10 +487,17 @@ async fn healthz() -> impl axum::response::IntoResponse {
     )
 }
 
-/// The largest `/mcp` request body the hub reads. Far above any real tool
+/// The largest `/mcp` request body the hub reads. Far above any other tool
 /// call (prompts and clipboard text cap at 64 KiB, a repo file at 512 KiB,
-/// JSON escaping at most doubles them).
-pub(crate) const MCP_BODY_MAX: usize = 8 * 1024 * 1024;
+/// JSON escaping at most doubles them); the one call that needs more is
+/// `work_link { attach }`, a task attachment as base64, so the cap is the
+/// larger of 8 MiB and an attachment at its ceiling on the wire
+/// ([`crate::store::ATTACHMENT_WIRE_BYTES`]).
+pub(crate) const MCP_BODY_MAX: usize = if crate::store::ATTACHMENT_WIRE_BYTES > 8 * 1024 * 1024 {
+    crate::store::ATTACHMENT_WIRE_BYTES
+} else {
+    8 * 1024 * 1024
+};
 
 /// Buffers an `/mcp` request body up to [`MCP_BODY_MAX`] and answers 413
 /// past it, before the MCP service sees the request. A declared

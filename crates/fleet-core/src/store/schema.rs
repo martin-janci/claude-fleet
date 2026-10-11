@@ -1879,6 +1879,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/164_wizard_state.sql"),
         already_applied: Some(has_wizard_state),
     },
+    // Task attachments and their content-addressed blobs: new tables,
+    // idempotent.
+    Migration::plain(
+        165,
+        include_str!("../../migrations/165_work_item_attachments.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
