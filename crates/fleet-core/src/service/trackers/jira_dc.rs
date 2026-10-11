@@ -396,6 +396,7 @@ impl TrackerProvider for JiraDc {
             write: true,
             describe: true,
             comments: true,
+            attachments: false,
         }
     }
 

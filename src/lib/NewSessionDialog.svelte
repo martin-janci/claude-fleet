@@ -1473,7 +1473,8 @@
               <p class="draft-error small" role="alert" data-testid="ticket-brief-draft-error">{draftError}</p>
             {/if}
             <p class="muted small">
-              Delivered with the first prompt (never typed into the pane). The description is
+              Delivered with the first prompt (never typed into the pane), with the ticket's
+              latest comments and attachment links read from its tracker. The description is
               the ticket author's text and stays fenced as untrusted.
             </p>
           {/if}

@@ -426,6 +426,7 @@ impl TrackerProvider for GitHub {
             write: true,
             describe: true,
             comments: true,
+            attachments: false,
         }
     }
 

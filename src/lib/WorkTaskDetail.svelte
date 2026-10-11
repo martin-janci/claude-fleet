@@ -32,7 +32,7 @@
   import WorkRuleEditor from './WorkRuleEditor.svelte';
   import TaskWorkSections from './TaskWorkSections.svelte';
   import TaskAttachments from './TaskAttachments.svelte';
-  import { attachToWork, pastedImages } from './task_attachments';
+  import { attachToWork, formatSize, pastedImages } from './task_attachments';
   import TaskBlockedSpend from './TaskBlockedSpend.svelte';
   import ProposedBy from './ProposedBy.svelte';
   import AiChangeLine from './AiChangeLine.svelte';
@@ -64,7 +64,7 @@
     workTrackerComments,
     type TaskTab,
   } from './task_detail';
-  import type { TrackerComment } from './work_view';
+  import type { TrackerAttachment, TrackerComment } from './work_view';
   import {
     dependencyName,
     groupSessionLinks,
@@ -312,6 +312,7 @@
   // Read when the Comments tab opens, once per ticket; an error never
   // hides fleet's own.
   let trackerComments = $state.raw<TrackerComment[]>([]);
+  let trackerAttachments = $state.raw<TrackerAttachment[]>([]);
   let trackerLoad = $state<'idle' | 'loading' | 'ok' | 'error'>('idle');
   let trackerError = $state<string | null>(null);
   let trackerLoadedFor: string | null = null;
@@ -323,9 +324,11 @@
     if (trackerLoadedFor !== key) return;
     if (r.ok) {
       trackerComments = r.value.comments ?? [];
+      trackerAttachments = r.value.attachments ?? [];
       trackerLoad = 'ok';
     } else {
       trackerComments = [];
+      trackerAttachments = [];
       trackerError = readErrorText(r.error);
       trackerLoad = 'error';
     }
@@ -340,6 +343,7 @@
     void taskId;
     trackerLoadedFor = null;
     trackerComments = [];
+    trackerAttachments = [];
     trackerLoad = 'idle';
   });
   const timeline = $derived(commentTimeline(detail?.comments ?? [], trackerComments));
@@ -929,6 +933,18 @@
               <button class="btn btn--quiet" type="button" onclick={() => task?.key && void loadTrackerComments(task.key)}>Retry</button>
             {/if}
           </div>
+        {/if}
+        {#if trackerAttachments.length > 0}
+          <section class="attachments" data-testid="work-task-tracker-attachments" aria-label="Attachments on {commentsTracker}">
+            <p class="att-head small muted">Attachments on {commentsTracker}</p>
+            <ul>
+              {#each trackerAttachments as a (a.id)}
+                <li data-testid="work-task-tracker-attachment">
+                  {#if a.url}<button class="link-btn" type="button" onclick={() => void openExternal(a.url ?? '')}>{a.name}</button>{:else}{a.name}{/if}{#if a.size}<span class="muted small">{` · ${formatSize(a.size)}`}</span>{/if}
+                </li>
+              {/each}
+            </ul>
+          </section>
         {/if}
         {#if timeline.length === 0 && trackerLoad !== 'loading'}
           <p class="muted" data-testid="work-task-comments-empty">
@@ -1685,6 +1701,14 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+  }
+  .attachments ul {
+    margin: 0 0 var(--space-3);
+    padding-left: var(--space-4);
+  }
+  .attachments .att-head {
+    margin: 0 0 var(--space-1);
+    font-weight: 500;
   }
   .tracker-load:empty {
     display: none;

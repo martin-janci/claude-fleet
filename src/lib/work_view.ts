@@ -506,7 +506,19 @@ export interface TrackerComments {
   provider: string;
   /** The newest 50, oldest first, without the ones fleet posted. */
   comments: TrackerComment[];
+  /** The ticket's attachments, oldest first (Asana; absent elsewhere). */
+  attachments?: TrackerAttachment[];
   can_post?: boolean;
+}
+
+/** One file attached to a ticket, as its tracker lists it. */
+export interface TrackerAttachment {
+  id: string;
+  name: string;
+  /** Opens in the tracker, behind its own sign-in. */
+  url?: string | null;
+  size?: number | null;
+  created_at?: number | null;
 }
 
 /** A native subtask on a task page. */

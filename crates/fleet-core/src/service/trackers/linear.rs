@@ -403,6 +403,7 @@ impl TrackerProvider for Linear {
             // ticket", which is what the capability is for.
             describe: false,
             comments: true,
+            attachments: false,
         }
     }
 

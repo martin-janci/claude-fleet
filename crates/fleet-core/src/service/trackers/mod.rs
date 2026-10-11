@@ -98,6 +98,85 @@ pub struct Caps {
     /// and posts one ([`WriteOp::Comment`]).
     #[serde(default)]
     pub comments: bool,
+    /// The provider lists an item's attachments on demand
+    /// ([`TrackerProvider::attachments`]): the task page's Comments tab and
+    /// a start's brief name them with their links.
+    #[serde(default)]
+    pub attachments: bool,
+}
+
+/// Most attachments one read answers with.
+pub const TRACKER_ATTACHMENTS_MAX: usize = 50;
+/// Longest attachment name kept, in characters.
+pub const TRACKER_ATTACHMENT_NAME_MAX_CHARS: usize = 200;
+
+/// One file attached to a ticket, as the tracker lists it. Third-party
+/// text: `name` is flattened and capped, and `url` is kept only when it is a
+/// plain `https` link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerAttachment {
+    /// The tracker's own id for it.
+    pub id: String,
+    pub name: String,
+    /// Where the tracker opens it (behind the tracker's own sign-in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Bytes, when the tracker says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// Unix seconds, when the tracker says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
+}
+
+impl TrackerAttachment {
+    /// An attachment from an answer's fields, capped and checked: `None`
+    /// for an id that is empty, long or not printable, or an empty name.
+    pub fn from_parts(
+        id: &str,
+        name: &str,
+        url: Option<&str>,
+        size: Option<u64>,
+        created: Option<&str>,
+    ) -> Option<TrackerAttachment> {
+        let id = id.trim();
+        if id.is_empty()
+            || id.len() > 200
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'=' | b':'))
+        {
+            return None;
+        }
+        let name: String = name
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(TRACKER_ATTACHMENT_NAME_MAX_CHARS)
+            .collect();
+        if name.is_empty() {
+            return None;
+        }
+        let url = url
+            .map(str::trim)
+            .filter(|u| {
+                u.starts_with("https://")
+                    && u.len() <= 2048
+                    && !u.chars().any(|c| c.is_control() || c.is_whitespace())
+            })
+            .map(str::to_string);
+        Some(TrackerAttachment {
+            id: id.to_string(),
+            name,
+            url,
+            size,
+            created_at: created.and_then(parse_timestamp),
+        })
+    }
 }
 
 /// Most tracker comments one read answers with: the newest.
@@ -549,6 +628,18 @@ pub trait TrackerProvider: Send + Sync {
             "this tracker does not serve comments".into(),
         ))
     }
+    /// One item's attachments, at most `limit` (at most
+    /// [`TRACKER_ATTACHMENTS_MAX`]), oldest first. Only a provider whose
+    /// `caps.attachments` is true implements it; the default refuses.
+    async fn attachments(
+        &self,
+        _r: &ItemRef,
+        _limit: usize,
+    ) -> Result<Vec<TrackerAttachment>, TrackerError> {
+        Err(TrackerError::Refused(
+            "this tracker does not list attachments".into(),
+        ))
+    }
 }
 
 /// A write fleet may make to a tracker (work graph M13.4e).
@@ -646,6 +737,7 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             write: true,
             describe: true,
             comments: true,
+            attachments: false,
         },
         "jira_dc" => Caps {
             query_lang: Some("jql".into()),
@@ -659,6 +751,7 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             write: true,
             describe: true,
             comments: true,
+            attachments: false,
         },
         "asana" => Caps {
             query_lang: None,
@@ -672,6 +765,7 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             write: true,
             describe: false,
             comments: true,
+            attachments: true,
         },
         "linear" => Caps {
             query_lang: Some("gql".into()),
@@ -685,6 +779,7 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             write: true,
             describe: false,
             comments: true,
+            attachments: false,
         },
         "github" => Caps {
             query_lang: Some("gql".into()),
@@ -698,6 +793,7 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             write: true,
             describe: true,
             comments: true,
+            attachments: false,
         },
         _ => Caps::default(),
     }

@@ -422,3 +422,79 @@ fn deleting_a_comment_cancels_its_pending_post() {
     assert_eq!(gone.tracker_post.unwrap().state, "pending");
     assert!(outbox(&w).is_empty(), "the pending post is cancelled");
 }
+
+fn plan_for(w: &W) -> crate::service::trackers::tickets::StartPlan {
+    serde_json::from_value(serde_json::json!({
+        "key": "ABC-1", "title": "Refund", "item_id": w.item, "project_id": 1,
+        "host_alias": "hosta", "branch": "abc-1-refund", "name": "ABC-1 Refund",
+    }))
+    .unwrap()
+}
+
+/// A start's brief carries the ticket's comments, read live by the hub:
+/// the session's Claude needs no tracker access of its own.
+#[tokio::test]
+async fn a_start_brief_carries_the_tickets_latest_comments_fenced() {
+    let w = jira(false);
+    answer(&w);
+    let tail = brief_extras(&w.store, &plan_for(&w), &w.net()).await;
+    let open = tail.find("[claude-fleet:").expect("fenced");
+    let first = tail.find("Ann (2026-10-01): first").expect(&tail);
+    let second = tail.find("Bob (2026-10-02): second").expect(&tail);
+    let end = tail.find(crate::mcp::guard::UNTRUSTED_END).unwrap();
+    assert!(open < first && first < second && second < end, "{tail}");
+    assert!(
+        w.fake.requests()[0].url.contains("maxResults=10"),
+        "{}",
+        w.fake.requests()[0].url
+    );
+}
+
+/// A tracker that fails costs the brief its comments, never the start.
+#[tokio::test]
+async fn a_failing_tracker_leaves_the_brief_without_them() {
+    let w = jira(false);
+    w.fake.always(
+        Method::Get,
+        "/rest/api/3/issue/ABC-1/comment",
+        Ok(Response::json(500, &serde_json::json!({}))),
+    );
+    assert_eq!(brief_extras(&w.store, &plan_for(&w), &w.net()).await, "");
+    let mut plan = plan_for(&w);
+    plan.item_id = None;
+    assert_eq!(brief_extras(&w.store, &plan, &w.net()).await, "");
+}
+
+/// The tail stays inside its budget, keeping the newest comments, and
+/// never loses its fence's end.
+#[test]
+fn the_brief_tail_keeps_the_newest_within_its_budget() {
+    let comments: Vec<TrackerComment> = (0..30)
+        .map(|i| TrackerComment {
+            id: format!("c{i}"),
+            author: "Ann".into(),
+            body: format!("comment {i} {}", "x".repeat(500)),
+            created_at: 1_790_000_000 + i,
+            url: None,
+        })
+        .collect();
+    let attachments = vec![TrackerAttachment {
+        id: "a1".into(),
+        name: "spec.pdf".into(),
+        url: Some("https://app.asana.com/x".into()),
+        size: None,
+        created_at: None,
+    }];
+    let tail = brief_tail(&attachments, &comments);
+    assert!(
+        tail.chars().count() <= BRIEF_EXTRAS_MAX_CHARS,
+        "{}",
+        tail.len()
+    );
+    assert!(tail.contains("- spec.pdf: https://app.asana.com/x"));
+    assert!(tail.contains("comment 29 "), "the newest is kept");
+    assert!(!tail.contains("comment 0 "), "the oldest gives way");
+    assert!(tail.contains("older on the ticket"));
+    assert!(tail.trim_end().ends_with(crate::mcp::guard::UNTRUSTED_END));
+    assert_eq!(brief_tail(&[], &[]), "");
+}

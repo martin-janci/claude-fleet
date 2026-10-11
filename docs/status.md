@@ -378,6 +378,14 @@ task page's Activity tab also lists each session that started, was
 suggested, turned down or stopped, and each comment. Not yet: comments on
 the phone.
 
+Tracker attachments and a start's comments (owner report 2026-10-11, an
+Asana session briefed with the key alone): `tracker_comments` also answers
+an Asana ticket's attachments (`TrackerProvider::attachments`,
+`caps.attachments`, Asana only so far), listed above the Comments tab; and
+a ticket start's brief ends with the ticket's attachments and newest 10
+comments, read live by the hub (`work::tracker_comments::brief_extras`), so
+the session's Claude needs no tracker access of its own.
+
 Tracker comments (owner decision 2026-10-11, changing D29; migration 171):
 the Comments tab shows the ticket's own comments beside fleet's, read live
 when the tab opens (`work { tracker_comments, key }`, routed desktop

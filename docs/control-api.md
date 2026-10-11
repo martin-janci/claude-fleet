@@ -671,7 +671,11 @@ Index by area (names only; see the reference for details):
   nothing is written). `work { action: "tracker_comments", key }` reads a
   ticket's own comments live (newest 50, oldest first, no cache; the ones
   fleet posted from a live comment left out; bodies fenced for a per-host
-  token; `can_post` says whether the caller may post there). `update` replaces the whole `settings` object. Keys are
+  token; `can_post` says whether the caller may post there), and for Asana
+  its `attachments` (name, link, size). A ticket start's brief ends with the
+  ticket's attachments and newest 10 comments, read live by the hub and
+  fenced (at most 1800 characters; a tracker that fails or takes over 8 s
+  leaves them out). `update` replaces the whole `settings` object. Keys are
   the tracker's own: `ABC-123` (Jira, Linear team keys), `owner/repo#42`
   (GitHub), `asana:<task gid>` (Asana, which has no human keys — detection is
   by URL); `lookup` and `start` take any of them, or the item's URL.

@@ -528,3 +528,48 @@ async fn asana_posts_a_story_with_its_pat() {
         .is_err());
     assert!(f.requests().is_empty());
 }
+
+#[tokio::test]
+async fn asana_lists_a_tasks_attachments_with_their_links() {
+    let f = FakeTransport::new();
+    f.once(
+        Method::Get,
+        "/attachments?parent=1200000000002001&limit=100&opt_fields=name,permanent_url,view_url,size,created_at",
+        Ok(Response::json(
+            200,
+            &json!({ "data": [
+                { "gid": "1200000000008002", "name": "spec\nv2.pdf",
+                  "permanent_url": "https://app.asana.com/app/asana/-/get_asset?asset_id=1200000000008002",
+                  "size": 2048, "created_at": "2026-10-02T09:00:00.000Z" },
+                { "gid": "1200000000008001", "name": "screenshot.png",
+                  "permanent_url": "",
+                  "view_url": "https://drive.google.com/file/d/abc/view",
+                  "created_at": "2026-10-01T09:00:00.000Z" },
+                { "gid": "1200000000008003", "name": "notes",
+                  "permanent_url": "javascript:alert(1)" },
+                { "gid": "../me", "name": "bad id" },
+            ] }),
+        )),
+    );
+    let got = asana(&f)
+        .attachments(&ItemRef::Id("1200000000002001".into()), 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        got.iter()
+            .map(|a| (a.name.as_str(), a.url.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            ("notes", None),
+            (
+                "screenshot.png",
+                Some("https://drive.google.com/file/d/abc/view")
+            ),
+            (
+                "spec v2.pdf",
+                Some("https://app.asana.com/app/asana/-/get_asset?asset_id=1200000000008002")
+            ),
+        ]
+    );
+    assert_eq!(got[2].size, Some(2048));
+}
