@@ -1694,6 +1694,38 @@ fn place_takes_an_item_id_a_group_id_and_names_everything_missing() {
         );
     }
 
+    // Free text that is already a derived group's name is refused: the
+    // section is bucketed by id and ordered by label, so this used to
+    // render one name over two sections. The refusal names the id, and
+    // `label:` is the way to insist on a group of one's own.
+    for (text, want_id) in [("acme/api", "repo:acme/api"), ("TP", "tracker:")] {
+        let err = place(Some(w.t2), Some(text), Some(t.placement_version)).unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID, "{text}");
+        assert!(
+            err.message.contains("already the name of") && err.message.contains(want_id),
+            "{text}: {}",
+            err.message
+        );
+    }
+    // Cased the other way it is the same name, and so the same refusal.
+    assert!(
+        place(Some(w.t2), Some("ACME/api"), Some(t.placement_version))
+            .unwrap_err()
+            .message
+            .contains("already the name of")
+    );
+    // `label:` insists, and keeps the derived group's words.
+    let t = place(
+        Some(w.t2),
+        Some("label:acme/api"),
+        Some(t.placement_version),
+    )
+    .unwrap();
+    assert_eq!(
+        (t.group.id.as_str(), t.group.label.as_str()),
+        ("label:acme/api", "acme/api")
+    );
+
     // A colon a person typed is not a prefix: unknown kinds stay labels.
     let t = place(Some(w.t2), Some("Q3: ship it"), Some(t.placement_version)).unwrap();
     assert_eq!(
