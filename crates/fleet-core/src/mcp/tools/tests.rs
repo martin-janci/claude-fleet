@@ -4441,8 +4441,11 @@ fn the_served_definition_budget_stays_bounded() {
     /// failure prints, and say in the commit message what was measured and
     /// when. Raised to 809 on 2026-10-11: merging main's `search` tool into
     /// gap plan batch 3 (`wizard_state`, `resume_or_new`) measured 111,954
-    /// bytes for 140 tools (799 a tool).
-    const BYTES_PER_TOOL: usize = 809;
+    /// bytes for 140 tools (799 a tool). Raised to 814 on 2026-10-11 when
+    /// work_link gained task attachments (`attach`, `attachment_delete`,
+    /// `mime`, `data_base64`, `attachment_id`) and `work` its `attachment`
+    /// read: measured 113,486 bytes for 141 tools (804 a tool).
+    const BYTES_PER_TOOL: usize = 814;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -8368,7 +8371,7 @@ async fn an_operator_start_waits_for_approval_and_a_phone_start_does_not() {
     assert!(
         asked
             .message
-            .contains("the operator's starts and kills always do"),
+            .contains("the operator's starts, kills and work decisions always do"),
         "{}",
         asked.message
     );
@@ -10378,7 +10381,7 @@ async fn the_operators_create_remote_waits_for_a_person() {
     assert!(
         asked
             .message
-            .contains("the operator's starts and kills always do"),
+            .contains("the operator's starts, kills and work decisions always do"),
         "{}",
         asked.message
     );
@@ -11901,6 +11904,8 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     ("work_link", "set_parent", &["Drive"]),
     // A comment is written into the owner's task: `edit`'s gate.
     ("work_link", "comment", &["Drive"]),
+    // So is an attachment: `edit`'s gate, as a comment.
+    ("work_link", "attach", &["Drive"]),
     // Sprint and release membership: `set_status`'s person gate, on the
     // item planned.
     ("work_link", "bucket_add", &["Drive"]),
@@ -11934,6 +11939,9 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // `TaskLink` (it spells the host `host` and carries no `tmux_name`).
     // Same defect as `work { org_impact }`'s, in the sibling arm (T9b).
     ("work_link", "place", &["ViewScope"]),
+    // The same write with nothing to place the task in, so the same
+    // answer and the same fence.
+    ("work_link", "unplace", &["ViewScope"]),
     // Two things a start does that reach an EXISTING row, and the old
     // exemption denied both. Its `E_EXISTS` prose names the session already
     // on the key (fenced in `tickets::already_running`), and the branch slug
@@ -12072,6 +12080,12 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
         "every_view_scope_page_hides_another_persons_live_session",
         "every_view_scope_page_hides_another_persons_ended_link",
     ),
+    (
+        "work_link",
+        "unplace",
+        "every_view_scope_page_hides_another_persons_live_session",
+        "every_view_scope_page_hides_another_persons_ended_link",
+    ),
     // The three ticket-cache arms are NOT in the sweep: their one
     // session-derived field is an id (or a one-word status), and
     // `ADA_SECRETS` is string-matched — `2` matches everything. They are
@@ -12132,6 +12146,19 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
 /// a reviewer can check, not an exemption: each says what the arm acts on
 /// INSTEAD of a session.
 const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
+    (
+        "work_link",
+        "attachment_delete",
+        "an attachment, by id: its item's org fence first (outside it, \
+         unknown), then its author's alone; no session is named or answered",
+    ),
+    (
+        "work",
+        "attachment",
+        "an attachment's bytes, by id: its item's org fence (outside it, \
+         unknown), its author withheld as `task` withholds a comment's; no \
+         session is named or answered",
+    ),
     (
         "work_link",
         "comment_delete",
@@ -16451,6 +16478,16 @@ fn view_scope_sweep_calls() -> Vec<(&'static str, &'static str, serde_json::Valu
             serde_json::json!({
                 "action": "place", "task_id": task,
                 "group": "Payments", "expected_version": 0
+            }),
+        ),
+        // The clear answers the same `WorkTask`, so it is swept too. It
+        // runs after the `place` above, whose placement it removes — the
+        // sweep's calls are ordered, and version 1 is what that left.
+        (
+            "work_link",
+            "unplace",
+            serde_json::json!({
+                "action": "unplace", "task_id": task, "expected_version": 1
             }),
         ),
     ]

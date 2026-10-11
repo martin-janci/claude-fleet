@@ -257,6 +257,21 @@ pub fn resume_source(
     Ok((plan.link_id, cid))
 }
 
+/// Where the key is live, in one sentence: the session is named only when
+/// its name is not the key over again ([`super::name_beside_key`]), so a
+/// session started from `TASK-230` does not read "TASK-230 is live in
+/// TASK-230 on mefistos".
+///
+/// One wording, two callers — [`live_elsewhere`]'s refusal and
+/// [`plan_resume`]'s blocking reason were the same `format!` twice.
+fn live_here(key: &str, l: &LiveWork) -> String {
+    let name = l.friendly_name.as_deref().unwrap_or(&l.tmux_name);
+    match super::name_beside_key(key, name) {
+        Some(name) => format!("{key} is live in {name} on {} — jump to it", l.host_alias),
+        None => format!("{key} is live on {} — jump to it", l.host_alias),
+    }
+}
+
 /// `E_EXISTS` for a key that already has a live session, worded for who is
 /// asking (multi-user M1, T9c).
 ///
@@ -288,15 +303,7 @@ fn live_elsewhere(
     if !seen {
         return IpcError::new(codes::E_EXISTS, format!("{key} already has a live session"));
     }
-    IpcError::new(
-        codes::E_EXISTS,
-        format!(
-            "{key} is live in {} on {} — jump to it",
-            l.friendly_name.as_deref().unwrap_or(&l.tmux_name),
-            l.host_alias
-        ),
-    )
-    .with_details(serde_json::json!({
+    IpcError::new(codes::E_EXISTS, live_here(key, l)).with_details(serde_json::json!({
         "session_id": l.session_id,
         "host_alias": l.host_alias,
         "tmux_name": l.tmux_name,
@@ -399,11 +406,7 @@ pub fn plan_resume(
 
     // Reasons that block every mode.
     let blocked: Option<String> = if let Some(l) = plan.live.first() {
-        Some(format!(
-            "{key} is live in {} on {} — jump to it",
-            l.friendly_name.as_deref().unwrap_or(&l.tmux_name),
-            l.host_alias
-        ))
+        Some(live_here(&key, l))
     } else if chosen.is_none() {
         Some(format!("{key} has no past sessions to resume"))
     } else {

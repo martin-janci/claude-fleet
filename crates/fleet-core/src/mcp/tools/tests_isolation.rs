@@ -2635,6 +2635,90 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Task attachments: a comment's fences. Attaching to host A's own local
+    // item — whoever may see it — and another host's answering as unknown.
+    let unknown_item_attach = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "attach", "item_id": 999_999, "name": "n.txt",
+                "mime": "text/plain", "data_base64": "aGk=" }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "attach",
+        move |_, _| {
+            json!({ "action": "attach", "item_id": local_a, "name": "a.txt",
+                    "mime": "text/plain", "data_base64": "aGk=" })
+        },
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    same_as_unknown(a, &unknown_item_attach, &local_a.to_string(), "999999")
+                }
+                _ => assert!(text(a).contains("\"name\":\"a.txt\""), "{who:?}: {a:?}"),
+            }
+        },
+    )
+    .await;
+    // Reading one: host A's item's attachment, unknown outside its fence —
+    // the same answer as an id nobody has.
+    let attachment_a = {
+        let s = fx.t.store.lock().unwrap();
+        s.add_attachment(
+            &crate::store::NewAttachment {
+                item_id: local_a,
+                name: "seen.txt",
+                mime: "text/plain",
+                author: "master",
+                author_person_id: None,
+                comment_id: None,
+            },
+            b"secret",
+            1024,
+        )
+        .unwrap()
+        .id
+    };
+    let unknown_attachment = call(
+        &fx,
+        Who::HostB,
+        "work",
+        json!({ "action": "attachment", "attachment_id": 999_999 }),
+    )
+    .await;
+    m.row(
+        "work",
+        "attachment",
+        move |_, _| json!({ "action": "attachment", "attachment_id": attachment_a }),
+        move |_, who, a| match who {
+            Who::HostB | Who::HostNone | Who::BoundB => {
+                same_as_unknown(a, &unknown_attachment, &attachment_a.to_string(), "999999")
+            }
+            _ => {
+                is_ok(who, a, "host A's attachment");
+                assert!(text(a).contains("c2VjcmV0"), "{who:?}: {a:?}");
+            }
+        },
+    )
+    .await;
+    // An attachment nobody has: unknown to every caller, the same answer.
+    m.row(
+        "work_link",
+        "attachment_delete",
+        |_, _| json!({ "action": "attachment_delete", "attachment_id": 999_999 }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            is_code(who, a, "E_NOTFOUND", "no such attachment")
+        },
+    )
+    .await;
     // Epics: `edit`'s fences — host A's own local item filed (here: kept at
     // the top) by whoever may see it, another host's answering as unknown,
     // a ticket refused for who sees it.
@@ -4202,6 +4286,29 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // `unplace` is the same write with nothing to place it in, so it passes
+    // the same gate — and it takes `item_id` as `place` now does.
+    m.row(
+        "work_link",
+        "unplace",
+        move |fx, _| {
+            json!({ "action": "unplace", "item_id": fx.item_b,
+                    "expected_version": placement_of(fx, &format!("item:{}", fx.item_b)) })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts do not place"),
+            Who::BoundA => is_code(who, a, "E_NOTFOUND", "B's task"),
+            _ => {
+                is_ok(who, a, "unplace");
+                assert!(
+                    text(a).contains("\"placement_version\":0"),
+                    "the placement is gone: {a:?}"
+                );
+            }
+        },
+    )
+    .await;
     let hidden = call(
         &fx,
         Who::BoundA,
@@ -5387,7 +5494,8 @@ fn work_changed_carries_ids_only_and_reaches_only_unbound_callers() {
     st::place(
         &store,
         &crate::service::view_scope::ViewScope::internal(),
-        &tid,
+        Some(&tid),
+        None,
         Some("Payments"),
         Some("SECRET-A note"),
         Some(0),

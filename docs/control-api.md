@@ -1082,6 +1082,10 @@ Index by area (names only; see the reference for details):
   the master an agent holds (the operator has `fleet-hub shepherd`); a write
   needs a trusted full device.
 - **Chat forms** — `ask`. Chat forms: open a `fleet.form/1` form in your own session's chat and wait for a person's answers; the person's side lists, gets, answers and declines. See `docs/forms.md`.
+- **Wizards** — `wizard_state`, a wizard left half-way, to resume on
+  another of your devices: `list {kind?}` | `get {kind, key?}` | `save
+  {kind, key?, step, answers, label?}` | `clear {kind, key?}`. Rows name the
+  device that saved last.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their
@@ -1831,7 +1835,10 @@ automatically on app start.
   `new_shell_session`, `new_bg_session`, `spawn_review`, `dispatch_task`
   with `new_worker`, `restore_host_sessions` (not its `dry_run`),
   `recreate_session`, `restart_session`, `work_link` `start` / `resume` —
-  its `safe_kill_session`, and every tool above return
+  its `safe_kill_session`, everything it writes into a session
+  (`send_prompt`, `run_prompt`, `queue_prompt`, and `dispatch_task` to a
+  worker that already exists: review round 15, F21 — nothing an LLM composes
+  reaches a session without a person), and every tool above return
   `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
   dialog or Control's cards, and on a hub from the owner's paired device,
   which lists the waiting calls with `mcp_confirms` (each with `nonce`,
