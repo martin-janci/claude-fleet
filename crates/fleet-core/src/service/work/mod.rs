@@ -28,6 +28,7 @@ pub mod retention;
 pub mod run;
 #[cfg(test)]
 mod scale_tests;
+pub mod stats;
 pub mod status;
 pub mod steps;
 pub mod structure;
@@ -480,6 +481,8 @@ pub enum WorkAction {
     Buckets,
     /// One sprint or release with its members.
     Bucket,
+    /// The tree's tasks counted per group and stage (persona dashboards).
+    Stats,
     /// Missions in scope (orchestration O1).
     Missions,
     /// One mission with its items and latest events.
@@ -518,6 +521,7 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("org_impact", WorkAction::OrgImpact),
     ("buckets", WorkAction::Buckets),
     ("bucket", WorkAction::Bucket),
+    ("stats", WorkAction::Stats),
     ("missions", WorkAction::Missions),
     ("mission", WorkAction::Mission),
     ("attachment", WorkAction::Attachment),

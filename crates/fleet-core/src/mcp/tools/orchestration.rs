@@ -1184,6 +1184,11 @@ impl FleetTools {
                     &w::buckets::bucket(&self.store, &view_scope, id).map_err(to_mcp_err)?,
                 )
             }
+            // Persona dashboards: the tree's own filtering, counted.
+            WorkAction::Stats => ok_json_compact(
+                &w::stats::stats(self.reader(), &view_scope, args.filters.as_ref())
+                    .map_err(to_mcp_err)?,
+            ),
             // Missions (orchestration O1): a mission is a PERSON's, so the
             // whole `view_scope` — its owner, its org's members, the org
             // boundary first (`missions::sees_mission`).

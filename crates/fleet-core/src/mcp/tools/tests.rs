@@ -11810,6 +11810,8 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // writes" — so another person's shipped PRs were in your digest (T9b).
     ("work", "today", &["ViewScope"]),
     ("work", "tree", &["ViewScope"]),
+    // The tree's own tasks, counted (persona dashboards).
+    ("work", "stats", &["ViewScope"]),
     ("work", "task", &["ViewScope"]),
     ("work", "review", &["ViewScope"]),
     ("work", "context", &["ViewScope"]),
@@ -12011,6 +12013,12 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
     (
         "work",
         "tree",
+        "every_view_scope_page_hides_another_persons_live_session",
+        "every_view_scope_page_hides_another_persons_ended_link",
+    ),
+    (
+        "work",
+        "stats",
         "every_view_scope_page_hides_another_persons_live_session",
         "every_view_scope_page_hides_another_persons_ended_link",
     ),
@@ -16434,6 +16442,11 @@ fn view_scope_sweep_calls() -> Vec<(&'static str, &'static str, serde_json::Valu
         ("work", "links", serde_json::json!({ "action": "links" })),
         ("work", "today", serde_json::json!({ "action": "today" })),
         ("work", "tree", serde_json::json!({ "action": "tree" })),
+        (
+            "work",
+            "stats",
+            serde_json::json!({ "action": "stats", "filters": { "group_by": "repo" } }),
+        ),
         (
             "work",
             "task",

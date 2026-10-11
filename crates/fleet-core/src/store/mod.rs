@@ -254,7 +254,7 @@ pub use work_journal::{
 };
 pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_MAX_CHARS};
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
-pub use work_status::STATUS_CATEGORIES;
+pub use work_status::{StatusLogRow, STATUS_CATEGORIES};
 pub use work_tasks::{
     is_epic, job_status, parse_due_date, validate_assignees, validate_due_date, ItemEdit,
     NativeItem, Proposal, TreeEntry, TreeRef, ACCEPT_UNDO_SECS, EPIC_KIND, LOCAL_DEPTH_MAX,
