@@ -309,6 +309,12 @@ impl DirectTransport {
         self
     }
 
+    /// Buffer bodies up to `max` bytes instead of [`DEFAULT_MAX_BODY`].
+    pub fn with_max_body(mut self, max: u64) -> Self {
+        self.max_body = max;
+        self
+    }
+
     /// Trust `pem` (one or more CA certificates) besides the platform store.
     /// Implies the address guard's pinned connect path.
     pub fn with_extra_ca(mut self, pem: Option<String>) -> Self {
