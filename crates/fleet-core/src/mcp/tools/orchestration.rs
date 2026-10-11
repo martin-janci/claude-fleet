@@ -1775,8 +1775,11 @@ impl FleetTools {
                     // sessions linked to it, so every live one of them must be
                     // this caller's to drive — the same level as the naming
                     // half, since the title it rewrites is what the owner's
-                    // sidebar shows for their own row.
-                    self.require_drive_on_item_sessions(&caller, item_id)?;
+                    // sidebar shows for their own row. `set_status`'s
+                    // exception applies: an agent renames its own task.
+                    if !self.own_session_works_on(&caller, item_id)? {
+                        self.require_drive_on_item_sessions(&caller, item_id)?;
+                    }
                     ok_json(
                         &local::rename_local_item(&args, &self.store, &scope)
                             .map_err(to_mcp_err)?,
