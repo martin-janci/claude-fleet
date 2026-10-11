@@ -160,7 +160,11 @@ pub(crate) mod routed {
         args: ProposeHostArgs,
     ) -> Result<Option<SuggestedHost>, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.route("propose_host_placement", &args).await,
+            // A hub before contract 17 has no such tool: propose nothing.
+            Some(hub) => match hub.route("propose_host_placement", &args).await {
+                Err(e) if e.code == fleet_core::ipc_error::codes::E_HUB_PROTOCOL => Ok(None),
+                r => r,
+            },
             None => {
                 let ctx = DecideCtx::jev(Arc::clone(store));
                 host_placement::propose(&ctx, cache, &args).await

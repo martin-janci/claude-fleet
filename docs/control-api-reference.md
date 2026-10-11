@@ -377,6 +377,12 @@ Mint a single-use pairing code for a new client device (phone, browser) and retu
 
 Parameters: `mode`, `name`, `org_id`, `person`, `trusted`, `ttl_s`
 
+### `pause_download`
+
+Pause (paused: true) or resume a sent file's copy in flight; it stops between slices. Answers the row. E_INVALID_STATE when it is not being copied.
+
+Parameters: `id`, `paused`
+
 ### `peer_exchange`
 
 Hub-to-hub link exchange (peer tokens only): deliver messages and acks, receive this hub's messages for the caller. Long-polls up to wait_ms. See docs/hub.md, Link two hubs.
@@ -688,6 +694,12 @@ Parameters: `level`, `session_id`
 Claim the unclaimed session THIS pane is in for a person: it becomes theirs and private. Only the session whose active pane this request's X-Fleet-Pane header names — being on the same host is not enough. Errors: E_NOTFOUND, E_INVALID_STATE (no pane of it proven), E_FORBIDDEN (another session's pane), E_EXISTS (owned).
 
 Parameters: `person`, `session_id`
+
+### `session_context_help`
+
+Context help at a session's composer: a question about the draft (empty asks about the draft alone), with the earlier prompts and the commands the composer accepts as context. Returns { answer, command?, model, host_alias, history_items, at }: a few lines and at most one proposal for the composer, never run. Runs one claude -p on the session's host under its account, on work.help_model (booked as context_help), for the owner or an answer/drive grant. Errors: E_INVALID_STATE (work.context_help off), E_FORBIDDEN (a watch grant), E_INVALID (nothing to ask about), E_CLAUDE_CLI, E_TIMEOUT, as session_conversation.
+
+Parameters: `commands`, `history`, `line`, `question`, `session_id`
 
 ### `session_conversation`
 
@@ -1133,6 +1145,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::library::add_library_items`
 - `commands::library::remove_library_item`
 - `commands::downloads::send_file`
+- `commands::downloads::pause_download`
 - `commands::downloads::remove_download`
 - `commands::downloads::save_download`
 - `commands::pages::get_fleet_settings`
@@ -1317,6 +1330,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::editor::open_session_in_editor`
 - `commands::windows::open_terminal_window`
 - `commands::context_help::context_help`
+- `commands::context_help::session_context_help`
 - `commands::voice::voice_claim`
 - `commands::voice::voice_release`
 - `cancel_command`

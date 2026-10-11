@@ -195,6 +195,9 @@ const SESSION_TIER = {
   // `send_prompt` admits it at `answer` for a key alone, after a fresh read of
   // the pane shows a dialog; a prompt stays `drive`.
   answer_dialog: 'answer',
+  // Context help at the composer: its answer is text for the box, which a
+  // watcher cannot send, and the run spends the owner's account.
+  session_context_help: 'answer',
 
   // ── reads: nothing to disable, listed so the gap is visibly deliberate ──
   capture_session: 'watch',

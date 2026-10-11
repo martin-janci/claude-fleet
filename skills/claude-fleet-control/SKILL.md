@@ -67,7 +67,8 @@ spawn      new_session new_shell_session new_bg_session spawn_review
 steer      send_prompt run_prompt queue_prompt queued_prompts wait_for_session
            capture_session session_transcript session_conversation
            session_conversations session_tool_detail session_summary_since
-           rewind_conversation broadcast_prompt touch_session_viewed ask
+           session_context_help rewind_conversation broadcast_prompt
+           touch_session_viewed ask
 coordinate send_message inbox wait_for_reply dispatch_task wait_for_task
            list_tasks cancel_task set_session_tags session_history
            register_self work work_link decide_related_session runs routines
@@ -81,8 +82,8 @@ review     repo_changes repo_diff repo_file repo_tree repo_log repo_blame
            repo_commit_diff
 share      session_share session_narrow session_unshare session_access
            session_presence my_grants session_ask_access access_requests
-files      send_file list_downloads remove_download library get_clipboard
-           set_clipboard
+files      send_file list_downloads pause_download remove_download library
+           get_clipboard set_clipboard
 devices    debug_devices
 assets     list_assets scan_assets import_assets plan_sync apply_sync
            changesets catalog_admin list_layers propose_layers resolve_preview

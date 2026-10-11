@@ -879,8 +879,8 @@ pub fn save(
     }
 }
 
-/// `routines { action: delete, routine_id }`: the routine and its runs.
-/// The sessions its runs started stay.
+/// `routines { action: delete, routine_id }`: the routine. Its runs stay,
+/// named, without it (migration 166); the sessions they started stay too.
 pub fn delete(store: &Mutex<Store>, scope: &ViewScope, id: i64) -> Result<bool, IpcError> {
     let s = lock(store)?;
     changeable(&s, scope, id)?;

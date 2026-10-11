@@ -558,6 +558,9 @@ pub const WORK_DRAFT_RELEASE_NOTES: &str = "work.draft_release_notes";
 /// A watched session's "Since 13:20" catch-up summary
 /// (`service::watch_summary`).
 pub const WORK_CATCH_UP_SUMMARIES: &str = "work.catch_up_summaries";
+/// Context help at a shell or composer prompt line
+/// (`service::context_help`).
+pub const WORK_CONTEXT_HELP: &str = "work.context_help";
 
 /// Task attachments: the largest file a task takes, in MiB (at most
 /// [`crate::store::ATTACHMENT_MAX_MB_CEILING`], what the desktop↔hub
@@ -1359,6 +1362,14 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Ai])
     .per_org(),
+    Spec::new(
+        WORK_CONTEXT_HELP,
+        "false",
+        Kind::Bool,
+        "Context help",
+        "Terminal and composer: Ask asks a model about the line you are typing, with its history as context, on the session's host. A proposed command is put on the line, never run.",
+    )
+    .tags(&[Tag::Ai]),
     Spec::new(
         WORK_HELP_MODEL,
         "haiku",

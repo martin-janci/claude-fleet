@@ -11,6 +11,7 @@
     loadDownloads,
     saveDownload,
     removeDownload,
+    pauseDownload,
     retryDownload,
     revealLabel,
     revealSaved,
@@ -70,6 +71,15 @@
     busy = d.id;
     try {
       await removeDownload(d.id);
+    } finally {
+      busy = null;
+    }
+  }
+
+  async function togglePause(d: Download) {
+    busy = d.id;
+    try {
+      await pauseDownload(d.id, !d.paused);
     } finally {
       busy = null;
     }
@@ -150,6 +160,11 @@
             {/if}
           </div>
           <div class="actions">
+            {#if d.state === 'fetching'}
+              <button data-testid="download-pause" disabled={busy === d.id} onclick={() => togglePause(d)}
+                >{d.paused ? 'Resume' : 'Pause'}</button
+              >
+            {/if}
             {#if d.state === 'failed'}
               <button data-testid="download-retry" disabled={busy === d.id} onclick={() => retry(d)}>Retry</button>
             {:else if d.state === 'ready' && $savedTo.has(d.id)}

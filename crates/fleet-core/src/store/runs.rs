@@ -380,11 +380,12 @@ pub const AUX_BRANCH: &str = "SELECT 'aux' AS src, a.id AS rid, a.origin AS kind
 ///   person's skip: `reason` says which).
 /// - kind `routine`; owner: the routine's name; cost: `cost_micros`, what
 ///   its session spent; host / org: the routine's. No model: the session's
-///   own.
+///   own. A run whose routine was deleted (166) keeps its `routine_name` and
+///   the host it ran on, and has no org.
 /// - sessions: the session it started (none for a skipped fire).
 /// - summary: the trigger (`cron`, `event`, `run_now`) and the reason.
 pub const ROUTINE_BRANCH: &str = "SELECT 'routine' AS src, rr.id AS rid, 'routine' AS kind, \
-       r.name AS owner, rr.started_at AS started_at, rr.finished_at AS ended_at, \
+       COALESCE(r.name, rr.routine_name) AS owner, rr.started_at AS started_at, rr.finished_at AS ended_at, \
        CASE WHEN rr.finished_at IS NOT NULL \
             THEN (rr.finished_at - rr.started_at) * 1000 END AS duration_ms, \
        CASE rr.state \
@@ -394,12 +395,12 @@ pub const ROUTINE_BRANCH: &str = "SELECT 'routine' AS src, rr.id AS rid, 'routin
             WHEN 'skipped' THEN 'nothing_to_do' ELSE 'running' END AS outcome, \
        CASE WHEN rr.state = 'failed' OR rr.outcome = 'failed' \
             THEN COALESCE(rr.reason, 'failed') END AS error, \
-       rr.cost_micros AS cost_micros, NULL AS model, r.host_alias AS host, \
+       rr.cost_micros AS cost_micros, NULL AS model, COALESCE(r.host_alias, rr.host_alias) AS host, \
        r.org_id AS org_id, NULL AS mission_id, rr.session_id AS s1, NULL AS s2, \
        rr.trigger || COALESCE(': ' || rr.reason, '') AS summary, \
        rr.routine_id AS routine_id \
      FROM routine_runs rr \
-     JOIN routines r ON r.id = rr.routine_id";
+     LEFT JOIN routines r ON r.id = rr.routine_id";
 
 /// The kinds and outcomes a source can produce, so a filter that no row of
 /// a source can match drops the whole branch instead of scanning it.

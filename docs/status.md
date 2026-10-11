@@ -25,14 +25,18 @@ account usage history (122), the Hosts page's probe facts (123), token use
 (126), the cost of fleet's own `claude -p` runs (127), every PR a session's
 branch has had (`pull_requests`, 128), cost per account (130), prompts
 queued for a busy session (133), the agent CLIs a host has (134) and the
-add-host wizard's state (135). The hub contract is revision 16
+add-host wizard's state (135). The hub contract is revision 17
 (`CONTRACT_REVISION`, `crates/fleet-core/src/wire_contract.rs`):
 revisions 11 to 14 add tools a revision-10 hub does not serve, so the
 desktop and its hub are upgraded together; 15 widens the form spec and
 adds the attention model's two classes (a mission waiting on a person, and
 Jev's "probably waiting" kept apart from Needs you) and no tool; 16 adds
 named tokens (`api_tokens`) and + Add account (`add_account`), so a
-desktop accepts only a revision-16 hub.
+desktop needs at least a revision-16 hub; 17 adds gap plan batch 3's tools
+and the composer's context help on a shared session
+(`session_context_help`), each of which a revision-16 hub answers as
+nothing saved, nothing proposed or "the hub needs updating", so a desktop
+accepts a revision-16 or 17 hub.
 
 Search (2026-10, three phases). Every search box ignores case and accents
 through one fold (`search_text.rs`, `src/lib/text_fold.ts`, fleet-mobile's
@@ -351,7 +355,7 @@ task page's Activity tab also lists each session that started, was
 suggested, turned down or stopped, and each comment. Not yet: comments on
 the phone.
 
-Task attachments (migration 166, `work_item_attachments` and the
+Task attachments (migration 167, `work_item_attachments` and the
 content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept
 in SQLite so a hub backup carries them; a blob goes with the last live
 attachment naming it): `work_link { attach, item_id, name, mime,

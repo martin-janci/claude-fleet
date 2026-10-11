@@ -11055,6 +11055,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("run_prompt", &["Drive"]),
     ("session_conversation", &["Read"]),
     ("session_summary_since", &["Read"]),
+    ("session_context_help", &["Answer"]),
     ("session_tool_detail", &["Read"]),
     ("session_transcript", &["Read"]),
     ("set_session_tags", &["Own"]),
@@ -11324,6 +11325,10 @@ const REVIEWED_WITHOUT_A_SESSION: &[(&str, &str)] = &[
     (
         "remove_download",
         "one DOWNLOAD, by `{id}` — a `downloads` row id, not a session id, which is why the schema clause below cannot see this tool at all. It is reviewed rather than silent: the row it names did come out of a session, so the fence is the same `own` tier `send_file` and `list_downloads` carry (`service::downloads::remove` -> `visible_row` -> `visible` -> `ViewScope::may_own`), and a row this caller may not see answers `Ok(false)` — a no-op, never an `E_NOTFOUND` that would tell it the id exists. A per-host token is additionally refused the tool outright by `NOT_FOR_HOST_TOKENS`",
+    ),
+    (
+        "pause_download",
+        "one DOWNLOAD's copy in flight, by `{id, paused}` — a `downloads` row id, as `remove_download` takes, under the same fence: `service::downloads::pause` -> `visible_row` -> `visible` -> `ViewScope::may_own`, so a row this caller may not see answers `E_NOTFOUND` exactly as an id that does not exist does. It only holds or releases this process's copy between slices; the row's bytes and path are not in its answer beyond what `list_downloads` already shows the same caller. A per-host token is additionally refused the tool outright by `NOT_FOR_HOST_TOKENS`",
     ),
     (
         "my_grants",
