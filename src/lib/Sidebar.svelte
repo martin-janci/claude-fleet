@@ -140,6 +140,7 @@
   import { attentionFacts } from './attention_facts';
   import { snapshotRows } from './motion_catalog';
   import { push, pushError } from './toasts';
+  import { pushRestartError } from './restart';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -1387,10 +1388,16 @@
   async function confirmRestart() {
     if (!pendingRestart) return;
     const sess = pendingRestart;
-    if ($sessionBlocked(sess, 'restart_session') !== null) return;
     pendingRestart = null;
-    const r = await restartSession(sess.host_alias, sess.tmux_name);
-    if (!r.ok) pushError(r.error, 'Restart failed');
+    await restartRow(sess, false);
+  }
+
+  // `force` only from the "Restart anyway" `pushRestartError` offers for the
+  // registered fleet controller; it passes the same gate again.
+  async function restartRow(sess: SessionRow, force: boolean) {
+    if ($sessionBlocked(sess, 'restart_session') !== null) return;
+    const r = await restartSession(sess.host_alias, sess.tmux_name, undefined, {}, { force });
+    if (!r.ok) pushRestartError(r.error, sess.host_alias, sess.tmux_name, () => void restartRow(sess, true));
   }
 
   function cancelRecreate() {
