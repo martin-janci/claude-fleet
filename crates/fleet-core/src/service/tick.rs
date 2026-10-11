@@ -251,6 +251,10 @@ pub fn spawn_reconcile_tick(
                         "reconcile tick: {forms} form row(s) aged, {swept} secret dir(s) removed"
                     );
                 }
+                let env_swept = service::env::sweep_env_files(store, &**ssh).await;
+                if env_swept > 0 {
+                    tracing::debug!(hosts = env_swept, "env files swept");
+                }
                 service::loops::report("forms", Ok::<_, String>(()), Some(period));
                 // Wave 2 Track D: lifecycle automation rides the same tick, after
                 // the pass so it sees fresh `stuck_kind` / `idle_since` stamps.

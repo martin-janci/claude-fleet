@@ -133,6 +133,83 @@ fn note_host(store: &Mutex<Store>, host: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// The hosts to record after a sweep: those that still hold a file, plus any
+/// host `prepare` recorded while the sweep ran (`current` has it, `read`, the
+/// list the sweep started from, did not).
+fn merge_hosts(keep: Vec<String>, read: &[String], current: &[String]) -> Vec<String> {
+    let mut out = keep;
+    for h in current {
+        if !read.contains(h) && !out.contains(h) {
+            out.push(h.clone());
+        }
+    }
+    out
+}
+
+/// Delete env files older than ENV_FILE_MAX_AGE_MIN on every recorded host;
+/// forget a host once its directory holds no file. Unreachable hosts stay
+/// recorded and are retried next tick. Returns the number of hosts swept.
+pub async fn sweep_env_files(store: &Mutex<Store>, ssh: &dyn SshExec) -> usize {
+    let read: Vec<String> = match lock(store)
+        .ok()
+        .and_then(|s| s.get_setting(ENV_FILES_HOSTS_KEY).ok().flatten())
+    {
+        Some(v) => serde_json::from_str(&v).unwrap_or_default(),
+        None => return 0,
+    };
+    if read.is_empty() {
+        return 0;
+    }
+    let script = format!(
+        "d=\"$HOME\"/'.claude-fleet/env'; [ -d \"$d\" ] || {{ echo clean; exit 0; }}; \
+         find \"$d\" -type f -name '*.sh' -mmin +{ENV_FILE_MAX_AGE_MIN} -exec rm -f {{}} +; \
+         ls -A \"$d\" | grep -q . && echo left || echo clean"
+    );
+    let mut swept = 0;
+    let mut keep = Vec::new();
+    for host in &read {
+        match crate::ssh::run_shell(ssh, host, &script, std::time::Duration::from_secs(20)).await {
+            Ok(out) if out.status.success() => {
+                swept += 1;
+                if String::from_utf8_lossy(&out.stdout)
+                    .trim_end()
+                    .ends_with("left")
+                {
+                    keep.push(host.clone());
+                }
+            }
+            Ok(_) => {
+                tracing::debug!(host = %host, "env file sweep exited non-zero; retrying next tick");
+                keep.push(host.clone());
+            }
+            Err(e) => {
+                tracing::debug!(host = %host, code = %e.code, "env file sweep failed; retrying next tick");
+                keep.push(host.clone());
+            }
+        }
+    }
+    if let Ok(s) = lock(store) {
+        // Re-read under the lock: a `prepare` may have recorded a host while
+        // the sweep was on the wire.
+        let current: Vec<String> = s
+            .get_setting(ENV_FILES_HOSTS_KEY)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default();
+        let keep = merge_hosts(keep, &read, &current);
+        let _ = if keep.is_empty() {
+            s.delete_setting(ENV_FILES_HOSTS_KEY)
+        } else {
+            s.set_setting(
+                ENV_FILES_HOSTS_KEY,
+                &serde_json::to_string(&keep).unwrap_or_default(),
+            )
+        };
+    }
+    swept
+}
+
 /// Resolve, write the file and wrap `pane_cmd`. An empty set returns
 /// `pane_cmd` unchanged and writes nothing.
 pub async fn prepare(
@@ -356,5 +433,99 @@ mod tests {
     fn an_empty_set_leaves_the_pane_command_alone() {
         let f = resolve(&store(), "local", None, None, &BTreeMap::new()).unwrap();
         assert!(f.is_empty());
+    }
+
+    #[test]
+    fn a_host_recorded_during_the_sweep_is_kept() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // a was clean, b still has files, c was recorded mid-sweep.
+        assert_eq!(
+            merge_hosts(s(&["b"]), &s(&["a", "b"]), &s(&["a", "b", "c"])),
+            s(&["b", "c"])
+        );
+        // Nothing new: only the hosts that still hold files.
+        assert_eq!(merge_hosts(s(&[]), &s(&["a"]), &s(&["a"])), s(&[]));
+        // A host already kept is not doubled.
+        assert_eq!(
+            merge_hosts(s(&["c"]), &s(&["a"]), &s(&["a", "c"])),
+            s(&["c"])
+        );
+    }
+
+    #[cfg(unix)]
+    mod sweep {
+        use super::*;
+        use crate::ssh::SshClient;
+        use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
+
+        /// A host `h` whose `ssh` runs each remote script on this machine
+        /// with HOME at a tempdir (the `env_launch` harness's fake).
+        fn fake(dir: &std::path::Path) -> SshClient {
+            let home = dir.join("home");
+            let bin = dir.join("bin");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::create_dir_all(&bin).unwrap();
+            let ssh_bin = write_exec(
+                &bin,
+                "ssh",
+                &format!(
+                    "#!/bin/sh\n{PROBE_GUARD}\
+                     case \"$*\" in *'-O check'*|*'-O exit'*) exit 0;; esac\n\
+                     while [ \"$#\" -gt 0 ] && [ \"$1\" != \"--\" ]; do shift; done\n\
+                     shift 2\n\
+                     HOME='{}' exec sh -c \"$*\"\n",
+                    home.display()
+                ),
+            );
+            SshClient::with_ssh_binary(ssh_bin)
+        }
+
+        fn age(path: &std::path::Path, mins: u64) {
+            let t = std::time::SystemTime::now() - std::time::Duration::from_secs(mins * 60);
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn the_sweep_removes_old_files_and_forgets_a_clean_host() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ssh = fake(tmp.path());
+            let dir = tmp.path().join("home/.claude-fleet/env");
+            std::fs::create_dir_all(&dir).unwrap();
+            let old = dir.join("old.sh");
+            let fresh = dir.join("fresh.sh");
+            std::fs::write(&old, "x").unwrap();
+            std::fs::write(&fresh, "x").unwrap();
+            age(&old, 11);
+            let s = store();
+            s.lock()
+                .unwrap()
+                .set_setting(ENV_FILES_HOSTS_KEY, r#"["h"]"#)
+                .unwrap();
+            assert_eq!(sweep_env_files(&s, &ssh).await, 1);
+            assert!(!old.exists() && fresh.exists());
+            // A fresh file remains, so the host is still recorded.
+            assert!(s
+                .lock()
+                .unwrap()
+                .get_setting(ENV_FILES_HOSTS_KEY)
+                .unwrap()
+                .unwrap()
+                .contains("\"h\""));
+            // Once it ages out, the next sweep empties the dir and forgets the host.
+            age(&fresh, 11);
+            assert_eq!(sweep_env_files(&s, &ssh).await, 1);
+            assert!(!fresh.exists());
+            assert_eq!(
+                s.lock().unwrap().get_setting(ENV_FILES_HOSTS_KEY).unwrap(),
+                None
+            );
+            // Nothing recorded: nothing swept.
+            assert_eq!(sweep_env_files(&s, &ssh).await, 0);
+        }
     }
 }
