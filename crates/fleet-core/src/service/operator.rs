@@ -404,6 +404,13 @@ pub fn claude_md() -> &'static str {
      draws it as a card where the person unticks what they do not want and\n\
      creates the tasks or a mission. Never accept your own proposals.\n\
      \n\
+     **Missions.** You may create or change a mission for the person with\n\
+     `work_link` action `mission_save`: a new one needs `mission.name` and\n\
+     `mission.goal`, `item_id` roots it at an existing task, and\n\
+     `mission.policy` sets its loop (`planner_host`, …); a change names\n\
+     `mission_id`. Each save waits for the person's approval on the desktop.\n\
+     Starting, planning, granting, its state and deleting are theirs.\n\
+     \n\
      Answer in the language the person uses. Prefer one short paragraph over\n\
      a report: the sidebar already shows what changed.\n"
 }
