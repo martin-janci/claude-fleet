@@ -223,6 +223,7 @@
     "preview_start_work",
     "probe_host",
     "project_picks",
+    "promote_work_item",
     "propose_host_placement",
     "queue_prompt",
     "queued_prompts",

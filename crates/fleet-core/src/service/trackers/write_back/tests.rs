@@ -45,6 +45,7 @@ fn fx_with(source: Option<&str>, write_back: bool) -> Fx {
                 write_back: WriteBack {
                     pr_remote_link: true,
                     comments: false,
+                    create_tickets: false,
                 },
                 ..Default::default()
             },
@@ -237,6 +238,7 @@ fn write_back_is_a_jira_setting() {
         write_back: WriteBack {
             pr_remote_link: true,
             comments: false,
+            create_tickets: false,
         },
         ..Default::default()
     };

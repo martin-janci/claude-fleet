@@ -391,6 +391,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // A ticket's comments at its tracker, read live beside fleet's own;
     // posting one is `comment_on_work`'s `post_to_tracker`.
     ("work_tracker_comments", Verdict::Routed { tool: "work" }),
+    // A task of fleet's own becomes a tracker's ticket (owner decision
+    // 2026-10-11): the hub owns the trackers and the outbox that creates it.
+    ("promote_work_item", Verdict::Routed { tool: "work_link" }),
     // Sprints and releases (design 2026-09-28 §6a/§6b): reads and
     // membership route; so do the buckets themselves, as work_link's
     // bucket_admin (owner decision 2026-10-10: the hub decides who plans).

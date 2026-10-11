@@ -709,6 +709,43 @@ off or the task has no ticket — then nothing is saved at all.
 This changes D29 on the owner's word (2026-10-11): comments a person posts
 are written back; transitions and worklogs still are not.
 
+### Local tasks, and promoting one to a ticket (off by default)
+
+Work can stay in fleet while it is small: a task of fleet's own, or a
+subtask under a Jira or Asana ticket (*+ Add subtask* on the ticket's page).
+Such a subtask is fleet's alone — the tracker never sees it — and starts,
+comments and sprints like any other task.
+
+When it should be tracked, **Promote to ticket…** on the task's page makes it
+one. With **Create tickets** on (Settings → Trackers → Write-back, Jira
+Cloud, Jira Data Center and Asana, off by default, behind a confirm):
+
+- **A subtask of a ticket** is created under that ticket, in its tracker: a
+  Jira sub-task (the project's first sub-task issue type), an Asana subtask.
+  Nothing to pick.
+- **A task at the top** goes to the tracker you pick: into a Jira project
+  the site owns (its *Task* type, else its first standard type), or into an
+  Asana project — or, with none, into the workspace, assigned to the
+  tracker's account so it shows in its views.
+- **What is sent**: the title and the description, signed `— <your name> via
+  fleet`. Assignees, due dates, priority, labels and estimates stay in fleet
+  for now.
+- **The task becomes the ticket.** Once the tracker answers, the same task
+  is that ticket — its new key (`ABC-7`; an Asana task draws its tracker's
+  display key), its tracker's status — and its sessions, comments,
+  subtasks, sprint and history stay with it. Its old fleet key still finds
+  it. Local subtasks under it stay fleet's own, and can be promoted in turn.
+- **Not promoted**: a tracker's ticket, an epic, a delegated job, an open
+  proposal, and a task under a task of fleet's own (promote its parent
+  first, or take it out to the top). Only a person promotes; an agent's
+  `promote` is refused.
+- **Once.** A create is not idempotent, so it is sent at most once, through
+  the same outbox as a comment: within seconds on the desktop or hub that
+  owns the trackers. The task page says *Creating the ticket in …* meanwhile,
+  or *Not created in …: <why>* after a refusal, and offers Promote again.
+- **The token needs permission to create issues** (Jira: *Create issues* in
+  the project; Asana: a key that may add tasks there).
+
 ### Sync
 
 The sync runs every `work.sync_interval_secs` (300 s by default; `0` turns

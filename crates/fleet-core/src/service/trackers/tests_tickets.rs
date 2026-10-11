@@ -939,6 +939,7 @@ async fn an_agents_start_is_recorded_as_the_agents_and_never_writes_back() {
                     write_back: WriteBack {
                         pr_remote_link: true,
                         comments: false,
+                        create_tickets: false,
                     },
                     ..Default::default()
                 },

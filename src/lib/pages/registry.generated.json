@@ -4917,6 +4917,18 @@
             {
               "key": "post_comments",
               "type": "field"
+            },
+            {
+              "key": "create_tickets",
+              "type": "field",
+              "when": {
+                "in": [
+                  "jira",
+                  "jira_dc",
+                  "asana"
+                ],
+                "key": "provider"
+              }
             }
           ],
           "title": "Write-back"
@@ -7145,6 +7157,20 @@
           "merge_path": [
             "write_back",
             "comments"
+          ],
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "confirm": "Fleet will write to this tracker: each task a person promotes is created as a ticket under this credential's account.",
+          "default": false,
+          "edit": "settings",
+          "help": "Let a person promote a task made in fleet to a ticket here: a subtask of a ticket becomes that ticket's subtask, a task goes into the project they pick. Agents never create one. The token needs permission to create issues.",
+          "id": "create_tickets",
+          "label": "Create tickets",
+          "merge_path": [
+            "write_back",
+            "create_tickets"
           ],
           "on_off": false,
           "type": "bool"

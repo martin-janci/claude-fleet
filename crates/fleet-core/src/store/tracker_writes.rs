@@ -24,6 +24,20 @@ pub const WRITE_OP_PR_REMOTE_LINK: &str = "pr_remote_link";
 /// [`comment_write_url`], `body` the text posted.
 pub const WRITE_OP_COMMENT: &str = "comment";
 
+/// A ticket created from a fleet task (owner decision 2026-10-11): `url`
+/// is [`item_write_url`], `title` and `body` the ticket's title and
+/// description, and `item_key` / `external_id` where it goes — the parent
+/// ticket's key and id for a subtask (`external_id` set), else the
+/// container (a Jira project key, an Asana project gid, or "" for the
+/// Asana workspace; `external_id` NULL). Once sent, `remote_id` is the new
+/// ticket's id and the task is that ticket ([`Store::promote_local_item`]).
+pub const WRITE_OP_CREATE_ITEM: &str = "create_item";
+
+/// A create write's `url`: which fleet task it promotes.
+pub fn item_write_url(item_id: i64) -> String {
+    format!("fleet-item:{item_id}")
+}
+
 /// A comment write's `url`: which fleet comment it posts, which keeps the
 /// outbox's unique key meaningful (one post per comment per tracker).
 pub fn comment_write_url(comment_id: i64) -> String {
@@ -196,9 +210,19 @@ impl Store {
         Ok(())
     }
 
-    /// A comment write settled: the task its fleet comment is on re-reads,
-    /// so the comment's post state shows. Nothing for any other write.
+    /// A comment or create write settled: the task it is about re-reads,
+    /// so the comment's post state (or the promotion's) shows. Nothing for
+    /// any other write.
     pub fn emit_comment_write(&self, url: &str) -> Result<(), IpcError> {
+        if let Some(item) = url
+            .strip_prefix("fleet-item:")
+            .and_then(|n| n.parse::<i64>().ok())
+        {
+            if self.get_work_item(item)?.is_some() {
+                self.emit_work_item(item, Default::default())?;
+            }
+            return Ok(());
+        }
         let Some(id) = url
             .strip_prefix("fleet-comment:")
             .and_then(|n| n.parse::<i64>().ok())
@@ -238,6 +262,46 @@ impl Store {
             r.get::<_, String>(0)
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Queue the ticket `w` creates from task `item_id` ([`WRITE_OP_CREATE_ITEM`],
+    /// `w.url` its [`item_write_url`]). A promotion that failed before is
+    /// replaced, so a person may try again; `false` when one is already
+    /// pending or sent.
+    pub fn enqueue_promotion(&self, w: &NewTrackerWrite<'_>) -> Result<bool, IpcError> {
+        debug_assert_eq!(w.op, WRITE_OP_CREATE_ITEM);
+        self.atomically(|s| {
+            if s.promotion_of_url(w.url)?
+                .is_some_and(|r| r.state != "failed")
+            {
+                return Ok(false);
+            }
+            s.conn.execute(
+                "DELETE FROM tracker_writes WHERE op = ?1 AND url = ?2 AND state = 'failed'",
+                rusqlite::params![WRITE_OP_CREATE_ITEM, w.url],
+            )?;
+            s.enqueue_tracker_write(w)
+        })
+    }
+
+    /// The newest promotion of task `item_id` to a tracker, whatever its
+    /// state: what the task page shows while it is sent, and why it was not.
+    pub fn promotion_of(&self, item_id: i64) -> Result<Option<TrackerWriteRow>, IpcError> {
+        self.promotion_of_url(&item_write_url(item_id))
+    }
+
+    fn promotion_of_url(&self, url: &str) -> Result<Option<TrackerWriteRow>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {COLUMNS} FROM tracker_writes WHERE op = ?1 AND url = ?2 \
+                     ORDER BY id DESC LIMIT 1"
+                ),
+                rusqlite::params![WRITE_OP_CREATE_ITEM, url],
+                map_row,
+            )
+            .optional()?)
     }
 
     /// The write failed with `error`. `next_at` is when to try again, or

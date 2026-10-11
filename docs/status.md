@@ -406,6 +406,24 @@ and URL; `TaskDetail.comments_tracker` / `can_post_to_tracker` say whose
 comments the tab reads and whether the reader may post. Not yet: the phone,
 editing a posted comment, attachments from trackers other than Asana.
 
+Promoting a task to a ticket (owner decision 2026-10-11: local tasks and
+subtasks first, tracked later): `work_link { promote, item_id, tracker_id?,
+container? }` (routed desktop `promote_work_item`, `service/work/promote.rs`)
+queues the outbox's `create_item` op (`url` `fleet-item:<id>`; `item_key` /
+`external_id` the parent ticket for a subtask, else the container), and the
+drain's `WriteOp::CreateItem` creates a Jira sub-task or task (createmeta
+picks the issue type) or an Asana task / subtask, then converts the task IN
+PLACE (`Store::promote_local_item`: same row, the tracker's key and id, the
+old key an alias) and reads the ticket back. Per tracker
+`settings.write_back.create_tickets`, **off by default** (Settings → Trackers
+→ Write-back → *Create tickets*, confirm-gated, Jira Cloud, Jira DC and
+Asana). Refused for a per-host token (`E_FORBIDDEN`), the setting off
+(`E_INVALID_STATE`), a tracker's ticket, an epic, a job, a proposal or a task
+under a task of fleet's own (`E_INVALID`). A failed promotion may be tried
+again. `TaskDetail.promotion` / `promote_targets` drive *Promote to
+ticket…* on the task page. Not yet: Linear and GitHub, sending assignees,
+due dates, priority, labels or estimates, epics, and the phone.
+
 Task attachments (migration 168, `work_item_attachments` and the
 content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept
 in SQLite so a hub backup carries them; a blob goes with the last live
