@@ -287,10 +287,14 @@ pub async fn run_print(
     let script = run
         .script()
         .map_err(|e| IpcError::new(crate::ipc_error::codes::E_VALIDATE, e))?;
+    // Through the login shell, as every fleet script runs: `bash -lc` with
+    // the script quoted once more for the remote shell's re-tokenizing (the
+    // `local` host joins the same words into its own `bash -c`).
+    let quoted = quote(&script);
     let out = ssh
         .run_with_stdin(
             host,
-            &[&script],
+            &["bash", "-lc", &quoted],
             run.stdin(prompt),
             Duration::from_secs(15),
             Duration::from_secs(run.timeout_secs.saturating_add(60)),

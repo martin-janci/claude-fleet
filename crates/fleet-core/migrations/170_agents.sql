@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
 );
 CREATE INDEX IF NOT EXISTS agent_jobs_due ON agent_jobs (state, next_attempt_at);
 CREATE INDEX IF NOT EXISTS agent_jobs_subject ON agent_jobs (agent, subject, created_at);
+-- The Runs list (`store::runs`) reads jobs newest first by created_at.
+CREATE INDEX IF NOT EXISTS agent_jobs_created ON agent_jobs (created_at);
 
 -- agent_actions: a write a job proposes (post a review, comment on a
 -- ticket, create a bug). `payload` is exactly what will be sent, so a

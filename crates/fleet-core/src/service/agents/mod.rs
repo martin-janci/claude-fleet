@@ -29,10 +29,10 @@
 //!   at most `agents.max_retries` times.
 //!
 //! The pollers and runners are injected ([`Registry`]), as the shepherd's
-//! executor is; step 1 of the design registers none, so both loops find no
-//! work until an agent lands.
+//! executor is; production registers the PR reviewer ([`review`]).
 
 pub mod admin;
+pub mod review;
 #[cfg(test)]
 mod tests;
 pub mod vehicle;
@@ -149,11 +149,12 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The production agents. None is registered yet (design step 1): the
-    /// reviewer lands in step 3, the support agent in step 6, each with the
-    /// SSH client its runs need.
-    pub fn live(_ssh: &Arc<SshClient>) -> Self {
-        Self::default()
+    /// The production agents: the PR reviewer. The support agent lands in
+    /// step 6 of the design.
+    pub fn live(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Self {
+        Registry {
+            agents: vec![review::agent(store, ssh)],
+        }
     }
 
     fn poller(&self, agent: &str) -> Option<&dyn AgentPoller> {
@@ -405,7 +406,7 @@ pub fn spawn_poll(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>, period: Durat
     let Some(flight) = take_flight(&RUNNING) else {
         return;
     };
-    let (store, reg) = (Arc::clone(store), Registry::live(ssh));
+    let (store, reg) = (Arc::clone(store), Registry::live(store, ssh));
     tokio::spawn(async move {
         let _flight = flight;
         let n = poll_with(&store, &reg, crate::store::now_unix()).await;
@@ -423,7 +424,7 @@ pub fn spawn_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>, period: Durati
     let Some(flight) = take_flight(&RUNNING) else {
         return;
     };
-    let (store, reg) = (Arc::clone(store), Registry::live(ssh));
+    let (store, reg) = (Arc::clone(store), Registry::live(store, ssh));
     tokio::spawn(async move {
         let _flight = flight;
         let n = run_with(&store, &reg, crate::store::now_unix()).await;

@@ -10,10 +10,11 @@
 //! | `jev`           | `decision_runs`        | one decision Jev was asked for (069)              |
 //! | `aux`           | `aux_usage`            | one of fleet's own `claude -p` runs (127)         |
 //! | `routine`       | `routine_runs`         | one fire of a routine, skipped ones included (131)|
+//! | `agent`         | `agent_jobs`           | one job of a built-in agent (reviewer, support; 170)|
 //!
 //! How each table's columns map onto a [`RunRow`] is written next to its
 //! branch below ([`TASKS_BRANCH`], [`ORCH_BRANCH`], [`JEV_BRANCH`],
-//! [`AUX_BRANCH`], [`ROUTINE_BRANCH`]).
+//! [`AUX_BRANCH`], [`ROUTINE_BRANCH`], [`AGENT_BRANCH`]).
 //!
 //! **Who may see which row is the service's to decide** (`service::runs`),
 //! not this file's: `store/` compares columns and has no `ViewScope` (R6-l).
@@ -38,7 +39,8 @@ use serde::{Deserialize, Serialize};
 /// - `planner`, `summary`, `commit_message`, `release_note`,
 ///   `morning_brief`, `brief`, `watch_summary`, `triage`, `context_help`: fleet's own
 ///   `claude -p` runs, by origin ([`super::AUX_ORIGINS`]);
-/// - `routine`: a routine's fire (a schedule, an event or Run now).
+/// - `routine`: a routine's fire (a schedule, an event or Run now);
+/// - `review`, `support`: a built-in agent's job (`service::agents`).
 pub const RUN_KINDS: &[&str] = &[
     "operator",
     "task",
@@ -54,6 +56,8 @@ pub const RUN_KINDS: &[&str] = &[
     "triage",
     "context_help",
     "routine",
+    "review",
+    "support",
 ];
 
 /// Every [`RunRow::outcome`], in plain words.
@@ -68,7 +72,7 @@ pub const RUN_KINDS: &[&str] = &[
 pub const RUN_OUTCOMES: &[&str] = &["ok", "failed", "needs_person", "nothing_to_do", "running"];
 
 /// Every [`RunRow::source`].
-pub const RUN_SOURCES: &[&str] = &["task", "orchestration", "jev", "aux", "routine"];
+pub const RUN_SOURCES: &[&str] = &["task", "orchestration", "jev", "aux", "routine", "agent"];
 
 /// A page's default size.
 pub const RUNS_DEFAULT_LIMIT: i64 = 50;
@@ -402,6 +406,38 @@ pub const ROUTINE_BRANCH: &str = "SELECT 'routine' AS src, rr.id AS rid, 'routin
      FROM routine_runs rr \
      LEFT JOIN routines r ON r.id = rr.routine_id";
 
+/// `agent_jobs` (alias `j`, its rule `ar`, migration 170): one job of a
+/// built-in agent.
+///
+/// - started_at: `created_at`, when its poll found it; ended_at: the last
+///   change of a finished job; duration: their difference, the wait for
+///   its debounce included.
+/// - outcome: `done` → ok; `failed` → failed, error = the job's; `skipped`
+///   → nothing_to_do (a draft, a diff too large, a head that moved: the
+///   reason is the summary); `needs_person` → needs_person; `pending` /
+///   `running` → running.
+/// - kind: the agent; owner: the rule's scope (`gh:o/r`), else the subject
+///   once the rule is gone; cost: `cost_micros`; host: the rule's. No org,
+///   mission or session: an agent works for the hub's owner.
+/// - summary: the subject and the trigger, and a skip's reason.
+pub const AGENT_BRANCH: &str = "SELECT 'agent' AS src, j.id AS rid, j.agent AS kind, \
+       COALESCE(ar.scope, j.subject) AS owner, j.created_at AS started_at, \
+       CASE WHEN j.state IN ('done', 'failed', 'skipped', 'needs_person') \
+            THEN j.updated_at END AS ended_at, \
+       CASE WHEN j.state IN ('done', 'failed', 'skipped', 'needs_person') \
+            THEN (j.updated_at - j.created_at) * 1000 END AS duration_ms, \
+       CASE j.state WHEN 'done' THEN 'ok' WHEN 'failed' THEN 'failed' \
+            WHEN 'skipped' THEN 'nothing_to_do' WHEN 'needs_person' THEN 'needs_person' \
+            ELSE 'running' END AS outcome, \
+       CASE WHEN j.state = 'failed' THEN COALESCE(j.error, 'failed') END AS error, \
+       j.cost_micros AS cost_micros, NULL AS model, ar.host_alias AS host, NULL AS org_id, \
+       NULL AS mission_id, NULL AS s1, NULL AS s2, \
+       j.subject || ' (' || j.trigger || ')' || \
+         COALESCE(': ' || CASE WHEN j.state = 'skipped' THEN j.error END, '') AS summary, \
+       NULL AS routine_id \
+     FROM agent_jobs j \
+     LEFT JOIN agent_rules ar ON ar.id = j.rule_id";
+
 /// The kinds and outcomes a source can produce, so a filter that no row of
 /// a source can match drops the whole branch instead of scanning it.
 fn branch_can_match(src: &str, f: &RunsFilter) -> bool {
@@ -413,6 +449,10 @@ fn branch_can_match(src: &str, f: &RunsFilter) -> bool {
         "orchestration" => (&["mission"], &["ok", "failed", "needs_person"]),
         "jev" => (&["jev"], &["ok", "failed", "needs_person", "nothing_to_do"]),
         "aux" => (super::AUX_ORIGINS, &["ok"]),
+        "agent" => (
+            &["review", "support"],
+            &["ok", "failed", "needs_person", "nothing_to_do", "running"],
+        ),
         _ => (
             &["routine"],
             &["ok", "failed", "needs_person", "nothing_to_do", "running"],
@@ -424,6 +464,9 @@ fn branch_can_match(src: &str, f: &RunsFilter) -> bool {
         && !((src == "jev" || src == "routine") && f.mission_id.is_some())
         // Only a routine fire belongs to a routine.
         && (src == "routine" || f.routine_id.is_none())
+        // An agent's job belongs to no org, mission or session.
+        && !(src == "agent"
+            && (f.org_id.is_some() || f.mission_id.is_some() || f.session_id.is_some()))
 }
 
 /// A JSON array of ids, for `IN (SELECT value FROM json_each(?))`.
@@ -476,6 +519,7 @@ pub(crate) fn union_sql(f: &RunsFilter) -> (String, Vec<Value>) {
             "orchestration" => (ORCH_BRANCH.replace("{ORCH_TASK}", ORCH_TASK), "e.at"),
             "jev" => (JEV_BRANCH.to_string(), "d.at"),
             "aux" => (AUX_BRANCH.replace("{AUX_SESSION}", AUX_SESSION), "a.at"),
+            "agent" => (AGENT_BRANCH.to_string(), "j.created_at"),
             _ => (ROUTINE_BRANCH.to_string(), "rr.started_at"),
         };
         match *src {
@@ -587,6 +631,10 @@ pub(crate) fn union_sql(f: &RunsFilter) -> (String, Vec<Value>) {
                     format!("(a.mission_id IN {IN_IDS} OR {AUX_SESSION} IN {IN_IDS})"),
                     [m, s],
                 ),
+                // An agent's job belongs to no session or mission: only
+                // whole-fleet spend sees it, as a Jev run about no session.
+                "agent" if *spend => {}
+                "agent" => w.push("0", []),
                 // `service::routines::sees_routine`: a fire is its routine's.
                 _ => w.push(format!("rr.routine_id IN {IN_IDS}"), [id_list(routines)]),
             }

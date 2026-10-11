@@ -52,6 +52,7 @@ mod read_cursors;
 mod read_pool;
 mod reconcile;
 mod reports;
+mod review_prs;
 mod routines;
 mod rows;
 mod runs;
@@ -187,6 +188,9 @@ pub use pull_requests::{
 pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
+pub use review_prs::{
+    NewReviewRecord, ReviewPrRow, ReviewRecordRow, REVIEW_PR_STATUSES, REVIEW_SKIP_REASONS,
+};
 pub use routines::{
     NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, ROUTINE_LEASE_SECS, ROUTINE_OVERLAPS,
     ROUTINE_RUN_OUTCOMES, ROUTINE_RUN_OUTCOME_SOURCES, ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,

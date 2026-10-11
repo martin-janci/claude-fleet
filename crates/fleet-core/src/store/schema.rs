@@ -1933,6 +1933,9 @@ const MIGRATIONS: &[Migration] = &[
     // Agent runtime (reviewer and support agents, step 1): `agent_rules`,
     // `agent_cursors`, `agent_jobs`, `agent_actions`. New tables, idempotent.
     Migration::plain(170, include_str!("../../migrations/170_agents.sql")),
+    // The PR reviewer (agents step 3): `review_prs`, `review_records`. New
+    // tables, idempotent.
+    Migration::plain(171, include_str!("../../migrations/171_review_prs.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

@@ -203,9 +203,8 @@ pub async fn prepare(
     expect_sha: Option<&str>,
 ) -> Result<(Prepared, String), IpcError> {
     let script = prepare_script(root, job_id, source, expect_sha).map_err(script_err)?;
-    let out = ssh
-        .run_bounded_capped(host, &[&script], CONNECT, PREPARE_WALL_CLOCK, 64 * 1024)
-        .await?;
+    let out =
+        crate::ssh::run_shell_bounded(ssh, host, &script, CONNECT, PREPARE_WALL_CLOCK).await?;
     Ok((
         parse_prepared(&String::from_utf8_lossy(&out.stdout)),
         workspace_dir(root, job_id),
@@ -218,9 +217,8 @@ pub async fn cleanup(ssh: &SshClient, host: &str, root: &str, job_id: i64) {
     let Ok(script) = cleanup_script(root, job_id) else {
         return;
     };
-    if let Err(e) = ssh
-        .run_bounded_capped(host, &[&script], CONNECT, CLEANUP_WALL_CLOCK, 16 * 1024)
-        .await
+    if let Err(e) =
+        crate::ssh::run_shell_bounded(ssh, host, &script, CONNECT, CLEANUP_WALL_CLOCK).await
     {
         tracing::warn!(host, job_id, error = %e.message, "[agents] workspace cleanup failed");
     }
@@ -231,9 +229,8 @@ pub async fn prune(ssh: &SshClient, host: &str, root: &str) {
     let Ok(script) = prune_script(root, STALE_WORKSPACE_MINS) else {
         return;
     };
-    if let Err(e) = ssh
-        .run_bounded_capped(host, &[&script], CONNECT, CLEANUP_WALL_CLOCK, 16 * 1024)
-        .await
+    if let Err(e) =
+        crate::ssh::run_shell_bounded(ssh, host, &script, CONNECT, CLEANUP_WALL_CLOCK).await
     {
         tracing::warn!(host, error = %e.message, "[agents] workspace prune failed");
     }

@@ -201,6 +201,9 @@ pub fn validate_grant(
             "config must be at most {AGENT_CONFIG_MAX_CHARS} characters"
         )));
     }
+    if agent == "review" {
+        crate::service::agents::review::ReviewConfig::parse(&config).map_err(invalid)?;
+    }
     let host = args
         .host
         .as_deref()
@@ -442,6 +445,15 @@ mod tests {
         let mut a = grant_args(pid);
         a.config = Some(serde_json::json!([1]));
         assert!(call(&st, &a, "x", 0).is_err());
+        for bad in [
+            serde_json::json!({ "max_turns": 0 }),
+            serde_json::json!({ "max_diff_lnes": 10 }),
+            serde_json::json!({ "test_blocking_importance": "low" }),
+        ] {
+            let mut a = grant_args(pid);
+            a.config = Some(bad.clone());
+            assert!(call(&st, &a, "x", 0).is_err(), "{bad}");
+        }
         let mut a = grant_args(pid);
         a.host = Some("nowhere".into());
         assert_eq!(call(&st, &a, "x", 0).unwrap_err().code, codes::E_NOTFOUND);

@@ -1,7 +1,7 @@
 # Reviewer and Support agents: design
 
-Status: steps 1 and 2 built (the runtime and the run vehicle, no agent
-registered yet), 2026-10-11.
+Status: steps 1 to 3 built (the runtime, the run vehicle, the reviewer at
+`watch`: it reviews and records, posts nothing), 2026-10-11.
 Asked for by the owner: bring the functionality of
 [`claude-code-reviewer`](https://github.com/martin-janci/claude-code-reviewer)
 and [`support-agent`](https://github.com/martin-janci/support-agent) into
@@ -464,9 +464,14 @@ dashboard pieces of the reviewer.
    `service/agents/workspace.rs` (prepare, cleanup, prune; tested against a
    real repository). The prune is wired into the run pass with the first
    agent, step 3, which knows each rule's checkout.
-3. **Reviewer, read side**: `review_prs`, the GitHub poller, `plan.rs`
-   and `diff.rs` with the ported tests, the run and its parse; level
-   `watch` works end to end (review stored and shown).
+3. **Reviewer, read side** (built): migration 171 (`review_prs`,
+   `review_records`), `service/agents/review/` (`plan.rs`, `diff.rs`,
+   `output.rs`, `prompt.rs` with the original's tests ported, the skill as
+   `skill.md`, the poller and runner behind a `ReviewHost` trait tested
+   with a fake host), the workspace prune at the start of each review, and
+   the jobs in the Runs list (`runs` source `agent`, kinds `review` and
+   `support`). Every level behaves as `watch` until step 4: the review is
+   recorded (`review_records.posted = 0`), nothing is posted.
 4. **Reviewer, write side**: `post.rs`, `propose` and `act`, verification,
    `/review` by polling; `tools/code-reviewer` deleted.
 5. **UI**: Automation › Agents rows, the agent page, Inbox actions;
