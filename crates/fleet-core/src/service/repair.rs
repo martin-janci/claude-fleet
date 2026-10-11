@@ -1342,6 +1342,18 @@ pub trait RepairExec: Send + Sync {
     async fn tmux_new_session(&self, name: &str, cwd: &str, pane_cmd: &str)
         -> Result<(), IpcError>;
     async fn tmux_respawn(&self, name: &str, cwd: &str, pane_cmd: &str) -> Result<(), IpcError>;
+    /// The command a tmux step launches: `spec.pane_cmd` sourcing the
+    /// session's environment ([`crate::service::env::prepare`], which
+    /// writes the env file on the host). Asked only when the plan has a
+    /// tmux step. Test doubles launch `spec.pane_cmd` as it is.
+    async fn launch_cmd(
+        &self,
+        store: &Mutex<Store>,
+        spec: &WorkspaceSpec,
+    ) -> Result<String, IpcError> {
+        let _ = store;
+        Ok(spec.pane_cmd.clone())
+    }
 }
 
 /// Production executor: local `bash -lc`, or `ssh <host> bash -lc '<script>'`
@@ -1446,6 +1458,22 @@ impl RepairExec for HostExec<'_> {
         self.tmux
             .respawn_pane_in(name, std::path::Path::new(cwd), pane_cmd)
             .await
+    }
+    async fn launch_cmd(
+        &self,
+        store: &Mutex<Store>,
+        spec: &WorkspaceSpec,
+    ) -> Result<String, IpcError> {
+        crate::service::env::prepare(
+            store,
+            self.ssh,
+            &self.host,
+            spec.project_id,
+            spec.session_id,
+            &Default::default(),
+            &spec.pane_cmd,
+        )
+        .await
     }
 }
 
@@ -1881,6 +1909,21 @@ async fn ensure_workspace_reporting(
         // Nothing git-side runs automatically; the caller decides.
         return Ok(report);
     }
+    // The pane a tmux step launches sources the session's environment.
+    // Resolved before any git step, so an unresolved variable refuses with
+    // the workspace untouched; skipped when no pane is (re)launched, so a
+    // repair that leaves tmux alone writes no env file and needs none.
+    let pane_cmd = if fix
+        .steps
+        .iter()
+        .any(|s| matches!(s, Step::TmuxCreate { .. } | Step::TmuxRespawn { .. }))
+    {
+        exec.launch_cmd(store, spec)
+            .await
+            .map_err(|e| fail(store, spec, e))?
+    } else {
+        spec.pane_cmd.clone()
+    };
 
     // ── adoption guard (explicit only: AdoptPath is never automatic) ────
     let adopt_path = fix.steps.iter().find_map(|s| match s {
@@ -2045,11 +2088,11 @@ async fn ensure_workspace_reporting(
     for step in &fix.steps {
         let res = match step {
             Step::TmuxCreate { cwd } => exec
-                .tmux_new_session(&spec.tmux_name, cwd, &spec.pane_cmd)
+                .tmux_new_session(&spec.tmux_name, cwd, &pane_cmd)
                 .await
                 .map(|_| "created"),
             Step::TmuxRespawn { cwd } => exec
-                .tmux_respawn(&spec.tmux_name, cwd, &spec.pane_cmd)
+                .tmux_respawn(&spec.tmux_name, cwd, &pane_cmd)
                 .await
                 .map(|_| "respawned"),
             _ => continue,
@@ -5540,6 +5583,60 @@ mod tests {
                 "no verify, no tmux after a lost apply"
             );
         }
+    }
+
+    /// The pane an explicit repair (re)creates sources the session's
+    /// environment from a file; no value is in the tmux command.
+    #[tokio::test]
+    async fn an_explicit_repair_launches_with_its_environment() {
+        use crate::ssh_fake::{unquote, FakeSsh, Match, Reply};
+        const ENV_PREFIX: &str = "__fleet_env_file=\"$HOME\"/'.claude-fleet/env/";
+        let fake = Arc::new(FakeSsh::new());
+        fake.with_home("/home/me");
+        let dead = HEALTHY_OUT.replace(
+            "tmux_alive=1\ntmux_cwd=/repo/.claude/worktrees/feat\ntmux_cwd_exists=1\n",
+            "tmux_alive=0\ntmux_dead=1\n",
+        );
+        fake.on_host(
+            "mefistos",
+            Match::script_contains("guess=1"),
+            Reply::ok(&remote_out(&dead)),
+        );
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        store
+            .lock()
+            .unwrap()
+            .set_env_var(
+                "global",
+                "",
+                "FLEET_T",
+                &crate::store::EnvValue::Plain("1".into()),
+            )
+            .unwrap();
+        let exec = fake_host_exec(&fake);
+        let rep = ensure_workspace(&remote_spec(), Policy::Explicit, vec![], &store, &exec)
+            .await
+            .unwrap();
+        assert_eq!(rep.tmux.as_deref(), Some("created"), "{rep:?}");
+        let calls = fake.calls_for("mefistos");
+        let tmux = calls
+            .iter()
+            .filter_map(|c| c.script())
+            .find(|s| s.contains("tmux new-session"))
+            .unwrap_or_else(|| panic!("no new-session: {:?}", fake.commands()));
+        let at = tmux
+            .find(" '__fleet_env_file=")
+            .unwrap_or_else(|| panic!("the pane does not source its environment: {tmux}"));
+        let pane = unquote(&tmux[at + 1..]).unwrap_or_else(|| panic!("{tmux}"));
+        assert!(pane.starts_with(ENV_PREFIX), "{pane}");
+        assert!(!pane.contains("FLEET_T=1"), "{pane}");
+        assert!(!tmux.contains("FLEET_T=1"), "{tmux}");
+        let body = calls
+            .iter()
+            .find(|c| c.is_upload())
+            .and_then(|c| c.stdin_str())
+            .expect("the env file was uploaded");
+        assert!(body.contains("export FLEET_T='1'"), "{body}");
     }
 
     // ── symlinked roots (macOS /var → /private/var, ~/projects → /mnt/…) ──

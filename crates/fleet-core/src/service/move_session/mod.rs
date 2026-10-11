@@ -2859,6 +2859,20 @@ async fn move_session_inner(
         &tmux_name,
         &snap.launch,
     );
+    // The target sources the session's environment: the target host's
+    // scope, the project's, and the source row's session scope (copied to
+    // the target row below). Before the workspace step; no store guard here.
+    let pane_cmd = crate::service::env::prepare(
+        store,
+        ssh,
+        &target,
+        snap.row.project_id,
+        Some(snap.row.id),
+        &Default::default(),
+        &pane_cmd,
+    )
+    .await
+    .map_err(|e| before_target("preparing the session's environment", e))?;
     let cwd = hooks
         .ensure_target_workspace(
             store,
@@ -3324,6 +3338,15 @@ async fn move_session_inner(
                 "[move_session] storing the launch options failed"
             );
         }
+        // The session-scope environment follows the session; the source's
+        // rows go with the source row when it is deleted.
+        if let Err(e) = s.copy_session_env(snap.row.id, row.id) {
+            tracing::warn!(
+                session_id = row.id,
+                error = %e,
+                "[move_session] copying the session's environment failed"
+            );
+        }
         // Usage (G1): the target's transcript is a whole-line prefix copy of
         // the source's, so its usage cursor starts where the source's stands
         // and the copied history is not counted twice.
@@ -3689,6 +3712,8 @@ mod tests {
         /// ran (`None` = no kill).
         moved_at_kill: Mutex<Option<bool>>,
         started: Mutex<Vec<(String, String)>>,
+        /// The pane command of every `start_target` call.
+        panes: Mutex<Vec<String>>,
         log: Mutex<Vec<String>>,
         /// What `pane_status` answers (the live pane of a stale-demoted
         /// source); `None` = cannot tell. Each ask is logged `pane <id>`.
@@ -3718,6 +3743,7 @@ mod tests {
                 mid_move_answers: Mutex::new(None),
                 moved_at_kill: Mutex::new(None),
                 started: Mutex::new(Vec::new()),
+                panes: Mutex::new(Vec::new()),
                 log: Mutex::new(Vec::new()),
                 pane: None,
                 target_owner: None,
@@ -3769,6 +3795,7 @@ mod tests {
             }
             .new_session(name, std::path::Path::new(cwd), pane_cmd)
             .await?;
+            self.panes.lock().unwrap().push(pane_cmd.to_string());
             if self.grow_source_on_start {
                 self.fake.on_host(
                     "alpha",
@@ -4155,6 +4182,65 @@ mod tests {
                 "handoff:started",
                 "handoff:done",
             ]
+        );
+    }
+
+    /// The target starts sourcing the session's environment, and the
+    /// session scope (a secret included) follows the session to its new row.
+    #[tokio::test]
+    async fn move_launches_the_target_with_its_environment() {
+        use crate::store::{EnvSource, EnvValue, Secret};
+        const ENV_PREFIX: &str = "__fleet_env_file=\"$HOME\"/'.claude-fleet/env/";
+        let f = fixture();
+        {
+            let s = f.store.lock().unwrap();
+            s.set_env_var("global", "", "FLEET_T", &EnvValue::Plain("1".into()))
+                .unwrap();
+            s.set_env_var(
+                "session",
+                &f.source_id.to_string(),
+                "SESS_SECRET",
+                &EnvValue::Secret(Secret::new("sess-secret-4471")),
+            )
+            .unwrap();
+        }
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false).await.expect("move");
+        let panes = hooks.panes.lock().unwrap().clone();
+        assert_eq!(panes.len(), 1, "{panes:?}");
+        assert!(panes[0].starts_with(ENV_PREFIX), "{}", panes[0]);
+        assert!(!panes[0].contains("FLEET_T=1"), "{}", panes[0]);
+        assert!(!panes[0].contains("sess-secret-4471"), "{}", panes[0]);
+        let body = f
+            .fake
+            .calls_for("beta")
+            .iter()
+            .filter(|c| c.is_upload())
+            .filter_map(|c| c.stdin_str())
+            .find(|b| b.contains("export FLEET_T="))
+            .expect("the env file was uploaded to the target");
+        assert!(body.contains("export FLEET_T='1'"), "{body}");
+        assert!(
+            body.contains("export SESS_SECRET='sess-secret-4471'"),
+            "{body}"
+        );
+        let on_target = f
+            .store
+            .lock()
+            .unwrap()
+            .env_for_launch("beta", None, Some(rep.target_session_id))
+            .unwrap();
+        let secret = on_target
+            .iter()
+            .find(|(n, _)| n == "SESS_SECRET")
+            .map(|(_, src)| match src {
+                EnvSource::Value(v) => v.expose().to_string(),
+                EnvSource::Ref(r) => panic!("a reference: {r}"),
+            });
+        assert_eq!(
+            secret.as_deref(),
+            Some("sess-secret-4471"),
+            "the session scope was copied to the target row"
         );
     }
 

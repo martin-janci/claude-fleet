@@ -218,6 +218,20 @@ impl Store {
         Ok(merged.into_iter().map(|(n, (_, s))| (n, s)).collect())
     }
 
+    /// Copy session `from`'s session-scope rows onto session `to` (a moved
+    /// session's new row), secrets and references included, replacing any
+    /// `to` already has under the same name. Nothing leaves the store.
+    pub fn copy_session_env(&self, from: i64, to: i64) -> Result<(), IpcError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO env_vars \
+               (scope, scope_key, name, value, credential_ref, secret, updated_at) \
+             SELECT 'session', ?2, name, value, credential_ref, secret, updated_at FROM env_vars \
+             WHERE scope = 'session' AND scope_key = ?1",
+            rusqlite::params![from.to_string(), to.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// Stored secret values, for the diagnostics bundle's literal masking.
     pub fn env_secret_literals(&self) -> Result<Vec<String>, IpcError> {
         let mut st = self
@@ -397,9 +411,10 @@ mod tests {
         }
         assert_eq!(
             src.matches("FROM env_vars").count(),
-            4,
+            5,
             "env_vars is read by list_env_vars, env_for_launch, \
-             env_secret_literals and deleted by unset_env_var only"
+             env_secret_literals and copy_session_env, and deleted by \
+             unset_env_var only"
         );
     }
 }

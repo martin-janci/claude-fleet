@@ -8203,6 +8203,7 @@ mod env_launch {
                      case \"$1\" in\n\
                      new-session) printf '%s\\n' \"$name\" >> \"$d/live\"; printf '%s\\n' \"$last\" >> \"$d/panes.log\";;\n\
                      respawn-pane) printf '%s\\n' \"$last\" >> \"$d/panes.log\";;\n\
+                     capture-pane) if [ -e \"$d/trust\" ]; then printf 'Do you trust the files in this folder?\\n ❯ 1. Yes, proceed\\n   2. No\\n'; fi;;\n\
                      list-sessions)\n\
                        if [ ! -s \"$d/live\" ]; then echo 'no server running on /tmp/fake'; exit 1; fi\n\
                        case \"$*\" in\n\
@@ -8489,6 +8490,34 @@ mod env_launch {
             let body = std::fs::read_to_string(env_file_of(&h.home(), pane)).unwrap();
             assert!(body.contains("export P='proj-v'"), "{pane}: {body}");
         }
+    }
+
+    /// A review session's pane sources the environment too (its project's
+    /// scope; the review row does not exist yet, so no session scope).
+    #[tokio::test]
+    async fn a_review_session_launches_with_its_environment() {
+        let h = Harness::new();
+        let row = new_session(h.args("dev-env-review", None), &h.store, &h.ssh, &h.reg)
+            .await
+            .expect("create");
+        h.set_global("FLEET_T", EnvValue::Plain("1".into()));
+        // The pane shows the trust dialog, so the prompt seed gives up at
+        // once instead of waiting for a REPL the fake never draws.
+        std::fs::write(h.dir.path().join("trust"), "").unwrap();
+        let review = serde_json::from_value(serde_json::json!({
+            "source_session_id": row.id, "prompt": "review it"
+        }))
+        .unwrap();
+        spawn_review(review, &h.store, &h.ssh)
+            .await
+            .expect("spawn_review");
+        let panes = h.panes();
+        assert_eq!(panes.len(), 2, "{panes:?}");
+        let pane = &panes[1];
+        assert!(pane.starts_with(PREFIX), "{pane}");
+        assert!(!pane.contains("FLEET_T=1"), "{pane}");
+        let body = std::fs::read_to_string(env_file_of(&h.home(), pane)).unwrap();
+        assert!(body.contains("export FLEET_T='1'"), "{body}");
     }
 
     #[tokio::test]
