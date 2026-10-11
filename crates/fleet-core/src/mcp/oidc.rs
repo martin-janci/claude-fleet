@@ -1022,5 +1022,6 @@ fn device_name_for(person: &str, taken: &[String]) -> String {
     }
 }
 
+mod jwks;
 #[cfg(test)]
 mod tests;
