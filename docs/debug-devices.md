@@ -88,9 +88,11 @@ Mirror waits about 5 s (scrcpy's start-up grace) before it reports success.
 
 While a mirror runs it claims the device with the note `scrcpy mirror`
 (30 minutes, renewed every 10). The claim is released when the window closes
-or on **Stop mirror**. A claim you already held when you pressed Mirror is
-kept exactly as it was (expiry and note) and is not released when the mirror
-ends. If the mirror's claim lapses (the laptop slept) and someone else claims
+or on **Stop mirror**. On a standalone desktop, a claim you already held
+when you pressed Mirror is kept exactly as it was (expiry and note) and is
+not released when the mirror ends. On a paired desktop the mirror takes the
+claim and releases it when it ends, until the hub can tell a client its own
+claims. If the mirror's claim lapses (the laptop slept) and someone else claims
 the device, the mirror leaves their claim alone. Mirroring a device that is
 already mirrored is refused (`E_EXISTS`) and leaves the running mirror's
 claim alone. If the app quits, scrcpy is killed and the claim lapses on its

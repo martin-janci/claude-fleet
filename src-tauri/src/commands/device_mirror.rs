@@ -121,19 +121,16 @@ pub async fn start_device_mirror(
     }
     let home = fleet_core::home::home_dir().unwrap_or_default();
     let tools = mirror::tools::find(&|k| std::env::var(k).ok(), &home)?;
-    // The holder the claim command records for this desktop: the desktop
-    // person standalone, the paired client on the hub (`Caller::label`).
-    let holder = match backend.hub() {
-        None => Asker::desktop().holder,
-        Some(hub) => format!("client:{}", hub.config().client_name),
-    };
+    // A claim counts as already ours only standalone: a paired client's name
+    // is stored locally and can go stale, so hub mode never trusts it.
+    let pre_held = backend.hub().is_none() && mirror::held_by(&d, &Asker::desktop().holder);
     let lease = Arc::new(OwnedLease::new(
         Arc::new(DesktopLease {
             backend: backend.inner().clone(),
             store: store.inner().clone(),
             id: d.id,
         }),
-        mirror::held_by(&d, &holder),
+        pre_held,
     ));
     lease.renew().await?; // takes the claim; E_CONFLICT names another holder
     let exec: Arc<dyn SshExec> = ssh.inner().clone();
