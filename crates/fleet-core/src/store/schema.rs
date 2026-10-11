@@ -1968,6 +1968,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/172_tracker_comment_writes.sql"),
         already_applied: Some(tracker_writes_has_remote_url),
     },
+    // Persona dashboards step 6: dashboards a person pinned, on the hub.
+    // `IF NOT EXISTS` throughout, so idempotent.
+    Migration::plain(
+        173,
+        include_str!("../../migrations/173_pinned_dashboards.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

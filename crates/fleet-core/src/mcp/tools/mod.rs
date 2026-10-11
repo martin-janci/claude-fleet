@@ -40,6 +40,7 @@ use std::sync::{Arc, Mutex};
 mod add_account;
 mod api_tokens;
 mod assets;
+mod dashboards;
 mod devices;
 mod downloads;
 mod fleet;
@@ -392,6 +393,7 @@ impl FleetTools {
             + Self::routines_router()
             + Self::start_rules_router()
             + Self::wizard_state_router()
+            + Self::dashboards_router()
             + Self::presence_router()
             + Self::library_router()
             + Self::runs_router()

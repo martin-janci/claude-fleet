@@ -10,15 +10,18 @@
   agent answers with a new block of the same id to pin over this one.
 -->
 <script lang="ts">
+  import { onMount } from 'svelte';
   import Button from './kit/Button.svelte';
   import DashboardBody from './DashboardBody.svelte';
   import { workspace, WORKSPACES, workspacePreset } from './workspace';
   import { askAgent } from './operator';
+  import { pushError } from './toasts';
   import {
     BUILTIN_DASHBOARDS,
     changePrompt,
     pinnedDashboards,
     shownDashboard,
+    loadPinned,
     unpinDashboard,
     type Dashboard,
     type PinnedDashboard,
@@ -45,10 +48,15 @@
     void askAgent(changePrompt(dash, widget));
   }
 
-  function unpin() {
+  // Pinned on another device since this window last read them: re-read on
+  // every visit.
+  onMount(() => void loadPinned());
+
+  async function unpin() {
     if (!pinned) return;
-    unpinDashboard(pinned.id);
-    shownDashboard.set(null);
+    const r = await unpinDashboard(pinned.id);
+    if (r.ok) shownDashboard.set(null);
+    else pushError(r.error, 'Unpin the dashboard');
   }
 
   function clock(unix: number | null): string {

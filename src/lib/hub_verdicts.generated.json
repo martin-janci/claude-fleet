@@ -145,6 +145,7 @@
     "control_route_follow",
     "control_route_propose",
     "create_work_task",
+    "dashboards",
     "debug_device_logs",
     "debug_device_screenshot",
     "decide_guide",

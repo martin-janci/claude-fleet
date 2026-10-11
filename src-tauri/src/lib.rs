@@ -639,6 +639,7 @@ pub fn run() {
             commands::prs::list_pull_requests,
             commands::start_rules::start_rules,
             commands::wizard_state::wizard_state,
+            commands::dashboards::dashboards,
             commands::api_tokens::api_tokens,
             commands::add_account::add_account,
             commands::presence::session_presence,

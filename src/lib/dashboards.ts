@@ -10,10 +10,11 @@
 //
 // Step 5: an agent proposes a dashboard as a `dashboard` chat block
 // (docs/chat-blocks.md), the card draws it live, and the person pins it.
-// Pinned dashboards are kept on this device, as the workspace is. A change
+// Step 6: pinned dashboards are kept on the hub, per person, so every
+// device of theirs shows them and the agent reads them. A change
 // goes back through the agent: "Change" puts the dashboard as it is into
 // the agent's composer, and its answer is a new block with the same id.
-import { get, writable } from 'svelte/store';
+import { writable } from 'svelte/store';
 import { readPref, writePref } from './prefs';
 import { checkUiBlock, UI_SPEC } from './rich_blocks';
 import { invokeCmd, type Result } from './result';
@@ -284,18 +285,18 @@ export function shortDate(unix: number | null | undefined): string {
 }
 
 // ---------------------------------------------------------------------------
-// Pinned dashboards (step 5)
+// Pinned dashboards (steps 5 and 6)
 
 /** A dashboard the person pinned from an agent's proposal. */
 export type PinnedDashboard = Dashboard & {
-  /** When it was pinned or last replaced, unix seconds. */
+  /** When it was first pinned, unix seconds. */
   pinned_at: number;
   /** The agent's one sentence on why, as the block gave it. */
   why?: string;
 };
 
-const PINNED_KEY = 'ui.dashboards.pinned';
-/** The most dashboards one device keeps pinned. */
+/** The most dashboards one person keeps pinned (`MAX_PINNED` in
+ *  service/dashboards.rs). */
 export const MAX_PINNED = 20;
 
 /** The block a dashboard is written as: the agent's own format. */
@@ -303,26 +304,73 @@ export function dashboardBlock(d: Dashboard): Record<string, unknown> {
   return { spec: UI_SPEC, kind: 'dashboard', id: d.id, title: d.title, intro: d.intro, widgets: d.widgets };
 }
 
-/** A stored list, each entry checked again as a block: a pref edited by
- *  hand, or written by an older app, never reaches the page unchecked. */
+/** A pinned dashboard as the hub answers it (`PinnedDashboardRow`). */
+interface PinnedRow {
+  id: string;
+  title: string;
+  spec: unknown;
+  why?: string | null;
+  pinned_at: number;
+}
+
+/** A block checked again as the card checks it: a row a newer build wrote,
+ *  or a pref edited by hand, never reaches the page unchecked. */
+function fromBlock(spec: unknown, pinned_at: number, why?: string | null): PinnedDashboard | null {
+  const c = checkUiBlock(JSON.stringify(spec));
+  if (!c.ok || c.block.kind !== 'dashboard') return null;
+  const { kind: _k, why: _w, ...d } = c.block;
+  return { ...d, pinned_at, ...(why ? { why } : {}) };
+}
+
+/** The person's pinned dashboards, as the last read or write left them.
+ *  Kept on the hub (`dashboards` tool), so every device of theirs shows
+ *  the same; a standalone desktop keeps them in its own store. */
+export const pinnedDashboards = writable<PinnedDashboard[]>([]);
+
+/** Step 5 kept pins in this device's local storage: the first read moves
+ *  them to the hub, then forgets them here. */
+const LOCAL_KEY = 'ui.dashboards.pinned';
+
 function isList(v: unknown): v is unknown[] {
   return Array.isArray(v);
 }
 
-function readPinned(): PinnedDashboard[] {
-  return readPref<unknown[]>(PINNED_KEY, [], isList).flatMap((raw) => {
+function localPins(): PinnedDashboard[] {
+  return readPref<unknown[]>(LOCAL_KEY, [], isList).flatMap((raw) => {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return [];
     const x = raw as PinnedDashboard;
-    const c = checkUiBlock(JSON.stringify(dashboardBlock(x)));
-    if (!c.ok || c.block.kind !== 'dashboard') return [];
-    const { kind: _k, why: _w, ...d } = c.block;
-    const pinned_at = typeof x.pinned_at === 'number' ? x.pinned_at : 0;
-    return [{ ...d, pinned_at, ...(typeof x.why === 'string' && x.why ? { why: x.why } : {}) }];
+    const d = fromBlock(dashboardBlock(x), typeof x.pinned_at === 'number' ? x.pinned_at : 0, x.why);
+    return d ? [d] : [];
   });
 }
 
-export const pinnedDashboards = writable<PinnedDashboard[]>(readPinned());
-pinnedDashboards.subscribe((list) => writePref(PINNED_KEY, list));
+function call<T>(args: Record<string, unknown>): Promise<Result<T>> {
+  return invokeCmd<T>('dashboards', { args });
+}
+
+let loading: Promise<void> | null = null;
+
+/** Read the pinned dashboards again; moves step 5's local pins first. */
+export async function loadPinned(): Promise<void> {
+  const r = await call<PinnedRow[]>({ action: 'list' });
+  if (!r.ok || !Array.isArray(r.value)) return;
+  let rows = r.value;
+  const local = localPins().filter((d) => !rows.some((x) => x.id === d.id));
+  for (const d of local) {
+    const p = await call<PinnedRow>({ action: 'pin', dashboard: dashboardBlock(d), ...(d.why ? { why: d.why } : {}) });
+    if (p.ok) rows = [...rows, p.value];
+  }
+  if (local.length || readPref<unknown[]>(LOCAL_KEY, [], isList).length) writePref(LOCAL_KEY, []);
+  pinnedDashboards.set(rows.flatMap((x) => fromBlock(x.spec, x.pinned_at, x.why) ?? []));
+}
+
+/** Read them once per window; the page and the cards call it on mount. */
+export function ensurePinned(): Promise<void> {
+  loading ??= loadPinned().catch(() => {
+    loading = null;
+  });
+  return loading;
+}
 
 /** The id of every built-in: a proposal may not take one over. */
 export const BUILTIN_IDS: ReadonlySet<string> = new Set(Object.values(BUILTIN_DASHBOARDS).map((d) => d.id));
@@ -333,7 +381,7 @@ export function sameDashboard(a: Dashboard, b: Dashboard): boolean {
 }
 
 /** What pinning `d` would do: add it, replace the pinned one of its id, or
- *  nothing (`same`). `full` when the device already keeps MAX_PINNED. */
+ *  nothing (`same`). `full` when the person already keeps MAX_PINNED. */
 export type PinState = 'new' | 'replace' | 'same' | 'full' | 'builtin';
 
 export function pinStateOf(d: Dashboard, pinned: readonly PinnedDashboard[]): PinState {
@@ -343,27 +391,24 @@ export function pinStateOf(d: Dashboard, pinned: readonly PinnedDashboard[]): Pi
   return pinned.length >= MAX_PINNED ? 'full' : 'new';
 }
 
-/** Pin `d`, or replace the pinned one of its id in place. False when it
- *  cannot be pinned (a built-in's id, or the device is full). */
-export function pinDashboard(d: Dashboard, why?: string, now = Math.floor(Date.now() / 1000)): boolean {
-  const list = get(pinnedDashboards);
-  const state = pinStateOf(d, list);
-  if (state === 'builtin' || state === 'full') return false;
-  const entry: PinnedDashboard = {
-    id: d.id,
-    title: d.title,
-    intro: d.intro,
-    widgets: d.widgets,
-    pinned_at: now,
-    ...(why ? { why } : {}),
-  };
-  const at = list.findIndex((p) => p.id === d.id);
-  pinnedDashboards.set(at >= 0 ? list.map((p, k) => (k === at ? entry : p)) : [...list, entry]);
-  return true;
+/** Pin `d` on the hub, or replace the pinned one of its id in place. The
+ *  hub checks the block again and refuses a built-in's id or a full list. */
+export async function pinDashboard(d: Dashboard, why?: string): Promise<Result<PinnedDashboard>> {
+  const r = await call<PinnedRow>({ action: 'pin', dashboard: dashboardBlock(d), ...(why ? { why } : {}) });
+  if (!r.ok) return r;
+  const entry = fromBlock(r.value.spec, r.value.pinned_at, r.value.why);
+  if (!entry) return { ok: false, error: { code: 'E_INVALID', message: 'the hub kept a dashboard this app cannot draw' } };
+  pinnedDashboards.update((list) =>
+    list.some((p) => p.id === entry.id) ? list.map((p) => (p.id === entry.id ? entry : p)) : [...list, entry],
+  );
+  return { ok: true, value: entry };
 }
 
-export function unpinDashboard(id: string): void {
+export async function unpinDashboard(id: string): Promise<Result<boolean>> {
+  const r = await call<{ removed: boolean }>({ action: 'unpin', id });
+  if (!r.ok) return r;
   pinnedDashboards.update((list) => list.filter((p) => p.id !== id));
+  return { ok: true, value: r.value.removed };
 }
 
 /** In words, what a replacement changes: widgets added, removed and
