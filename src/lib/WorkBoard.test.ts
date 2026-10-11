@@ -110,6 +110,22 @@ describe('WorkBoard', () => {
     );
   });
 
+  it('keeps a bare key with no live session off the board and says so under To do', async () => {
+    const p = page();
+    p.tasks.push(
+      task({ task_id: 'ref:ABC-338', item_id: null, key: 'ABC-338', title: '', kind: 'ref', status_category: null, counts: { active: 0, ended: 2, suggested: 0 }, sessions: [], last_activity_at: NOW }),
+      task({ task_id: 'ref:ABC-220', item_id: null, key: 'ABC-220', title: '', kind: 'ref', status_category: null, counts: { active: 1, ended: 0, suggested: 0 }, last_activity_at: NOW }),
+    );
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => (cmd === 'work_tree' ? p : null));
+    render(WorkBoard);
+    await flush();
+    expect(screen.getByTestId('work-board').textContent).not.toContain('ABC-338');
+    expect(column('doing').textContent).toContain('ABC-220');
+    expect(column('todo').querySelector('[data-testid="work-board-unplaced"]')?.textContent).toBe(
+      '1 task not shown: it has no status and no live session. Grouped lists it.',
+    );
+  });
+
   it('says who has each card and when it is due ("You · Fri"); an overdue date is marked', async () => {
     const ymd = (d: Date) =>
       `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;

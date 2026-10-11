@@ -83,6 +83,7 @@
     boardStep,
     displayTitle,
     groupTasksForBoard,
+    unplacedNote,
     type BoardLane,
     type TaskNode,
   } from './task_list';
@@ -124,11 +125,15 @@
   const columns = $derived(
     groupTasksForBoard(tasks, Math.floor(Date.now() / 1000), overrides, moved, typeof scope !== 'number'),
   );
+  const unplaced = $derived(unplacedNote(columns.unplaced));
   /** Some column is a tracker's own name: say where the columns come from. */
   const trackerLanes = $derived(columns.lanes.some((l) => l.id !== l.status));
   const laneById = (id: string | undefined) => columns.lanes.find((l) => l.id === id);
-  /** The column a card shows in now: a pending move's, else its own. */
-  const laneOfCard = (t: WorkTask): BoardLane => laneById(overrides.get(t.task_id)) ?? boardLaneOf(t);
+  /** The column a card shows in now: a pending move's, else its own. Only a
+   *  card on the board is asked, so it has a column (`groupTasksForBoard`
+   *  leaves out a task with none). */
+  const laneOfCard = (t: WorkTask): BoardLane =>
+    laneById(overrides.get(t.task_id)) ?? boardLaneOf(t) ?? columns.lanes[0];
 
   let sprintSeq = 0;
   async function loadSprints() {
@@ -559,6 +564,9 @@
           {#if nodes.length === 0}<p class="muted empty">Nothing here.</p>{/if}
           {#if lane.id === 'done' && columns.doneHidden > 0}
             <p class="muted empty" data-testid="work-board-done-hidden">{columns.doneHidden} older not shown</p>
+          {/if}
+          {#if lane.id === 'todo' && unplaced}
+            <p class="muted empty" data-testid="work-board-unplaced">{unplaced}</p>
           {/if}
         </div>
       {/each}
