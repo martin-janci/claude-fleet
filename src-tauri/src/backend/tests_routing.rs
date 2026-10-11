@@ -2142,6 +2142,31 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Context help at the composer: the request crosses flat, beside
+        // the session id, as SessionContextHelpParams takes it.
+        (
+            "session_context_help",
+            "session_context_help",
+            json!({ "session_id": 42, "question": "why?", "line": "/plan", "history": ["fix it"], "commands": ["/plan — Plan"] }),
+            r#"{"answer":"Use /plan.","model":"haiku","host_alias":"h","history_items":1,"at":1791466000}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::context_help::routed::session_context_help(
+                    b,
+                    commands::context_help::SessionContextHelpArgs {
+                        session_id: 42,
+                        request: fleet_core::service::context_help::HelpRequest {
+                            question: "why?".into(),
+                            line: "/plan".into(),
+                            history: vec!["fix it".into()],
+                            commands: vec!["/plan — Plan".into()],
+                        },
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "session_access",
             "session_access",
@@ -8136,6 +8161,25 @@ fn a_hub_before_contract_17_reads_as_nothing_saved_and_nothing_proposed() {
         assert_eq!(got, want, "{action}");
         assert_eq!(fake.only_call().0, "wizard_state", "{action}");
     }
+    // Context help has nothing to fall back to: it says the hub needs
+    // updating, rather than the transport's own words.
+    let fake = unknown_tool();
+    let e = block_on(commands::context_help::routed::session_context_help(
+        &remote_backend(&fake),
+        commands::context_help::SessionContextHelpArgs {
+            session_id: 42,
+            request: fleet_core::service::context_help::HelpRequest {
+                line: "/plan".into(),
+                ..Default::default()
+            },
+        },
+        &st,
+        &ssh(),
+    ))
+    .expect_err("no tool, no answer");
+    assert_eq!(e.code, codes::E_HUB_PROTOCOL);
+    assert!(e.message.contains("hub updated"), "{e:?}");
+    assert_eq!(fake.only_call().0, "session_context_help");
     // Any other refusal is still an error.
     let fake = Fake::answering("not json");
     let got = block_on(commands::account_usage::routed::propose_host_placement(

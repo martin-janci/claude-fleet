@@ -260,4 +260,8 @@
 //!   `progress_token` and reports `repair:progress` frames (event kind
 //!   `repair`). Additive: `fleet_health` carries `devices`,
 //!   `playbooks_week` and `decide.week`.
+//!   `session_context_help` (the composer's context help, for a person a
+//!   session is shared with at `answer` or `drive` too) is new as well; a
+//!   revision-16 hub has no such tool, and the desktop says the hub needs
+//!   updating for context help.
 pub const CONTRACT_REVISION: u32 = 17;

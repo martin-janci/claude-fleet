@@ -163,6 +163,8 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 /// owner's rule: a desktop that updates before its hub keeps working.
 /// Downloads Pause (`pause_download`, G7.15) is refused there with that
 /// same `E_HUB_PROTOCOL`, which the sheet words as "the hub needs updating first".
+/// The composer's context help (`session_context_help`) likewise answers
+/// that the hub needs updating for context help.
 pub const MIN_HUB_CONTRACT: u32 = 16;
 
 /// The highest hub wire-contract revision this build understands. A hub
@@ -195,7 +197,8 @@ pub const MIN_HUB_CONTRACT: u32 = 16;
 ///
 /// Raised to 16 with revision 16 (gap plan M15 batch 2).
 ///
-/// Raised to 17 with revision 17 (gap plan batch 3, G7.2 and G7.3).
+/// Raised to 17 with revision 17 (gap plan batch 3, G7.2 and G7.3, and
+/// `session_context_help`).
 pub const MAX_HUB_CONTRACT: u32 = 17;
 
 /// Where a hub's wire-contract revision stands against what this build
