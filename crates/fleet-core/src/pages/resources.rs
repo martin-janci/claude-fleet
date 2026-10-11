@@ -1324,6 +1324,11 @@ const DEBUG_DEVICE: ResourceType = ResourceType {
             .result(ResultView::Output),
         ActionSpec::new("debug_device.logs", "Logs", "debug_device_logs", &[DEBUG_DEVICE_ID]).result(ResultView::Output),
         ActionSpec::new("debug_device.screenshot", "Screenshot", "debug_device_screenshot", &[DEBUG_DEVICE_ID]).result(ResultView::Image),
+        ActionSpec::new("debug_device.mirror", "Mirror", "start_device_mirror", &[DEBUG_DEVICE_ID])
+            .variants(&["physical", "emulator"])
+            .result(ResultView::Output),
+        ActionSpec::new("debug_device.mirror_stop", "Stop mirror", "stop_device_mirror", &[DEBUG_DEVICE_ID])
+            .variants(&["physical", "emulator"]),
         ActionSpec::new("debug_device.release", "Release claim", "release_debug_device", &[DEBUG_DEVICE_ID])
             .confirm("Whoever holds it loses the claim; another session may then use the device."),
         ActionSpec::new("debug_device.boot", "Start", "boot_debug_device", &[DEBUG_DEVICE_ID]).variants(&["emulator", "simulator"]),
@@ -1651,6 +1656,8 @@ mod tests {
                 "set_org_setting",
                 "set_tracker_credential",
                 "shutdown_debug_device",
+                "start_device_mirror",
+                "stop_device_mirror",
                 "test_tracker",
                 "unlink_peer_hub",
                 "update_debug_device",
