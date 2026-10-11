@@ -756,6 +756,26 @@ pub fn task_visible_in_scope(
         Some(id) => s.get_session_by_id(id)?,
         None => None,
     };
+    // A mission's headless check (`work::orchestrate::checks`) names no
+    // session: it ran in the checkout of the item's implementation and read
+    // its code, so it is shown to whoever sees that implementation's worker,
+    // and to nobody else (no implementation, or one whose worker is gone:
+    // fail closed, as the pure check does).
+    if task.requester_session_id.is_none()
+        && task.worker_session_id.is_none()
+        && task.detached_at.is_none()
+        && !scope.is_unrestricted()
+    {
+        if let Some(item) = task.work_item_id {
+            let implementer = s
+                .latest_item_task(item, "implement")?
+                .and_then(|t| t.worker_session_id)
+                .map(|w| s.get_session_by_id(w))
+                .transpose()?
+                .flatten();
+            return Ok(implementer.is_some_and(|r| scope.sees_session_row(&r).is_visible()));
+        }
+    }
     Ok(task_visible_in_scope_pure(
         task,
         requester.as_ref(),

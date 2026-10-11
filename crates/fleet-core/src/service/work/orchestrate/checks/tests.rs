@@ -374,3 +374,48 @@ fn a_lost_headless_check_is_failed_after_its_deadline() {
     assert_eq!(verdict(since + DEADLINE_SECS - 1), None);
     assert!(verdict(since + DEADLINE_SECS + 1).is_some());
 }
+
+/// A headless check names no session: whoever sees the implementation's
+/// worker sees it, and nobody else (a person's Start wave and graph read it
+/// through this).
+#[test]
+fn a_headless_check_is_shown_to_whoever_sees_the_implementer() {
+    use crate::mcp::auth::{Caller, ClientRef, TokenMode};
+    let (s, item) = world();
+    let ana = s.create_person("ana", None).unwrap().id;
+    let bob = s.create_person("bob", None).unwrap().id;
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET owner_person_id = ?1, visibility = 'private'",
+            [ana],
+        )
+        .unwrap();
+    let t = record_headless_run(&s, "review it", item, 1, "review").unwrap();
+    let person = |id| {
+        Caller {
+            api: None,
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 7,
+                name: "phone".into(),
+                trusted: false,
+                org_id: None,
+                person_id: Some(id),
+            }),
+            mode: TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
+        }
+        .view_scope(&s)
+        .unwrap()
+    };
+    let sees = |v: &ViewScope| crate::service::tasks::task_visible_in_scope(&s, &t, v).unwrap();
+    assert!(sees(&person(ana)), "the implementer's owner");
+    assert!(!sees(&person(bob)), "someone else");
+    assert!(sees(&ViewScope::internal()));
+    // No implementation left to judge by: nobody but the hub.
+    s.conn_ref()
+        .execute("DELETE FROM tasks WHERE role = 'implement'", [])
+        .unwrap();
+    assert!(!sees(&person(ana)));
+}
