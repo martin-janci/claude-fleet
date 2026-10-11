@@ -367,6 +367,11 @@ pub const ORCHESTRATOR_MAX_LEVEL: &str = "orchestrator.max_level";
 pub const ORCHESTRATOR_HEADLESS_CHECKS: &str = "orchestrator.headless_checks";
 /// The model [`ORCHESTRATOR_HEADLESS_CHECKS`] runs (one of [`SUMMARY_MODELS`]).
 pub const ORCHESTRATOR_HEADLESS_MODEL: &str = "orchestrator.headless_model";
+/// Control's chat sends the option an agent's `choices` card marks
+/// `recommended` once nobody has answered for
+/// [`CONTROL_AUTO_CONTINUE_MINUTES`] (`src/lib/auto_continue.ts`).
+pub const CONTROL_AUTO_CONTINUE: &str = "control.auto_continue";
+pub const CONTROL_AUTO_CONTINUE_MINUTES: &str = "control.auto_continue_minutes";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
 /// Recreates the `oom` playbook may run on one session per 24 h
 /// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
@@ -889,6 +894,21 @@ pub const SPECS: &[Spec] = &[
         "The Claude model headless reviews and tests run.",
     )
     .tags(&[Tag::Experimental, Tag::Advanced]),
+    Spec::new(
+        CONTROL_AUTO_CONTINUE,
+        "true",
+        Kind::Bool,
+        "Go on with the recommended option",
+        "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo, and only while the app is open.",
+    ),
+    Spec::new(
+        CONTROL_AUTO_CONTINUE_MINUTES,
+        "10",
+        Kind::Int { min: 1, max: 1440 },
+        "Wait before going on",
+        "How long Control's chat waits for your answer before it sends the recommended option.",
+    )
+    .unit(Unit::Minutes),
     Spec::new(
         PLAYBOOK_PRESS_ENTER,
         "false",

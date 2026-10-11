@@ -300,6 +300,46 @@
       "danger": {
         "level": "none"
       },
+      "default": "true",
+      "help": "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo, and only while the app is open.",
+      "key": "control.auto_continue",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Go on with the recommended option",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "10",
+      "help": "How long Control's chat waits for your answer before it sends the recommended option.",
+      "key": "control.auto_continue_minutes",
+      "kind": {
+        "max": 1440,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Wait before going on",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "minutes",
+      "value": "10"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "false",
       "help": "Press Enter for sessions stuck on a \"Press Enter\" prompt. Auth menus, trust prompts and reconnects are always notify-only.",
       "key": "playbooks.press_enter",
@@ -4693,7 +4733,7 @@
     },
     {
       "id": "settings.control_api",
-      "intro": "The embedded MCP server an AI assistant drives the fleet through. Read-only here.",
+      "intro": "The embedded MCP server an AI assistant drives the fleet through (read-only here), and how Control's chat goes on when you do not answer.",
       "layout": "category",
       "parent": "settings",
       "sections": [
@@ -4717,6 +4757,19 @@
             }
           ],
           "title": "Server"
+        },
+        {
+          "items": [
+            {
+              "key": "control.auto_continue",
+              "type": "field"
+            },
+            {
+              "key": "control.auto_continue_minutes",
+              "type": "field"
+            }
+          ],
+          "title": "Chat"
         }
       ],
       "spec": "fleet.page/1",

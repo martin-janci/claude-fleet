@@ -147,6 +147,8 @@
   import { projectSkills } from './project_skills';
   import { completeTaskLink, matchTaskLinks, taskLinkQuery, type TaskLink } from './control_task_link';
   import { overflowMark } from './overflow_mark';
+  import AutoContinueBar from './AutoContinueBar.svelte';
+  import { recommendedPick } from './auto_continue';
 
   let {
     session,
@@ -210,6 +212,9 @@
     // Gap plan G7.8: a line naming the day ("Today", "Yesterday",
     // "Thu 8 Oct") above the first row of each day (Control's chat).
     daySeparators = false,
+    // Control's chat: send a `choices` card's recommended option when
+    // nobody answers in time (`auto_continue.ts`).
+    autoContinue = false,
   }: {
     session: SessionRow;
     visible: boolean;
@@ -228,6 +233,7 @@
     placeholder?: string;
     linkTasks?: () => Promise<TaskLink[]>;
     daySeparators?: boolean;
+    autoContinue?: boolean;
   } = $props();
 
   // Raw: replaced whole on each read and never mutated, so a deep proxy only
@@ -1222,6 +1228,7 @@
   // read yet is the mangled line the gate exists to prevent.
   const outboxBusy = $derived(outgoing.some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'));
   const busyBlocked = $derived(blockWhileBusy && (busyNote !== null || outboxBusy));
+  const autoPick = $derived(autoContinue ? recommendedPick(conv) : null);
 
   // ── May this client write into this session at all? (multi-user M1) ─────
   //
@@ -2633,6 +2640,15 @@
     >
       {@render composerAbove()}
     </div>
+  {/if}
+  {#if autoContinue && showComposer && canPrompt && bgEntry === null}
+    <AutoContinueBar
+      sessionId={session.id}
+      pick={autoPick}
+      ready={busyNote === null && !outboxBusy && viewing === null && writeBlocked === null}
+      typing={draft.trim() !== ''}
+      onSend={(text) => void sendText(text)}
+    />
   {/if}
   {#if showComposer && canPrompt && bgEntry === null}
     <form

@@ -623,6 +623,13 @@ its `test:<command>` lines as `Bash(<command>)`, everything else denied
 `done_when` reads it unchanged; its cost is booked as `headless_check` on
 the mission. A checkout that moved or is dirty, a command with shell syntax,
 or a host outside the grant takes the session path.
+Control's chat goes on by itself (ON by default, `control.auto_continue`):
+when the agent's reply ends on a `choices` card with an option marked
+`recommended`, the desktop sends it after `control.auto_continue_minutes`
+(10) of nobody answering, with a countdown, *Send now* and *Cancel* above
+the box (`src/lib/auto_continue.ts`). Never a risky option, never a card
+more than a day old, only while the app is open; fleet-mobile does not do
+it.
 
 Routines are landed (`service/routines/`, migrations 131 and 139, redesign
 8.5 to 8.10): a saved prompt that starts a session on a cron schedule, on a

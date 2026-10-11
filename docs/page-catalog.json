@@ -2865,6 +2865,32 @@
     },
     {
       "default_widget": "switch",
+      "key": "control.auto_continue",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Go on with the recommended option",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "control.auto_continue_minutes",
+      "kind": {
+        "max": 1440,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Wait before going on",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "playbooks.press_enter",
       "kind": {
         "type": "bool"

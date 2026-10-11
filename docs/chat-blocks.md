@@ -121,11 +121,21 @@ may be a string, a number or a bool.
 |---|---|---|
 | `title` | no | ≤ 120 chars |
 | `question` | no | Markdown, ≤ 500 |
-| `options` | yes | 1–8 of `{ label, prompt, hint? }` |
+| `options` | yes | 1–8 of `{ label, prompt, hint?, recommended? }` |
 
 A button shows `label` (≤ 80) and `hint` (≤ 200). A click puts `prompt`
 (≤ 4000) in the composer. Write `prompt` as the person's instruction to
 you, for example `"Open a draft PR"`.
+
+`recommended: true` marks the option you would pick (at most one). The
+button says *Recommended*. In Control's chat, when the card ends your reply
+and nobody answers, the app sends that option's `prompt` once
+`control.auto_continue` is on and `control.auto_continue_minutes` have
+passed with you quiet and the box empty; a countdown above the box offers
+*Send now* and *Cancel*, and typing stops it. An option or a question that
+names a push, a delete or another step that is hard to undo
+(`src/lib/quick_answer.ts`'s `risky`) is never sent this way, nor a card
+from a reply more than a day old.
 
 ### `form`
 
