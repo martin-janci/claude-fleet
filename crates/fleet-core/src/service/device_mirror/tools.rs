@@ -94,10 +94,13 @@ mod tests {
         None
     }
 
+    #[cfg(unix)]
     fn system_dirs() -> Vec<PathBuf> {
         SYSTEM_DIRS.iter().map(PathBuf::from).collect()
     }
 
+    // Unix layout: `:`-separated PATH and no `.exe` suffix.
+    #[cfg(unix)]
     #[test]
     fn candidates_cover_path_homebrew_and_the_sdk() {
         let home = Path::new("/home/u");

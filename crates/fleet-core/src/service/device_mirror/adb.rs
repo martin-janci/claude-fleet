@@ -111,10 +111,16 @@ pub fn parse_local_version(text: &str) -> Option<u32> {
 }
 
 pub async fn local_version(adb: &Path) -> Result<u32, IpcError> {
-    let out = crate::proc::command(adb)
-        .arg("version")
-        .output()
+    let mut cmd = crate::proc::command(adb);
+    cmd.arg("version").kill_on_drop(true);
+    let out = tokio::time::timeout(REQUEST_TIMEOUT, cmd.output())
         .await
+        .map_err(|_| {
+            IpcError::new(
+                codes::E_TIMEOUT,
+                format!("{} version did not answer", adb.display()),
+            )
+        })?
         .map_err(|e| {
             IpcError::new(
                 codes::E_TOOL_MISSING,
