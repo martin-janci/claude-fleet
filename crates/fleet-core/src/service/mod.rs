@@ -38,6 +38,7 @@ pub mod forms;
 pub mod fresh;
 pub mod gc;
 pub mod guides;
+pub mod headless;
 pub mod health;
 pub mod hooks;
 pub mod hooks_install;

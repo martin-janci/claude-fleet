@@ -15,7 +15,6 @@
 use super::steps::Step;
 use crate::service::claude_print::{self, parse_envelope, Envelope};
 use crate::service::work::graph::MissionGraph;
-use crate::shell::quote;
 use crate::store::{CardRow, MissionEventRow, MissionRow, TreeEntry, TreeRef, WorkItemRow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -338,15 +337,16 @@ depends_on}; remove_dep {item_id, depends_on}; run {item_id, role?: implement | 
 /// is `--output-format json`'s envelope, so the run's cost can be booked
 /// (redesign 8.2); [`planner_answer`] takes the model's text out of it.
 pub fn planner_script(model: &str, prompt: &str) -> String {
-    let claude = format!(
-        "claude -p --model {} --output-format json {} {}",
-        quote(model),
-        claude_print::isolation_flags(),
-        quote(prompt),
-    );
+    let agent = crate::service::headless::default_agent();
+    let claude = agent.command(&crate::service::headless::HeadlessJob {
+        model,
+        prompt: Some(prompt),
+        stdin_file: None,
+        fork_of: None,
+    });
     format!(
         "{} {}",
-        claude_print::noclaude_check(PLANNER_TAG),
+        agent.missing_check(PLANNER_TAG),
         claude_print::run_capped(
             PLANNER_TAG,
             &claude,

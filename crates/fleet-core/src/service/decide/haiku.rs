@@ -232,15 +232,17 @@ pub fn prompt_for(req: &JevRequest) -> Result<(String, Vec<String>), String> {
 /// `claude` reads the prompt from the command's stdin.
 pub fn haiku_script(model: &str, host_timeout_secs: u64) -> Result<String, String> {
     use crate::service::claude_print;
-    use crate::shell::quote;
+    use crate::service::headless::{self, HeadlessJob};
     if !MODELS.contains(&model) {
         return Err(format!("refusing model {model:?}"));
     }
-    let claude = format!(
-        "claude -p --model {} --output-format json {}",
-        quote(model),
-        claude_print::isolation_flags()
-    );
+    let agent = headless::default_agent();
+    let claude = agent.command(&HeadlessJob {
+        model,
+        prompt: None,
+        stdin_file: None,
+        fork_of: None,
+    });
     let t = HAIKU_TAG;
     Ok(format!(
         "set -o pipefail; \
@@ -250,7 +252,7 @@ pub fn haiku_script(model: &str, host_timeout_secs: u64) -> Result<String, Strin
          {run}; s=$?; \
          if [ -n \"$d\" ]; then cd / && rmdir -- \"$d\" 2>/dev/null; fi; \
          exit $s",
-        noclaude = claude_print::noclaude_check(t),
+        noclaude = agent.missing_check(t),
         run = claude_print::run_capped(t, &claude, host_timeout_secs, OUTPUT_CAP_BYTES, false),
     ))
 }
