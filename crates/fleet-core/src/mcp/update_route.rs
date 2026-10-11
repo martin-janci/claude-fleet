@@ -77,7 +77,7 @@ pub async fn handle_artifact(
     if let Err(e) = update::identity(&caller) {
         return refusal(e);
     }
-    let fetch = update::HttpsFetch::new(Some(&update::channel_base_url()));
+    let fetch = update::HttpsFetch::for_artifacts(Some(&update::channel_base_url()));
     let path = match update::mirror::local_copy(
         state.store(),
         &fetch,

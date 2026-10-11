@@ -39,7 +39,16 @@ pub struct DiagnosticsInputs<'a> {
     pub mcp_running: bool,
     /// `McpRuntime::last_error()`.
     pub mcp_bind_error: Option<String>,
+    /// A hub owns the fleet (the desktop as a hub client). Settings, the
+    /// control API, hosts and sessions are then this app's own database,
+    /// untouched since it paired, and each section says so: a reader took a
+    /// month-old `last_pinged_at` and `update.track` for the hub's.
+    pub hub_owns_fleet: bool,
 }
+
+/// The line under each section a hub client reads from its own database.
+pub const LOCAL_ONLY_NOTE: &str =
+    "(this app's own database, not the hub's: a hub owns this fleet, so these values are not live)";
 
 /// Wire shape of `collect_diagnostics`. Mirrored in `src/lib/diagnostics.ts`.
 #[derive(Debug, Clone, Serialize)]
@@ -93,6 +102,13 @@ fn without_timestamp(line: &str) -> &str {
     match line.find(char::is_whitespace) {
         Some(i) => line[i..].trim_start(),
         None => line,
+    }
+}
+
+/// [`LOCAL_ONLY_NOTE`], when a hub owns the fleet.
+fn local_note(t: &mut String, hub_owns_fleet: bool) {
+    if hub_owns_fleet {
+        let _ = writeln!(t, "{LOCAL_ONLY_NOTE}");
     }
 }
 
@@ -298,12 +314,14 @@ pub fn collect(
     let _ = writeln!(t);
 
     let _ = writeln!(t, "== Settings ==");
+    local_note(&mut t, inputs.hub_owns_fleet);
     for (k, v) in &settings {
         let _ = writeln!(t, "{k} = {v}");
     }
     let _ = writeln!(t);
 
     let _ = writeln!(t, "== Control API (MCP) ==");
+    local_note(&mut t, inputs.hub_owns_fleet);
     let _ = writeln!(t, "enabled: {mcp_enabled}");
     let _ = writeln!(t, "bound: {}", inputs.mcp_running);
     let _ = writeln!(t, "port: {mcp_port}");
@@ -321,6 +339,7 @@ pub fn collect(
     let _ = writeln!(t);
 
     let _ = writeln!(t, "== Hosts ({}) ==", hosts.len());
+    local_note(&mut t, inputs.hub_owns_fleet);
     for h in &hosts {
         let _ = writeln!(
             t,
@@ -375,6 +394,7 @@ pub fn collect(
         "== Sessions ({} total; status/claude_status) ==",
         sessions.len()
     );
+    local_note(&mut t, inputs.hub_owns_fleet);
     for (host, counts) in &by_host {
         let parts: Vec<String> = counts.iter().map(|(k, n)| format!("{k}={n}")).collect();
         let _ = writeln!(t, "{host}: {}", parts.join(" "));
@@ -446,6 +466,7 @@ mod tests {
             mcp_running: true,
             // An error string that (wrongly) carries a token must still be masked.
             mcp_bind_error: Some(format!("could not bind: Bearer {ODD_TOK}")),
+            hub_owns_fleet: false,
         }
     }
 
@@ -520,6 +541,7 @@ mod tests {
                 tunnels: HashMap::new(),
                 mcp_running: false,
                 mcp_bind_error: None,
+                hub_owns_fleet: false,
             },
         )
         .unwrap();
@@ -530,6 +552,42 @@ mod tests {
         assert!(b.text.contains("mefistos: running/unknown=2"), "{}", b.text);
         assert!(b.text.contains("log_file: (none yet)"));
         assert!(b.log_file.is_none());
+    }
+
+    /// A hub client's Settings, control API, Hosts and Sessions come from its
+    /// own database, which a hub's fleet never updates: each section says so.
+    #[test]
+    fn a_hub_client_bundle_marks_its_local_sections() {
+        let tmp = tempfile::tempdir().unwrap();
+        let logs = tmp.path().join("logs");
+        let store = seeded_store();
+        let render = |hub_owns_fleet| {
+            collect(
+                &store,
+                DiagnosticsInputs {
+                    data_dir: tmp.path(),
+                    log_dir: &logs,
+                    tunnels: HashMap::new(),
+                    mcp_running: false,
+                    mcp_bind_error: None,
+                    hub_owns_fleet,
+                },
+            )
+            .unwrap()
+            .text
+        };
+        let client = render(true);
+        for heading in [
+            "== Settings ==",
+            "== Control API (MCP) ==",
+            "== Hosts (",
+            "== Sessions (",
+        ] {
+            let at = client.find(heading).unwrap_or_else(|| panic!("{heading}"));
+            let next = client[at..].lines().nth(1).unwrap();
+            assert_eq!(next, LOCAL_ONLY_NOTE, "under {heading}");
+        }
+        assert!(!render(false).contains(LOCAL_ONLY_NOTE));
     }
 
     #[test]
