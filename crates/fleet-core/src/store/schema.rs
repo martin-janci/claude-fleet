@@ -358,6 +358,17 @@ fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 166: `routine_runs` already has its
+/// `routine_name` column (the rebuild ran). See [`Migration`].
+fn routine_runs_has_routine_name(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'routine_name'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 165: `wizard_state` exists (and
 /// `host_setups`, which it replaced, is gone). See [`Migration`].
 fn has_wizard_state(conn: &Connection) -> rusqlite::Result<bool> {
@@ -1882,6 +1893,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 165,
         sql: include_str!("../../migrations/165_wizard_state.sql"),
         already_applied: Some(has_wizard_state),
+    },
+    // M15 step G7.4: a routine's runs outlive it (`routine_id` nullable, ON
+    // DELETE SET NULL, plus `routine_name`). A table rebuild, so guarded.
+    Migration {
+        version: 166,
+        sql: include_str!("../../migrations/166_routine_runs_outlive_routine.sql"),
+        already_applied: Some(routine_runs_has_routine_name),
     },
 ];
 
@@ -6262,6 +6280,52 @@ mod tests {
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(row(wid).name, "feat-imports", "a re-run changes nothing");
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// 166 (gap plan G7.4): the runs keep their ids, rows and routine's
+    /// name through the rebuild, and from then on deleting a routine leaves
+    /// its runs with the name and no routine.
+    #[test]
+    fn migration_166_keeps_a_deleted_routines_runs() {
+        let s = store_at_version(165);
+        s.conn
+            .execute_batch(
+                "INSERT INTO routines (id, name, trigger, cron, host_alias, project_id, prompt, created_at, updated_at)
+                 VALUES (7, 'Nightly triage', 'cron', '0 3 * * *', 'local', 1, 'go', 1, 1);
+                 INSERT INTO routine_runs (id, routine_id, trigger, state, started_at, finished_at, outcome, outcome_source, host_alias)
+                 VALUES (41, 7, 'cron', 'done', 10, 20, 'did_work', 'rule', 'local');",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        type Row = (Option<i64>, Option<String>, String, Option<String>);
+        let row = |id: i64| -> Row {
+            s.conn
+                .query_row(
+                    "SELECT routine_id, routine_name, state, outcome FROM routine_runs WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            row(41),
+            (
+                Some(7),
+                Some("Nightly triage".into()),
+                "done".into(),
+                Some("did_work".into())
+            )
+        );
+        assert!(s.delete_routine(7).unwrap());
+        assert_eq!(row(41).0, None, "the run stays, without its routine");
+        assert_eq!(row(41).1.as_deref(), Some("Nightly triage"));
+        // A re-run only records the version.
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 166;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(row(41).1.as_deref(), Some("Nightly triage"));
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     }
 

@@ -255,17 +255,16 @@ describe('the Inbox block', () => {
 describe('deleting a routine (G1.4, the destructive confirm)', () => {
   const many: RoutineRunRow[] = Array.from({ length: 6 }, (_, i) => ({ ...ok, id: 10 + i }));
 
-  it('a routine with many runs asks for its name, and Delete routine sends delete only then', async () => {
+  it('a routine with many runs keeps them (G7.4), so it asks with the red verb alone', async () => {
     route([sweep], many);
     render(RoutinesPanel);
     await screen.findByTestId('routine-title');
     await fireEvent.click(screen.getByTestId('routine-delete'));
     const dialog = await screen.findByTestId('destructive-confirm');
     expect(dialog.textContent).toContain('Delete routine "Morning PR sweep"?');
-    expect(dialog.textContent).toContain('Its 6 runs go with it. Sessions it started keep running.');
+    expect(dialog.textContent).toContain('Its 6 runs stay in Runs under its name. Sessions it started keep running.');
+    expect(screen.queryByTestId('destructive-typed-name')).toBeNull();
     const go = screen.getByTestId('routine-delete-confirm') as HTMLButtonElement;
-    expect(go.disabled).toBe(true);
-    await fireEvent.input(screen.getByTestId('destructive-typed-name'), { target: { value: 'Morning PR sweep' } });
     expect(go.disabled).toBe(false);
     await fireEvent.click(go);
     await waitFor(() => expect(argsOf('delete')).toEqual({ action: 'delete', routine_id: 3 }));
@@ -277,7 +276,7 @@ describe('deleting a routine (G1.4, the destructive confirm)', () => {
     render(RoutinesPanel);
     await screen.findByTestId('routine-title');
     await fireEvent.click(screen.getByTestId('routine-delete'));
-    expect((await screen.findByTestId('destructive-confirm')).textContent).toContain('Its run goes with it.');
+    expect((await screen.findByTestId('destructive-confirm')).textContent).toContain('Its run stays in Runs under its name.');
     expect(screen.queryByTestId('destructive-typed-name')).toBeNull();
     await fireEvent.click(screen.getByTestId('routine-delete-confirm'));
     await waitFor(() => expect(argsOf('delete')).toEqual({ action: 'delete', routine_id: 3 }));

@@ -730,6 +730,37 @@ fn a_routines_fires_are_runs_linked_to_their_sessions() {
     assert_eq!(list(&fx, scoped(vec![routine])).1, 3);
 }
 
+/// Deleting a routine leaves its fires in Runs under its name (migration
+/// 166, gap plan G7.4); a scoped reader, who saw them through the routine,
+/// no longer does.
+#[test]
+fn a_deleted_routines_fires_stay_under_its_name() {
+    let fx = fixture();
+    let routine = with_routine(&fx);
+    assert!(fx.s.delete_routine(routine).unwrap());
+    let (rows, total) = list(
+        &fx,
+        RunsFilter {
+            kind: Some("routine".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(total, 3);
+    assert!(rows.iter().all(|r| r.owner == "Nightly tidy"), "{rows:?}");
+    assert!(rows.iter().all(|r| r.routine_id.is_none()));
+    let scoped = RunsFilter {
+        kind: Some("routine".into()),
+        reach: RunsReach::Scoped {
+            sessions: vec![fx.w, fx.r],
+            missions: vec![],
+            routines: vec![routine],
+            spend: true,
+        },
+        ..Default::default()
+    };
+    assert_eq!(list(&fx, scoped).1, 0);
+}
+
 /// A done fire reads what its outcome pass judged (migration 139): a run
 /// that needs a person is not "ok", and one that found nothing is quiet.
 #[test]

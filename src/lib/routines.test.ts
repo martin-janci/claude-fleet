@@ -176,13 +176,14 @@ describe('the Inbox', () => {
 describe('routineDeleteLoss (G1.4)', () => {
   const run = { id: 1, routine_id: 1, trigger: 'cron', state: 'done', cost_micros: 0, started_at: 1 } as const;
   it('counts the runs that go with it and says the sessions stay', () => {
-    expect(routineDeleteLoss({ runs: [] })).toEqual({ loss: 0, lead: "It has no runs yet. Sessions it started keep running. This can't be undone." });
-    expect(routineDeleteLoss({ runs: [run] }).lead).toMatch(/^Its run goes with it\./);
-    expect(routineDeleteLoss({ runs: [run, run, run] })).toMatchObject({ loss: 3, lead: expect.stringMatching(/^Its 3 runs go with it\./) });
+    expect(routineDeleteLoss({ runs: [] })).toEqual({ loss: 0, lead: "It has no runs yet. Sessions it started keep running. The routine itself can't be brought back." });
+    expect(routineDeleteLoss({ runs: [run] }).lead).toMatch(/^Its run stays in Runs under its name\./);
+    // G7.4: the runs outlive the routine, so none of them counts as lost.
+    expect(routineDeleteLoss({ runs: [run, run, run] })).toMatchObject({ loss: 0, lead: expect.stringMatching(/^Its 3 runs stay in Runs under its name\./) });
   });
   it('a full page of runs may be more: says "or more"', () => {
     const page = Array.from({ length: ROUTINE_RUNS_SHOWN }, () => run);
-    expect(routineDeleteLoss({ runs: page }).lead).toMatch(/^Its 20 or more runs go with it\./);
+    expect(routineDeleteLoss({ runs: page }).lead).toMatch(/^Its 20 or more runs stay in Runs under its name\./);
   });
 });
 

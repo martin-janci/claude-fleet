@@ -753,18 +753,20 @@ export function spentSince(runs: readonly RoutineRunRow[], since: number): numbe
  *  a detail holding this many may have more. */
 export const ROUTINE_RUNS_SHOWN = 20;
 
-/** What deleting a routine loses, for the destructive confirm (G1.4): its
- *  runs go with it (fleet-core `delete_routine`), the sessions they started
- *  stay. `loss` is the runs counted, `lead` says it in one sentence. */
+/** What deleting a routine loses, for the destructive confirm (G1.4): only
+ *  the routine. Its runs stay in Runs under its name (fleet-core
+ *  `delete_routine`, migration 166, gap plan G7.4) and the sessions they
+ *  started keep running, so nothing counted is lost: `loss` is 0 and `lead`
+ *  says what stays. */
 export function routineDeleteLoss(detail: Pick<RoutineDetail, 'runs'>): { loss: number; lead: string } {
   const n = detail.runs.length;
   const runs =
     n === 0
       ? 'It has no runs yet.'
       : n >= ROUTINE_RUNS_SHOWN
-        ? `Its ${n} or more runs go with it.`
-        : `Its ${n === 1 ? 'run goes' : `${n} runs go`} with it.`;
-  return { loss: n, lead: `${runs} Sessions it started keep running. This can't be undone.` };
+        ? `Its ${n} or more runs stay in Runs under its name.`
+        : `Its ${n === 1 ? 'run stays' : `${n} runs stay`} in Runs under its name.`;
+  return { loss: 0, lead: `${runs} Sessions it started keep running. The routine itself can't be brought back.` };
 }
 
 // ---- the schedule picker and its next run (gap plan G2.3) -----------------
