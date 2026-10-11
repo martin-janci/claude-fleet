@@ -1011,9 +1011,6 @@ mod tests {
         assert_eq!(failure(b"plain error"), None);
     }
 
-    /// The scripts against stub tools: a fake `adb` on PATH answers like
-    /// the real one, so the bash itself (quoting, PIPESTATUS, the marker)
-    /// is exercised, not only the parsers.
     #[cfg(unix)]
     #[test]
     fn the_start_server_script_starts_adb_or_says_it_is_missing() {
@@ -1057,6 +1054,9 @@ mod tests {
         assert!(failure(&out.stderr).unwrap().contains("adb"));
     }
 
+    /// The scripts against stub tools: a fake `adb` on PATH answers like
+    /// the real one, so the bash itself (quoting, PIPESTATUS, the marker)
+    /// is exercised, not only the parsers.
     #[cfg(unix)]
     #[test]
     fn the_scan_and_run_scripts_work_against_a_stub_adb() {

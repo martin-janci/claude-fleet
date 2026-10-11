@@ -66,7 +66,7 @@ physical iPhone the button shows and is refused (`E_UNSUPPORTED`), and
 (`brew install scrcpy android-platform-tools`). They are looked up in
 `FLEET_SCRCPY` / `FLEET_ADB`, then `PATH`, then `/opt/homebrew/bin` and
 `/usr/local/bin`, and for adb also `ANDROID_HOME` / `ANDROID_SDK_ROOT`,
-`~/Library/Android/sdk` and `~/Android/Sdk`. Neither needs to exist on the
+`~/Library/Android/sdk`, `~/Android/Sdk` and `~/Android/sdk`. Neither needs to exist on the
 device's host beyond its adb server.
 
 Two routes, chosen from where the device is:
@@ -80,13 +80,21 @@ Two routes, chosen from where the device is:
   `ssh -W 127.0.0.1:<port> <alias>`.
 
 In hub-client mode a device on host `local` (the hub's own machine) answers
-`E_NO_ROUTE`: that needs the hub relay, which is not built yet.
+`E_NO_ROUTE`: that needs the hub relay, which is not built yet. So do
+devices on an agent host or a WSL host, which this machine has no ssh route
+to; they wait for the hub relay too.
+
+Mirror waits about 5 s (scrcpy's start-up grace) before it reports success.
 
 While a mirror runs it claims the device with the note `scrcpy mirror`
 (30 minutes, renewed every 10). The claim is released when the window closes
-or on **Stop mirror**. Mirroring a device that is already mirrored is
-refused (`E_EXISTS`) and leaves the running mirror's claim alone. If the app
-quits, scrcpy is killed and the claim lapses on its own.
+or on **Stop mirror**. A claim you already held when you pressed Mirror is
+kept exactly as it was (expiry and note) and is not released when the mirror
+ends. If the mirror's claim lapses (the laptop slept) and someone else claims
+the device, the mirror leaves their claim alone. Mirroring a device that is
+already mirrored is refused (`E_EXISTS`) and leaves the running mirror's
+claim alone. If the app quits, scrcpy is killed and the claim lapses on its
+own.
 
 Before it starts, the mirror checks the host's adb server: it asks it
 `host:version` and compares the answer with this machine's `adb version`. A
@@ -110,14 +118,14 @@ reaches `127.0.0.1` on the allowlisted ports of the device's own host.
 |---|---|
 | `E_TOOL_MISSING` | `scrcpy` or `adb` not found on this machine |
 | `E_ADB_VERSION_MISMATCH` | the host's adb server and this machine's adb differ |
-| `E_NO_ROUTE` | no way to reach the device: hub-local device, host adb server down and not startable |
-| `E_MIRROR_FAILED` | scrcpy exited early; the message ends with its output |
+| `E_NO_ROUTE` | no way to reach the device: hub-local device, agent or WSL host, host adb server down and not startable |
+| `E_MIRROR_FAILED` | scrcpy exited non-zero within the 5 s start-up grace; the message ends with its output |
 | `E_UNSUPPORTED` | an iOS device |
 | `E_INVALID_STATE` | the device is not ready, or has no adb serial yet |
 | `E_EXISTS` | it is already mirrored |
 | `E_CONFLICT` | someone else holds its claim |
 | `E_LIMIT` | all forward ports on the host are taken |
-| `E_NOTFOUND` | **Stop mirror** on a device that is not mirrored |
+| `E_NOTFOUND` | an unknown device id, or **Stop mirror** on a device that is not mirrored |
 
 ## From a session
 

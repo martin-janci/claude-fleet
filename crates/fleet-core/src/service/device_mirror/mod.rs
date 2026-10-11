@@ -18,6 +18,7 @@ use crate::ssh::SshExec;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -54,6 +55,67 @@ pub struct MirrorInfo {
 pub trait Lease: Send + Sync {
     async fn renew(&self) -> Result<(), IpcError>;
     async fn release(&self);
+}
+
+/// Whether `d`'s live claim is `holder`'s: the device lookup shows
+/// `claimed_by` only while the claim is unexpired. `holder` is the string
+/// the claim command records for this desktop (`you (desktop)` standalone,
+/// `client:<name>` on a hub).
+pub fn held_by(d: &DebugDevice, holder: &str) -> bool {
+    d.claimed_by.as_deref() == Some(holder)
+}
+
+/// A mirror's lease that only ever touches a claim the mirror owns.
+///
+/// - `pre_held`: this desktop already held the claim when Mirror was
+///   pressed (a manual claim, Install with claim). The claim is left exactly
+///   as it was: never renewed (which would cut its expiry and overwrite its
+///   note, `claim` being re-entrant per holder) and never released.
+/// - `lost`: a renewal answered `E_CONFLICT`, so the claim lapsed and
+///   someone else took it. From then on the lease neither renews (which
+///   would take the device back once their claim lapses) nor releases
+///   (which, the desktop being a person, would clear their claim).
+pub struct OwnedLease {
+    inner: Arc<dyn Lease>,
+    pre_held: bool,
+    lost: AtomicBool,
+}
+
+impl OwnedLease {
+    pub fn new(inner: Arc<dyn Lease>, pre_held: bool) -> Self {
+        Self {
+            inner,
+            pre_held,
+            lost: AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Lease for OwnedLease {
+    async fn renew(&self) -> Result<(), IpcError> {
+        if self.pre_held {
+            return Ok(());
+        }
+        if self.lost.load(Ordering::SeqCst) {
+            return Err(IpcError::new(
+                codes::E_CONFLICT,
+                "the mirror's claim lapsed and another holder took the device",
+            ));
+        }
+        let r = self.inner.renew().await;
+        if matches!(&r, Err(e) if e.code == codes::E_CONFLICT) {
+            self.lost.store(true, Ordering::SeqCst);
+        }
+        r
+    }
+
+    async fn release(&self) {
+        if self.pre_held || self.lost.load(Ordering::SeqCst) {
+            return;
+        }
+        self.inner.release().await
+    }
 }
 
 /// How a remote mirror reaches its host.
@@ -446,7 +508,24 @@ impl Mirrors {
                 let mut kill = false;
                 loop {
                     tokio::select! {
-                        _ = child.wait() => break,
+                        status = child.wait() => {
+                            // Past the grace, a failure has no caller left
+                            // to answer: log it, or it vanishes.
+                            if let Some(status) = status.ok().filter(|s| !s.success()) {
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                let t = String::from_utf8_lossy(
+                                    &tail.lock().unwrap_or_else(|p| p.into_inner()),
+                                )
+                                .into_owned();
+                                tracing::warn!(
+                                    device = id,
+                                    %status,
+                                    output = %t.trim(),
+                                    "device mirror: scrcpy exited with a failure"
+                                );
+                            }
+                            break;
+                        }
                         _ = &mut rx => { kill = true; break; }
                         _ = renew.tick() => {
                             if let Err(e) = lease.renew().await {

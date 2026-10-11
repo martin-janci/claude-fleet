@@ -31,6 +31,118 @@ impl Lease for CountingLease {
     }
 }
 
+/// A lease that records its calls and fails renewals with `fail` (an
+/// error code) while it is set.
+#[derive(Default)]
+struct RecordingLease {
+    renewed: AtomicUsize,
+    released: AtomicUsize,
+    fail: std::sync::Mutex<Option<&'static str>>,
+}
+impl RecordingLease {
+    fn failing(&self, code: Option<&'static str>) {
+        *self.fail.lock().unwrap() = code;
+    }
+    fn counts(&self) -> (usize, usize) {
+        (
+            self.renewed.load(Ordering::SeqCst),
+            self.released.load(Ordering::SeqCst),
+        )
+    }
+}
+#[async_trait::async_trait]
+impl Lease for RecordingLease {
+    async fn renew(&self) -> Result<(), IpcError> {
+        self.renewed.fetch_add(1, Ordering::SeqCst);
+        let fail = *self.fail.lock().unwrap();
+        match fail {
+            Some(code) => Err(IpcError::new(code, "renewal refused")),
+            None => Ok(()),
+        }
+    }
+    async fn release(&self) {
+        self.released.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn claimed(holder: Option<&str>) -> DebugDevice {
+    let mut d = device("android", "physical", true, "mefistos");
+    d.claimed_by = holder.map(str::to_string);
+    d
+}
+
+#[test]
+fn a_claim_is_pre_held_only_when_this_holder_has_it() {
+    assert!(held_by(&claimed(Some("you (desktop)")), "you (desktop)"));
+    assert!(held_by(&claimed(Some("client:laptop")), "client:laptop"));
+    assert!(!held_by(
+        &claimed(Some("host:mefistos#s1")),
+        "you (desktop)"
+    ));
+    assert!(!held_by(&claimed(Some("client:phone")), "client:laptop"));
+    assert!(!held_by(&claimed(None), "you (desktop)"));
+}
+
+#[tokio::test]
+async fn a_pre_held_lease_never_renews_nor_releases() {
+    let inner = Arc::new(RecordingLease::default());
+    let lease = OwnedLease::new(inner.clone(), true);
+    lease.renew().await.unwrap();
+    lease.renew().await.unwrap();
+    lease.release().await;
+    assert_eq!(
+        inner.counts(),
+        (0, 0),
+        "the claim held before the mirror stays as it was"
+    );
+}
+
+#[tokio::test]
+async fn a_normal_lease_renews_and_releases_once() {
+    let inner = Arc::new(RecordingLease::default());
+    let lease = OwnedLease::new(inner.clone(), false);
+    lease.renew().await.unwrap();
+    lease.renew().await.unwrap();
+    lease.release().await;
+    assert_eq!(inner.counts(), (2, 1));
+}
+
+#[tokio::test]
+async fn the_first_renew_still_reports_another_holder() {
+    let inner = Arc::new(RecordingLease::default());
+    inner.failing(Some(codes::E_CONFLICT));
+    let lease = OwnedLease::new(inner.clone(), false);
+    assert_eq!(lease.renew().await.unwrap_err().code, codes::E_CONFLICT);
+}
+
+#[tokio::test]
+async fn a_lost_claim_is_never_released_nor_retaken() {
+    let inner = Arc::new(RecordingLease::default());
+    let lease = OwnedLease::new(inner.clone(), false);
+    lease.renew().await.unwrap();
+    // The claim lapsed while the laptop slept; another session took it.
+    inner.failing(Some(codes::E_CONFLICT));
+    assert_eq!(lease.renew().await.unwrap_err().code, codes::E_CONFLICT);
+    // Their claim lapses in turn: the mirror must not take it back.
+    inner.failing(None);
+    assert!(lease.renew().await.is_err());
+    lease.release().await;
+    assert_eq!(inner.counts(), (2, 0), "someone else's claim is left alone");
+}
+
+#[tokio::test]
+async fn a_transient_renewal_failure_keeps_the_claim_ours() {
+    let inner = Arc::new(RecordingLease::default());
+    let lease = OwnedLease::new(inner.clone(), false);
+    lease.renew().await.unwrap();
+    inner.failing(Some(codes::E_HUB_UNREACHABLE));
+    assert!(lease.renew().await.is_err());
+    inner.failing(None);
+    lease.renew().await.unwrap();
+    lease.release().await;
+    assert_eq!(inner.counts(), (3, 1));
+}
+
 #[test]
 fn only_a_ready_android_device_with_a_serial_can_be_mirrored() {
     assert_eq!(
@@ -406,6 +518,64 @@ mod lifecycle {
         assert!(!log.contains("--tunnel-port"), "{log}");
         mirrors.kill_all();
         assert_no_ssh(&ssh);
+    }
+
+    #[tokio::test]
+    async fn a_pre_held_claim_survives_a_mirror_that_ran_and_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = tools::Tools {
+            scrcpy: stub_scrcpy(dir.path(), None),
+            adb: stub_adb(dir.path(), 41),
+        };
+        let (dead, _ssh) = remote("127.0.0.1:9".parse().unwrap());
+        let inner = Arc::new(RecordingLease::default());
+        let lease = Arc::new(OwnedLease::new(inner.clone(), true));
+        lease.renew().await.unwrap();
+        let mirrors = Mirrors::new();
+        mirrors
+            .start(
+                &device("android", "emulator", true, "local"),
+                true,
+                tools,
+                dead,
+                lease,
+            )
+            .await
+            .unwrap();
+        mirrors.stop(7).await.unwrap();
+        for _ in 0..50 {
+            if mirrors.list().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(mirrors.list().is_empty());
+        assert_eq!(inner.counts(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_pre_held_claim_survives_a_failed_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = tools::Tools {
+            scrcpy: stub_scrcpy(dir.path(), Some(1)),
+            adb: stub_adb(dir.path(), 41),
+        };
+        let (dead, _ssh) = remote("127.0.0.1:9".parse().unwrap());
+        let inner = Arc::new(RecordingLease::default());
+        let lease = Arc::new(OwnedLease::new(inner.clone(), true));
+        lease.renew().await.unwrap();
+        let e = Mirrors::new()
+            .start(
+                &device("android", "emulator", true, "local"),
+                true,
+                tools,
+                dead,
+                lease,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_MIRROR_FAILED);
+        assert_eq!(inner.counts(), (0, 0));
     }
 
     /// A stub scrcpy that records a SIGTERM in `<dir>/term` and exits.

@@ -6,8 +6,10 @@ use super::debug_devices::{routed, ClaimDebugDeviceArgs, DebugDeviceArgs};
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::relay::ssh::SshDialer;
-use fleet_core::service::debug_devices::DebugDevice;
-use fleet_core::service::device_mirror::{self as mirror, Lease, MirrorInfo, Mirrors, Remote};
+use fleet_core::service::debug_devices::{Asker, DebugDevice};
+use fleet_core::service::device_mirror::{
+    self as mirror, Lease, MirrorInfo, Mirrors, OwnedLease, Remote,
+};
 use fleet_core::ssh::{SshClient, SshExec};
 use fleet_core::store::Store;
 use serde::Serialize;
@@ -86,6 +88,29 @@ pub async fn start_device_mirror(
 ) -> Result<MirrorStarted, IpcError> {
     let d = device(&backend, &store, &ssh, args.id).await?;
     mirror::validate(&d)?;
+    // Everything that refuses without touching the host runs before the
+    // claim, so a refusal costs no claim-and-release round trip.
+    mirror::choose_route(&d.host, backend.hub().is_none())?;
+    // This machine's ssh has no route to an agent host's adb server, and a
+    // WSL distribution is reached through wsl.exe, not `ssh -W`.
+    if ssh.routes_through_agent(&d.host) {
+        return Err(IpcError::new(
+            codes::E_NO_ROUTE,
+            format!(
+                "{} is an agent host; mirroring it needs the hub relay, which this version does not have yet",
+                d.host
+            ),
+        ));
+    }
+    if fleet_core::wsl::is_wsl_host(&d.host) {
+        return Err(IpcError::new(
+            codes::E_NO_ROUTE,
+            format!(
+                "{} is a WSL host, which has no ssh route for the mirror's relays; mirroring it needs the hub relay, which this version does not have yet",
+                d.host
+            ),
+        ));
+    }
     // Before the claim: a second click must not re-claim a device whose
     // claim the running mirror holds.
     if mirrors.is_mirrored(d.id) {
@@ -96,11 +121,20 @@ pub async fn start_device_mirror(
     }
     let home = fleet_core::home::home_dir().unwrap_or_default();
     let tools = mirror::tools::find(&|k| std::env::var(k).ok(), &home)?;
-    let lease = Arc::new(DesktopLease {
-        backend: backend.inner().clone(),
-        store: store.inner().clone(),
-        id: d.id,
-    });
+    // The holder the claim command records for this desktop: the desktop
+    // person standalone, the paired client on the hub (`Caller::label`).
+    let holder = match backend.hub() {
+        None => Asker::desktop().holder,
+        Some(hub) => format!("client:{}", hub.config().client_name),
+    };
+    let lease = Arc::new(OwnedLease::new(
+        Arc::new(DesktopLease {
+            backend: backend.inner().clone(),
+            store: store.inner().clone(),
+            id: d.id,
+        }),
+        mirror::held_by(&d, &holder),
+    ));
     lease.renew().await?; // takes the claim; E_CONFLICT names another holder
     let exec: Arc<dyn SshExec> = ssh.inner().clone();
     let remote = Remote {
