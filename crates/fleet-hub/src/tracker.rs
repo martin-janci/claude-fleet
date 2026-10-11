@@ -87,6 +87,22 @@ pub enum TrackerCmd {
         /// The tracker's id, from `tracker list`.
         id: i64,
     },
+    /// Fleet's ticket keys: each project's (and GitHub repository's, and
+    /// Asana tracker's) prefix, its ticket count, and the prefix a project
+    /// with no tickets yet would get.
+    Prefixes,
+    /// Set or rename a ticket prefix (`FLT` → keys read FLT-12). Every key
+    /// already drawn follows, and the old prefix keeps resolving.
+    Prefix {
+        /// The new prefix: a letter, then letters, digits or _, 2–10 long.
+        prefix: String,
+        /// The project, by id (`prefixes` prints it).
+        #[arg(long, conflicts_with = "space", required_unless_present = "space")]
+        project: Option<i64>,
+        /// The ticket space, by id (`prefixes` prints it).
+        #[arg(long)]
+        space: Option<i64>,
+    },
     /// Asana: set sections' status categories and confirm the section map
     /// (what Settings → Work's Confirm does). The inferred map is kept
     /// under your entries; `fleet-hub decide proposals` prints this line
@@ -99,6 +115,45 @@ pub enum TrackerCmd {
         #[arg(long = "set", value_name = "NAME=CATEGORY", required = true)]
         sets: Vec<String>,
     },
+}
+
+/// One line per ticket space: `CF   acme/claude-fleet  12 tickets  space 3`.
+fn prefix_line(r: &Value) -> String {
+    let prefix = r["prefix"].as_str().unwrap_or("?");
+    let label = r["label"].as_str().unwrap_or("?");
+    let mut line = format!("{prefix:<10} {label}");
+    if r["suggested"].as_bool().unwrap_or(false) {
+        line.push_str("  (suggested; no tickets yet)");
+    } else {
+        let n = r["tickets"].as_i64().unwrap_or(0);
+        line.push_str(&format!("  {n} ticket{}", if n == 1 { "" } else { "s" }));
+    }
+    if let Some(id) = r["space_id"].as_i64() {
+        line.push_str(&format!("  space {id}"));
+    }
+    if let Some(id) = r["project_id"].as_i64() {
+        line.push_str(&format!("  project {id}"));
+    }
+    let former: Vec<&str> = r["former_prefixes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if !former.is_empty() {
+        line.push_str(&format!("  (was {})", former.join(", ")));
+    }
+    line
+}
+
+fn print_prefixes(v: &Value) {
+    let rows = v.as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        out::line("no projects or ticket spaces yet");
+    }
+    for r in rows {
+        out::line(&prefix_line(&r));
+    }
 }
 
 /// `NAME=CATEGORY` → `(name, category)`: split at the last `=`, the name
@@ -423,6 +478,28 @@ pub async fn run(
                 return Err(r["error"].as_str().unwrap_or("the test failed").to_string());
             }
         }
+        TrackerCmd::Prefixes => {
+            let v = call_tool(&conn, "work_admin", json!({ "action": "ticket_prefixes" })).await?;
+            print_prefixes(&v);
+        }
+        TrackerCmd::Prefix {
+            prefix,
+            project,
+            space,
+        } => {
+            let v = call_tool(
+                &conn,
+                "work_admin",
+                json!({
+                    "action": "set_ticket_prefix",
+                    "prefix": prefix,
+                    "project_id": project,
+                    "space_id": space,
+                }),
+            )
+            .await?;
+            print_prefixes(&v);
+        }
         TrackerCmd::Status => {
             let v = call_tool(&conn, "work_admin", json!({ "action": "status" })).await?;
             // `{ trackers, retention }` since M12.3; a bare array before.
@@ -572,6 +649,36 @@ mod tests {
             "h"
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn a_prefix_needs_a_project_or_a_space_and_prints_one_line_each() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct T {
+            #[command(subcommand)]
+            cmd: TrackerCmd,
+        }
+        assert!(T::try_parse_from(["t", "prefixes"]).is_ok());
+        assert!(T::try_parse_from(["t", "prefix", "FLT", "--project", "3"]).is_ok());
+        assert!(T::try_parse_from(["t", "prefix", "FLT", "--space", "1"]).is_ok());
+        assert!(T::try_parse_from(["t", "prefix", "FLT"]).is_err());
+        assert!(
+            T::try_parse_from(["t", "prefix", "FLT", "--space", "1", "--project", "3"]).is_err()
+        );
+        assert_eq!(
+            prefix_line(&json!({
+                "space_id": 1, "project_id": 3, "label": "acme/claude-fleet",
+                "prefix": "FLT", "tickets": 12, "former_prefixes": ["CF"]
+            })),
+            "FLT        acme/claude-fleet  12 tickets  space 1  project 3  (was CF)"
+        );
+        assert_eq!(
+            prefix_line(&json!({
+                "project_id": 4, "label": "acme/payments", "prefix": "PAY", "suggested": true
+            })),
+            "PAY        acme/payments  (suggested; no tickets yet)  project 4"
+        );
     }
 
     #[test]

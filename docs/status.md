@@ -46,9 +46,12 @@ task written in a project draws `CF-12` as its key (outside a project it is
 still `TASK-<id>`; items keyed before 168 keep their keys); a GitHub issue or
 Asana task keeps its tracker key as identity and carries `display_key`, which
 the UI shows and every key lookup answers to. A project's GitHub issues share
-its numbering. `Store::rename_ticket_prefix` renames a prefix Jira-like (keys
-follow, the old prefix still resolves); it has no MCP action or Settings UI
-yet, and fleet-mobile does not show `display_key` yet.
+its numbering. A prefix is set or renamed Jira-like (keys follow; the old
+prefix still resolves once a ticket used it) in Settings → Ticket keys, by
+`work_admin { ticket_prefixes | set_ticket_prefix }` (master-only), or with
+`fleet-hub tracker prefixes` / `tracker prefix <P> --project <id>`; a paired
+desktop shows the panel read-only (`LocalOnly`). fleet-mobile shows
+`display_key` wherever it shows a key, and groups and acts on `key`.
 
 Search (2026-10, three phases). Every search box ignores case and accents
 through one fold (`search_text.rs`, `src/lib/text_fold.ts`, fleet-mobile's

@@ -116,6 +116,23 @@ pub fn derive_ticket_prefix(name: &str) -> String {
     }
 }
 
+/// What a person typed as a prefix, upper-cased, or `E_INVALID` saying
+/// what a prefix is.
+pub fn parse_ticket_prefix(raw: &str) -> Result<String, IpcError> {
+    let p = raw.trim().to_ascii_uppercase();
+    if valid_ticket_prefix(&p) {
+        Ok(p)
+    } else {
+        Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "a ticket prefix is a letter then letters, digits or _, \
+                 {TICKET_PREFIX_MIN}–{TICKET_PREFIX_MAX} long"
+            ),
+        ))
+    }
+}
+
 /// `PREFIX-12` → `("PREFIX", 12)` for a valid prefix; else `None`.
 fn split_ticket_key(key: &str) -> Option<(String, i64)> {
     let (p, n) = key.rsplit_once('-')?;
@@ -140,6 +157,33 @@ fn map_space(r: &rusqlite::Row<'_>) -> rusqlite::Result<TicketSpace> {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
     })
+}
+
+/// One row of Settings → Ticket keys (`work_admin { ticket_prefixes }`): a
+/// ticket space, or a project that has none yet with the prefix it would
+/// get.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TicketPrefixRow {
+    /// `None` for a project whose space is not made yet.
+    #[serde(default)]
+    pub space_id: Option<i64>,
+    #[serde(default)]
+    pub project_id: Option<i64>,
+    /// `project:<id>` | `github:<owner/repo>` | `tracker:<id>`.
+    pub scope: String,
+    /// What a person reads: `acme/claude-fleet`, `GitHub acme/web`,
+    /// `Asana · Company B`.
+    pub label: String,
+    pub prefix: String,
+    /// The prefix is only suggested: nothing has drawn on it yet, and a
+    /// first ticket may still find it taken.
+    #[serde(default)]
+    pub suggested: bool,
+    /// Tickets drawn so far.
+    #[serde(default)]
+    pub tickets: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former_prefixes: Vec<String>,
 }
 
 const SPACE_COLUMNS: &str = "id, scope, prefix, next_seq, former_prefixes";
@@ -426,26 +470,146 @@ impl Store {
         }
     }
 
+    /// Every ticket space, with a label and its ticket count, then every
+    /// project (not fleet's own) that has none yet with the prefix its name
+    /// suggests — by label.
+    pub fn ticket_prefix_overview(&self) -> Result<Vec<TicketPrefixRow>, IpcError> {
+        let mut out = Vec::new();
+        let mut with_space = std::collections::HashSet::new();
+        for sp in self.list_ticket_spaces()? {
+            let (label, project_id) = self.ticket_scope_label(&sp.scope)?;
+            if let Some(pid) = project_id {
+                with_space.insert(pid);
+            }
+            let tickets: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM work_items WHERE ticket_space_id = ?1",
+                rusqlite::params![sp.id],
+                |r| r.get(0),
+            )?;
+            out.push(TicketPrefixRow {
+                space_id: Some(sp.id),
+                project_id,
+                scope: sp.scope,
+                label,
+                prefix: sp.prefix,
+                suggested: false,
+                tickets,
+                former_prefixes: sp.former_prefixes,
+            });
+        }
+        for p in self.list_projects()? {
+            if p.system || with_space.contains(&p.id) {
+                continue;
+            }
+            out.push(TicketPrefixRow {
+                space_id: None,
+                project_id: Some(p.id),
+                scope: format!("project:{}", p.id),
+                label: format!("{}/{}", p.owner, p.repo),
+                prefix: derive_ticket_prefix(&p.repo),
+                suggested: true,
+                tickets: 0,
+                former_prefixes: Vec::new(),
+            });
+        }
+        out.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+        Ok(out)
+    }
+
+    /// A scope as a person reads it, and the project it is, if one.
+    fn ticket_scope_label(&self, scope: &str) -> Result<(String, Option<i64>), IpcError> {
+        if let Some(id) = scope
+            .strip_prefix("project:")
+            .and_then(|i| i.parse::<i64>().ok())
+        {
+            let name: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT owner || '/' || repo FROM projects WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            return Ok((name.unwrap_or_else(|| format!("project {id}")), Some(id)));
+        }
+        if let Some(repo) = scope.strip_prefix("github:") {
+            return Ok((format!("GitHub {repo}"), None));
+        }
+        if let Some(id) = scope
+            .strip_prefix("tracker:")
+            .and_then(|i| i.parse::<i64>().ok())
+        {
+            let name: Option<(String, String)> = self
+                .conn
+                .query_row(
+                    "SELECT provider, name FROM trackers WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            return Ok((
+                match name {
+                    Some((provider, name)) => {
+                        let mut p = provider;
+                        if let Some(c) = p.get_mut(..1) {
+                            c.make_ascii_uppercase();
+                        }
+                        format!("{p} · {name}")
+                    }
+                    None => format!("tracker {id} (removed)"),
+                },
+                None,
+            ));
+        }
+        Ok((scope.to_string(), None))
+    }
+
+    /// Set the prefix of a space (`space_id`) or of a project's
+    /// (`project_id`, its space made first when it has none): a rename by
+    /// [`Self::rename_ticket_prefix`]'s rules. `E_INVALID` when neither is
+    /// given.
+    pub fn set_ticket_prefix(
+        &self,
+        space_id: Option<i64>,
+        project_id: Option<i64>,
+        prefix: &str,
+    ) -> Result<TicketSpace, IpcError> {
+        let space_id = match (space_id, project_id) {
+            (Some(id), _) => id,
+            (None, Some(pid)) => {
+                // Checked before the space is made, so a refused prefix
+                // leaves no space behind.
+                let wanted = parse_ticket_prefix(prefix)?;
+                let existing = self.ticket_space_by_scope(&format!("project:{pid}"))?;
+                if existing.is_none() && !self.ticket_prefix_free(&wanted, None)? {
+                    return Err(IpcError::new(
+                        codes::E_EXISTS,
+                        format!("ticket prefix {wanted} is already in use"),
+                    ));
+                }
+                self.project_ticket_space(pid)?.id
+            }
+            (None, None) => {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "set_ticket_prefix needs space_id or project_id",
+                ))
+            }
+        };
+        self.rename_ticket_prefix(space_id, prefix)
+    }
+
     /// Rename a space's prefix, Jira-like: every native key and display key
     /// in it follows (`OLD-7` → `NEW-7`, emitted), and the old prefix keeps
     /// resolving. `E_INVALID` for a malformed prefix, `E_EXISTS` for one in
     /// use, `E_NOTFOUND` for no such space. Renaming to its own prefix is a
-    /// no-op.
+    /// no-op; the old prefix is kept for lookups only when a ticket drew on it.
     pub fn rename_ticket_prefix(
         &self,
         space_id: i64,
         prefix: &str,
     ) -> Result<TicketSpace, IpcError> {
-        let prefix = prefix.trim().to_ascii_uppercase();
-        if !valid_ticket_prefix(&prefix) {
-            return Err(IpcError::new(
-                codes::E_INVALID,
-                format!(
-                    "a ticket prefix is a letter then letters, digits or _, \
-                     {TICKET_PREFIX_MIN}–{TICKET_PREFIX_MAX} long"
-                ),
-            ));
-        }
+        let prefix = parse_ticket_prefix(prefix)?;
         let Some(space) = self.ticket_space(space_id)? else {
             return Err(IpcError::new(
                 codes::E_NOTFOUND,
@@ -463,9 +627,11 @@ impl Store {
                 format!("ticket prefix {prefix} is already in use"),
             ));
         }
+        // The old prefix keeps resolving only when a ticket ever used it; a
+        // prefix nothing drew on is simply let go.
         let mut former = space.former_prefixes.clone();
         former.retain(|f| f != &prefix);
-        if !former.contains(&space.prefix) {
+        if space.next_seq > 1 && !former.contains(&space.prefix) {
             former.push(space.prefix.clone());
         }
         let tx = self.conn.unchecked_transaction()?;

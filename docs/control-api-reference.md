@@ -919,7 +919,7 @@ Parameters: `action`, `before_event`, `bucket_id`, `cursor`, `filters`, `host_al
 
 Trackers, orgs, retention, usage counts, sprints and releases; see action. Never returns a secret.
 
-Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket_id`, `carry`, `carry_to`, `color`, `confirm_nonce`, `credential_ref`, `days`, `ends_at`, `expected_version`, `external_id`, `goal`, `host_alias`, `isolate_sessions`, `jev`, `jev_reply`, `kind`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `shipped_ref`, `site_url`, `starts_at`, `state`, `tracker_id`, `transport`, `username`
+Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket_id`, `carry`, `carry_to`, `color`, `confirm_nonce`, `credential_ref`, `days`, `ends_at`, `expected_version`, `external_id`, `goal`, `host_alias`, `isolate_sessions`, `jev`, `jev_reply`, `kind`, `name`, `org_id`, `owner`, `path_prefix`, `prefix`, `project_id`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `shipped_ref`, `site_url`, `space_id`, `starts_at`, `state`, `tracker_id`, `transport`, `username`
 
 ### `work_link`
 
@@ -1057,6 +1057,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::trackers::test_tracker`
 - `commands::trackers::remove_tracker`
 - `commands::trackers::tracker_sync_metrics`
+- `commands::trackers::ticket_prefixes`
+- `commands::trackers::set_ticket_prefix`
 - `commands::trackers::status_map_proposals`
 - `commands::trackers::decide_status_map_proposal`
 - `commands::trackers::work_retention_status`

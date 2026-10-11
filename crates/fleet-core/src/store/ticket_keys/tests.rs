@@ -231,3 +231,60 @@ fn renaming_a_prefix_moves_every_key_and_the_old_one_still_resolves() {
     // New work keeps counting where the space left off.
     assert_eq!(task(&s, "b", Some(p), None).key.as_deref(), Some("CF-3"));
 }
+
+#[test]
+fn the_overview_lists_every_space_and_suggests_one_for_each_project_without() {
+    let s = Store::open_in_memory().unwrap();
+    let cf = s.upsert_project("acme", "claude-fleet", "/p/cf").unwrap();
+    s.upsert_project("acme", "payments", "/p/pay").unwrap();
+    task(&s, "a", Some(cf), None);
+    let asana = s
+        .add_tracker("asana", "Company B", "https://app.asana.com")
+        .unwrap();
+    s.upsert_tracker_item(asana.id, &write("1", "asana:1209876543210987"))
+        .unwrap();
+    let rows = s.ticket_prefix_overview().unwrap();
+    let got: Vec<(&str, &str, bool, i64)> = rows
+        .iter()
+        .map(|r| (r.label.as_str(), r.prefix.as_str(), r.suggested, r.tickets))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("acme/claude-fleet", "CF", false, 1),
+            ("acme/payments", "PAY", true, 0),
+            ("Asana · Company B", "CB", false, 1),
+        ]
+    );
+}
+
+#[test]
+fn setting_a_projects_prefix_before_its_first_ticket_reserves_nothing_else() {
+    let s = Store::open_in_memory().unwrap();
+    let p = s.upsert_project("acme", "claude-fleet", "/p/cf").unwrap();
+    // A refused prefix makes no space.
+    assert_eq!(
+        s.set_ticket_prefix(None, Some(p), "TASK").unwrap_err().code,
+        codes::E_EXISTS
+    );
+    assert_eq!(
+        s.set_ticket_prefix(None, Some(p), "f").unwrap_err().code,
+        codes::E_INVALID
+    );
+    assert!(s.list_ticket_spaces().unwrap().is_empty());
+    assert_eq!(
+        s.set_ticket_prefix(None, None, "FLT").unwrap_err().code,
+        codes::E_INVALID
+    );
+
+    let space = s.set_ticket_prefix(None, Some(p), "flt").unwrap();
+    assert_eq!(space.prefix, "FLT");
+    // The derived CF was never used, so it is not kept.
+    assert!(space.former_prefixes.is_empty());
+    assert_eq!(task(&s, "a", Some(p), None).key.as_deref(), Some("FLT-1"));
+    let q = s.upsert_project("acme", "core-front", "/p/x").unwrap();
+    assert_eq!(s.project_ticket_space(q).unwrap().prefix, "CF");
+    // By space id, once it exists.
+    let renamed = s.set_ticket_prefix(Some(space.id), None, "FLEET").unwrap();
+    assert_eq!(renamed.former_prefixes, vec!["FLT".to_string()]);
+}

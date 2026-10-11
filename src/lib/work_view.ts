@@ -504,6 +504,8 @@ export interface StepLine {
 export interface SessionTaskRef {
   task_id: string;
   key?: string | null;
+  /** Its fleet ticket key (`FLT-12`), shown in place of `key`. */
+  display_key?: string | null;
   title?: string | null;
   kind?: string;
   status_category?: string | null;
@@ -549,14 +551,26 @@ export interface ReviewItem {
   host?: string | null;
   link_id: number;
   link_version?: number;
-  task: { task_id: string; key?: string | null; title?: string | null; org_id?: number | null };
+  task: {
+    task_id: string;
+    key?: string | null;
+    display_key?: string | null;
+    title?: string | null;
+    org_id?: number | null;
+  };
   why?: string[];
   strength?: string | null;
   rule?: string | null;
   /** 0–100, from detection (`work::confidence`); absent from an older hub. */
   confidence?: number | null;
   preselected?: boolean;
-  alternatives?: { link_id?: number | null; task_id: string; key?: string | null; title?: string | null }[];
+  alternatives?: {
+    link_id?: number | null;
+    task_id: string;
+    key?: string | null;
+    display_key?: string | null;
+    title?: string | null;
+  }[];
   created_at?: number;
   /** Who proposed it when no rule read it off a signal: the decision
    *  model's suggestion (J1, rule R12, redesign 6.8). Absent otherwise, and
@@ -1343,10 +1357,17 @@ export function blockedOnLine(
 }
 
 /** `KEY title`, or the title alone, or the task id. */
-export function taskLabel(t: { key?: string | null; title?: string | null; task_id: string }): string {
+export function taskLabel(t: {
+  key?: string | null;
+  display_key?: string | null;
+  title?: string | null;
+  task_id: string;
+}): string {
   const title = (t.title ?? '').trim();
-  if (t.key && title) return `${t.key} ${title}`;
-  return t.key || title || t.task_id;
+  // The fleet ticket key (`FLT-12`) reads in place of a tracker's own id.
+  const key = t.display_key || t.key;
+  if (key && title) return `${key} ${title}`;
+  return key || title || t.task_id;
 }
 
 /** Where a task's org comes from, as a sentence. */

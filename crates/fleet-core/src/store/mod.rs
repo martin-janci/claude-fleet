@@ -208,7 +208,8 @@ pub use task_report::{
     EVIDENCE_FILES_MAX, REPORT_ENTRY_MAX_CHARS, REPORT_LIST_MAX, REPORT_OUTCOMES,
 };
 pub use ticket_keys::{
-    derive_ticket_prefix, valid_ticket_prefix, TicketSpace, TICKET_PREFIX_MAX, TICKET_PREFIX_MIN,
+    derive_ticket_prefix, parse_ticket_prefix, valid_ticket_prefix, TicketPrefixRow, TicketSpace,
+    TICKET_PREFIX_MAX, TICKET_PREFIX_MIN,
 };
 pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
