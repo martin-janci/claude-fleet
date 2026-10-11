@@ -45,6 +45,7 @@
   import AppRail from './lib/AppRail.svelte';
   import { toggleControl, toggleToday } from './lib/control';
   import type { RailId } from './lib/rail';
+  import { workspaceLanding } from './lib/workspace';
   import { loadProjects, applyProjectEvents } from './lib/projects';
   import { loadSessions, applySessionEvents, applyStartProgress, sessions, sessionsAnswered, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
   import { bootstrapError as bootstrapFailure } from './lib/bootstrap_state';
@@ -795,6 +796,16 @@
     else if (id === 'toolkit') showToolkit();
     else if (id === 'settings') settingsOpen.set(true);
   }
+  // A workspace switch (the rail's tile or ⌘K) lands where that workspace
+  // starts, as a click on that rail item would; the request is taken once.
+  $effect(() => {
+    const l = $workspaceLanding;
+    if (!l) return;
+    untrack(() => {
+      workspaceLanding.set(null);
+      onRailSelect(l.rail);
+    });
+  });
   // The task board (sprints design 2026-09-28 §6c) is an overlay over the
   // terminal like Assets, opened from the Work view's Board button
   // (`workBoardOpen`, a view of the same destination store); it keeps the
