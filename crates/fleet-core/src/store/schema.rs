@@ -1846,6 +1846,12 @@ const MIGRATIONS: &[Migration] = &[
     // `search_fts`) and the triggers that keep it in step. `IF NOT EXISTS`
     // and an upsert backfill, then a rebuild: safe to re-run.
     Migration::plain(163, include_str!("../../migrations/163_search_index.sql")),
+    // Single sign-on: `person_identities`, which person an OIDC account
+    // (issuer, subject) is. `IF NOT EXISTS`: safe to re-run.
+    Migration::plain(
+        164,
+        include_str!("../../migrations/164_person_identities.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

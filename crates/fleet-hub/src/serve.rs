@@ -920,6 +920,22 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     // `mcp_confirms` / `answer_mcp_confirm` (redesign step 9.2). Unanswered,
     // it expires with CONFIRM_TTL like on a desktop.
     let confirm_bus = Arc::clone(&bus);
+    // Single sign-on (Keycloak / OIDC): read from the environment only — the
+    // client secret must not sit in `state.db` beside what it guards. A
+    // half-configured provider fails the start rather than leaving sign-in
+    // silently off.
+    let oidc =
+        fleet_core::mcp::oidc::OidcConfig::from_lookup(|k| env.get(k).cloned())?.map(|cfg| {
+            tracing::info!(
+                issuer = %cfg.issuer,
+                client_id = %cfg.client_id,
+                auto_provision = cfg.auto_provision,
+                roles = ?cfg.allowed_roles,
+                "single sign-on on: devices pair through {}/auth/oidc/start",
+                base.url.trim_end_matches('/')
+            );
+            Arc::new(fleet_core::mcp::oidc::OidcProvider::new(cfg))
+        });
     let guards = McpGuards::new(Arc::new(
         move |req: &fleet_core::mcp::guard::ConfirmRequest| {
             tracing::info!(
@@ -929,7 +945,8 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             );
             confirm_bus.confirm_changed();
         },
-    ));
+    ))
+    .with_oidc(oidc);
 
     warn_if_confirm_destructive(&store);
 

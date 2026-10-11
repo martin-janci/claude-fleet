@@ -1050,6 +1050,88 @@ stored setting) on a *running* hub, a phone can be sent to the new address by
 the QR and then handed the old one to talk to. Restart `fleet-hub serve`
 before pairing anything, and the two agree again.
 
+## Sign in with Keycloak
+
+Instead of walking a code from the hub's terminal to every device, a hub can
+let people **sign in with Keycloak** (or any other OpenID Connect provider)
+and pair a device for themselves. It ends exactly where `fleet-hub pair`
+ends — in a single-use pairing code that the app redeems at `POST /pair` —
+so there is no new kind of token, no session cookie and no new door past
+the bearer check: the provider only stands in for the operator at the
+terminal, deciding **whose** device the code is for.
+
+It is off unless `FLEET_HUB_OIDC_ISSUER` is set. Configuration is the hub's
+environment only (`fleet-hub.env` in Docker): the client secret does not go
+into `state.db` beside the data it guards.
+
+| Env | Default | What it is |
+|---|---|---|
+| `FLEET_HUB_OIDC_ISSUER` | unset (off) | The issuer URL; for Keycloak `https://<host>/realms/<realm>`. Must be `https://`. |
+| `FLEET_HUB_OIDC_CLIENT_ID` | — (required) | The Keycloak client's id. |
+| `FLEET_HUB_OIDC_CLIENT_SECRET` | unset | A confidential client's secret. Unset: a public client, PKCE alone. |
+| `FLEET_HUB_OIDC_ALLOWED_ROLES` | empty (any account) | Comma-separated realm roles, client roles or groups; a sign-in holding none is refused. `/team` and `team` match each other. |
+| `FLEET_HUB_OIDC_AUTO_PROVISION` | `true` | An account's first sign-in creates its person. `false`: only accounts the operator linked get in. |
+| `FLEET_HUB_OIDC_USERNAME_CLAIM` | `preferred_username` | The ID-token claim a new person is named after. |
+| `FLEET_HUB_OIDC_MODE` | `full` | `full` or `readonly`: what a device paired this way may do. |
+| `FLEET_HUB_OIDC_SCOPES` | `openid profile email` | Requested scopes (`openid` is always added). |
+| `FLEET_HUB_OIDC_CA_FILE` | unset | Extra CA certificates (PEM) for a provider on a private CA. |
+
+A half-configured provider (an issuer and no client id, an `http://`
+issuer, an unknown mode) fails `fleet-hub serve` at start, so a typo cannot
+leave sign-in silently off.
+
+**In Keycloak**, create a client in the realm: *OpenID Connect*, *Standard
+flow* on (direct access grants off), *Client authentication* on for a
+confidential client (copy its secret from *Credentials*), and one *Valid
+redirect URI*: `https://fleet.example.com/auth/oidc/callback` — the hub's
+`FLEET_HUB_PUBLIC_URL` plus `/auth/oidc/callback`. Realm and client roles
+reach the hub in the access token as Keycloak sends them; for groups add a
+*Group Membership* mapper to the client's dedicated scope. Give the people
+who may use the fleet a role (say `fleet-users`) and set
+`FLEET_HUB_OIDC_ALLOWED_ROLES=fleet-users`.
+
+**Pairing a device:** open `https://fleet.example.com/auth/oidc/start` on it
+(optionally `?name=ada-phone`; the default name is `<person>-sso`, then
+`-sso-2`, …), sign in, and the page shows an eight-character code good for
+five minutes, an **Open in the Orbit Fleet app** link (`claudefleet:` +
+the pair URL, which fills the app's Pair screen) and the pair URL for a
+desktop. The device is paired `full` (or `FLEET_HUB_OIDC_MODE`), not
+trusted, bound to no org — `fleet-hub client trust` and `client bind` work
+on it like on any other.
+
+**Who it pairs.** An account is the pair (issuer, `sub`), never its
+username or e-mail, which the provider may let its owner change:
+
+- An account already linked pairs as that person — refused if the person is
+  disabled (`person disable` ends SSO reach too).
+- An account seen for the first time creates a person named after its
+  username, when auto-provisioning is on and no live person holds the name.
+- It is **never** linked to an existing person by name: anybody who can set
+  their username at the provider could otherwise become a colleague. So
+  that sign-in is refused, and the page prints the command for the
+  operator — which is also how you link your own account to this hub's
+  owner:
+
+```bash
+fleet-hub person link-sso owner --subject 0b7d…-uuid   # issuer: FLEET_HUB_OIDC_ISSUER
+fleet-hub person unlink-sso --subject 0b7d…-uuid        # devices stay paired until `client revoke`
+```
+
+**Security, precisely.** The flow is the authorization code flow with PKCE
+(S256), a `state` held in hub memory for ten minutes and bound to the
+browser by an `HttpOnly`, `SameSite=Lax` cookie (a callback from another
+browser is refused — login CSRF), and a `nonce` checked in the ID token.
+The hub exchanges the code itself over TLS, at the token endpoint the
+provider's discovery document names, which must be on the issuer's own
+host; it checks the ID token's `iss`, `aud`/`azp`, `exp` and `nonce`, and
+relies on TLS rather than the token's signature — what OIDC Core §3.1.3.7
+allows for a token taken straight from the token endpoint; the token never
+passes through the browser. Starts and callbacks are rate-limited per
+address. A hub restart forgets every sign-in in flight, like every pairing
+code. What is not built: logout at the provider (a paired device lives
+until `client revoke` or `person disable`, as before), org membership from
+Keycloak groups, and sign-in from the desktop app's own window.
+
 ## Clients
 
 ```bash

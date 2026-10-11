@@ -27,6 +27,7 @@ mod forms;
 mod guides;
 mod host_setup;
 mod hosts_accounts;
+mod identities;
 mod item_deps;
 mod item_verify;
 mod layers;
@@ -100,7 +101,7 @@ pub use changesets::{
 };
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, ClientBinding, CLIENT_MODES,
-    LINE_SEPARATORS,
+    LINE_SEPARATORS, MAX_CLIENT_NAME_LEN,
 };
 pub use control_handoffs::{
     handoff_preview, ControlHandoffRow, HandoffItem, NewHandoff, HANDOFFS_KEEP, HANDOFF_PREVIEW_MAX,
@@ -119,6 +120,7 @@ pub use downloads::{DownloadRow, NewDownload};
 pub use forms::{FormFinish, FormRow, NewForm, FORM_STATES};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
+pub use identities::{normalize_issuer, IdentityRow, MAX_IDENTITY_FIELD_LEN};
 pub use item_deps::{ItemDepRow, DEP_SOURCES};
 pub use item_verify::{
     normalize_done_when, VerificationRow, DONE_WHEN_LINE_MAX_CHARS, DONE_WHEN_MAX,
