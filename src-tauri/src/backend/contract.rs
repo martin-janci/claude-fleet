@@ -161,6 +161,8 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 /// lacks, and the desktop reads that hub's `E_HUB_PROTOCOL` as "nothing
 /// saved" and "nothing proposed" (as G7.10 does for `resume_or_new`). The
 /// owner's rule: a desktop that updates before its hub keeps working.
+/// Downloads Pause (`pause_download`, G7.15) is refused there with that
+/// same `E_HUB_PROTOCOL`, which the sheet words as "the hub needs updating first".
 pub const MIN_HUB_CONTRACT: u32 = 16;
 
 /// The highest hub wire-contract revision this build understands. A hub

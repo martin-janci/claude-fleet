@@ -249,7 +249,10 @@
 //!   `propose_host_placement` (Jev's host for a new session); the desktop
 //!   routes both, and a revision-16 hub serves neither: the desktop reads
 //!   its `E_HUB_PROTOCOL` as nothing saved and nothing proposed, so the
-//!   desktop's minimum stays 16 and it may update before its hub. `send_prompt` keys
+//!   desktop's minimum stays 16 and it may update before its hub.
+//!   `pause_download` (G7.15: Pause on a copy in flight; a download row
+//!   carries `paused`) is new too; against a revision-16 hub the desktop's
+//!   Pause says the hub needs updating and the copy goes on. `send_prompt` keys
 //!   take Meta chords (`M-a`..`M-z`, `M-Enter`, `M-BSpace`, `M-Left`,
 //!   `M-Right`), which a revision-16 hub refuses. `new_bg_session` takes
 //!   `agent: "codex"` (a Codex session in `project_id`, prompt queued),

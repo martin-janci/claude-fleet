@@ -918,7 +918,9 @@ Index by area (names only; see the reference for details):
   worktree root, ≤ `downloads.max_file_mb`, folders refused (zip them). It
   answers the row in state `fetching` at once; the copy runs in the
   background. A per-host token sends from its OWN host only — that is how a
-  session's Claude hands over what it made. `list_downloads` (a read) and
+  session's Claude hands over what it made. `list_downloads` (a read),
+  `pause_download` (`{ id, paused }`: hold a copy in flight between slices,
+  or let it go on; the row answers `paused: true` while held) and
   `remove_download` are a person's, never served to a per-host token; the
   bytes are `GET /downloads/<id>` (bearer, not a tool result). Events:
   `download:changed { id }`, ids only, never on a host- or org-bound

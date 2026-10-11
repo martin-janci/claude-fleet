@@ -1297,6 +1297,9 @@ desktop's *⤓ Downloads* (footer) list it for you to save, share or open.
 The copy runs in the background in 8 MiB pieces over the same SSH (or
 agent) link the hub already uses; the row shows *copying…* until it is
 ready, and a toast says so. Folders are refused: zip them first.
+*Pause* on a copy in flight (`pause_download`) holds it after the piece
+being read; *Resume* goes on from there. A paused copy is still marked
+failed if the hub stops.
 
 | setting | default | |
 |---|---|---|

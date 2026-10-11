@@ -824,6 +824,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "remove_download",
         },
     ),
+    (
+        "pause_download",
+        Verdict::Routed {
+            tool: "pause_download",
+        },
+    ),
     // Control's Library (9.7) is indexed on the machine that owns the
     // fleet, the hub when paired, beside the downloads; one tool by action.
     ("list_library", Verdict::Routed { tool: "library" }),

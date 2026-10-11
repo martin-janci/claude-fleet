@@ -32,6 +32,8 @@ export interface Download {
   expires_at?: number;
   /** Bytes copied so far while `fetching`. Absent from an older hub. */
   fetched_bytes?: number;
+  /** A person paused the copy (G7.15); absent while it runs. */
+  paused?: boolean;
 }
 
 export interface DownloadList {
@@ -197,6 +199,11 @@ const firstSeen = new Map<number, { at: number; bytes: number }>();
  *  hub) only `copying…`. */
 export function transferText(d: Download, now = Date.now()): string {
   const got = d.fetched_bytes;
+  if (d.paused) {
+    // The rate starts again from the next reading once it goes on.
+    firstSeen.delete(d.id);
+    return got === undefined ? 'paused' : `${fmtSize(got)} of ${fmtSize(d.size)} · paused`;
+  }
   if (got === undefined) return 'copying…';
   const first = firstSeen.get(d.id);
   if (!first) firstSeen.set(d.id, { at: now, bytes: got });
@@ -238,6 +245,23 @@ export async function saveDownload(id: number): Promise<string | null> {
     );
   }
   return r.value;
+}
+
+/** Pause a copy in flight, or let it go on (G7.15, Toasts board "Pause").
+ *  It stops between slices of the copy. */
+export async function pauseDownload(id: number, paused: boolean): Promise<void> {
+  const r = await invokeCmd<Download>('pause_download', { args: { id, paused } });
+  if (!r.ok) {
+    // A hub before contract 17 has no pause_download: the copy goes on.
+    const message = r.error.code === 'E_HUB_PROTOCOL'
+      ? 'the hub needs updating first; the copy goes on meanwhile.'
+      : r.error.message;
+    push({ kind: 'error', code: r.error.code, message: `${paused ? 'Pause' : 'Resume'}: ${message}` });
+    return;
+  }
+  race.touch(id);
+  const row = r.value;
+  downloads.update((rows) => rows.map((d) => (d.id === id ? { ...d, ...row, paused: row.paused } : d)));
 }
 
 export async function removeDownload(id: number): Promise<void> {

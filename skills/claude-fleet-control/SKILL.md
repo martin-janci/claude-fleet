@@ -81,8 +81,8 @@ review     repo_changes repo_diff repo_file repo_tree repo_log repo_blame
            repo_commit_diff
 share      session_share session_narrow session_unshare session_access
            session_presence my_grants session_ask_access access_requests
-files      send_file list_downloads remove_download library get_clipboard
-           set_clipboard
+files      send_file list_downloads pause_download remove_download library
+           get_clipboard set_clipboard
 devices    debug_devices
 assets     list_assets scan_assets import_assets plan_sync apply_sync
            changesets catalog_admin list_layers propose_layers resolve_preview

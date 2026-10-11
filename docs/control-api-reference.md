@@ -377,6 +377,12 @@ Mint a single-use pairing code for a new client device (phone, browser) and retu
 
 Parameters: `mode`, `name`, `org_id`, `person`, `trusted`, `ttl_s`
 
+### `pause_download`
+
+Pause (paused: true) or resume a sent file's copy in flight; it stops between slices. Answers the row. E_INVALID_STATE when it is not being copied.
+
+Parameters: `id`, `paused`
+
 ### `peer_exchange`
 
 Hub-to-hub link exchange (peer tokens only): deliver messages and acks, receive this hub's messages for the caller. Long-polls up to wait_ms. See docs/hub.md, Link two hubs.
@@ -1130,6 +1136,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::library::add_library_items`
 - `commands::library::remove_library_item`
 - `commands::downloads::send_file`
+- `commands::downloads::pause_download`
 - `commands::downloads::remove_download`
 - `commands::downloads::save_download`
 - `commands::pages::get_fleet_settings`

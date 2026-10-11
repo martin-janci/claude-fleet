@@ -9,6 +9,8 @@
 //! — into `<data dir>/downloads/<id>`, hashing as it writes. A client reads
 //! the rows with [`list`] and the bytes with `GET /downloads/<id>`
 //! ([`open_ready`]). [`sweep`] drops what is past `downloads.keep_secs`.
+//! [`pause`] holds a copy in flight between slices and lets it go on (gap
+//! plan G7.15); a removed copy stops at its next slice.
 //!
 //! Scope: the master and an unbound client see every row; a client bound
 //! to an org sees its org's; a per-host token sees, and sends from, its own
@@ -176,8 +178,94 @@ fn present(b: &Budget, mut row: DownloadRow) -> DownloadRow {
     row.expires_at = b.expires_at(&row);
     if row.state == "fetching" {
         row.fetched_bytes = Some(progress::get(row.id).unwrap_or(0) as i64);
+        row.paused = control::is_paused(row.id).then_some(true);
     }
     row
+}
+
+/// The copies in flight ([`spawn_fetch`]), which a person paused and which
+/// were removed, in memory like [`progress`]: a copy lives in this process,
+/// and a restart fails it (`fail_interrupted_downloads`), paused or not.
+mod control {
+    use std::collections::HashSet;
+    use std::sync::{LazyLock, Mutex};
+
+    static RUNNING: LazyLock<Mutex<HashSet<i64>>> = LazyLock::new(Default::default);
+    static PAUSED: LazyLock<Mutex<HashSet<i64>>> = LazyLock::new(Default::default);
+    static STOPPED: LazyLock<Mutex<HashSet<i64>>> = LazyLock::new(Default::default);
+
+    fn set(m: &Mutex<HashSet<i64>>, id: i64, on: bool) {
+        let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+        if on {
+            g.insert(id);
+        } else {
+            g.remove(&id);
+        }
+    }
+
+    fn has(m: &Mutex<HashSet<i64>>, id: i64) -> bool {
+        m.lock().unwrap_or_else(|e| e.into_inner()).contains(&id)
+    }
+
+    /// A copy of `id` starts in this process.
+    pub fn begin(id: i64) {
+        set(&RUNNING, id, true);
+    }
+
+    pub fn is_running(id: i64) -> bool {
+        has(&RUNNING, id)
+    }
+
+    /// Pause or go on: only a copy in flight here; false otherwise.
+    pub fn set_paused(id: i64, on: bool) -> bool {
+        if !is_running(id) {
+            return false;
+        }
+        set(&PAUSED, id, on);
+        true
+    }
+
+    pub fn is_paused(id: i64) -> bool {
+        has(&PAUSED, id)
+    }
+
+    /// The copy in flight stops at its next slice.
+    pub fn stop(id: i64) {
+        if is_running(id) {
+            set(&STOPPED, id, true);
+        }
+    }
+
+    pub fn is_stopped(id: i64) -> bool {
+        has(&STOPPED, id)
+    }
+
+    /// The copy ended: forget it.
+    pub fn clear(id: i64) {
+        set(&RUNNING, id, false);
+        set(&PAUSED, id, false);
+        set(&STOPPED, id, false);
+    }
+}
+
+/// How often a paused copy looks whether it may go on.
+const PAUSE_POLL: Duration = Duration::from_millis(250);
+
+/// Before each slice: wait while the copy is paused; `E_CANCELLED` once it
+/// was removed (the row is gone, so nothing more is worth reading).
+async fn hold_while_paused(id: i64) -> Result<(), IpcError> {
+    loop {
+        if control::is_stopped(id) {
+            return Err(IpcError::new(
+                codes::E_CANCELLED,
+                "the download was removed",
+            ));
+        }
+        if !control::is_paused(id) {
+            return Ok(());
+        }
+        tokio::time::sleep(PAUSE_POLL).await;
+    }
 }
 
 /// Bytes copied per download in flight, in memory: a copy lives in this
@@ -468,6 +556,7 @@ pub async fn send(
 
 /// Copy `row`'s bytes in the background; the row ends `ready` or `failed`.
 pub fn spawn_fetch(store: Arc<Mutex<Store>>, ssh: Arc<dyn SshExec>, row: DownloadRow) {
+    control::begin(row.id);
     tokio::spawn(async move {
         let id = row.id;
         let copied = |got: u64| {
@@ -479,6 +568,7 @@ pub fn spawn_fetch(store: Arc<Mutex<Store>>, ssh: Arc<dyn SshExec>, row: Downloa
         let result = fetch_chunked(&*ssh, &row, CHUNK_BYTES, &copied).await;
         progress::clear(id);
         let Ok(s) = crate::ipc_error::lock(&store) else {
+            control::clear(id);
             return;
         };
         match result {
@@ -496,6 +586,9 @@ pub fn spawn_fetch(store: Arc<Mutex<Store>>, ssh: Arc<dyn SshExec>, row: Downloa
                 }
             }
         }
+        // Under the store's lock, after the row left `fetching`: a pause
+        // that comes later is refused rather than left behind.
+        control::clear(id);
     });
 }
 
@@ -527,6 +620,7 @@ async fn fetch_chunked(
     let mut hash = sha2::Sha256::new();
     let mut got = 0u64;
     while got < size {
+        hold_while_paused(row.id).await?;
         let want = chunk_bytes.min(size - got);
         let out = crate::ssh::run_shell(
             ssh,
@@ -639,9 +733,44 @@ pub fn remove(s: &Store, scope: &ViewScope, id: i64) -> Result<bool, IpcError> {
     let Ok(row) = visible_row(s, scope, id) else {
         return Ok(false);
     };
+    // The copy in flight stops at its next slice, paused or not.
+    control::stop(row.id);
     let removed = s.delete_download(row.id)?;
     remove_files(row.id);
     Ok(removed)
+}
+
+/// Arguments of `pause_download`.
+#[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct PauseDownloadArgs {
+    /// The download's id (`list_downloads`).
+    pub id: i64,
+    /// true pauses the copy, false lets it go on.
+    pub paused: bool,
+}
+
+/// Pause a copy in flight, or let it go on (Toasts board, "Pause" on a copy
+/// in flight). It stops between slices, so the slice being read finishes
+/// first. The row as `list` shows it; `E_NOTFOUND` for a row this caller
+/// may not see, `E_INVALID_STATE` for one that is not being copied.
+pub fn pause(
+    s: &Store,
+    scope: &ViewScope,
+    args: &PauseDownloadArgs,
+) -> Result<DownloadRow, IpcError> {
+    let row = visible_row(s, scope, args.id)?;
+    if row.state != "fetching" || !control::set_paused(row.id, args.paused) {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "download {} is {}: only a copy in flight pauses",
+                row.id, row.state
+            ),
+        ));
+    }
+    s.note_download_progress(row.id);
+    Ok(present(&Budget::from_store(s), row))
 }
 
 /// A ready download the caller may fetch, and where its bytes are; stamps

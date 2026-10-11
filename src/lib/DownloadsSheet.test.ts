@@ -11,7 +11,8 @@ vi.mock('@tauri-apps/plugin-opener', () => ({ revealItemInDir: vi.fn(() => Promi
 import DownloadsSheet from './DownloadsSheet.svelte';
 import { _resetDownloadsForTests, savedTo, type Download } from './downloads';
 import { clearNotices } from './notifications';
-import { clearToasts, push } from './toasts';
+import { clearToasts, push, toasts } from './toasts';
+import { get } from 'svelte/store';
 import { expectAccessible } from './a11y_check';
 
 const MB = 1024 * 1024;
@@ -44,6 +45,35 @@ async function open(rows: Download[], tab?: 'downloads' | 'notifications') {
 }
 
 describe('Downloads', () => {
+  it('pauses a copy in flight and lets it go on (G7.15)', async () => {
+    await open([row(5, 'fetching', { fetched_bytes: 62 * MB })]);
+    expect(screen.getByTestId('download-pause').textContent).toBe('Pause');
+    invoke.mockResolvedValueOnce(row(5, 'fetching', { fetched_bytes: 62 * MB, paused: true }));
+    await fireEvent.click(screen.getByTestId('download-pause'));
+    await tick();
+    await tick();
+    expect(invoke).toHaveBeenCalledWith('pause_download', { args: { id: 5, paused: true } });
+    expect(screen.getByTestId('download-progress').textContent).toBe('62.0 MB of 88.0 MB · paused');
+    expect(screen.getByTestId('download-pause').textContent).toBe('Resume');
+    invoke.mockResolvedValueOnce(row(5, 'fetching', { fetched_bytes: 62 * MB }));
+    await fireEvent.click(screen.getByTestId('download-pause'));
+    await tick();
+    await tick();
+    expect(invoke).toHaveBeenLastCalledWith('pause_download', { args: { id: 5, paused: false } });
+    expect(screen.getByTestId('download-pause').textContent).toBe('Pause');
+  });
+
+  it('says Pause needs the hub updated when the hub is older (G7.15)', async () => {
+    await open([row(5, 'fetching', { fetched_bytes: 62 * MB })]);
+    invoke.mockRejectedValueOnce({ code: 'E_HUB_PROTOCOL', message: 'unknown tool pause_download' });
+    await fireEvent.click(screen.getByTestId('download-pause'));
+    await tick();
+    await tick();
+    const t = get(toasts).at(-1);
+    expect(t?.message).toBe('Pause: the hub needs updating first; the copy goes on meanwhile.');
+    expect(screen.getByTestId('download-pause').textContent).toBe('Pause');
+  });
+
   it('retries a failed transfer: the file is sent again and the failed row goes', async () => {
     await open([row(3, 'failed', { error: 'host went offline' })]);
     expect(screen.getByTestId('download-row').dataset.state).toBe('failed');

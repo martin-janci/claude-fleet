@@ -592,6 +592,7 @@ pub fn run() {
             commands::library::add_library_items,
             commands::library::remove_library_item,
             commands::downloads::send_file,
+            commands::downloads::pause_download,
             commands::downloads::remove_download,
             commands::downloads::save_download,
             commands::pages::get_fleet_settings,

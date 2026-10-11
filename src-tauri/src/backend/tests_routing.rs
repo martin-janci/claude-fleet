@@ -757,6 +757,19 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "pause_download",
+            "pause_download",
+            json!({ "id": 7, "paused": true }),
+            r#"{"id":7,"at":1,"host_alias":"trn","path":"/w/a.pdf","name":"a.pdf","size":3,"state":"fetching","source":"person","fetched_bytes":1,"paused":true}"#,
+            Box::new(|b, s, _| {
+                let args = fleet_core::service::downloads::PauseDownloadArgs {
+                    id: 7,
+                    paused: true,
+                };
+                block_on(commands::downloads::routed::pause_download(b, args, s)).map(|_| ())
+            }),
+        ),
+        (
             "remove_download",
             "remove_download",
             json!({ "id": 7 }),

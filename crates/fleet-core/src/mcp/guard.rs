@@ -600,6 +600,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Gap plan G7.15: Pause on a copy in flight, a person's like removing.
+    ToolPolicy {
+        name: "pause_download",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Routines (Orbit Fleet 8.5): a person's own scheduled prompts. Its
     // run_now starts a session, hence the lifecycle deadline; a host's token
     // is not served it (`NOT_FOR_HOST_TOKENS`).
@@ -1710,8 +1718,8 @@ pub fn is_client_tool(name: &str) -> bool {
 /// another host and write into — the catalog is what the master gate exists
 /// to prevent. `changesets` (Assets M4) applies and undoes those same
 /// catalog edits and rolls layers out to hosts, so it is refused alike, its
-/// `list` included (R25 amended). `list_downloads` / `remove_download` are a
-/// person's: a host's Claude only sends files.
+/// `list` included (R25 amended). `list_downloads` / `remove_download` /
+/// `pause_download` are a person's: a host's Claude only sends files.
 /// `routines` (Orbit Fleet 8.5) is a person's too: a session does not
 /// schedule sessions. `library` (9.7) is the index beside the downloads, a
 /// person's for the same reason. So is `start_rules` (8.11): a session does
@@ -1732,6 +1740,7 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "library",
     "list_downloads",
     "remove_download",
+    "pause_download",
     "routines",
     "start_rules",
     "wizard_state",

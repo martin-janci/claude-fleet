@@ -11323,6 +11323,10 @@ const REVIEWED_WITHOUT_A_SESSION: &[(&str, &str)] = &[
         "one DOWNLOAD, by `{id}` — a `downloads` row id, not a session id, which is why the schema clause below cannot see this tool at all. It is reviewed rather than silent: the row it names did come out of a session, so the fence is the same `own` tier `send_file` and `list_downloads` carry (`service::downloads::remove` -> `visible_row` -> `visible` -> `ViewScope::may_own`), and a row this caller may not see answers `Ok(false)` — a no-op, never an `E_NOTFOUND` that would tell it the id exists. A per-host token is additionally refused the tool outright by `NOT_FOR_HOST_TOKENS`",
     ),
     (
+        "pause_download",
+        "one DOWNLOAD's copy in flight, by `{id, paused}` — a `downloads` row id, as `remove_download` takes, under the same fence: `service::downloads::pause` -> `visible_row` -> `visible` -> `ViewScope::may_own`, so a row this caller may not see answers `E_NOTFOUND` exactly as an id that does not exist does. It only holds or releases this process's copy between slices; the row's bytes and path are not in its answer beyond what `list_downloads` already shows the same caller. A per-host token is additionally refused the tool outright by `NOT_FOR_HOST_TOKENS`",
+    ),
+    (
         "my_grants",
         "the CALLER's own person and the live grants to them (multi-user M1, T12). It takes no parameters at all, so there is nothing to address a session with: the one input is who the caller is, resolved through `fleet::owner_for` — a device's `person_id` off the connection, the hub's personal owner for the master, and `None` for a per-host token (which is additionally refused the tool outright by `NOT_FOR_HOST_TOKENS`). `None` answers an EMPTY grant list, never every grant, which is the one way this surface could have leaked",
     ),
