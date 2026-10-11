@@ -52,7 +52,6 @@
     type HandoffItem,
   } from './handoffs';
   import { displayName } from './attention';
-  import { leave } from './destination';
   import { editWorkItem, mergeWorkProposal, parseAssignees, setWorkStatus } from './work';
   import { undoWorkAccept, verifyWorkItem } from './missions';
   import { placeWork, workTask, workTreeMeta, type DuplicateHint } from './work_view';
@@ -60,7 +59,7 @@
   import { sessions } from './sessions';
   import { focusSession } from './session_focus';
   import { openMission } from './missions';
-  import { showTaskInWorkView, sidebarView } from './work_view';
+  import { showTaskInWorkView } from './work_view';
   import ReviewDialog from './ReviewDialog.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
@@ -146,7 +145,6 @@
 
   function openMissionChip(h: ControlHandoff) {
     if (h.mission_id == null) return;
-    sidebarView.set('work');
     openMission(h.mission_id);
   }
 
@@ -182,7 +180,6 @@
   function editInWork(h: ControlHandoff) {
     if (!h.item) return;
     showTaskInWorkView(`item:${h.item.id}`);
-    leave('control');
   }
 
   // ── G3.11: the created-task and status card ──

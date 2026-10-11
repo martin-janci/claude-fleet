@@ -21,6 +21,7 @@ import type { ProposalLike, ProposalSource } from './ai_proposal';
 import { derived, get, writable, type Readable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
 import { readPref, writePref } from './prefs';
+import { uncoverWork } from './destination';
 import type { DecisionProposal } from './proposals';
 import { acceptCommandRow, formatCostMicros, sessions, type SessionEvent, type SessionRow } from './sessions';
 import { bumpWorkChanged, workChanged, type WorkChangeKind, type WorkEvidence } from './work';
@@ -1552,6 +1553,14 @@ export const knownWorkFacets = writable<WorkTreeFacets | null>(null);
 export const sidebarView = writable<SidebarView>(readPref('sidebar.view', 'sessions', isSidebarView));
 sidebarView.subscribe((v) => writePref('sidebar.view', v));
 
+/** The Work view on show: the sidebar on Work, and off a page that covers
+ *  it (Control, Files, a fleet page). Every "open in Work" goes through
+ *  this; the sidebar alone changes nothing a person sees from Control. */
+export function showWorkView(): void {
+  sidebarView.set('work');
+  uncoverWork();
+}
+
 export function toggleSidebarView(): void {
   sidebarView.update((v) => (v === 'work' ? 'sessions' : 'work'));
 }
@@ -1637,7 +1646,7 @@ let revealSeqN = 0;
 
 /** "Show in Work view": switch the sidebar, select the task, reveal it. */
 export function showTaskInWorkView(taskId: string, links?: readonly TaskSessionLink[]): void {
-  sidebarView.set('work');
+  showWorkView();
   openTask(taskId, links);
   revealTaskRequest.set({ taskId, seq: ++revealSeqN });
 }

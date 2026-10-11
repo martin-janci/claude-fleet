@@ -23,8 +23,9 @@ import { localMidnight } from './today';
 import { openRoutines } from './routines';
 import type { WorkTask } from './work_view';
 import { readPref, writePref } from './prefs';
-import { goTo, leave } from './destination';
-import { sidebarView } from './work_view';
+import { goTo } from './destination';
+import { showWorkView } from './work_view';
+import { openMissionsTab } from './missions';
 import { sessionMatchesSearch } from './search';
 
 export type ControlViewId = 'needs-you' | 'session' | 'tasks' | 'routines' | 'prs' | 'library' | 'today';
@@ -74,8 +75,8 @@ export function openElsewhere(id: ElsewhereId): void {
     openRoutines();
     return;
   }
-  sidebarView.set('work');
-  leave('control');
+  if (id === 'missions') openMissionsTab();
+  else showWorkView();
 }
 
 export interface ControlViewsLayout {
