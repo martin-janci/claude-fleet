@@ -1,16 +1,21 @@
 {
   "schema": 1,
   "track": "dev",
-  "sequence": 13,
-  "generated_at": "2026-10-10T23:53:18Z",
-  "expires_at": "2026-10-24T23:53:18Z",
-  "current": "0.6.3-dev.14.desktop.gfa5304d",
-  "recommended": "0.6.3-dev.14.desktop.gfa5304d",
+  "sequence": 14,
+  "generated_at": "2026-10-11T13:43:27Z",
+  "expires_at": "2026-10-25T13:43:27Z",
+  "current": "0.6.3-dev.115.desktop.gdb7a017",
+  "recommended": "0.6.3-dev.115.desktop.gdb7a017",
   "minimum_supported": {},
   "mandatory": [],
   "rollback": null,
   "withdrawn": [],
   "releases": [
+    {
+      "version": "0.6.3-dev.115.desktop.gdb7a017",
+      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.115.desktop.gdb7a017/release-manifest.json",
+      "manifest_sha256": "1b90da7a7c8c89a7e4089a785c5bc1c4a1cd23fb9271af706fda4883ee6b678a"
+    },
     {
       "version": "0.6.3-dev.14.desktop.gfa5304d",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.14.desktop.gfa5304d/release-manifest.json",
