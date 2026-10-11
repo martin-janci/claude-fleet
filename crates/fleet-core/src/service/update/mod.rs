@@ -504,6 +504,10 @@ fn decide_for(
     if d.reason.code == fleet_update::ReasonCode::Pinned && d.target.is_some() {
         d.next_check_secs = d.next_check_secs.min(PINNED_RECHECK_SECS);
     }
+    // No later than the hub's own next look at the channel: on `dev` and
+    // `nightly` a release the hub verified reaches `fleet-updater` and the
+    // agents within that, not after the six-hour default.
+    d.next_check_secs = d.next_check_secs.min(channel_poll_secs(store));
     Ok(d)
 }
 
