@@ -1,6 +1,7 @@
 //! The one locked-down `claude -p` run fleet starts on a host, shared by the
-//! dead-session summary ([`super::work::summary`]) and the Jev `claude -p
-//! haiku` baseline ([`super::decide::haiku`]).
+//! dead-session summary ([`super::work::summary`]), the Jev `claude -p
+//! haiku` baseline ([`super::decide::haiku`]) and the agents' runs
+//! ([`super::agents::vehicle`], which give a run read-only tools).
 //!
 //! * [`isolation_flags`] are the words that take everything away from the
 //!   run: no hooks, no built-in tool, no MCP server, no transcript left.
@@ -24,15 +25,47 @@ use serde_json::Value;
 /// built-in tool; `--strict-mcp-config` with no `--mcp-config` loads no MCP
 /// server; `--no-session-persistence` leaves no transcript.
 pub fn isolation_flags() -> String {
-    [
-        "--settings",
-        &quote(r#"{"disableAllHooks":true}"#),
-        "--tools",
-        &quote(""),
-        "--strict-mcp-config",
-        "--no-session-persistence",
-    ]
-    .join(" ")
+    isolation_flags_with(&[], &[]).expect("no tools is always valid")
+}
+
+/// PURE: [`isolation_flags`] with the built-in `tools` the run may use
+/// (`Read`, `Grep`, `Glob` …) and the extra tools it may call without a
+/// prompt (`allowed`, for MCP tools: `mcp__<server>__<tool>`, `*` allowed
+/// as the tool). Everything else stays taken away: no hooks, no MCP server
+/// unless the caller adds its own `--mcp-config` after these words (with
+/// `--strict-mcp-config` nothing else loads), no transcript. A name outside
+/// those shapes is refused, so no caller can smuggle a flag or `Bash(…)` in.
+pub fn isolation_flags_with(tools: &[&str], allowed: &[&str]) -> Result<String, String> {
+    fn word(s: &str) -> bool {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+    for t in tools {
+        if !t.chars().next().is_some_and(|c| c.is_ascii_uppercase()) || !word(t) {
+            return Err(format!("refusing tool name {t:?}"));
+        }
+    }
+    for a in allowed {
+        let ok = a
+            .strip_prefix("mcp__")
+            .and_then(|rest| rest.split_once("__"))
+            .is_some_and(|(server, tool)| word(server) && (tool == "*" || word(tool)));
+        if !ok {
+            return Err(format!(
+                "refusing allowed tool {a:?}: only mcp__<server>__<tool>"
+            ));
+        }
+    }
+    let settings = quote(r#"{"disableAllHooks":true}"#);
+    let tools = quote(&tools.join(","));
+    let mut words = vec!["--settings", &settings, "--tools", &tools];
+    let allowed_list = quote(&allowed.join(","));
+    if !allowed.is_empty() {
+        words.extend(["--allowedTools", &allowed_list]);
+    }
+    words.extend(["--strict-mcp-config", "--no-session-persistence"]);
+    Ok(words.join(" "))
 }
 
 /// PURE: the script line that ends with `<tag>noclaude` when `claude` is not
@@ -234,6 +267,33 @@ mod tests {
             isolation_flags(),
             r#"--settings '{"disableAllHooks":true}' --tools '' --strict-mcp-config --no-session-persistence"#
         );
+    }
+
+    #[test]
+    fn tools_and_mcp_tools_are_named_or_refused() {
+        assert_eq!(
+            isolation_flags_with(&["Read", "Grep", "Glob"], &["mcp__graylog__search"]).unwrap(),
+            r#"--settings '{"disableAllHooks":true}' --tools 'Read,Grep,Glob' --allowedTools 'mcp__graylog__search' --strict-mcp-config --no-session-persistence"#
+        );
+        assert!(isolation_flags_with(&["Read"], &["mcp__kb__*"]).is_ok());
+        for bad in [
+            "Bash(rm:*)",
+            "read",
+            "Read --dangerously-skip-permissions",
+            "",
+            "Re ad",
+        ] {
+            assert!(isolation_flags_with(&[bad], &[]).is_err(), "{bad}");
+        }
+        for bad in [
+            "Bash",
+            "mcp__x",
+            "mcp____y",
+            "mcp__x__y z",
+            "mcp__x__y,Bash",
+        ] {
+            assert!(isolation_flags_with(&[], &[bad]).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -686,8 +686,8 @@ Jev's `pr_triage` (`decide.jev.pr_triage`, off by default) records in
 shadow what each new episode most likely needs. Not built: the Inbox
 card, the UI.
 
-The agent runtime (reviewer and support agents, step 1 of 8) is built and
-does nothing yet: no agent is registered, so its loops find no work (spec
+The agent runtime (reviewer and support agents, steps 1 and 2 of 8) is
+built and does nothing yet: no agent is registered, so its loops find no work (spec
 `docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`).
 Migration 170 (`agent_rules`, `agent_cursors`, `agent_jobs`,
 `agent_actions`), `service/agents/` with the loops `agents_poll` and
@@ -695,7 +695,11 @@ Migration 170 (`agent_rules`, `agent_cursors`, `agent_jobs`,
 `agents.poll_interval_secs`, `agents.max_concurrent` and
 `agents.max_retries`, `fleet-hub agents grant | revoke | pause-all |
 approve | reject | status`, and the `agents` tool, served only to the
-owner's own paired device. Not built: the reviewer (steps 2 to 4), the UI
+owner's own paired device. The run vehicle (step 2): a locked-down
+`claude -p` with read-only tools (`claude_print::isolation_flags_with`,
+`service/agents/vehicle.rs`), its MCP config and system prompt carried on
+stdin, in a detached worktree beside the checkout
+(`service/agents/workspace.rs`). Not built: the reviewer (steps 2 to 4), the UI
 (step 5), the support agent (steps 6 and 7); until an agent's executor
 lands an approved action stays `approved`.
 

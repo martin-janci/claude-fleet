@@ -1,6 +1,7 @@
 # Reviewer and Support agents: design
 
-Status: step 1 built (the runtime, no agent registered yet), 2026-10-11.
+Status: steps 1 and 2 built (the runtime and the run vehicle, no agent
+registered yet), 2026-10-11.
 Asked for by the owner: bring the functionality of
 [`claude-code-reviewer`](https://github.com/martin-janci/claude-code-reviewer)
 and [`support-agent`](https://github.com/martin-janci/support-agent) into
@@ -203,26 +204,30 @@ and adds:
 - `--tools Read,Grep,Glob` for both agents (the reviewer's set);
 - for support only, `--mcp-config <file>` listing the rule's MCP servers by
   their catalog install name, and `--allowedTools` limited to their
-  read tools (`mcp__graylog__search`, …). The file is written by fleet
-  from the catalog's resolved spec, with secrets substituted the way
-  `catalog/sync/secrets.rs` does, into a `0600` temp file the run script
-  removes.
+  read tools (`mcp__graylog__search`, …). Fleet builds the file from the
+  catalog's resolved spec, with secrets substituted the way
+  `catalog/sync/secrets.rs` does. It travels on the run's stdin, never in
+  the command line a host's `ps` shows: the script copies it by its byte
+  length into a private temp directory (`umask 077`, removed on exit).
 
-The skill text goes in with `--append-system-prompt-file`, the job's input
-on stdin, `--output-format json`, `--max-turns` and `--model` from the
+The skill text goes in with `--append-system-prompt-file` (copied off
+stdin the same way), the job's input on the rest of stdin, `--output-format json`, `--max-turns` and `--model` from the
 rule's config. The existing test that asserts `--tools` appears once keeps
 holding for each variant.
 
 ### Workspace for a run
 
 Neither agent may run in a session's worktree. A run gets its own
-detached worktree under the project's checkout on the rule's host:
-`git fetch origin pull/<n>/head` (review) or `<branch>` (support, the
-default branch) then `git worktree add --detach <root>/.fleet-agents/<job>
-FETCH_HEAD`, removed when the job finishes, with a prune of anything older
-than `agents.stale_worktree_mins` (60) on each `agents_run` pass. The
-script is built like `service/repair.rs::BranchSource::Mirror` (fetch or
-refuse); lifecycle's `worktree_add_script` never fetches and is not reused.
+detached worktree beside the project's checkout on the rule's host,
+`<root>.fleet-agents/job-<id>`, so it never shows in the checkout's own
+`git status` (`service/agents/workspace.rs`). The commit is fetched into
+the job's private ref, `refs/fleet-agents/job-<id>` (`pull/<n>/head` for a
+review, a branch for support), not `FETCH_HEAD`, which two jobs on one repo
+would share; a head that moved past the commit the job was about is
+refused. The worktree and ref go when the job finishes, and a prune at the
+start of each `agents_run` pass removes anything older than 60 minutes
+(passes are single-flight, so it never races a job). Lifecycle's
+`worktree_add_script` never fetches and is not reused.
 
 ### UI
 
@@ -453,9 +458,12 @@ dashboard pieces of the reviewer.
    `agents.*` settings, the `agents` tool (status; grant, revoke,
    pause_all; approve / reject). The `runs` kinds move to step 3, with the
    first job that runs.
-2. **Run vehicle**: `claude_print::isolation_flags_with`, the detached
-   review worktree script, the MCP-config temp file; tests on the rendered
-   scripts.
+2. **Run vehicle** (built): `claude_print::isolation_flags_with`,
+   `service/agents/vehicle.rs` (the run script, stdin-borne MCP config and
+   system prompt, the outcome and its error kind) and
+   `service/agents/workspace.rs` (prepare, cleanup, prune; tested against a
+   real repository). The prune is wired into the run pass with the first
+   agent, step 3, which knows each rule's checkout.
 3. **Reviewer, read side**: `review_prs`, the GitHub poller, `plan.rs`
    and `diff.rs` with the ported tests, the run and its parse; level
    `watch` works end to end (review stored and shown).

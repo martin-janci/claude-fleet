@@ -35,6 +35,8 @@
 pub mod admin;
 #[cfg(test)]
 mod tests;
+pub mod vehicle;
+pub mod workspace;
 
 use crate::service::settings;
 use crate::ssh::SshClient;
