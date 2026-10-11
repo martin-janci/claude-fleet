@@ -908,6 +908,20 @@ function trackerLine(text: string, max: number): string {
   return defuseMarkers(flat).slice(0, max);
 }
 
+/** A task written in fleet, not a tracker's ticket (the backend's
+ *  `with_native_defaults` test). */
+function isNativeTask(t: TicketRow): boolean {
+  return t.origin === 'manual' || t.origin === 'proposed' || t.origin === 'agent';
+}
+
+/** What a start names its ticket by: the work item when the row is one (a
+ *  tracker's cached ticket or a fleet task), else its key. A task started by
+ *  key resolved as a key no tracker knows: linked to the key alone, its
+ *  title and notes never reached Claude. */
+export function ticketRef(t: TicketRow): { item_id: number } | { reference: string } {
+  return t.id != null ? { item_id: t.id } : { reference: t.key ?? '' };
+}
+
 /** Same budget as the backend's `BRIEF_MAX_CHARS`. */
 export const BRIEF_MAX_CHARS = 4000;
 
@@ -916,6 +930,12 @@ export const BRIEF_MAX_CHARS = 4000;
  *  defused and the DESCRIPTION is what is cut to fit, so the end marker
  *  always survives. */
 export function ticketBriefPreview(t: TicketRow, branch: string): string {
+  // A fleet task's brief is its title and notes (the backend's
+  // `with_native_defaults`; a subtask's also leads with its parent's).
+  if (isNativeTask(t)) {
+    const notes = t.notes?.trim();
+    return notes ? `${t.title}\n\n${notes}` : t.title;
+  }
   let out = `You are starting work on ${t.key ?? ''}`;
   if (t.title) out += `: ${trackerLine(t.title, 200)}`;
   out += '\n';
