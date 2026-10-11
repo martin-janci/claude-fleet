@@ -382,8 +382,12 @@ fn create(
         level: input.level,
     };
     // Everything a create can refuse is refused before a new root task is
-    // made for it, so a refusal leaves nothing behind.
+    // made for it, so a refusal leaves nothing behind — the policy too,
+    // which the row takes in a second write below.
     s.check_new_mission(&new)?;
+    if let Some(p) = &input.policy {
+        crate::store::check_policy(p)?;
+    }
     let root_item_id = match root {
         Some(r) => r,
         None => {
@@ -396,13 +400,27 @@ fn create(
             .id
         }
     };
-    s.create_mission(
+    let created = s.create_mission(
         &NewMission {
             root_item_id: Some(root_item_id),
             ..new
         },
         &actor(scope),
-    )
+    )?;
+    // A policy named at birth (a planner host, say) is kept rather than
+    // dropped: a mission is created with the defaults and then given it.
+    match &input.policy {
+        Some(p) => s.update_mission(
+            created.id,
+            Some(created.version),
+            &MissionPatch {
+                policy: Some(p.clone()),
+                ..MissionPatch::default()
+            },
+            &actor(scope),
+        ),
+        None => Ok(created),
+    }
 }
 
 fn update(

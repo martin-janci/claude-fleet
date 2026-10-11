@@ -179,7 +179,12 @@ says so:
   — `repo:<owner>/<repo>`, `tracker:<tracker id>:<container>`,
   `key:<PREFIX>`, `label:<text>` — which puts the task in *that* section
   instead of opening a second one named after the id; an id that names no
-  such group is refused. Remember that a placement outranks every rule and
+  such group is refused — and so is free text that is already a derived
+  group's *name* (`martin-janci/claude-fleet` beside the
+  `repo:martin-janci/claude-fleet` group), since a section is bucketed by
+  its id and ordered by its label, so the two would show one name over two
+  sections; the refusal names the id to pass, and `label:<name>` insists on
+  a group of your own with that name. Remember that a placement outranks every rule and
   every derived grouping until it is cleared, so pinning a task to the
   repository it sits in today keeps it there after its session moves.
   `work_link { action: unplace, task_id | item_id, expected_version }`

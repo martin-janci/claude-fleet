@@ -506,7 +506,12 @@ include_local }` adds own tasks. Link windows (P-7) need no migration:
 `work_journal.rs`'s `WINDOW_LO` / `WINDOW_HI` bound a link's journal by the
 switches around it, and a link no switch touched reads as before. The
 desktop's attach picker (`AttachPicker.svelte`, `attach.ts`) and Work on
-task… (`SessionTasks.svelte`) read them. Not yet: the new task's brief
+task… (`SessionTasks.svelte`) read them. An agent knows its own tasks
+from its pane (per-host token + `X-Fleet-Pane`, `FleetTools::own_session`):
+`whoami {}`, `work { session_tasks }` without `session_id`, and
+`list_tasks { mine | worker_session_id }`; `session_tasks`, `work { task }`
+and `list_tasks` mark the caller's own rows (`is_self`,
+`is_self_requester` / `is_self_worker`). Not yet: the new task's brief
 waiting for the next prompt (J3), own tasks in ⌘K.
 C0: the operator is born with the `fleet-brainstorm` skill
 (`skills/fleet-brainstorm/SKILL.md`, written to its directory's
@@ -545,7 +550,10 @@ mission), a repo allow-list and a capped event log (`store/orchestration.rs`).
 `work { missions | mission }` and `work_link { mission_save | mission_state |
 mission_repo | mission_item | mission_delete }` (`service/work/missions.rs`)
 fence by the mission's org first, then its owner or the org's members (only
-an org admin changes one); per-host and peer tokens are refused. Seven routed
+an org admin changes one); per-host and peer tokens are refused. The operator
+may `mission_save` (create or change) for the hub's owner, each save approved
+by a person, and reads the owner's missions; every other `mission_*` action
+refuses it. Seven routed
 desktop commands (`commands/missions.rs`) back the Work view's Missions tab.
 Projects carry no org, so the repo allow-list is not org-checked yet. O2 is built: `work_item_deps` and
 `work_items.held_at` (migration 116), drawn by `work_link { dep | hold }`

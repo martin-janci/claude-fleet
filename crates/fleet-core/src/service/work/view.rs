@@ -226,6 +226,11 @@ pub struct TaskLink {
     /// A person kept this conflict on purpose (`work_link { ack }`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_ack_at: Option<i64>,
+    /// The link's session is the CALLER's own (an agent in its pane, proven
+    /// by its per-host token and `X-Fleet-Pane`). Set by the tool layer,
+    /// never by the graph: the graph does not know who asks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_self: bool,
 }
 
 /// A task's counts.
@@ -918,6 +923,9 @@ pub struct SessionTasks {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_link_id: Option<i64>,
     pub links: Vec<SessionTaskLink>,
+    /// `session_id` is the caller's own session (see [`TaskLink::is_self`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_self: bool,
 }
 
 /// One item of the review inbox.
@@ -1637,6 +1645,32 @@ impl Graph {
         self.trackers.contains_key(&id)
     }
 
+    /// Every group [`group_of`] DERIVES, as lower-cased label → its id.
+    ///
+    /// A section is bucketed by its id (`tree`'s `groups.entry`) and ordered
+    /// by its LABEL ([`sort_key`]), so two groups that merely share a label
+    /// render as two sections with one name. Free text equal to a derived
+    /// group's name is the way left into that, and `structure::group_value`
+    /// refuses it by naming the id to pass instead — which is why this
+    /// answers the id and not just the names.
+    pub(crate) fn derived_group_labels(&self) -> HashMap<String, String> {
+        let mut out: HashMap<String, String> = HashMap::new();
+        for repo in self.repo_groups() {
+            out.insert(repo.to_lowercase(), format!("repo:{repo}"));
+        }
+        for i in self.items.values() {
+            if let (Some(tid), Some(c)) = (i.item.tracker_id, i.containers.first()) {
+                let label =
+                    container_label(self.trackers.get(&tid).map(|t| t.provider.as_str()), c);
+                out.insert(label.to_lowercase(), format!("tracker:{tid}:{c}"));
+            }
+            if let Some(p) = i.item.key.as_deref().and_then(key_prefix) {
+                out.insert(p.to_lowercase(), format!("key:{p}"));
+            }
+        }
+        out
+    }
+
     fn repo_of(&self, l: &ViewLink) -> Option<String> {
         let pid = match self.session_of(l) {
             Some(row) => row.project_id,
@@ -2167,6 +2201,7 @@ fn task_link(
             t.iter().filter(|x| x.as_str() != task_id).count() as u32
         }),
         review_ack_at: l.review_ack_at,
+        is_self: false,
     }
 }
 
@@ -4264,6 +4299,7 @@ pub fn session_tasks(
         org_id: row.org_id,
         primary_link_id: primary,
         links,
+        is_self: false,
     })
 }
 

@@ -209,6 +209,7 @@ pub use task_report::{
     EvidenceCommit, EvidenceFile, TaskEvidence, TaskReport, EVIDENCE_COMMITS_MAX,
     EVIDENCE_FILES_MAX, REPORT_ENTRY_MAX_CHARS, REPORT_LIST_MAX, REPORT_OUTCOMES,
 };
+pub use tasks::TaskEnd;
 pub use ticket_keys::{
     derive_ticket_prefix, parse_ticket_prefix, valid_ticket_prefix, TicketPrefixRow, TicketSpace,
     TICKET_PREFIX_MAX, TICKET_PREFIX_MIN,
