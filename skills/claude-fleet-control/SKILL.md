@@ -67,7 +67,8 @@ spawn      new_session new_shell_session new_bg_session spawn_review
 steer      send_prompt run_prompt queue_prompt queued_prompts wait_for_session
            capture_session session_transcript session_conversation
            session_conversations session_tool_detail session_summary_since
-           rewind_conversation broadcast_prompt touch_session_viewed ask
+           session_context_help rewind_conversation broadcast_prompt
+           touch_session_viewed ask
 coordinate send_message inbox wait_for_reply dispatch_task wait_for_task
            list_tasks cancel_task set_session_tags session_history
            register_self work work_link decide_related_session runs routines

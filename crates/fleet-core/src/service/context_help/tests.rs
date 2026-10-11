@@ -238,7 +238,7 @@ async fn fleets_model_runs_one_isolated_claude_on_the_host_and_is_booked() {
     );
 
     let store = Mutex::new(Store::open_in_memory().unwrap());
-    book(&store, &a, usage.as_ref());
+    book(&store, &a, usage.as_ref(), None);
     let rows = crate::ipc_error::lock(&store)
         .unwrap()
         .aux_usage_of_origin(crate::store::AUX_ORIGIN_CONTEXT_HELP)
@@ -327,4 +327,54 @@ fn the_script_hands_claude_the_context_on_stdin_and_never_in_argv() {
     let args = std::fs::read_to_string(&argv).unwrap();
     assert!(!args.contains("pwned"), "{args}");
     assert!(args.contains(SHELL_INSTRUCTION), "{args}");
+}
+
+/// The hub's path (`session_context_help`): refused while Writing help's
+/// toggle is off; then the composer's help runs on the session's host
+/// under the profile it was launched with, on the org's model, and is
+/// booked to the session's org.
+#[tokio::test]
+async fn a_sessions_composer_help_runs_under_its_launch_and_is_booked_to_its_org() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_host("mercury", Some("mercury")).unwrap();
+    let org = s.add_org("Acme", None, false).unwrap().id;
+    s.set_host_org("mercury", Some(org)).unwrap();
+    let id = s
+        .upsert_session("dev-1", "mercury", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.set_session_profile(id, Some("work")).unwrap();
+    let row = s.get_session_by_id(id).unwrap().unwrap();
+    let store = Mutex::new(s);
+    let fake = FakeSsh::new();
+    fake.on_host(
+        "mercury",
+        Match::script_contains("claude -p"),
+        Reply::ok(&format!("{HELP_TAG}run\n{ENVELOPE}\n")),
+    );
+    let r = req("why?", "/plan");
+    let ask = || ask_for_session(&store, &fake, &row, &r);
+
+    let off = ask().await.unwrap_err();
+    assert_eq!(off.code, codes::E_INVALID_STATE, "{off:?}");
+    assert!(fake.calls().is_empty(), "nothing runs while it is off");
+
+    settings::set(
+        &crate::ipc_error::lock(&store).unwrap(),
+        settings::WORK_CONTEXT_HELP,
+        "true",
+    )
+    .unwrap();
+    let a = ask().await.unwrap();
+    assert_eq!(
+        (a.model.as_str(), a.host_alias.as_str()),
+        ("haiku", "mercury")
+    );
+    let script = fake.calls()[0].script().unwrap();
+    assert!(script.contains("claude-profiles/\"'work'"), "{script}");
+    let rows = crate::ipc_error::lock(&store)
+        .unwrap()
+        .aux_usage_of_origin(crate::store::AUX_ORIGIN_CONTEXT_HELP)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].org_id, Some(org));
 }

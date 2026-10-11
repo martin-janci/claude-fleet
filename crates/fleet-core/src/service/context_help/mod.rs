@@ -503,18 +503,52 @@ impl HelpModel for ClaudeOnHost<'_> {
     }
 }
 
-/// Book a run's cost (`aux_usage`, origin `context_help`).
+/// Help at a session's composer, for whoever may answer it: the session
+/// row's owner, or a person it is shared with at `answer` or `drive` (the
+/// `session_context_help` hub tool checks that; a standalone desktop owns
+/// every row). Runs on the session's host under the profile it was
+/// launched with, on the fleet's `work.help_model`, and is booked to the
+/// session's org. Refused while Writing help's `work.context_help` is off.
+pub async fn ask_for_session(
+    store: &std::sync::Mutex<crate::store::Store>,
+    exec: &dyn SshExec,
+    row: &crate::store::SessionRow,
+    req: &HelpRequest,
+) -> Result<HelpAnswer, IpcError> {
+    let (profile, model) = {
+        let s = crate::ipc_error::lock(store)?;
+        settings::require_writing_help(&s, settings::WORK_CONTEXT_HELP)?;
+        let (_, _, profile) = s.session_launch(row.id)?;
+        (
+            profile,
+            settings::get_string_for(&s, settings::WORK_HELP_MODEL, row.org_id),
+        )
+    };
+    let model = ClaudeOnHost {
+        exec,
+        host: row.host_alias.clone(),
+        profile: profile.filter(|p| !p.is_empty()),
+        model,
+    };
+    let (answer, usage) = ask(&model, Surface::Composer, req, None).await?;
+    book(store, &answer, usage.as_ref(), row.org_id);
+    Ok(answer)
+}
+
+/// Book a run's cost (`aux_usage`, origin `context_help`), to `org_id`'s
+/// usage when the session has one.
 pub fn book(
     store: &std::sync::Mutex<crate::store::Store>,
     answer: &HelpAnswer,
     usage: Option<&claude_print::Envelope>,
+    org_id: Option<i64>,
 ) {
     let row = crate::store::NewAuxUsage {
         origin: crate::store::AUX_ORIGIN_CONTEXT_HELP,
         host_alias: answer.host_alias.clone(),
         model: answer.model.clone(),
         mission_id: None,
-        org_id: None,
+        org_id,
         claude_session_id: None,
         input_tokens: usage.and_then(|u| u.input_tokens),
         output_tokens: usage.and_then(|u| u.output_tokens),

@@ -1042,6 +1042,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
+    // Context help at the composer, drafted on the session's host. Not
+    // read-only: it runs claude and books its cost.
+    ToolPolicy {
+        name: "session_context_help",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     // One tool call's input and result, grepped from the same transcript.
     ToolPolicy {
         name: "session_tool_detail",

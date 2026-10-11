@@ -36,7 +36,7 @@
   import ForkSheet from './ForkSheet.svelte';
   import SendLaterSheet from './SendLaterSheet.svelte';
   import ContextHelp from './ContextHelp.svelte';
-  import { askContextHelp, commandLine, helpModel } from './context_help';
+  import { askComposerHelp, commandLine, helpModel } from './context_help';
   import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
   import Icon from './kit/Icon.svelte';
   import { suggestedForkName } from './reply_actions';
@@ -1715,16 +1715,15 @@
   let sendLaterOpen = $state(false);
   // Context help (`context_help.ts`): ask Haiku about the draft, with the
   // earlier prompts (the ↑ recall list) and the commands the box accepts as
-  // context. It runs over this machine's ssh, as the terminal does, so it is
-  // offered where the terminal is: on a session this client owns.
+  // context. `session_context_help` runs it on the hub when paired, so a
+  // session shared at `answer` or `drive` has it too; a watcher does not.
   let helpOpen = $state(false);
   /** Writing help's "Context help" toggle, off by default. */
   const helpOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workContextHelp));
   let helpCommands = $state<string[]>([]);
   const helpBlocked = $derived(
-    $accessOf(session) !== 'own'
-      ? 'Context help runs over this machine’s SSH, which reaches only sessions you own'
-      : null,
+    hubActionBlocked('session_context_help', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'session_context_help'),
   );
   function openHelp() {
     helpOpen = true;
@@ -1734,12 +1733,10 @@
     });
   }
   function askHelp(question: string) {
-    return askContextHelp(
-      { host_alias: session.host_alias, session_name: session.tmux_name, profile: session.claude_profile },
-      { surface: 'composer', line: draft, history, commands: helpCommands },
-      question,
-      helpModel($fleetSettings),
-    );
+    // The grant can narrow while the panel is open: ask again at the call.
+    const blocked = $sessionBlocked(session, 'session_context_help');
+    if (blocked) return Promise.resolve({ ok: false as const, error: { code: 'E_FORBIDDEN', message: blocked } });
+    return askComposerHelp(session.id, { line: draft, history, commands: helpCommands }, question);
   }
   const sendLaterBlocked = $derived(
     viewing !== null
@@ -3399,7 +3396,7 @@
        they sit a step above the tool rows, receipts and footers around
        them, which stay at text-2xs/xs. 1.6 rather than the token's 1.5:
        a reply runs to many lines, and the extra lead keeps the eye on the
-       right one at 80ch (WCAG 1.4.12 asks for at least 1.5). */
+       right one across the column (WCAG 1.4.12 asks for at least 1.5). */
     font-size: var(--text-md);
     line-height: 1.6;
     color: var(--fg);

@@ -744,6 +744,25 @@ pub struct SessionSummarySinceParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionContextHelpParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// The question; empty asks about `line` alone.
+    #[serde(default)]
+    pub question: String,
+    /// What is in the composer now.
+    #[serde(default)]
+    pub line: String,
+    /// The composer's earlier prompts, oldest first.
+    #[serde(default)]
+    pub history: Vec<String>,
+    /// The commands the composer accepts, one per entry
+    /// (`/plan #KEY or a goal — Plan subtasks…`).
+    #[serde(default)]
+    pub commands: Vec<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SessionToolDetailParams {
     /// Fleet session id.
     pub session_id: i64,
