@@ -17908,6 +17908,70 @@ async fn a_local_items_status_is_not_another_persons_to_set() {
     }
 }
 
+/// An agent sets the status of a task its OWN session is on, even when the
+/// task is shared with a session it cannot drive (another person's). The
+/// exception is that narrow: without its own link it is refused as before,
+/// and `edit` keeps the full gate.
+#[tokio::test]
+async fn an_agent_sets_the_status_of_its_own_shared_task() {
+    let g = gate_fixture();
+    let (a_row, b_row) = (g.a_row, g.b_row);
+    let shared = g
+        .store
+        .name_session_work(a_row, Some("LOC-1"), "Shared work")
+        .unwrap()
+        .0
+        .id;
+    let bobs = g
+        .store
+        .name_session_work(b_row, Some("LOC-2"), "Bob's alone")
+        .unwrap()
+        .0
+        .id;
+    let t = test_tools(g.store);
+    let call = |who: Caller, args: serde_json::Value| {
+        t.work_link(
+            Extension(who),
+            Parameters(serde_json::from_value(args).unwrap()),
+        )
+    };
+    // Bob's session works on the shared task too.
+    call(
+        device_of(g.bob, g.ada),
+        serde_json::json!({
+            "action": "link", "session_id": b_row, "item_id": shared, "primary": false,
+        }),
+    )
+    .await
+    .expect("Bob links his own session");
+    let set = |who: Caller, item: i64| {
+        call(
+            who,
+            serde_json::json!({ "action": "set_status", "item_id": item, "status": "done" }),
+        )
+    };
+    let me = pane_caller(Some("%7"));
+
+    set(me.clone(), shared)
+        .await
+        .expect("its own task, shared with Bob's session");
+
+    for (who, item, what) in [
+        (pane_caller(None), shared, "no pane proven"),
+        (me.clone(), bobs, "a task its session is not on"),
+    ] {
+        let e = format!("{:?}", set(who, item).await.expect_err(what));
+        assert!(e.contains("E_NOTFOUND"), "{what}: {e}");
+    }
+    let e = call(
+        me,
+        serde_json::json!({ "action": "edit", "item_id": shared, "title": "Renamed" }),
+    )
+    .await
+    .expect_err("edit keeps the full gate");
+    assert!(format!("{e:?}").contains("E_NOTFOUND"), "{e:?}");
+}
+
 /// **A local item whose only link was UNLINKED is nobody's to write**
 /// (multi-user M1, T9e).
 ///
