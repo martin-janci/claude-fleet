@@ -300,6 +300,12 @@ pub fn place(
 /// `view::group_of` derives (`key:ABC` of `ABC-12`) and an id has to match
 /// it exactly to land in the same bucket.
 ///
+/// Free text that is already a derived group's NAME is refused, naming the
+/// id to pass instead: a section is bucketed by its id and ordered by its
+/// label, so `group: "martin-janci/claude-fleet"` beside the derived
+/// `repo:martin-janci/claude-fleet` rendered one name over two sections.
+/// `label:<that name>` is the way to insist on a group of one's own.
+///
 /// A manual placement OUTRANKS every rule and every derived grouping until
 /// it is cleared, so pinning a task to the repo it happens to sit in today
 /// keeps it there after its session moves to another one. That is the
@@ -330,8 +336,24 @@ fn group_value(g: &Graph, group: Option<&str>) -> Result<Option<String>, IpcErro
         Some(crate::service::work::view::GroupId::Key(p)) => {
             Ok(Some(format!("key:{}", p.to_ascii_uppercase())))
         }
-        // A `label:` id and free text are both the person's own words.
-        _ => Ok(Some(raw.to_string())),
+        // A `label:` id is the person's own words, deliberately — a group
+        // they named after a repository is theirs to name.
+        Some(crate::service::work::view::GroupId::Label(_)) => Ok(Some(raw.to_string())),
+        // Free text, which is a `label:` group of its own — unless it is
+        // the NAME of a group that already exists. A section is bucketed by
+        // its id and ordered by its label, so the two would render as one
+        // name over two sections, which is the whole complaint this
+        // grammar answers; naming the id is the way to mean that group.
+        None => {
+            if let Some(id) = g.derived_group_labels().get(&raw.to_lowercase()) {
+                return Err(invalid(format!(
+                    "\"{raw}\" is already the name of the {id} group: pass group: \"{id}\" to put \
+                     the task THERE, \"label:{raw}\" for a group of your own with that name, or \
+                     pick another name"
+                )));
+            }
+            Ok(Some(raw.to_string()))
+        }
     }
 }
 

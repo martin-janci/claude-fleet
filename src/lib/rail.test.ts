@@ -9,6 +9,7 @@ describe('rail', () => {
       'inbox',
       'sessions',
       'work',
+      'dashboards',
       'automation',
       'accounts',
       'toolkit',
@@ -17,8 +18,8 @@ describe('rail', () => {
   });
 
   it('shows every item whose step has landed (Automation since 8.4)', () => {
-    expect(visibleRailItems().map((i) => i.id)).toEqual(['control', 'inbox', 'sessions', 'work', 'automation', 'accounts', 'toolkit', 'settings']);
-    expect(visibleRailItems([...RAIL_ITEMS.slice(0, 4), { ...RAIL_ITEMS[4], landed: false }]).map((i) => i.id)).toEqual([
+    expect(visibleRailItems().map((i) => i.id)).toEqual(['control', 'inbox', 'sessions', 'work', 'dashboards', 'automation', 'accounts', 'toolkit', 'settings']);
+    expect(visibleRailItems([...RAIL_ITEMS.slice(0, 4), { ...RAIL_ITEMS[5], landed: false }]).map((i) => i.id)).toEqual([
       'control',
       'inbox',
       'sessions',
@@ -41,5 +42,6 @@ describe('rail', () => {
     expect(currentRailItem('files', 'inbox')).toBe('inbox');
     expect(currentRailItem('control', 'work')).toBe('control');
     expect(currentRailItem('automation', 'sessions')).toBe('automation');
+    expect(currentRailItem('dashboard', 'work')).toBe('dashboards');
   });
 });

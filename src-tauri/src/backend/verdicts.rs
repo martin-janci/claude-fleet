@@ -395,6 +395,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // membership route; so do the buckets themselves, as work_link's
     // bucket_admin (owner decision 2026-10-10: the hub decides who plans).
     ("work_buckets", Verdict::Routed { tool: "work" }),
+    ("work_stats", Verdict::Routed { tool: "work" }),
     ("work_bucket", Verdict::Routed { tool: "work" }),
     ("add_work_to_bucket", Verdict::Routed { tool: "work_link" }),
     (

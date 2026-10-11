@@ -225,6 +225,7 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
       'rail-inbox',
       'rail-sessions',
       'rail-work',
+      'rail-dashboards',
       'rail-automation',
       'rail-accounts',
       'rail-toolkit',

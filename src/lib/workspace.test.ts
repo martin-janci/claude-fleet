@@ -37,8 +37,8 @@ describe('workspaces', () => {
 
   it('features the preset’s items first, in its order', () => {
     const ids = workspaceRailItems('pm', visibleRailItems()).map((i) => i.id);
-    expect(ids.slice(0, 4)).toEqual(['inbox', 'control', 'work', 'automation']);
-    expect(ids.slice(4)).toEqual(['sessions', 'accounts', 'toolkit', 'settings']);
+    expect(ids.slice(0, 5)).toEqual(['inbox', 'dashboards', 'control', 'work', 'automation']);
+    expect(ids.slice(5)).toEqual(['sessions', 'accounts', 'toolkit', 'settings']);
   });
 
   it('every preset lands on a rail item it features', () => {
@@ -51,7 +51,7 @@ describe('workspaces', () => {
     expect(get(workspace)).toBe('scrum');
     expect(get(workViewFilters)).toEqual(workspacePreset('scrum').work);
     expect(get(workLayout)).toBe('grouped');
-    expect(get(workspaceLanding)?.rail).toBe('work');
+    expect(get(workspaceLanding)?.rail).toBe('dashboards');
     expect(localStorage.getItem('cf:pref:ui.workspace')).toBe('"scrum"');
   });
 

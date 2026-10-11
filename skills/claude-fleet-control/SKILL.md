@@ -275,6 +275,12 @@ own forms: `add_host`, `add_project`, `get_started`, `new_session`,
 broken one shows as code with the reason. Format: `docs/chat-blocks.md`.
 Use `ask` instead when you need the answers before you continue.
 
+In `choices`, mark the option you would pick `"recommended": true` (one
+per card). In Control's chat, when the person does not answer for the
+minutes `control.auto_continue_minutes` sets, the app sends that option for
+them, so recommend only what you would do anyway; it is never sent for an
+option or question naming a push, a delete or another step hard to undo.
+
 When the person asks in their own words for what a wizard does ("set up a
 new project for acme/pos on mercury"), answer with its `wizard` block and
 put what their message already says in `values`, by the wizard's field
@@ -300,7 +306,10 @@ Change which task you are on with `work_link { session_id: <yours>, action:
 "link" | "switch" | "unlink", … }`. A local task (no tracker ticket) you work
 on also takes `work_link { action: "set_status", item_id, status }`, `edit`
 and `comment` by `item_id`; a tracker ticket's status changes in the tracker.
-A write is refused when the task is also linked to a session you cannot drive.
+`set_status`, `edit` and `comment` work on any local task your own session is
+on, even one shared with other people's sessions; renaming it (`name` with
+`item_id`) is refused when the task is also linked to a session you cannot
+drive.
 
 ## Tasks, subtasks and proposals (shared work context)
 

@@ -36,6 +36,48 @@ pub fn isolation_flags() -> String {
     .join(" ")
 }
 
+/// The built-in tools a read-only run has: reading inside its working
+/// directory, nothing that writes, runs or reaches the network.
+pub const READ_ONLY_TOOLS: &str = "Read,Grep,Glob";
+/// The built-in tools a run may never have, whatever its policy says.
+pub const NEVER_TOOLS: &str = "Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task";
+
+/// PURE: the flag words of a run that may use some tools, each value quoted
+/// with [`crate::shell::quote`]. The same hooks, MCP and transcript lock-down
+/// as [`isolation_flags`]; `--tools` names only [`READ_ONLY_TOOLS`] (plus
+/// `Bash` when `bash` names commands), `--allowedTools` pre-approves exactly
+/// `Bash(<command>)` for each of `bash` and nothing else, and
+/// `--permission-mode dontAsk` denies whatever would have asked, so a run
+/// without a person never waits on a prompt nor widens: a read outside the
+/// working directory, another command, any write. [`NEVER_TOOLS`] are denied
+/// on top. Checked against Claude Code 2.1.296's `--help`.
+pub fn tool_flags(bash: &[&str]) -> String {
+    let tools = if bash.is_empty() {
+        READ_ONLY_TOOLS.to_string()
+    } else {
+        format!("{READ_ONLY_TOOLS},Bash")
+    };
+    let mut words = vec![
+        "--settings".to_string(),
+        quote(r#"{"disableAllHooks":true}"#),
+        "--tools".into(),
+        quote(&tools),
+        "--disallowedTools".into(),
+        quote(NEVER_TOOLS),
+    ];
+    if !bash.is_empty() {
+        words.push("--allowedTools".into());
+        words.extend(bash.iter().map(|c| quote(&format!("Bash({c})"))));
+    }
+    words.extend([
+        "--permission-mode".into(),
+        "dontAsk".into(),
+        "--strict-mcp-config".into(),
+        "--no-session-persistence".into(),
+    ]);
+    words.join(" ")
+}
+
 /// PURE: the script line that ends with `<tag>noclaude` when `claude` is not
 /// on the host's login PATH.
 pub fn noclaude_check(tag: &str) -> String {
@@ -235,6 +277,27 @@ mod tests {
             isolation_flags(),
             r#"--settings '{"disableAllHooks":true}' --tools '' --strict-mcp-config --no-session-persistence"#
         );
+    }
+
+    #[test]
+    fn a_tool_policy_reads_or_runs_exactly_what_it_names() {
+        let read = tool_flags(&[]);
+        assert_eq!(
+            read,
+            r#"--settings '{"disableAllHooks":true}' --tools 'Read,Grep,Glob' --disallowedTools 'Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task' --permission-mode dontAsk --strict-mcp-config --no-session-persistence"#
+        );
+        assert!(!read.contains("Bash") && !read.contains("--allowedTools"));
+        let test = tool_flags(&["cargo test -p x", "pnpm test"]);
+        assert!(test.contains("--tools 'Read,Grep,Glob,Bash'"), "{test}");
+        assert!(
+            test.contains("--allowedTools 'Bash(cargo test -p x)' 'Bash(pnpm test)' --permission-mode dontAsk"),
+            "{test}"
+        );
+        for f in [&read, &test] {
+            for gone in ["bypass", "dangerously", "acceptEdits", "auto"] {
+                assert!(!f.contains(gone), "{gone} in {f}");
+            }
+        }
     }
 
     #[test]

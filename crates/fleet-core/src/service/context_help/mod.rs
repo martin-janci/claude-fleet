@@ -404,6 +404,7 @@ pub fn help_script(
         prompt: Some(instruction),
         stdin_file: Some("d"),
         fork_of: None,
+        ..Default::default()
     });
     let t = HELP_TAG;
     Ok(format!(

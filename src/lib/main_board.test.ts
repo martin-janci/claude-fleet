@@ -43,8 +43,9 @@ describe('the Main board (3.2): the rail', () => {
   const rail = between('<nav class="rail"', '</nav>');
   const boardItems = [...rail.matchAll(/<a href="#([a-z]+)"[^>]*><svg\/>([^<]+)/g)].map((m) => ({ id: m[1], label: m[2].trim() }));
 
-  it('reads the board: eight items, Settings after the spacer', () => {
-    expect(boardItems.map((i) => i.id)).toEqual(['control', 'inbox', 'sessions', 'work', 'automation', 'accounts', 'toolkit', 'settings']);
+  it('reads the board: nine items, Settings after the spacer', () => {
+    // Dashboards joined after Work with the persona workspaces (step 4).
+    expect(boardItems.map((i) => i.id)).toEqual(['control', 'inbox', 'sessions', 'work', 'dashboards', 'automation', 'accounts', 'toolkit', 'settings']);
     expect(rail.lastIndexOf('<div')).toBeLessThan(rail.indexOf('href="#settings"'));
     expect(rail.lastIndexOf('<div')).toBeGreaterThan(rail.indexOf('href="#toolkit"'));
   });

@@ -105,6 +105,7 @@ pub fn commit_body(model: &str, profile: Option<&str>) -> Result<String, String>
         prompt: Some(COMMIT_PROMPT),
         stdin_file: Some("d"),
         fork_of: None,
+        ..Default::default()
     });
     let t = DRAFT_TAG;
     Ok(format!(

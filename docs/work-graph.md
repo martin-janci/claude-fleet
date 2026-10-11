@@ -87,7 +87,7 @@ The Work tab opens in **List** layout; the header, filters and saved views are u
 
 ### Priority, labels and estimate
 
-A task carries a **priority** (`urgent`, `high`, `medium` or `low`, or none), up to 20 **labels** and an **estimate** in story **points** or **hours** (`work_items.priority`, `labels`, `estimate`, `estimate_unit`; migration 170). The task page's rail shows them under *Details* (a row only when it is set: the priority as a coloured dot and its word, the labels as chips, the estimate as "3 pts" or "4 h"), and its header adds a chip for an urgent or high one.
+A task carries a **priority** (`urgent`, `high`, `medium` or `low`, or none), up to 20 **labels** and an **estimate** in story **points** or **hours** (`work_items.priority`, `labels`, `estimate`, `estimate_unit`; migration 171). The task page's rail shows them under *Details* (a row only when it is set: the priority as a coloured dot and its word, the labels as chips, the estimate as "3 pts" or "4 h"), and its header adds a chip for an urgent or high one.
 
 On a task written in fleet a person sets them in **Edit task** or with `work_link { action: edit, item_id, priority?, labels?, estimate?, estimate_unit? }`: a priority from the four, labels of at most 40 characters each (trimmed, each once), an estimate from 0 to 1000. `priority: ""`, `labels: []` and `estimate: 0` clear them, the unit going with the estimate; `estimate_unit` alone re-units the estimate the task has, and a first estimate without one is in points. A bad value refuses the whole edit.
 
@@ -196,7 +196,12 @@ says so:
   — `repo:<owner>/<repo>`, `tracker:<tracker id>:<container>`,
   `key:<PREFIX>`, `label:<text>` — which puts the task in *that* section
   instead of opening a second one named after the id; an id that names no
-  such group is refused. Remember that a placement outranks every rule and
+  such group is refused — and so is free text that is already a derived
+  group's *name* (`martin-janci/claude-fleet` beside the
+  `repo:martin-janci/claude-fleet` group), since a section is bucketed by
+  its id and ordered by its label, so the two would show one name over two
+  sections; the refusal names the id to pass, and `label:<name>` insists on
+  a group of your own with that name. Remember that a placement outranks every rule and
   every derived grouping until it is cleared, so pinning a task to the
   repository it sits in today keeps it there after its session moves.
   `work_link { action: unplace, task_id | item_id, expected_version }`

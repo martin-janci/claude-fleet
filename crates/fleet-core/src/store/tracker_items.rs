@@ -57,7 +57,7 @@ pub struct TrackerItemWrite {
     /// `YYYY-MM-DD` (migration 154).
     pub due_at: Option<String>,
     /// `urgent | high | medium | low`, normalised by the adapter
-    /// (migration 170).
+    /// (migration 171).
     pub priority: Option<String>,
     /// The tracker's labels, tidied ([`super::tidy_labels`]).
     pub labels: Vec<String>,

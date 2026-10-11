@@ -361,6 +361,17 @@ pub const ORCHESTRATOR_ENABLED: &str = "orchestrator.enabled";
 /// Orchestration O6: the highest autonomy any mission's loop may take,
 /// whatever a mission asks and a grant signs (design §7.1).
 pub const ORCHESTRATOR_MAX_LEVEL: &str = "orchestrator.max_level";
+/// F3: a mission's review and test runs as one headless `claude -p` run in
+/// the implementer's checkout (read-only tools, the test commands only)
+/// instead of an interactive session. Off by default.
+pub const ORCHESTRATOR_HEADLESS_CHECKS: &str = "orchestrator.headless_checks";
+/// The model [`ORCHESTRATOR_HEADLESS_CHECKS`] runs (one of [`SUMMARY_MODELS`]).
+pub const ORCHESTRATOR_HEADLESS_MODEL: &str = "orchestrator.headless_model";
+/// Control's chat sends the option an agent's `choices` card marks
+/// `recommended` once nobody has answered for
+/// [`CONTROL_AUTO_CONTINUE_MINUTES`] (`src/lib/auto_continue.ts`).
+pub const CONTROL_AUTO_CONTINUE: &str = "control.auto_continue";
+pub const CONTROL_AUTO_CONTINUE_MINUTES: &str = "control.auto_continue_minutes";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
 /// Recreates the `oom` playbook may run on one session per 24 h
 /// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
@@ -867,6 +878,37 @@ pub const SPECS: &[Spec] = &[
         "The most any mission's loop may do on its own, whatever the mission asks and its grant signs. 0: the loop only keeps the cards; 1: it also asks the planner, and a person presses every step; 2: runs, retries, reviews and closes within a grant; 3: also creates the planner's tasks.",
     )
     .unit(Unit::Count),
+    Spec::new(
+        ORCHESTRATOR_HEADLESS_CHECKS,
+        "false",
+        Kind::Bool,
+        "Headless reviews and tests",
+        "Run a mission's review and its test commands as one Claude run in the implementer's checkout, with read-only tools and only those commands, instead of opening a session for each. Falls back to a session when the checkout moved or a command is not a plain one.",
+    )
+    .tags(&[Tag::Experimental]),
+    Spec::new(
+        ORCHESTRATOR_HEADLESS_MODEL,
+        "sonnet",
+        Kind::Choice(SUMMARY_MODELS),
+        "Headless check model",
+        "The Claude model headless reviews and tests run.",
+    )
+    .tags(&[Tag::Experimental, Tag::Advanced]),
+    Spec::new(
+        CONTROL_AUTO_CONTINUE,
+        "true",
+        Kind::Bool,
+        "Go on with the recommended option",
+        "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo, and only while the app is open.",
+    ),
+    Spec::new(
+        CONTROL_AUTO_CONTINUE_MINUTES,
+        "10",
+        Kind::Int { min: 1, max: 1440 },
+        "Wait before going on",
+        "How long Control's chat waits for your answer before it sends the recommended option.",
+    )
+    .unit(Unit::Minutes),
     Spec::new(
         PLAYBOOK_PRESS_ENTER,
         "false",

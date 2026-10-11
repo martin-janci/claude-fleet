@@ -866,6 +866,22 @@ Index by area (names only; see the reference for details):
   leave it when the tracker stops reporting them. A person's membership is
   never touched by a sync. A provider without sprints (GitHub, Asana) or
   versions (Asana) only cannot be adopted from (`E_INVALID`).
+  **Counting work** (persona dashboards, step 3): `work { action: "stats",
+  filters? }` answers the Work view's tasks counted instead of listed. It
+  takes the tree's `filters` (`group_by` included) and returns `total`,
+  `stages` (`backlog`, `in_progress`, `in_review`, `blocked`, `done`),
+  `pct_done`, `needs_you` and `cost_micros`, overall and per group. Groups
+  come largest first, at most 200, with the rest counted in `groups_more`.
+  The counts come from the same filtering and the same scope as `tree`, so
+  they agree with the board, and a task the caller could not open is never
+  counted. Grouped by `sprint` or `release`, each group also carries its
+  bucket's `bucket` health: `state`, `starts_at`, `ends_at`, `goal`,
+  `pct_time_elapsed`, and `added_after_start` / `removed_after_start` (the
+  members the caller sees that joined or left after the start). An agent
+  asked "how is the sprint going" reads this and answers with a `results`
+  card (`docs/chat-blocks.md`). Every change of an item's stored status is
+  also logged by triggers in `work_status_log` (migration 170), so later
+  burn-up and cycle-time reads have history to draw from.
   `work { action: "local_items" }` lists local items (`id`, `key`, `title`,
   `created_at`, `updated_at`, `live_sessions`), newest change first.
   Readonly tokens cannot name or rename. A per-host token names work only on

@@ -3,7 +3,7 @@
 //! alone ([`Store::delete_comment`]).
 //!
 //! A comment on a tracker ticket may also be posted to the tracker
-//! (migration 171): [`Store::add_comment_posting`] queues the write-back
+//! (migration 172): [`Store::add_comment_posting`] queues the write-back
 //! outbox's `comment` op in the same transaction as the comment, and each
 //! row carries that post's state ([`TrackerPost`]). Deleting a comment whose
 //! post is still pending cancels the post; one already sent stays at the

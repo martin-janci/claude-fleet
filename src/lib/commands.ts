@@ -179,6 +179,8 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
           synonyms: ['pause', 'pause all', 'automation', 'stop', 'loops'] },
     { id: 'app.automation', label: 'Open Automation', section: 'Commands', description: 'Routines, runs, agents',
       synonyms: ['automation', 'routines', 'runs', 'agents', 'loops'] },
+    { id: 'app.dashboard', label: 'Open dashboard', section: 'Commands', description: 'This workspace’s numbers',
+      synonyms: ['dashboard', 'dashboards', 'stats', 'sprint', 'health', 'charts'] },
   );
   // Workspaces (persona design 2026-10-11): one row per workspace not active.
   const active = get(workspace);
@@ -318,6 +320,9 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
       return;
     case 'app.automation':
       goTo('automation');
+      return;
+    case 'app.dashboard':
+      goTo('dashboard');
       return;
     case 'app.automation-pause': {
       const on = !settingBool(get(fleetSettings), SETTING_KEYS.automationPaused);

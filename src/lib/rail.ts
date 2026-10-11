@@ -11,6 +11,7 @@ export type RailId =
   | 'inbox'
   | 'sessions'
   | 'work'
+  | 'dashboards'
   | 'automation'
   | 'accounts'
   | 'toolkit'
@@ -31,6 +32,8 @@ export const RAIL_ITEMS: readonly RailItem[] = [
   { id: 'inbox', label: 'Inbox', shortcut: null, step: '3.3', landed: true },
   { id: 'sessions', label: 'Sessions', shortcut: 'work-view', step: '3.2', landed: true },
   { id: 'work', label: 'Work', shortcut: 'work-view', step: '3.2', landed: true },
+  // Persona dashboards (design 2026-10-11, step 4).
+  { id: 'dashboards', label: 'Dashboards', shortcut: null, step: 'persona-4', landed: true },
   { id: 'automation', label: 'Automation', shortcut: null, step: '8.4', landed: true },
   { id: 'accounts', label: 'Accounts', shortcut: 'hosts', step: '4.1', landed: true },
   { id: 'toolkit', label: 'Toolkit', shortcut: null, step: '3.16', landed: true },
@@ -53,6 +56,7 @@ export function visibleRailItems(items: readonly RailItem[] = RAIL_ITEMS): RailI
 export function currentRailItem(dest: Destination, view: SidebarView): RailId | null {
   if (dest === 'control') return 'control';
   if (dest === 'automation') return 'automation';
+  if (dest === 'dashboard') return 'dashboards';
   if (dest === 'accounts' || dest === 'hosts') return 'accounts';
   if (dest === 'assets') return 'toolkit';
   return view === 'work' ? 'work' : view === 'inbox' ? 'inbox' : 'sessions';

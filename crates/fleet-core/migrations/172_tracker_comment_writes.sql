@@ -21,4 +21,4 @@ ALTER TABLE tracker_writes ADD COLUMN remote_url TEXT;
 CREATE INDEX IF NOT EXISTS idx_tracker_writes_comment
   ON tracker_writes(url) WHERE op = 'comment';
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (171);
+INSERT OR IGNORE INTO schema_version (version) VALUES (172);

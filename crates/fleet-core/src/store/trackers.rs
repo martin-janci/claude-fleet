@@ -155,7 +155,7 @@ pub struct WriteBack {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pr_remote_link: bool,
     /// Post a comment a person wrote in fleet to the ticket, when they ask
-    /// for it (owner decision 2026-10-11, migration 171).
+    /// for it (owner decision 2026-10-11, migration 172).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub comments: bool,
 }

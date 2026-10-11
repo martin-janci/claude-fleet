@@ -62,7 +62,7 @@
 //!   again (the tracker upserts the same remote link — one call, no change),
 //!   and a failed row stays for the whole window, so `fleet_health`'s
 //!   `write_failures` still counts it. One liveness rule: a sent `comment`
-//!   (migration 171) stays while its fleet comment is live, since its
+//!   (migration 172) stays while its fleet comment is live, since its
 //!   `remote_id` keeps the tracker's copy from showing twice. Its status
 //!   `rows` count EVERY outbox row, pending included, like the journal's.
 //!
