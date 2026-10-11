@@ -1323,8 +1323,6 @@ mod tests {
         assert!(!row.provisioned && !row.provision_stale && row.provisioned_at.is_none());
     }
 
-    /// Migration 093: a merged host keeps its admissions, like its layer
-    /// assignments (M2 fix round 1).
     #[test]
     fn merging_hosts_carries_their_environment_and_into_wins() {
         let s = Store::open_in_memory().unwrap();
@@ -1343,6 +1341,8 @@ mod tests {
         assert_eq!(got, [("new", "A", Some("new")), ("new", "B", Some("b"))]);
     }
 
+    /// Migration 093: a merged host keeps its admissions, like its layer
+    /// assignments (M2 fix round 1).
     #[test]
     fn merge_host_alias_carries_admissions() {
         let s = Store::open_in_memory().unwrap();

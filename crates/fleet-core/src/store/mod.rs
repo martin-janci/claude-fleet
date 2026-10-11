@@ -225,8 +225,6 @@ pub use tracker_writes::{
     comment_write_url, NewTrackerWrite, TrackerWriteRow, WRITE_MAX_ATTEMPTS, WRITE_OP_COMMENT,
     WRITE_OP_PR_REMOTE_LINK,
 };
-// Used by the launch-time reference resolver (a later task of the env feature).
-#[allow(unused_imports)]
 pub(crate) use trackers::read_credential_ref;
 pub use trackers::{
     ghes_host_ok, ghes_host_part, github_site, is_allowed_tracker_host, normalize_dc_site,
