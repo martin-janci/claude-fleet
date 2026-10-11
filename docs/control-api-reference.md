@@ -313,9 +313,9 @@ Parameters: `claude_status`, `force`, `fresh_for`, `host_alias`, `include_lost`,
 
 ### `list_tasks`
 
-Tasks, newest first. Read-only. A per-host token sees only tasks it requested from its host or whose worker is on its host.
+Tasks, newest first. Read-only. A per-host token sees only tasks it requested from its host or whose worker is on its host. `mine: true` from inside a fleet session lists the tasks your own session dispatched or was given; every row names your end (`is_self_requester` / `is_self_worker`).
 
-Parameters: `limit`, `requester_session_id`, `state`
+Parameters: `limit`, `mine`, `requester_session_id`, `state`, `worker_session_id`
 
 ### `list_worktrees`
 
@@ -911,7 +911,7 @@ Parameters: `task_id`, `timeout_s`
 
 ### `whoami`
 
-Find your own fleet row from your tmux session name (`tmux display-message -p '#S'`). E_NOTFOUND until fleet has reconciled it; E_AMBIGUOUS when the name exists on several hosts: pick yours from the error's {session_id, host_alias} candidates and use session_id from then on.
+Find your own fleet row. From inside a fleet session call it with no argument: your pane names you. Else pass your tmux session name (`tmux display-message -p '#S'`). E_NOTFOUND until fleet has reconciled it; E_AMBIGUOUS when the name exists on several hosts: pick yours from the error's {session_id, host_alias} candidates and use session_id from then on.
 
 Parameters: `tmux_name`
 
