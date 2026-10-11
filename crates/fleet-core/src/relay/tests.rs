@@ -130,3 +130,74 @@ async fn dropping_the_listener_ends_its_connections() {
         "the listener must be gone"
     );
 }
+
+#[cfg(unix)]
+mod ssh_dialer {
+    use super::super::ssh::SshDialer;
+    use super::*;
+    use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
+
+    /// A fake `ssh` that records its argv and echoes stdin to stdout.
+    fn fake_ssh(dir: &std::path::Path) -> std::path::PathBuf {
+        let log = dir.join("argv");
+        write_exec(
+            dir,
+            "ssh",
+            &format!(
+                "#!/bin/sh\n{PROBE_GUARD}printf '%s\\n' \"$@\" > {}\nexec cat\n",
+                crate::shell::quote(&log.display().to_string())
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn it_runs_ssh_dash_w_to_the_hosts_loopback_and_splices_stdio() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = SshDialer::with_binary(fake_ssh(dir.path()));
+        let mut s = d.dial("mefistos", 5037).await.unwrap();
+        s.write_all(b"hello").await.unwrap();
+        let mut buf = [0u8; 5];
+        s.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello");
+        let argv = std::fs::read_to_string(dir.path().join("argv")).unwrap();
+        let argv: Vec<&str> = argv.lines().collect();
+        assert_eq!(
+            argv[argv.len() - 4..],
+            ["-W", "127.0.0.1:5037", "--", "mefistos"]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_refuses_a_port_or_an_alias_that_could_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = SshDialer::with_binary(fake_ssh(dir.path()));
+        assert_eq!(
+            d.dial("mefistos", 22).await.err().unwrap().code,
+            codes::E_INVALID
+        );
+        assert_eq!(
+            d.dial("-oProxyCommand=touch /tmp/x", 5037)
+                .await
+                .err()
+                .unwrap()
+                .code,
+            codes::E_INVALID
+        );
+        assert!(!dir.path().join("argv").exists(), "ssh must not have run");
+    }
+
+    #[tokio::test]
+    async fn the_production_argv_carries_batch_mode_and_a_connect_timeout() {
+        let d = SshDialer::new(crate::ssh::SshClient::new());
+        let argv = d.argv("mefistos", 27183);
+        assert!(argv.iter().any(|a| a == "BatchMode=yes"), "{argv:?}");
+        assert!(
+            argv.iter().any(|a| a.starts_with("ConnectTimeout=")),
+            "{argv:?}"
+        );
+        assert_eq!(
+            argv[argv.len() - 4..],
+            ["-W", "127.0.0.1:27183", "--", "mefistos"]
+        );
+    }
+}
