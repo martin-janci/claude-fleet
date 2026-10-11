@@ -18036,12 +18036,12 @@ async fn a_local_items_status_is_not_another_persons_to_set() {
     }
 }
 
-/// An agent sets the status of a task its OWN session is on, even when the
-/// task is shared with a session it cannot drive (another person's). The
-/// exception is that narrow: without its own link it is refused as before,
-/// and `edit` keeps the full gate.
+/// An agent sets the status of, edits and comments on a task its OWN
+/// session is on, even when the task is shared with a session it cannot
+/// drive (another person's). The exception is that narrow: without its own
+/// link it is refused as before, and rename keeps the full gate.
 #[tokio::test]
-async fn an_agent_sets_the_status_of_its_own_shared_task() {
+async fn an_agent_writes_its_own_shared_task() {
     let g = gate_fixture();
     let (a_row, b_row) = (g.a_row, g.b_row);
     let shared = g
@@ -18072,31 +18072,37 @@ async fn an_agent_sets_the_status_of_its_own_shared_task() {
     )
     .await
     .expect("Bob links his own session");
-    let set = |who: Caller, item: i64| {
-        call(
-            who,
-            serde_json::json!({ "action": "set_status", "item_id": item, "status": "done" }),
-        )
+    let write = |who: Caller, action: &str, item: i64| {
+        let args = match action {
+            "set_status" => {
+                serde_json::json!({ "action": action, "item_id": item, "status": "done" })
+            }
+            "edit" => serde_json::json!({ "action": action, "item_id": item, "title": "Renamed" }),
+            "comment" => {
+                serde_json::json!({ "action": action, "item_id": item, "notes": "progress" })
+            }
+            _ => serde_json::json!({ "action": action, "item_id": item, "title": "Renamed" }),
+        };
+        call(who, args)
     };
     let me = pane_caller(Some("%7"));
 
-    set(me.clone(), shared)
-        .await
-        .expect("its own task, shared with Bob's session");
-
-    for (who, item, what) in [
-        (pane_caller(None), shared, "no pane proven"),
-        (me.clone(), bobs, "a task its session is not on"),
-    ] {
-        let e = format!("{:?}", set(who, item).await.expect_err(what));
-        assert!(e.contains("E_NOTFOUND"), "{what}: {e}");
+    for action in ["set_status", "edit", "comment"] {
+        write(me.clone(), action, shared)
+            .await
+            .unwrap_or_else(|e| panic!("{action}: its own task, shared with Bob's: {e:?}"));
+        for (who, item, what) in [
+            (pane_caller(None), shared, "no pane proven"),
+            (me.clone(), bobs, "a task its session is not on"),
+        ] {
+            let e = format!("{:?}", write(who, action, item).await.expect_err(what));
+            assert!(e.contains("E_NOTFOUND"), "{action}, {what}: {e}");
+        }
     }
-    let e = call(
-        me,
-        serde_json::json!({ "action": "edit", "item_id": shared, "title": "Renamed" }),
-    )
-    .await
-    .expect_err("edit keeps the full gate");
+    // Rename keeps the full gate.
+    let e = write(me, "name", shared)
+        .await
+        .expect_err("rename keeps the full gate");
     assert!(format!("{e:?}").contains("E_NOTFOUND"), "{e:?}");
 }
 

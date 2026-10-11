@@ -1835,7 +1835,10 @@ impl FleetTools {
             let item_id = args
                 .item_id
                 .ok_or_else(|| mcp_err("E_INVALID", "edit needs item_id", None))?;
-            self.require_drive_on_item_sessions(&caller, item_id)?;
+            // `set_status`'s exception: an agent edits its own task.
+            if !self.own_session_works_on(&caller, item_id)? {
+                self.require_drive_on_item_sessions(&caller, item_id)?;
+            }
             return ok_json(
                 &crate::service::work::local::edit_local_item(&args, &self.store, &scope)
                     .map_err(to_mcp_err)?,
@@ -1849,7 +1852,10 @@ impl FleetTools {
             let item_id = args
                 .item_id
                 .ok_or_else(|| mcp_err("E_INVALID", "comment needs item_id", None))?;
-            self.require_drive_on_item_sessions(&caller, item_id)?;
+            // `set_status`'s exception: an agent comments on its own task.
+            if !self.own_session_works_on(&caller, item_id)? {
+                self.require_drive_on_item_sessions(&caller, item_id)?;
+            }
             let person = self.view_scope(&caller)?.person;
             return ok_json(
                 &crate::service::work::local::comment(
