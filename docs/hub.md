@@ -580,11 +580,17 @@ MCP server entry (the skill files and hooks are picked up live).
 **Stale content, and `fleet-hub provision`.** Every provisioning records a
 fingerprint of what it shipped (both skills, the managed CLAUDE.md block and
 the hook shape); `list_hosts` reports `provision_stale: true` for a host whose
-fingerprint is not this build's. A minute after start the hub refreshes every
-reachable stale host *content only* — skills, the CLAUDE.md block and hooks,
-with the host's existing token; no new token, no `~/.claude.json` rewrite, no
-Claude restart. By hand: `fleet-hub provision [--host <alias>]
-[--content-only]` (the `provision_hosts {host, content_only}` tool).
+fingerprint is not this build's. A minute after start, and then every five
+minutes, the hub refreshes every reachable stale host *content only* —
+skills, the CLAUDE.md block and hooks, with the host's existing token; no new
+token, no `~/.claude.json` rewrite, no Claude restart. A host that was offline
+(or whose agent had not reconnected) is picked up by a later pass; a refresh
+that fails is kept as the host's `provision_warning` and retried with a
+backoff (5 min, doubling, at most 6 h). By hand: `fleet-hub provision [--host
+<alias>] [--content-only]` (the `provision_hosts {host, content_only}` tool),
+or **Re-provision this host** on the host's page in a paired desktop — the
+hub owner's own device may run `provision_hosts` for one host with
+`content_only` (never every host, a token or a rotation).
 
 **The pane header, and why `--content-only` cannot add it.** Provisioning also
 writes `"X-Fleet-Pane": "${TMUX_PANE:-}"` into each host's
@@ -1052,6 +1058,88 @@ stored setting) on a *running* hub, a phone can be sent to the new address by
 the QR and then handed the old one to talk to. Restart `fleet-hub serve`
 before pairing anything, and the two agree again.
 
+## Sign in with Keycloak
+
+Instead of walking a code from the hub's terminal to every device, a hub can
+let people **sign in with Keycloak** (or any other OpenID Connect provider)
+and pair a device for themselves. It ends exactly where `fleet-hub pair`
+ends — in a single-use pairing code that the app redeems at `POST /pair` —
+so there is no new kind of token, no session cookie and no new door past
+the bearer check: the provider only stands in for the operator at the
+terminal, deciding **whose** device the code is for.
+
+It is off unless `FLEET_HUB_OIDC_ISSUER` is set. Configuration is the hub's
+environment only (`fleet-hub.env` in Docker): the client secret does not go
+into `state.db` beside the data it guards.
+
+| Env | Default | What it is |
+|---|---|---|
+| `FLEET_HUB_OIDC_ISSUER` | unset (off) | The issuer URL; for Keycloak `https://<host>/realms/<realm>`. Must be `https://`. |
+| `FLEET_HUB_OIDC_CLIENT_ID` | — (required) | The Keycloak client's id. |
+| `FLEET_HUB_OIDC_CLIENT_SECRET` | unset | A confidential client's secret. Unset: a public client, PKCE alone. |
+| `FLEET_HUB_OIDC_ALLOWED_ROLES` | empty (any account) | Comma-separated realm roles, client roles or groups; a sign-in holding none is refused. `/team` and `team` match each other. |
+| `FLEET_HUB_OIDC_AUTO_PROVISION` | `true` | An account's first sign-in creates its person. `false`: only accounts the operator linked get in. |
+| `FLEET_HUB_OIDC_USERNAME_CLAIM` | `preferred_username` | The ID-token claim a new person is named after. |
+| `FLEET_HUB_OIDC_MODE` | `full` | `full` or `readonly`: what a device paired this way may do. |
+| `FLEET_HUB_OIDC_SCOPES` | `openid profile email` | Requested scopes (`openid` is always added). |
+| `FLEET_HUB_OIDC_CA_FILE` | unset | Extra CA certificates (PEM) for a provider on a private CA. |
+
+A half-configured provider (an issuer and no client id, an `http://`
+issuer, an unknown mode) fails `fleet-hub serve` at start, so a typo cannot
+leave sign-in silently off.
+
+**In Keycloak**, create a client in the realm: *OpenID Connect*, *Standard
+flow* on (direct access grants off), *Client authentication* on for a
+confidential client (copy its secret from *Credentials*), and one *Valid
+redirect URI*: `https://fleet.example.com/auth/oidc/callback` — the hub's
+`FLEET_HUB_PUBLIC_URL` plus `/auth/oidc/callback`. Realm and client roles
+reach the hub in the access token as Keycloak sends them; for groups add a
+*Group Membership* mapper to the client's dedicated scope. Give the people
+who may use the fleet a role (say `fleet-users`) and set
+`FLEET_HUB_OIDC_ALLOWED_ROLES=fleet-users`.
+
+**Pairing a device:** open `https://fleet.example.com/auth/oidc/start` on it
+(optionally `?name=ada-phone`; the default name is `<person>-sso`, then
+`-sso-2`, …), sign in, and the page shows an eight-character code good for
+five minutes, an **Open in the Orbit Fleet app** link (`claudefleet:` +
+the pair URL, which fills the app's Pair screen) and the pair URL for a
+desktop. The device is paired `full` (or `FLEET_HUB_OIDC_MODE`), not
+trusted, bound to no org — `fleet-hub client trust` and `client bind` work
+on it like on any other.
+
+**Who it pairs.** An account is the pair (issuer, `sub`), never its
+username or e-mail, which the provider may let its owner change:
+
+- An account already linked pairs as that person — refused if the person is
+  disabled (`person disable` ends SSO reach too).
+- An account seen for the first time creates a person named after its
+  username, when auto-provisioning is on and no live person holds the name.
+- It is **never** linked to an existing person by name: anybody who can set
+  their username at the provider could otherwise become a colleague. So
+  that sign-in is refused, and the page prints the command for the
+  operator — which is also how you link your own account to this hub's
+  owner:
+
+```bash
+fleet-hub person link-sso owner --subject 0b7d…-uuid   # issuer: FLEET_HUB_OIDC_ISSUER
+fleet-hub person unlink-sso --subject 0b7d…-uuid        # devices stay paired until `client revoke`
+```
+
+**Security, precisely.** The flow is the authorization code flow with PKCE
+(S256), a `state` held in hub memory for ten minutes and bound to the
+browser by an `HttpOnly`, `SameSite=Lax` cookie (a callback from another
+browser is refused — login CSRF), and a `nonce` checked in the ID token.
+The hub exchanges the code itself over TLS, at the token endpoint the
+provider's discovery document names, which must be on the issuer's own
+host; it checks the ID token's `iss`, `aud`/`azp`, `exp` and `nonce`, and
+relies on TLS rather than the token's signature — what OIDC Core §3.1.3.7
+allows for a token taken straight from the token endpoint; the token never
+passes through the browser. Starts and callbacks are rate-limited per
+address. A hub restart forgets every sign-in in flight, like every pairing
+code. What is not built: logout at the provider (a paired device lives
+until `client revoke` or `person disable`, as before), org membership from
+Keycloak groups, and sign-in from the desktop app's own window.
+
 ## Clients
 
 ```bash
@@ -1110,12 +1198,18 @@ What a client may do:
   since an auto-send chip is a prompt one tap away. A `set` may name the list
   it last read as `expected`; if another device saved in between, it answers
   `E_CONFLICT` instead of overwriting that edit.
-- **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
+- **Neither mode reaches fleet admin.** `provision_hosts`,
   `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
   `set_host_harnesses`, `pair_client`, `revoke_client`, `set_client_trust`
   and `list_clients` are master-token only, so a paired phone can neither
   re-provision the fleet nor pair a second device nor revoke (or trust) your
-  own client — nor even enumerate the other devices you have paired.
+  own client — nor even enumerate the other devices you have paired. The
+  hub owner's own devices (`Access::Person`) are the exception for a few:
+  `add_host` and `install_agent` (contract 13; the writes ask a trusted
+  `full` device), `set_account_nickname` and `check_host` — so the phone and
+  a paired desktop add a host from the hub's SSH config, name an account and
+  read a host's health checklist, where before only a standalone desktop
+  could.
 - **Except what you grant: the asset catalog.** `fleet-hub client grant
   <name> assets` lets that one client manage the asset catalog from its
   Assets tab — configure and load the checkout, create / edit / delete
@@ -3321,15 +3415,12 @@ Every command below refuses in hub client mode; the full table, with the command
 | --- | --- |
 | `account_spend` | this app collects no usage while a hub owns the fleet, so its store has no spend per account; read usage on the hub |
 | `account_usage_history` | this app does not poll account usage while a hub owns the fleet, so it keeps no history; read usage on the hub |
-| `add_host` | registering a host is fleet administration, which the hub reserves for its own operator — add it there with `fleet-hub` |
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `catalog_spawn_author_session` | an author session is a Claude session started in the catalog's checkout on the machine that owns it, and the hub has no tool that starts one; edit the assets from this panel, or start a session in the checkout on the hub's machine |
-| `check_host` | the health checklist reads a host's settings over this app's own SSH; repair a host's hooks from the hub with `fleet-hub provision --host <alias>` |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
 | `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
 | `discard_host_setup` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
-| `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
 | `draft_commit_message` | the hub exposes no draft tool — a commit message is drafted where the commit is made: in the session, or from a standalone app |
 | `fetch_page_source` | a page's data sources read this fleet's store, which the hub owns; read the same numbers on the hub with usage_report |
@@ -3346,7 +3437,7 @@ Every command below refuses in hub client mode; the full table, with the command
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
 | `merge_host` | merging one host's rows into another is fleet administration, which the hub reserves for its own operator — run it there with `fleet-hub host merge <from> <into>` |
 | `probe_ssh_alias` | it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it |
-| `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub provision [--host <alias>] [--content-only]` |
+| `provision_hosts` | Refuses when no host, or rotate: true — a full provisioning (otherwise routes to `provision_hosts`): it rewrites every host's hook block and tokens to report to this app; provision from the hub with `fleet-hub provision [--host <alias>] [--rotate]` (one host's content is refreshed from its page, and the hub refreshes stale hosts by itself) |
 | `purge_project` | it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub |
 | `record_host_placement` | the decision model's runs are recorded on the hub that owns the fleet; nothing to record here |
 | `refresh_account_usage` | it reads the account's usage over this machine's SSH connection to the host; refresh it on the hub |
@@ -3369,7 +3460,6 @@ Every command below refuses in hub client mode; the full table, with the command
 | `rotate_host_token` | it re-provisions the host to report to this app; rotate the token on the hub |
 | `run_host_setup_check` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `save_host_setup` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
-| `set_account_nickname` | the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `status_map_proposals` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |

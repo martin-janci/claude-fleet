@@ -282,6 +282,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     },
     // Plan usage per account (hub contract 11 follow-up): the same reach as
     // `list_accounts`, read from what the hub's bus followed.
+    // An account's nickname: the label every device shows for it. The hub
+    // owner's (master or own device), like `add_account`; another person's
+    // or an org's device reads the accounts and does not rename them.
+    ToolPolicy {
+        name: "set_account_nickname",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "account_usage",
         access: Access::Client,
@@ -382,6 +392,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
+    // The host detail's health checklist (Orbit Fleet 4.7): one SSH read of
+    // tmux, PATH and ~/.claude/settings.json on a fleet host. The hub
+    // owner's, like `add_host`: it reads a host's own configuration.
+    ToolPolicy {
+        name: "check_host",
+        access: Access::Person,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     ToolPolicy {
         name: "remove_host",
         access: Access::Master,
@@ -405,9 +425,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // `Person` since mefistos (2026-10-11): the hub owner's own device may
+    // refresh ONE host's content (`content_only`, no rotation — the same
+    // secret-free pass the hub runs on its own); the tool refuses it
+    // anything wider, which mints tokens and stays the master's.
     ToolPolicy {
         name: "provision_hosts",
-        access: Access::Master,
+        access: Access::Person,
         readonly: false,
         confirm: false,
         deadline: Deadline::Lifecycle,
@@ -2881,7 +2905,6 @@ mod tests {
     #[test]
     fn admin_tools_are_the_fleet_admin_set_and_mutating() {
         for t in [
-            "provision_hosts",
             "remove_host",
             "merge_host",
             "hide_host",
@@ -2899,7 +2922,9 @@ mod tests {
         // Contract 13 (Martin, "Owner's phone"; trackers "Allow on phone"):
         // the hub owner's own device reaches these past the gate, and the
         // handler asks for a trusted `full` device (`owner_device_admin`).
-        for t in ["add_host", "install_agent", "work_admin"] {
+        // `provision_hosts` (mefistos, 2026-10-11): the handler narrows the
+        // device to one host's content refresh (`provision_scope_allowed`).
+        for t in ["add_host", "install_agent", "work_admin", "provision_hosts"] {
             assert_eq!(policy(t).map(|p| p.access), Some(Access::Person), "{t}");
             assert!(!is_admin_tool(t), "{t}");
             assert!(!is_readonly_tool(t), "{t}");

@@ -56,8 +56,10 @@ pub struct HostCheck {
 
 /// `check_host`'s arguments: the host, and optionally a projects base path
 /// to check there.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "CheckHostParams")]
 pub struct CheckHostArgs {
+    /// Host.
     pub alias: String,
     /// A projects base path (absolute, or `~/…`) to check on the host:
     /// whether it exists, and whether the login user may write there.

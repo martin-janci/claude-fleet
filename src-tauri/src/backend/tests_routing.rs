@@ -551,6 +551,31 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             "[]",
             Box::new(|b, s, _| block_on(commands::hosts::routed::list_accounts(b, s)).map(|_| ())),
         ),
+        // The hub's ~/.ssh/config: the candidates its own add_host can reach.
+        (
+            "discover_hosts",
+            "discover_hosts",
+            json!({}),
+            "[]",
+            Box::new(|b, _, _| block_on(commands::hosts::routed::discover_hosts(b)).map(|_| ())),
+        ),
+        (
+            "check_host",
+            "check_host",
+            json!({ "alias": "trn", "base_path": null }),
+            r#"{"alias":"trn","checked_at":1,"error":null,"tmux_version":"3.4","agents_on_path":["claude"],"fleet_hooks":true,"guard_hook":true}"#,
+            Box::new(|b, _, h| {
+                block_on(commands::hosts::routed::check_host(
+                    b,
+                    fleet_core::service::host_check::CheckHostArgs {
+                        alias: "trn".into(),
+                        base_path: None,
+                    },
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "list_account_usage",
             "account_usage",
@@ -4011,6 +4036,43 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 block_on(commands::tasks::routed::cancel_task(b, 11, s)).map(|_| ())
             }),
         ),
+        // Contract 13: the hub owner's trusted full device adds a host.
+        (
+            "add_host",
+            "add_host",
+            json!({ "alias": "trn", "ssh_alias": "trn-ssh", "transport": null }),
+            HOST_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::hosts::routed::add_host(
+                    b,
+                    fleet_core::service::hosts::AddHostArgs {
+                        alias: "trn".into(),
+                        ssh_alias: "trn-ssh".into(),
+                        transport: None,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_account_nickname",
+            "set_account_nickname",
+            json!({ "uuid": "u1", "nickname": "Work" }),
+            r#"{"uuid":"u1","nickname":"Work"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::hosts::routed::set_account_nickname(
+                    b,
+                    fleet_core::service::hosts::SetAccountNicknameArgs {
+                        uuid: "u1".into(),
+                        nickname: Some("Work".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "install_agent",
             "install_agent",
@@ -4313,6 +4375,25 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     },
                     s,
                     h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // One host without a rotation — "Re-provision this host" — routes as
+        // the hub's content-only refresh of that host (mefistos, 2026-10-11).
+        (
+            "provision_hosts",
+            "provision_hosts",
+            json!({ "host": "mefistos", "content_only": true }),
+            r#"[{"host":"mefistos","status":"provisioned"}]"#,
+            Box::new(|b, s, h| {
+                block_on(commands::mcp::routed::provision_hosts(
+                    b,
+                    false,
+                    Some("mefistos".into()),
+                    s,
+                    h,
+                    &Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new()),
                 ))
                 .map(|_| ())
             }),
@@ -6303,6 +6384,32 @@ fn a_command_the_table_cannot_answer_is_still_refused() {
             .is_ok(),
         "standalone owns its own fleet; a missing row is not its problem"
     );
+}
+
+/// A full provisioning — every host, or a rotation — mints tokens and
+/// rewrites `~/.claude.json`, so a paired desktop refuses it rather than
+/// route it; only one host's content refresh reaches the hub.
+#[test]
+fn provision_hosts_routes_one_hosts_refresh_and_refuses_a_full_run() {
+    for (rotate, host) in [(false, None), (true, Some("mefistos".to_string()))] {
+        let fake = Fake::answering("[]");
+        let (_dir, st) = store();
+        let err = block_on(commands::mcp::routed::provision_hosts(
+            &remote_backend(&fake),
+            rotate,
+            host.clone(),
+            &st,
+            &ssh(),
+            &Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new()),
+        ))
+        .expect_err("a full provisioning stays the hub operator's");
+        assert_eq!(
+            err.code,
+            codes::E_LOCAL_ONLY,
+            "rotate={rotate} host={host:?}: {err:?}"
+        );
+        fake.was_not_called();
+    }
 }
 
 /// #146: `repair_session` routes only

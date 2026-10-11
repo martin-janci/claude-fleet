@@ -337,13 +337,16 @@ Index by area (names only; see the reference for details):
   `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
-  `probe_host`, `hide_host`, `provision_hosts`, `wizard_state` (a wizard
+  `probe_host`, `check_host` (a host's health checklist over the hub's SSH:
+  tmux, agents on PATH, fleet's hooks; the hub owner's devices, contract
+  17), `hide_host`, `provision_hosts`, `wizard_state` (a wizard
   left half-way, Add host or Add a project, kept on the hub so it resumes
   on the person's other device; not served to a per-host token),
   `propose_host_placement` (the decision model's host for a new session of
   a project: `{host_alias, confidence_pct, run_id}` or null; a person's
   device only, never a per-host token; hub contract 17),
-  `list_accounts`, `account_usage` (each account's latest plan usage: the
+  `list_accounts`, `set_account_nickname` (an account's label on every
+  device; the hub owner's devices, contract 17), `account_usage` (each account's latest plan usage: the
   5-hour and weekly windows with their reset times, status and when it was
   fetched, as the hub's usage poll last answered; never fetches; hub
   contract 11), `check_account_headroom` (whether starting or switching a
@@ -1656,7 +1659,7 @@ timeline instead of a reply. See `docs/hub.md` → *Link two hubs*.
 
 Unless `provision.install_ag` is off, provisioning (full and `content_only`) also installs fleet's `ag` launcher: the embedded `tools/ag` tree is staged under `~/.local/share/fleet/ag-src` and its installer puts `ag` in `~/.local/share/ag` (linked from `~/.local/bin/ag`, never over a foreign `ag`) and adds a `cl` alias (`claude --yolo`) with its shim in `~/.local/bin` unless the host's ag config already defines `cl`. This step is optional: a failure is appended to the host result's `detail` (full and `content_only` runs alike; the hub's unattended refresh logs it) and provisioning continues. The installer never adds `cl` over a command the host already has (a `cl` elsewhere on `PATH`, or a `~/.local/bin/cl` ag did not write), and never edits a symlinked ag config. Panes then launch through the host's own `cl` if it has one, else `~/.local/share/ag/ag claude --yolo`, else `claude --dangerously-skip-permissions`.
 
-**Upgrade heads-up:** the `ag` launcher is part of the provisioning fingerprint, so upgrading to this build makes every provisioned host `provision_stale`, and the hub's unattended content refresh installs `ag` and (where the host has no `cl`) a `cl` shim on every reachable host within about a minute of start. To opt out, set `provision.install_ag=false` right after upgrading.
+**Upgrade heads-up:** the `ag` launcher is part of the provisioning fingerprint, so upgrading to this build makes every provisioned host `provision_stale`, and the hub's unattended content refresh installs `ag` and (where the host has no `cl`) a `cl` shim on every reachable host within about a minute of start (and on a host that comes online later, at the next pass: the refresh repeats every five minutes). To opt out, set `provision.install_ag=false` right after upgrading.
 
 **After upgrading claude-fleet to a build with per-host tokens, re-provision every host** (Settings → Control API → **Provision hosts**; no rotate needed). Until a host is re-provisioned it keeps authenticating with the master token and its old command hook keeps posting `?token=` — the master token is still accepted in that query form on `/hook` (only there, and only the master token) for the transition — but it has no host identity, cannot be set `readonly`, and its hook still carries the token in argv. **The `?token=` form is removed in 0.4.**
 

@@ -300,7 +300,7 @@ describe('host health helpers', () => {
     expect(healthSampleFresh(host('x', { health_at: null }), NOW)).toBe(false);
   });
 
-  it('provision_stale outranks disk_low and names the content-only refresh', () => {
+  it('provision_stale outranks disk_low and says fleet refreshes it by itself', () => {
     const base = {
       hasToken: true,
       tokensLoaded: true,
@@ -315,7 +315,8 @@ describe('host health helpers', () => {
     const stale = host('x', { provision_stale: true, disk_home_free_kb: 3_600_000, disk_home_total_kb: 150_000_000 });
     const mark = hostAttention({ ...base, host: stale });
     expect(mark?.kind).toBe('provision_stale');
-    expect(mark?.title).toContain('fleet-hub provision --host x --content-only');
+    expect(mark?.title).toContain('Fleet refreshes it by itself');
+    expect(mark?.title).toContain('Re-provision this host');
   });
 });
 

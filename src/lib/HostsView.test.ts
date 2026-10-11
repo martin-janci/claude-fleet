@@ -523,8 +523,11 @@ describe('HostsView: hub client', () => {
   // #147, finding 5: the `e` shortcut called `startEdit` directly, bypassing
   // the nickname button's own `disabled={blocked !== null}` — the same
   // non-button-path gap as `r`/`u` above, just found later.
+  // The nickname routes to the hub (`set_account_nickname`), so it is blocked
+  // only while the hub cannot be reached.
   it('e does nothing while blocked: no editor opens, no set_account_nickname', async () => {
     hubStatus.set(remote);
+    hubConnection.set({ state: 'offline', attempt: 1, retry_in_secs: 5, reason: 'refused' });
     mount({ preselect: 'mefistos' });
     await tick();
     await key(list(), 'e');

@@ -164,7 +164,11 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 /// Downloads Pause (`pause_download`, G7.15) is refused there with that
 /// same `E_HUB_PROTOCOL`, which the sheet words as "the hub needs updating first".
 /// The composer's context help (`session_context_help`) likewise answers
-/// that the hub needs updating for context help.
+/// that the hub needs updating for context help. An account's nickname and
+/// a host's health checklist (`set_account_nickname`, `check_host`) route
+/// to tools added at revision 17 without a bump; a hub without them answers
+/// `E_HUB_PROTOCOL`, which the field and the checklist show as their error,
+/// where before this build both were refused outright.
 pub const MIN_HUB_CONTRACT: u32 = 16;
 
 /// The highest hub wire-contract revision this build understands. A hub

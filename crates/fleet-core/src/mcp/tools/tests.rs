@@ -420,7 +420,6 @@ fn fleet_admin_tools_are_master_only() {
     let phone = client_caller("phone", TokenMode::Full);
     assert!(!phone.is_master());
     for t in [
-        "provision_hosts",
         "remove_host",
         "merge_host",
         "forget_project",
@@ -469,6 +468,56 @@ fn fleet_admin_tools_are_master_only() {
 // ---- client-token gating (Task 3: prove the gates hold for the new
 // caller kind — a paired client such as a phone) ----
 
+/// mefistos (2026-10-11): the hub owner's paired desktop showed "Re-provision
+/// this host" disabled forever. Its device may now refresh ONE host's
+/// content — the secret-free pass the hub runs by itself — and nothing that
+/// mints or rotates a token, or touches every host.
+#[test]
+fn the_owners_device_may_refresh_one_hosts_content_and_nothing_wider() {
+    use super::params::ProvisionHostsParams;
+    let desktop = client_caller("mac-desktop", TokenMode::Full);
+    assert!(guard::access_allows(&desktop, "provision_hosts"));
+    let params = |host: Option<&str>, content_only: bool, rotate: bool| ProvisionHostsParams {
+        rotate,
+        host: host.map(str::to_string),
+        content_only,
+    };
+    assert!(super::fleet::provision_scope_allowed(
+        &desktop,
+        &params(Some("mefistos"), true, false)
+    )
+    .is_ok());
+    for (p, what) in [
+        (params(None, true, false), "every host"),
+        (
+            params(Some("mefistos"), false, false),
+            "a full run mints a token",
+        ),
+        (params(Some("mefistos"), true, true), "a rotation"),
+    ] {
+        let e = super::fleet::provision_scope_allowed(&desktop, &p).expect_err(what);
+        assert!(
+            e.message.starts_with("E_FORBIDDEN"),
+            "{what}: {}",
+            e.message
+        );
+    }
+    assert!(
+        super::fleet::provision_scope_allowed(&Caller::master(), &params(None, false, true))
+            .is_ok()
+    );
+    // Never a host's own Claude, nor a readonly device.
+    assert!(!guard::access_allows(
+        &host_caller("mefistos", TokenMode::Full),
+        "provision_hosts"
+    ));
+    assert!(enforce_mode(
+        &client_caller("phone", TokenMode::Readonly),
+        "provision_hosts"
+    )
+    .is_err());
+}
+
 /// Martin's "Owner's phone" and trackers "Allow on phone" (contract 13):
 /// the hub owner's trusted `full` phone adds hosts, installs fleet-agent and
 /// manages trackers; an untrusted or readonly one, a second person's and a
@@ -496,7 +545,13 @@ async fn the_owners_trusted_phone_administers_hosts_and_trackers_only() {
             e.message
         );
     }
-    for t in ["add_host", "install_agent", "work_admin"] {
+    for t in [
+        "add_host",
+        "install_agent",
+        "work_admin",
+        "set_account_nickname",
+        "check_host",
+    ] {
         assert!(guard::access_allows(&phone, t), "{t}");
         assert!(
             !guard::access_allows(&another_person(phone.clone()), t),
@@ -3936,7 +3991,9 @@ fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
         !client.iter().any(|n| guard::is_admin_tool(n)),
         "a paired client must not be served the fleet-admin tools"
     );
-    assert!(!client.iter().any(|n| n == "provision_hosts"));
+    // The hub owner's device is served `provision_hosts` for one host's
+    // content refresh only (`provision_scope_allowed`).
+    assert!(client.iter().any(|n| n == "provision_hosts"));
 }
 
 /// The phone gates its work UI on `tools/list` rather than on the contract
@@ -19608,4 +19665,69 @@ async fn update_policy_is_an_org_admins_for_their_own_org() {
     assert_eq!(v["policies"].as_array().unwrap().len(), 2);
     let v = result_json(&call(admin.clone(), clear).await.expect("her own"));
     assert_eq!(v["removed"], true);
+}
+
+/// An account's nickname set through the hub: every device reads the same
+/// label, and blank clears it. Before the tool a paired desktop refused the
+/// edit and the phone could not make it at all.
+#[tokio::test]
+async fn set_account_nickname_names_and_clears_through_the_hub() {
+    let (tools, store) = quick_replies_tools();
+    store
+        .lock()
+        .unwrap()
+        .upsert_account(&crate::store::AccountRow {
+            uuid: "u1".into(),
+            email: Some("a@b.c".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let named = tools
+        .set_account_nickname(Parameters(crate::service::hosts::SetAccountNicknameArgs {
+            uuid: "u1".into(),
+            nickname: Some("  Work ".into()),
+        }))
+        .await
+        .expect("named");
+    assert_eq!(result_json(&named)["nickname"], "Work");
+    let cleared = tools
+        .set_account_nickname(Parameters(crate::service::hosts::SetAccountNicknameArgs {
+            uuid: "u1".into(),
+            nickname: None,
+        }))
+        .await
+        .expect("cleared");
+    assert!(result_json(&cleared)["nickname"].is_null());
+    let err = tools
+        .set_account_nickname(Parameters(crate::service::hosts::SetAccountNicknameArgs {
+            uuid: "nobody".into(),
+            nickname: Some("x".into()),
+        }))
+        .await
+        .expect_err("unknown uuid");
+    assert!(err.message.starts_with("E_NOTFOUND"), "{}", err.message);
+}
+
+/// `check_host` answers about a host of this fleet only: an alias the store
+/// does not know is refused before any SSH, so the hub never dials wherever
+/// a caller names.
+#[tokio::test]
+async fn check_host_refuses_a_host_the_fleet_does_not_have() {
+    let (tools, _store) = quick_replies_tools();
+    let err = tools
+        .check_host(Parameters(crate::service::host_check::CheckHostArgs {
+            alias: "elsewhere".into(),
+            base_path: None,
+        }))
+        .await
+        .expect_err("not a fleet host");
+    assert!(err.message.starts_with("E_NOTFOUND"), "{}", err.message);
+    let err = tools
+        .check_host(Parameters(crate::service::host_check::CheckHostArgs {
+            alias: "-oProxyCommand=x".into(),
+            base_path: None,
+        }))
+        .await
+        .expect_err("hostile alias");
+    assert!(err.message.starts_with("E_INVALID"), "{}", err.message);
 }

@@ -1901,6 +1901,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/166_routine_runs_outlive_routine.sql"),
         already_applied: Some(routine_runs_has_routine_name),
     },
+    // Single sign-on: `person_identities`, which person an OIDC account
+    // (issuer, subject) is. `IF NOT EXISTS`: safe to re-run.
+    Migration::plain(
+        167,
+        include_str!("../../migrations/167_person_identities.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

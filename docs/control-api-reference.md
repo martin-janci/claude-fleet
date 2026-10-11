@@ -111,6 +111,12 @@ Whether starting or switching a session on host_alias under login `profile` (a p
 
 Parameters: `host_alias`, `profile`
 
+### `check_host`
+
+A host's health checklist over SSH: tmux, the agents on PATH, fleet's hooks and worker guard in ~/.claude/settings.json; base_path: whether it exists and is writable. Reads only.
+
+Parameters: `alias`, `base_path`
+
 ### `control_handoffs`
 
 What the agent handed on, newest first: prompts and tasks sent to sessions, new sessions, missions, tasks and proposed trees, each with its target's state now.
@@ -435,7 +441,7 @@ Propose a layer split from the last scan, grouping assets by the exact set of ho
 
 ### `provision_hosts`
 
-Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it. host: one alias; content_only: skills, CLAUDE.md and hooks only, no token.
+Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it. host: one alias; content_only: skills, CLAUDE.md and hooks only, no token. The hub owner's device may run content_only for one host only.
 
 Parameters: `content_only`, `host`, `rotate`
 
@@ -760,6 +766,12 @@ Parameters: `fresh_for`, `max_chars`, `session_id`, `since_turn`
 Revoke a person's or org's grant on your session (owner only; kept, revoked, for audit). Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
 
 Parameters: `org`, `person`, `session_id`
+
+### `set_account_nickname`
+
+Name a Claude account (≤ 32 characters; empty or null clears). Returns the account row.
+
+Parameters: `nickname`, `uuid`
 
 ### `set_client_trust`
 

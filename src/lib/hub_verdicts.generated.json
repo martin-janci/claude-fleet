@@ -2,15 +2,12 @@
   "local_only": [
     "account_spend",
     "account_usage_history",
-    "add_host",
     "add_tracker",
     "catalog_spawn_author_session",
-    "check_host",
     "check_local_prereqs",
     "decide_status_map_proposal",
     "discard_host_setup",
     "discard_kill_session",
-    "discover_hosts",
     "dismiss_agent_session",
     "draft_commit_message",
     "fetch_page_source",
@@ -27,7 +24,6 @@
     "mcp_status",
     "merge_host",
     "probe_ssh_alias",
-    "provision_hosts",
     "purge_project",
     "record_host_placement",
     "refresh_account_usage",
@@ -49,7 +45,6 @@
     "rotate_host_token",
     "run_host_setup_check",
     "save_host_setup",
-    "set_account_nickname",
     "set_host_token_mode",
     "set_tracker_credential",
     "status_map_proposals",
@@ -67,6 +62,7 @@
     "access_requests",
     "ack_work_link",
     "add_account",
+    "add_host",
     "add_library_items",
     "add_org",
     "add_org_project",
@@ -138,6 +134,7 @@
     "catalog_update_asset",
     "catalog_write_layer",
     "check_account_headroom",
+    "check_host",
     "claim_debug_device",
     "comment_on_work",
     "confirm_session_work",
@@ -159,6 +156,7 @@
     "delete_work_view",
     "describe_fleet_settings",
     "disable_person",
+    "discover_hosts",
     "discover_lost_sessions",
     "dismiss_ghost_session",
     "dismiss_reopened",
@@ -290,6 +288,7 @@
     "session_tool_detail",
     "session_unshare",
     "session_work_links",
+    "set_account_nickname",
     "set_device_person",
     "set_device_trust",
     "set_fleet_setting",
@@ -355,6 +354,10 @@
     "work_views"
   ],
   "routed_unless": [
+    {
+      "command": "provision_hosts",
+      "unless": "no host, or rotate: true — a full provisioning"
+    },
     {
       "command": "repair_session",
       "unless": "explicit: false, the automatic pre-attach check"

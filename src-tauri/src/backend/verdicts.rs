@@ -27,11 +27,13 @@ pub enum Verdict {
     /// part of what the command does has a counterpart on the hub. `unless`
     /// names the shape that refuses; `instead` is that refusal's sentence.
     ///
-    /// One command has this verdict, and the honest thing is to say so rather
-    /// than to file it under whichever half is more convenient: `repair_session`
+    /// Two commands have this verdict, and the honest thing is to say so rather
+    /// than to file them under whichever half is more convenient: `repair_session`
     /// routes the explicit repair (the Repair workspace button, which maps
     /// one-to-one onto the tool's always-explicit repair) and refuses the
-    /// automatic pre-attach check, which would become destructive by surprise.
+    /// automatic pre-attach check, which would become destructive by surprise;
+    /// `provision_hosts` routes one host's content-only refresh and refuses a
+    /// full provisioning, which mints tokens.
     RoutedUnless {
         tool: &'static str,
         unless: &'static str,
@@ -1220,9 +1222,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── hosts and accounts ──────────────────────────────────────────────────
     (
         "discover_hosts",
-        Verdict::LocalOnly {
-            instead: "it reads this machine's ~/.ssh/config, not the hub's — register hosts \
-                      on the hub itself with `fleet-hub` or a standalone app",
+        Verdict::Routed {
+            tool: "discover_hosts",
         },
     ),
     ("list_hosts", Verdict::Routed { tool: "list_hosts" }),
@@ -1232,13 +1233,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "list_accounts",
         },
     ),
-    (
-        "add_host",
-        Verdict::LocalOnly {
-            instead: "registering a host is fleet administration, which the hub reserves for \
-                      its own operator — add it there with `fleet-hub`",
-        },
-    ),
+    ("add_host", Verdict::Routed { tool: "add_host" }),
     ("probe_host", Verdict::Routed { tool: "probe_host" }),
     // Orbit Fleet 4.9: only a hub accepts agents, so the job runs there; a
     // standalone desktop answers with the service's own refusal.
@@ -1280,13 +1275,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       <from> <into>`",
         },
     ),
-    (
-        "check_host",
-        Verdict::LocalOnly {
-            instead: "the health checklist reads a host's settings over this app's own SSH; \
-                      repair a host's hooks from the hub with `fleet-hub provision --host <alias>`",
-        },
-    ),
+    ("check_host", Verdict::Routed { tool: "check_host" }),
     (
         "list_host_setups",
         Verdict::LocalOnly {
@@ -1328,9 +1317,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "set_account_nickname",
-        Verdict::LocalOnly {
-            instead: "the nickname lives in the hub's database and there is no tool to set \
-                      it; rename the account on the hub",
+        Verdict::Routed {
+            tool: "set_account_nickname",
         },
     ),
     // ── account usage ───────────────────────────────────────────────────────
@@ -1402,11 +1390,19 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       running; install it from the hub",
         },
     ),
+    // "Re-provision this host" routes as the hub's content-only refresh of
+    // that one host (`Access::Person`: the hub owner's own device); every
+    // host at once, or a rotation, mints tokens and rewrites
+    // `~/.claude.json`, which stays the hub operator's.
     (
         "provision_hosts",
-        Verdict::LocalOnly {
-            instead: "it rewrites every host's hook block to report to this app; provision \
-                      from the hub with `fleet-hub provision [--host <alias>] [--content-only]`",
+        Verdict::RoutedUnless {
+            tool: "provision_hosts",
+            unless: "no host, or rotate: true — a full provisioning",
+            instead: "it rewrites every host's hook block and tokens to report to this app; \
+                      provision from the hub with `fleet-hub provision [--host <alias>] \
+                      [--rotate]` (one host's content is refreshed from its page, and the hub \
+                      refreshes stale hosts by itself)",
         },
     ),
     (
