@@ -1907,6 +1907,12 @@ const MIGRATIONS: &[Migration] = &[
         167,
         include_str!("../../migrations/167_person_identities.sql"),
     ),
+    // Task attachments and their content-addressed blobs: new tables,
+    // idempotent.
+    Migration::plain(
+        168,
+        include_str!("../../migrations/168_work_item_attachments.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -6339,7 +6345,7 @@ mod tests {
     /// `host_setups` into `wizard_state` as `add_host` rows, and the old
     /// table goes; the store still reads them as drafts.
     #[test]
-    fn migration_165_moves_the_add_host_drafts_into_wizard_state() {
+    fn migration_168_moves_the_add_host_drafts_into_wizard_state() {
         let s = store_at_version(164);
         s.conn
             .execute_batch(
