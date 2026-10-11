@@ -22,7 +22,7 @@
   import { assessRow, hasReading, verdictLabel, verdictState } from './evidence';
   import StatusDot from './kit/StatusDot.svelte';
   import { changedAny, describeEvidence, onWorkChangedDebounced } from './work';
-  import { providerInfo, unavailableLabel } from './trackers';
+  import { providerInfo, unavailableLabel, shownKey } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import WorkPlaceDialog from './WorkPlaceDialog.svelte';
@@ -355,7 +355,7 @@
 <section class="task-detail" data-testid="work-task-detail" aria-label="Task">
   <header>
     <h2>
-      {#if task?.key}<span class="key">{task.key}</span>{/if}
+      {#if task?.key}<span class="key" title={task.key}>{shownKey(task)}</span>{/if}
       <span class="title" class:unavailable={task?.unavailable}>{task ? task.title || (task.key ? '' : task.task_id) : 'Task'}</span>
     </h2>
     <div class="head-actions">

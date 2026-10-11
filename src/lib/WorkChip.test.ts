@@ -66,6 +66,24 @@ describe('WorkChip', () => {
     expect(chip.title).toContain('connect its tracker in Settings → Trackers to see ZED-9');
   });
 
+  it('shows the ticket key fleet issued, and a key fleet issued needs no tracker', () => {
+    render(WorkChip, {
+      props: {
+        workKey: { key: 'asana:1209876543210987', display: 'CB-4', source: 'link', from: 'Refunds' },
+        now: () => T,
+      },
+    });
+    expect(screen.getByTestId('work-chip').textContent).toContain('CB-4');
+    render(WorkChip, {
+      props: {
+        workKey: { key: 'CF-12', display: 'CF-12', source: 'link', from: 'Native task' },
+        testid: 'native',
+        now: () => T,
+      },
+    });
+    expect(screen.getByTestId('native').className).not.toContain('unbound');
+  });
+
   it('a plain key without a tracker item is just a key', () => {
     render(WorkChip, {
       props: { workKey: { key: 'ABC-2', source: 'branch', from: 'abc-2' }, now: () => T },

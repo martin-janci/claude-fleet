@@ -245,6 +245,10 @@ pub struct WorkTask {
     pub item_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The item's fleet ticket key (`FLT-12`, migration 168), shown in
+    /// place of `key`; absent when it drew none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_key: Option<String>,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -2398,6 +2402,7 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         task_id: b.task_id.clone(),
         item_id: item.map(|i| i.item.id),
         key,
+        display_key: item.and_then(|i| i.item.display_key.clone()),
         title,
         url: item.and_then(|i| i.item.url.clone()),
         kind: task_kind(item).into(),

@@ -193,6 +193,8 @@ export interface WorkTask {
   title?: string | null;
   url?: string | null;
   kind: WorkTaskKind | string;
+  /** Its fleet ticket key (`FLT-12`), shown in place of `key`. */
+  display_key?: string | null;
   tracker_id?: number | null;
   tracker_name?: string | null;
   provider?: string | null;

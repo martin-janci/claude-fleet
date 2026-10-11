@@ -88,13 +88,13 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Every tracker item that answers to `key` (normalised) by key or
-    /// alias, in any tracker — unlike `tracker_item_for_key`, which answers
-    /// only when exactly one tracker has it.
+    /// Every tracker item that answers to `key` (normalised) by key, ticket
+    /// key or alias, in any tracker — unlike `tracker_item_for_key`, which
+    /// answers only when exactly one tracker has it.
     pub fn tracker_items_with_key(&self, key: &str) -> Result<Vec<WorkItemRow>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {ITEM_COLUMNS} FROM work_items WHERE tracker_id IS NOT NULL AND \
-               (key = ?1 OR EXISTS (SELECT 1 FROM json_each(COALESCE(aliases, '[]')) \
+               (key = ?1 OR display_key = ?1 OR EXISTS (SELECT 1 FROM json_each(COALESCE(aliases, '[]')) \
                                     WHERE value = ?1)) \
              ORDER BY id"
         ))?;

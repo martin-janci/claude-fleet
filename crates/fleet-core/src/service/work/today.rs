@@ -693,6 +693,7 @@ mod tests {
                 held_at: None,
                 done_when: Vec::new(),
                 due_at: None,
+                display_key: None,
             },
             org_id: None,
             from: None,
