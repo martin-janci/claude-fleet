@@ -461,6 +461,13 @@ pub const MOVE_WAIT_MAX_MINS: &str = "move.wait_max_mins";
 /// `service::account_limits`).
 pub const ACCOUNTS_PAUSE_AT: &str = "accounts.pause_at";
 pub const USAGE_ENABLED: &str = "usage.enabled";
+/// Copy conversation text into the hub's search index, so a search finds
+/// what was said in any session (search phase 3, `service::search_index`).
+/// Off by default: it stores transcript text on the hub, which nothing else
+/// does.
+pub const SEARCH_INDEX_TRANSCRIPTS: &str = "search.index_transcripts";
+/// Days of conversation text the search index keeps.
+pub const SEARCH_TRANSCRIPT_DAYS: &str = "search.transcript_days";
 /// Seconds between usage passes (one batched script per host). `0` stops
 /// collection.
 pub const USAGE_INTERVAL_SECS: &str = "usage.interval_secs";
@@ -1090,6 +1097,24 @@ pub const SPECS: &[Spec] = &[
         "Sum each session's token usage from its Claude transcript and show an estimated cost.",
     ),
     Spec::new(
+        SEARCH_INDEX_TRANSCRIPTS,
+        "false",
+        Kind::Bool,
+        "Search conversation text",
+        "Copy what is said in each session into the hub's search index, so a search finds it in any conversation. Turning it off deletes the copied text.",
+    )
+    .danger("Conversation text, which may hold secrets, will be stored in the hub's database.")
+    .tags(&[Tag::Experimental]),
+    Spec::new(
+        SEARCH_TRANSCRIPT_DAYS,
+        "30",
+        Kind::Int { min: 1, max: 365 },
+        "Conversation text kept",
+        "Days of conversation text the search index keeps.",
+    )
+    .unit(Unit::Days)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
         USAGE_INTERVAL_SECS,
         "300",
         Kind::Secs,
@@ -1442,7 +1467,7 @@ pub const SPECS: &[Spec] = &[
     ),
     Spec::new(
         UPDATE_AGENT_MODE,
-        "notify",
+        "automatic",
         Kind::Choice(UPDATE_MODES),
         "Agent updates",
         "The same choice for fleet-agent on hosts the hub cannot reach.",

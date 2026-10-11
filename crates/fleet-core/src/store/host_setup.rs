@@ -1,5 +1,5 @@
 //! The add-host wizard's saved drafts (rows of `wizard_state`, migration
-//! 164) and the fleet-agent install jobs (migration 135, Orbit Fleet 4.9). The rules (which checks run, how an
+//! 165) and the fleet-agent install jobs (migration 135, Orbit Fleet 4.9). The rules (which checks run, how an
 //! install proceeds) are in `service::host_setup` and
 //! `service::agent_install`; this is the rows.
 
@@ -55,7 +55,7 @@ pub struct AgentInstallRow {
 const INSTALL_COLS: &str = "id, host_alias, version, state, step, detail, started_at, finished_at";
 
 /// The add-host wizard's drafts are the `add_host` rows of `wizard_state`
-/// (migration 164), fleet's own (no person): the desktop wizard runs over
+/// (migration 166), fleet's own (no person): the desktop wizard runs over
 /// this app's own SSH.
 const ADD_HOST: &str = "add_host";
 

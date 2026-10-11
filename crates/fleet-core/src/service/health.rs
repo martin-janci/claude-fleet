@@ -124,6 +124,66 @@ pub struct Health {
     /// while false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub automation_paused: bool,
+    /// The devices paired to this hub that the caller may count, and when
+    /// the caller's own device last reached it (Settings › Hub, gap plan
+    /// G7.3). Filled by `fleet_health` for a paired device and the master;
+    /// `None` (not sent) for a per-host token and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<PairedDevices>,
+    /// Stuck-session playbooks that acted over the last seven days, per
+    /// `stuck_kind` (`press_enter`, `oom`, …), over the sessions the caller
+    /// sees: "Ran 3 times this week" (gap plan G7.3). Refusals are not
+    /// runs. Not sent when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub playbooks_week: BTreeMap<String, u32>,
+}
+
+/// [`Health::devices`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairedDevices {
+    /// Live (not revoked) paired devices: the caller's person's own, or
+    /// every one for the master.
+    pub paired: u32,
+    /// When the calling device last reached the hub, before this call
+    /// (`client_tokens.last_seen_at`, stamped at most once a minute).
+    /// `None` for the master token.
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+    /// When the hub's last clean reconcile pass finished: what "last sync"
+    /// reads. Same value as `hub.reconcile.last_ok_at`.
+    #[serde(default)]
+    pub last_sync_at: Option<i64>,
+}
+
+/// What [`Health::playbooks_week`] counts over.
+pub const PLAYBOOK_WEEK_SECS: i64 = 7 * 86_400;
+
+/// [`Health::playbooks_week`] over `sessions`: the `playbook_applied`
+/// entries since `since` of the rows a playbook touched in that window
+/// (`last_playbook_at`, so a quiet fleet costs no event reads), keyed by the
+/// stuck kind before the detail's first `:`. A `…:skipped:…` refusal is not
+/// a run.
+pub fn playbooks_since(
+    s: &Store,
+    sessions: &[crate::store::SessionRow],
+    since: i64,
+) -> BTreeMap<String, u32> {
+    let mut out = BTreeMap::new();
+    for row in sessions
+        .iter()
+        .filter(|r| r.last_playbook_at.is_some_and(|t| t >= since))
+    {
+        for detail in s.playbook_details_since(row.id, since).unwrap_or_default() {
+            if detail.contains(":skipped:") {
+                continue;
+            }
+            let kind = detail.split(':').next().unwrap_or_default();
+            if !kind.is_empty() {
+                *out.entry(kind.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    out
 }
 
 /// `fleet_health.hub`: this process's uptime and its last reconcile pass.
@@ -871,17 +931,24 @@ fn health_at(
         now,
     );
     let metrics = &tracker_sync::metrics_for;
-    let (summary, usage_by_day, trackers, tunnels) = match view {
+    let week = now - PLAYBOOK_WEEK_SECS;
+    let (summary, usage_by_day, trackers, tunnels, playbooks_week) = match view {
         HealthView::Fleet => (
             summarize(&sessions, &hosts, red),
             usage::recent_days(s, now, usage::HEALTH_DAYS, None),
             trackers_scoped(s, &OrgScope::All, metrics, now, &[]),
             tunnels,
+            playbooks_since(s, &sessions, week),
         ),
         HealthView::Host { alias, trackers } => {
             host_rows.retain(|r| &r.alias == alias);
             let mut summary = summarize(&sessions, &hosts, red);
             summary.usage_by_host.retain(|k, _| k == alias);
+            let own: Vec<SessionRow> = sessions
+                .iter()
+                .filter(|r| &r.host_alias == alias)
+                .cloned()
+                .collect();
             (
                 summary,
                 usage::recent_days(s, now, usage::HEALTH_DAYS, Some(alias.as_str())),
@@ -890,6 +957,7 @@ fn health_at(
                     .map(|scope| trackers_scoped(s, scope, metrics, now, &[]))
                     .unwrap_or_default(),
                 tunnels,
+                playbooks_since(s, &own, week),
             )
         }
         HealthView::Org(view) => {
@@ -950,7 +1018,8 @@ fn health_at(
                 .into_iter()
                 .filter(|(host, _)| visible.contains(host))
                 .collect();
-            (summary, usage_by_day, trackers, tunnels)
+            let playbooks = playbooks_since(s, &sessions, week);
+            (summary, usage_by_day, trackers, tunnels, playbooks)
         }
         HealthView::Person(person) => {
             let total = sessions.len();
@@ -978,6 +1047,7 @@ fn health_at(
                 person_usage_by_day(s, now, sessions.len() == total),
                 trackers_scoped(s, &OrgScope::All, metrics, now, &[]),
                 tunnels,
+                playbooks_since(s, &sessions, week),
             )
         }
         HealthView::Blank => (
@@ -985,6 +1055,7 @@ fn health_at(
             Vec::new(),
             TrackersHealth::default(),
             Default::default(),
+            BTreeMap::new(),
         ),
     };
     let mut h = Health {
@@ -1035,6 +1106,8 @@ fn health_at(
         },
         loops: crate::service::loops::registry().snapshot(),
         automation_paused: crate::service::loops::paused(s),
+        devices: None,
+        playbooks_week,
     };
     h.set_tunnels(tunnels);
     if matches!(view, HealthView::Blank) {
@@ -1121,6 +1194,8 @@ pub fn unready_health() -> Health {
         org_budgets: Vec::new(),
         loops: Vec::new(),
         automation_paused: false,
+        devices: None,
+        playbooks_week: BTreeMap::new(),
     }
 }
 
@@ -1758,6 +1833,46 @@ mod tests {
         assert_eq!(s.sessions_total, 4);
     }
 
+    /// "Ran 3 times this week" (gap plan G7.3): the playbook runs per stuck
+    /// kind over the sessions in view; a refusal is not a run, and a row no
+    /// playbook touched this week is not read.
+    #[test]
+    fn playbook_runs_this_week_count_per_kind_without_refusals() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let a = store
+            .upsert_session("a", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let b = store
+            .upsert_session("b", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let now = now_unix();
+        store
+            .mark_playbook_applied(a, now, "press_enter:press_enter")
+            .unwrap();
+        store.mark_playbook_applied(a, now, "oom:recreate").unwrap();
+        store
+            .mark_playbook_applied(b, now, "press_enter:press_enter")
+            .unwrap();
+        store
+            .mark_playbook_applied(b, now, "oom:recreate:skipped:working")
+            .unwrap();
+        let rows = store.list_all_sessions().unwrap();
+        let week = playbooks_since(&store, &rows, now - PLAYBOOK_WEEK_SECS);
+        assert_eq!(
+            week,
+            BTreeMap::from([("oom".to_string(), 1), ("press_enter".to_string(), 2)])
+        );
+        // Only `a` in view: `b`'s runs are not counted.
+        let only_a: Vec<_> = rows.into_iter().filter(|r| r.id == a).collect();
+        assert_eq!(
+            playbooks_since(&store, &only_a, now - PLAYBOOK_WEEK_SECS),
+            BTreeMap::from([("oom".to_string(), 1), ("press_enter".to_string(), 1)])
+        );
+        // Nothing this week (the rows' last run is older): nothing read.
+        assert!(playbooks_since(&store, &only_a, now + 10).is_empty());
+    }
+
     #[test]
     fn health_from_store_counts_a_ghosted_session() {
         let store = Store::open_in_memory().unwrap();
@@ -1990,6 +2105,8 @@ mod tests {
             org_budgets: Vec::new(),
             loops: Vec::new(),
             automation_paused: false,
+            devices: None,
+            playbooks_week: BTreeMap::new(),
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");

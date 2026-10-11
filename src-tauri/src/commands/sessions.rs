@@ -397,8 +397,9 @@ pub async fn new_bg_session(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
+    reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<bg_sessions::NewBgSessionResult, IpcError> {
-    routed::new_bg_session(&backend, args, &store, &ssh).await
+    routed::new_bg_session(&backend, args, &store, &ssh, &reg).await
 }
 
 /// Delete all Claude Code state for a project and remove it from the fleet database.
@@ -1148,6 +1149,7 @@ pub(crate) mod routed {
         args: NewBgSessionArgs,
         store: &Mutex<Store>,
         ssh: &Arc<SshClient>,
+        reg: &Arc<CancellationRegistry>,
     ) -> Result<bg_sessions::NewBgSessionResult, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("new_bg_session", &args).await,
@@ -1158,7 +1160,7 @@ pub(crate) mod routed {
             // and this arm is not reached.
             None => {
                 let owner = fleet_core::service::sessions::hub_personal_owner(store);
-                bg_sessions::new_bg_session_tracked(args, store, ssh, owner).await
+                bg_sessions::new_bg_session_tracked(args, store, ssh, reg, owner).await
             }
         }
     }

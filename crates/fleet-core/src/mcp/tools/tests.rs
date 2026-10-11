@@ -2787,6 +2787,7 @@ fn router_sum_serves_every_tool() {
         include_str!("presence.rs"),
         include_str!("library.rs"),
         include_str!("runs.rs"),
+        include_str!("search.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -4379,13 +4380,15 @@ fn the_served_definition_budget_stays_bounded() {
     /// surface). Lowered from 815 on 2026-10-10: dropping `null` from
     /// optional parameters' types and `"minimum": 0` from unsigned ones
     /// (`present::drop_optional_null`) measured 106,006 bytes for 135 tools
-    /// (785 a tool), down from 110,022. Raised to 807 from 110,870 bytes for
-    /// 139 tools (798 a tool) on 2026-10-11, when work_link gained task
-    /// attachments (`attach`, `attachment_delete`, `mime`, `data_base64`,
-    /// `attachment_id`) and `work` its `attachment` read. Raise it only from
-    /// a measurement the failure prints, and say in the commit message what
-    /// was measured and when.
-    const BYTES_PER_TOOL: usize = 807;
+    /// (785 a tool), down from 110,022. Raise it only from a measurement the
+    /// failure prints, and say in the commit message what was measured and
+    /// when. Raised to 809 on 2026-10-11: merging main's `search` tool into
+    /// gap plan batch 3 (`wizard_state`, `resume_or_new`) measured 111,954
+    /// bytes for 140 tools (799 a tool). Raised to 814 on 2026-10-11 when
+    /// work_link gained task attachments (`attach`, `attachment_delete`,
+    /// `mime`, `data_base64`, `attachment_id`) and `work` its `attachment`
+    /// read: measured 113,486 bytes for 141 tools (804 a tool).
+    const BYTES_PER_TOOL: usize = 814;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

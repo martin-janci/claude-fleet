@@ -427,4 +427,28 @@ describe('AssetEditor: Toolkit forms', () => {
     const writes = invoke.mock.calls.filter((c) => c[0] === 'catalog_update_asset');
     expect((writes[1][1] as { args: { asset: EditableAsset } }).args.asset.description).toBe('Create an isolated git worktree.');
   });
+
+  it('Discard drops the staged edits and goes back to what the editor opened with (G7.5)', async () => {
+    byCmd({ catalog_lint_asset: { errors: [], warnings: [] } });
+    render(AssetEditor, { asset: skillAsset(), onsaved: () => {}, oncancel: () => {} });
+    expect(screen.getByTestId('editor-discard')).toBeDisabled();
+    await fireEvent.input(screen.getByTestId('editor-description'), { target: { value: 'Changed.' } });
+    expect(screen.getByTestId('editor-discard')).not.toBeDisabled();
+    await fireEvent.click(screen.getByTestId('editor-discard'));
+    expect((screen.getByTestId('editor-description') as HTMLTextAreaElement).value).toBe('Create an isolated git worktree.');
+    expect(screen.getByTestId('editor-save')).toBeDisabled();
+    expect(screen.getByTestId('editor-discard')).toBeDisabled();
+  });
+
+  it('Lint runs the server lint on demand and says what it found (G7.5)', async () => {
+    byCmd({ catalog_lint_asset: { errors: [], warnings: [{ field: 'body', message: 'has a TODO' }] } });
+    render(AssetEditor, { asset: skillAsset(), onsaved: () => {}, oncancel: () => {} });
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    await fireEvent.click(screen.getByTestId('editor-lint-run'));
+    await waitFor(() => expect(screen.getByTestId('editor-lint-note').textContent).toBe('0 errors, 1 warning.'));
+    expect(invoke.mock.calls.filter((c) => c[0] === 'catalog_lint_asset')).toHaveLength(2);
+    await fireEvent.input(screen.getByTestId('editor-version'), { target: { value: '2' } });
+    await fireEvent.click(screen.getByTestId('editor-lint-run'));
+    await waitFor(() => expect(screen.getByTestId('editor-lint-note').textContent).toBe('0 errors, 1 warning in the saved version. Save to lint your changes.'));
+  });
 });

@@ -28,6 +28,7 @@ use super::sync::fetch_one;
 use super::ItemRef;
 use super::TrackerNet;
 use crate::ipc_error::{codes, lock, IpcError};
+use crate::search_text;
 use crate::service::orgs::{self, OrgScope};
 use crate::service::work::resume::InFlight;
 use crate::store::{Decider, SessionRow, Store, TrackerRow, WorkItemRow, WorkLinkRow, WorkTarget};
@@ -271,9 +272,7 @@ pub fn tickets_and_tasks(
     let mut tasks: Vec<WorkItemRow> = Vec::new();
     if let Some(visible) = &visible {
         let allowed = allowed(&reader.org, &s)?;
-        let q = query
-            .map(|q| q.trim().to_lowercase())
-            .filter(|q| !q.is_empty());
+        let q = query.map(str::trim).filter(|q| !q.is_empty());
         for item in s.local_work_items()? {
             if tasks.len() >= limit_n {
                 break;
@@ -291,10 +290,13 @@ pub fn tickets_and_tasks(
             if !own {
                 continue;
             }
-            if let Some(q) = &q {
-                let hay = format!("{} {}", item.key.as_deref().unwrap_or_default(), item.title)
-                    .to_lowercase();
-                if !hay.contains(q.as_str()) {
+            if let Some(q) = q {
+                let hay = search_text::fold(&format!(
+                    "{} {}",
+                    item.key.as_deref().unwrap_or_default(),
+                    item.title
+                ));
+                if !search_text::matches_words(&hay, q) {
                     continue;
                 }
             }
@@ -335,9 +337,7 @@ pub(crate) fn tickets_in(
     let allowed = allowed(scope, s)?;
     let trackers = s.list_trackers()?;
     let now = crate::service::catalog::now_secs();
-    let q = query
-        .map(|q| q.trim().to_lowercase())
-        .filter(|q| !q.is_empty());
+    let q = query.map(str::trim).filter(|q| !q.is_empty());
     let limit = limit
         .unwrap_or(TICKETS_DEFAULT_LIMIT)
         .clamp(1, TICKETS_MAX_LIMIT);
@@ -352,15 +352,19 @@ pub(crate) fn tickets_in(
                 continue;
             }
         }
-        if let Some(q) = &q {
-            let hay = format!(
+        if let Some(q) = q {
+            let hay = search_text::fold(&format!(
                 "{} {} {}",
                 item.key.as_deref().unwrap_or_default(),
                 item.title,
                 item.assignees.join(" ")
-            )
-            .to_lowercase();
-            if !hay.contains(q.as_str()) && !item.aliases.iter().any(|a| a.to_lowercase() == *q) {
+            ));
+            if !search_text::matches_words(&hay, q)
+                && !item
+                    .aliases
+                    .iter()
+                    .any(|a| search_text::fold(a) == search_text::fold(q))
+            {
                 continue;
             }
         }

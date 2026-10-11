@@ -91,7 +91,16 @@ describe('PromptsSnippets (Toolkit › Prompts & snippets)', () => {
     expect(screen.getAllByTestId('preset-label')).toHaveLength(seeded.length + 1);
 
     await fireEvent.click(screen.getAllByTestId('preset-remove')[0]);
+    // Remove asks first (G7.5): Cancel keeps the chip, Remove drops it.
+    await fireEvent.click(screen.getByTestId('confirm-cancel'));
+    expect(get(composerPresets)).toHaveLength(seeded.length + 1);
+    await fireEvent.click(screen.getAllByTestId('preset-remove')[0]);
+    await fireEvent.click(screen.getByTestId('preset-remove-confirm'));
     expect(get(composerPresets)[0].label).toBe('Compact');
+    // The empty chip just added goes without asking.
+    await fireEvent.click(screen.getAllByTestId('preset-remove').at(-1)!);
+    expect(screen.queryByTestId('preset-remove-confirm')).toBeNull();
+    expect(get(composerPresets)).toHaveLength(seeded.length - 1);
 
     // Reset stores nothing and takes the backend's built-ins back.
     inv.mockClear();

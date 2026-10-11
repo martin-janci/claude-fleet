@@ -1,0 +1,44 @@
+name: strip-pr-attribution
+
+# Claude Projects prepends two lines to every PR description it opens:
+#
+#   <!-- claude-projects-attribution: {...} -->
+#   _Requested by **…** · [project thread](https://claude.ai/…)_
+#
+# There is no setting to turn that off, so this job deletes both lines from
+# the description when a PR is opened or its description edited. The edit is
+# made with GITHUB_TOKEN, which starts no new workflow run, so it cannot loop.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  strip:
+    # A fork's token is read-only; Claude's PRs come from branches here.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+            const stripped = body
+              .replace(/^[ \t]*<!--\s*claude-projects-attribution:[^\n]*-->[ \t]*\r?\n?/gm, '')
+              .replace(/^[ \t]*_Requested by \*\*[^\n]*\[project thread\]\(https:\/\/claude\.ai\/[^\n]*\)_[ \t]*\r?\n?/gm, '')
+              .replace(/^\s*\n/, '');
+            if (stripped === body) {
+              core.info('No Claude Projects attribution in the description.');
+              return;
+            }
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              body: stripped,
+            });
+            core.info('Removed the Claude Projects attribution lines.');

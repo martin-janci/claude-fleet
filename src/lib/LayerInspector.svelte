@@ -59,6 +59,7 @@
     <div class="meta">
       <Badge tone="muted" label={layer.axis} />
       {#if layer.extends}<span class="muted">extends <code>{layer.extends}</code></span>{/if}
+      {#if layer.orgs?.length}<span class="muted" data-testid="layer-applies-by-org">applies by organisation: {layer.orgs.join(', ')}</span>{/if}
       <span class="grow"></span>
       {#if writable && form?.mode !== 'rename'}
         <button type="button" class="btn btn--quiet" data-testid="layer-rename" disabled={busy} onclick={() => (form = { mode: 'rename' })}>Rename</button>

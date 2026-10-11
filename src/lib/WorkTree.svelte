@@ -91,6 +91,7 @@
     type WorkTreePage,
     type WorkTreeSection,
     type WorkTreeSectionAsk,
+    knownWorkFacets,
   } from './work_view';
   import { loadTabCounts, taskTabCount } from './work_tab_counts';
   import type { IpcError } from './result';
@@ -259,6 +260,7 @@
   }
   function onListPage(p: WorkTreePage) {
     listPage = p;
+    if (p.facets) knownWorkFacets.set(p.facets);
     workTreeMeta.set({ orgs: p.orgs, trackers: p.trackers, groups: p.groups });
   }
 
@@ -380,6 +382,7 @@
     pageFiltersKey = fk;
     const p = pageOf(r.value);
     page = p;
+    if (p.facets) knownWorkFacets.set(p.facets);
     if (opts.review) {
       if (typeof r.value?.review_total === 'number') reviewTotal = r.value.review_total;
       else void loadReviewCount();
@@ -811,7 +814,14 @@
     </div>
     {#if tab === 'tasks'}
       {@const meta = listMode ? listPage : page}
-      <WorkFiltersBar orgs={meta?.orgs ?? []} trackers={meta?.trackers ?? []} listLayout={listMode} {people} {columns} />
+      <WorkFiltersBar
+        orgs={meta?.orgs ?? []}
+        trackers={meta?.trackers ?? []}
+        listLayout={listMode}
+        {people}
+        {columns}
+        facets={meta?.facets ?? {}}
+      />
     {/if}
   </header>
 

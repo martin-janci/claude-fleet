@@ -93,13 +93,13 @@
 
 <style>
   p {
-    margin: 0 0 0.6em;
+    margin: 0 0 0.8em;
   }
   p:last-child {
     margin-bottom: 0;
   }
   .md-h {
-    margin: 0.9em 0 0.4em;
+    margin: 1.2em 0 0.45em;
     line-height: 1.3;
     font-weight: 650;
     color: var(--fg);
@@ -114,7 +114,7 @@
   .md-h5,
   .md-h6 { font-size: 0.95em; color: var(--fg-muted); }
   .md-pre-wrap {
-    margin: 0.5em 0 0.7em;
+    margin: 0.6em 0 0.9em;
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg-pane);
@@ -150,8 +150,8 @@
     padding: var(--space-2) 0.7rem;
     overflow-x: auto;
     font-family: var(--mono);
-    font-size: var(--text-2xs);
-    line-height: 1.5;
+    font-size: var(--text-code);
+    line-height: var(--text-code-lh);
     white-space: pre;
     tab-size: 4;
   }
@@ -168,11 +168,11 @@
     color: var(--fg-muted);
   }
   .md-list {
-    margin: 0.3em 0 0.6em;
+    margin: 0.3em 0 0.8em;
     padding-left: 1.4em;
   }
   .md-list li {
-    margin: 0.15em 0;
+    margin: 0.25em 0;
   }
   .md-list :global(.md-list) {
     margin: 0.1em 0 0.2em;

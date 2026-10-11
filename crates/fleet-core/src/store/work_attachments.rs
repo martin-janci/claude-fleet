@@ -1,4 +1,4 @@
-//! Task attachments (migration 165): files and images on a task, kept in
+//! Task attachments (migration 166): files and images on a task, kept in
 //! fleet and never written to a tracker. About the ITEM, as a comment is, so
 //! the caller fences it with the item; deleting one is its author's alone
 //! ([`Store::delete_attachment`]).

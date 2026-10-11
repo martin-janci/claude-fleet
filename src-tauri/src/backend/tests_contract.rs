@@ -438,6 +438,10 @@ fn sample_health() -> Health {
         // out of the contract (empty and false are not sent).
         loops: Vec::new(),
         automation_paused: false,
+        // Gap plan G7.3: the phone's Settings › Hub and playbook counts; no
+        // desktop reads them, so they stay out of the contract.
+        devices: None,
+        playbooks_week: Default::default(),
     }
 }
 
@@ -455,6 +459,8 @@ fn sample_decide_health() -> fleet_core::service::decide::DecideHealth {
         budget_spent: true,
         degraded: true,
         reason: Some("breaker_open".into()),
+        // Gap plan G7.3: the phone's decision stats; not read on a desktop.
+        week: None,
     }
 }
 

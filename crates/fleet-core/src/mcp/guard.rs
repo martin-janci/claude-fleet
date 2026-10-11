@@ -298,6 +298,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Gap plan G7.3: Jev's host for a new session, for the phone's New
+    // session. Reads the store and asks the decision model; writes only the
+    // decision record. A per-host token does not place sessions.
+    ToolPolicy {
+        name: "propose_host_placement",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     // The composer's shared chip row. One tool both reads and replaces the
     // list, so it is classified as a write and a `readonly` client cannot
     // call it at all — not even to read. That is deliberate: a readonly
@@ -620,6 +630,18 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     },
     // Presence (redesign 11.7b): reports into the hub's in-memory board and
     // reads it back; touches no row. A person's tool, not a host token's.
+    // Search phase 3: one query over the full-text index. Every hit is
+    // fenced for the caller in `service::search` (a session's through
+    // `sees_session_row`, a gone one's through `sees_past_conversation`, an
+    // item through the org), so a host's token finds what it may already
+    // read and nothing more.
+    ToolPolicy {
+        name: "search",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "session_presence",
         access: Access::Client,
@@ -1694,7 +1716,8 @@ pub fn is_client_tool(name: &str) -> bool {
 /// schedule sessions. `library` (9.7) is the index beside the downloads, a
 /// person's for the same reason. So is `start_rules` (8.11): a session does
 /// not decide where everyone's tasks start. And `wizard_state` (G7.2): a
-/// session runs no wizard, and a row is a person's.
+/// session runs no wizard, and a row is a person's; nor does it ask Jev
+/// where a person's new session goes (`propose_host_placement`, G7.3).
 ///
 /// The five sharing surfaces joined them in multi-user M1 (T12) for a
 /// different reason: a per-host token proves no PERSON
@@ -1712,6 +1735,7 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "routines",
     "start_rules",
     "wizard_state",
+    "propose_host_placement",
     "session_share",
     "session_unshare",
     "session_narrow",

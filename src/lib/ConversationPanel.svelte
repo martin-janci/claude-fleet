@@ -14,9 +14,10 @@
   // send-keys into the REPL), so anything typed here is what the terminal
   // would have received. bg / external rows have no REPL to type into, so
   // they stay read-only.
+  import { conversationFindRequest } from './search_api';
   import { untrack, tick, setContext, type Snippet } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
-  import { sendPrompt, hasNoPane, sessions, sessionAgent, type SessionRow } from './sessions';
+  import { sendPrompt, hasNoPane, sessions, sessionAgent, restartSession, type SessionRow } from './sessions';
   import AnswerPrompt from './AnswerPrompt.svelte';
   import FormCard from './forms/FormCard.svelte';
   import ChatWizards from './forms/ChatWizards.svelte';
@@ -86,8 +87,9 @@
     completeSlashCommand,
     newDividerAnchor,
     turnAnchor,
-    MODEL_OPTIONS,
-    EFFORT_OPTIONS,
+    agentModelProfile,
+    slashCommandsFor,
+    presetForAgent,
     pickerCommand,
     modelShortLabel,
     sessionActivity,
@@ -141,8 +143,10 @@
   import { readOnlyAnswerLine, sharerName } from './shared_view';
   import { inboxQueue, nextInInbox } from './inbox';
   import { push as pushToast } from './toasts';
+  import ConfirmDialog from './ConfirmDialog.svelte';
   import { projectSkills } from './project_skills';
   import { completeTaskLink, matchTaskLinks, taskLinkQuery, type TaskLink } from './control_task_link';
+  import { overflowMark } from './overflow_mark';
 
   let {
     session,
@@ -185,6 +189,7 @@
     // (AgentPanel's removable context chip). Only shown when there IS a
     // composer to sit above.
     composerAbove,
+    composerTools,
     // The working indicator in another voice (redesign step
     // 9.13): Control's chat reads the running turn itself and answers the
     // loader and the line to show instead of the Atom's "Thinking · …".
@@ -214,6 +219,9 @@
     promptPrefix?: string | null;
     blockWhileBusy?: boolean;
     composerAbove?: Snippet;
+    /** Extra chips that join the quick-prompt row (Control's operator
+     *  commands), so one row of chips sits above the box, not two. */
+    composerTools?: Snippet;
     thinkingAs?: (conv: Conversation | null) => { loader: LoaderName; label: string } | null;
     runCommand?: (text: string) => boolean;
     composerHint?: string;
@@ -896,6 +904,15 @@
     if (next && scrollToRow(next.rowKey)) currentTurnPos += delta;
   }
 
+  // ⌘K found this session by what was said in it: Find opens on the query.
+  $effect(() => {
+    const req = $conversationFindRequest;
+    if (!req || req.sessionId !== session.id || !visible || !threadShown) return;
+    conversationFindRequest.set(null);
+    findQuery = req.query;
+    findIndex = 0;
+    void openFind();
+  });
   async function openFind() {
     // Nothing to search while the thread is loading or empty. The shortcut
     // checks this too (it also owns preventDefault); the header's ⌕ button
@@ -1279,23 +1296,71 @@
     if (!chipHold) chipHeld = false;
   });
 
-  // Model / effort pickers: each sends `/model <v>` or `/effort <v>` through
-  // the same outbox as a typed slash command. The model shows from the row
-  // (the transcript's); effort is in no transcript, so the picker remembers
-  // what it last sent to each session and otherwise shows the row's, if any.
+  // Model / effort pickers, per agent (`agentModelProfile`). Claude Code's
+  // send `/model <v>` or `/effort <v>` through the same outbox as a typed
+  // slash command. Codex's `/model` takes no argument, so its pickers list
+  // Codex's own models and relaunch it on the same conversation under the
+  // pick, after a confirm (a turn in progress is lost). The model shows from
+  // the row (the transcript's); effort is in no Claude transcript, so the
+  // picker remembers what it last sent to each session and otherwise shows
+  // the row's, if any — a relaunch stores it on the row.
+  const modelProfile = $derived(agentModelProfile(agent));
+  /** A relaunch pick waiting on its confirm. */
+  let relaunchPick = $state<{ cmd: 'model' | 'effort'; value: string; label: string } | null>(null);
+  let relaunching = $state(false);
   let effortSent = $state<Record<number, string>>({});
   const currentModel = $derived(modelShortLabel(session.model));
-  const currentEffort = $derived(effortSent[session.id] ?? session.effort_level ?? '');
-  // Each picker sends `/model` or `/effort` through the outbox, so it is a
-  // write like any other.
-  const pickersDisabled = $derived(viewing !== null || busyBlocked || writeBlocked !== null);
+  const currentEffort = $derived(
+    (modelProfile.mode === 'command' ? effortSent[session.id] : undefined) ?? session.effort_level ?? '',
+  );
+  // Each picker sends `/model` or `/effort` through the outbox, or restarts
+  // the pane, so it is a write like any other.
+  const pickersDisabled = $derived(viewing !== null || busyBlocked || writeBlocked !== null || relaunching);
+  const pickVerb = $derived(
+    modelProfile.mode === 'relaunch' ? `relaunch ${agentName} on it` : null,
+  );
   function pickSetting(cmd: 'model' | 'effort', e: Event) {
     const el = e.currentTarget as HTMLSelectElement;
-    const line = pickerCommand(cmd, el.value);
+    const value = el.value;
+    if (modelProfile.mode === 'relaunch') {
+      // The select snaps back to what the session runs; the confirm decides.
+      el.value = cmd === 'model' ? '' : currentEffort;
+      const opts = cmd === 'model' ? modelProfile.models : modelProfile.efforts;
+      const label = opts.find((o) => o.value === value)?.label ?? value;
+      if (value.trim()) relaunchPick = { cmd, value, label };
+      return;
+    }
+    const line = pickerCommand(cmd, value);
     if (cmd === 'model') el.value = '';
     if (!line) return;
-    if (cmd === 'effort') effortSent = { ...effortSent, [session.id]: el.value };
+    if (cmd === 'effort') effortSent = { ...effortSent, [session.id]: value };
     void sendText(line);
+  }
+  async function confirmRelaunch() {
+    const pick = relaunchPick;
+    relaunchPick = null;
+    if (!pick || relaunching) return;
+    // A relaunch is `restart_session` (the `own` tier), not the
+    // `send_prompt` a `/model` line is, so it has its own gate.
+    const blocked =
+      hubActionBlocked('restart_session', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'restart_session');
+    if (blocked !== null) {
+      pushToast({ kind: 'error', message: blocked });
+      return;
+    }
+    relaunching = true;
+    const r = await restartSession(session.host_alias, session.tmux_name, undefined, { [pick.cmd]: pick.value });
+    relaunching = false;
+    if (!r.ok) {
+      pushToast({ kind: 'error', message: `Could not relaunch ${agentName}: ${r.error.message}` });
+      return;
+    }
+    {
+      pushToast({
+        kind: 'info',
+        message: `${agentName} relaunched on ${pick.cmd === 'model' ? pick.label : `${pick.label.toLowerCase()} effort`}`,
+      });
+    }
   }
   const statusNote = $derived(
     // First: a composer that cannot send at all owes that sentence before any
@@ -1316,7 +1381,13 @@
   // The composer shows three quick prompts and puts the rest under ⋯
   // (redesign 5.9); a suggested Compact stays out in front.
   const CHIPS_SHOWN = 3;
-  const validPresets = $derived($composerPresets.filter((p) => p.label.trim() && p.text.trim()));
+  // Each chip as this agent takes it: a Codex session drops a chip for a
+  // Claude-only command and spells `/clear` as `/new` (`presetForAgent`).
+  const validPresets = $derived(
+    $composerPresets
+      .map((p) => presetForAgent(p, agent))
+      .filter((p): p is ComposerPreset => p !== null && !!p.label.trim() && !!p.text.trim()),
+  );
   const chipList = $derived(
     !chipsExpanded
       ? validPresets.filter((p, i) => i < CHIPS_SHOWN || (suggestCompact && isCompactPreset(p)))
@@ -1327,15 +1398,18 @@
   // layout (redesign 5.9), read once the draft starts a slash command.
   let projectCmds = $state<SlashCommand[]>([]);
   const slashDraft = $derived(draft.startsWith('/') && !/\s/.test(draft));
+  // A Codex session reads no `.claude/` commands, and runs a skill as
+  // `$name`, not `/name`, so only its built-ins are offered.
+  const builtinCmds = $derived(slashCommandsFor(agent));
   $effect(() => {
-    if (!slashDraft) return;
+    if (!slashDraft || agent === 'codex') return;
     const id = session.id;
     void projectSkills(id).then((list) => {
       if (session.id === id) projectCmds = list;
     });
   });
   const slashMatches = $derived(
-    slashDismissedFor === draft ? [] : matchSlashCommands(draft, projectCmds),
+    slashDismissedFor === draft ? [] : matchSlashCommands(draft, agent === 'codex' ? [] : projectCmds, builtinCmds),
   );
   // Ids for the combobox wiring, per panel instance so two panels never hand
   // the same id to assistive tech.
@@ -2547,7 +2621,19 @@
   {/if}
   </div>
   {#if composerAbove && showComposer && canPrompt && bgEntry === null}
-    <div class="composer-above">{@render composerAbove()}</div>
+    <!-- Capped and scrolled on its own (Control chat UX, 2026-10-10): a
+         stack of task cards here used to take the whole pane and leave the
+         transcript with no height and nothing to scroll. -->
+    <div
+      class="composer-above"
+      role="region"
+      aria-label="Activity above the box"
+      tabindex="-1"
+      data-testid="conv-composer-above"
+      use:overflowMark
+    >
+      {@render composerAbove()}
+    </div>
   {/if}
   {#if showComposer && canPrompt && bgEntry === null}
     <form
@@ -2660,18 +2746,22 @@
             >
           {/if}
         {/each}
+        {#if chipsExpanded || chipsHidden > 0}
+          <!-- Redesign 5.9: three chips, the rest under ⋯. -->
+          <button
+            type="button"
+            class="btn btn--chip chips-more"
+            data-testid="conv-chips-more"
+            aria-expanded={chipsExpanded}
+            aria-label={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
+            title={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
+            onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : '⋯'}</button>
+        {/if}
+        {#if composerTools}
+          <span class="chips-sep" aria-hidden="true"></span>
+          {@render composerTools()}
+        {/if}
       </div>
-      {#if chipsExpanded || chipsHidden > 0}
-        <!-- Redesign 5.9: three chips, the rest under ⋯. -->
-        <button
-          type="button"
-          class="btn btn--chip chips-more"
-          data-testid="conv-chips-more"
-          aria-expanded={chipsExpanded}
-          aria-label={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
-          title={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
-          onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : '⋯'}</button>
-      {/if}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="composer-shell"
@@ -2750,12 +2840,14 @@
             class="composer-pick"
             data-testid="conv-model-pick"
             aria-label="Model"
-            title={currentModel ? `Model: ${currentModel}. Pick one to send /model.` : 'Pick a model to send /model.'}
+            title={currentModel
+              ? `Model: ${currentModel}. Pick one to ${pickVerb ?? 'send /model'}.`
+              : `Pick a model to ${pickVerb ?? 'send /model'}.`}
             value=""
             disabled={pickersDisabled}
             onchange={(e) => pickSetting('model', e)}>
             <option value="" disabled>{currentModel ?? 'Model'}</option>
-            {#each MODEL_OPTIONS as o (o.value)}
+            {#each modelProfile.models as o (o.value)}
               <option value={o.value}>{o.label}</option>
             {/each}
           </select>
@@ -2763,14 +2855,16 @@
             class="composer-pick"
             data-testid="conv-effort-pick"
             aria-label="Effort"
-            title={currentEffort ? `Effort: ${currentEffort}. Pick one to send /effort.` : 'Pick an effort level to send /effort.'}
+            title={currentEffort
+              ? `Effort: ${currentEffort}. Pick one to ${pickVerb ?? 'send /effort'}.`
+              : `Pick an effort level to ${pickVerb ?? 'send /effort'}.`}
             value={currentEffort}
             disabled={pickersDisabled}
             onchange={(e) => pickSetting('effort', e)}>
-            {#if !EFFORT_OPTIONS.some((o) => o.value === currentEffort)}
+            {#if !modelProfile.efforts.some((o) => o.value === currentEffort)}
               <option value={currentEffort} disabled>{currentEffort || 'Effort'}</option>
             {/if}
-            {#each EFFORT_OPTIONS as o (o.value)}
+            {#each modelProfile.efforts as o (o.value)}
               <option value={o.value}>{o.label}</option>
             {/each}
           </select>
@@ -2834,6 +2928,21 @@
   />
 {/if}
 
+{#if relaunchPick}
+  {@const pick = relaunchPick}
+  <ConfirmDialog
+    title={pick.cmd === 'model' ? `Switch ${agentName} to ${pick.label}?` : `Set ${agentName}'s effort to ${pick.label}?`}
+    confirmLabel="Relaunch"
+    onconfirm={confirmRelaunch}
+    oncancel={() => (relaunchPick = null)}
+    confirmTestId="conv-relaunch-confirm"
+  >
+    {agentName} picks its {pick.cmd === 'model' ? 'model' : 'reasoning effort'} when it starts, so this
+    relaunches <code>{session.tmux_name}</code> on the same conversation with
+    {pick.cmd === 'model' ? 'the new model' : 'the new effort'}. A turn in progress is lost.
+  </ConfirmDialog>
+{/if}
+
 {#if forkOpen}
   <ForkSheet
     sessionId={session.id}
@@ -2845,10 +2954,34 @@
 
 <style>
   .composer-above {
+    flex: 0 1 auto;
+    min-height: 0;
+    /* The transcript keeps the rest; the tray scrolls. */
+    max-height: min(40%, 22rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
     display: flex;
     flex-wrap: wrap;
+    align-content: flex-start;
     gap: 0.35rem;
-    padding: 0 var(--chat-inset);
+    padding: var(--space-1) var(--chat-inset);
+  }
+  /* Says there is more below while the tray overflows. */
+  .composer-above:global([data-overflow='true']) {
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--space-4)), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - var(--space-4)), transparent);
+  }
+  .composer-above:global([data-overflow='true'][data-at-end='true']) {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+  .composer-above:focus {
+    outline: none;
+  }
+  .composer-above:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
   }
   .conversation-panel {
     /* The reading column every part of the thread lines up with: the turns,
@@ -2928,9 +3061,18 @@
   }
   .chips {
     display: flex;
+    align-items: center;
     gap: var(--control-gap);
     margin: 0 0 6px;
     flex-wrap: wrap;
+  }
+  /* Between the quick prompts and the chips a host adds (Control's
+     operator commands). */
+  .chips-sep {
+    align-self: stretch;
+    width: 1px;
+    margin: 2px var(--space-1);
+    background: var(--border);
   }
   /* Marks an auto-send chip: a click sends rather than fills. */
   .chip-send {
@@ -3347,8 +3489,9 @@
   .prompt-text {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    font-size: var(--text-xs);
-    line-height: 1.5;
+    /* The prompt is read like the reply, so it takes the same step. */
+    font-size: var(--text-md);
+    line-height: 1.55;
     color: var(--fg);
   }
   /* Outgoing: the prompt block while it is on its way, and its receipt. */
@@ -3422,13 +3565,19 @@
     cursor: pointer;
   }
   .reply {
-    font-size: var(--text-xs);
+    /* The manual's step for the conversation and long prose (text-md,
+       tokens.json): the agent's words are what the pane is read for, so
+       they sit a step above the tool rows, receipts and footers around
+       them, which stay at text-2xs/xs. 1.6 rather than the token's 1.5:
+       a reply runs to many lines, and the extra lead keeps the eye on the
+       right one across the reading column (WCAG 1.4.12 asks for at least 1.5). */
+    font-size: var(--text-md);
     line-height: 1.6;
     color: var(--fg);
     overflow-wrap: break-word;
   }
   .text {
-    margin: 0.35rem 0 0.6rem;
+    margin: 0.4rem 0 0.75rem;
   }
   .reply-footer {
     display: flex;

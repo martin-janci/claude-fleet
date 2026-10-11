@@ -358,7 +358,7 @@ fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 164: `wizard_state` exists (and
+/// `already_applied` guard of migration 166: `wizard_state` exists (and
 /// `host_setups`, which it replaced, is gone). See [`Migration`].
 fn has_wizard_state(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -369,7 +369,7 @@ fn has_wizard_state(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 163: `start_rules` already has its
+/// `already_applied` guard of migration 164: `start_rules` already has its
 /// `agent` column. See [`Migration`].
 fn start_rules_has_agent(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1864,26 +1864,30 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/162_work_bucket_owner.sql"),
         already_applied: Some(work_buckets_has_owner),
     },
+    // Search phase 3: the full-text index (`search_docs`, FTS5
+    // `search_fts`) and the triggers that keep it in step. `IF NOT EXISTS`
+    // and an upsert backfill, then a rebuild: safe to re-run.
+    Migration::plain(163, include_str!("../../migrations/163_search_index.sql")),
     // M15 step G7.1: start and placement rules name how a start runs (host
     // fallback, account, model, effort, agent) — ADD COLUMNs, so a guard.
     Migration {
-        version: 163,
-        sql: include_str!("../../migrations/163_rule_start_targets.sql"),
+        version: 164,
+        sql: include_str!("../../migrations/164_rule_start_targets.sql"),
         already_applied: Some(start_rules_has_agent),
     },
     // M15 step G7.2: `wizard_state`, the add-host wizard's drafts
     // generalised so any wizard resumes on another device. It moves the
     // `host_setups` rows and drops that table, so a guard.
     Migration {
-        version: 164,
-        sql: include_str!("../../migrations/164_wizard_state.sql"),
+        version: 165,
+        sql: include_str!("../../migrations/165_wizard_state.sql"),
         already_applied: Some(has_wizard_state),
     },
     // Task attachments and their content-addressed blobs: new tables,
     // idempotent.
     Migration::plain(
-        165,
-        include_str!("../../migrations/165_work_item_attachments.sql"),
+        166,
+        include_str!("../../migrations/166_work_item_attachments.sql"),
     ),
 ];
 
@@ -2155,9 +2159,9 @@ impl Store {
     /// ADD COLUMN plus `IF NOT EXISTS` / `DROP … IF EXISTS` DDL, and 065's
     /// trigger rebuild is still the latest one, so running them late is
     /// what running them in order would have left.
-    /// Migration 163's `work_rules` half (gap plan G7.1): `host_alias` and
+    /// Migration 164's `work_rules` half (gap plan G7.1): `host_alias` and
     /// `profile`, "its sessions start here". In Rust, after the repair of a
-    /// skipped 066 (which creates `work_rules`), so a database that met 163
+    /// skipped 066 (which creates `work_rules`), so a database that met 164
     /// before it had the table still gets them. Idempotent.
     fn ensure_work_rules_start_columns(&self) -> Result<()> {
         let has_table: i64 = self.conn.query_row(
@@ -6267,12 +6271,12 @@ mod tests {
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     }
 
-    /// 164 (gap plan G7.2): the add-host wizard's drafts move from
+    /// 165 (gap plan G7.2): the add-host wizard's drafts move from
     /// `host_setups` into `wizard_state` as `add_host` rows, and the old
     /// table goes; the store still reads them as drafts.
     #[test]
-    fn migration_164_moves_the_add_host_drafts_into_wizard_state() {
-        let s = store_at_version(163);
+    fn migration_166_moves_the_add_host_drafts_into_wizard_state() {
+        let s = store_at_version(164);
         s.conn
             .execute_batch(
                 "INSERT INTO host_setups (ssh_alias, alias, step, checks, answers, created_at, updated_at)

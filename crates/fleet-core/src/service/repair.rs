@@ -41,6 +41,7 @@
 //! A healthy workspace costs exactly one probe and no writes.
 //! Spec: `docs/specs/2026-09-11-session-worktree-repair.md`.
 
+use crate::events::RepairStep;
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
@@ -1720,6 +1721,121 @@ pub async fn ensure_workspace_with(
     exec: &dyn RepairExec,
     allow_auto_unregister: bool,
 ) -> Result<RepairReport, IpcError> {
+    let progress = RepairReporter::new(store, None);
+    ensure_workspace_reporting(
+        spec,
+        policy,
+        siblings,
+        store,
+        exec,
+        allow_auto_unregister,
+        &progress,
+    )
+    .await
+}
+
+/// Reports an explicit repair's four steps ([`RepairStep`]) as
+/// `repair:progress` frames under the caller's token (gap plan G7.3).
+/// `advance` closes the step in flight and every step it skips over as
+/// `done` (nothing to do there), then opens the next; `finish` closes the
+/// rest; `fail` marks the step in flight `failed`. Without a token every
+/// call is a no-op.
+pub(crate) struct RepairReporter<'a> {
+    store: &'a Mutex<Store>,
+    token: Option<String>,
+    /// 0 = nothing started yet, else `RepairStep::index()`.
+    at: std::sync::atomic::AtomicU8,
+}
+
+impl<'a> RepairReporter<'a> {
+    pub(crate) fn new(store: &'a Mutex<Store>, token: Option<String>) -> Self {
+        Self {
+            store,
+            token,
+            at: std::sync::atomic::AtomicU8::new(0),
+        }
+    }
+
+    fn emit(&self, step: RepairStep, state: crate::events::MoveStepState) {
+        let Some(token) = self.token.as_deref() else {
+            return;
+        };
+        // A poisoned lock loses a progress frame, never the repair.
+        if let Ok(s) = self.store.lock() {
+            s.bus_repair_progress(&crate::events::RepairProgress {
+                token: token.to_string(),
+                step,
+                index: step.index(),
+                total: RepairStep::ALL.len() as u8,
+                state,
+            });
+        }
+    }
+
+    fn at(&self) -> u8 {
+        self.at.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn step_at(&self, index: u8) -> Option<RepairStep> {
+        RepairStep::ALL.into_iter().find(|s| s.index() == index)
+    }
+
+    /// Close the step in flight and every step between it and `step` (each
+    /// had nothing to do), then open `step`. A step already passed is not
+    /// reopened.
+    pub(crate) fn advance(&self, step: RepairStep) {
+        use crate::events::MoveStepState::{Done, Started};
+        let at = self.at();
+        if step.index() <= at {
+            return;
+        }
+        if let Some(prev) = self.step_at(at) {
+            self.emit(prev, Done);
+        }
+        for skipped in RepairStep::ALL
+            .into_iter()
+            .filter(|s| s.index() > at && s.index() < step.index())
+        {
+            self.emit(skipped, Started);
+            self.emit(skipped, Done);
+        }
+        self.at
+            .store(step.index(), std::sync::atomic::Ordering::Relaxed);
+        self.emit(step, Started);
+    }
+
+    /// The repair succeeded: close the step in flight and any left.
+    pub(crate) fn finish(&self) {
+        let last = RepairStep::ALL[RepairStep::ALL.len() - 1];
+        if self.at() < last.index() {
+            self.advance(last);
+        }
+        if self.at() == last.index() {
+            self.emit(last, crate::events::MoveStepState::Done);
+        }
+        self.at.store(u8::MAX, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The repair failed in the step in flight.
+    pub(crate) fn fail(&self) {
+        if let Some(step) = self.step_at(self.at()) {
+            self.emit(step, crate::events::MoveStepState::Failed);
+        }
+        self.at.store(u8::MAX, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// [`ensure_workspace_with`], reporting its steps to `progress`.
+async fn ensure_workspace_reporting(
+    spec: &WorkspaceSpec,
+    policy: Policy,
+    siblings: Vec<i64>,
+    store: &Mutex<Store>,
+    exec: &dyn RepairExec,
+    allow_auto_unregister: bool,
+    progress: &RepairReporter<'_>,
+) -> Result<RepairReport, IpcError> {
+    progress.advance(RepairStep::Check);
     let probe = run_probe(exec, spec).await?;
     record_healthy_fingerprint(store, spec, &probe);
     // Read the rows under the store lock; canonicalize local paths only after
@@ -1803,6 +1919,7 @@ pub async fn ensure_workspace_with(
     let adopting = adopt_path.is_some();
 
     // ── apply git steps, then verify (adoption is verified too) ─────────
+    progress.advance(RepairStep::Fix);
     let mut dir_changed = false;
     let mut final_branch: Option<String> = fix.branch_drift.clone();
     if fix.has_git_steps() || adopting {
@@ -1883,6 +2000,7 @@ pub async fn ensure_workspace_with(
             w.path = fix.cwd.clone();
             w.path_is_guess = false;
         }
+        progress.advance(RepairStep::Verify);
         let after = run_probe(exec, &vspec)
             .await
             .map_err(|e| fail(store, spec, e))?;
@@ -1923,6 +2041,7 @@ pub async fn ensure_workspace_with(
     }
 
     // ── tmux ────────────────────────────────────────────────────────────
+    progress.advance(RepairStep::Pane);
     for step in &fix.steps {
         let res = match step {
             Step::TmuxCreate { cwd } => exec
@@ -2543,6 +2662,44 @@ pub async fn repair_session(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<RepairReport, IpcError> {
+    repair_session_reporting(session_id, explicit, store, ssh, None).await
+}
+
+/// [`repair_session`] reporting its four steps as `repair:progress` frames
+/// under `progress_token` (gap plan G7.3: the phone's repair checklist).
+/// The token is checked like a `start_token`; without one nothing is sent.
+pub async fn repair_session_reporting(
+    session_id: i64,
+    explicit: bool,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    progress_token: Option<String>,
+) -> Result<RepairReport, IpcError> {
+    if let Some(t) = progress_token.as_deref() {
+        crate::service::sessions::validate_start_token(t).map_err(|e| {
+            IpcError::new(
+                &e.code,
+                e.message.replacen("start_token", "progress_token", 1),
+            )
+        })?;
+    }
+    let progress = RepairReporter::new(store, progress_token);
+    let out = repair_session_with(session_id, explicit, store, ssh, &progress).await;
+    match &out {
+        Ok(_) => progress.finish(),
+        Err(_) => progress.fail(),
+    }
+    out
+}
+
+async fn repair_session_with(
+    session_id: i64,
+    explicit: bool,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    progress: &RepairReporter<'_>,
+) -> Result<RepairReport, IpcError> {
+    progress.advance(RepairStep::Check);
     {
         let s = lock(store)?;
         let row = s
@@ -2568,7 +2725,18 @@ pub async fn repair_session(
     } else {
         Entry::Attach
     };
-    ensure_workspace(&spec, policy_for(entry), siblings, store, &exec).await
+    // Click-driven, so it may drop a stale registration of ours under the
+    // full guard, as [`ensure_workspace`] does.
+    ensure_workspace_reporting(
+        &spec,
+        policy_for(entry),
+        siblings,
+        store,
+        &exec,
+        true,
+        progress,
+    )
+    .await
 }
 
 /// The automatic pre-check for lifecycle callers that own tmux (restart,
@@ -4515,7 +4683,9 @@ mod tests {
         assert!(commands.contains("repair::repair_session(args.session_id, args.explicit"));
         let tools_src = module_src("src/mcp/tools");
         let tools = tools_src.as_str();
-        assert!(tools.contains("repair::repair_session(id, true"));
+        assert!(
+            tools.contains("repair::repair_session_reporting(\n            id,\n            true,")
+        );
         assert!(tools.contains("\"repair_session\",\n            p.confirm_nonce.as_deref(),"));
         // Only the opt-in tick may drop a stale entry automatically.
         for (name, src) in [
@@ -6920,5 +7090,69 @@ mod tests {
             .output()
             .unwrap();
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use crate::events::RecordingEventBus;
+
+    fn store_with_bus() -> (Mutex<Store>, Arc<RecordingEventBus>) {
+        let bus = Arc::new(RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        bus.take();
+        (Mutex::new(s), bus)
+    }
+
+    /// The phone's repair checklist ticks every step once, in order: a step
+    /// with nothing to do (no git steps, so no fix or verify) reads done.
+    #[test]
+    fn a_repair_reports_every_step_once_in_order() {
+        let (store, bus) = store_with_bus();
+        let r = RepairReporter::new(&store, Some("rp-1".into()));
+        r.advance(RepairStep::Check);
+        r.advance(RepairStep::Check);
+        r.advance(RepairStep::Pane);
+        r.finish();
+        r.finish();
+        assert_eq!(
+            bus.take(),
+            vec![
+                "repair:progress:rp-1:check:started",
+                "repair:progress:rp-1:check:done",
+                "repair:progress:rp-1:fix:started",
+                "repair:progress:rp-1:fix:done",
+                "repair:progress:rp-1:verify:started",
+                "repair:progress:rp-1:verify:done",
+                "repair:progress:rp-1:pane:started",
+                "repair:progress:rp-1:pane:done",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failure_marks_the_step_in_flight_and_nothing_follows() {
+        let (store, bus) = store_with_bus();
+        let r = RepairReporter::new(&store, Some("rp-2".into()));
+        r.advance(RepairStep::Check);
+        r.advance(RepairStep::Fix);
+        r.fail();
+        r.finish();
+        let frames = bus.take();
+        assert_eq!(
+            frames.last().map(String::as_str),
+            Some("repair:progress:rp-2:fix:failed")
+        );
+        assert!(!frames.iter().any(|f| f.contains(":verify:")));
+    }
+
+    #[test]
+    fn without_a_token_nothing_is_emitted() {
+        let (store, bus) = store_with_bus();
+        let r = RepairReporter::new(&store, None);
+        r.advance(RepairStep::Check);
+        r.finish();
+        assert!(bus.take().is_empty());
     }
 }

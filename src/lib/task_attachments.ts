@@ -1,5 +1,5 @@
 // Task attachments: files and images on a task, kept in fleet (migration
-// 165) and never written to a tracker. The bytes travel as base64 through
+// 166) and never written to a tracker. The bytes travel as base64 through
 // `attach_to_work` / `work_attachment`, routed to the hub like comments.
 import { get } from 'svelte/store';
 import { fleetSettings, SETTING_KEYS } from './fleet_settings';

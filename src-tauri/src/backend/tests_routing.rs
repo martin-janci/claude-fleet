@@ -565,6 +565,21 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "propose_host_placement",
+            "propose_host_placement",
+            json!({ "project_id": 7 }),
+            "null",
+            Box::new(|b, s, _| {
+                let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
+                let args =
+                    fleet_core::service::decide::host_placement::ProposeHostArgs { project_id: 7 };
+                block_on(commands::account_usage::routed::propose_host_placement(
+                    b, s, &cache, args,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "check_account_headroom",
             "check_account_headroom",
             json!({ "host_alias": "mac", "profile": "work" }),
@@ -936,6 +951,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                         session_id: 42,
                         leaving: false,
                     },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "search",
+            "search",
+            json!({ "query": "prihlasenie sso", "limit": 5 }),
+            r#"{"hits":[{"kind":"item","ref":"7","title":"PAY-7 Prihlásenie cez SSO","snippet":"","at":1,"task_id":"item:7","key":"PAY-7"}],"transcripts_indexed":false}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::search::routed::search(
+                    b,
+                    fleet_core::service::search::SearchArgs {
+                        query: "prihlasenie sso".into(),
+                        kinds: Vec::new(),
+                        limit: Some(5),
+                    },
+                    s,
                 ))
                 .map(|_| ())
             }),
@@ -3714,6 +3747,8 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         name: "demo".into(),
                         force: false,
                         profile: Some("work".into()),
+                        model: None,
+                        effort: None,
                     },
                     s,
                     h,
@@ -3976,6 +4011,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     },
                     s,
                     h,
+                    &fleet_core::cancel::CancellationRegistry::new(),
                 ))
                 .map(|_| ())
             }),
@@ -7140,6 +7176,7 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/updates.rs"),
     ),
     ("commands/runs.rs", include_str!("../commands/runs.rs")),
+    ("commands/search.rs", include_str!("../commands/search.rs")),
     (
         "commands/routines.rs",
         include_str!("../commands/routines.rs"),

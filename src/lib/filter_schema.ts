@@ -22,7 +22,7 @@ export type FilterSection = (typeof FILTER_SECTIONS)[number];
 /** The Work panel's headings, in order (board "Work · tasks with filters
  *  open"; Sessions sits under the live-session switch, More holds what
  *  the board leaves out). */
-export const WORK_FILTER_SECTIONS = ['Organisation', 'Status', 'Tracker', 'Assignee', 'Sessions', 'More'] as const;
+export const WORK_FILTER_SECTIONS = ['Organisation', 'Status', 'Tracker', 'Assignee', 'Planning', 'Sessions', 'More'] as const;
 export type WorkFilterSection = (typeof WORK_FILTER_SECTIONS)[number];
 
 export interface FilterControl<S extends string = FilterSection> {
@@ -68,6 +68,9 @@ export const WORK_FILTER_SCHEMA: Record<WorkControlId, FilterControl<WorkFilterS
   tracker: { label: 'Tracker', place: 'Tracker', testid: 'work-filter-tracker' },
   mine: { label: 'Me', place: 'Assignee', testid: 'work-filter-assignee' },
   assignee: { label: 'Assignee', place: 'Assignee', testid: 'work-filter-assignee' },
+  iteration: { label: 'Sprint', place: 'Planning', testid: 'work-filter-sprint', when: 'a tracker has sprints' },
+  epic: { label: 'Epic', place: 'Planning', testid: 'work-filter-epic', when: 'a tracker has epics' },
+  item_type: { label: 'Type', place: 'Planning', testid: 'work-filter-type', when: 'a tracker names its types' },
   has: { label: 'Only tasks with a live session', place: 'Sessions', testid: 'work-filter-live' },
   view: { label: 'Saved view', place: 'More', testid: 'work-view-select' },
   review: { label: 'To review', place: 'More', testid: 'work-filter-review' },

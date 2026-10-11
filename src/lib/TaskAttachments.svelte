@@ -1,4 +1,4 @@
-<!-- A task's Attachments (migration 165): files and images kept in fleet,
+<!-- A task's Attachments (migration 166): files and images kept in fleet,
      never written to a tracker. Add with the button, by dropping files on
      the section, or by pasting an image anywhere on the task page; images
      show as thumbnails that open in a lightbox, other files download. Each

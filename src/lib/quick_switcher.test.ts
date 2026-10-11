@@ -485,7 +485,7 @@ describe('asset and command entries', () => {
 
 // ---- the New session picker (project picker spec v2) -------------------------
 
-import { isNewSessionChord, workBlock } from './quick_switcher';
+import { isNewSessionChord, switcherEmptyText, workBlock } from './quick_switcher';
 
 describe('isNewSessionChord', () => {
   const k = (o: Partial<KeyboardEvent>) => ({ key: 'n', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...o });
@@ -510,5 +510,14 @@ describe('workBlock', () => {
   it('a ticket with no live_session_ids field counts as free; the cap is a parameter', () => {
     const free = { ticket: { key: 'B-1' } as never, section: 'My work' };
     expect(workBlock([free, t('B-2', 'My work')], 1).map((x) => (x.ticket as { key: string }).key)).toEqual(['B-1']);
+  });
+});
+
+describe('switcherEmptyText', () => {
+  it('says what was searched', () => {
+    expect(switcherEmptyText({ mode: 'hosts', rest: 'mef' }, true, 'Ctrl')).toBe('No host matches “mef”.');
+    expect(switcherEmptyText({ mode: 'work', rest: 'x' }, true, 'Ctrl')).toBe('No task or ticket matches “x”.');
+    expect(switcherEmptyText({ mode: 'all', rest: 'x' }, false, '⌘')).toContain('⌘↵ creates a session');
+    expect(switcherEmptyText({ mode: 'all', rest: '' }, false, '⌘')).toBe('No sessions yet.');
   });
 });

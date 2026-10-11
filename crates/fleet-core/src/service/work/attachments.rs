@@ -1,4 +1,4 @@
-//! Task attachments (migration 165): `work_link { attach }` /
+//! Task attachments (migration 166): `work_link { attach }` /
 //! `{ attachment_delete }` and `work { attachment }`, shared by the MCP tools
 //! and the desktop's Routed commands. An attachment is about the ITEM, as a
 //! comment is ([`super::local::comment`]): an item outside the caller's

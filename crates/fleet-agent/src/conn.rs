@@ -557,13 +557,20 @@ where
                     // a plain function cannot do.
                     Message::Text(text) => match decode_hub_frame_lenient(&text) {
                         Ok(Decoded::Frame(HubFrame::Welcome { hub_version, proto })) => {
-                            if let Some(reason) =
-                                judge_proto(proto).refusal_reason("fleet-agent", "the hub")
+                            // A hub AHEAD of this agent is not refused: it
+                            // already judged our `hello.proto` and admitted
+                            // it, so it speaks ours on this connection. Only
+                            // a hub too old for us (below our window) ends
+                            // it. Refusing ahead locked every proto-1 agent
+                            // out of the first proto-2 hub, with no way back
+                            // but a hand install on each host.
+                            if let Some(reason) = judge_proto(proto.min(fleet_proto::PROTO_VERSION))
+                                .refusal_reason("fleet-agent", "the hub")
                             {
                                 break SessionEnd::VersionRefused(reason);
                             }
                             welcomed = true;
-                            link.hub_proto = proto;
+                            link.hub_proto = proto.min(fleet_proto::PROTO_VERSION);
                             let hub_version = sanitized_hub_version(&hub_version);
                             tracing::info!(
                                 hub_version, proto, "[agent] hub protocol compatible"
@@ -1152,22 +1159,53 @@ fn backoff() -> Backoff {
 /// file: this is how "is it connected" is answered.
 pub struct Notifier {
     socket: Option<PathBuf>,
+    /// The same line, kept for the in-process updater
+    /// ([`crate::self_update`]), which has no `systemctl show` to read it.
+    link: Arc<LinkStatus>,
+}
+
+/// What the connection loop says about itself, for whoever runs in the same
+/// process: the last status line, and a wake-up when the hub refused this
+/// agent's protocol (an update is the only way forward).
+#[derive(Default)]
+pub struct LinkStatus {
+    line: std::sync::Mutex<String>,
+    pub refused: tokio::sync::Notify,
+}
+
+impl LinkStatus {
+    /// Connected, as `fleet-agent status` reads it: the line starts [`CONNECTED`].
+    pub fn connected(&self) -> bool {
+        self.line().starts_with(CONNECTED)
+    }
+
+    pub fn line(&self) -> String {
+        self.line.lock().map(|l| l.clone()).unwrap_or_default()
+    }
 }
 
 impl Notifier {
     /// The socket systemd named in `$NOTIFY_SOCKET`, if any.
     pub fn from_env() -> Self {
-        Self {
-            socket: std::env::var_os("NOTIFY_SOCKET").map(PathBuf::from),
-        }
+        Self::at(std::env::var_os("NOTIFY_SOCKET").map(PathBuf::from))
     }
 
     pub fn at(socket: Option<PathBuf>) -> Self {
-        Self { socket }
+        Self {
+            socket,
+            link: Arc::default(),
+        }
+    }
+
+    pub fn link(&self) -> Arc<LinkStatus> {
+        Arc::clone(&self.link)
     }
 
     /// Best effort: a failed report must never stop the agent.
     pub fn status(&self, text: &str) {
+        if let Ok(mut l) = self.link.line.lock() {
+            *l = text.to_string();
+        }
         #[cfg(unix)]
         if let Some(socket) = &self.socket {
             let _ = send_notify(
@@ -1269,6 +1307,7 @@ where
             // once the fix lands.
             backoff.force_max();
             tracing::error!(hub = %url, "[agent] {why}");
+            notifier.link.refused.notify_one();
         }
         let delay = backoff.next(jitter());
         if !version_refused {
@@ -1284,7 +1323,15 @@ where
 
 /// `fleet-agent run`: serve `config`'s hub until SIGTERM or SIGINT, then kill
 /// whatever is still running and return.
-pub async fn run(config: crate::config::Config) -> Result<(), String> {
+pub async fn run(
+    config: crate::config::Config,
+    self_update: Option<crate::self_update::SelfUpdate>,
+) -> Result<(), String> {
+    let notifier = Notifier::from_env();
+    if let Some(u) = self_update {
+        let (config, link) = (config.clone(), notifier.link());
+        tokio::spawn(async move { u.run(&config, link).await });
+    }
     let endpoint = Endpoint::parse(&config.hub, config.insecure)?;
     let dialer = Dialer::new(endpoint, config.token, config.ca_file.as_deref())?;
     let agent = Agent::with_report_errors(
@@ -1292,7 +1339,6 @@ pub async fn run(config: crate::config::Config) -> Result<(), String> {
         exec::MAX_CONCURRENT,
         config.report_errors,
     );
-    let notifier = Notifier::from_env();
     let stop = shutdown_signal()?;
     tokio::select! {
         never = run_with(&dialer, &agent, &notifier, Beats::heartbeat, tokio::time::sleep) => match never {},
@@ -2424,6 +2470,30 @@ mod tests {
             }
             other => panic!("expected VersionRefused, got {other:?}"),
         }
+    }
+
+    /// A hub AHEAD of this agent's protocol is accepted: the hub already
+    /// admitted our `hello.proto`, so the connection speaks ours.
+    #[tokio::test]
+    async fn a_hub_ahead_of_the_agent_is_accepted_at_the_agents_proto() {
+        let mut p = pair_before_welcome(quiet_agent(None, crate::exec::MAX_CONCURRENT)).await;
+        p.hub
+            .send(Message::Text(
+                encode_hub_frame(&HubFrame::Welcome {
+                    hub_version: "9.0.0".into(),
+                    proto: fleet_proto::PROTO_VERSION + 5,
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        // The agent keeps serving: no refusal ends the session.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !p.served.is_finished(),
+            "the agent refused a hub ahead of it"
+        );
     }
 
     /// A close reason is hub-controlled text that goes straight into

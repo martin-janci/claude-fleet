@@ -44,4 +44,4 @@ CREATE TABLE IF NOT EXISTS work_attachment_blobs (
   created_at INTEGER NOT NULL
 );
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (165);
+INSERT OR IGNORE INTO schema_version (version) VALUES (166);
