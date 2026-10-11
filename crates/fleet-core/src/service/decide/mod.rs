@@ -43,6 +43,9 @@ pub mod duplicate;
 mod duplicate_tests;
 pub mod floor;
 pub mod haiku;
+pub mod haiku_shadow;
+#[cfg(test)]
+mod haiku_shadow_tests;
 pub mod host_placement;
 #[cfg(test)]
 mod host_placement_tests;
@@ -797,6 +800,9 @@ pub struct DecideCtx {
     pub store: Arc<Mutex<Store>>,
     pub backend: Arc<dyn DecisionBackend>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// The transport the second opinion runs over; `None` takes the one the
+    /// process installed ([`haiku_shadow::install`]).
+    haiku_exec: Option<Arc<dyn crate::ssh::SshExec>>,
 }
 
 impl DecideCtx {
@@ -805,6 +811,7 @@ impl DecideCtx {
             store,
             backend,
             clock: Arc::new(crate::store::now_unix),
+            haiku_exec: None,
         }
     }
 
@@ -819,6 +826,12 @@ impl DecideCtx {
         self
     }
 
+    /// The second opinion's transport (tests).
+    pub fn with_haiku_exec(mut self, exec: Arc<dyn crate::ssh::SshExec>) -> Self {
+        self.haiku_exec = Some(exec);
+        self
+    }
+
     fn now(&self) -> i64 {
         (self.clock)()
     }
@@ -826,8 +839,19 @@ impl DecideCtx {
 
 /// Ask. Gate, redact, call once, check, and record — see the module docs.
 /// Never errors: every failure is a [`Fallback`] on the outcome and on the
-/// recorded run.
+/// recorded run. When the second opinion is on ([`haiku_shadow`]), the same
+/// question is also asked of Claude in a task of its own, after Jev's
+/// answer, so it never delays the caller.
 pub async fn decide(ctx: &DecideCtx, req: DecideRequest) -> DecisionOutcome {
+    let second = haiku_shadow::plan(ctx, &req);
+    let outcome = decide_jev(ctx, req).await;
+    if let Some(job) = second {
+        crate::rt::spawn(job.run());
+    }
+    outcome
+}
+
+async fn decide_jev(ctx: &DecideCtx, req: DecideRequest) -> DecisionOutcome {
     let now = ctx.now();
     let provider = ctx.backend.provider();
     let redacted = req.request.redacted();
@@ -1181,7 +1205,8 @@ pub fn week_of(stats: &[DecisionStatRow]) -> DecideWeek {
 }
 
 /// PURE: the judgement over the live `stats` of the window (rows of
-/// [`Store::decision_stats`]; benchmark rows are skipped).
+/// [`Store::decision_stats`]; benchmark rows and the second opinion's are
+/// skipped).
 pub fn health_of(
     enabled: bool,
     modes: BTreeMap<String, String>,
@@ -1190,7 +1215,10 @@ pub fn health_of(
     budget_spent: bool,
 ) -> DecideHealth {
     let (mut attempts, mut failures) = (0u32, 0u32);
-    for r in stats.iter().filter(|r| !r.bench) {
+    for r in stats
+        .iter()
+        .filter(|r| !r.bench && r.provider != haiku::PROVIDER_HAIKU)
+    {
         let f = r.fallback.as_deref();
         if f.is_some_and(|f| HEALTH_NOT_ATTEMPTS.contains(&f)) {
             continue;

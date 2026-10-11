@@ -152,6 +152,7 @@ pub fn request(prompt: &str, candidates: &[(i64, String)]) -> JevRequest {
             instructions: Value::String(INSTRUCTIONS.into()),
             criteria: criteria.into_iter().collect(),
         },
+        order_salt: None,
     }
 }
 

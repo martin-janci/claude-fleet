@@ -4413,6 +4413,63 @@
       ]
     },
     {
+      "default_widget": "switch",
+      "key": "decide.haiku.shadow",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Second opinion from Claude",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "text",
+      "key": "decide.haiku.host",
+      "kind": {
+        "max": 64,
+        "type": "text"
+      },
+      "label": "Second opinion: host",
+      "widgets": [
+        "text",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.haiku.model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Second opinion: model",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "decide.haiku.daily_calls",
+      "kind": {
+        "max": 10000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Second opinion: calls a day",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "number",
       "key": "decide.retention_days",
       "kind": {

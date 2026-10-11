@@ -50,28 +50,39 @@ pub enum Perturbation {
     /// Every fenced code block replaced by `[code: <lang>, N lines]` (J1,
     /// decision D42's A/B).
     Code,
+    /// The same request with its options in another order (the request's
+    /// `order_salt`): nothing a model reads changes but the order, so the
+    /// "answer changed" rate is how much the order moves the answer (Jev
+    /// leans toward the first option, TypeSafe's jaggedness notes).
+    OptionOrder,
 }
 
 impl Perturbation {
-    pub const ALL: [Perturbation; 6] = [
+    pub const ALL: [Perturbation; 7] = [
         Perturbation::Fold,
         Perturbation::Typo,
         Perturbation::Emoji,
         Perturbation::NoBoard,
         Perturbation::ShuffleBoard,
         Perturbation::Code,
+        Perturbation::OptionOrder,
     ];
     /// What `status-map --perturb` takes.
-    pub const STATUS_MAP: [Perturbation; 5] = [
+    pub const STATUS_MAP: [Perturbation; 6] = [
         Perturbation::Fold,
         Perturbation::Typo,
         Perturbation::Emoji,
         Perturbation::NoBoard,
         Perturbation::ShuffleBoard,
+        Perturbation::OptionOrder,
     ];
     /// What `work-link --perturb` takes.
-    pub const WORK_LINK: [Perturbation; 3] =
-        [Perturbation::Fold, Perturbation::Typo, Perturbation::Code];
+    pub const WORK_LINK: [Perturbation; 4] = [
+        Perturbation::Fold,
+        Perturbation::Typo,
+        Perturbation::Code,
+        Perturbation::OptionOrder,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -81,6 +92,7 @@ impl Perturbation {
             Perturbation::NoBoard => "no-board",
             Perturbation::ShuffleBoard => "shuffle-board",
             Perturbation::Code => "code",
+            Perturbation::OptionOrder => "option-order",
         }
     }
 
@@ -93,6 +105,15 @@ impl Perturbation {
     pub fn case_id(self, id: &str) -> String {
         format!("{id}.{}", self.as_str())
     }
+}
+
+/// PURE: the `order_salt` a case's request carries: its id when the case
+/// is an [`Perturbation::OptionOrder`] variant, else none (the request's own
+/// order).
+pub fn order_salt(case_id: &str) -> Option<String> {
+    case_id
+        .ends_with(&format!(".{}", Perturbation::OptionOrder.as_str()))
+        .then(|| case_id.to_string())
 }
 
 /// PURE: a seed from `parts` (the first 8 bytes of the SHA-256 of them,

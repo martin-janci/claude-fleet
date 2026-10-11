@@ -1,6 +1,7 @@
-//! The one locked-down `claude -p` run fleet starts on a host, shared by the
-//! dead-session summary ([`super::work::summary`]) and the Jev `claude -p
-//! haiku` baseline ([`super::decide::haiku`]).
+//! The script around the one locked-down `claude -p` run fleet starts on a
+//! host, shared by every headless run (the summaries, the drafts, the
+//! planner, context help and the Jev `claude -p haiku` baseline). Which CLI
+//! runs and its command words are [`super::headless`]'s.
 //!
 //! * [`isolation_flags`] are the words that take everything away from the
 //!   run: no hooks, no built-in tool, no MCP server, no transcript left.

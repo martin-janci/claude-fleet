@@ -76,7 +76,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// The question's version, recorded on every Jev run of the benchmark.
-pub const QUESTION_VERSION: &str = "work_link.bench.v1";
+pub const QUESTION_VERSION: &str = "work_link.bench.v2";
 /// The check's version ([`Shape::ChoiceNoul`]'s second call).
 pub const NOUL_QUESTION_VERSION: &str = "work_link.bench.noul.v1";
 /// Card J1's registered acceptance (assist), test map §5.
@@ -1116,6 +1116,7 @@ pub fn jev_request(case: &BenchCase) -> JevRequest {
                 .iter()
                 .map(|c| (c.id.clone(), c.title.as_str())),
         ),
+        order_salt: super::perturb::order_salt(&case.id),
     }
 }
 
@@ -1142,6 +1143,7 @@ pub fn noul_request(case: &BenchCase, candidate: &Candidate) -> JevRequest {
                 ),
             }),
         },
+        order_salt: None,
     }
 }
 
@@ -1455,6 +1457,10 @@ pub struct ProviderMetrics {
     pub latency_p95_ms: Option<i64>,
     pub input_tokens: i64,
     pub cost_microusd: i64,
+    /// Model providers: the spend per right answer at the threshold
+    /// ([`super::cost_per_correct`]); `None` for a rule, and under
+    /// [`SHOW_MIN_CASES`] right answers (it would reveal the count).
+    pub cost_per_correct_microusd: Option<i64>,
 }
 
 /// Jev against BM25 at BM25's coverage (card J1: "≥ 10 points above BM25
@@ -1824,6 +1830,9 @@ fn provider_metrics(
         latency_p95_ms: percentile(&lat, 95.0),
         input_tokens: tokens,
         cost_microusd: cost,
+        cost_per_correct_microusd: (p.is_model() && t.correct >= SHOW_MIN_CASES)
+            .then(|| super::cost_per_correct(cost, t.correct))
+            .flatten(),
     }
 }
 
@@ -2588,7 +2597,7 @@ impl BenchReport {
                 d.dataset, d.scope, d.cases, d.none_cases
             ));
             v.push(format!(
-                "  {:<6} {:>7} {:>8} {:>9} {:>8} {:>18} {:>9} {:>11} {:>9} {:>10}  skipped",
+                "  {:<6} {:>7} {:>8} {:>9} {:>8} {:>18} {:>9} {:>11} {:>9} {:>10} {:>10}  skipped",
                 "",
                 "cases",
                 "answered",
@@ -2598,7 +2607,8 @@ impl BenchReport {
                 "abstain",
                 "p50/p95 ms",
                 "tokens",
-                "cost"
+                "cost",
+                "cost/right"
             ));
             for p in &d.providers {
                 let skipped = if p.skipped.is_empty() {
@@ -2611,7 +2621,7 @@ impl BenchReport {
                         .join(", ")
                 };
                 v.push(format!(
-                    "  {:<6} {:>7} {:>8} {:>9} {:>8} {:>18} {:>9} {:>11} {:>9} {:>10}  {}",
+                    "  {:<6} {:>7} {:>8} {:>9} {:>8} {:>18} {:>9} {:>11} {:>9} {:>10} {:>10}  {}",
                     p.provider,
                     p.cases.to_string(),
                     p.answered.to_string(),
@@ -2629,6 +2639,7 @@ impl BenchReport {
                     },
                     p.input_tokens,
                     crate::service::decide::fmt_usd(p.cost_microusd),
+                    super::fmt_cost_per_correct(p.cost_per_correct_microusd),
                     skipped
                 ));
             }

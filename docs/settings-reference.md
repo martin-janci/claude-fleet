@@ -237,6 +237,10 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `decide.jev.breaker_open_secs` | `300` | 10–86400 seconds | fleet | How long an open breaker refuses calls. |
 | `decide.jev.daily_token_budget` | `2000000` | 0–1000000000 tokens, `0` = none | fleet | Input tokens the decision model may be sent per UTC day. At $0.042 per million, the default is under $0.09 a day. |
 | `decide.jev.model` | `jev-1.13.0` | `jev-1.13.0` / `jev-latest` | fleet | The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe. |
+| `decide.haiku.shadow` | `false` | on / off | fleet | Also ask Claude every question a Jev use case in shadow or assist asks, on the host below, and record its answer beside Jev's to compare them. Nothing acts on it. Experimental. Asks to confirm. |
+| `decide.haiku.host` | `` | text, up to 64 characters | fleet | The host whose Claude account answers. Only questions about its own organisation are sent to it. Experimental. |
+| `decide.haiku.model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet | The Claude model the second opinion asks. Experimental. |
+| `decide.haiku.daily_calls` | `200` | 0–10000, `0` = none | fleet | Questions the second opinion may ask per UTC day. One at a time; a question that comes while one is running is not asked. Experimental. |
 | `decide.retention_days` | `90` | 0–3650 days, `0` = forever | fleet | Days a decision record (ids and numbers, never text) is kept. |
 | `decide.jev.floors` | `` | text, up to 8192 characters | fleet | Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against. |
 

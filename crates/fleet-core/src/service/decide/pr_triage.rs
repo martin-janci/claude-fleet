@@ -112,6 +112,7 @@ pub fn request(condition: Condition, ev: &PrEvidence) -> JevRequest {
             "unpushed_commits": ev.ahead.unwrap_or(0),
         }),
         question: question(),
+        order_salt: None,
     }
 }
 

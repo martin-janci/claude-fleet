@@ -1,7 +1,8 @@
 //! The `work_link` benchmark's robustness pass (dataset C, `work-link
 //! --perturb`): each asked case's first prompt folded (no diacritics), with
 //! a typo, or with its fenced code blocks replaced by a placeholder
-//! (decision D42's A/B), asked of the same providers and compared with the
+//! (decision D42's A/B), or the same request with its options in another
+//! order (`option-order`), asked of the same providers and compared with the
 //! original at each provider's own operating point — its raw pick, before
 //! any threshold chosen on dev (a threshold would be chosen again on the
 //! variants, and the pair would compare two thresholds). A "none of these"
@@ -20,11 +21,22 @@ use serde::Serialize;
 /// that changes it. The id is `<id>.<perturbation>`; the candidates, the
 /// truth, the org and the language cells stay the original's.
 pub fn variant(c: &BenchCase, p: Perturbation) -> Option<BenchCase> {
+    if p == Perturbation::OptionOrder {
+        let v = BenchCase {
+            id: p.case_id(&c.id),
+            ..c.clone()
+        };
+        let order = |x: &BenchCase| super::work_link::jev_request(x).option_order();
+        return (order(&v) != order(c)).then_some(v);
+    }
     let state = match p {
         Perturbation::Fold => perturb::fold_diacritics(&c.state),
         Perturbation::Typo => perturb::typo(&c.state, perturb::seed_of(&[p.as_str(), &c.id])),
         Perturbation::Code => perturb::code_placeholder(&c.state),
-        Perturbation::Emoji | Perturbation::NoBoard | Perturbation::ShuffleBoard => return None,
+        Perturbation::Emoji
+        | Perturbation::NoBoard
+        | Perturbation::ShuffleBoard
+        | Perturbation::OptionOrder => return None,
     };
     (state != c.state).then(|| BenchCase {
         id: p.case_id(&c.id),

@@ -241,6 +241,7 @@ pub fn question_for(input: &LostInput) -> JevRequest {
     JevRequest {
         state: state(input),
         question: question(&input.candidates),
+        order_salt: None,
     }
 }
 

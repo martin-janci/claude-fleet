@@ -1866,6 +1866,24 @@ fn a_prompt_variant_changes_the_state_only() {
     assert!(wr::variant(&plain, Perturbation::Fold).is_none());
     assert!(wr::variant(&plain, Perturbation::Code).is_none());
     assert!(wr::variant(&c, Perturbation::NoBoard).is_none());
+    // option-order: the same case, its options in another order.
+    let c = BenchCase {
+        candidates: (1..=6)
+            .map(|i| Candidate {
+                id: format!("i{i}"),
+                title: format!("item {i}"),
+                description: None,
+                provider: "jira".into(),
+            })
+            .collect(),
+        ..c
+    };
+    let o = wr::variant(&c, Perturbation::OptionOrder).unwrap();
+    assert_eq!((&o.state, &o.candidates), (&c.state, &c.candidates));
+    assert_eq!(o.id, Perturbation::OptionOrder.case_id(&c.id));
+    let (a, b) = (jev_request(&o), jev_request(&c));
+    assert_eq!((&a.state, &a.question), (&b.state, &b.question));
+    assert_ne!(a.option_order(), b.option_order());
 }
 
 #[tokio::test]
