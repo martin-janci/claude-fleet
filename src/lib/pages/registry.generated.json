@@ -3096,6 +3096,28 @@
       "zero": "forever"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "",
+      "help": "Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against.",
+      "key": "decide.jev.floors",
+      "kind": {
+        "max": 8192,
+        "type": "text"
+      },
+      "label": "Jev: fitted floors",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "none",
+      "value": ""
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "none"
@@ -4528,6 +4550,10 @@
           "items": [
             {
               "key": "decide.jev.model",
+              "type": "field"
+            },
+            {
+              "key": "decide.jev.floors",
               "type": "field"
             },
             {

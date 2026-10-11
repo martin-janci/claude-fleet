@@ -4471,6 +4471,19 @@
     },
     {
       "default_widget": "text",
+      "key": "decide.jev.floors",
+      "kind": {
+        "max": 8192,
+        "type": "text"
+      },
+      "label": "Jev: fitted floors",
+      "widgets": [
+        "text",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "text",
       "key": "hub.bind",
       "kind": {
         "max": 255,

@@ -75,8 +75,54 @@ acceptance.
   anything else is `invalid_answer` and is not used. A feature may set a
   confidence floor: below it the answer is recorded as `low_confidence` and
   not used.
+- **Confidence is the top probability.** The confidence a floor reads, a
+  run records and a proposal shows is the probability of the chosen option
+  (for a score, of its likeliest level), not the API's separate
+  `confidence` field, which is used only when no probabilities came back.
+  Independent tests of jev-1.13 found that field never better calibrated
+  than the top probability, and overconfident out of distribution.
+- **Options in no fixed order.** Jev leans toward the first option it reads
+  (TypeSafe's jaggedness notes), and options kept in key order would put the
+  same one first every time (`done` for `status_map`, the lowest id for
+  `work_link`). A choice's options are sent in an order keyed by the
+  request itself (SHA-256 of its canonical JSON): the same request always
+  reads the same way, so a run can be replayed, while across requests every
+  option takes the first place about equally often. The `haiku` baseline
+  lists the options in the same order. That the API reads options in the
+  order the JSON lists them is assumed, not documented by TypeSafe.
+- **Fitted floors.** A feature's built-in floor (0.5) can be raised from
+  evidence with `fleet-hub decide floor fit` (below, *Fitted floors*).
 - **Pinned model.** `decide.jev.model` is `jev-1.13.0` by default: TypeSafe
   advises pinning a version when thresholds are tuned against it.
+
+## Fitted floors
+
+Every feature asks at a built-in confidence floor of 0.5. Once a feature
+has runs a person followed up — `confirmed` counts as right, `corrected`
+and `rejected` as wrong; `ignored`, `unsure` answers and benchmark runs do
+not count — a floor can be fitted to them:
+
+```bash
+fleet-hub decide floor fit status_map                     # print the numbers
+fleet-hub decide floor fit status_map --precision 0.97 --apply
+fleet-hub decide floor show
+fleet-hub decide floor clear status_map
+```
+
+The fit takes the runs of one question version (the newest labelled run's
+unless `--question-version` says) asked under the pinned `decide.jev.model`
+(it refuses `jev-latest`), oldest first, and splits them in two by time. The
+older half picks the lowest floor (0.5 up to 0.999) at which its answers
+reach `--precision` (0.95 by default) with at least `--min-answered` (30)
+answers left; the newer half must reach the same precision at that floor.
+Only a fit that holds on both halves is stored, with `--apply`, into
+`decide.jev.floors` over the running hub's `set_setting` (validated and
+audited like every `decide.*` setting; `floor show` and the fit itself read
+the database and need no hub).
+From the next call the feature is held to the higher of its built-in floor
+and the fitted one. The fitted floor applies only to the question version
+and model it was fitted against: when an adapter changes its question or
+the model setting changes, the built-in floor stands until a new fit.
 
 ## Fallbacks
 
@@ -1050,6 +1096,7 @@ redesign's transition plan.
 | `decide.haiku.model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet | The Claude model the second opinion asks. Experimental. |
 | `decide.haiku.daily_calls` | `200` | 0–10000, `0` = none | fleet | Questions the second opinion may ask per UTC day. One at a time; a question that comes while one is running is not asked. Experimental. |
 | `decide.retention_days` | `90` | 0–3650 days, `0` = forever | fleet | Days a decision record (ids and numbers, never text) is kept. |
+| `decide.jev.floors` | `` | text, up to 8192 characters | fleet | Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against. |
 <!-- END GENERATED: settings decide. -->
 
 On a standalone desktop they are in Settings → *Decisions (Jev)*. On a hub
@@ -1373,7 +1420,8 @@ release per attempt:
 ```
 
 It replaces the instructions and each option's criterion for **both**
-`jev` and `haiku`; the option ids and their order, the confidence floor and
+`jev` and `haiku`; the option ids and their order (keyed by the request,
+*What a call does*), the confidence floor and
 the state (the section and its board window, redacted as ever) stay the
 adapter's, so what leaves the hub about a section does not change. The file
 must hold exactly those five options, no text may be empty, and `version`

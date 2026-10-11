@@ -41,6 +41,7 @@ mod control_route_tests;
 pub mod duplicate;
 #[cfg(test)]
 mod duplicate_tests;
+pub mod floor;
 pub mod haiku;
 pub mod haiku_shadow;
 #[cfg(test)]
@@ -731,8 +732,9 @@ pub struct DecideRequest {
     /// The adapter's question version, a constant bumped when its
     /// question changes.
     pub question_version: String,
-    /// Below this confidence a valid answer is recorded with
-    /// [`Fallback::LowConfidence`]. `None`: no floor.
+    /// Below this confidence (the answer's top probability) a valid answer
+    /// is recorded with [`Fallback::LowConfidence`]. `None`: no floor. A
+    /// floor fitted for the feature ([`floor`]) raises it.
     pub min_confidence: Option<f64>,
 }
 
@@ -919,13 +921,22 @@ async fn decide_jev(ctx: &DecideCtx, req: DecideRequest) -> DecisionOutcome {
             };
             run.input_fp = s.decision_fp_key().ok().map(|k| fingerprint(&k, &redacted));
             clear(&s, req.feature, req.org_id, provider, now, req.caller())
+                .map(|c| (c, floor::read(&s)))
         }
         Err(_) => Err(Fallback::FlagOff),
     };
-    let cleared = match gated {
+    let (cleared, floors) = match gated {
         Ok(c) => c,
         Err(f) => return record(ctx, run, None, None, Some(f)),
     };
+    // The adapter's floor, raised to the feature's fitted one (`floor`).
+    let min_confidence = floor::effective(
+        req.min_confidence,
+        &floors,
+        req.feature,
+        &req.question_version,
+        &cleared.cfg.model,
+    );
 
     // 2. The checks the API would refuse, before anything is sent.
     if let Err(why) = redacted.check(&cleared.cfg.model) {
@@ -1022,7 +1033,8 @@ async fn decide_jev(ctx: &DecideCtx, req: DecideRequest) -> DecisionOutcome {
         confidence: valid.confidence,
         model_version: run.model_version.clone(),
     };
-    let low = match (req.min_confidence, answer.confidence) {
+    // `confidence` is the answer's top probability (`jev::top_probability`).
+    let low = match (min_confidence, answer.confidence) {
         (Some(floor), Some(c)) => c < floor,
         (Some(_), None) => true,
         (None, _) => false,
