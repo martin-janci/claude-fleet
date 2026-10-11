@@ -186,7 +186,7 @@ pub fn list_accounts(store: &Mutex<Store>) -> Result<Vec<crate::store::AccountRo
     s.list_accounts().map_err(IpcError::from)
 }
 
-#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "AddHostParams")]
 pub struct AddHostArgs {
     /// Fleet alias: letters, digits, dashes.
@@ -459,9 +459,13 @@ pub fn hide_host(args: HideHostArgs, store: &Mutex<Store>) -> Result<HostRow, Ip
     list_one(store, &args.alias)
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "SetAccountNicknameParams")]
 pub struct SetAccountNicknameArgs {
+    /// Account uuid (list_accounts).
     pub uuid: String,
+    /// The name; empty or null clears.
+    #[serde(default)]
     pub nickname: Option<String>,
 }
 

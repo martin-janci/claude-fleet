@@ -1,12 +1,13 @@
 //! Tauri IPC wrappers for SSH host management. Logic lives in `service::hosts`;
 //! this file only adapts `tauri::State` to plain references.
 //!
-//! Remote mode: `list_hosts`, `list_accounts` and `probe_host` have hub tools
-//! and route there. The rest are **fleet administration**, which the hub
-//! refuses to a paired client by design (`mcp::tools::support::enforce_admin`
-//! makes `add_host`, `remove_host` and `hide_host` master-only), so they
-//! refuse here with the reason rather than reaching the network to be told no —
-//! or worse, editing this machine's own database behind the hub's back.
+//! Remote mode: `list_hosts`, `list_accounts`, `probe_host`, `discover_hosts`
+//! and `add_host` have hub tools and route there (`add_host` since contract
+//! 13 answers the hub owner's trusted full device, as the phone's Add host
+//! does). The rest are **fleet administration** the hub keeps master-only
+//! (`remove_host`, `hide_host`, `merge_host`), so they refuse here with the
+//! reason rather than reaching the network to be told no — or worse, editing
+//! this machine's own database behind the hub's back.
 
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
@@ -30,11 +31,7 @@ use tauri::State;
 pub async fn discover_hosts(
     backend: State<'_, Arc<FleetBackend>>,
 ) -> Result<Vec<SshHost>, IpcError> {
-    // Reads *this machine's* ~/.ssh/config, which says nothing about the hub's
-    // hosts — and it only ever feeds the Add-host dialog, which a client
-    // cannot complete anyway.
-    backend.refuse_local_only("discover_hosts")?;
-    hosts::discover_hosts_fresh().await
+    routed::discover_hosts(&backend).await
 }
 
 #[tauri::command]
@@ -60,8 +57,7 @@ pub async fn add_host(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<HostRow, IpcError> {
-    backend.refuse_local_only("add_host")?;
-    hosts::add_host(args, &store, &*ssh).await
+    routed::add_host(&backend, args, &store, &ssh).await
 }
 
 #[tauri::command]
@@ -114,28 +110,16 @@ pub async fn agent_installs(
 }
 
 /// Orbit Fleet 4.7: the host detail's health checklist read (agents on
-/// PATH, fleet's hooks and the worker guard, tmux). LocalOnly like
-/// `provision_hosts`: it reads a host's `~/.claude/settings.json` over this
-/// app's own SSH, which a paired client does not administer.
+/// PATH, fleet's hooks and the worker guard, tmux). Paired, the hub runs it
+/// over its own SSH (`check_host`, the hub owner's): the hub is the one whose
+/// route and hooks matter, and this machine may not reach the host at all.
 #[tauri::command]
 pub async fn check_host(
     args: fleet_core::service::host_check::CheckHostArgs,
     backend: State<'_, Arc<FleetBackend>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<fleet_core::service::host_check::HostCheck, IpcError> {
-    backend.refuse_local_only("check_host")?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    // M15 G7.12: Settings › Projects asks about a base path too.
-    fleet_core::service::host_check::check_host_with(
-        &ssh,
-        &args.alias,
-        args.base_path.as_deref(),
-        now,
-    )
-    .await
+    routed::check_host(&backend, args, &ssh).await
 }
 
 // ---- Orbit Fleet 4.9: the add-host wizard ------------------------------
@@ -228,14 +212,15 @@ pub fn hide_host(
     hosts::hide_host(args, &store)
 }
 
-#[tauri::command(async)]
-pub fn set_account_nickname(
+/// Paired, the nickname is the hub's (its `set_account_nickname`), so every
+/// device that reads `list_accounts` shows it; the row event follows.
+#[tauri::command]
+pub async fn set_account_nickname(
     args: SetAccountNicknameArgs,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<AccountRow, IpcError> {
-    backend.refuse_local_only("set_account_nickname")?;
-    hosts::set_account_nickname(args, &store)
+    routed::set_account_nickname(&backend, args, &store).await
 }
 
 /// The routing, away from `tauri::State` so the tests can drive it.
@@ -257,6 +242,31 @@ pub(crate) mod routed {
         }
     }
 
+    /// Paired, the candidates are the HUB's ~/.ssh/config hosts: the hub is
+    /// the one that SSHes to whatever `add_host` registers, so this machine's
+    /// config would offer aliases the hub cannot resolve.
+    pub async fn discover_hosts(backend: &FleetBackend) -> Result<Vec<SshHost>, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("discover_hosts", &serde_json::json!({})).await,
+            None => hosts::discover_hosts_fresh().await,
+        }
+    }
+
+    /// Paired, the hub probes the alias over its own SSH and keeps the host
+    /// only if it answers; it asks for the owner's trusted full device and
+    /// says `fleet-hub client trust <name>` to any other.
+    pub async fn add_host(
+        backend: &FleetBackend,
+        args: AddHostArgs,
+        store: &Mutex<Store>,
+        ssh: &SshClient,
+    ) -> Result<HostRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("add_host", &args).await,
+            None => hosts::add_host(args, store, ssh).await,
+        }
+    }
+
     pub async fn list_accounts(
         backend: &FleetBackend,
         store: &Mutex<Store>,
@@ -264,6 +274,39 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.list_accounts().await,
             None => hosts::list_accounts(store),
+        }
+    }
+
+    pub async fn check_host(
+        backend: &FleetBackend,
+        args: fleet_core::service::host_check::CheckHostArgs,
+        ssh: &Arc<SshClient>,
+    ) -> Result<fleet_core::service::host_check::HostCheck, IpcError> {
+        if let Some(hub) = backend.hub() {
+            return hub.route("check_host", &args).await;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // M15 G7.12: Settings › Projects asks about a base path too.
+        fleet_core::service::host_check::check_host_with(
+            ssh,
+            &args.alias,
+            args.base_path.as_deref(),
+            now,
+        )
+        .await
+    }
+
+    pub async fn set_account_nickname(
+        backend: &FleetBackend,
+        args: SetAccountNicknameArgs,
+        store: &Mutex<Store>,
+    ) -> Result<AccountRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("set_account_nickname", &args).await,
+            None => hosts::set_account_nickname(args, store),
         }
     }
 

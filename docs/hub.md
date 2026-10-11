@@ -1198,12 +1198,18 @@ What a client may do:
   since an auto-send chip is a prompt one tap away. A `set` may name the list
   it last read as `expected`; if another device saved in between, it answers
   `E_CONFLICT` instead of overwriting that edit.
-- **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
+- **Neither mode reaches fleet admin.** `provision_hosts`,
   `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
   `set_host_harnesses`, `pair_client`, `revoke_client`, `set_client_trust`
   and `list_clients` are master-token only, so a paired phone can neither
   re-provision the fleet nor pair a second device nor revoke (or trust) your
-  own client — nor even enumerate the other devices you have paired.
+  own client — nor even enumerate the other devices you have paired. The
+  hub owner's own devices (`Access::Person`) are the exception for a few:
+  `add_host` and `install_agent` (contract 13; the writes ask a trusted
+  `full` device), `set_account_nickname` and `check_host` — so the phone and
+  a paired desktop add a host from the hub's SSH config, name an account and
+  read a host's health checklist, where before only a standalone desktop
+  could.
 - **Except what you grant: the asset catalog.** `fleet-hub client grant
   <name> assets` lets that one client manage the asset catalog from its
   Assets tab — configure and load the checkout, create / edit / delete
@@ -3409,15 +3415,12 @@ Every command below refuses in hub client mode; the full table, with the command
 | --- | --- |
 | `account_spend` | this app collects no usage while a hub owns the fleet, so its store has no spend per account; read usage on the hub |
 | `account_usage_history` | this app does not poll account usage while a hub owns the fleet, so it keeps no history; read usage on the hub |
-| `add_host` | registering a host is fleet administration, which the hub reserves for its own operator — add it there with `fleet-hub` |
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `catalog_spawn_author_session` | an author session is a Claude session started in the catalog's checkout on the machine that owns it, and the hub has no tool that starts one; edit the assets from this panel, or start a session in the checkout on the hub's machine |
-| `check_host` | the health checklist reads a host's settings over this app's own SSH; repair a host's hooks from the hub with `fleet-hub provision --host <alias>` |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
 | `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
 | `discard_host_setup` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
-| `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
 | `draft_commit_message` | the hub exposes no draft tool — a commit message is drafted where the commit is made: in the session, or from a standalone app |
 | `fetch_page_source` | a page's data sources read this fleet's store, which the hub owns; read the same numbers on the hub with usage_report |
@@ -3457,7 +3460,6 @@ Every command below refuses in hub client mode; the full table, with the command
 | `rotate_host_token` | it re-provisions the host to report to this app; rotate the token on the hub |
 | `run_host_setup_check` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `save_host_setup` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
-| `set_account_nickname` | the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `status_map_proposals` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |

@@ -96,7 +96,7 @@ describe('hubBlock', () => {
   });
 
   it('the fleet-administration actions say a client is not the administrator', () => {
-    for (const action of ['add_host', 'remove_host', 'hide_host'] as const) {
+    for (const action of ['remove_host', 'hide_host'] as const) {
       expect(hubBlock(action, remote)!.toLowerCase(), action).toContain('client');
     }
   });
@@ -254,9 +254,9 @@ describe('hubActionBlocked', () => {
   // the connection, and says the REASONS sentence, not an offline one.
   it('a refused action is blocked the same way whatever the connection is doing', () => {
     for (const conn of [CONNECTING, CONNECTED, RECONNECTING, OFFLINE, TOO_OLD, TOO_NEW]) {
-      const why = hubActionBlocked('add_host', remote, conn);
+      const why = hubActionBlocked('remove_host', remote, conn);
       expect(why, conn.state).not.toBeNull();
-      expect(why, conn.state).toBe(hubBlock('add_host', remote));
+      expect(why, conn.state).toBe(hubBlock('remove_host', remote));
       expect(why!.toLowerCase(), conn.state).toContain('client');
     }
   });
