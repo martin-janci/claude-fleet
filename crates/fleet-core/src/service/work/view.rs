@@ -1645,6 +1645,32 @@ impl Graph {
         self.trackers.contains_key(&id)
     }
 
+    /// Every group [`group_of`] DERIVES, as lower-cased label → its id.
+    ///
+    /// A section is bucketed by its id (`tree`'s `groups.entry`) and ordered
+    /// by its LABEL ([`sort_key`]), so two groups that merely share a label
+    /// render as two sections with one name. Free text equal to a derived
+    /// group's name is the way left into that, and `structure::group_value`
+    /// refuses it by naming the id to pass instead — which is why this
+    /// answers the id and not just the names.
+    pub(crate) fn derived_group_labels(&self) -> HashMap<String, String> {
+        let mut out: HashMap<String, String> = HashMap::new();
+        for repo in self.repo_groups() {
+            out.insert(repo.to_lowercase(), format!("repo:{repo}"));
+        }
+        for i in self.items.values() {
+            if let (Some(tid), Some(c)) = (i.item.tracker_id, i.containers.first()) {
+                let label =
+                    container_label(self.trackers.get(&tid).map(|t| t.provider.as_str()), c);
+                out.insert(label.to_lowercase(), format!("tracker:{tid}:{c}"));
+            }
+            if let Some(p) = i.item.key.as_deref().and_then(key_prefix) {
+                out.insert(p.to_lowercase(), format!("key:{p}"));
+            }
+        }
+        out
+    }
+
     fn repo_of(&self, l: &ViewLink) -> Option<String> {
         let pid = match self.session_of(l) {
             Some(row) => row.project_id,
