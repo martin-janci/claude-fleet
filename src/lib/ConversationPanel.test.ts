@@ -1023,6 +1023,42 @@ describe('ConversationPanel model / effort pickers', () => {
     expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/effort high');
     expect(pick.value).toBe('high');
   });
+
+  it("lists Codex's models for a Codex session and relaunches on a confirmed pick", async () => {
+    const mockedInvoke = invoke as unknown as ReturnType<typeof vi.fn>;
+    mockedInvoke.mockClear();
+    await mountPanel({ agent: 'codex', model: 'gpt-6-sol' });
+    const pick = screen.getByTestId('conv-model-pick') as HTMLSelectElement;
+    const values = Array.from(pick.options).map((o) => o.value);
+    expect(pick.options[0].textContent).toBe('GPT-6-Sol');
+    expect(values).toContain('gpt-6.1-sol');
+    expect(values).not.toContain('opus');
+    await fireEvent.change(pick, { target: { value: 'gpt-6.1-sol' } });
+    await settle();
+    // Codex's `/model` takes no argument: nothing is typed into the pane.
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(pick.value).toBe('');
+    expect(mockedInvoke).not.toHaveBeenCalledWith('restart_session', expect.anything());
+    await fireEvent.click(screen.getByTestId('conv-relaunch-confirm'));
+    await settle();
+    expect(mockedInvoke).toHaveBeenCalledWith('restart_session', {
+      args: { host_alias: 'local', name: 'ctl', model: 'gpt-6.1-sol' },
+    });
+  });
+
+  it('offers a Codex session no `auto` effort and no Claude slash commands', async () => {
+    await mountPanel({ agent: 'codex' });
+    const effort = screen.getByTestId('conv-effort-pick') as HTMLSelectElement;
+    expect(Array.from(effort.options).map((o) => o.value)).not.toContain('auto');
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: '/n' } });
+    await settle();
+    const menu = screen.getByTestId('conv-slash-menu');
+    expect(menu.textContent).toContain('/new');
+    await fireEvent.input(box, { target: { value: '/context' } });
+    await settle();
+    expect(screen.queryByTestId('conv-slash-menu')).toBeNull();
+  });
 });
 
 describe('ConversationPanel slash commands', () => {

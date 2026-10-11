@@ -920,15 +920,74 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
  * whole draft is one token that begins with `/` (no spaces or newlines): once
  * an argument or a second line is being typed, the menu gets out of the way.
  */
-export function matchSlashCommands(draft: string, extra: readonly SlashCommand[] = []): SlashCommand[] {
+export function matchSlashCommands(
+  draft: string,
+  extra: readonly SlashCommand[] = [],
+  builtins: readonly SlashCommand[] = SLASH_COMMANDS,
+): SlashCommand[] {
   if (!draft.startsWith('/') || /\s/.test(draft)) return [];
   const prefix = draft.slice(1).toLowerCase();
   // A project skill named like a built-in is not offered twice: the REPL
   // runs the built-in.
-  const builtin = new Set(SLASH_COMMANDS.map((c) => c.name));
-  return [...SLASH_COMMANDS, ...extra.filter((c) => !builtin.has(c.name))].filter((c) =>
+  const builtin = new Set(builtins.map((c) => c.name));
+  return [...builtins, ...extra.filter((c) => !builtin.has(c.name))].filter((c) =>
     c.name.toLowerCase().startsWith(prefix),
   );
+}
+
+/**
+ * Codex's built-in commands worth offering from the composer (its `/` menu
+ * lists about fifty), as the adapter lists them
+ * (`crates/fleet-core/src/agent_adapter/codex.rs` SLASH). None takes an
+ * argument on the same line except `/mention` and `/rename`.
+ */
+export const CODEX_SLASH_COMMANDS: readonly SlashCommand[] = [
+  { name: 'model', description: 'Choose the model and reasoning effort' },
+  { name: 'permissions', description: 'Choose what Codex is allowed to do' },
+  { name: 'new', description: 'Start a new chat' },
+  { name: 'compact', description: 'Summarise the conversation to free context' },
+  { name: 'status', description: 'Show the configuration and token usage' },
+  { name: 'diff', description: 'Show the git diff, untracked files included' },
+  { name: 'review', description: 'Review the current changes' },
+  { name: 'plan', description: 'Switch to Plan mode' },
+  { name: 'mention', description: 'Mention a file', args: true },
+  { name: 'resume', description: 'Resume a saved chat' },
+  { name: 'fork', description: 'Fork the current chat' },
+  { name: 'rename', description: 'Rename the current thread', args: true },
+  { name: 'init', description: 'Write an AGENTS.md for this project' },
+  { name: 'skills', description: 'Use skills' },
+  { name: 'mcp', description: 'List MCP tools' },
+  { name: 'hooks', description: 'View and manage lifecycle hooks' },
+  { name: 'memories', description: 'Configure memory use and generation' },
+  { name: 'copy', description: 'Copy the last response' },
+  { name: 'export', description: 'Export the conversation as markdown' },
+  { name: 'exit', description: 'Quit Codex (the tmux session stays)' },
+];
+
+/** The built-in slash commands the composer offers for `agent`'s session. */
+export function slashCommandsFor(agent: SessionAgent): readonly SlashCommand[] {
+  return agent === 'codex' ? CODEX_SLASH_COMMANDS : SLASH_COMMANDS;
+}
+
+/** Claude Code commands Codex runs under another name: a `/clear` chip in
+ *  a Codex session starts a new chat, as it does in Claude Code. */
+const CODEX_SLASH_ALIASES: Readonly<Record<string, string>> = { clear: 'new' };
+
+/**
+ * A quick-action chip as `agent`'s session can take it: the same chip, a
+ * slash command renamed to the agent's own spelling, or `null` when it names
+ * a command the agent does not have (Claude's `/context` typed into Codex
+ * would be sent as a prompt). Only Codex is narrowed: a Claude session may
+ * run a project skill no list here knows of.
+ */
+export function presetForAgent<P extends { text: string }>(p: P, agent: SessionAgent): P | null {
+  if (agent !== 'codex') return p;
+  const m = /^\/([A-Za-z][\w:-]*)(.*)$/s.exec(p.text.trim());
+  if (!m) return p;
+  const name = m[1].toLowerCase();
+  if (CODEX_SLASH_COMMANDS.some((c) => c.name === name)) return p;
+  const alias = CODEX_SLASH_ALIASES[name];
+  return alias ? { ...p, text: `/${alias}${m[2]}` } : null;
 }
 
 /** What identifies a turn across reloads and "Load older": its prompt's
@@ -998,6 +1057,70 @@ export const EFFORT_OPTIONS: readonly PickerOption[] = [
   ...LAUNCH_EFFORT_OPTIONS,
 ];
 
+/** The models Codex lists (`codex debug models`), newest first as its
+ *  `/model` picker orders them — the adapter's MODELS
+ *  (`crates/fleet-core/src/agent_adapter/codex.rs`). */
+export const CODEX_MODEL_OPTIONS: readonly PickerOption[] = [
+  { value: 'gpt-6.1-sol', label: 'GPT-6.1-Sol' },
+  { value: 'gpt-6-astra', label: 'GPT-6-Astra' },
+  { value: 'gpt-6-sol', label: 'GPT-6-Sol' },
+  { value: 'gpt-6-luna', label: 'GPT-6-Luna' },
+  { value: 'gpt-5.6-sol', label: 'GPT-5.6-Sol' },
+  { value: 'gpt-5.6-terra', label: 'GPT-5.6-Terra' },
+  { value: 'gpt-5.6-luna', label: 'GPT-5.6-Luna' },
+  { value: 'gpt-5.5', label: 'GPT-5.5' },
+];
+
+/** The reasoning levels Codex takes as `model_reasoning_effort` that a
+ *  session stores (the adapter's EFFORTS). Codex has no `auto`. */
+export const CODEX_EFFORT_OPTIONS: readonly PickerOption[] = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra high' },
+  { value: 'max', label: 'Max' },
+];
+
+/**
+ * How `agent` changes its model or effort mid-session. Claude Code reads
+ * `/model <alias>` and `/effort <level>` from the prompt line (`'command'`).
+ * Codex's `/model` takes no argument — it opens a picker in the terminal —
+ * so fleet relaunches it on the same conversation with `-m` and
+ * `model_reasoning_effort` instead (`'relaunch'`, `restart_session`'s
+ * `model` / `effort`).
+ */
+export type ModelSwitchMode = 'command' | 'relaunch';
+
+/** What a session of `agent` offers in its model / effort pickers and how a
+ *  pick reaches it. `models` and `efforts` are what the composer's pickers
+ *  list mid-session; `launchModels` / `launchEfforts` what a start takes. */
+export interface AgentModelProfile {
+  mode: ModelSwitchMode;
+  models: readonly PickerOption[];
+  efforts: readonly PickerOption[];
+  launchModels: readonly PickerOption[];
+  launchEfforts: readonly PickerOption[];
+}
+
+export function agentModelProfile(agent: SessionAgent): AgentModelProfile {
+  if (agent === 'codex') {
+    return {
+      mode: 'relaunch',
+      models: CODEX_MODEL_OPTIONS,
+      efforts: CODEX_EFFORT_OPTIONS,
+      launchModels: CODEX_MODEL_OPTIONS,
+      launchEfforts: CODEX_EFFORT_OPTIONS,
+    };
+  }
+  return {
+    mode: 'command',
+    models: MODEL_OPTIONS,
+    efforts: EFFORT_OPTIONS,
+    launchModels: MODEL_OPTIONS.filter((o) => o.value !== 'default'),
+    launchEfforts: LAUNCH_EFFORT_OPTIONS,
+  };
+}
+
 /** The line a picker sends: `/model opus`, `/effort high`. `null` for an
  *  empty or multi-word value, which the REPL would not read as one argument. */
 export function pickerCommand(cmd: 'model' | 'effort', value: string): string | null {
@@ -1007,9 +1130,13 @@ export function pickerCommand(cmd: 'model' | 'effort', value: string): string | 
 }
 
 /** Short label for a transcript model id: `claude-opus-5-5` → `opus 5.5`,
- *  `claude-sonnet-5[1m]` → `sonnet 5 [1m]`. Anything else is returned as-is. */
+ *  `claude-sonnet-5[1m]` → `sonnet 5 [1m]`, a Codex model by its picker
+ *  label (`GPT-6-Sol`). Anything else is returned as-is. */
 export function modelShortLabel(model: string | null): string | null {
   if (!model) return null;
+  // A Codex model reads as Codex's own picker names it: `gpt-6-sol` → `GPT-6-Sol`.
+  const codex = CODEX_MODEL_OPTIONS.find((o) => o.value === model.trim().toLowerCase());
+  if (codex) return codex.label;
   const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?$/i.exec(model.trim());
   if (!m) return model;
   const ver = m[3] ? `${m[2]}.${m[3]}` : m[2];

@@ -3525,6 +3525,8 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         name: "demo".into(),
                         force: false,
                         profile: Some("work".into()),
+                        model: None,
+                        effort: None,
                     },
                     s,
                     h,
