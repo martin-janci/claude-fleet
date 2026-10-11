@@ -2,6 +2,7 @@
 //! resumes, and one real run over a JSONL file through a local shell.
 
 use super::*;
+#[cfg(unix)]
 use crate::ssh::LocalExec;
 
 fn user(text: &str, ts: &str) -> String {
@@ -101,6 +102,9 @@ fn every_value_in_the_script_is_quoted() {
     assert!(s.contains("'/tmp/a b/$(rm -rf ~).jsonl'"), "{s}");
 }
 
+// The pass runs its script in the host's bash, like `git_fixture`; a
+// Windows runner's `bash` is not that shell (it never sees the temp path).
+#[cfg(unix)]
 #[tokio::test]
 async fn a_pass_indexes_new_text_and_resumes_where_it_stopped() {
     let dir = tempfile::tempdir().unwrap();
