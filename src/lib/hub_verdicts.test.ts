@@ -103,8 +103,11 @@ describe('ROUTED_ACTIONS against the generated routed/routed_unless commands', (
 //                  this reason to a paired desktop through `resourceBlock`
 //   host_tokens -> list_host_tokens / set_host_token_mode / rotate_host_token
 //                  (HostDetail.svelte's per-host token controls)
+//   provision_all -> provision_hosts for every host (Settings → Control API);
+//                  one host's refresh routes (`routed_unless`)
 const REASONS_KEYS_THAT_ARE_NOT_COMMANDS: ReadonlySet<string> = new Set([
   'repo_write',
+  'provision_all',
   'fleet_settings',
   'host_tokens',
   'catalog_registry',

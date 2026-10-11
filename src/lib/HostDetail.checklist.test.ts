@@ -100,13 +100,30 @@ describe('HostDetail: health checklist', () => {
     expect(props.onnewsession).toHaveBeenCalledTimes(1);
   });
 
-  it('a paired client cannot run the checks or re-provision, and says why', () => {
+  it('a paired client cannot run the checks, and says why', () => {
     hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
     mount();
     const run = screen.getByTestId('detail-run-checks') as HTMLButtonElement;
-    const prov = screen.getByTestId('detail-reprovision') as HTMLButtonElement;
-    expect(run.disabled && prov.disabled).toBe(true);
+    expect(run.disabled).toBe(true);
     expect(run.title).toMatch(/paired client/);
+  });
+
+  // mefistos (2026-10-11): the button sat disabled on every paired desktop.
+  // It now asks the hub to refresh this one host; only a dropped link blocks it.
+  it('a paired client re-provisions through the hub while connected', async () => {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
+    hubConnection.set({ state: 'connected' });
+    mount();
+    const prov = screen.getByTestId('detail-reprovision') as HTMLButtonElement;
+    expect(prov.disabled).toBe(false);
+    await fireEvent.click(prov);
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'provision_hosts')).toBe(true));
+    const call = inv.mock.calls.find((c) => c[0] === 'provision_hosts')!;
+    expect(call[1]).toEqual({ rotate: false, host: 'mercury' });
+    expect(inv.mock.calls.some((c) => c[0] === 'check_host')).toBe(false);
+
+    hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 1, reason: 'test' });
+    await waitFor(() => expect(prov.disabled).toBe(true));
   });
 
   it('New shows the Hex field with its own step text while checking and re-provisioning', async () => {
