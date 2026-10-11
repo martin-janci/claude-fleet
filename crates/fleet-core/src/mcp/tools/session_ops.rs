@@ -466,6 +466,20 @@ impl FleetTools {
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await
             .map_err(to_mcp_err)?;
+        // A person's start answers Jev's host proposal, if one is waiting
+        // (gap plan G7.3: the phone asks the hub for it). Best effort.
+        if let (None, false, Some(project_id)) =
+            (&caller.host_alias, caller.is_operator(), row.project_id)
+        {
+            if let Ok(s) = lock(&self.store) {
+                let _ = crate::service::decide::host_placement::record_start(
+                    &s,
+                    project_id,
+                    &row.host_alias,
+                    crate::store::now_unix(),
+                );
+            }
+        }
         ok_json(&row)
     }
 
@@ -980,7 +994,8 @@ impl FleetTools {
         session on a host with an initial prompt, which becomes its default \
         friendly name. Returns the claude_session_id AND the fleet row \
         (`session`; absent until reconcile matches it, on the next tick) for \
-        session_transcript { session_id }.")]
+        session_transcript { session_id }. agent \"codex\" needs \
+        project_id and takes no read_only or stop limits.")]
     pub(super) async fn new_bg_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1042,6 +1057,7 @@ impl FleetTools {
             args,
             &self.store,
             &self.ssh,
+            &self.reg,
             owner,
         )
         .await

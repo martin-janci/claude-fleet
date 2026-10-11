@@ -1356,9 +1356,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "propose_host_placement",
-        Verdict::LocalOnly {
-            instead: "the decision model and the account usage are the hub's while it owns \
-                      the fleet; pick the host as usual",
+        Verdict::Routed {
+            tool: "propose_host_placement",
         },
     ),
     (

@@ -538,6 +538,14 @@ pub(crate) const KIND_FENCES: &[(&str, KindFence)] = &[
         ),
     ),
     (
+        "repair",
+        KindFence::NoSessionContent(
+            "a `RepairProgress`: the caller's own opaque `progress_token` (validated \
+            like a start token), one of four fixed step names, its index and a state. \
+            It names no host, no session, no person and no path",
+        ),
+    ),
+    (
         "work",
         KindFence::NoSessionContent(
             "tracker items, trackers and Work-view structure. Org data, not session data, \

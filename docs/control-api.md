@@ -330,13 +330,19 @@ Index by area (names only; see the reference for details):
 - **Fleet & hosts** — `fleet_health` (with `trackers`: each tracker's sync
   health and the detection backlog, from cached sync state; a per-host token
   sees its own org's trackers; and `org_budgets`, the orgs at or over a
-  daily or monthly budget, for a caller that sees every session),
+  daily or monthly budget, for a caller that sees every session; `devices`,
+  the paired device count with the caller's last seen and the hub's last
+  sync; `playbooks_week`, playbook runs this week per kind; `decide.week`,
+  this week's decision counts),
   `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
   `probe_host`, `hide_host`, `provision_hosts`, `wizard_state` (a wizard
   left half-way, Add host or Add a project, kept on the hub so it resumes
   on the person's other device; not served to a per-host token),
+  `propose_host_placement` (the decision model's host for a new session of
+  a project: `{host_alias, confidence_pct, run_id}` or null; a person's
+  device only, never a per-host token; hub contract 17),
   `list_accounts`, `account_usage` (each account's latest plan usage: the
   5-hour and weekly windows with their reset times, status and when it was
   fetched, as the hub's usage poll last answered; never fetches; hub
@@ -446,7 +452,9 @@ Index by area (names only; see the reference for details):
   `repair_session` (explicit repair, same as the Repair workspace button:
   may unregister this worktree's stale entry, adopt a moved checkout,
   recreate the branch and respawn the pane; behind the desktop confirmation
-  when `mcp.confirm_destructive` is on), `kill_session`, `safe_kill_session`,
+  when `mcp.confirm_destructive` is on; a `progress_token` streams its
+  check / fix / verify / pane steps as `repair:progress` events of kind
+  `repair`), `kill_session`, `safe_kill_session`,
   `dismiss_ghost_session`, `adopt_session` (a live tmux session fleet did
   not start, `started_at` null, becomes fleet's: `started_at` is set and the
   caller owns it when nobody did; the pane is untouched; `project_id` puts it

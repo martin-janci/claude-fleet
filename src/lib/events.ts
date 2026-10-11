@@ -158,6 +158,9 @@ type Queued =
   | { name: 'sync:progress'; payload: SyncProgress }
   | { name: 'move:progress'; payload: MoveProgress }
   | { name: 'start:progress'; payload: StartProgressFrame }
+  // `repair:progress` (gap plan G7.3): one step of a `repair_session` asked
+  // with a progress_token. The phone draws it; no desktop listener yet.
+  | { name: 'repair:progress'; payload: unknown }
   | { name: 'work:item'; payload: WorkItemRow }
   | { name: 'work:tracker'; payload: TrackerRow }
   | { name: 'work:tracker_removed'; payload: { id: number } }

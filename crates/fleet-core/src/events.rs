@@ -97,6 +97,10 @@ pub enum RowChange {
     /// worktree, tmux, agent. Keyed by the caller's own opaque start token,
     /// never by host or name. Not a store row.
     StartProgress(StartProgress),
+    /// A step boundary of an explicit `repair_session` (gap plan G7.3):
+    /// check, fix, verify, pane — the phone's repair checklist. Keyed by
+    /// the caller's own opaque token, like [`RowChange::StartProgress`].
+    RepairProgress(RepairProgress),
     /// A tracker item's normalised row changed (work graph M3). Emitted
     /// only on a real change: a sync pass that finds nothing new is silent.
     /// Never sent to a host-bound `/events` stream (the interim fence of
@@ -461,6 +465,59 @@ impl StartStep {
     }
 }
 
+/// The four steps an explicit workspace repair goes through (gap plan
+/// G7.3), in order. A step with nothing to do reports `done` as the repair
+/// passes it.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairStep {
+    /// Probing the host: the directory, the worktree, the branch, tmux.
+    Check,
+    /// The git steps: unregister, re-add, adopt, recreate the branch.
+    Fix,
+    /// Probing again: the directory is a healthy worktree on its branch.
+    Verify,
+    /// The tmux session: created or respawned in the directory.
+    Pane,
+}
+
+impl RepairStep {
+    pub const ALL: [RepairStep; 4] = [
+        RepairStep::Check,
+        RepairStep::Fix,
+        RepairStep::Verify,
+        RepairStep::Pane,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RepairStep::Check => "check",
+            RepairStep::Fix => "fix",
+            RepairStep::Verify => "verify",
+            RepairStep::Pane => "pane",
+        }
+    }
+
+    /// 1-based position in [`Self::ALL`].
+    pub const fn index(self) -> u8 {
+        self as u8 + 1
+    }
+}
+
+/// One step boundary of an explicit `repair_session` with a
+/// `progress_token`: the token the caller minted, the step, its place and
+/// a state (`started`, `done` or `failed`). Like [`StartProgress`] it names
+/// no host, no session and no path; the report and any error reach the
+/// caller through the tool's result.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RepairProgress {
+    pub token: String,
+    pub step: RepairStep,
+    pub index: u8,
+    pub total: u8,
+    pub state: MoveStepState,
+}
+
 /// One step boundary of an in-flight `new_session`. `token` is the opaque
 /// string the caller minted and passed as `start_token`, so only the client
 /// that started the session can tell whose start this is: the frame names
@@ -501,6 +558,7 @@ impl RowChange {
             RowChange::SyncProgress(_) => "sync:progress",
             RowChange::MoveProgress(_) => "move:progress",
             RowChange::StartProgress(_) => "start:progress",
+            RowChange::RepairProgress(_) => "repair:progress",
             RowChange::WorkItemUpdated(_) => "work:item",
             RowChange::TrackerUpdated(_) => "work:tracker",
             RowChange::TrackerRemoved(_) => "work:tracker_removed",
@@ -563,6 +621,7 @@ impl RowChange {
             RowChange::SyncProgress(p) => to_value(p),
             RowChange::MoveProgress(p) => to_value(p),
             RowChange::StartProgress(p) => to_value(p),
+            RowChange::RepairProgress(p) => to_value(p),
             RowChange::WorkItemUpdated(r) => to_value(r),
             RowChange::TrackerUpdated(r) => to_value(r),
             RowChange::TrackerRemoved(id) => serde_json::json!({ "id": id }),
@@ -656,6 +715,10 @@ pub trait EventBus: Send + Sync {
     /// See [`RowChange::StartProgress`].
     fn start_progress(&self, p: &StartProgress) {
         self.emit(&RowChange::StartProgress(p.clone()));
+    }
+    /// See [`RowChange::RepairProgress`].
+    fn repair_progress(&self, p: &RepairProgress) {
+        self.emit(&RowChange::RepairProgress(p.clone()));
     }
     /// See [`RowChange::GrantChanged`].
     fn grant_changed(&self, g: &GrantChanged) {
@@ -877,7 +940,7 @@ impl AttentionInputs {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 33] = [
+pub const EVENT_NAMES: [&str; 34] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -899,6 +962,7 @@ pub const EVENT_NAMES: [&str; 33] = [
     "sync:progress",
     "move:progress",
     "start:progress",
+    "repair:progress",
     "work:item",
     "work:tracker",
     "work:tracker_removed",
@@ -916,7 +980,7 @@ pub const EVENT_NAMES: [&str; 33] = [
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
 /// is what the `/events` route's `?kinds=` filter matches on.
 /// `event_kinds_cover_every_name` keeps it in step with the variants.
-pub const EVENT_KINDS: [&str; 20] = [
+pub const EVENT_KINDS: [&str; 21] = [
     "session",
     "host",
     "account",
@@ -929,6 +993,7 @@ pub const EVENT_KINDS: [&str; 20] = [
     "sync",
     "move",
     "start",
+    "repair",
     "work",
     "settings",
     "update",
@@ -1264,6 +1329,9 @@ impl EventBus for RecordingEventBus {
             RowChange::StartProgress(p) => {
                 format!("{}:{}:{}", p.token, p.step.as_str(), p.state.as_str())
             }
+            RowChange::RepairProgress(p) => {
+                format!("{}:{}:{}", p.token, p.step.as_str(), p.state.as_str())
+            }
             RowChange::WorkItemUpdated(r) => r.id.to_string(),
             RowChange::TrackerUpdated(r) => format!("{}:{}", r.id, r.state),
             RowChange::TrackerRemoved(id) => id.to_string(),
@@ -1486,6 +1554,7 @@ mod tests {
                 RowChange::SyncProgress(_) => pinned_name!("sync:progress"),
                 RowChange::MoveProgress(_) => pinned_name!("move:progress"),
                 RowChange::StartProgress(_) => pinned_name!("start:progress"),
+                RowChange::RepairProgress(_) => pinned_name!("repair:progress"),
                 RowChange::WorkItemUpdated(_) => pinned_name!("work:item"),
                 RowChange::TrackerUpdated(_) => pinned_name!("work:tracker"),
                 RowChange::TrackerRemoved(_) => pinned_name!("work:tracker_removed"),

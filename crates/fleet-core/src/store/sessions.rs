@@ -1520,6 +1520,23 @@ impl Store {
             .map(|n| n as u32)
     }
 
+    /// The `playbook_applied` details of session `id` since `since`, for
+    /// the week's playbook counts (`service::health::playbooks_since`).
+    /// Read through the `(session_id, at)` index.
+    pub fn playbook_details_since(
+        &self,
+        id: i64,
+        since: i64,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT detail FROM session_events \
+             WHERE session_id = ?1 AND at >= ?2 AND kind = 'playbook_applied' \
+               AND detail IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![id, since], |r| r.get::<_, String>(0))?;
+        rows.collect()
+    }
+
     /// Carry the row `(host_alias, old)` over to `new` after fleet renamed its
     /// tmux session (`rename_session`). Returns the renamed row, or `None`
     /// when no row held `old`.
@@ -2422,6 +2439,12 @@ impl Store {
     /// boundary (redesign step 5.13).
     pub fn bus_start_progress(&self, p: &crate::events::StartProgress) {
         self.bus.start_progress(p);
+    }
+
+    /// Emit `repair:progress` (not a store row): an explicit repair step
+    /// boundary for the caller that passed a `progress_token` (G7.3).
+    pub fn bus_repair_progress(&self, p: &crate::events::RepairProgress) {
+        self.bus.repair_progress(p);
     }
 
     /// Emit `confirm:changed` (not a store row): the confirmation queue

@@ -219,8 +219,6 @@ const REASONS = {
     'this app does not poll account usage while a hub owns the fleet, so it keeps no history',
   account_spend:
     'this app collects no usage while a hub owns the fleet, so it has no spend per account',
-  propose_host_placement:
-    'the decision model and the account usage are the hub’s while it owns the fleet; pick the host as usual',
   record_host_placement: 'the decision model’s runs are recorded on the hub that owns the fleet; nothing to record here',
   set_account_nickname:
     'the nickname lives in the hub’s database and there is no tool to set it',

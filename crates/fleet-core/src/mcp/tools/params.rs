@@ -961,6 +961,9 @@ pub struct RepairSessionParams {
     /// Nonce from an approved `E_CONFIRM_REQUIRED`.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+    /// 1–64 of A-Za-z0-9_-.
+    #[serde(default)]
+    pub progress_token: Option<String>,
 }
 
 // --- asset catalog ---------------------------------------------------------

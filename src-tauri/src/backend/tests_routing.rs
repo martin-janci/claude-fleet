@@ -565,6 +565,21 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "propose_host_placement",
+            "propose_host_placement",
+            json!({ "project_id": 7 }),
+            "null",
+            Box::new(|b, s, _| {
+                let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
+                let args =
+                    fleet_core::service::decide::host_placement::ProposeHostArgs { project_id: 7 };
+                block_on(commands::account_usage::routed::propose_host_placement(
+                    b, s, &cache, args,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "check_account_headroom",
             "check_account_headroom",
             json!({ "host_alias": "mac", "profile": "work" }),
@@ -3944,6 +3959,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     },
                     s,
                     h,
+                    &fleet_core::cancel::CancellationRegistry::new(),
                 ))
                 .map(|_| ())
             }),

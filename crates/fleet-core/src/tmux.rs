@@ -1462,6 +1462,11 @@ pub enum NamedKey {
     /// `ESC [ 2 0 0 ~ 3 ESC [ 2 0 1 ~` — the first key the dialog sees is
     /// ESC, which cancels it. `send-keys 3` delivers one raw `3`.
     Digit(DigitKey),
+    /// Meta (Alt) plus a letter or one of a few editing keys, from
+    /// [`MetaKey`]'s closed list: the REPL's word motions (M-b / M-f),
+    /// M-Enter for a newline without sending, and the phone's Alt key
+    /// (gap plan G7.3).
+    Meta(MetaKey),
 }
 
 /// An ordinal a dialog can be answered with: `1`..`9`, and nothing else.
@@ -1493,6 +1498,32 @@ pub const CTRL_NAMES: [&str; 19] = [
     "C-t", "C-u", "C-v", "C-w", "C-x", "C-y",
 ];
 
+/// A Meta (Alt) chord a pane may be sent: `M-a`..`M-z`, `M-Enter` (a
+/// newline in the prompt without sending it), `M-BSpace` (delete the word
+/// before the cursor) and `M-Left` / `M-Right` (move by word). Lower-case
+/// letters only: tmux reads `M-A` as Meta-Shift-a, another key. Private
+/// field, so [`new`](Self::new) is the only way in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetaKey(usize);
+
+/// The tmux names of the Meta chords [`MetaKey`] admits.
+pub const META_NAMES: [&str; 30] = [
+    "M-a", "M-b", "M-c", "M-d", "M-e", "M-f", "M-g", "M-h", "M-i", "M-j", "M-k", "M-l", "M-m",
+    "M-n", "M-o", "M-p", "M-q", "M-r", "M-s", "M-t", "M-u", "M-v", "M-w", "M-x", "M-y", "M-z",
+    "M-Enter", "M-BSpace", "M-Left", "M-Right",
+];
+
+impl MetaKey {
+    /// `Some` for a name in [`META_NAMES`], exactly as spelled there.
+    pub fn new(name: &str) -> Option<Self> {
+        META_NAMES.iter().position(|n| *n == name).map(Self)
+    }
+
+    pub fn tmux_name(self) -> &'static str {
+        META_NAMES[self.0]
+    }
+}
+
 impl CtrlKey {
     /// `Some` for a name in [`CTRL_NAMES`], exactly as spelled there.
     pub fn new(name: &str) -> Option<Self> {
@@ -1521,7 +1552,8 @@ impl NamedKey {
     /// `send_prompt` paths (the service function and the MCP tool) print
     /// this, so the message can never fall behind [`parse`](Self::parse).
     pub const VOCABULARY: &'static str = "Enter, Escape, Tab, BTab, Up, Down, Left, Right, C-c, \
-         C-a/b/d/e/f/g/h/k/l/n/o/p/r/t/u/v/w/x/y or a digit 1-9";
+         C-a/b/d/e/f/g/h/k/l/n/o/p/r/t/u/v/w/x/y, M-a..M-z, M-Enter, M-BSpace, M-Left, \
+         M-Right or a digit 1-9";
 
     /// Every key name [`parse`](Self::parse) accepts, digits included: what
     /// the `keys` argument's schema enumerates, so a client can tell a hub
@@ -1531,6 +1563,7 @@ impl NamedKey {
             "Enter", "Escape", "Tab", "BTab", "Up", "Down", "Left", "Right", "C-c",
         ];
         v.extend(CTRL_NAMES);
+        v.extend(META_NAMES);
         v.extend(DIGIT_NAMES);
         v
     }
@@ -1547,6 +1580,7 @@ impl NamedKey {
             "Right" => Some(Self::Right),
             "BTab" => Some(Self::BackTab),
             _ if s.starts_with("C-") => CtrlKey::new(s).map(Self::Ctrl),
+            _ if s.starts_with("M-") => MetaKey::new(s).map(Self::Meta),
             // Exactly one ASCII digit. `str::parse::<u8>` would accept
             // "+1", " 1" and "007"; a dialog answer must be the literal
             // keystroke or nothing.
@@ -1568,6 +1602,7 @@ impl NamedKey {
             Self::Right => "Right",
             Self::BackTab => "BTab",
             Self::Ctrl(k) => k.tmux_name(),
+            Self::Meta(k) => k.tmux_name(),
             // Sound by construction: `DigitKey`'s field is private and
             // `DigitKey::new` admits only 1..=9.
             Self::Digit(d) => DIGIT_NAMES[(d.get() - 1) as usize],
@@ -3725,14 +3760,32 @@ mod tests {
         // Tab and Enter under other names, flow control, suspend; and
         // anything that is not exactly a listed name.
         for refused in [
-            "C-i", "C-j", "C-m", "C-s", "C-q", "C-z", "C-A", "C-", "C-ab", "C-1", "M-x", "C-\\",
-            "S-Up", "up", "Home", "C-a ", " C-a",
+            "C-i", "C-j", "C-m", "C-s", "C-q", "C-z", "C-A", "C-", "C-ab", "C-1", "C-\\", "S-Up",
+            "up", "Home", "C-a ", " C-a", "M-A", "M-", "M-1", "M-Up", "M-Tab", "M-aa", "m-x",
+            "M-C-a",
         ] {
             assert_eq!(
                 NamedKey::parse(refused),
                 None,
                 "{refused:?} must be refused"
             );
+        }
+    }
+
+    #[test]
+    fn meta_chords_are_the_listed_ones() {
+        // The phone's Alt key (G7.3): every letter, and the four editing
+        // chords; the vocabulary names them.
+        assert_eq!(NamedKey::parse("M-x").map(NamedKey::tmux_name), Some("M-x"));
+        assert_eq!(
+            NamedKey::parse("M-Enter").map(NamedKey::tmux_name),
+            Some("M-Enter")
+        );
+        for name in META_NAMES {
+            assert!(NamedKey::parse(name).is_some(), "{name} parses");
+        }
+        for word in ["M-a..M-z", "M-Enter", "M-BSpace", "M-Left", "M-Right"] {
+            assert!(NamedKey::VOCABULARY.contains(word), "{word} is named");
         }
     }
 
