@@ -1,4 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+const nativeWriteText = vi.fn();
+vi.mock('./clipboard_native', () => ({ nativeWriteText: (t: string) => nativeWriteText(t) }));
+
 import { trimSelectionText, sanitizePaste, framePaste, copyText } from './clipboard';
 
 describe('trimSelectionText', () => {
@@ -66,5 +70,45 @@ describe('copyText', () => {
   it('resolves false without throwing when the Clipboard API is missing', async () => {
     setClipboard(undefined);
     await expect(copyText('x')).resolves.toBe(false);
+  });
+});
+
+describe('copyText in the desktop app', () => {
+  const webWrite = vi.fn();
+  let original: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: webWrite }, configurable: true });
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    nativeWriteText.mockReset();
+    webWrite.mockReset();
+  });
+  afterEach(() => {
+    Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+    if (original) Object.defineProperty(navigator, 'clipboard', original);
+    else Reflect.deleteProperty(navigator, 'clipboard');
+  });
+
+  it('writes through the native clipboard, not the web API that WKWebView rejects after an await', async () => {
+    nativeWriteText.mockResolvedValue({ ok: true, value: undefined });
+    await expect(copyText('tmux attach -t dev-x')).resolves.toBe(true);
+    expect(nativeWriteText).toHaveBeenCalledWith('tmux attach -t dev-x');
+    expect(webWrite).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the web API when the native write fails', async () => {
+    nativeWriteText.mockResolvedValue({ ok: false, error: { code: 'E_CLIPBOARD', message: 'no' } });
+    webWrite.mockResolvedValue(undefined);
+    await expect(copyText('x')).resolves.toBe(true);
+    expect(webWrite).toHaveBeenCalledWith('x');
+  });
+
+  it('reports the native error when both routes fail', async () => {
+    nativeWriteText.mockResolvedValue({ ok: false, error: { code: 'E_CLIPBOARD', message: 'plugin said no' } });
+    webWrite.mockRejectedValue(new Error('NotAllowedError'));
+    const onError = vi.fn();
+    await expect(copyText('x', onError)).resolves.toBe(false);
+    expect(String(onError.mock.calls[0][0])).toContain('plugin said no');
   });
 });

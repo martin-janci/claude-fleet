@@ -982,7 +982,7 @@
           {hubBlock('mcp_status', $hubStatus)}
         </p>
         <p class="hook-desc" data-testid="provision-remote">
-          {hubBlock('provision_hosts', $hubStatus)}
+          {hubBlock('provision_all', $hubStatus)}
         </p>
       </section>
     {:else}

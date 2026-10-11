@@ -1644,7 +1644,17 @@ pub(super) async fn kill_session_with(
         return Ok(id);
     }
     let tmux = (deps.exec)(&args.host_alias);
-    tmux.kill_session(&args.name).await?;
+    let tmux_gone = match tmux.kill_session(&args.name).await {
+        Ok(()) => false,
+        // A ghost: its tmux session (or the whole server) is already gone,
+        // so there is nothing to kill. Finish the bookkeeping below instead
+        // of failing with "can't find session" and leaving the row stuck.
+        Err(e) if crate::tmux::session_already_gone(&e.message) => {
+            tracing::info!(session_id = id, error = %e.message, "[kill] tmux already gone");
+            true
+        }
+        Err(e) => return Err(e),
+    };
     // Its shell terminals (step 5.3) go with it. Best-effort: a terminal
     // left behind is no session row, only a stray tmux session.
     super::terminals::close_all_after_kill(&*tmux, &args.name).await;
@@ -1659,8 +1669,20 @@ pub(super) async fn kill_session_with(
     // still ghosts the row, as before.
     if let Ok(s) = store.lock() {
         record_kill(&s, id, claude_sid.as_deref());
-        if let Err(e) = s.mark_session_killed(id, now_unix()) {
-            tracing::warn!(session_id = id, error = %e, "[kill] marking the killed row failed");
+        match s.mark_session_killed(id, now_unix()) {
+            // Already a ghost before this kill, with no tmux left: a
+            // resumable loss (`host_reboot`, `tmux_server_gone`) is exempt
+            // from the reap for the lost-session TTL, so the person's Kill
+            // would leave it listed for days. They asked for it gone.
+            Ok(None) if tmux_gone => {
+                if let Err(e) = s.delete_session(id) {
+                    tracing::warn!(session_id = id, error = %e, "[kill] removing the ghost row failed");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(session_id = id, error = %e, "[kill] marking the killed row failed");
+            }
         }
     }
     super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias)
@@ -2445,35 +2467,16 @@ pub async fn recreate_session(
         );
         (sess, cwd_src, pane_cmd)
     };
-    // Automatic self-repair (create-only): re-add a deleted worktree from its
-    // existing branch and use the verified path; anything more returns
-    // E_REPAIR_REQUIRED. Orphans (no project) keep the plain resolution.
-    let cwd = match crate::service::repair::ensure_session_workspace(
-        sess.id,
-        crate::service::repair::Entry::Recreate,
-        store,
-        ssh,
-    )
-    .await
-    {
-        Ok(rep) => rep.cwd,
+    // Recreate is the confirmed "rebuild it" action, so it brings the
+    // workspace back whatever that takes: re-clone a missing remote
+    // checkout, then repair — the explicit repair when the automatic one
+    // stops short (a stale `.git` link after a re-clone, a registration
+    // whose directory is gone). Orphans (no project) keep the plain
+    // resolution.
+    let cwd = match recreate_workspace(sess.id, &sess.host_alias, store, ssh).await {
+        Ok(cwd) => cwd,
         Err(e) if e.code == codes::E_NOREPO => {
             resolve_cwd_source(cwd_src, &sess.host_alias, ssh).await?
-        }
-        // The checkout itself is gone on a remote host: clone it back the
-        // way a new session there would, then repair again (a worktree row
-        // is re-added from its branch on origin). Locally the checkout is
-        // the user's own, so the refusal stands.
-        Err(e) if e.code == codes::E_REPO_MISSING && sess.host_alias != "local" => {
-            reclone_project_root(store, &**ssh, sess.id).await?;
-            crate::service::repair::ensure_session_workspace(
-                sess.id,
-                crate::service::repair::Entry::Recreate,
-                store,
-                ssh,
-            )
-            .await?
-            .cwd
         }
         Err(e) => return Err(e),
     };
@@ -2514,6 +2517,36 @@ pub async fn recreate_session(
         row
     };
     Ok(row)
+}
+
+/// The workspace a recreated session starts in. The automatic repair first;
+/// on a remote host whose checkout is gone, clone it back the way a new
+/// session there would and repair again (locally the checkout is the
+/// user's own, so that refusal stands); and when only an explicit repair
+/// can finish (`E_REPAIR_REQUIRED`), run it — the person already confirmed
+/// the rebuild, and the explicit repair never deletes a directory.
+async fn recreate_workspace(
+    session_id: i64,
+    host_alias: &str,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<String, IpcError> {
+    use crate::service::repair::{ensure_session_workspace, repair_session, Entry};
+    let first = match ensure_session_workspace(session_id, Entry::Recreate, store, ssh).await {
+        Err(e) if e.code == codes::E_REPO_MISSING && host_alias != "local" => {
+            reclone_project_root(store, &**ssh, session_id).await?;
+            ensure_session_workspace(session_id, Entry::Recreate, store, ssh).await
+        }
+        other => other,
+    };
+    match first {
+        Ok(rep) => Ok(rep.cwd),
+        Err(e) if e.code == codes::E_REPAIR_REQUIRED => {
+            tracing::info!(session_id, why = %e.message, "[recreate] running the explicit workspace repair");
+            Ok(repair_session(session_id, true, store, ssh).await?.cwd)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Clone a remote session's missing project checkout back to the root the

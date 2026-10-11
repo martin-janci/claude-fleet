@@ -129,6 +129,14 @@ paused, with Show and *Switch to <account>* (step 4.4's bulk move, one
 click). Not built: a hub vault for setup-tokens and API keys,
 and automatic switching when an account hits its limit.
 
+Single sign-on (docs/hub.md → *Sign in with Keycloak*): a hub with
+`FLEET_HUB_OIDC_ISSUER` set lets a person pair a device by signing in with
+Keycloak or another OIDC provider (`mcp/oidc.rs`, `/auth/oidc/start` →
+`/auth/oidc/callback` → an ordinary pairing code). Accounts are linked to
+people by (issuer, sub) (migration 167, `fleet-hub person link-sso`).
+OFF by default. Not built: org membership from Keycloak groups, logout at
+the provider, an SSO button in the desktop or mobile app.
+
 The headless `fleet-hub` daemon, `fleet-agent` for hosts the hub cannot reach
 over SSH, paired-client access for phones/browsers, and hub-client mode
 (pairing the desktop itself to a hub) are landed; see `docs/hub.md`. Their
@@ -355,7 +363,7 @@ task page's Activity tab also lists each session that started, was
 suggested, turned down or stopped, and each comment. Not yet: comments on
 the phone.
 
-Task attachments (migration 167, `work_item_attachments` and the
+Task attachments (migration 168, `work_item_attachments` and the
 content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept
 in SQLite so a hub backup carries them; a blob goes with the last live
 attachment naming it): `work_link { attach, item_id, name, mime,

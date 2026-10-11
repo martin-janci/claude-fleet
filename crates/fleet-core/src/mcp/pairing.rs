@@ -451,6 +451,10 @@ pub struct PairState {
     /// as `attempt_interval`.
     pub(crate) global_limit: usize,
     pub(crate) global_window: Duration,
+    /// Single sign-on (`mcp::oidc`): the provider a sign-in at
+    /// `/auth/oidc/start` goes to, or `None` when the hub has none — the
+    /// default, under which both `/auth/oidc` routes answer 404.
+    pub oidc: Option<Arc<super::oidc::OidcProvider>>,
 }
 
 impl PairState {
@@ -469,7 +473,14 @@ impl PairState {
             global: Arc::new(GlobalBudget::default()),
             global_limit: GLOBAL_ATTEMPTS,
             global_window: GLOBAL_WINDOW,
+            oidc: None,
         }
+    }
+
+    /// The same state with single sign-on through `oidc`.
+    pub fn with_oidc(mut self, oidc: Option<Arc<super::oidc::OidcProvider>>) -> Self {
+        self.oidc = oidc;
+        self
     }
 }
 

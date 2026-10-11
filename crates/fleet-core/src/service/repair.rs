@@ -2300,6 +2300,21 @@ pub(crate) async fn resolve_remote_paths(
     ))
 }
 
+/// The checkout a linked worktree path sits in: `<checkout>` for
+/// `<checkout>/.worktrees/<name>` or `<checkout>/.claude/worktrees/<name>`
+/// (the two layouts fleet creates; `<name>` may hold a `/`). `None` for any
+/// other shape, which keeps the settings-derived root. PURE.
+pub(crate) fn checkout_of_worktree(path: &str) -> Option<&str> {
+    ["/.claude/worktrees/", "/.worktrees/"]
+        .iter()
+        .find_map(|marker| {
+            let at = path.find(marker)?;
+            let (checkout, name) = (&path[..at], &path[at + marker.len()..]);
+            (checkout.starts_with('/') && checkout.len() > 1 && !name.is_empty())
+                .then_some(checkout)
+        })
+}
+
 /// Snapshot taken under the store lock; finalized off-lock (remote `$HOME`).
 struct SpecSeed {
     row: SessionRow,
@@ -2508,6 +2523,17 @@ pub(crate) async fn spec_for_session_with(
                 path_is_guess: recorded.is_none(),
                 row_is_local: false,
             });
+        // A recorded worktree belongs to the checkout it sits in, whatever
+        // the host's layout says today: a worktree made under
+        // `<root>/github.com/<owner>/<repo>` stays that repo's after the
+        // layout changes, and probing (or re-cloning) the settings-derived
+        // root instead reported a missing repo and left the worktree's
+        // `.git` link pointing at a checkout git was never asked about.
+        let root = recorded
+            .as_deref()
+            .and_then(checkout_of_worktree)
+            .map(str::to_string)
+            .unwrap_or(root);
         (root, wt)
     };
     if let Some(w) = &worktree {
@@ -4307,6 +4333,68 @@ mod tests {
         assert_eq!(w.path, wt);
         assert_eq!(w.branch, "feat/imports");
         assert!(!w.path_is_guess, "the host's own row is trusted");
+    }
+
+    /// PD-2229: a worktree made under the github layout
+    /// (`~/projects/github.com/<owner>/<repo>/.worktrees/<name>`) on a host
+    /// later switched to the flat layout. Its checkout is the repo it sits
+    /// in, not `~/projects/<repo>`: probing that one reported "repository is
+    /// missing", and Recreate cloned a second copy beside it whose git never
+    /// knew the worktree.
+    #[tokio::test]
+    async fn a_recorded_remote_worktree_keeps_its_own_checkout_after_a_layout_change() {
+        let s = Store::open_in_memory().unwrap();
+        crate::service::settings::set(&s, crate::service::settings::PROJECTS_LAYOUT, "flat")
+            .unwrap();
+        s.upsert_host("trn").unwrap();
+        let pid = s
+            .upsert_project("papayapos", "pos-frontend", "/repo")
+            .unwrap();
+        let wt = "/home/dev/projects/github.com/papayapos/pos-frontend/.worktrees/lively-mercury";
+        let wid = s
+            .upsert_worktree_on("trn", pid, "lively-mercury", wt, Some("lively-mercury"))
+            .unwrap();
+        let sid = s
+            .upsert_session(
+                "dev-pos--lively-mercury",
+                "trn",
+                Some(pid),
+                Some(wid),
+                1,
+                1,
+                "lost",
+                None,
+            )
+            .unwrap();
+        let store = Mutex::new(s);
+        let fake = crate::ssh_fake::FakeSsh::new();
+        fake.with_home("/home/dev");
+        let (spec, _) = spec_for_session_with(&store, &fake, sid).await.unwrap();
+        assert_eq!(
+            spec.project_root,
+            "/home/dev/projects/github.com/papayapos/pos-frontend"
+        );
+        assert_eq!(spec.worktree.unwrap().path, wt);
+    }
+
+    #[test]
+    fn checkout_of_worktree_reads_both_layouts_and_nothing_else() {
+        assert_eq!(
+            checkout_of_worktree("/p/o/r/.worktrees/feat"),
+            Some("/p/o/r")
+        );
+        assert_eq!(
+            checkout_of_worktree("/p/o/r/.worktrees/feat/imports"),
+            Some("/p/o/r")
+        );
+        assert_eq!(
+            checkout_of_worktree("/p/r/.claude/worktrees/x"),
+            Some("/p/r")
+        );
+        assert_eq!(checkout_of_worktree("/p/r/.worktrees/"), None);
+        assert_eq!(checkout_of_worktree("/.worktrees/x"), None);
+        assert_eq!(checkout_of_worktree("relative/.worktrees/x"), None);
+        assert_eq!(checkout_of_worktree("/srv/elsewhere/feat"), None);
     }
 
     /// The UX agent's operator dir is a system project: not a checkout, on

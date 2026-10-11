@@ -1901,11 +1901,17 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/166_routine_runs_outlive_routine.sql"),
         already_applied: Some(routine_runs_has_routine_name),
     },
+    // Single sign-on: `person_identities`, which person an OIDC account
+    // (issuer, subject) is. `IF NOT EXISTS`: safe to re-run.
+    Migration::plain(
+        167,
+        include_str!("../../migrations/167_person_identities.sql"),
+    ),
     // Task attachments and their content-addressed blobs: new tables,
     // idempotent.
     Migration::plain(
-        167,
-        include_str!("../../migrations/167_work_item_attachments.sql"),
+        168,
+        include_str!("../../migrations/168_work_item_attachments.sql"),
     ),
 ];
 
@@ -6339,7 +6345,7 @@ mod tests {
     /// `host_setups` into `wizard_state` as `add_host` rows, and the old
     /// table goes; the store still reads them as drafts.
     #[test]
-    fn migration_167_moves_the_add_host_drafts_into_wizard_state() {
+    fn migration_168_moves_the_add_host_drafts_into_wizard_state() {
         let s = store_at_version(164);
         s.conn
             .execute_batch(

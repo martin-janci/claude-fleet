@@ -1595,8 +1595,16 @@ impl TmuxExec for IdentityTmux {
     async fn new_session(&self, _n: &str, _c: &std::path::Path, _p: &str) -> Result<(), IpcError> {
         Ok(())
     }
-    async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
-        Ok(())
+    async fn kill_session(&self, n: &str) -> Result<(), IpcError> {
+        // As real tmux answers a kill of a session it does not have.
+        if self.sessions.iter().any(|t| t.name == n) {
+            Ok(())
+        } else {
+            Err(IpcError::new(
+                codes::E_TMUX,
+                format!("can't find session: {n}"),
+            ))
+        }
     }
     async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
         Ok(())
@@ -8091,4 +8099,59 @@ fn a_failed_profile_write_at_start_is_an_error_and_a_model_write_is_not() {
     assert_eq!(e.code, "E_INTERNAL");
     assert!(e.message.contains("profile"), "{}", e.message);
     assert!(!e.message.contains("injected"), "{}", e.message);
+}
+
+/// A ghost whose tmux is already gone (here a resumable `host_reboot` loss,
+/// which the reap keeps for the lost-session TTL): Kill used to fail with
+/// "can't find session" and leave the row listed. Now it succeeds and the
+/// row goes.
+#[tokio::test]
+async fn killing_a_ghost_whose_tmux_is_gone_removes_it() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("x")],
+        Some(boot_a_pid(Some(1))),
+        vec![],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let id = store
+        .lock()
+        .unwrap()
+        .get_session("x", "mefistos")
+        .unwrap()
+        .expect("row")
+        .id;
+    store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET status = 'ghost', lost_at = 1, lost_reason = 'host_reboot' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(Some(2))), vec![]);
+    let ssh = Arc::new(SshClient::new());
+    let killed = kill_session_with(
+        KillSessionArgs {
+            host_alias: "mefistos".into(),
+            name: "x".into(),
+            force: false,
+        },
+        &store,
+        &ssh,
+        &deps,
+    )
+    .await
+    .expect("a kill of a session tmux no longer has is done, not failed");
+    assert_eq!(killed, id);
+    assert!(store
+        .lock()
+        .unwrap()
+        .get_session_by_id(id)
+        .unwrap()
+        .is_none());
 }
