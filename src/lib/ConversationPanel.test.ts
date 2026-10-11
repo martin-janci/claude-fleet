@@ -1767,6 +1767,9 @@ describe('ConversationPanel live indicator', () => {
       expect(more.getAttribute('aria-label')).toBe('2 more quick prompts');
       await fireEvent.click(more);
       expect(screen.getAllByTestId('conv-chip').map((c) => c.textContent?.trim())).toEqual(['A', 'B', 'C', 'D', 'E']);
+      await fireEvent.click(more);
+      expect(screen.getAllByTestId('conv-chip').map((c) => c.textContent?.trim())).toEqual(['A', 'B', 'C']);
+      expect(screen.getByTestId('conv-chips-more').getAttribute('aria-expanded')).toBe('false');
     });
   });
 

@@ -24,6 +24,7 @@
   import { pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
   import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
+  import { chipsThatFit } from './composer_chips';
   import { contextLevel } from './attention';
   import { shortAge } from './session_status';
   import { onTimelineEvent, onConversationsChanged } from './live_events';
@@ -1378,8 +1379,10 @@
   const ctxLevel = $derived(contextLevel(session.context_pct));
   const suggestCompact = $derived(ctxLevel === 'warn' || ctxLevel === 'crit');
   const isCompactPreset = (p: ComposerPreset) => /^\/compact\b/.test(p.text.trim());
-  // The composer shows three quick prompts and puts the rest under ⋯
-  // (redesign 5.9); a suggested Compact stays out in front.
+  // The composer shows the quick prompts that fit on one line and puts the
+  // rest under ⋯ (redesign 5.9); a suggested Compact stays out in front.
+  // Three until the row has been measured (and always under jsdom, which
+  // lays nothing out).
   const CHIPS_SHOWN = 3;
   // Each chip as this agent takes it: a Codex session drops a chip for a
   // Claude-only command and spells `/clear` as `/new` (`presetForAgent`).
@@ -1388,10 +1391,66 @@
       .map((p) => presetForAgent(p, agent))
       .filter((p): p is ComposerPreset => p !== null && !!p.label.trim() && !!p.text.trim()),
   );
+  let chipsRow: HTMLDivElement | undefined = $state();
+  let chipsMeasure: HTMLSpanElement | undefined = $state();
+  let chipsSep: HTMLSpanElement | undefined = $state();
+  /** The indices of `validPresets` that fit on the collapsed row; null
+   *  until measured. */
+  let chipsFit = $state<number[] | null>(null);
+  const outerWidth = (el: Element) => {
+    const cs = getComputedStyle(el);
+    return el.getBoundingClientRect().width + (parseFloat(cs.marginLeft) || 0) + (parseFloat(cs.marginRight) || 0);
+  };
+  function measureChips() {
+    const row = chipsRow;
+    const m = chipsMeasure;
+    if (!row || !m) return;
+    const width = row.clientWidth;
+    const kids = Array.from(m.children);
+    let next: number[] | null = null;
+    if (width > 0 && kids.length === validPresets.length + 1) {
+      const gap = parseFloat(getComputedStyle(row).columnGap) || 0;
+      // The host's chips (Control's operator commands) share the line.
+      let tools = 0;
+      for (let el: Element | null = chipsSep ?? null; el; el = el.nextElementSibling) tools += gap + outerWidth(el);
+      const pinned = suggestCompact ? validPresets.flatMap((p, i) => (isCompactPreset(p) ? [i] : [])) : [];
+      next = chipsThatFit(
+        kids.slice(0, -1).map(outerWidth),
+        width - tools,
+        outerWidth(kids[kids.length - 1]),
+        gap,
+        pinned,
+      );
+    }
+    if (next?.join() !== chipsFit?.join()) chipsFit = next;
+  }
+  $effect(() => {
+    const row = chipsRow;
+    const m = chipsMeasure;
+    if (!row || !m) return;
+    const ro = new ResizeObserver(() => measureChips());
+    ro.observe(row);
+    ro.observe(m);
+    // A host chip coming or going changes the room left, not the row's size.
+    const mo = new MutationObserver(() => measureChips());
+    mo.observe(row, { childList: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+    };
+  });
+  $effect(() => {
+    // Re-measure when the presets or the suggestion change.
+    void validPresets;
+    void suggestCompact;
+    untrack(measureChips);
+  });
   const chipList = $derived(
-    !chipsExpanded
-      ? validPresets.filter((p, i) => i < CHIPS_SHOWN || (suggestCompact && isCompactPreset(p)))
-      : validPresets,
+    chipsExpanded
+      ? validPresets
+      : chipsFit
+        ? validPresets.filter((_, i) => chipsFit!.includes(i))
+        : validPresets.filter((p, i) => i < CHIPS_SHOWN || (suggestCompact && isCompactPreset(p))),
   );
   const chipsHidden = $derived(!chipsExpanded ? validPresets.length - chipList.length : 0);
   // The project's own skills and commands join the built-ins in the New
@@ -2722,7 +2781,17 @@
             onclick={() => void sendText('')}>⏎ Press Enter</button>
         </div>
       {/if}
-      <div class="chips" data-testid="conv-chips">
+      <div class="chips" data-testid="conv-chips" bind:this={chipsRow}>
+        <!-- Every chip at its natural width, out of the flow, so the
+             collapsed row can tell how many fit (measureChips). -->
+        <span class="chips-measure" aria-hidden="true" bind:this={chipsMeasure}>
+          {#each validPresets as p, i (i)}
+            <span class="btn btn--chip"
+              >{p.label}{#if p.auto_send}<span class="chip-send">&nbsp;↵</span>{/if}</span
+            >
+          {/each}
+          <span class="btn btn--chip">⋯</span>
+        </span>
         {#each chipList as p, i (i)}
           {#if p.label.trim() && p.text.trim()}
             {@const suggested = suggestCompact && isCompactPreset(p)}
@@ -2746,7 +2815,7 @@
           {/if}
         {/each}
         {#if chipsExpanded || chipsHidden > 0}
-          <!-- Redesign 5.9: three chips, the rest under ⋯. -->
+          <!-- Redesign 5.9: the chips that fit, the rest under ⋯. -->
           <button
             type="button"
             class="btn btn--chip chips-more"
@@ -2757,7 +2826,7 @@
             onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : '⋯'}</button>
         {/if}
         {#if composerTools}
-          <span class="chips-sep" aria-hidden="true"></span>
+          <span class="chips-sep" aria-hidden="true" bind:this={chipsSep}></span>
           {@render composerTools()}
         {/if}
       </div>
@@ -3061,11 +3130,28 @@
     justify-content: flex-start;
   }
   .chips {
+    position: relative;
     display: flex;
     align-items: center;
     gap: var(--control-gap);
     margin: 0 0 6px;
     flex-wrap: wrap;
+  }
+  /* Zero-sized and clipped, so it adds no scroll overflow; its chips keep
+     their natural width inside it (flex: none). */
+  .chips-measure {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: flex;
+    width: 0;
+    height: 0;
+    overflow: hidden;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .chips-measure > :global(*) {
+    flex: none;
   }
   /* Between the quick prompts and the chips a host adds (Control's
      operator commands). */
