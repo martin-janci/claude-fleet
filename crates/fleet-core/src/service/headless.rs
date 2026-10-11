@@ -41,6 +41,20 @@ pub struct HeadlessJob<'a> {
     /// A conversation id to fork and continue (the transcript stays as it
     /// was); `None` starts with no conversation.
     pub fork_of: Option<&'a str>,
+    /// The tools the run may use; no tool at all by default.
+    pub tools: ToolPolicy<'a>,
+}
+
+/// What a headless run may use. A run has no person to answer a prompt, so
+/// every policy denies whatever it does not name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolPolicy<'a> {
+    /// No tool ([`claude_print::isolation_flags`]).
+    #[default]
+    None,
+    /// Read, grep and glob inside the working directory, and these exact
+    /// shell commands (none: no shell). Never a write, never the network.
+    ReadOnly { bash: &'a [&'a str] },
 }
 
 /// An agent CLI that can run a [`HeadlessJob`] locked down: no tools, no
@@ -81,7 +95,10 @@ impl HeadlessAgent for ClaudeCode {
             quote(job.model),
             "--output-format".into(),
             "json".into(),
-            claude_print::isolation_flags(),
+            match job.tools {
+                ToolPolicy::None => claude_print::isolation_flags(),
+                ToolPolicy::ReadOnly { bash } => claude_print::tool_flags(bash),
+            },
         ]);
         if let Some(p) = job.prompt {
             words.push(quote(p));

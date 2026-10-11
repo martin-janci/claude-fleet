@@ -15,6 +15,7 @@
 //! Every step taken, refused or braked is a mission event, so the timeline
 //! says what the machine did and why it did not.
 
+pub mod checks;
 pub mod drafts;
 pub mod guard;
 pub mod integrate;
@@ -420,8 +421,23 @@ async fn apply_step_inner(
                 }
                 (start_for(&s, m, item_id, actor, a.grant.as_ref())?, a.grant)
             };
-            let _ = grant;
             let role = step.role.as_deref().unwrap_or("implement");
+            // F3: a review or a test, headless in the implementer's
+            // checkout, when the setting is on and the checkout allows.
+            if let Some(started) = checks::try_start(
+                deps,
+                m,
+                item_id,
+                role,
+                start.profile.as_deref(),
+                grant.as_ref().and_then(|g| g.hosts.as_deref()),
+                view,
+                step.context.as_deref(),
+            )
+            .await?
+            {
+                return Ok((started.0, Some(started.1)));
+            }
             let out = super::run::run_item_with(
                 &deps.store,
                 &deps.ssh,

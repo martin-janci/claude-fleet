@@ -21,6 +21,7 @@ export type RunKind =
   | 'watch_summary'
   | 'triage'
   | 'context_help'
+  | 'headless_check'
   | 'routine';
 
 /** How it ended, in plain words (`RUN_OUTCOMES`). */

@@ -29,6 +29,9 @@ pub const AUX_ORIGIN_TRIAGE: &str = "triage";
 /// [`NewAuxUsage::origin`] of a person's context help at a shell or
 /// composer prompt line (`service::context_help`).
 pub const AUX_ORIGIN_CONTEXT_HELP: &str = "context_help";
+/// [`NewAuxUsage::origin`] of a mission's headless review or test run
+/// (`work::orchestrate::checks`).
+pub const AUX_ORIGIN_HEADLESS_CHECK: &str = "headless_check";
 
 /// Every origin above: each is also a run kind (`RUN_KINDS`).
 pub const AUX_ORIGINS: &[&str] = &[
@@ -41,6 +44,7 @@ pub const AUX_ORIGINS: &[&str] = &[
     AUX_ORIGIN_WATCH_SUMMARY,
     AUX_ORIGIN_TRIAGE,
     AUX_ORIGIN_CONTEXT_HELP,
+    AUX_ORIGIN_HEADLESS_CHECK,
 ];
 
 /// One run to book.

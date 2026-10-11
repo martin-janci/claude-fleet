@@ -125,11 +125,15 @@
         <button
           type="button"
           class="option"
+          class:recommended={o.recommended}
           data-testid="rich-choice"
           disabled={sessionId === null}
           title={o.hint ?? o.prompt}
           onclick={() => fill(o.prompt)}
-          ><span class="option-label">{o.label}</span>{#if o.hint}<span class="hint">{o.hint}</span>{/if}</button
+          ><span class="option-label">{o.label}{#if o.recommended}<span class="rec" data-testid="rich-choice-recommended"
+                >Recommended</span
+              >{/if}</span
+          >{#if o.hint}<span class="hint">{o.hint}</span>{/if}</button
         >
       {/each}
     </div>
@@ -279,5 +283,7 @@
   .option:hover:not(:disabled) { background: var(--control-bg-hover); border-color: var(--accent); }
   .option:disabled { opacity: 0.6; cursor: default; }
   .option-label { font-weight: 600; }
+  .option.recommended { border-color: var(--accent); }
+  .rec { margin-left: var(--space-2); font-size: var(--text-2xs); font-weight: 500; color: var(--accent); }
   .hint { font-size: var(--text-2xs); color: var(--fg-muted); }
 </style>

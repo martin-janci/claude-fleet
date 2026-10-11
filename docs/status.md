@@ -620,6 +620,22 @@ run when the hub does not answer. Hosts get it on re-provisioning
 In the New layout, Jev K3 (off) proposes a stuck mission's outcome and next
 step, and Control shows a "Sent to a mission" receipt for what the operator
 handed over (`control_handoffs`, migration 140, redesign 9.3).
+Built but OFF by default: `orchestrator.headless_checks` runs a member's
+`review` and `test` steps as one `claude -p` run in the implementer's
+finished checkout (`orchestrate/checks.rs`, F3) instead of a session of
+their own: a review gets Read/Grep/Glob and the diff, a test also exactly
+its `test:<command>` lines as `Bash(<command>)`, everything else denied
+(`--permission-mode dontAsk`). The result is the same task and report, so
+`done_when` reads it unchanged; its cost is booked as `headless_check` on
+the mission. A checkout that moved or is dirty, a command with shell syntax,
+or a host outside the grant takes the session path.
+Control's chat goes on by itself (ON by default, `control.auto_continue`):
+when the agent's reply ends on a `choices` card with an option marked
+`recommended`, the desktop sends it after `control.auto_continue_minutes`
+(10) of nobody answering, with a countdown, *Send now* and *Cancel* above
+the box (`src/lib/auto_continue.ts`). Never a risky option, never a card
+more than a day old, only while the app is open; fleet-mobile does not do
+it.
 
 Routines are landed (`service/routines/`, migrations 131 and 139, redesign
 8.5 to 8.10): a saved prompt that starts a session on a cron schedule, on a
