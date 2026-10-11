@@ -8070,6 +8070,70 @@ fn a_hub_download_is_checked_through_list_downloads_before_a_byte_moves() {
     assert!(!asked.load(std::sync::atomic::Ordering::SeqCst));
 }
 
+/// G7.3: a revision-16 hub serves neither `wizard_state` nor
+/// `propose_host_placement`, and answers a JSON-RPC error (unknown tool). The
+/// desktop's minimum stays 16, so against that hub wizard resume reads as
+/// nothing saved and the host proposal as nothing proposed, not as an error.
+#[test]
+fn a_hub_before_contract_17_reads_as_nothing_saved_and_nothing_proposed() {
+    let unknown_tool = || {
+        Arc::new(Fake {
+            body: format!(
+                "event: message\ndata: {}\n\n",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": { "code": -32602, "message": "tool not found" },
+                })
+            ),
+            seen: Mutex::new(Vec::new()),
+        })
+    };
+    let (_dir, st) = store();
+    let fake = unknown_tool();
+    let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
+    let got = block_on(commands::account_usage::routed::propose_host_placement(
+        &remote_backend(&fake),
+        &st,
+        &cache,
+        fleet_core::service::decide::host_placement::ProposeHostArgs { project_id: 7 },
+    ))
+    .expect("nothing proposed, not an error");
+    assert!(got.is_none());
+    assert_eq!(fake.only_call().0, "propose_host_placement");
+    for (action, want) in [
+        ("list", json!([])),
+        ("get", Value::Null),
+        ("save", Value::Null),
+        ("clear", json!({ "removed": false })),
+    ] {
+        let fake = unknown_tool();
+        let args = fleet_core::service::wizard_state::WizardStateArgs {
+            action: action.into(),
+            kind: Some("add_project".into()),
+            step: Some(1),
+            ..Default::default()
+        };
+        let got = block_on(commands::wizard_state::routed::wizard_state(
+            &remote_backend(&fake),
+            &st,
+            args,
+        ))
+        .unwrap_or_else(|e| panic!("{action}: {e:?}"));
+        assert_eq!(got, want, "{action}");
+        assert_eq!(fake.only_call().0, "wizard_state", "{action}");
+    }
+    // Any other refusal is still an error.
+    let fake = Fake::answering("not json");
+    let got = block_on(commands::account_usage::routed::propose_host_placement(
+        &remote_backend(&fake),
+        &st,
+        &cache,
+        fleet_core::service::decide::host_placement::ProposeHostArgs { project_id: 7 },
+    ));
+    assert!(got.is_err());
+}
+
 /// 11.6: the one routed command whose answer is an image block rather than
 /// the tool's JSON. The caption is the first text block, the image the first
 /// image block, and the row's tool is the one the request carried.

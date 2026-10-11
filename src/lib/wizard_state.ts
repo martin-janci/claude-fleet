@@ -31,7 +31,8 @@ function call<T>(args: Args): Promise<Result<T>> {
 export const listWizards = (kind?: WizardKind) => call<WizardState[]>({ action: 'list', ...(kind ? { kind } : {}) });
 export const getWizard = (kind: WizardKind, key?: string) => call<WizardState | null>({ action: 'get', kind, ...(key ? { key } : {}) });
 export const saveWizard = (kind: WizardKind, step: number, answers: Record<string, unknown>, opts: { key?: string; label?: string } = {}) =>
-  call<WizardState>({
+  // `null` when a hub before contract 17 kept nothing.
+  call<WizardState | null>({
     action: 'save',
     kind,
     step,

@@ -28,8 +28,25 @@ pub(crate) mod routed {
         args: WizardStateArgs,
     ) -> Result<serde_json::Value, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.route("wizard_state", &args).await,
+            Some(hub) => match hub.route("wizard_state", &args).await {
+                // A hub before contract 17 has no such tool: nothing saved
+                // there, so nothing to resume, and a save keeps nothing.
+                Err(e) if e.code == fleet_core::ipc_error::codes::E_HUB_PROTOCOL => {
+                    Ok(before_wizard_state(&args.action))
+                }
+                r => r,
+            },
             None => wizard_state::run(store, &ViewScope::internal(), &args, None),
+        }
+    }
+
+    /// What `wizard_state` answers on a hub that does not serve it: no rows,
+    /// no row, nothing removed, and a save that kept nothing (`null`).
+    pub fn before_wizard_state(action: &str) -> serde_json::Value {
+        match action {
+            "list" => serde_json::json!([]),
+            "clear" => serde_json::json!({ "removed": false }),
+            _ => serde_json::Value::Null,
         }
     }
 }

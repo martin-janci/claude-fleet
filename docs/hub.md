@@ -373,12 +373,14 @@ upgrade before the hub is touched (point `FLEET_HUB_DATA` at the right
 directory) — it never migrates without a backup. An upgrade never prunes an older
 version's `pre-<version>-*.db` (see *Backups*).
 
-**Order across the three binaries.** Today (the hub serves contract 17, the desktop accepts 17,
+**Order across the three binaries.** Today (the hub serves contract 17, the desktop accepts 16–17,
 proto 1 on both sides; `fleet-hub compat` prints a build's windows) the order is a habit: hub, then desktop, then the
 agents. When a release bumps `CONTRACT_REVISION`, upgrade the **hub first,
 then the desktop in the same window** — there is no mixed window, the desktop
 refuses with `E_HUB_CONTRACT` until it is updated, hooks and the phone keep
-working meanwhile. When a release bumps `PROTO_VERSION`, upgrade the **hub
+working meanwhile. Revision 17 is the exception: it keeps the desktop's minimum at 16,
+so a desktop that updates first keeps working against a revision-16 hub
+(wizard resume and the host proposal stay empty until the hub updates). When a release bumps `PROTO_VERSION`, upgrade the **hub
 first**; the release holds `MIN_SUPPORTED_PROTO` at the previous value so an
 older `fleet-agent` keeps connecting until it is reinstalled. A hub upgrade
 never needs the agents restarted.

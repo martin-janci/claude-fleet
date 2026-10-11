@@ -247,7 +247,9 @@
 //! - **17** — *the phone's batch-3 data* (gap plan G7.2, G7.3). New tools:
 //!   `wizard_state` (a wizard resumes on another device) and
 //!   `propose_host_placement` (Jev's host for a new session); the desktop
-//!   routes both, and a revision-16 hub serves neither. `send_prompt` keys
+//!   routes both, and a revision-16 hub serves neither: the desktop reads
+//!   its `E_HUB_PROTOCOL` as nothing saved and nothing proposed, so the
+//!   desktop's minimum stays 16 and it may update before its hub. `send_prompt` keys
 //!   take Meta chords (`M-a`..`M-z`, `M-Enter`, `M-BSpace`, `M-Left`,
 //!   `M-Right`), which a revision-16 hub refuses. `new_bg_session` takes
 //!   `agent: "codex"` (a Codex session in `project_id`, prompt queued),
