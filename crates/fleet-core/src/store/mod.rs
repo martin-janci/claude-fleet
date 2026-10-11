@@ -23,6 +23,7 @@ mod debug_devices;
 mod decisions;
 mod deferred_prompts;
 mod downloads;
+mod env_vars;
 mod forms;
 mod guides;
 mod host_setup;
@@ -122,6 +123,9 @@ pub use decisions::{
 };
 pub use deferred_prompts::{DeferredPromptRow, DeferredTiming, DEFERRED_MAX_ATTEMPTS};
 pub use downloads::{DownloadRow, NewDownload};
+pub use env_vars::{
+    check_env_name, check_env_scope, check_env_value, EnvSource, EnvValue, EnvVarRow, ENV_SCOPES,
+};
 pub use forms::{FormFinish, FormRow, NewForm, FORM_STATES};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
@@ -221,6 +225,9 @@ pub use tracker_writes::{
     comment_write_url, NewTrackerWrite, TrackerWriteRow, WRITE_MAX_ATTEMPTS, WRITE_OP_COMMENT,
     WRITE_OP_PR_REMOTE_LINK,
 };
+// Used by the launch-time reference resolver (a later task of the env feature).
+#[allow(unused_imports)]
+pub(crate) use trackers::read_credential_ref;
 pub use trackers::{
     ghes_host_ok, ghes_host_part, github_site, is_allowed_tracker_host, normalize_dc_site,
     normalize_provider_site, normalize_site_url, validate_credential_ref, validate_ghes_hostname,

@@ -1968,6 +1968,8 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/172_tracker_comment_writes.sql"),
         already_applied: Some(tracker_writes_has_remote_url),
     },
+    // Session environment variables and secrets.
+    Migration::plain(173, include_str!("../../migrations/173_env_vars.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2396,6 +2398,7 @@ mod tests {
     use super::*;
 
     const EXPECTED_TABLES: &[&str] = &[
+        "env_vars",
         "hosts",
         "projects",
         "worktrees",

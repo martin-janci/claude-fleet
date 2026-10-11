@@ -335,6 +335,7 @@ fn the_chain_from_pre_work_graph_to_latest_is_fast_complete_and_sound() {
         "trg_work_journal_session_delete",
         "trg_work_links_snap_org",
         "trg_read_cursors_on_session_delete",
+        "trg_env_vars_on_session_delete",
     ] {
         assert_eq!(
             count(
