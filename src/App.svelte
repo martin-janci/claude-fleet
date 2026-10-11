@@ -1507,6 +1507,10 @@
   .view-slot {
     position: absolute;
     inset: 0;
+    /* Each slot is its own stacking context, so a z-index inside one (the
+       terminal's "Connection lost" banner) stays under the overlays above
+       it instead of floating over the Details tab. */
+    isolation: isolate;
   }
   .view-slot.overlay {
     z-index: 2;

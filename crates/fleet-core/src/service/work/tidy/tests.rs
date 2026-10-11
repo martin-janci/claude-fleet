@@ -1251,3 +1251,39 @@ fn a_safe_kill_candidate_carries_its_worktrees_measured_size() {
     let wire = serde_json::to_value(of(unmeasured)).unwrap();
     assert!(wire.get("worktree_kb").is_none(), "{wire}");
 }
+
+/// A ghost (its tmux gone) whose item is still in progress: a person's
+/// Archive files it away, where a live session with the same item is
+/// protected. Auto-tidy never takes that exemption.
+#[tokio::test]
+async fn a_manual_archive_of_a_ghost_skips_the_live_work_protections() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let ghost = seed(&store, "ghost", "in_progress");
+    let live = seed(&store, "live", "in_progress");
+    store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET status = 'ghost' WHERE id = ?1",
+            [ghost],
+        )
+        .unwrap();
+    let exec = FakeExec::default();
+    let report = tidy_apply(
+        &store,
+        &exec,
+        &[item(ghost, "archive"), item(live, "archive")],
+        &OrgScope::All,
+        NOW,
+    )
+    .await
+    .unwrap();
+    let got: Vec<(i64, bool)> = report
+        .results
+        .iter()
+        .map(|r| (r.session_id, r.ok))
+        .collect();
+    assert_eq!(got, vec![(ghost, true), (live, false)], "{report:?}");
+    assert!(exec.calls().is_empty(), "an archive never kills");
+}
