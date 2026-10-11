@@ -32,6 +32,8 @@
   import TaskWorkSections from './TaskWorkSections.svelte';
   import TaskBlockedSpend from './TaskBlockedSpend.svelte';
   import ProposedBy from './ProposedBy.svelte';
+  import AiChangeLine from './AiChangeLine.svelte';
+  import type { ProposalSource } from './ai_proposal';
   import { proposalFor } from './proposals';
   import WorkButton from './WorkButton.svelte';
   import { tablistKeys } from './tablist_keys';
@@ -147,10 +149,30 @@
     if (!t || placingProposed) return;
     placingProposed = true;
     proposalError = null;
+    const source = groupProposal?.source ?? 'jev';
     const r = await placeWork(t.task_id, label, t.placement_version ?? 0);
     placingProposed = false;
-    if (r.ok) placed(r.value, null);
-    else proposalError = readErrorText(r.error);
+    if (r.ok) {
+      placed(r.value, null);
+      // G7.15: a change AI proposed reads as the AI patterns board's line,
+      // with Undo (the placement cleared, at the version this one left).
+      placedByProposal = { task: t.task_id, label, source, version: r.value.placement_version ?? 0 };
+    } else proposalError = readErrorText(r.error);
+  }
+
+  /** The placement the person took from Jev's proposal, while it stands. */
+  let placedByProposal = $state<{ task: string; label: string; source: ProposalSource; version: number } | null>(null);
+  async function undoProposedPlacement() {
+    const p = placedByProposal;
+    if (!p || placingProposed) return;
+    placingProposed = true;
+    proposalError = null;
+    const r = await placeWork(p.task, '', p.version);
+    placingProposed = false;
+    if (r.ok) {
+      placed(r.value, null);
+      placedByProposal = null;
+    } else proposalError = readErrorText(r.error);
   }
 
   // A placement saved: show the task and its placement line as the hub
@@ -225,6 +247,11 @@
     const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 60_000);
     return () => clearInterval(t);
   });
+  // The placement rule that put the task in its group: its "its sessions
+  // start here" host and account apply when no start rule decides (G7.1).
+  const placingRule = $derived(
+    task?.group?.source === 'rule' && task.group.rule_id != null ? (rules.find((r) => r.id === task.group.rule_id && r.enabled) ?? null) : null,
+  );
   const ruleName = $derived(task?.group?.rule_id != null ? (rules.find((r) => r.id === task.group.rule_id)?.name ?? null) : null);
   const matchingRules = $derived((detail?.rules ?? []).map((id) => rules.find((r) => r.id === id)?.name ?? `rule ${id}`));
 
@@ -472,8 +499,23 @@
     {/if}
     {#if startRule}
       <p class="line" data-testid="work-task-start-rule">
-        Starts in <strong>{ruleProject(startRule, $projects.map((t) => t.project))}</strong>{#if startRule.host_alias}&nbsp;on {startRule.host_alias}{:else}&nbsp;on its last host{/if}
+        Starts in <strong>{ruleProject(startRule, $projects.map((t) => t.project))}</strong>{#if startRule.host_alias}&nbsp;on {startRule.host_alias}{:else}&nbsp;on its last host{/if}{#if startRule.fallback_host}, else {startRule.fallback_host}{/if}
         <span class="muted small">· rule {startRule.pattern}</span>
+      </p>
+      {#if startRule.profile || startRule.model || startRule.effort || startRule.agent === 'codex'}
+        <dl class="prov" data-testid="work-task-start-launch">
+          {#if startRule.agent === 'codex'}<dt>Agent</dt><dd>Codex</dd>{/if}
+          {#if startRule.profile}<dt>Account</dt><dd data-testid="work-task-start-account">{startRule.profile}</dd>{/if}
+          {#if startRule.model || startRule.effort}
+            <dt>Model</dt>
+            <dd data-testid="work-task-start-model">{startRule.model ?? "host's default"}{#if startRule.effort}&nbsp;· effort {startRule.effort}{/if}</dd>
+          {/if}
+        </dl>
+      {/if}
+    {:else if placingRule && (placingRule.host_alias || placingRule.profile)}
+      <p class="line" data-testid="work-task-placement-start">
+        Sessions start on <strong>{placingRule.host_alias ?? 'its usual host'}</strong>{#if placingRule.profile}&nbsp;· account {placingRule.profile}{/if}
+        <span class="muted small">· rule “{placingRule.name}”</span>
       </p>
     {/if}
 
@@ -488,6 +530,16 @@
         <dd data-testid="work-task-group">
           <strong>{task.group?.source === 'none' ? 'No group' : task.group?.label}</strong> — {groupSourceText(task.group, task, ruleName)}
           <div class="muted small" data-testid="work-task-group-note">{placementNote(task.group, task)}</div>
+          {#if placedByProposal && placedByProposal.task === task.task_id}
+            <AiChangeLine
+              what="Placed in {placedByProposal.label}"
+              source={placedByProposal.source}
+              onundo={() => void undoProposedPlacement()}
+              undoing={placingProposed}
+              undoBlocked={placeBlocked}
+              testid="work-task-group-ai-change"
+            />
+          {/if}
           {#if groupProposal}
             <div class="group-proposal" data-testid="work-task-group-proposal">
               <span>Jev proposes “{groupProposal.value}”</span>
@@ -738,6 +790,10 @@
     initial={ruleDraft}
     onclose={() => (ruleDraft = null)}
     onsaved={() => {
+      void loadRules();
+      void load(taskId);
+    }}
+    onundone={() => {
       void loadRules();
       void load(taskId);
     }}

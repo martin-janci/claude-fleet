@@ -276,6 +276,12 @@ pub struct RestartSessionParams {
     /// Switch login profile ("" = host login).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// Relaunch under this model ("" = host default); how a Codex session changes model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Relaunch at this reasoning effort ("" = host default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
@@ -744,6 +750,25 @@ pub struct SessionSummarySinceParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionContextHelpParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// The question; empty asks about `line` alone.
+    #[serde(default)]
+    pub question: String,
+    /// What is in the composer now.
+    #[serde(default)]
+    pub line: String,
+    /// The composer's earlier prompts, oldest first.
+    #[serde(default)]
+    pub history: Vec<String>,
+    /// The commands the composer accepts, one per entry
+    /// (`/plan #KEY or a goal — Plan subtasks…`).
+    #[serde(default)]
+    pub commands: Vec<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SessionToolDetailParams {
     /// Fleet session id.
     pub session_id: i64,
@@ -955,6 +980,9 @@ pub struct RepairSessionParams {
     /// Nonce from an approved `E_CONFIRM_REQUIRED`.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+    /// 1–64 of A-Za-z0-9_-.
+    #[serde(default)]
+    pub progress_token: Option<String>,
 }
 
 // --- asset catalog ---------------------------------------------------------
@@ -1093,6 +1121,17 @@ pub struct ControlRouteParams {
     #[serde(default)]
     pub run_id: Option<i64>,
     /// follow: the option kept or picked (m<id>, s<id>, control).
+    #[serde(default)]
+    pub chosen: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ResumeOrNewParams {
+    /// propose | follow
+    pub action: String,
+    /// The work key a new session plans (PD-2412).
+    pub key: String,
+    /// follow: the person's pick, new or l<link id>.
     #[serde(default)]
     pub chosen: Option<String>,
 }
@@ -1358,7 +1397,7 @@ pub struct UpdateAdminParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RoutinesParams {
-    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now.
+    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome.
     pub action: String,
     /// Every action but list, and save or preview of a change.
     #[serde(default)]
@@ -1375,6 +1414,12 @@ pub struct RoutinesParams {
     /// runs: how many, newest first (default 20, at most 200).
     #[serde(default)]
     pub limit: Option<i64>,
+    /// set_run_outcome: the run, one of this routine's.
+    #[serde(default)]
+    pub run_id: Option<i64>,
+    /// set_run_outcome: did_work | nothing | needs_person.
+    #[serde(default)]
+    pub outcome: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

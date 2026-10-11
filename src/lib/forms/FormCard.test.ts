@@ -162,7 +162,7 @@ describe('FormCard', () => {
     render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null, closed: true } });
     const r = await screen.findByTestId('form-outcome');
     expect(r).toHaveTextContent('Deploy');
-    expect(screen.getByTestId('form-ended')).toHaveTextContent('answered by phone (device)');
+    expect(screen.getByTestId('form-ended')).toHaveTextContent('answered on phone');
   });
 
   // ── Step 10.1: receipt, 1–9, expiry ──────────────────────────────────
@@ -175,7 +175,7 @@ describe('FormCard', () => {
     render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
     await fireEvent.click(await screen.findByTestId('form-field-env-prod'));
     await fireEvent.click(screen.getByTestId('form-submit'));
-    expect(await screen.findByTestId('form-ended')).toHaveTextContent('answered by Martin · now');
+    expect(await screen.findByTestId('form-ended')).toHaveTextContent(/^answered by Martin · \d\d:\d\d$/);
     expect(screen.queryByTestId('form-card')).toBeNull();
     expect(screen.getByTestId('form-summary')).toHaveTextContent('Production · more options off');
     expect(screen.queryByTestId('form-answers')).toBeNull();

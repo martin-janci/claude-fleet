@@ -64,6 +64,7 @@ import {
   type ConvTurn,
   type ConvItem,
 } from './conversation';
+import { agentModelProfile, slashCommandsFor, presetForAgent, CODEX_MODEL_OPTIONS, CODEX_SLASH_COMMANDS } from './conversation';
 import { notificationTone, notificationMark, notificationLabel } from './conversation';
 import type { SessionRow } from './sessions';
 import type { TaskRow } from './tasks';
@@ -1197,5 +1198,72 @@ describe('conversation copy names the row’s agent (Codex Conversation tab)', (
     );
     expect(agentLabel('agy')).toBe('Agy');
     expect(agentLabel('claude')).toBe('Claude Code');
+  });
+});
+
+describe('daySeparator (G7.8, Control: a line per day)', () => {
+  const NOW = new Date(2026, 9, 10, 15, 0).getTime();
+  const iso = (d: Date) => d.toISOString();
+  const turn = (d: Date) => ({ kind: 'turn' as const, index: 0, turn: { prompt: 'x', at: iso(d), ended_at: null, items: [] } });
+  const ev = (d: Date) =>
+    ({ kind: 'event' as const, event: { at: Math.floor(d.getTime() / 1000), label: 'e', tone: 'info' } }) as never;
+
+  it('names the day above the first row of each day, and only there', async () => {
+    const { daySeparator } = await import('./conversation');
+    const rows = [
+      turn(new Date(2026, 9, 8, 9, 0)),
+      turn(new Date(2026, 9, 9, 10, 0)),
+      ev(new Date(2026, 9, 9, 11, 0)),
+      turn(new Date(2026, 9, 10, 8, 2)),
+      turn(new Date(2026, 9, 10, 9, 0)),
+    ];
+    const seps = rows.map((_, i) => daySeparator(rows, i, NOW));
+    expect(seps[0]).toMatch(/Thu 8 Oct/);
+    expect(seps.slice(1)).toEqual(['Yesterday', null, 'Today', null]);
+  });
+
+  it('a row with no time never starts a day', async () => {
+    const { daySeparator } = await import('./conversation');
+    const rows = [{ kind: 'turn' as const, index: 0, turn: { prompt: 'x', at: null, ended_at: null, items: [] } }];
+    expect(daySeparator(rows, 0, NOW)).toBeNull();
+  });
+});
+
+describe('Codex in the composer', () => {
+  it('offers Codex its own models and efforts, switched by a relaunch', () => {
+    const codex = agentModelProfile('codex');
+    expect(codex.mode).toBe('relaunch');
+    expect(codex.models).toBe(CODEX_MODEL_OPTIONS);
+    expect(codex.models.some((o) => o.value === 'opus')).toBe(false);
+    expect(codex.efforts.some((o) => o.value === 'auto')).toBe(false);
+    const claude = agentModelProfile('claude');
+    expect(claude.mode).toBe('command');
+    expect(claude.models.some((o) => o.value === 'opus')).toBe(true);
+    expect(claude.launchModels.some((o) => o.value === 'default')).toBe(false);
+  });
+
+  it('names a Codex model as its picker does', () => {
+    expect(modelShortLabel('gpt-6-sol')).toBe('GPT-6-Sol');
+    expect(modelShortLabel('claude-opus-5-5')).toBe('opus 5.5');
+    expect(modelShortLabel('gpt-9-unknown')).toBe('gpt-9-unknown');
+  });
+
+  it("matches a Codex session's slash commands, not Claude's", () => {
+    expect(slashCommandsFor('codex')).toBe(CODEX_SLASH_COMMANDS);
+    expect(slashCommandsFor('claude')).toBe(SLASH_COMMANDS);
+    const codex = matchSlashCommands('/c', [], slashCommandsFor('codex')).map((c) => c.name);
+    expect(codex).toEqual(['compact', 'copy']);
+    expect(matchSlashCommands('/n', [], slashCommandsFor('codex')).map((c) => c.name)).toEqual(['new']);
+    expect(matchSlashCommands('/context', [], slashCommandsFor('codex'))).toEqual([]);
+  });
+
+  it('fits quick-action chips to Codex', () => {
+    const chip = (text: string) => ({ label: 'x', text });
+    expect(presetForAgent(chip('/clear'), 'codex')?.text).toBe('/new');
+    expect(presetForAgent(chip('/compact'), 'codex')?.text).toBe('/compact');
+    expect(presetForAgent(chip('/context'), 'codex')).toBeNull();
+    expect(presetForAgent(chip('continue'), 'codex')?.text).toBe('continue');
+    // Claude may run a project skill no list knows of: left alone.
+    expect(presetForAgent(chip('/my-skill'), 'claude')?.text).toBe('/my-skill');
   });
 });

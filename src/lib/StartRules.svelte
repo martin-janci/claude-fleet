@@ -9,12 +9,15 @@
   import { projects } from './projects';
   import { hosts } from './hosts';
   import { readErrorText } from './work_view';
+  import { LAUNCH_EFFORT_OPTIONS, MODEL_OPTIONS } from './conversation';
   import {
+    accountChoices,
     acceptStartRule,
     deleteStartRule,
     dismissStartRule,
     listStartRules,
     patternProblem,
+    ruleLaunchLine,
     ruleLine,
     ruleProject,
     saveStartRule,
@@ -30,6 +33,15 @@
   let pattern = $state('');
   let projectId = $state<number | null>(null);
   let host = $state('');
+  // How its starts run (gap plan G7.1).
+  let fallback = $state('');
+  let profile = $state('');
+  let model = $state('');
+  let effort = $state('');
+  let agent = $state('');
+
+  const accounts = $derived(accountChoices($hosts, host, profile));
+  const models = MODEL_OPTIONS.filter((o) => o.value !== 'default');
 
   const choices = $derived($projects.map((t) => t.project).filter((p) => !p.system));
   const problem = $derived(editing == null ? null : patternProblem(pattern) ?? (projectId == null ? 'Pick a repository.' : null));
@@ -43,7 +55,7 @@
     const r = await listStartRules();
     loaded = true;
     if (r.ok) {
-      rules = r.value;
+      rules = Array.isArray(r.value) ? r.value : [];
       error = null;
     } else error = readErrorText(r.error);
   }
@@ -66,13 +78,23 @@
     pattern = rule?.pattern ?? '';
     projectId = rule?.project_id ?? null;
     host = rule?.host_alias ?? '';
+    fallback = rule?.fallback_host ?? '';
+    profile = rule?.profile ?? '';
+    model = rule?.model ?? '';
+    effort = rule?.effort ?? '';
+    agent = rule?.agent ?? '';
   }
 
   function save() {
     if (problem || projectId == null) return;
     const id = editing || undefined;
     const pid = projectId;
-    void act(() => saveStartRule({ pattern: pattern.trim(), project_id: pid, host_alias: host || null }, id));
+    void act(() =>
+      saveStartRule(
+        { pattern: pattern.trim(), project_id: pid, host_alias: host || null, fallback_host: fallback || null, profile: profile || null, model: model || null, effort: effort || null, agent: agent || null },
+        id,
+      ),
+    );
   }
 </script>
 
@@ -114,6 +136,51 @@
         {/each}
       </select>
     </label>
+    <label>
+      <span>Else</span>
+      <select data-testid="start-rules-fallback" bind:value={fallback}>
+        <option value="">No fallback host</option>
+        {#each $hosts.filter((h) => h.alias !== host) as h (h.alias)}
+          <option value={h.alias}>{h.alias}, when {host || 'its last host'} is offline</option>
+        {/each}
+      </select>
+    </label>
+    <label>
+      <span>Agent</span>
+      <select data-testid="start-rules-agent" bind:value={agent}>
+        <option value="">Claude Code</option>
+        <option value="codex">Codex</option>
+      </select>
+    </label>
+    {#if agent !== 'codex'}
+      <label>
+        <span>Account</span>
+        <select data-testid="start-rules-account" bind:value={profile}>
+          <option value="">The host's own login</option>
+          {#each accounts as a (a.value)}
+            <option value={a.value}>{a.label}</option>
+          {/each}
+        </select>
+      </label>
+    {/if}
+    <label>
+      <span>Model</span>
+      <select data-testid="start-rules-model" bind:value={model}>
+        <option value="">The host's default</option>
+        {#each models as m (m.value)}
+          <option value={m.value}>{m.label}</option>
+        {/each}
+      </select>
+    </label>
+    <label>
+      <span>Effort</span>
+      <select data-testid="start-rules-effort" bind:value={effort}>
+        <option value="">Default</option>
+        {#each LAUNCH_EFFORT_OPTIONS as e (e.value)}
+          <option value={e.value}>{e.label}</option>
+        {/each}
+      </select>
+    </label>
     {#if problem && pattern.trim()}<p class="hint" data-testid="start-rules-problem">{problem}</p>{/if}
     <div class="acts">
       <button class="btn btn--quiet" type="button" onclick={() => (editing = null)}>Cancel</button>
@@ -125,7 +192,7 @@
 <section class="rules" aria-label="Start rules" data-testid="start-rules">
   <header class="head">
     <h3>Rules</h3>
-    <span class="sub">Which repository a task starts in. A rule decides before Jev is asked.</span>
+    <span class="sub">Where a task's sessions start: the repository, host, account, model and agent. A rule decides before Jev is asked.</span>
     {#if editing == null}
       <button class="btn btn--quiet" type="button" data-testid="start-rules-new" onclick={() => edit(null)}>+ New rule</button>
     {/if}
@@ -157,6 +224,7 @@
           {:else}
             <span class="line">
               <span class="pat">{r.pattern}</span> → {ruleProject(r)}{r.host_alias ? ` on ${r.host_alias}` : ''}
+              {#if ruleLaunchLine(r)}<span class="meta" data-testid="start-rules-launch">{ruleLaunchLine(r)}</span>{/if}
               <span class="meta">{r.hits ? `decided ${r.hits} start${r.hits === 1 ? '' : 's'}` : 'not used yet'}</span>
             </span>
             {#if r.may_change}

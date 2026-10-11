@@ -2221,7 +2221,11 @@ describe('NewSessionDialog in the New layout', () => {
     await fireEvent.click(codex);
     expect(codex.getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByTestId('kind-work').getAttribute('aria-pressed')).toBe('false');
-    expect(screen.queryByTestId('launch-model')).toBeNull();
+    // Codex's own models and efforts (`codex -m`), never Claude's aliases.
+    const model = screen.getByTestId('launch-model') as HTMLSelectElement;
+    const values = Array.from(model.options).map((o) => o.value);
+    expect(values).toContain('gpt-6-sol');
+    expect(values).not.toContain('opus');
     expect(screen.queryByTestId('launch-account')).toBeNull();
     expect(screen.queryByTestId('run-background')).toBeNull();
     const checks = calls('check_account_headroom').length;
@@ -2231,6 +2235,19 @@ describe('NewSessionDialog in the New layout', () => {
     expect(args).toMatchObject({ kind: 'work', agent: 'codex', model: null, effort: null, profile: null });
     // No Claude account limit check stands between Create and a Codex start.
     expect(calls('check_account_headroom')).toHaveLength(checks);
+  });
+
+  it('starts a Codex session on the Codex model and effort picked', async () => {
+    hosts.update((hs) => hs.map((h) => (h.alias === 'local' ? { ...h, agents_on_path: ['claude', 'codex'] } : h)));
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('agent-codex'));
+    await fireEvent.change(screen.getByTestId('launch-model'), { target: { value: 'gpt-6-luna' } });
+    await fireEvent.change(screen.getByTestId('launch-effort'), { target: { value: 'high' } });
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));
+    const args = (calls('new_session')[0][1] as any).args;
+    expect(args).toMatchObject({ agent: 'codex', model: 'gpt-6-luna', effort: 'high', profile: null });
   });
 
   it('a Claude Code session sends no agent', async () => {

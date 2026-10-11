@@ -22,6 +22,10 @@ export interface DeviceSummary {
   catalogs: string[];
   /** The device this list was read through. */
   this_device?: boolean;
+  /** M15 G7.14: `desktop` or `phone`, from its app's last header. */
+  kind?: string;
+  /** M15 G7.14: "phone · fleet-mobile 0.5.4". */
+  app?: string;
 }
 
 /** `pair_device`: the one-time code, the URL a phone opens and the URL's QR
@@ -59,6 +63,13 @@ export async function loadPeople(): Promise<Result<PersonSummary[]>> {
   const r = await invokeCmd<PersonSummary[]>('list_people');
   if (r.ok) people.set(Array.isArray(r.value) ? r.value : []);
   return r;
+}
+
+/** Trust a paired device (M15 G7.14: from an org's member row). Its
+ *  prompts then reach agents unmarked; the hub refuses a caller that may
+ *  not. */
+export function trustDevice(device: string): Promise<Result<DeviceSummary>> {
+  return invokeCmd<DeviceSummary>('update_device', { args: { device, trusted: true } });
 }
 
 /** Re-read the devices. A failure (a readonly device the hub refuses, an

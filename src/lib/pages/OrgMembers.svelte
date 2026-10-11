@@ -7,6 +7,7 @@
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import ActionForm from './ActionForm.svelte';
   import PairingResult from './PairingResult.svelte';
+  import { trustDevice } from '../devices';
   import { buildArgs, type ActionSpec, type ResourceRecord } from './resources';
   import {
     memberPairing,
@@ -27,6 +28,7 @@
     busy = false,
     options,
     run,
+    onchanged = () => {},
     now = () => Math.floor(Date.now() / 1000),
   }: {
     record: ResourceRecord;
@@ -37,6 +39,8 @@
     busy?: boolean;
     options: (param: string) => { value: string; label: string }[];
     run: (action: ActionSpec, args: Record<string, unknown>) => Promise<boolean>;
+    /** Re-read the list after a change made outside `run` (a trust). */
+    onchanged?: () => void;
     now?: () => number;
   } = $props();
 
@@ -126,6 +130,31 @@
     if (ok && person) startPairing(person);
   }
 
+  // --- trust (M15 G7.14) -----------------------------------------------------
+
+  /** Why the last Trust device did not go through, by device. */
+  let trustNote = $state<Record<string, string>>({});
+  let trusting = $state<string | null>(null);
+
+  /** Trust a member's device. One that has not paired yet is not there to
+   *  trust: say that it is waiting, rather than a raw "not found". */
+  async function trust(device: string, person: string) {
+    trusting = device;
+    const r = await trustDevice(device);
+    trusting = null;
+    if (r.ok) {
+      trustNote = { ...trustNote, [device]: '' };
+      if (pairingHere?.pairing?.name === device) memberPairing.set(null);
+      // Re-read the list: the row loses its "not trusted".
+      onchanged();
+      return;
+    }
+    trustNote = {
+      ...trustNote,
+      [device]: r.error.code === 'E_NOTFOUND' ? `Waiting for ${person} to pair…` : r.error.message,
+    };
+  }
+
   async function mint() {
     const p = pairingHere;
     if (!p || !device.trim()) return;
@@ -169,7 +198,26 @@
               </select>
             {:else}{m.role}{/if}
           </td>
-          {#if showDevices}<td class="dim" data-testid="member-devices">{m.devices?.length ? m.devices.join(', ') : 'none'}</td>{/if}
+          {#if showDevices}
+            <td class="dim" data-testid="member-devices">
+              {#if m.devices?.length}
+                {#each m.devices as d, i (d)}
+                  {@const untrusted = m.untrusted_devices?.includes(d) ?? false}
+                  {i > 0 ? ', ' : ''}<span class="device"
+                    >{d}{#if untrusted}<span class="untrusted" data-testid="member-device-untrusted">{' · not trusted'}</span
+                      >{#if !readonly}<button
+                          type="button"
+                          class="btn btn--quiet"
+                          disabled={busy || trusting !== null}
+                          aria-label={`Trust device: ${d}`}
+                          data-testid={`member-trust-${d}`}
+                          onclick={() => void trust(d, nameOf(m))}>Trust device</button
+                        >{/if}{/if}{#if trustNote[d]}<span class="error" role="alert"> {trustNote[d]}</span>{/if}</span
+                  >
+                {/each}
+              {:else}none{/if}
+            </td>
+          {/if}
           {#if showSessions}<td
               data-testid="member-sessions"
               title={(m.private_sessions ?? 0) > 0 ? PRIVATE_TITLE : undefined}>{memberSessionsWord(m)}</td
@@ -209,7 +257,23 @@
     <div class="pair" data-testid="member-pairing">
       {#if pairingHere.pairing}
         <PairingResult pairing={pairingHere.pairing} onclose={() => memberPairing.set(null)} />
-        <p class="dim">Once it pairs, it shows under Needs an admin until you trust it in Settings → Devices.</p>
+        <!-- M15 G7.14: the Add member flow's second step. -->
+        {@const dev = pairingHere.pairing.name}
+        <div class="trust-step" data-testid="member-trust-step">
+          <p>
+            <strong>Trust {pairingHere.person}'s device.</strong>
+            <span class="dim">Until you do, what it types reaches agents marked, and it shows under Needs an admin.</span>
+          </p>
+          {#if !readonly}
+            <button
+              type="button"
+              class="btn"
+              disabled={trusting !== null}
+              data-testid="member-trust-new"
+              onclick={() => void trust(dev, pairingHere!.person)}>Trust device</button>
+          {/if}
+          {#if trustNote[dev]}<p class="dim" role="status" data-testid="member-trust-note">{trustNote[dev]}</p>{/if}
+        </div>
       {:else}
         <p>Send {pairingHere.person} a pairing code for their device. It is fenced to {orgName} and theirs.</p>
         <form
@@ -322,6 +386,22 @@
   }
   .error {
     color: var(--danger);
+  }
+  .untrusted {
+    color: var(--usage-warn);
+  }
+  .device .btn {
+    margin-left: 0.25rem;
+  }
+  .trust-step {
+    margin-top: 0.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .trust-step p {
+    margin: 0;
   }
   .choices {
     display: flex;

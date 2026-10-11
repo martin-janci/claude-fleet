@@ -61,6 +61,10 @@
             },
             {
               "type": "field",
+              "key": "work.context_help"
+            },
+            {
+              "type": "field",
               "key": "work.help_model"
             },
             {

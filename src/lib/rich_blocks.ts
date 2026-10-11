@@ -73,6 +73,20 @@ export type ProgressStepState = (typeof PROGRESS_STEP_STATES)[number];
 export interface ProgressStep {
   title: string;
   state: ProgressStepState;
+  /** One line under the step while it runs: "attempt 2 of 10" (G7.4). */
+  detail?: string;
+}
+
+/** What an error's next step may do itself instead of filling the
+ *  composer (G7.4; chat_blocks.rs `NEXT_ACTIONS`). */
+export const NEXT_ACTIONS = ['login', 'open_host', 'open_accounts'] as const;
+export type NextAction = (typeof NEXT_ACTIONS)[number];
+const NEXT_ACTIONS_ON_HOST: readonly string[] = ['login', 'open_host'];
+/** An error's next step: a choice, or with `action` one the app runs. */
+export interface UiNextStep extends UiChoice {
+  action?: NextAction;
+  /** The host a `login` or `open_host` acts on. */
+  host?: string;
 }
 
 /** A value's type in a results card: the page data sources' column types
@@ -114,16 +128,18 @@ export type UiBlock =
       unit?: string;
       steps?: ProgressStep[];
       note?: string;
+      /** When the job started (unix seconds): the card counts the time since. */
+      started_at?: number;
     }
   | { kind: 'results'; title?: string; summary?: string; items: ResultItem[] }
-  | { kind: 'error'; code: string; title: string; body?: string; detail?: string; next: UiChoice[] }
+  | { kind: 'error'; code: string; title: string; body?: string; detail?: string; next: UiNextStep[] }
   /** A settings change waiting for a person: the id `set_setting` with
    *  `propose: true` answered. The card reads the key and values from the
    *  proposal, never from the block (`rich/SettingCard.svelte`). */
   | { kind: 'setting'; proposal: number; note?: string }
   /** One of the app's own wizards as a form in the chat (step 10.12): the
    *  spec is the app's, never the block's (`forms/WizardChatCard.svelte`). */
-  | { kind: 'wizard'; wizard: ChatWizardId; why?: string };
+  | { kind: 'wizard'; wizard: ChatWizardId; why?: string; values?: Record<string, string | number | boolean> };
 
 export type UiKind = UiBlock['kind'];
 export const UI_KINDS: UiKind[] = ['report', 'steps', 'guide', 'callout', 'facts', 'choices', 'form', 'progress', 'results', 'error', 'setting', 'wizard'];
@@ -477,6 +493,34 @@ function choice(o: Record<string, unknown>, p: Problems, at: string): UiChoice {
   };
 }
 
+/** A `wizard` block's drafted answers (G7.4; chat_blocks.rs `drafted_values`). */
+function draftedValues(v: unknown, p: Problems): Record<string, string | number | boolean> | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (!isObject(v) || Array.isArray(v)) {
+    p.add('', '`values` must be an object of answers by field name');
+    return undefined;
+  }
+  const keys = Object.keys(v);
+  if (keys.length > 20) p.add('', '`values` has more than 20 answers');
+  const out: Record<string, string | number | boolean> = {};
+  for (const k of keys.sort()) {
+    const at = `values › ${k}`;
+    if (!/^[a-z][a-z0-9_]{0,39}$/.test(k)) p.add(at, 'must be a field name: lowercase letters, digits and _');
+    const x = v[k];
+    if (typeof x === 'string' && [...x].length > 500) p.add(at, 'is longer than 500 characters');
+    else if (typeof x === 'string' || typeof x === 'boolean' || (typeof x === 'number' && Number.isFinite(x))) out[k] = x;
+    else p.add(at, 'must be text, a number or true/false');
+  }
+  return out;
+}
+
+function nextStep(o: Record<string, unknown>, p: Problems, at: string): UiNextStep {
+  const c = choice(o, p, at);
+  const action = o.action === undefined || o.action === null ? undefined : oneOf(o, 'action', p, at, NEXT_ACTIONS);
+  const host = action && NEXT_ACTIONS_ON_HOST.includes(action) ? key(o, 'host', p, at) : undefined;
+  return { ...c, ...(action ? { action } : {}), ...(host ? { host } : {}) };
+}
+
 function resultItem(o: Record<string, unknown>, p: Problems, at: string): ResultItem | null {
   switch (o.type) {
     case 'stat': {
@@ -683,8 +727,12 @@ export function checkUiBlock(raw: string): Check {
         each(stepList, p, 'step', (s, at) => ({
           title: str(s, 'title', p, at, { required: true, max: 200 }) ?? '',
           state: oneOf(s, 'state', p, at, PROGRESS_STEP_STATES, 'pending') ?? 'pending',
+          detail: str(s, 'detail', p, at, { max: 120 }),
         }));
-      block = { kind: 'progress', id, title, state, done, total, unit: str(v, 'unit', p, '', { max: 20 }), steps, note: str(v, 'note', p, '', { max: 2000 }) };
+      const unit = str(v, 'unit', p, '', { max: 20 });
+      const note = str(v, 'note', p, '', { max: 2000 });
+      const started_at = num(v, 'started_at', p, '', { min: 0 });
+      block = { kind: 'progress', id, title, state, done, total, unit, steps, note, started_at };
       break;
     }
     case 'results': {
@@ -699,7 +747,7 @@ export function checkUiBlock(raw: string): Check {
     case 'error': {
       const code = key(v, 'code', p, '');
       const title = str(v, 'title', p, '', { required: true, max: 120 }) ?? '';
-      const next = each(optArr(v, 'next', p, '', 1, 4) ?? [], p, 'next', (o, at) => choice(o, p, at));
+      const next = each(optArr(v, 'next', p, '', 1, 4) ?? [], p, 'next', (o, at) => nextStep(o, p, at));
       block = { kind: 'error', code, title, body: str(v, 'body', p, '', { max: 4000 }), detail: str(v, 'detail', p, '', { max: 8000 }), next };
       break;
     }
@@ -713,7 +761,8 @@ export function checkUiBlock(raw: string): Check {
     case 'wizard': {
       const wizard = oneOf(v, 'wizard', p, '', CHAT_WIZARD_IDS);
       const why = str(v, 'why', p, '', { max: 500 });
-      if (wizard) block = { kind: 'wizard', wizard, why };
+      const values = draftedValues(v.values, p);
+      if (wizard) block = { kind: 'wizard', wizard, why, ...(values ? { values } : {}) };
       break;
     }
   }

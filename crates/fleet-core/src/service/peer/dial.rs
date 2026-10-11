@@ -224,7 +224,7 @@ pub async fn run_link(
     call: Arc<dyn PeerCall>,
     cancel: CancellationToken,
 ) -> LinkExit {
-    let mut backoff = Backoff::new();
+    let mut backoff = Backoff::for_link(link_id);
     let Ok(notify) = lock(&store).map(|s| s.message_notify()) else {
         return LinkExit::Cancelled;
     };

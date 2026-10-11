@@ -20,7 +20,7 @@
   import { sendFile } from './downloads';
   import { sessionView } from './prefs';
   import { copyText } from './clipboard';
-  import { insertIntoComposer } from './conversation';
+  import { agentLabel, insertIntoComposer } from './conversation';
   import { goTo } from './destination';
   import { accessOf } from './access';
   import { editorBlockedReason, openSessionInEditor } from './editor';
@@ -250,6 +250,25 @@
     goTo('session');
   }
   const editorBlocked = $derived(editorBlockedReason(session, $accessOf(session)));
+
+  // G7.10: "Ask Claude about this" on the diff. It drafts a message in the
+  // session's composer naming the file and which diff is shown; the person
+  // writes the question and sends it, nothing goes on its own.
+  const askName = $derived(
+    session.agent === 'codex' || session.agent === 'agy' ? agentLabel(session.agent) : 'Claude',
+  );
+  function askAboutDiff(p: string): void {
+    const which = commit
+      ? `in commit ${commit.slice(0, 9)}`
+      : range
+        ? range === 'unpushed'
+          ? 'in the commits not pushed yet'
+          : 'against the base branch'
+        : 'in the working tree';
+    insertIntoComposer(session.id, `About the diff of @${p} ${which}: `);
+    sessionView.set('conversation');
+    goTo('session');
+  }
 </script>
 
 <div class="viewer" data-testid="file-viewer">
@@ -301,6 +320,15 @@
             title="Add @{p} to this session's message"
             onclick={() => mention(p)}>Mention in chat</button
           >
+          {#if view === 'diff' && diff && !diff.binary && diff.diff.trim() !== ''}
+            <button
+              type="button"
+              class="act"
+              data-testid="viewer-ask-diff"
+              title="Start a message to {askName} about this diff in the session's composer"
+              onclick={() => askAboutDiff(p)}>Ask {askName} about this</button
+            >
+          {/if}
           <button
             type="button"
             class="act"

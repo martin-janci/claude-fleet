@@ -10,6 +10,10 @@ vi.mock('../clipboard', () => ({ copyText: vi.fn(() => Promise.resolve(true)) })
 
 import RichText from '../RichText.svelte';
 import { composerDrafts } from '../conversation';
+import { hosts } from '../hosts';
+import { destination } from '../destination';
+import { get } from 'svelte/store';
+import { elapsedWords } from './progress_board';
 
 const ui = (o: Record<string, unknown>) => '```fleet-ui\n' + JSON.stringify({ spec: 'fleet.ui/1', ...o }) + '\n```';
 
@@ -114,3 +118,62 @@ describe('error', () => {
     expect((screen.getByTestId('rich-error-next') as HTMLButtonElement).disabled).toBe(true);
   });
 });
+
+describe('G7.4: live progress and next steps as actions', () => {
+  it('counts the time since a running job started and says a step\'s detail', () => {
+    const started = Math.floor(Date.now() / 1000) - 252;
+    reply(panel(), ui({ kind: 'progress', id: 'wake', title: 'Waking mac', started_at: started, steps: [{ title: 'Wait for SSH', state: 'running', detail: 'attempt 2 of 10' }] }));
+    expect(screen.getByTestId('rich-progress-elapsed').textContent).toMatch(/^4 min 1[2-3] s$/);
+    expect(screen.getByTestId('rich-progress-step-detail').textContent).toBe('attempt 2 of 10');
+  });
+
+  it('stops counting once the job is done', () => {
+    reply(panel(), ui({ kind: 'progress', id: 'wake', title: 'Woke mac', state: 'done', started_at: 1 }));
+    expect(screen.queryByTestId('rich-progress-elapsed')).toBeNull();
+  });
+
+  it('elapsedWords reads seconds, minutes and hours', () => {
+    expect([elapsedWords(-3), elapsedWords(12), elapsedWords(252), elapsedWords(3900)]).toEqual(['0 s', '12 s', '4 min 12 s', '1 h 05 min']);
+  });
+
+  it('runs an action instead of filling the composer, even in a read-only view', async () => {
+    hosts.set([{ alias: 'mac', hidden: false } as never]);
+    reply(
+      panel(),
+      ui({ kind: 'error', code: 'E_TURN_AUTH', title: 'Login expired', next: [{ label: 'Accounts', prompt: 'Open the accounts', action: 'open_accounts' }] }),
+      null,
+    );
+    const b = screen.getByTestId('rich-error-next') as HTMLButtonElement;
+    expect(b.disabled).toBe(false);
+    await fireEvent.click(b);
+    expect(get(destination)).toBe('accounts');
+    expect(composerDrafts.size).toBe(0);
+  });
+
+  it('a login action opens the login on that host; an unknown host turns it off with the reason', async () => {
+    hosts.set([{ alias: 'mac', hidden: false } as never]);
+    reply(
+      panel(),
+      ui({
+        kind: 'error',
+        code: 'E_TURN_AUTH',
+        title: 'Login expired',
+        next: [
+          { label: 'Re-login on mac', prompt: 'Log in again on mac', action: 'login', host: 'mac' },
+          { label: 'Re-login on nas', prompt: 'Log in again on nas', action: 'login', host: 'nas' },
+        ],
+      }),
+      4,
+    );
+    const [mac, nas] = screen.getAllByTestId('rich-error-next') as HTMLButtonElement[];
+    expect(nas.disabled).toBe(true);
+    expect(nas.title).toBe('This app has no host named nas.');
+    expect(screen.queryByTestId('form-step-title')).toBeNull();
+    await fireEvent.click(mac);
+    await tick();
+    // The Add account wizard, open on mac.
+    expect(screen.getAllByTestId('form-step-title').length).toBeGreaterThan(0);
+    expect(composerDrafts.get(4)).toBeUndefined();
+  });
+});
+

@@ -53,6 +53,11 @@ pub struct DownloadRow {
     /// and then a client shows the copy without a count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetched_bytes: Option<i64>,
+    /// A person paused the copy (gap plan G7.15, Toasts board "Pause"):
+    /// filled in by the service while `fetching`, never stored. Absent when
+    /// it runs, and from a hub that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<bool>,
 }
 
 /// A download to insert, in state `fetching`.
@@ -92,6 +97,7 @@ fn row(r: &rusqlite::Row<'_>) -> Result<DownloadRow> {
         owner_person_id: r.get(16)?,
         expires_at: None,
         fetched_bytes: None,
+        paused: None,
     })
 }
 

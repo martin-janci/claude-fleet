@@ -104,6 +104,25 @@ export function askContextHelp(
   });
 }
 
+/** Ask at a session's composer (`session_context_help`): on a paired
+ *  desktop the hub runs it, so a session shared at `answer` or `drive` gets
+ *  it too; the model is the fleet's `work.help_model`. */
+export function askComposerHelp(
+  sessionId: number,
+  ctx: Omit<HelpContext, 'surface' | 'terminal'>,
+  question: string,
+): Promise<Result<HelpAnswer>> {
+  return invokeCmd<HelpAnswer>('session_context_help', {
+    args: {
+      session_id: sessionId,
+      question: question.trim(),
+      line: ctx.line,
+      history: recentHistory(ctx.history ?? []),
+      commands: (ctx.commands ?? []).slice(0, HELP_COMMANDS_MAX),
+    },
+  });
+}
+
 /** Why help cannot be asked, or `null`: there must be a question or a line. */
 export function askBlocked(question: string, line: string): string | null {
   return question.trim() === '' && line.trim() === '' ? 'Ask a question, or type something to ask about' : null;

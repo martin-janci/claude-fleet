@@ -1,5 +1,5 @@
 {
-  "revision": 16,
+  "revision": 17,
   "types": {
     "AccessRequestView": [
       "id",
@@ -556,6 +556,7 @@
       "messages_today",
       "messages_total",
       "pending",
+      "retry_every_s",
       "revoked_at",
       "role",
       "state",
@@ -633,6 +634,17 @@
     "RepoTree": [
       "entries",
       "truncated"
+    ],
+    "ResumeOrNew": [
+      "confidence_pct",
+      "link_id",
+      "name",
+      "reason",
+      "run_id",
+      "session_id",
+      "source",
+      "unsure",
+      "value"
     ],
     "ResumePlan": [
       "branch",

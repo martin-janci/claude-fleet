@@ -8,7 +8,8 @@
   import { destination } from '../destination';
   import { matchShortcut } from '../shortcuts';
   import { detectMac, isEditable } from '../terminal_keys';
-  import { startingValues, stepProblems, visibleSteps } from './form_model';
+  import { hostCheckWarnings, shownBecause, startingValues, stepProblems, visibleSteps } from './form_model';
+  import { hosts } from '../hosts';
   import { optionsOfField, type FieldProblem, type FormField, type FormProposal, type FormSpec, type OptionSpec, type Values } from './forms';
   import { reviewSections } from './receipt';
   import { clearSaved, loadSaved, restorable, saveForLater } from './saved_answers';
@@ -17,7 +18,7 @@
   import { neverDecidesField, preselect } from '../ai_proposal';
   import { QUICK_ANSWER, risky } from '../quick_answer';
   import Loader from '../Loader.svelte';
-  import { fieldCount, submitKey } from './form_frame';
+  import { fieldCount, submitHint, submitKey } from './form_frame';
 
   let {
     spec,
@@ -34,8 +35,12 @@
     onunplaced,
     oncancel,
     onsavelater,
+    hostAlias = null,
   }: {
     spec: FormSpec;
+    /** The host a spec's `checks` read when they name no host field (the
+     *  form's session's host). */
+    hostAlias?: string | null;
     /** Jev's likely option for one choice (step 10.9): shown first and
      *  pre-selected when the field is empty; never a risky option. */
     proposal?: FormProposal | null;
@@ -79,6 +84,11 @@
   let values = $state<Values>({ ...started });
   let index = $state(0);
   const steps = $derived(visibleSteps(spec, values));
+  // G7.4: what the answers need from a host and it lacks, said above the
+  // last button before sending. A warning only: the person may still send.
+  const hostWarnings = $derived(
+    spec.checks?.length ? hostCheckWarnings(spec, values, hostAlias, (a) => $hosts.find((h) => h.alias === a)) : [],
+  );
   const step = $derived(steps[Math.min(index, steps.length - 1)]);
   const last = $derived(index >= steps.length - 1);
   const localProblems = $derived(stepProblems(spec, Math.min(index, steps.length - 1), values));
@@ -296,6 +306,7 @@
   // 1–9: only while the session view shows, no field, terminal or dialog has
   // the keyboard, and no question card takes the digits first.
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  const hint = submitHint(isMac);
   function onWindowKeydown(e: KeyboardEvent) {
     const f = keyField;
     if (!f || off || e.defaultPrevented || $destination !== 'session') return;
@@ -341,6 +352,7 @@
   {#if step}
     <h6 data-testid="form-step-title">{step.title}</h6>
     {#if step.intro}<p class="intro">{step.intro}</p>{/if}
+    {#if shownBecause(step.when, spec)}<p class="because" data-testid="form-step-because">{shownBecause(step.when, spec)}</p>{/if}
     {#if step.kind === 'review'}
       <div class="review" data-testid="form-review">
         {#each review as sec (sec.step)}
@@ -521,11 +533,17 @@
             >{#if f.type === 'bool' || f.type === 'multiselect' || (f.type === 'select' && numbered(f))}<DraftedLabel testid={`form-drafted-${f.name}`} />{' '}{/if}by {f.drafted.by} · from {f.drafted.from}</span>
         {/if}
         {#if f.help}<span class="help">{f.help}</span>{/if}
+        {#if shownBecause(f.when, spec)}<span class="because" data-testid={`form-because-${f.name}`}>{shownBecause(f.when, spec)}</span>{/if}
         {#if f.type === 'secret' && f.secret_note}<span class="help secret-note" data-testid={`form-secret-note-${f.name}`}>{f.secret_note}</span>{/if}
         {#if f.disabled_reason !== undefined}<span class="reason" data-testid={`form-disabled-${f.name}`}>{f.disabled_reason}</span>{/if}
         {#if problemOf(f.name)}<span class="err" data-testid={`form-problem-${f.name}`}>{problemOf(f.name)}</span>{/if}
       </div>
     {/each}
+    </div>
+  {/if}
+  {#if last && hostWarnings.length}
+    <div class="host-warn" role="status" data-testid="form-host-warnings">
+      {#each hostWarnings as w (w)}<p data-testid="form-host-warning">{w}</p>{/each}
     </div>
   {/if}
   {#if saveFailed}<span class="err" data-testid="form-save-later-failed">This device could not keep the answers.</span>{/if}
@@ -540,7 +558,14 @@
       <button type="button" data-testid="form-back" disabled={busy} onclick={() => ((index -= 1), (tried = false))}>Back</button>
     {/if}
     {#if last}
-      <button type="button" class="primary" data-testid="form-submit" disabled={off || !ready} onclick={submit}>
+      <button
+        type="button"
+        class="primary"
+        data-testid="form-submit"
+        data-shortcut={busy ? undefined : hint.label}
+        aria-keyshortcuts={hint.aria}
+        disabled={off || !ready}
+        onclick={submit}>
         {#if busy && sent}{#if buttonLoader}<Loader name="comet" size={12} class="btn-loader" />{/if}{sending}{:else}{spec.submit ?? 'Submit'}{/if}
       </button>
     {:else}
@@ -555,8 +580,12 @@
   .count { font-size: var(--text-2xs); color: var(--fg-muted); }
   h6 { margin: 0; font-size: var(--text-sm); }
   .intro { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); }
+  .host-warn { padding: 0.35rem 0.55rem; border-left: 3px solid var(--usage-warn); background: color-mix(in srgb, var(--usage-warn) 8%, transparent); border-radius: var(--radius-sm); font-size: var(--text-2xs); }
+  .host-warn p { margin: 0; }
+  .because { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); font-style: italic; }
   .fields { display: flex; flex-direction: column; gap: 0.6rem; }
   .field { display: flex; flex-direction: column; gap: 0.2rem; }
+  [data-shortcut]::after { content: ' ' attr(data-shortcut); opacity: 0.7; font-size: 0.9em; }
   .why { margin: -0.3rem 0 0; text-align: right; font-size: var(--text-2xs); color: var(--fg-muted); }
   label, .label { font-size: var(--text-2xs); }
   .check { display: flex; gap: 0.35rem; align-items: flex-start; }

@@ -1056,7 +1056,7 @@ fn layer_edits(
                 return Err(already(&item.name));
             }
             let axis = super::layers::parse_axis(p.axis.as_deref())?;
-            let l = super::layers::new_layer(&item.name, axis, p.description, p.members)?;
+            let l = super::layers::new_layer(&item.name, axis, p.description, p.members, p.orgs)?;
             edits.writes.push((layer_rel(&item.name), layer_yaml(&l)?));
         }
         a if a == ItemAction::RenameLayer.as_str() => {
@@ -5757,6 +5757,7 @@ mod tests {
                 axis: None,
                 description: Some("On the servers".into()),
                 members: vec!["skill/w".into()],
+                orgs: vec![],
             },
             &ssh,
         )
@@ -5778,6 +5779,35 @@ mod tests {
             .unwrap();
         assert_eq!(u.state, "undone");
         assert!(!file.exists());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_create_layer_card_writes_the_orgs_it_applies_by() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        f.store
+            .lock()
+            .unwrap()
+            .add_org("Papaya", None, false)
+            .unwrap();
+        let (home, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let v = propose_and_apply(
+            &f,
+            LayerChange::Create {
+                catalog: None,
+                layer: "papaya".into(),
+                axis: None,
+                description: None,
+                members: vec!["skill/w".into()],
+                orgs: vec!["Papaya".into()],
+            },
+            &ssh,
+        )
+        .await;
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        assert_eq!(layer_in(&f, "papaya").orgs, vec!["Papaya".to_string()]);
     }
 
     #[tokio::test]

@@ -743,6 +743,11 @@
           {order}
           writable={canWrite(layerSelected.catalog, ctx)}
           busy={anyBusy}
+          cards={$changesetSummaries}
+          onopencard={(id) => {
+            view = 'inbox';
+            select(`card:${id}`);
+          }}
           onchange={proposeChange}
         />
       {/key}

@@ -20,7 +20,8 @@
       "org",
       "person"
     ],
-    "group_by": "person"
+    "group_by": "person",
+    "subtitle": "app"
   },
   "sections": [
     {
@@ -37,6 +38,14 @@
         {
           "type": "field",
           "key": "this_device"
+        },
+        {
+          "type": "field",
+          "key": "kind"
+        },
+        {
+          "type": "field",
+          "key": "app"
         },
         {
           "type": "field",

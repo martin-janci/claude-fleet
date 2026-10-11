@@ -116,6 +116,11 @@ pub struct WorkArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
     pub with_review_total: Option<bool>,
+    /// Tree: name each task's mission and wave (the Board's chip). Kept out
+    /// of the served schema, as `sections`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub with_missions: Option<bool>,
     /// Draft rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "object_schema")]

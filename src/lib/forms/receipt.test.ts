@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import type { FormView } from './forms';
-import { FORM_EXPIRE_SECS, answerList, answerSummary, endedMark, endedWords, expiresIn } from './receipt';
+import { FORM_EXPIRE_SECS, answerList, answerSummary, decidedClock, endedMark, endedWords, expiresIn } from './receipt';
 
 function answered(over: Partial<FormView> = {}): FormView {
   return {
@@ -64,6 +64,15 @@ describe('form receipt', () => {
     expect(endedWords(answered({ state: 'expired' }))).toBe('expired');
     expect(endedWords(answered({ state: 'cancelled' }))).toBe('withdrawn by the agent');
     expect(['answered', 'declined', 'expired', 'cancelled'].map(endedMark)).toEqual(['✓', '✕', '◷', '–']);
+  });
+
+  it('says on which device and at what time (G7.4)', () => {
+    const at = new Date(2026, 9, 12, 12, 41).getTime() / 1000;
+    expect(endedWords(answered({ answered_by: 'you (desktop)', decided_at: at }), at + 60)).toBe('answered by you on the desktop · 12:41');
+    expect(endedWords(answered({ answered_by: 'Pixel 8 (device)', decided_at: at }), at + 60)).toBe('answered on Pixel 8 · 12:41');
+    expect(endedWords(answered({ answered_by: 'the control API', decided_at: at }))).toBe('answered by the control API');
+    expect(decidedClock(at, at + 2 * 86_400)).toBe('Mon 12:41');
+    expect(decidedClock(at, at + 30 * 86_400)).toBe('12 Oct 12:41');
   });
 });
 

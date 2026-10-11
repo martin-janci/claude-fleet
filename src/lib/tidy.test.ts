@@ -60,7 +60,7 @@ describe('the legend, the row detail and Restore all (G3.12)', () => {
       'Never',
     ]);
     const ghost = cand(3, { reason: 'ghost_expiring', action: 'resume_or_expire' });
-    expect(tidyLegend([ghost]).map((l) => l.label)).toEqual(['Keep for 7 days', 'Never', 'Restore all']);
+    expect(tidyLegend([ghost]).map((l) => l.label)).toEqual(['Keep for 7 days', 'Never', 'Expire', 'Restore all']);
     expect(tidyLegend([])).toEqual([]);
   });
 
@@ -118,8 +118,10 @@ describe('tidy choices', () => {
 
   it('a lost session is not preselected and never offers a kill', () => {
     const ghost = cand(3, { reason: 'ghost_expiring', action: 'resume_or_expire' });
-    expect(choicesFor(ghost)).toEqual(['snooze', 'never']);
+    // G7.9: Expire comes last, so it is never the preselected choice.
+    expect(choicesFor(ghost)).toEqual(['snooze', 'never', 'expire']);
     expect(defaultChoice(ghost)).toBe('snooze');
+    expect(choicesFor({ ...ghost, link_id: null })).toEqual(['expire']);
     expect(preselected(ghost)).toBe(false);
   });
 

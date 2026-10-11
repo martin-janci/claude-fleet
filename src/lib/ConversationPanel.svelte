@@ -17,7 +17,7 @@
   import { conversationFindRequest } from './search_api';
   import { untrack, tick, setContext, type Snippet } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
-  import { sendPrompt, hasNoPane, sessions, sessionAgent, type SessionRow } from './sessions';
+  import { sendPrompt, hasNoPane, sessions, sessionAgent, restartSession, type SessionRow } from './sessions';
   import AnswerPrompt from './AnswerPrompt.svelte';
   import FormCard from './forms/FormCard.svelte';
   import ChatWizards from './forms/ChatWizards.svelte';
@@ -36,8 +36,8 @@
   import ForkSheet from './ForkSheet.svelte';
   import SendLaterSheet from './SendLaterSheet.svelte';
   import ContextHelp from './ContextHelp.svelte';
-  import { askContextHelp, commandLine, helpModel } from './context_help';
-  import { fleetSettings } from './fleet_settings';
+  import { askComposerHelp, commandLine, helpModel } from './context_help';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
   import Icon from './kit/Icon.svelte';
   import { suggestedForkName } from './reply_actions';
   import {
@@ -87,8 +87,9 @@
     completeSlashCommand,
     newDividerAnchor,
     turnAnchor,
-    MODEL_OPTIONS,
-    EFFORT_OPTIONS,
+    agentModelProfile,
+    slashCommandsFor,
+    presetForAgent,
     pickerCommand,
     modelShortLabel,
     sessionActivity,
@@ -105,6 +106,7 @@
     CONV_MAX_TURNS,
     PROBE_TTL_MS,
     isQuietStatus,
+    daySeparator,
     shouldFetchTranscript,
     CONVERSATION_POLL_MS,
     ACTIVITY_POLL_MS,
@@ -141,7 +143,9 @@
   import { readOnlyAnswerLine, sharerName } from './shared_view';
   import { inboxQueue, nextInInbox } from './inbox';
   import { push as pushToast } from './toasts';
+  import ConfirmDialog from './ConfirmDialog.svelte';
   import { projectSkills } from './project_skills';
+  import { completeTaskLink, matchTaskLinks, taskLinkQuery, type TaskLink } from './control_task_link';
   import { overflowMark } from './overflow_mark';
 
   let {
@@ -199,6 +203,13 @@
     // (Control: "# task · @ host · / command").
     composerHint = '↵ send · ⇧↵ newline · ↑ history',
     placeholder = 'Send a prompt…',
+    // Gap plan G7.8: "# link a task". A host that hands its tasks here
+    // (Control) gets a menu on `#` that puts a task's key in the box
+    // (`control_task_link.ts`). Read once, the first time `#` is typed.
+    linkTasks,
+    // Gap plan G7.8: a line naming the day ("Today", "Yesterday",
+    // "Thu 8 Oct") above the first row of each day (Control's chat).
+    daySeparators = false,
   }: {
     session: SessionRow;
     visible: boolean;
@@ -215,6 +226,8 @@
     runCommand?: (text: string) => boolean;
     composerHint?: string;
     placeholder?: string;
+    linkTasks?: () => Promise<TaskLink[]>;
+    daySeparators?: boolean;
   } = $props();
 
   // Raw: replaced whole on each read and never mutated, so a deep proxy only
@@ -1283,23 +1296,71 @@
     if (!chipHold) chipHeld = false;
   });
 
-  // Model / effort pickers: each sends `/model <v>` or `/effort <v>` through
-  // the same outbox as a typed slash command. The model shows from the row
-  // (the transcript's); effort is in no transcript, so the picker remembers
-  // what it last sent to each session and otherwise shows the row's, if any.
+  // Model / effort pickers, per agent (`agentModelProfile`). Claude Code's
+  // send `/model <v>` or `/effort <v>` through the same outbox as a typed
+  // slash command. Codex's `/model` takes no argument, so its pickers list
+  // Codex's own models and relaunch it on the same conversation under the
+  // pick, after a confirm (a turn in progress is lost). The model shows from
+  // the row (the transcript's); effort is in no Claude transcript, so the
+  // picker remembers what it last sent to each session and otherwise shows
+  // the row's, if any — a relaunch stores it on the row.
+  const modelProfile = $derived(agentModelProfile(agent));
+  /** A relaunch pick waiting on its confirm. */
+  let relaunchPick = $state<{ cmd: 'model' | 'effort'; value: string; label: string } | null>(null);
+  let relaunching = $state(false);
   let effortSent = $state<Record<number, string>>({});
   const currentModel = $derived(modelShortLabel(session.model));
-  const currentEffort = $derived(effortSent[session.id] ?? session.effort_level ?? '');
-  // Each picker sends `/model` or `/effort` through the outbox, so it is a
-  // write like any other.
-  const pickersDisabled = $derived(viewing !== null || busyBlocked || writeBlocked !== null);
+  const currentEffort = $derived(
+    (modelProfile.mode === 'command' ? effortSent[session.id] : undefined) ?? session.effort_level ?? '',
+  );
+  // Each picker sends `/model` or `/effort` through the outbox, or restarts
+  // the pane, so it is a write like any other.
+  const pickersDisabled = $derived(viewing !== null || busyBlocked || writeBlocked !== null || relaunching);
+  const pickVerb = $derived(
+    modelProfile.mode === 'relaunch' ? `relaunch ${agentName} on it` : null,
+  );
   function pickSetting(cmd: 'model' | 'effort', e: Event) {
     const el = e.currentTarget as HTMLSelectElement;
-    const line = pickerCommand(cmd, el.value);
+    const value = el.value;
+    if (modelProfile.mode === 'relaunch') {
+      // The select snaps back to what the session runs; the confirm decides.
+      el.value = cmd === 'model' ? '' : currentEffort;
+      const opts = cmd === 'model' ? modelProfile.models : modelProfile.efforts;
+      const label = opts.find((o) => o.value === value)?.label ?? value;
+      if (value.trim()) relaunchPick = { cmd, value, label };
+      return;
+    }
+    const line = pickerCommand(cmd, value);
     if (cmd === 'model') el.value = '';
     if (!line) return;
-    if (cmd === 'effort') effortSent = { ...effortSent, [session.id]: el.value };
+    if (cmd === 'effort') effortSent = { ...effortSent, [session.id]: value };
     void sendText(line);
+  }
+  async function confirmRelaunch() {
+    const pick = relaunchPick;
+    relaunchPick = null;
+    if (!pick || relaunching) return;
+    // A relaunch is `restart_session` (the `own` tier), not the
+    // `send_prompt` a `/model` line is, so it has its own gate.
+    const blocked =
+      hubActionBlocked('restart_session', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'restart_session');
+    if (blocked !== null) {
+      pushToast({ kind: 'error', message: blocked });
+      return;
+    }
+    relaunching = true;
+    const r = await restartSession(session.host_alias, session.tmux_name, undefined, { [pick.cmd]: pick.value });
+    relaunching = false;
+    if (!r.ok) {
+      pushToast({ kind: 'error', message: `Could not relaunch ${agentName}: ${r.error.message}` });
+      return;
+    }
+    {
+      pushToast({
+        kind: 'info',
+        message: `${agentName} relaunched on ${pick.cmd === 'model' ? pick.label : `${pick.label.toLowerCase()} effort`}`,
+      });
+    }
   }
   const statusNote = $derived(
     // First: a composer that cannot send at all owes that sentence before any
@@ -1320,7 +1381,13 @@
   // The composer shows three quick prompts and puts the rest under ⋯
   // (redesign 5.9); a suggested Compact stays out in front.
   const CHIPS_SHOWN = 3;
-  const validPresets = $derived($composerPresets.filter((p) => p.label.trim() && p.text.trim()));
+  // Each chip as this agent takes it: a Codex session drops a chip for a
+  // Claude-only command and spells `/clear` as `/new` (`presetForAgent`).
+  const validPresets = $derived(
+    $composerPresets
+      .map((p) => presetForAgent(p, agent))
+      .filter((p): p is ComposerPreset => p !== null && !!p.label.trim() && !!p.text.trim()),
+  );
   const chipList = $derived(
     !chipsExpanded
       ? validPresets.filter((p, i) => i < CHIPS_SHOWN || (suggestCompact && isCompactPreset(p)))
@@ -1331,15 +1398,18 @@
   // layout (redesign 5.9), read once the draft starts a slash command.
   let projectCmds = $state<SlashCommand[]>([]);
   const slashDraft = $derived(draft.startsWith('/') && !/\s/.test(draft));
+  // A Codex session reads no `.claude/` commands, and runs a skill as
+  // `$name`, not `/name`, so only its built-ins are offered.
+  const builtinCmds = $derived(slashCommandsFor(agent));
   $effect(() => {
-    if (!slashDraft) return;
+    if (!slashDraft || agent === 'codex') return;
     const id = session.id;
     void projectSkills(id).then((list) => {
       if (session.id === id) projectCmds = list;
     });
   });
   const slashMatches = $derived(
-    slashDismissedFor === draft ? [] : matchSlashCommands(draft, projectCmds),
+    slashDismissedFor === draft ? [] : matchSlashCommands(draft, agent === 'codex' ? [] : projectCmds, builtinCmds),
   );
   // Ids for the combobox wiring, per panel instance so two panels never hand
   // the same id to assistive tech.
@@ -1384,6 +1454,33 @@
     histIndex = null;
   }
   const slashOpen = $derived(slashMatches.length > 0);
+
+  // ── # link a task (G7.8) ──
+  let taskLinks = $state.raw<TaskLink[] | null>(null);
+  let taskIndex = $state(0);
+  let taskDismissedFor = $state<string | null>(null);
+  const taskQuery = $derived(linkTasks && !slashOpen ? taskLinkQuery(draft) : null);
+  $effect(() => {
+    if (taskQuery === null || taskLinks !== null || !linkTasks) return;
+    taskLinks = [];
+    void linkTasks().then((list) => (taskLinks = list));
+  });
+  const taskMatches = $derived(
+    taskQuery === null || taskDismissedFor === draft ? [] : matchTaskLinks(taskQuery, taskLinks ?? []),
+  );
+  const taskOpen = $derived(taskMatches.length > 0);
+  $effect(() => {
+    if (taskIndex >= taskMatches.length) taskIndex = 0;
+  });
+  const TASK_LIST_ID = `conv-task-list-${hlSuffix}`;
+  const taskOptionId = (i: number) => `conv-task-opt-${hlSuffix}-${i}`;
+
+  function acceptTask(t: TaskLink) {
+    draft = completeTaskLink(draft, t);
+    taskDismissedFor = draft;
+    histIndex = null;
+    box?.focus();
+  }
   // Keep the highlight inside the list as the prefix narrows it.
   $effect(() => {
     if (slashIndex >= slashMatches.length) slashIndex = 0;
@@ -1575,6 +1672,25 @@
     // WebKit fires the composition-confirming Enter with isComposing false
     // and keyCode 229; treat it as composition too.
     if (e.isComposing || e.keyCode === 229) return;
+    if (taskOpen) {
+      const highlighted = taskMatches[taskIndex] ?? taskMatches[0];
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const n = taskMatches.length;
+        taskIndex = (taskIndex + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+        return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.altKey)) {
+        e.preventDefault();
+        acceptTask(highlighted);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        taskDismissedFor = draft;
+        return;
+      }
+    }
     if (slashOpen) {
       const highlighted = slashMatches[slashIndex] ?? slashMatches[0];
       if (e.key === 'ArrowDown') {
@@ -1715,14 +1831,15 @@
   let sendLaterOpen = $state(false);
   // Context help (`context_help.ts`): ask Haiku about the draft, with the
   // earlier prompts (the ↑ recall list) and the commands the box accepts as
-  // context. It runs over this machine's ssh, as the terminal does, so it is
-  // offered where the terminal is: on a session this client owns.
+  // context. `session_context_help` runs it on the hub when paired, so a
+  // session shared at `answer` or `drive` has it too; a watcher does not.
   let helpOpen = $state(false);
+  /** Writing help's "Context help" toggle, off by default. */
+  const helpOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workContextHelp));
   let helpCommands = $state<string[]>([]);
   const helpBlocked = $derived(
-    $accessOf(session) !== 'own'
-      ? 'Context help runs over this machine’s SSH, which reaches only sessions you own'
-      : null,
+    hubActionBlocked('session_context_help', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'session_context_help'),
   );
   function openHelp() {
     helpOpen = true;
@@ -1732,12 +1849,10 @@
     });
   }
   function askHelp(question: string) {
-    return askContextHelp(
-      { host_alias: session.host_alias, session_name: session.tmux_name, profile: session.claude_profile },
-      { surface: 'composer', line: draft, history, commands: helpCommands },
-      question,
-      helpModel($fleetSettings),
-    );
+    // The grant can narrow while the panel is open: ask again at the call.
+    const blocked = $sessionBlocked(session, 'session_context_help');
+    if (blocked) return Promise.resolve({ ok: false as const, error: { code: 'E_FORBIDDEN', message: blocked } });
+    return askComposerHelp(session.id, { line: draft, history, commands: helpCommands }, question);
   }
   const sendLaterBlocked = $derived(
     viewing !== null
@@ -2116,8 +2231,10 @@
           </p>
         {/if}
         {#if conv}
-          {#each thread as row (rowKey(row))}
+          {#each thread as row, ri (rowKey(row))}
             {@const key = rowKey(row)}
+            {@const day = daySeparators ? daySeparator(thread, ri, nowMs) : null}
+            {#if day}<div class="day-sep" data-testid="conv-day-separator" role="separator" aria-label={day}><span>{day}</span></div>{/if}
             {#if row.kind === 'event'}
               <div
                 class="event"
@@ -2553,7 +2670,27 @@
           {/each}
         </ul>
       {/if}
-      {#if helpOpen}
+      {#if taskOpen}
+        <ul class="slash-menu" role="listbox" id={TASK_LIST_ID} aria-label="Link a task" data-testid="conv-task-menu">
+          {#each taskMatches as t, i (t.key)}
+            <li role="presentation" class:active={i === taskIndex} data-testid="conv-task-item">
+              <button
+                type="button"
+                role="option"
+                id={taskOptionId(i)}
+                aria-selected={i === taskIndex}
+                tabindex="-1"
+                onmousedown={(e) => e.preventDefault()}
+                onclick={() => acceptTask(t)}>
+                <span class="slash-name">#{t.key}</span>
+                <span class="slash-desc">{t.title}</span>
+                {#if t.status}<span class="slash-source">{t.status}</span>{/if}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if helpOn && helpOpen}
         <ContextHelp
           model={helpModel($fleetSettings)}
           line={draft}
@@ -2671,8 +2808,12 @@
           class="composer-input"
           data-testid="conv-composer-input"
           aria-label="Prompt"
-          aria-controls={slashOpen ? SLASH_LIST_ID : undefined}
-          aria-activedescendant={slashOpen ? slashOptionId(Math.min(slashIndex, slashMatches.length - 1)) : undefined}
+          aria-controls={slashOpen ? SLASH_LIST_ID : taskOpen ? TASK_LIST_ID : undefined}
+          aria-activedescendant={slashOpen
+            ? slashOptionId(Math.min(slashIndex, slashMatches.length - 1))
+            : taskOpen
+              ? taskOptionId(Math.min(taskIndex, taskMatches.length - 1))
+              : undefined}
           aria-describedby={COMPOSER_HINT_ID}
           bind:this={box}
           bind:value={draft}
@@ -2698,12 +2839,14 @@
             class="composer-pick"
             data-testid="conv-model-pick"
             aria-label="Model"
-            title={currentModel ? `Model: ${currentModel}. Pick one to send /model.` : 'Pick a model to send /model.'}
+            title={currentModel
+              ? `Model: ${currentModel}. Pick one to ${pickVerb ?? 'send /model'}.`
+              : `Pick a model to ${pickVerb ?? 'send /model'}.`}
             value=""
             disabled={pickersDisabled}
             onchange={(e) => pickSetting('model', e)}>
             <option value="" disabled>{currentModel ?? 'Model'}</option>
-            {#each MODEL_OPTIONS as o (o.value)}
+            {#each modelProfile.models as o (o.value)}
               <option value={o.value}>{o.label}</option>
             {/each}
           </select>
@@ -2711,27 +2854,31 @@
             class="composer-pick"
             data-testid="conv-effort-pick"
             aria-label="Effort"
-            title={currentEffort ? `Effort: ${currentEffort}. Pick one to send /effort.` : 'Pick an effort level to send /effort.'}
+            title={currentEffort
+              ? `Effort: ${currentEffort}. Pick one to ${pickVerb ?? 'send /effort'}.`
+              : `Pick an effort level to ${pickVerb ?? 'send /effort'}.`}
             value={currentEffort}
             disabled={pickersDisabled}
             onchange={(e) => pickSetting('effort', e)}>
-            {#if !EFFORT_OPTIONS.some((o) => o.value === currentEffort)}
+            {#if !modelProfile.efforts.some((o) => o.value === currentEffort)}
               <option value={currentEffort} disabled>{currentEffort || 'Effort'}</option>
             {/if}
-            {#each EFFORT_OPTIONS as o (o.value)}
+            {#each modelProfile.efforts as o (o.value)}
               <option value={o.value}>{o.label}</option>
             {/each}
           </select>
           <span class="composer-hint" id={COMPOSER_HINT_ID} data-testid="conv-composer-hint">{composerHint}</span>
-          <button
-            type="button"
-            class="btn btn--icon btn--quiet"
-            data-testid="conv-help-button"
-            aria-label="Ask {helpModel($fleetSettings)} about this prompt"
-            aria-expanded={helpOpen}
-            title={helpBlocked ?? `Ask ${helpModel($fleetSettings)} about this prompt, with your earlier prompts as context`}
-            disabled={helpBlocked !== null}
-            onclick={() => (helpOpen ? (helpOpen = false) : openHelp())}>?</button>
+          {#if helpOn}
+            <button
+              type="button"
+              class="btn btn--icon btn--quiet"
+              data-testid="conv-help-button"
+              aria-label="Ask {helpModel($fleetSettings)} about this prompt"
+              aria-expanded={helpOpen}
+              title={helpBlocked ?? `Ask ${helpModel($fleetSettings)} about this prompt, with your earlier prompts as context`}
+              disabled={helpBlocked !== null}
+              onclick={() => (helpOpen ? (helpOpen = false) : openHelp())}>?</button>
+          {/if}
           <button
             type="button"
             class="btn btn--icon btn--quiet"
@@ -2780,6 +2927,21 @@
       box?.focus();
     }}
   />
+{/if}
+
+{#if relaunchPick}
+  {@const pick = relaunchPick}
+  <ConfirmDialog
+    title={pick.cmd === 'model' ? `Switch ${agentName} to ${pick.label}?` : `Set ${agentName}'s effort to ${pick.label}?`}
+    confirmLabel="Relaunch"
+    onconfirm={confirmRelaunch}
+    oncancel={() => (relaunchPick = null)}
+    confirmTestId="conv-relaunch-confirm"
+  >
+    {agentName} picks its {pick.cmd === 'model' ? 'model' : 'reasoning effort'} when it starts, so this
+    relaunches <code>{session.tmux_name}</code> on the same conversation with
+    {pick.cmd === 'model' ? 'the new model' : 'the new effort'}. A turn in progress is lost.
+  </ConfirmDialog>
 {/if}
 
 {#if forkOpen}
@@ -3059,6 +3221,20 @@
   }
   .composer-pick:disabled {
     opacity: 0.5;
+  }
+  .day-sep {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: var(--space-2) 0;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
+  .day-sep::before,
+  .day-sep::after {
+    content: '';
+    flex: 1;
+    border-top: 1px solid var(--border);
   }
   .composer-hint {
     flex: 1 1 auto;
@@ -3395,7 +3571,7 @@
        they sit a step above the tool rows, receipts and footers around
        them, which stay at text-2xs/xs. 1.6 rather than the token's 1.5:
        a reply runs to many lines, and the extra lead keeps the eye on the
-       right one at 80ch (WCAG 1.4.12 asks for at least 1.5). */
+       right one across the reading column (WCAG 1.4.12 asks for at least 1.5). */
     font-size: var(--text-md);
     line-height: 1.6;
     color: var(--fg);

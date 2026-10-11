@@ -33,6 +33,11 @@ pub enum LayerChange {
         description: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         members: Vec<String>,
+        /// Applies by organisation: the names of the orgs whose hosts take
+        /// this layer on top of their own assignment (a context layer only).
+        /// Empty: it applies by host, as assigned.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        orgs: Vec<String>,
     },
     Rename {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,12 +90,14 @@ pub(super) fn new_layer(
     axis: Axis,
     description: Option<String>,
     members: Vec<String>,
+    orgs: Vec<String>,
 ) -> Result<Layer, IpcError> {
     let mut l = author::layer_template(name, axis);
     if let Some(d) = description {
         l.description = d;
     }
     l.members = members;
+    l.orgs = orgs;
     l.validate().map_err(invalid)?;
     Ok(l)
 }
@@ -116,6 +123,7 @@ pub async fn propose_layer(
             axis,
             description,
             members,
+            orgs,
             ..
         } => {
             check_layer_name(layer)?;
@@ -125,7 +133,22 @@ pub async fn propose_layer(
                 )));
             }
             let axis = parse_axis(axis.as_deref())?;
-            new_layer(layer, axis, description.clone(), members.clone())?;
+            new_layer(
+                layer,
+                axis,
+                description.clone(),
+                members.clone(),
+                orgs.clone(),
+            )?;
+            if !orgs.is_empty() {
+                let known = lock(store)?.list_orgs()?;
+                if let Some(o) = orgs
+                    .iter()
+                    .find(|o| !known.iter().any(|k| k.name.eq_ignore_ascii_case(o)))
+                {
+                    return Err(invalid(format!("no organisation named {o}")));
+                }
+            }
             (
                 format!("New layer {layer} in {name}"),
                 NewChangesetItem {
@@ -138,6 +161,7 @@ pub async fn propose_layer(
                         axis: Some(axis.as_str().into()),
                         description: description.clone(),
                         members: members.clone(),
+                        orgs: orgs.clone(),
                         ..Default::default()
                     }
                     .to_json(),
@@ -231,6 +255,7 @@ mod tests {
             axis: None,
             description: None,
             members: vec![],
+            orgs: vec![],
         }
     }
 
@@ -247,6 +272,46 @@ mod tests {
             "{}",
             e.message
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_layer_applying_by_organisation_names_a_real_org_on_the_context_axis() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let by_org = |axis: Option<&str>, org: &str| LayerChange::Create {
+            catalog: None,
+            layer: "papaya".into(),
+            axis: axis.map(String::from),
+            description: None,
+            members: vec![],
+            orgs: vec![org.into()],
+        };
+        let e = propose_layer(by_org(None, "Papaya"), &f.store)
+            .await
+            .unwrap_err();
+        assert!(
+            e.message.contains("no organisation named Papaya"),
+            "{}",
+            e.message
+        );
+        let e = propose_layer(by_org(Some("role"), "Papaya"), &f.store)
+            .await
+            .unwrap_err();
+        assert!(
+            e.message.contains("must be a context layer"),
+            "{}",
+            e.message
+        );
+        f.store
+            .lock()
+            .unwrap()
+            .add_org("Papaya", None, false)
+            .unwrap();
+        let v = propose_layer(by_org(None, "papaya"), &f.store)
+            .await
+            .unwrap();
+        assert_eq!(v.state, "proposed");
     }
 
     #[tokio::test]

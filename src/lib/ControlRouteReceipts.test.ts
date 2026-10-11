@@ -4,7 +4,7 @@ import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
-const { box, focus, enqueue, mission } = vi.hoisted(() => {
+const { box, focus, enqueue, mission, getMission, decideCard } = vi.hoisted(() => {
   let subs: ((v: unknown) => void)[] = [];
   let value: { msgs: Record<number, unknown[]> } = { msgs: {} };
   return {
@@ -22,10 +22,16 @@ const { box, focus, enqueue, mission } = vi.hoisted(() => {
     focus: vi.fn((..._a: unknown[]) => true),
     enqueue: vi.fn((..._a: unknown[]) => 'm1'),
     mission: vi.fn(),
+    getMission: vi.fn(),
+    decideCard: vi.fn(),
   };
 });
 vi.mock('./outbox', () => ({ outbox: { store: box, enqueue: (...a: unknown[]) => enqueue(...a) } }));
-vi.mock('./missions', () => ({ openMission: (...a: unknown[]) => mission(...a) }));
+vi.mock('./missions', () => ({
+  openMission: (...a: unknown[]) => mission(...a),
+  getMission: (...a: unknown[]) => getMission(...a),
+  decideMissionCard: (...a: unknown[]) => decideCard(...a),
+}));
 vi.mock('./session_focus', () => ({ focusSession: (...a: unknown[]) => focus(...a) }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
@@ -57,6 +63,9 @@ beforeEach(() => {
   focus.mockClear();
   enqueue.mockClear();
   mission.mockClear();
+  getMission.mockReset();
+  decideCard.mockReset();
+  decideCard.mockResolvedValue({ ok: true, value: {} });
   sessions.set([{ id: 9, tmux_name: 'fed-v2', host_alias: 'mac', lost_at: null } as SessionRow]);
   inv.mockReset();
   route = {
@@ -170,11 +179,42 @@ describe('Control routing receipts', () => {
     expect(screen.getByTestId('control-route-send-error').textContent).toBe('fed-v2 is no longer running.');
   });
 
-  it('a mission receipt offers no send, and opens the mission', async () => {
+  it('a mission receipt opens the mission, and Send answers its open question (G7.8)', async () => {
+    getMission.mockResolvedValue({
+      ok: true,
+      value: {
+        plan: {
+          cards: [
+            { id: 70, kind: 'create', state: 'open', created_at: 1 },
+            { id: 72, kind: 'ask', state: 'open', created_at: 5 },
+            { id: 71, kind: 'ask', state: 'open', created_at: 3 },
+          ],
+        },
+      },
+    });
     render(ControlRouteReceipts, { sessionId: 1 });
-    await send(msg('a', 'How far did the federation handshake get?'));
-    expect(screen.queryByTestId('control-route-send')).toBeNull();
+    await send(msg('a', 'Use the staging hub for the handshake'));
     await fireEvent.click(screen.getByTestId('control-route-target'));
     expect(mission).toHaveBeenCalledWith(3);
+    expect(screen.getByTestId('control-route-send').textContent).toBe('↳ Send to Hub federation v2');
+    await fireEvent.click(screen.getByTestId('control-route-send'));
+    await tick();
+    await tick();
+    expect(decideCard).toHaveBeenCalledWith(71, true, 'Use the staging hub for the handshake');
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(screen.getByTestId('control-route-handed').textContent).toBe('↳ Sent to mission Hub federation v2 ↗');
+  });
+
+  it('a mission with no open question takes nothing and says so', async () => {
+    getMission.mockResolvedValue({ ok: true, value: { plan: { cards: [] } } });
+    render(ControlRouteReceipts, { sessionId: 1 });
+    await send(msg('a', 'How far did the federation handshake get?'));
+    await fireEvent.click(screen.getByTestId('control-route-send'));
+    await tick();
+    await tick();
+    expect(decideCard).not.toHaveBeenCalled();
+    expect(screen.getByTestId('control-route-send-error').textContent).toBe(
+      'Hub federation v2 has no open question to answer; open it to steer it.',
+    );
   });
 });

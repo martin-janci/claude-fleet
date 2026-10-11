@@ -127,3 +127,26 @@ export function paneChoices(pane: string | undefined): { key: LoginKey; label: s
 export function asksForCode(pane: string | undefined): boolean {
   return !!pane && /paste code/i.test(pane);
 }
+
+/** A one-time device code on the pane ("Enter code ABCD-1234"), for the
+ *  login pane's Copy code (M15 G7.12). `null` when the CLI shows none. */
+export function deviceCode(pane: string | undefined): string | null {
+  if (!pane) return null;
+  const m = /\bcode\b[^\n]*?\b([A-Z0-9]{4,5}-[A-Z0-9]{4,5})\b/i.exec(pane);
+  return m ? m[1].toUpperCase() : null;
+}
+
+/** How long the sign-in link lasts: what the pane says ("expires in 15
+ *  minutes"), else the 10 minutes Claude's sign-in page gives a link. */
+export const LOGIN_LINK_MINUTES = 10;
+export function linkMinutes(pane: string | undefined): number {
+  const m = pane ? /expires?\s+in\s+(\d{1,3})\s*min/i.exec(pane) : null;
+  return m ? Number(m[1]) : LOGIN_LINK_MINUTES;
+}
+
+/** The expiry line under the link: minutes left, or that it has run out. */
+export function expiryLine(seenAt: number, minutes: number, now: number): { text: string; expired: boolean } {
+  const left = Math.ceil((seenAt + minutes * 60_000 - now) / 60_000);
+  if (left <= 0) return { text: 'This link has expired. Start over for a new one.', expired: true };
+  return { text: `The link expires in ${left} min.`, expired: false };
+}

@@ -12,7 +12,7 @@ import SessionRowItem from './SessionRowItem.svelte';
 import { hosts } from './hosts';
 import { session } from './hosts_fixture';
 import { sessions, type SessionRow } from './sessions';
-import { LOCAL_WORK_TITLE_MAX, patchWorkItemTitle, workTitleError } from './work';
+import { LOCAL_WORK_TITLE_MAX, branchMates, patchWorkItemTitle, workTitleError } from './work';
 import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
 import { resetAccessForTests, setMyGrants } from './access';
@@ -79,26 +79,31 @@ describe('NameWorkDialog', () => {
     expect(get(sessions).find((s) => s.id === 7)?.work?.title).toBe('Ops cleanup');
   });
 
-  it("offers the session agent's name as a draft, off until used, marked Drafted and undoable (G2.1)", async () => {
+  it("prefills the session agent's name as a draft, marked Drafted and undoable (G2.1, G7.6)", async () => {
     sessions.set([live({ friendly_name: 'Receipt rounding fix' })]);
     vi.mocked(invoke).mockResolvedValue(named(7));
     render(NameWorkDialog, {
       props: { target: { mode: 'name', sessions: [{ id: 7, label: 'dev-foo' }] }, onclose: vi.fn() },
     });
-    // Off by default: the title starts as the person's, empty.
+    await tick();
+    // Prefilled as the board shows it, labelled Drafted.
     const input = screen.getByTestId('name-work-title') as HTMLInputElement;
+    expect(input.value).toBe('Receipt rounding fix');
+    expect(screen.getByTestId('name-work-drafted-label').textContent).toBe('Drafted');
+    expect(invoke).not.toHaveBeenCalled();
+    // Undo empties the field; the draft is offered again as a link.
+    await fireEvent.click(screen.getByTestId('name-work-draft-undo'));
+    await tick();
     expect(input.value).toBe('');
     expect(screen.queryByTestId('name-work-drafted')).toBeNull();
+    // Typed, then the draft used: Undo puts back what the person had typed.
     await type('name-work-title', 'Mine');
     await fireEvent.click(screen.getByTestId('name-work-use-draft'));
     await tick();
     expect(input.value).toBe('Receipt rounding fix');
-    expect(screen.getByTestId('name-work-drafted-label').textContent).toBe('Drafted');
-    // Undo puts back what the person had typed.
     await fireEvent.click(screen.getByTestId('name-work-draft-undo'));
     await tick();
     expect(input.value).toBe('Mine');
-    expect(screen.queryByTestId('name-work-drafted')).toBeNull();
     // Used, then edited: it is the person's now, no pill.
     await fireEvent.click(screen.getByTestId('name-work-use-draft'));
     await tick();
@@ -108,6 +113,61 @@ describe('NameWorkDialog', () => {
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith('name_session_work', { args: { session_id: 7, title: 'Receipt rounding' } }),
     );
+  });
+
+  it('a rename is never prefilled from a draft', async () => {
+    sessions.set([live({ friendly_name: 'Receipt rounding fix' })]);
+    render(NameWorkDialog, {
+      props: { target: { mode: 'rename', itemId: 40, title: 'Ops cleanup' }, onclose: vi.fn() },
+    });
+    await tick();
+    expect((screen.getByTestId('name-work-title') as HTMLInputElement).value).toBe('Ops cleanup');
+    expect(screen.queryByTestId('name-work-drafted')).toBeNull();
+  });
+
+  it('also names the other sessions on the branch, ticked, and leaves them out when unticked (G7.6)', async () => {
+    vi.mocked(invoke).mockImplementation(async (_cmd, a) => named((a as { args: { session_id: number } }).args.session_id));
+    const target = {
+      mode: 'name' as const,
+      sessions: [{ id: 7, label: 'dev-foo' }],
+      branchMates: [
+        { id: 8, label: 'dev-foo-2' },
+        { id: 9, label: 'dev-foo-3' },
+      ],
+    };
+    const { unmount } = render(NameWorkDialog, { props: { target, onclose: vi.fn() } });
+    const box = screen.getByTestId('name-work-branch-mates') as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    expect(box.parentElement?.textContent).toMatch(/Also name the 2 other sessions on this branch/);
+    await type('name-work-title', 'Ops cleanup');
+    await fireEvent.click(screen.getByTestId('name-work-submit'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
+    expect(invoke).toHaveBeenNthCalledWith(1, 'name_session_work', { args: { session_id: 7, title: 'Ops cleanup' } });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'link_session_work', { args: { session_id: 8, item_id: 40 } });
+    expect(invoke).toHaveBeenNthCalledWith(3, 'link_session_work', { args: { session_id: 9, item_id: 40 } });
+    unmount();
+
+    vi.mocked(invoke).mockClear();
+    render(NameWorkDialog, { props: { target, onclose: vi.fn() } });
+    await fireEvent.click(screen.getByTestId('name-work-branch-mates'));
+    await type('name-work-title', 'Ops cleanup');
+    await fireEvent.click(screen.getByTestId('name-work-submit'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    expect(invoke).toHaveBeenCalledWith('name_session_work', { args: { session_id: 7, title: 'Ops cleanup' } });
+  });
+
+  it('branchMates: same host and checkout, live, with no work yet', () => {
+    const me = live({ id: 1, worktree_id: 5 });
+    const all = [
+      me,
+      live({ id: 2, worktree_id: 5 }),
+      live({ id: 3, worktree_id: 6 }),
+      live({ id: 4, worktree_id: 5, lost_at: 100 }),
+      named(5),
+      { ...live({ id: 6, worktree_id: 5 }), host_alias: 'other' },
+    ].map((r) => (r.id === 5 ? { ...r, worktree_id: 5 } : r));
+    expect(branchMates(me, all).map((r) => r.id)).toEqual([2]);
+    expect(branchMates(live({ id: 1, worktree_id: null }), all)).toEqual([]);
   });
 
   it('offers no draft when the session has no agent name', async () => {
@@ -275,6 +335,18 @@ describe('the row work menu', () => {
         args: { session_id: 7, title: 'Ops cleanup' },
       }),
     );
+  });
+
+  it('"Name this work…" on a row offers the other sessions on its branch (G7.6)', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd) => (cmd === 'session_work_links' ? [] : named(7)));
+    const me = live({ worktree_id: 5 });
+    sessions.set([me, live({ id: 8, tmux_name: 'dev-foo-2', worktree_id: 5 }), live({ id: 9, worktree_id: 6 })]);
+    render(SessionRowItem, { props: props(me) });
+    await openMenu();
+    await fireEvent.click(screen.getByTestId('work-name'));
+    await tick();
+    const box = screen.getByTestId('name-work-branch-mates') as HTMLInputElement;
+    expect(box.parentElement?.textContent).toMatch(/Also name the other session on this branch/);
   });
 
   it('offers Rename… for a local item only, never for a ticket', async () => {

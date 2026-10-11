@@ -23,6 +23,7 @@
     type WorkTask,
   } from './work_view';
   import WorkConflictNotice from './WorkConflictNotice.svelte';
+  import { savedWithUndo } from './forms/form_frame';
 
   let {
     task,
@@ -118,11 +119,26 @@
       return;
     }
     ondone?.(r.value, group.trim() === '' ? null : note.trim() || null);
+    offerUndo(r.value, group.trim());
     if (group.trim() === '') {
       onclose();
       return;
     }
     placed = group.trim();
+  }
+
+  // "Saved": Undo puts the task back where it was (its old group and note,
+  // or back to where it would go by itself), over exactly the placement
+  // this made.
+  function offerUndo(now: WorkTask, group: string) {
+    const wasLabel = before.group?.source === 'manual' ? before.group.label : '';
+    const wasNote = untrack(() => currentNote);
+    const what = group === '' ? `${taskLabel(now)} is back where it goes by itself.` : `${taskLabel(now)} placed in ${group}.`;
+    savedWithUndo(what, async () => {
+      const r = await placeWork(now.task_id, wasLabel, now.placement_version ?? 0, wasNote);
+      if (r.ok) ondone?.(r.value, wasLabel === '' ? null : wasNote);
+      else onreload?.();
+    });
   }
 </script>
 

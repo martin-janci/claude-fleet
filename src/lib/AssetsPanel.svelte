@@ -14,8 +14,8 @@
   } from './assets_workspace';
   import { proposeAndReload } from './assets_cards';
   import { assetsViewRequest, type AssetsViewRequest } from './app_views';
-  import { push } from './toasts';
-  import { loadFleetSettings } from './fleet_settings';
+  import { push, pushError } from './toasts';
+  import { fleetSettings, loadFleetSettings, setFleetSetting, settingBool, SETTING_KEYS } from './fleet_settings';
   import type { IpcError } from './result';
   import ImportDialog from './ImportDialog.svelte';
   import SecretsPanel from './SecretsPanel.svelte';
@@ -31,6 +31,10 @@
 
   let setupPath = $state('~/agent-assets');
   let setupRemote = $state('');
+  // Toolkit forms board: "Push after each change" in the setup form writes
+  // `catalog.auto_push`; it means something only with a remote to push to.
+  let setupAutoPush = $state<boolean | null>(null);
+  const autoPushOn = $derived(setupAutoPush ?? settingBool($fleetSettings, SETTING_KEYS.catalogAutoPush));
   let busy = $state<'' | 'setup' | 'pull' | 'scan' | 'plan' | 'apply' | 'commit' | 'push' | 'propose'>('');
   // The workspace's own card verbs (apply, dismiss, undo, admit, propose
   // again), bound up so the switcher's commands wait for them too.
@@ -67,6 +71,7 @@
   let lastPlan = $state<SyncPlan | null>(null);
   let showSecrets = $state(false);
   let showNewAsset = $state(false);
+  let newAssetKind = $state<AssetKind>('skill');
   let showLintAll = $state(false);
   let showCommitPrompt = $state(false);
   /** "Write it with Claude…" from New asset (G2.6): its seeded instructions. */
@@ -249,6 +254,14 @@
       view = 'library';
       selectedKey = r.select;
     }
+    // "+ Add skill" (M15 G7.13): New asset on that kind, where a new asset
+    // could be made by hand here (the workspace's own New asset button).
+    if (r.newKind && workspaceShown && !catalogBlocked && busy === '') {
+      clearPlan();
+      newAssetKind = r.newKind;
+      showNewAsset = true;
+      return;
+    }
     // Rescan, Sync and Propose change things: a client without the grant (the
     // read-only overview) or without a catalog, or a panel or a card verb
     // that is busy, does nothing.
@@ -297,6 +310,11 @@
     busy = 'setup'; error = null;
     const c = await configureCatalog(setupPath, setupRemote);
     if (!c.ok) { error = c.error.message; busy = ''; return; }
+    const wantPush = setupRemote.trim() !== '' && autoPushOn;
+    if (wantPush !== settingBool($fleetSettings, SETTING_KEYS.catalogAutoPush)) {
+      const s = await setFleetSetting(SETTING_KEYS.catalogAutoPush, wantPush ? 'true' : 'false');
+      if (!s.ok) pushError(s.error, 'The catalog is set up, but "Push after each change" was not saved');
+    }
     await reload(false);
     busy = '';
   }
@@ -471,6 +489,11 @@
       <p class="muted">Point fleet at a git repo of skills, agents, hooks, MCP servers and plugin refs. A remote URL is cloned into the path when the path is empty.{#if hubOverview} The path is on the hub's machine{$hubStatus.url ? ` (${$hubStatus.url})` : ''}, and the clone uses its git credentials.{/if}</p>
       <label>{hubOverview ? "Path on the hub's machine" : 'Local path'} <input bind:value={setupPath} data-testid="assets-setup-path" /></label>
       <label>Remote URL (optional) <input bind:value={setupRemote} placeholder="git@github.com:you/agent-assets.git" /></label>
+      <label class="check" title={setupRemote.trim() === '' ? 'Needs a remote URL to push to.' : undefined}>
+        <input type="checkbox" checked={setupRemote.trim() !== '' && autoPushOn} disabled={setupRemote.trim() === ''} onchange={(e) => (setupAutoPush = e.currentTarget.checked)} data-testid="assets-setup-auto-push" />
+        Push after each change
+      </label>
+      <p class="muted hint">{setupRemote.trim() === '' ? 'With a remote URL, fleet can push every applied change for you.' : 'Every applied change is committed and pushed to the remote; off, changes wait for your Push.'}</p>
       {#if error}<p class="error">{error}</p>{/if}
       <button class="primary" onclick={setup} disabled={busy !== ''} data-testid="assets-setup-submit">{busy === 'setup' ? 'Setting up…' : 'Use this catalog'}</button>
     </div>
@@ -527,7 +550,11 @@
   {/if}
   {#if showNewAsset}
     <NewAssetDialog
-      onclose={() => (showNewAsset = false)}
+      initialKind={newAssetKind}
+      onclose={() => {
+        showNewAsset = false;
+        newAssetKind = 'skill';
+      }}
       onsaved={onAssetCreated}
       onwrite={authorNewBlocked === null
         ? (instructions) => {
@@ -563,6 +590,8 @@
   .assets-panel { display: flex; flex-direction: column; height: 100%; }
   .setup { max-width: 480px; margin: 40px auto; display: flex; flex-direction: column; gap: 10px; }
   .setup label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-xs); }
+  .setup label.check { flex-direction: row; align-items: center; gap: 6px; }
+  .setup .hint { margin: -6px 0 0; }
   .cmd { margin: 0; padding: 6px 8px; font-family: var(--font-mono); font-size: var(--text-xs); background: var(--bg-pane); border-radius: var(--radius-sm); white-space: pre-wrap; word-break: break-all; user-select: text; }
   .muted { color: var(--fg-muted); } .error { color: var(--usage-crit); padding: 4px 10px; margin: 0; }
   .pad { padding: 14px; }

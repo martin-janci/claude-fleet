@@ -257,6 +257,14 @@ pub enum FieldKind {
     Choice {
         options: &'static [(&'static str, &'static str)],
     },
+    /// One of a source's values, picked from a select inside the edit form
+    /// (M15 step G7.14: a device's org and person). `none` labels the empty
+    /// choice, which clears the value; without it a value must be picked.
+    Pick {
+        source: OptionSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        none: Option<&'static str>,
+    },
     /// Unix seconds, shown as how long ago ("5 min ago", "never").
     Time,
     /// A whole number the backend counts (an org's live sessions); shown,
@@ -354,9 +362,15 @@ pub enum Sub {
         field: &'static str,
         text: &'static str,
     },
+    /// The roles of the members listed at `field` (M15 step G7.14): "2
+    /// admins · 2 members · 1 viewer"; nothing when the list is absent.
+    Roles { field: &'static str },
 }
 
 /// A badge in the list and the detail header while a field has a value.
+/// `{hub}` in a badge's text is the hub's address when the desktop is paired
+/// to one, and nothing otherwise ("owns the hub fleet.example", M15 step
+/// G7.14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "when", rename_all = "snake_case")]
 pub enum Badge {
@@ -581,6 +595,14 @@ pub const ORG_ROLE_CHOICES: &[(&str, &str)] = &[
     ("viewer", "Viewer — reads only"),
 ];
 
+/// The caller's own role in an org (`OrgDetail::my_role`), as its header
+/// says it (M15 step G7.14).
+const MY_ROLES: &[(&str, &str)] = &[
+    ("admin", "you are an admin"),
+    ("member", "you are a member"),
+    ("viewer", "you are a viewer"),
+];
+
 const ORG: ResourceType = ResourceType {
     id: "org",
     label: "Organisation",
@@ -597,6 +619,8 @@ const ORG: ResourceType = ResourceType {
         FieldSpec::new("session_count", "Live sessions", "Its live sessions that you can see.", FieldKind::Count)
             .sub(Sub::Count { field: "needs_you", text: "need you" }),
         FieldSpec::new("needs_you", "Need you", "Of those, the ones waiting on a person: a question, a permission, a stop.", FieldKind::Count),
+        FieldSpec::new("member_count", "Members", "Who is in it, by role. Shown to its own people and the fleet's administrator.", FieldKind::Count)
+            .sub(Sub::Roles { field: "members" }),
         FieldSpec::new("spent_today_micros", "Spent today", "Estimated cost of its sessions today (UTC). Shown when you can see every session.", FieldKind::Money)
             .sub(Sub::Budget { field: "budget_daily_usd" }),
         FieldSpec::new("spent_week_micros", "Last 7 days", "Estimated cost of its sessions over the last 7 days.", FieldKind::Money),
@@ -812,8 +836,10 @@ const ORG: ResourceType = ResourceType {
             FieldKind::Bool { on_off: false, default: false },
         )
         .edit("owns_hub")
-        .badge(Badge::True { text: "owns the hub" })
+        .badge(Badge::True { text: "owns the hub {hub}" })
         .confirm("This org's admins will administer every host on the hub."),
+        FieldSpec::new("my_role", "Your role", "What you may do in it: an admin administers it, a member works in it, a viewer reads.", FieldKind::Choice { options: MY_ROLES })
+            .badge(Badge::Label),
         FieldSpec::new(
             "admins_see_unclaimed",
             "Admins see unclaimed sessions",
@@ -1072,6 +1098,9 @@ const DEVICE_MODES: &[(&str, &str)] = &[
     ("readonly", "Watch only"),
 ];
 
+/// `DeviceSummary.kind`.
+const DEVICE_KINDS: &[(&str, &str)] = &[("desktop", "Desktop"), ("phone", "Phone")];
+
 const DEVICE_RESOURCE: ResourceType = ResourceType {
     id: "device",
     label: "Device",
@@ -1098,8 +1127,24 @@ const DEVICE_RESOURCE: ResourceType = ResourceType {
         .edit("trusted")
         .badge(Badge::True { text: "trusted" })
         .confirm("Its prompts will reach agents unmarked, and it will be able to change the company's orgs, devices and settings."),
-        FieldSpec::new("org", "Org", "The org it is bound to; none sees every org.", FieldKind::Text { max: 80 }),
-        FieldSpec::new("person", "Belongs to", "Whose device it is: it sees their sessions and the ones shared with them.", FieldKind::Text { max: 64 }),
+        FieldSpec::new(
+            "org",
+            "Org",
+            "The org it is bound to; none sees every org.",
+            FieldKind::Pick { source: OptionSource::Orgs, none: Some("No org — every org") },
+        )
+        .edit("org")
+        .confirm("From its next request it sees only the org picked here (every org, with none)."),
+        FieldSpec::new(
+            "person",
+            "Belongs to",
+            "Whose device it is: it sees their sessions and the ones shared with them.",
+            FieldKind::Pick { source: OptionSource::People, none: None },
+        )
+        .edit("person")
+        .confirm("From its next request it sees that person's sessions and the ones shared with them, and no others."),
+        FieldSpec::new("kind", "Kind", "A desktop or a phone, as its app last said.", FieldKind::Choice { options: DEVICE_KINDS }),
+        FieldSpec::new("app", "App", "What it runs, as its app last said; nothing until it has called the hub.", FieldKind::Text { max: 80 }),
         FieldSpec::new(
             "catalogs",
             "May change catalogs",
@@ -1145,16 +1190,9 @@ const DEVICE_RESOURCE: ResourceType = ResourceType {
         ActionSpec::new("device.revoke", "Revoke", "revoke_device", &[DEVICE])
             .confirm("Its next request is refused and the name is free again. Pair it again to bring it back."),
     ),
-    actions: &[
-        ActionSpec::new("device.bind", "Bind to an org", "bind_device_org", &[DEVICE, ("org", Bind::Param("org"))])
-            .params(&[param("org", "Org", ParamKind::Options { source: OptionSource::Orgs }, true)])
-            .confirm("From its next request it sees only that org's work and sessions."),
-        ActionSpec::new("device.unbind", "Unbind from its org", "bind_device_org", &[DEVICE])
-            .confirm("From its next request it sees every org again."),
-        ActionSpec::new("device.hand_over", "Hand to a person", "set_device_person", &[DEVICE, ("person", Bind::Param("person"))])
-            .params(&[param("person", "Person", person(), true)])
-            .confirm("From its next request it sees that person's sessions and the ones shared with them, and no others."),
-    ],
+    // The org and the person are picked in the edit form (M15 step G7.14);
+    // Apply sends them through `update_device`.
+    actions: &[],
     create_flow: None,
     variant_by: None,
 };
@@ -1168,7 +1206,7 @@ const PERSON_RESOURCE: ResourceType = ResourceType {
     id_field: "id",
     title_field: "name",
     color_field: None,
-    empty: "Nobody yet. A person is added when a device is paired to them.",
+    empty: "Nobody yet. Add a person, or pair a device to them.",
     fields: &[
         FieldSpec::new("name", "Name", "What grants and devices are addressed to.", FieldKind::Text { max: 64 }).edit("name"),
         FieldSpec::new("display_name", "Shown as", "How the apps show them; empty shows the name.", FieldKind::Text { max: 80 }).edit("display_name"),
@@ -1177,7 +1215,18 @@ const PERSON_RESOURCE: ResourceType = ResourceType {
         FieldSpec::new("created_at", "Added", "When the hub first heard of them.", FieldKind::Time),
         FieldSpec::new("disabled_at", "Disabled", "When their devices and the shares made to them were revoked.", FieldKind::Time),
     ],
-    create: None,
+    create: Some(
+        ActionSpec::new(
+            "person.add",
+            "+ Person",
+            "add_person",
+            &[("name", Bind::Param("name")), ("display_name", Bind::Param("display_name"))],
+        )
+        .params(&[
+            param("name", "Name", text(64, "jana"), true),
+            param("display_name", "Shown as (optional)", text(80, "Jana Nováková"), false),
+        ]),
+    ),
     update: Some(ActionSpec::new("person.update", "Apply", "rename_person", &[("person_id", Bind::Record("id"))])),
     delete: Some(
         ActionSpec::new("person.disable", "Disable", "disable_person", &[("person_id", Bind::Record("id"))])
@@ -1253,10 +1302,24 @@ const DEBUG_DEVICE: ResourceType = ResourceType {
         ActionSpec::new("debug_device.rescan", "Rescan host", "scan_debug_devices", &[("host", Bind::Record("host"))]),
         ActionSpec::new("debug_device.claim", "Claim", "claim_debug_device", &[DEBUG_DEVICE_ID, ("note", Bind::Param("note"))])
             .params(&[param("note", "For (optional)", text(200, "testing the login flow"), false)]),
-        ActionSpec::new("debug_device.install", "Install app…", "install_debug_device", &[DEBUG_DEVICE_ID, ("path", Bind::Param("path")), ("host", Bind::Param("host"))])
+        ActionSpec::new(
+            "debug_device.install",
+            "Install app…",
+            "install_debug_device",
+            &[
+                DEBUG_DEVICE_ID,
+                ("path", Bind::Param("path")),
+                ("host", Bind::Param("host")),
+                ("claim", Bind::Param("claim")),
+                ("note", Bind::Param("note")),
+            ],
+        )
             .params(&[
                 param("path", "App (.apk, .app or .ipa)", text(1024, "~/app/build/outputs/apk/debug/app-debug.apk"), true),
                 param("host", "On host (optional; the device's own when empty)", ParamKind::Options { source: OptionSource::Hosts }, false),
+                // M15 step G7.14: claimed first, so others see it in use.
+                param("claim", "Claim it while installing (others see it in use)", ParamKind::Toggle { default: true }, false),
+                param("note", "For (optional)", text(200, "testing the login flow"), false),
             ])
             .result(ResultView::Output),
         ActionSpec::new("debug_device.logs", "Logs", "debug_device_logs", &[DEBUG_DEVICE_ID]).result(ResultView::Output),
@@ -1307,6 +1370,7 @@ const PEER_LINK: ResourceType = ResourceType {
         FieldSpec::new("pending", "Waiting", "Messages queued for the other fleet.", FieldKind::Count),
         FieldSpec::new("last_exchange_at", "Last exchange", "When the hubs last traded messages.", FieldKind::Time),
         FieldSpec::new("last_error", "Last error", "Why the last exchange failed, while it is failing.", FieldKind::Text { max: 512 }),
+        FieldSpec::new("retry", "Retrying", "How often this hub tries the link again while it is down (it backs off to once a minute).", FieldKind::Text { max: 32 }),
     ],
     create: Some(
         ActionSpec::new("peer_link.add", "Link a hub", "link_peer_hub", &[("url", Bind::Param("url")), ("code", Bind::Param("code"))]).params(&[
@@ -1539,6 +1603,7 @@ mod tests {
                 "add_org",
                 "add_org_project",
                 "add_org_rule",
+                "add_person",
                 "assign_host_org",
                 "assign_tracker_org",
                 "bind_device_org",
@@ -1582,7 +1647,6 @@ mod tests {
                 "revoke_org_member_grants",
                 "revoke_org_share",
                 "scan_debug_devices",
-                "set_device_person",
                 "set_org_member",
                 "set_org_setting",
                 "set_tracker_credential",

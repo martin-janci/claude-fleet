@@ -17,6 +17,7 @@
   import { catalogStatuses } from '../assets_workspace';
   import { devices, people, type Pairing } from '../devices';
   import { hosts } from '../hosts';
+  import { hubStatus } from '../hub';
   import { orgs } from '../orgs';
   import { trackers } from '../trackers';
   import { push, pushError } from '../toasts';
@@ -30,6 +31,7 @@
     afterChange,
     badgesOf,
     buildArgs,
+    hubHost,
     idOf,
     itemValue,
     itemsOf,
@@ -210,6 +212,8 @@
   /** A select's choices for a list field's add form: the source's values,
    *  minus the ones the record already has. */
   function options(field: FieldSpec, param: string): { value: string; label: string }[] {
+    // A picked field (a device's org and person, G7.14): the whole source.
+    if (field.type === 'pick') return sourceOptions(field.source);
     const action = field.type === 'items' ? field.add.find((a) => a.params.some((p) => p.name === param)) : undefined;
     const spec = action?.params.find((p) => p.name === param);
     // A suggestion leaves nothing out: picking a member again changes their role.
@@ -268,7 +272,7 @@
                 <span class="swatch" style:background={String(r[resource.color_field] ?? '') || 'transparent'}></span>
               {/if}
               <span class="title">{titleOf(resource, r)}</span>
-              {#each badgesOf(resource, r) as b (b)}<span class="badge" data-testid="resource-badge">{b}</span>{/each}
+              {#each badgesOf(resource, r, hubHost($hubStatus.url)) as b (b)}<span class="badge" data-testid="resource-badge">{b}</span>{/each}
             </button>
           </li>
         {/each}

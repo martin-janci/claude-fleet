@@ -274,11 +274,13 @@ impl FleetTools {
             "restart_session",
             p.confirm_nonce.as_deref(),
             &format!(
-                "host={} name={} force={} profile={}",
+                "host={} name={} force={} profile={} model={} effort={}",
                 bound_text(Some(&host_alias)),
                 bound_text(Some(&name)),
                 p.force,
-                bound_text(p.profile.as_deref())
+                bound_text(p.profile.as_deref()),
+                bound_text(p.model.as_deref()),
+                bound_text(p.effort.as_deref())
             ),
             &caller,
         )?;
@@ -287,6 +289,8 @@ impl FleetTools {
             name,
             force: p.force,
             profile: p.profile,
+            model: p.model,
+            effort: p.effort,
         };
         let row = sessions::restart_session(args, &self.store, &self.ssh)
             .await
@@ -485,7 +489,8 @@ impl FleetTools {
         elsewhere, recreate the branch from base once origin confirms it is \
         gone, and respawn a pane whose directory vanished. No-op when \
         healthy. Call it after any tool answers E_REPAIR_REQUIRED, then \
-        retry that tool. Returns a RepairReport. Errors: E_REPO_MISSING, \
+        retry that tool. progress_token: steps arrive as repair:progress. \
+        Returns a RepairReport. Errors: E_REPO_MISSING, \
         E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, \
         E_HOST_OFFLINE, E_CONFIRM_REQUIRED (gated by \
         mcp.confirm_destructive).")]
@@ -534,9 +539,15 @@ impl FleetTools {
                     ))
                 })?
         };
-        let rep = crate::service::repair::repair_session(id, true, &self.store, &self.ssh)
-            .await
-            .map_err(to_mcp_err)?;
+        let rep = crate::service::repair::repair_session_reporting(
+            id,
+            true,
+            &self.store,
+            &self.ssh,
+            p.progress_token,
+        )
+        .await
+        .map_err(to_mcp_err)?;
         ok_json(&rep)
     }
 

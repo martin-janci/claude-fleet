@@ -8,8 +8,8 @@
 
   /** How a card ended: kept by the caller so a re-drawn card stays one line. */
   export type ChatFormEnded =
-    | { state: 'answered'; summary: string; starting: string | null }
-    | { state: 'declined'; note: string };
+    | { state: 'answered'; summary: string; starting: string | null; at?: number }
+    | { state: 'declined'; note: string; at?: number };
 </script>
 
 <script lang="ts">
@@ -26,7 +26,7 @@
   import SavedLaterLine from './SavedLaterLine.svelte';
   import Loader from '../Loader.svelte';
   import { finishedSpec, partialSpec } from './partial_spec';
-  import { answerSummary, endedMark } from './receipt';
+  import { answerSummary, decidedClock, endedMark } from './receipt';
   import type { FormSpec, FormView, Values } from './forms';
 
   let {
@@ -102,7 +102,7 @@
     wizard?.clearSecrets();
     if (r.ok) {
       wizard?.forgetSaved();
-      ended = { state: 'answered', summary: r.summary ?? summaryOf(whole, values), starting: r.starting ?? null };
+      ended = { state: 'answered', summary: r.summary ?? summaryOf(whole, values), starting: r.starting ?? null, at: Math.floor(Date.now() / 1000) };
       onended?.(ended);
       return;
     }
@@ -115,7 +115,7 @@
     await ondecline?.(note.trim());
     busy = false;
     wizard?.forgetSaved();
-    ended = { state: 'declined', note: note.trim() };
+    ended = { state: 'declined', note: note.trim(), at: Math.floor(Date.now() / 1000) };
     onended?.(ended);
   }
 </script>
@@ -125,7 +125,9 @@
     <div class="line">
       <span class={`mark ${ended.state}`} aria-hidden="true">{endedMark(ended.state)}</span>
       <strong>{whole.title}</strong>
-      <span class="meta">{ended.state === 'answered' ? 'answered by you' : 'declined'}</span>
+      <span class="meta"
+        >{ended.state === 'answered' ? 'answered by you on the desktop' : 'declined'}{ended.at ? ` · ${decidedClock(ended.at, Math.floor(Date.now() / 1000))}` : ''}</span
+      >
     </div>
     {#if ended.state === 'answered' && ended.summary}<div class="summary" data-testid="chat-form-summary">{ended.summary}</div>{/if}
     {#if ended.state === 'declined' && ended.note}<div class="summary">“{ended.note}”</div>{/if}

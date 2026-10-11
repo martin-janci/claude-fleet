@@ -14,10 +14,11 @@ impl FleetTools {
         detection_backlog: suggestions undecided for detection_backlog_days). \
         A per-host token sees its own host's usage and its org's trackers. \
         hub: uptime and last reconcile pass; tunnels_mode none|reverse; \
-        peer_links_total. \
+        peer_links_total. devices: {paired, last_seen_at, last_sync_at}. \
+        playbooks_week: runs per kind. \
         hosts[]: per host disk_home_pct/disk_low, claude_behind, \
         agent_behind, hooks_silent. decide (master only): Jev's last \
-        hour, degraded if its breaker is open or >20% failed. loops[]: \
+        hour, degraded if its breaker is open or >20% failed; week: 7 days' answers. loops[]: \
         each background job's last and next run and result \
         (ok/error/paused); automation_paused.")]
     pub(super) async fn fleet_health(
@@ -138,6 +139,32 @@ impl FleetTools {
                     l.last_error = Some("failed (details on the hub)".into());
                 }
             }
+        }
+        // Settings › Hub (gap plan G7.3): how many devices are paired and
+        // when this one last reached the hub. A person's device counts its
+        // person's own; the master every live one; a per-host token none.
+        if caller.host_alias.is_none() {
+            h.devices = self.reader().lock().ok().and_then(|s| {
+                let live = s.active_client_tokens().ok()?;
+                let me = caller.client.as_ref();
+                let paired = match me {
+                    Some(c) => live
+                        .iter()
+                        .filter(|t| c.person_id.is_some() && t.person_id == c.person_id)
+                        .count(),
+                    None if caller.is_master() => live.len(),
+                    None => return None,
+                };
+                Some(health::PairedDevices {
+                    paired: paired as u32,
+                    last_seen_at: me.and_then(|c| {
+                        live.iter()
+                            .find(|t| t.id == c.id)
+                            .and_then(|t| t.last_seen_at)
+                    }),
+                    last_sync_at: h.hub.as_ref().and_then(|hub| hub.reconcile.last_ok_at),
+                })
+            });
         }
         // An agent reads it: a tracker's error is the tracker's text.
         h.trackers.fence_errors();
@@ -269,6 +296,34 @@ impl FleetTools {
         let now = crate::store::now_unix();
         ok_json_compact(
             &crate::service::account_limits::served_check_account_headroom(&p, self.reader(), now)
+                .map_err(to_mcp_err)?,
+        )
+    }
+
+    #[tool(description = "Jev's host for a new session of project_id: \
+        {host_alias, confidence_pct, run_id}, or null (off, one candidate, \
+        unsure). E_FORBIDDEN for an org-bound client.")]
+    pub(super) async fn propose_host_placement(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<crate::service::decide::host_placement::ProposeHostArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "propose_host_placement",
+            &format!("project={}", p.project_id),
+        );
+        // The proposal weighs every host and every account's use; a client
+        // bound to an org sees its own org's hosts only, so it is not asked.
+        if caller.client.as_ref().is_some_and(|c| c.org_id.is_some()) {
+            return Err(to_mcp_err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "the host proposal weighs every host; a client bound to an org picks its host",
+            )));
+        }
+        let ctx = crate::service::decide::DecideCtx::jev(Arc::clone(&self.store));
+        ok_json_compact(
+            &crate::service::decide::host_placement::propose_served(&ctx, &p)
+                .await
                 .map_err(to_mcp_err)?,
         )
     }
@@ -930,6 +985,57 @@ impl FleetTools {
             other => Err(mcp_err(
                 "E_INVALID",
                 format!("control_route's action is propose or follow, not {other:?}"),
+                None,
+            )),
+        }
+    }
+
+    // ---- New session: resume or start fresh (gap plan G7.10, Jev N2) ----
+
+    #[tool(description = "Whether a new session on a work key should \
+        resume a past session or start fresh (propose {key}), or record \
+        the person's pick (follow {key, chosen}).")]
+    pub(super) async fn resume_or_new(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ResumeOrNewParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::service::decide::{resume_or_new, DecideCtx};
+        audit(
+            "resume_or_new",
+            &format!("action={}", p.action.escape_debug()),
+        );
+        refuse_operator_answer(&caller)?;
+        let scope = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            caller.view_scope(&s).map_err(to_mcp_err)?
+        };
+        match p.action.as_str() {
+            "propose" => {
+                let ctx = DecideCtx::jev(std::sync::Arc::clone(&self.store));
+                ok_json_compact(
+                    &resume_or_new::propose_for_key(&ctx, &scope, &p.key)
+                        .await
+                        .map_err(to_mcp_err)?,
+                )
+            }
+            "follow" => {
+                let Some(chosen) = p.chosen else {
+                    return Err(mcp_err("E_INVALID", "follow needs chosen", None));
+                };
+                let marked = resume_or_new::follow_for_key(
+                    &self.store,
+                    &scope,
+                    &p.key,
+                    &chosen,
+                    crate::store::now_unix(),
+                )
+                .map_err(to_mcp_err)?;
+                ok_json_compact(&marked)
+            }
+            other => Err(mcp_err(
+                "E_INVALID",
+                format!("resume_or_new's action is propose or follow, not {other:?}"),
                 None,
             )),
         }

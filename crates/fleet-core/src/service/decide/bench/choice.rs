@@ -625,6 +625,8 @@ fn prepare_work_placement(input: &Value) -> Result<Prepared, String> {
                 version: 1,
                 conditions: Default::default(),
                 group: g.as_str()?.to_string(),
+                host_alias: None,
+                profile: None,
                 created_at: 0,
                 updated_at: 0,
             })

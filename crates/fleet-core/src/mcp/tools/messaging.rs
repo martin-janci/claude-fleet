@@ -1002,6 +1002,7 @@ fn answer_key_kind(key: crate::tmux::NamedKey) -> Result<(), String> {
         // the session; it answers nothing.
         NamedKey::CtrlC
         | NamedKey::Ctrl(_)
+        | NamedKey::Meta(_)
         | NamedKey::Left
         | NamedKey::Right
         | NamedKey::BackTab => Err(format!(

@@ -2498,6 +2498,85 @@ fn a_tree_query_groups_by_mission_and_names_only_missions_the_caller_reads() {
     assert!(!dump.contains("Beta's secret"), "{dump}");
 }
 
+/// Orbit Fleet G7.6: a read that asks names each task's mission and its
+/// wave (the Board card's chip), only for missions the caller reads; a read
+/// that does not ask pays nothing and names none. `done_when` rides along.
+#[test]
+fn a_tree_read_with_missions_names_the_mission_and_wave_of_each_task() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        let mission = |org: i64, name: &str| {
+            s.create_mission(
+                &crate::store::NewMission {
+                    org_id: Some(org),
+                    owner_person_id: None,
+                    root_item_id: None,
+                    name,
+                    goal: "g",
+                    non_goals: None,
+                    done_when: &[],
+                    mode: None,
+                    level: None,
+                },
+                "fleet",
+            )
+            .unwrap()
+        };
+        let m = mission(w.org_a, "Ship login");
+        s.set_mission_item(m.id, w.t1, true, "fleet").unwrap();
+        s.set_mission_item(m.id, w.t2, true, "fleet").unwrap();
+        // TK-2 waits on TK-1: wave 2. TK-1 waits on TK-3, outside the
+        // mission: still wave 1.
+        s.add_item_dep(w.t2, w.t1, "person", "test").unwrap();
+        s.add_item_dep(w.t1, w.t3, "person", "test").unwrap();
+        s.set_item_done_when(w.t2, &["ci".to_string(), "review".to_string()], "test")
+            .unwrap();
+        let other = mission(w.org_b, "Beta's secret");
+        s.set_mission_item(other.id, w.t3, true, "fleet").unwrap();
+    }
+    let read = |scope: &OrgScope, with_missions: bool| {
+        tree(
+            &w.st,
+            &vs(scope),
+            &TreeArgs {
+                limit: Some(200),
+                with_missions,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let p = read(&OrgScope::All, true);
+    let m1 = task_of(&p, "TK-1").mission.clone().expect("TK-1's mission");
+    assert_eq!((m1.name.as_str(), m1.wave), ("Ship login", Some(1)));
+    let m2 = task_of(&p, "TK-2").mission.clone().expect("TK-2's mission");
+    assert_eq!((m2.id, m2.wave), (m1.id, Some(2)));
+    assert_eq!(
+        task_of(&p, "TK-3")
+            .mission
+            .as_ref()
+            .map(|m| m.name.as_str()),
+        Some("Beta's secret")
+    );
+    assert_eq!(task_of(&p, "TK-2").done_when, vec!["ci", "review"]);
+    assert!(task_of(&p, "TK-1").done_when.is_empty());
+
+    // Not asked: no mission on any task, and none on the wire.
+    let p = read(&OrgScope::All, false);
+    assert!(p.tasks.iter().all(|t| t.mission.is_none()));
+    assert!(!serde_json::to_string(&p).unwrap().contains("\"mission\""));
+
+    // Org A's client sees TK-3 but not Beta's mission: no name.
+    let p = read(&strict(w.org_a), true);
+    assert_eq!(
+        task_of(&p, "TK-1").mission.as_ref().map(|m| m.wave),
+        Some(Some(1))
+    );
+    assert!(task_of(&p, "TK-3").mission.is_none());
+    assert!(!serde_json::to_string(&p).unwrap().contains("Beta's secret"));
+}
+
 #[test]
 fn a_tree_query_groups_by_the_account_its_sessions_run_on() {
     let w = world();

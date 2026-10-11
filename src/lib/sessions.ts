@@ -597,15 +597,21 @@ export async function touchSessionViewed(sessionId: number): Promise<Result<Sess
 
 /** Restart the session in place. With `profile`, resume its conversation
  *  under that credential profile instead (`''` = the host's own login): a
- *  running `claude` cannot change its login, so a switch is a restart. */
+ *  running `claude` cannot change its login, so a switch is a restart.
+ *  `launch.model` / `launch.effort` do the same for the model and reasoning
+ *  effort (`''` = the host's default) — how a Codex session, whose `/model`
+ *  takes no argument, changes model. */
 export async function restartSession(
   hostAlias: string,
   name: string,
   profile?: string,
+  launch: { model?: string; effort?: string } = {},
 ): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>('restart_session', {
-    args: profile === undefined ? { host_alias: hostAlias, name } : { host_alias: hostAlias, name, profile },
-  });
+  const args: Record<string, unknown> = { host_alias: hostAlias, name };
+  if (profile !== undefined) args.profile = profile;
+  if (launch.model !== undefined) args.model = launch.model;
+  if (launch.effort !== undefined) args.effort = launch.effort;
+  const r = await invokeCmd<SessionRow>('restart_session', { args });
   if (r.ok) acceptCommandRow(r.value);
   return r;
 }
@@ -1161,16 +1167,19 @@ Pass 1 — correctness: does the code do what it should? Any bugs?
 Pass 2 — code quality: clarity, structure, test coverage.
 Pass 3 — risk: anything dangerous, security-sensitive, or destructive?
 
-Cite file:line for every point. End with an overall verdict: approve / approve-with-fixes / needs-rework.`;
+Cite file:line for every point. End with one line in this form: \`Verdict: approve | approve-with-fixes | needs-rework · <N> blocking · <M> nits\`.`;
 
 export async function spawnReview(
   sourceSessionId: number,
   prompt: string,
   signal?: AbortSignal,
+  agent: 'claude' | 'codex' = 'claude',
 ): Promise<Result<SessionRow>> {
   const r = await invokeCmdAbortable<SessionRow>(
     'spawn_review',
-    { args: { source_session_id: sourceSessionId, prompt } },
+    // M15 G7.12: Codex as the reviewer; Claude Code stays the default and
+    // is not named, so an older hub reads the same call.
+    { args: agent === 'claude' ? { source_session_id: sourceSessionId, prompt } : { source_session_id: sourceSessionId, prompt, agent } },
     signal,
   );
   if (r.ok) mergeSession(r.value);

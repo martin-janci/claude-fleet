@@ -128,6 +128,25 @@ fn an_agent_proposes_and_only_an_approved_guide_is_live() {
         (now.len(), now[0].title.as_str()),
         (1, "Tidy up idle sessions")
     );
+    // The view says where the live guide came from (G7.15): the approved
+    // row's proposer and approver, not the superseded one's.
+    let a = &view(&s, true).unwrap().approvals;
+    assert_eq!(a.len(), 1);
+    assert_eq!(
+        (
+            a[0].page_id.as_str(),
+            a[0].source.as_str(),
+            a[0].source_detail.as_deref(),
+            a[0].approved_by.as_deref()
+        ),
+        (
+            "guide.cleanup",
+            "agent",
+            Some("host web-1"),
+            Some("person (client phone)")
+        )
+    );
+    assert!(a[0].approved_at.is_some());
 
     // Rejecting leaves the live guide; removing takes it off.
     let r3 = propose(&s, &example(), None, agent()).unwrap();
@@ -135,6 +154,10 @@ fn an_agent_proposes_and_only_an_approved_guide_is_live() {
     assert_eq!(live(&s).len(), 1);
     let v = remove(&s, "guide.cleanup", person()).unwrap();
     assert!(v.guides.is_empty());
+    assert!(
+        v.approvals.is_empty(),
+        "a removed guide has no provenance line"
+    );
     assert!(remove(&s, "guide.cleanup", person()).is_err());
 }
 

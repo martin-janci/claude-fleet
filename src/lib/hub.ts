@@ -219,8 +219,6 @@ const REASONS = {
     'this app does not poll account usage while a hub owns the fleet, so it keeps no history',
   account_spend:
     'this app collects no usage while a hub owns the fleet, so it has no spend per account',
-  propose_host_placement:
-    'the decision model and the account usage are the hub’s while it owns the fleet; pick the host as usual',
   record_host_placement: 'the decision model’s runs are recorded on the hub that owns the fleet; nothing to record here',
   set_account_nickname:
     'the nickname lives in the hub’s database and there is no tool to set it',
@@ -386,6 +384,8 @@ export const ROUTED_ACTIONS = [
   'queue_prompt',
   'queued_prompts',
   'cancel_queued_prompt',
+  // The composer's context help: one claude -p the hub runs and books.
+  'session_context_help',
   'recreate_session',
   // `restore_host_sessions` batches `recreate_session` over a host's lost
   // rows and is `routed` in `verdicts.rs` like it — it was missing here, so
@@ -471,6 +471,9 @@ export const ROUTED_ACTIONS = [
   // grant or decline of one (both buttons, so both are writes here).
   'session_ask_access',
   'access_requests',
+  // Gap plan G7.11: the Share sheet's "Trust now" (a device's mode, through
+  // the hub's org_admin).
+  'update_device',
   // Orchestration O1: the Missions tab's writes.
   'save_mission',
   'set_mission_state',

@@ -770,6 +770,8 @@ async fn rewind_conversation_with(
                     name: sess.tmux_name.clone(),
                     force: false,
                     profile: None,
+                    model: None,
+                    effort: None,
                 })
                 .await;
             // The rebind is committed before the restart can be attempted at

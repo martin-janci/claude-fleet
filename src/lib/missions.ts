@@ -961,6 +961,58 @@ export function missionGroups(missions: readonly Mission[]): MissionGroup[] {
   );
 }
 
+/** The mission list's Filters (G7.7, the Missions board). Each one left
+ *  out (or false) lets every mission through. */
+export interface MissionFilters {
+  /** Only missions waiting on a person (`waiting_on`). */
+  needsYou?: boolean;
+  /** Only the viewer's own (`owner_person_id`). */
+  mine?: boolean;
+  /** Only this organisation's; `0` = no organisation. */
+  orgId?: number | null;
+  /** Only missions that may run in this repository (`project_id`). */
+  projectId?: number | null;
+  /** `finite` | `continuous`. */
+  mode?: string | null;
+}
+
+/** How many filters are on: the Filters button's count. */
+export function missionFilterCount(f: MissionFilters): number {
+  return [f.needsYou, f.mine, f.orgId != null, f.projectId != null, !!f.mode].filter(Boolean).length;
+}
+
+/** The missions `f` lets through. `me` is the viewer's person id; without
+ *  one, Mine lets nothing through. */
+export function filterMissions(missions: readonly Mission[], f: MissionFilters, me: number | null = null): Mission[] {
+  return missions.filter(
+    (m) =>
+      (!f.needsYou || m.waiting_on != null) &&
+      (!f.mine || (me != null && m.owner_person_id === me)) &&
+      (f.orgId == null || (f.orgId === 0 ? m.org_id == null : m.org_id === f.orgId)) &&
+      (f.projectId == null || (m.repos ?? []).some((r) => r.project_id === f.projectId)) &&
+      (!f.mode || m.mode === f.mode),
+  );
+}
+
+/** What the Filters can choose from: the organisations and repositories the
+ *  listed missions name (`0` for missions with no organisation), and whether
+ *  both modes occur. */
+export function missionFilterChoices(missions: readonly Mission[]): {
+  orgIds: number[];
+  repos: { project_id: number; name: string }[];
+  modes: string[];
+} {
+  const orgIds = [...new Set(missions.map((m) => m.org_id ?? 0))].sort((a, b) => a - b);
+  const repos = new Map<number, string>();
+  for (const m of missions) for (const r of m.repos ?? []) if (!repos.has(r.project_id)) repos.set(r.project_id, r.name);
+  const modes = [...new Set(missions.map((m) => m.mode))].sort();
+  return {
+    orgIds,
+    repos: [...repos].map(([project_id, name]) => ({ project_id, name })).sort((a, b) => a.name.localeCompare(b.name)),
+    modes,
+  };
+}
+
 /** The missions whose row reads its detail for a reason line: the ones
  *  still going, newest change first, at most `cap`. */
 export function missionsToExplain(missions: readonly Mission[], cap = 12): Mission[] {

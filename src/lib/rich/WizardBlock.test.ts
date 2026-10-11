@@ -50,4 +50,27 @@ describe('a wizard block', () => {
     expect(screen.getByTestId('rich-wizard-off')).toHaveTextContent('New session: opens in the live conversation.');
     expect(screen.queryByTestId('chat-form')).toBeNull();
   });
+
+  it('starts from answers drafted from the person\'s message, marked Drafted, dropping what it cannot take (G7.4)', async () => {
+    render(RichText, {
+      props: {
+        source: ui({ kind: 'wizard', wizard: 'add_project', why: 'You asked to set up pos on mercury.', values: { source: 'folder', host: 'mercury', path: '~/src/pos', nope: 'x' } }),
+        sessionId: 4,
+      },
+    });
+    await screen.findByTestId('wizard-chat-card');
+    await waitFor(() => expect(screen.getByTestId('form-field-host-mercury')).toHaveAttribute('aria-checked', 'true'));
+    expect(screen.getByTestId('form-field-source-folder')).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByTestId('form-drafted-from-host')).toHaveTextContent('by the agent · from your message');
+    await fireEvent.click(screen.getByTestId('form-next'));
+    expect((screen.getByTestId('form-field-path') as HTMLInputElement).value).toBe('~/src/pos');
+  });
+
+  it('drops a drafted option the wizard does not offer', async () => {
+    render(RichText, { props: { source: ui({ kind: 'wizard', wizard: 'add_project', values: { host: 'pluto' } }), sessionId: 4 } });
+    await screen.findByTestId('wizard-chat-card');
+    await waitFor(() => expect(screen.getByTestId('form-field-host-mercury')).toBeTruthy());
+    expect(screen.queryByTestId('form-drafted-from-host')).toBeNull();
+  });
 });
+

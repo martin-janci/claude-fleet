@@ -44,6 +44,7 @@
     sessionPhrase,
     todayKpis,
     todayLine,
+    shippedWhen,
     IN_PROGRESS_SHOWN,
     type Today,
     type TodayBucket,
@@ -306,7 +307,7 @@
         {#each view.shipped as x (`${x.how}|${x.key ?? x.pr_url ?? x.at}`)}
           <li class="group shipped">
             <span class="label">{x.key ? groupLabel({ key: x.key, title: x.title ?? '' }) : x.title || 'Untitled work'}</span>
-            <span class="status">{x.how === 'done' ? 'done' : 'PR'}</span>
+            <span class="status" data-testid="today-shipped-when">{shippedWhen(x)}</span>
             {#if x.from}<span class="status" data-testid="today-shipped-from">from {x.from}</span>{/if}
             {#if x.pr_url}
               <button class="btn btn--quiet link" type="button" onclick={() => void openExternal(x.pr_url ?? '')}>PR</button>

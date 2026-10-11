@@ -71,7 +71,7 @@ export type Item =
   | { type: 'table'; source: SourceRef; columns?: string[]; copy?: boolean }
   | { type: 'chart'; source: SourceRef; chart: 'line' | 'bar' | 'stacked_bar' | 'sparkline'; title?: string }
   | { type: 'account_usage'; source: SourceRef; view: UsageView }
-  | { type: 'notice'; tone: 'info' | 'warn' | 'danger'; text: string }
+  | { type: 'notice'; tone: 'info' | 'warn' | 'danger' | 'later'; text: string }
   | { type: 'custom'; component: CustomComponent }
   | { type: 'action'; action: string }
   | { type: 'link'; page: string; label?: string };
@@ -121,6 +121,8 @@ export interface TableView {
   columns: string[];
   filters?: string[];
   group_by?: string;
+  /** A field shown under the record's title in its column (M15 G7.14). */
+  subtitle?: string;
 }
 
 export interface Page {

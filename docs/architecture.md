@@ -476,7 +476,9 @@ bullet for the area you are about to change.
   never stored.
 - **Context help** (`service/context_help/`, `commands/context_help.rs`,
   `src/lib/context_help.ts`, `ContextHelp.svelte`): *Ask Haiku* on a shell
-  terminal's strip and the composer's `?` (Control's included). One request
+  terminal's strip and the composer's `?` (Control's included), behind
+  Writing help's `work.context_help` (off by default; the command checks
+  it too on a standalone desktop, whose state.db is the fleet's). One request
   shape for both surfaces — the question, the line being typed, history and
   the commands the line accepts — and one reply: a few lines plus at most
   one proposal, which the desktop puts on the prompt line (a shell gets
@@ -486,9 +488,14 @@ bullet for the area you are about to change.
   a `HelpModel` trait: `ClaudeOnHost` is one isolated `claude -p --model
   <work.help_model>` (Haiku by default) on the session's host under its
   profile, the context on stdin; another backend implements the trait and
-  nothing else moves. The command is `SameInBoth`, like `pty_open`: this
-  machine's own ssh, offered only on a session this client owns; a
-  standalone desktop books the run as `context_help` in `aux_usage`.
+  nothing else moves. The shell strip's `context_help` is `SameInBoth`,
+  like `pty_open`: this machine's own ssh, offered only on a session this
+  client owns. The composer's `session_context_help` is routed (contract
+  17) to the hub tool of that name, at `answer` (`SESSION_TIER`), so a
+  session shared at `answer` or `drive` has it too; it runs under the
+  session's launch profile (`ask_for_session`). The run is booked as
+  `context_help` in `aux_usage` where it ran (the hub, or a standalone
+  desktop), the composer's to the session's org.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. PTYs live in an id-keyed map (`PtyState` in `pty.rs`,

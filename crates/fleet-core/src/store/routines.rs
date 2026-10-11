@@ -125,6 +125,8 @@ pub struct RoutineFields {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutineRunRow {
     pub id: i64,
+    /// The routine it ran for; 0 once that routine is deleted (migration
+    /// 166: its runs stay, with `routine_runs.routine_name`).
     pub routine_id: i64,
     /// cron | event | run_now
     pub trigger: String,
@@ -233,7 +235,8 @@ const RUN_COLS: &str = "id, routine_id, trigger, trigger_ref, state, reason, ses
 fn run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRunRow> {
     Ok(RoutineRunRow {
         id: r.get(0)?,
-        routine_id: r.get(1)?,
+        // NULL once its routine is deleted (166): read as 0.
+        routine_id: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
         trigger: r.get(2)?,
         trigger_ref: r.get(3)?,
         state: r.get(4)?,
@@ -373,11 +376,18 @@ impl Store {
     }
 
     /// Remove a routine and its runs. `false`: no such routine.
+    /// Delete a routine. Its runs stay (migration 166): each keeps the
+    /// routine's name, written here, and loses its `routine_id`.
     pub fn delete_routine(&self, id: i64) -> Result<bool, IpcError> {
-        Ok(self
-            .conn
-            .execute("DELETE FROM routines WHERE id = ?1", [id])?
-            == 1)
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE routine_runs SET routine_name = \
+               (SELECT name FROM routines WHERE id = ?1) WHERE routine_id = ?1",
+            [id],
+        )?;
+        let gone = tx.execute("DELETE FROM routines WHERE id = ?1", [id])? == 1;
+        tx.commit()?;
+        Ok(gone)
     }
 
     /// Turn a routine on or off. On: the schedule restarts at `next_run_at`

@@ -157,12 +157,28 @@
       />
       <button class="ghost" onclick={pickFolder} disabled={busy}>Choose…</button>
     </div>
+    <div class="excludes">
+      <label class="muted small" for="lw-leave-out-{session.id}">
+        Leave out (optional): one pattern per line, .gitignore syntax. .git, target/,
+        node_modules/ and the like are always left out.
+      </label>
+      <textarea
+        id="lw-leave-out-{session.id}"
+        rows="2"
+        bind:value={excludesText}
+        placeholder="*.log&#10;fixtures/large/"
+        data-testid="lw-leave-out"
+      ></textarea>
+    </div>
     <div class="row">
       <button
         class="primary"
         disabled={busy || !folder.trim()}
         data-testid="lw-enable"
-        onclick={() => run(() => enableLocalWorkspace(session.id, folder.trim()))}
+        onclick={() =>
+          run(() =>
+            enableLocalWorkspace(session.id, folder.trim(), excludesFromText(excludesText)),
+          )}
       >
         Enable sync
       </button>

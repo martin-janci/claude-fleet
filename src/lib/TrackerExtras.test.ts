@@ -96,6 +96,26 @@ describe('TrackerExtras: Asana sections', () => {
       settings: { section_map: { 'in progress': 'in_progress', shipped: 'in_progress' }, section_map_confirmed: true },
     });
   });
+
+  it('M15 G7.14: once confirmed, says how many columns are mapped and opens the map again', async () => {
+    const asana = row({
+      id: 8,
+      provider: 'asana',
+      name: 'Company B',
+      site_url: 'https://app.asana.com',
+      config: { section_map: { 'in progress': 'in_progress', shipped: 'done', ideas: 'todo' } },
+      settings: { section_map: { 'in progress': 'in_progress', shipped: 'done' }, section_map_confirmed: true },
+    });
+    route([asana], { update_tracker: asana });
+    render(TrackerExtras, { props: { tracker: asana } });
+    expect((await screen.findByTestId('tracker-column-map')).textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      '2 columns mapped · Column map',
+    );
+    expect(screen.queryByTestId('asana-sections')).toBeNull();
+    await fireEvent.click(screen.getByTestId('tracker-column-map-open'));
+    expect(screen.getByTestId('asana-sections')).toBeInTheDocument();
+    expect(screen.queryByTestId('tracker-column-map')).toBeNull();
+  });
 });
 
 describe('TrackerExtras: Jev section proposals (status_map assist)', () => {

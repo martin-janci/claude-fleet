@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { checklistLoaderText, checklistRows, needsReprovision, type HostCheck } from './host_check';
+import { basePathLine, checklistLoaderText, checklistRows, needsReprovision, type HostCheck } from './host_check';
 import type { AssetInventoryRow } from './assets';
 import { host } from './hosts_fixture';
 
@@ -116,5 +116,32 @@ describe('checklistLoaderText (4.13)', () => {
     expect(checklistLoaderText('mercury', false, false)).toBeNull();
     expect(checklistLoaderText('mercury', true, false)).toMatch(/^Checking mercury/);
     expect(checklistLoaderText('mercury', true, true)).toMatch(/^Re-provisioning mercury/);
+  });
+});
+
+describe('basePathLine (M15 G7.12)', () => {
+  const answered = (base_path?: HostCheck['base_path'], error: string | null = null): HostCheck => ({
+    alias: 'trn',
+    checked_at: 1,
+    error,
+    tmux_version: null,
+    agents_on_path: null,
+    fleet_hooks: null,
+    guard_hook: null,
+    base_path,
+  });
+
+  it('says whether the user may write there, and which answers stop a save', () => {
+    expect(basePathLine('trn', answered({ path: '/srv/work', state: 'unwritable', user: 'dev' }))).toEqual({
+      text: '/srv/work is not writable by user dev on trn.',
+      problem: true,
+    });
+    expect(basePathLine('trn', answered({ path: '~/p', state: 'ok', user: 'dev' }))?.problem).toBe(false);
+    expect(basePathLine('trn', answered({ path: '~/new', state: 'creatable' }))?.text).toBe(
+      '~/new does not exist yet; fleet can create it on trn.',
+    );
+    expect(basePathLine('trn', answered({ path: '/etc/passwd', state: 'not_dir' }))?.problem).toBe(true);
+    expect(basePathLine('trn', answered(undefined))).toBeNull();
+    expect(basePathLine('trn', answered(undefined, 'timed out'))?.text).toBe('trn did not answer: timed out');
   });
 });

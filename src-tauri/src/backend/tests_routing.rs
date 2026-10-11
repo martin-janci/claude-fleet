@@ -76,6 +76,22 @@ impl Fake {
         )
     }
 
+    /// `(tool, arguments)` of every call it was given, in order.
+    fn calls(&self) -> Vec<(String, Value)> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| {
+                let v: Value = serde_json::from_str(b).expect("a JSON-RPC body");
+                (
+                    v["params"]["name"].as_str().expect("a tool").to_string(),
+                    v["params"]["arguments"].clone(),
+                )
+            })
+            .collect()
+    }
+
     fn was_not_called(&self) {
         let seen = self.seen.lock().unwrap();
         assert!(
@@ -296,6 +312,98 @@ const ROUTED_WITHOUT_A_CASE: &[(&str, &str)] = &[
     ),
 ];
 
+/// M15 step G7.14: the device edit form picks the org and the person, and
+/// Apply sends each as its own `org_admin` action, the org before the
+/// person; "" unbinds.
+#[test]
+fn a_device_edit_binds_its_org_then_hands_it_over() {
+    let fake = Fake::answering(r#"{"name":"phone","mode":"full","trusted":false,"created_at":1}"#);
+    let (_dir, st) = store();
+    block_on(commands::org_devices::routed::update_device(
+        &remote_backend(&fake),
+        &st,
+        commands::org_devices::UpdateDeviceArgs {
+            device: "phone".into(),
+            org: Some("Acme".into()),
+            person: Some("ada".into()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        fake.calls(),
+        vec![
+            (
+                "org_admin".to_string(),
+                json!({ "action": "bind_device", "device": "phone", "org": "Acme" })
+            ),
+            (
+                "org_admin".to_string(),
+                json!({ "action": "set_device_person", "device": "phone", "person": "ada" })
+            ),
+        ]
+    );
+    let fake = Fake::answering(r#"{"name":"phone","mode":"full","trusted":false,"created_at":1}"#);
+    block_on(commands::org_devices::routed::update_device(
+        &remote_backend(&fake),
+        &st,
+        commands::org_devices::UpdateDeviceArgs {
+            device: "phone".into(),
+            org: Some(String::new()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        fake.calls(),
+        vec![(
+            "org_admin".to_string(),
+            json!({ "action": "bind_device", "device": "phone" })
+        )],
+        "an empty org unbinds"
+    );
+}
+
+/// M15 step G7.14: "Claim it while installing" claims the device first,
+/// with its note, then installs; both on the hub's `debug_devices`.
+#[test]
+fn installing_with_a_claim_claims_the_device_first() {
+    // One answer that reads as both a device (the claim) and a run (the
+    // install): the fake answers every call alike.
+    let both = format!(
+        "{},\"exit_code\":0,\"output\":\"Success\",\"truncated\":false}}",
+        DEBUG_DEVICE_JSON.trim_end_matches('}')
+    );
+    let fake = Fake::answering(&both);
+    let (_dir, st) = store();
+    block_on(commands::debug_devices::routed::install_debug_device(
+        &remote_backend(&fake),
+        &st,
+        &ssh(),
+        commands::debug_devices::InstallDebugDeviceArgs {
+            id: 3,
+            path: "~/app.apk".into(),
+            host: None,
+            claim: Some(true),
+            note: Some("login flow".into()),
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        fake.calls(),
+        vec![
+            (
+                "debug_devices".to_string(),
+                json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null })
+            ),
+            (
+                "debug_devices".to_string(),
+                json!({ "action": "install", "device": "3", "path": "~/app.apk", "host": null })
+            ),
+        ]
+    );
+}
+
 /// The other half of the tool check in [`check`]: a wrong tool must not be
 /// able to hide by having no case at all.
 /// Work graph M5: every Routed work command is one fleet-core's isolation
@@ -452,6 +560,21 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
                 block_on(commands::account_usage::routed::list_account_usage(
                     b, s, &cache,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "propose_host_placement",
+            "propose_host_placement",
+            json!({ "project_id": 7 }),
+            "null",
+            Box::new(|b, s, _| {
+                let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
+                let args =
+                    fleet_core::service::decide::host_placement::ProposeHostArgs { project_id: 7 };
+                block_on(commands::account_usage::routed::propose_host_placement(
+                    b, s, &cache, args,
                 ))
                 .map(|_| ())
             }),
@@ -631,6 +754,19 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     ssh,
                 ))
                 .map(|_| ())
+            }),
+        ),
+        (
+            "pause_download",
+            "pause_download",
+            json!({ "id": 7, "paused": true }),
+            r#"{"id":7,"at":1,"host_alias":"trn","path":"/w/a.pdf","name":"a.pdf","size":3,"state":"fetching","source":"person","fetched_bytes":1,"paused":true}"#,
+            Box::new(|b, s, _| {
+                let args = fleet_core::service::downloads::PauseDownloadArgs {
+                    id: 7,
+                    paused: true,
+                };
+                block_on(commands::downloads::routed::pause_download(b, args, s)).map(|_| ())
             }),
         ),
         (
@@ -922,6 +1058,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                         action: "accept".into(),
                         rule_id: Some(3),
                         rule: None,
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "wizard_state",
+            "wizard_state",
+            json!({ "action": "get", "kind": "add_project" }),
+            r#"{"kind":"add_project","key":"","step":2,"answers":{},"checks":[],"created_at":1,"updated_at":2}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::wizard_state::routed::wizard_state(
+                    b,
+                    s,
+                    fleet_core::service::wizard_state::WizardStateArgs {
+                        action: "get".into(),
+                        kind: Some("add_project".into()),
+                        ..Default::default()
                     },
                 ))
                 .map(|_| ())
@@ -1753,6 +1907,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                             limit: Some(50),
                         }]),
                         with_review_total: Some(true),
+                        with_missions: None,
                     },
                     s,
                 ))
@@ -1980,6 +2135,31 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     commands::sessions::SessionSummarySinceArgs {
                         session_id: 42,
                         since: 1_791_465_600,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Context help at the composer: the request crosses flat, beside
+        // the session id, as SessionContextHelpParams takes it.
+        (
+            "session_context_help",
+            "session_context_help",
+            json!({ "session_id": 42, "question": "why?", "line": "/plan", "history": ["fix it"], "commands": ["/plan — Plan"] }),
+            r#"{"answer":"Use /plan.","model":"haiku","host_alias":"h","history_items":1,"at":1791466000}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::context_help::routed::session_context_help(
+                    b,
+                    commands::context_help::SessionContextHelpArgs {
+                        session_id: 42,
+                        request: fleet_core::service::context_help::HelpRequest {
+                            question: "why?".into(),
+                            line: "/plan".into(),
+                            history: vec!["fix it".into()],
+                            commands: vec!["/plan — Plan".into()],
+                        },
                     },
                     s,
                     h,
@@ -2562,6 +2742,24 @@ fn org_admin_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "add_person",
+            "org_admin",
+            json!({ "action": "add_person", "name": "ada", "display_name": "Ada" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::add_person(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        name: Some("ada".into()),
+                        display_name: Some("Ada".into()),
+                        ..OrgAdminArgs::new("add_person")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "rename_person",
             "org_admin",
             json!({ "action": "rename_person", "person_id": 2, "name": "ada" }),
@@ -2813,6 +3011,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         path: "~/app.apk".into(),
                         // An empty host means the device's own: sent as absent.
                         host: Some(" ".into()),
+                        ..Default::default()
                     },
                 ))
                 .map(|_| ())
@@ -2891,6 +3090,40 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     s,
                     7,
                     "m3".into(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "resume_or_new_propose",
+            "resume_or_new",
+            json!({ "action": "propose", "key": "PD-2412" }),
+            r#"{"value":"l7","link_id":7,"source":"jev","confidence_pct":82,"unsure":false}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::resume_or_new_propose(
+                    b,
+                    commands::work::ResumeOrNewArgs {
+                        key: "PD-2412".into(),
+                        chosen: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "resume_or_new_follow",
+            "resume_or_new",
+            json!({ "action": "follow", "key": "PD-2412", "chosen": "new" }),
+            "true",
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::resume_or_new_follow(
+                    b,
+                    commands::work::ResumeOrNewArgs {
+                        key: "PD-2412".into(),
+                        chosen: Some("new".into()),
+                    },
+                    s,
                 ))
                 .map(|_| ())
             }),
@@ -3500,6 +3733,8 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         name: "demo".into(),
                         force: false,
                         profile: Some("work".into()),
+                        model: None,
+                        effort: None,
                     },
                     s,
                     h,
@@ -3544,6 +3779,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     SpawnReviewArgs {
                         source_session_id: 7,
                         prompt: "review it".into(),
+                        agent: None,
                         call_id: None,
                         origin: None,
                     },
@@ -3568,6 +3804,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     SpawnReviewArgs {
                         source_session_id: 7,
                         prompt: "review it".into(),
+                        agent: None,
                         call_id: Some(123),
                         origin: None,
                     },
@@ -3760,6 +3997,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     },
                     s,
                     h,
+                    &fleet_core::cancel::CancellationRegistry::new(),
                 ))
                 .map(|_| ())
             }),
@@ -6904,6 +7142,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/start_rules.rs"),
     ),
     (
+        "commands/wizard_state.rs",
+        include_str!("../commands/wizard_state.rs"),
+    ),
+    (
         "commands/api_tokens.rs",
         include_str!("../commands/api_tokens.rs"),
     ),
@@ -7864,6 +8106,89 @@ fn a_hub_download_is_checked_through_list_downloads_before_a_byte_moves() {
     let e = got.expect_err("a file still copying is not saved");
     assert_eq!(e.code, codes::E_NOTFOUND);
     assert!(!asked.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+/// G7.3: a revision-16 hub serves neither `wizard_state` nor
+/// `propose_host_placement`, and answers a JSON-RPC error (unknown tool). The
+/// desktop's minimum stays 16, so against that hub wizard resume reads as
+/// nothing saved and the host proposal as nothing proposed, not as an error.
+#[test]
+fn a_hub_before_contract_17_reads_as_nothing_saved_and_nothing_proposed() {
+    let unknown_tool = || {
+        Arc::new(Fake {
+            body: format!(
+                "event: message\ndata: {}\n\n",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": { "code": -32602, "message": "tool not found" },
+                })
+            ),
+            seen: Mutex::new(Vec::new()),
+        })
+    };
+    let (_dir, st) = store();
+    let fake = unknown_tool();
+    let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
+    let got = block_on(commands::account_usage::routed::propose_host_placement(
+        &remote_backend(&fake),
+        &st,
+        &cache,
+        fleet_core::service::decide::host_placement::ProposeHostArgs { project_id: 7 },
+    ))
+    .expect("nothing proposed, not an error");
+    assert!(got.is_none());
+    assert_eq!(fake.only_call().0, "propose_host_placement");
+    for (action, want) in [
+        ("list", json!([])),
+        ("get", Value::Null),
+        ("save", Value::Null),
+        ("clear", json!({ "removed": false })),
+    ] {
+        let fake = unknown_tool();
+        let args = fleet_core::service::wizard_state::WizardStateArgs {
+            action: action.into(),
+            kind: Some("add_project".into()),
+            step: Some(1),
+            ..Default::default()
+        };
+        let got = block_on(commands::wizard_state::routed::wizard_state(
+            &remote_backend(&fake),
+            &st,
+            args,
+        ))
+        .unwrap_or_else(|e| panic!("{action}: {e:?}"));
+        assert_eq!(got, want, "{action}");
+        assert_eq!(fake.only_call().0, "wizard_state", "{action}");
+    }
+    // Context help has nothing to fall back to: it says the hub needs
+    // updating, rather than the transport's own words.
+    let fake = unknown_tool();
+    let e = block_on(commands::context_help::routed::session_context_help(
+        &remote_backend(&fake),
+        commands::context_help::SessionContextHelpArgs {
+            session_id: 42,
+            request: fleet_core::service::context_help::HelpRequest {
+                line: "/plan".into(),
+                ..Default::default()
+            },
+        },
+        &st,
+        &ssh(),
+    ))
+    .expect_err("no tool, no answer");
+    assert_eq!(e.code, codes::E_HUB_PROTOCOL);
+    assert!(e.message.contains("hub updated"), "{e:?}");
+    assert_eq!(fake.only_call().0, "session_context_help");
+    // Any other refusal is still an error.
+    let fake = Fake::answering("not json");
+    let got = block_on(commands::account_usage::routed::propose_host_placement(
+        &remote_backend(&fake),
+        &st,
+        &cache,
+        fleet_core::service::decide::host_placement::ProposeHostArgs { project_id: 7 },
+    ));
+    assert!(got.is_err());
 }
 
 /// 11.6: the one routed command whose answer is an image block rather than

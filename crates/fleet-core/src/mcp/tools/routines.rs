@@ -13,8 +13,10 @@ impl FleetTools {
         {routine_id}: runs and fixes; runs {routine_id, limit?}; \
         failing: Inbox; budget: fleet spend today; \
         save {routine, routine_id?}: the whole routine; preview: save's dry \
-        run; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause \
-        all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.")]
+        run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; \
+        set_run_outcome {run_id, outcome}: a person's did_work | nothing | \
+        needs_person (needs_person lands it in the Inbox). Pause all stops \
+        the schedule, not run_now. E_NOTFOUND, E_INVALID.")]
     pub(super) async fn routines(
         &self,
         Extension(caller): Extension<Caller>,
@@ -32,7 +34,9 @@ impl FleetTools {
         // operator wrote in one would reach a session with no person in
         // between (transition plan, "Where AI never decides"). The operator
         // is an unbound client, so nothing below would stop it.
-        if caller.is_operator() && matches!(p.action.as_str(), "save" | "run_now") {
+        if caller.is_operator()
+            && matches!(p.action.as_str(), "save" | "run_now" | "set_run_outcome")
+        {
             return Err(mcp_err(
                 codes::E_FORBIDDEN,
                 "a person saves and runs routines, from the desktop or the phone; \
@@ -113,11 +117,31 @@ impl FleetTools {
                     .map_err(to_mcp_err)?;
                 ok_json_compact(&run)
             }
+            "set_run_outcome" => {
+                let run_id = p
+                    .run_id
+                    .ok_or_else(|| mcp_err(codes::E_INVALID, "set_run_outcome needs run_id", None))?;
+                let outcome = p
+                    .outcome
+                    .as_deref()
+                    .ok_or_else(|| mcp_err(codes::E_INVALID, "set_run_outcome needs outcome", None))?;
+                ok_json_compact(
+                    &routines::set_run_outcome(
+                        store,
+                        &scope,
+                        id()?,
+                        run_id,
+                        outcome,
+                        crate::store::now_unix(),
+                    )
+                    .map_err(to_mcp_err)?,
+                )
+            }
             other => Err(mcp_err(
                 codes::E_INVALID,
                 format!(
                     "action must be list | get | runs | failing | budget | save | preview | delete | \
-                     set_enabled | skip_next | run_now, got {other:?}"
+                     set_enabled | skip_next | run_now | set_run_outcome, got {other:?}"
                 ),
                 None,
             )),

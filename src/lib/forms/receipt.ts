@@ -124,10 +124,36 @@ const ENDED: Record<string, string> = {
   pending: 'still waiting',
 };
 
-/** "answered by Martin", "declined", "withdrawn by the agent", "expired". */
-export function endedWords(form: FormView): string {
-  const by = form.answered_by && (form.state === 'answered' || form.state === 'declined') ? ` by ${form.answered_by}` : '';
-  return `${ENDED[form.state] ?? form.state}${by}`;
+/** Who answered, where (the Components board's "answered by Martin on the
+ *  phone"): the hub writes `answered_by` as "<who> (desktop)" for this app
+ *  and "<device> (device)" for a paired device, which names the device,
+ *  not its person. Anything else is said as it was written. */
+export function answeredWho(by: string): string {
+  const desk = /^(.*) \(desktop\)$/.exec(by);
+  if (desk) return `by ${desk[1]} on the desktop`;
+  const dev = /^(.*) \(device\)$/.exec(by);
+  if (dev) return `on ${dev[1]}`;
+  return `by ${by}`;
+}
+
+/** When it was decided, as a clock: "12:41" today, "Mon 12:41" this week,
+ *  "3 Oct 12:41" before. */
+export function decidedClock(at: number, nowSec: number): string {
+  const d = new Date(at * 1000);
+  const now = new Date(nowSec * 1000);
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  if (d.toDateString() === now.toDateString()) return hm;
+  if (nowSec - at < 6 * 86_400) return `${d.toLocaleDateString('en-GB', { weekday: 'short' })} ${hm}`;
+  return `${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} ${hm}`;
+}
+
+/** "answered by Martin on the desktop · 12:41", "answered on Pixel ·
+ *  Mon 09:02", "declined", "withdrawn by the agent", "expired". The clock
+ *  only with `nowSec` and a decision time. */
+export function endedWords(form: FormView, nowSec?: number): string {
+  const by = form.answered_by && (form.state === 'answered' || form.state === 'declined') ? ` ${answeredWho(form.answered_by)}` : '';
+  const at = nowSec !== undefined && form.decided_at ? ` · ${decidedClock(form.decided_at, nowSec)}` : '';
+  return `${ENDED[form.state] ?? form.state}${by}${at}`;
 }
 
 /** The mark before the title: ✓ answered, ✕ declined, ◷ expired, – withdrawn. */

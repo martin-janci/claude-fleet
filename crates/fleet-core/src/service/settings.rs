@@ -558,6 +558,9 @@ pub const WORK_DRAFT_RELEASE_NOTES: &str = "work.draft_release_notes";
 /// A watched session's "Since 13:20" catch-up summary
 /// (`service::watch_summary`).
 pub const WORK_CATCH_UP_SUMMARIES: &str = "work.catch_up_summaries";
+/// Context help at a shell or composer prompt line
+/// (`service::context_help`).
+pub const WORK_CONTEXT_HELP: &str = "work.context_help";
 
 /// Tidy-up (work graph M7): a session whose linked item has been done at
 /// least this many days (and that is idle, below) is suggested for tidying.
@@ -654,6 +657,9 @@ pub const DECIDE_JEV_MAIN_TICKET: &str = "decide.jev.main_ticket";
 /// `tracker_duplicate`'s mode (J7: a local task that may be the same work
 /// as a tracker ticket, redesign step 6.8).
 pub const DECIDE_JEV_TRACKER_DUPLICATE: &str = "decide.jev.tracker_duplicate";
+/// `resume_or_new`'s mode (N2: resume a past session of the work key the
+/// New session dialog plans, or start fresh; gap plan G7.10).
+pub const DECIDE_JEV_RESUME_OR_NEW: &str = "decide.jev.resume_or_new";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -1343,6 +1349,14 @@ pub const SPECS: &[Spec] = &[
     .tags(&[Tag::Ai])
     .per_org(),
     Spec::new(
+        WORK_CONTEXT_HELP,
+        "false",
+        Kind::Bool,
+        "Context help",
+        "Terminal and composer: Ask asks a model about the line you are typing, with its history as context, on the session's host. A proposed command is put on the line, never run.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
         WORK_HELP_MODEL,
         "haiku",
         Kind::Choice(SUMMARY_MODELS),
@@ -1665,6 +1679,15 @@ pub const SPECS: &[Spec] = &[
         Kind::Choice(DECIDE_MODES),
         "Jev: local task duplicates a ticket",
         "Flagging in Review a new local task that may be the same work as an open tracker ticket. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_RESUME_OR_NEW,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: resume or start fresh",
+        "Proposing, in New session, whether to resume a past session of the same work or start fresh. A single recent past session decides without Jev. Shadow only records; assist suggests.",
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
@@ -3001,6 +3024,8 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_RESTORE_TARGET, None), "off");
         assert_eq!(resolve(DECIDE_JEV_MAIN_TICKET, None), "off");
         assert_eq!(resolve(DECIDE_JEV_TRACKER_DUPLICATE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_RESUME_OR_NEW, None), "off");
+        assert!(validate(DECIDE_JEV_RESUME_OR_NEW, "auto").is_err());
         assert!(validate(DECIDE_JEV_MAIN_TICKET, "auto").is_err());
         assert!(validate(DECIDE_JEV_RESTORE_TARGET, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_MODEL, None), "jev-1.13.0");

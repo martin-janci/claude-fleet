@@ -19,6 +19,10 @@
   import { loadProposals, settingProposals, settingsWritable } from './pages/review';
   import { allPages, guideProposals, loadGuides } from './pages/guides';
   import { hosts } from './hosts';
+  import { basePathLine, checkHost } from './host_check';
+  import { devices, loadDevices } from './devices';
+  import { hubHeaderFacts, othersText } from './hub_header';
+  import StartRules from './StartRules.svelte';
   import { mcpStatus } from './mcp';
   import { healthCheck } from './ipc';
   import { appVersion, loadAppVersion } from './app_version';
@@ -91,6 +95,12 @@
   );
   const offlineCount = $derived($hosts.filter((h) => !h.reachable).length);
 
+  async function openAutomation() {
+    onClose();
+    await tick();
+    goTo('automation');
+  }
+
   async function openHosts() {
     onClose();
     // After the dialog has unmounted and restored focus, so the Hosts view
@@ -159,6 +169,11 @@
       if (r.error.code === 'E_HUB_PLAINTEXT') hubPlaintextRefused = true;
     }
   }
+
+  // M15 G7.13: the status header (SettingsHub board). Unpair… asks first,
+  // then is Disconnect.
+  const hubFacts = $derived(hubHeaderFacts($devices, Math.floor(Date.now() / 1000)));
+  let unpairAsk = $state(false);
 
   async function doDisconnect() {
     hubBusy = true;
@@ -276,6 +291,8 @@
           if (r.ok && r.value) hubVersion = r.value.version;
           else hubVersionFailed = true;
         });
+        // M15 G7.13: the status header's last sync and device count.
+        void loadDevices();
         await loadHubPages();
       }
       return;
@@ -343,10 +360,53 @@
     baseDrafts = { ...baseDrafts, [alias]: (e.currentTarget as HTMLInputElement).value };
   }
 
+  // M15 G7.12: each base path is checked on its host (`check_host` with a
+  // base path) before it is saved: a path the login user cannot write stops
+  // the save, a host that does not answer does not.
+  let baseChecks = $state<Record<string, { path: string; text: string; problem: boolean }>>({});
+
+  async function checkBasePaths(): Promise<boolean> {
+    const asked = $hosts.map((h) => ({ alias: h.alias, path: previewRoot(h.alias) }));
+    const answers = await Promise.all(asked.map((a) => checkHost(a.alias, a.path)));
+    const next: typeof baseChecks = {};
+    let blocked = false;
+    answers.forEach((r, i) => {
+      const { alias, path } = asked[i];
+      const line = r.ok ? (r.value ? basePathLine(alias, r.value) : null) : { text: `${alias}: ${r.error.message}`, problem: false };
+      if (!line) return;
+      // Only a host that answered can say a path is wrong.
+      const problem = line.problem && r.ok && !r.value?.error;
+      next[alias] = { path, text: line.text, problem };
+      blocked ||= problem;
+    });
+    baseChecks = next;
+    return !blocked;
+  }
+
+  async function checkProjects() {
+    projectsBusy = true;
+    projectsError = null;
+    projectsMsg = null;
+    await checkBasePaths();
+    projectsBusy = false;
+  }
+
+  function discardProjects() {
+    resetProjectDrafts();
+    baseChecks = {};
+    projectsError = null;
+    projectsMsg = null;
+  }
+
   async function saveProjects() {
     projectsBusy = true;
     projectsError = null;
     projectsMsg = null;
+    if (!(await checkBasePaths())) {
+      projectsError = 'Not saved: a base path below cannot be used on its host.';
+      projectsBusy = false;
+      return;
+    }
     const map: Record<string, string> = {};
     for (const [alias, p] of Object.entries(baseDrafts)) {
       const t = p.trim();
@@ -454,12 +514,51 @@
     </p>
     </div>
 
+    <div class="panel" hidden={panel !== 'automation-limits'} data-testid="settings-panel-automation-limits">
+    <section class="block hosts-line" data-testid="settings-automation-limits">
+      <h4>Automation limits</h4>
+      <span class="hosts-summary">The routines' daily budget, today's spend and Pause all</span>
+      <button class="hook-btn" onclick={openAutomation} data-testid="settings-open-automation">Open Automation</button>
+    </section>
+    <p class="hook-desc">
+      Automation has its own view, beside Work and Toolkit. Its foot shows what the routines spent today
+      against their budget, with Pause all; the budget itself is under System › Automation here.
+    </p>
+    </div>
+
     <div class="panel" hidden={panel !== 'hub'} data-testid="settings-panel-hub">
     <section class="block" data-testid="hub-section">
       <div class="section-header">
         <h4>Hub</h4>
       </div>
       {#if isRemote}
+        <div class="hub-status" data-testid="hub-status-header">
+          <span
+            >Paired with <code>{$hubStatus.url}</code>{#if hubVersion} · hub {hubVersion}{/if} · this desktop is a client{#if hubFacts.lastSync}
+              · <span data-testid="hub-last-sync">{hubFacts.lastSync}</span>{/if}{#if othersText(hubFacts.others)}
+              · <span data-testid="hub-device-count">{othersText(hubFacts.others)}</span>{/if}</span
+          >
+          <span class="grow"></span>
+          <button class="hook-btn" data-testid="hub-open-devices" onclick={() => select('devices')}>People &amp; devices</button>
+          {#if !unpairAsk}
+            <button class="hook-btn" data-testid="hub-unpair" disabled={hubBusy} onclick={() => (unpairAsk = true)}>Unpair…</button>
+          {/if}
+        </div>
+        {#if unpairAsk}
+          <div class="mcp-field" data-testid="hub-unpair-confirm">
+            <span class="hook-desc">Unpair from <code>{$hubStatus.url}</code>? This machine forgets the pairing; the hub keeps the client until an operator revokes it.</span>
+            <button class="hook-btn" data-testid="hub-unpair-cancel" onclick={() => (unpairAsk = false)}>Cancel</button>
+            <button
+              class="hook-btn"
+              data-testid="hub-unpair-confirm-btn"
+              disabled={hubBusy}
+              onclick={async () => {
+                await doDisconnect();
+                unpairAsk = false;
+              }}>Unpair</button
+            >
+          </div>
+        {/if}
         <p class="mcp-blurb" data-testid="hub-connected">
           This window is a <strong>client</strong> of
           <code>{$hubStatus.url}</code>, paired as
@@ -693,18 +792,42 @@
             data-testid="projects-preview-{h.alias}">
             {pathErr ?? projectPathPreview(previewRoot(h.alias), layoutDraft)}
           </span>
+          {#if baseChecks[h.alias] && baseChecks[h.alias].path === previewRoot(h.alias) && pathErr === null}
+            <span
+              class="hook-desc project-preview"
+              class:err={baseChecks[h.alias].problem}
+              data-testid="projects-check-{h.alias}">{baseChecks[h.alias].text}</span
+            >
+          {/if}
         </div>
       {/each}
       <div class="mcp-field">
+        <button
+          onclick={checkProjects}
+          disabled={projectsBusy || projectsInvalid || !projectsLoaded}
+          data-testid="projects-check">Check on hosts</button>
+        <button
+          onclick={discardProjects}
+          disabled={projectsBusy || !projectsLoaded}
+          data-testid="projects-discard">Discard</button>
         <button
           onclick={saveProjects}
           disabled={projectsBusy || projectsInvalid || !projectsLoaded}
           data-testid="projects-save">Save &amp; rescan</button>
         {#if projectsMsg}<span class="hook-desc" data-testid="projects-msg">{projectsMsg}</span>{/if}
       </div>
-      {#if projectsError}<p class="err">{projectsError}</p>{/if}
+      {#if projectsError}<p class="err" data-testid="projects-error">{projectsError}</p>{/if}
     </section>
     {/if}
+    <!-- M15 G7.12: the start rules inline under Projects (Accounts forms
+         board); the same list Automation › Rules shows. -->
+    <section class="block" data-testid="projects-start-rules">
+      <div class="section-header">
+        <h4>Start rules</h4>
+      </div>
+      <p class="mcp-blurb">A ticket key decides the project and host a session starts in.</p>
+      {#if panel === 'projects'}<StartRules />{/if}
+    </section>
     </div>
 
     <div class="panel" hidden={panel !== 'appearance'} data-testid="settings-panel-onboarding">
@@ -1041,6 +1164,15 @@
   }
 
   .log-path code { word-break: break-all; }
+
+  .hub-status {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    font-size: var(--text-xs);
+  }
+  .hub-status .grow { flex: 1; }
 
   .hosts-line {
     display: flex;

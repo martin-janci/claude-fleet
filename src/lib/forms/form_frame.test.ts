@@ -2,7 +2,7 @@
 // failure reads, and the Undo toast after a save.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
-import { fieldCount, formFailure, savedWithUndo, submitKey } from './form_frame';
+import { fieldCount, formFailure, savedWithUndo, submitHint, submitKey } from './form_frame';
 import { clearToasts, runToastAction, toasts } from '../toasts';
 import { findConflicts } from '../shortcuts';
 
@@ -97,5 +97,12 @@ describe('savedWithUndo', () => {
   it('offers no Undo when the save cannot be put back', () => {
     savedWithUndo('Saved.');
     expect(get(toasts)[0].action).toBeNull();
+  });
+});
+
+describe('submitHint (G7.4)', () => {
+  it('reads ⌘↵ on the Mac and Ctrl+Enter elsewhere', () => {
+    expect(submitHint(true)).toEqual({ label: '⌘↵', aria: 'Meta+Enter' });
+    expect(submitHint(false)).toEqual({ label: 'Ctrl+Enter', aria: 'Control+Enter' });
   });
 });

@@ -9,7 +9,6 @@
   import SavedLaterLine from './SavedLaterLine.svelte';
   import { answerForm, declineForm, getForm, type FieldProblem, type FormView, type Values } from './forms';
   import { answerList, answerSummary, endedMark, endedWords, expiresIn } from './receipt';
-  import { shortAge } from '../session_status';
 
   let {
     formId,
@@ -61,7 +60,7 @@
   let showAnswers = $state(false);
   const summary = $derived(form && form.state === 'answered' ? answerSummary(form) : '');
   const answers = $derived(form && showAnswers ? answerList(form) : []);
-  const ended = $derived(form ? `${endedWords(form)}${form.decided_at ? ` · ${shortAge(form.decided_at, now)}` : ''}` : '');
+  const ended = $derived(form ? endedWords(form, now) : '');
 
   async function submit(values: Values) {
     if (blocked !== null) return;
@@ -138,6 +137,7 @@
       <FormWizard
         bind:this={wizard}
         spec={form.spec}
+        hostAlias={form.host_alias}
         {busy}
         disabled={blocked !== null}
         serverProblems={problems}

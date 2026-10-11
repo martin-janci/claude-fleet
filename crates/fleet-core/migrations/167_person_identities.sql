@@ -18,4 +18,4 @@ CREATE TABLE IF NOT EXISTS person_identities (
 );
 CREATE INDEX IF NOT EXISTS idx_person_identities_person ON person_identities(person_id);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (164);
+INSERT OR IGNORE INTO schema_version (version) VALUES (167);

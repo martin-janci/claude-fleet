@@ -709,6 +709,9 @@ describe('HostDetail Codex assets (F3a)', () => {
     const sel = screen.getByTestId('detail-codex') as HTMLSelectElement;
     expect(sel.value).toBe('auto');
     await fireEvent.change(sel, { target: { value: 'on' } });
+    // M15 G7.12: a draft until Save.
+    expect(mockedSetHarnesses).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByTestId('detail-integrations-save'));
     expect(mockedSetHarnesses).toHaveBeenCalledWith('mefistos', ['claude', 'codex']);
   });
 
@@ -718,7 +721,21 @@ describe('HostDetail Codex assets (F3a)', () => {
     const sel = screen.getByTestId('detail-codex') as HTMLSelectElement;
     expect(sel.value).toBe('off');
     await fireEvent.change(sel, { target: { value: 'auto' } });
+    await fireEvent.click(screen.getByTestId('detail-integrations-save'));
     expect(mockedSetHarnesses).toHaveBeenCalledWith('mefistos', null);
+  });
+
+  it('Discard drops the draft and sends nothing (M15 G7.12)', async () => {
+    mount('mefistos');
+    const sel = screen.getByTestId('detail-codex') as HTMLSelectElement;
+    const save = screen.getByTestId('detail-integrations-save') as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    await fireEvent.change(sel, { target: { value: 'off' } });
+    expect(save.disabled).toBe(false);
+    await fireEvent.click(screen.getByTestId('detail-integrations-discard'));
+    expect(sel.value).toBe('auto');
+    expect(save.disabled).toBe(true);
+    expect(mockedSetHarnesses).not.toHaveBeenCalled();
   });
 
   it('an offline paired desktop cannot change it and says why', () => {
@@ -838,6 +855,34 @@ describe('HostDetail Lost and found with proposals (4.12)', () => {
     await fireEvent.click(screen.getByTestId('lost-target-confirm'));
     await settle();
     expect(mockedAdopt).toHaveBeenCalledWith(scratch.id, 3);
+  });
+
+  it('Attach… lists the panes outside fleet with their age; Switch to it opens one, Add it to the list adopts (G7.10)', async () => {
+    const { scratch, hostSessions } = withScratch();
+    mockedTarget.mockResolvedValue({ ok: true, value: { project_id: 3, source: 'rule', reason: 'directory' } });
+    mockedAdopt.mockResolvedValueOnce({ ok: true, value: { ...scratch, started_at: NOW } });
+    mount('mefistos', { hostSessions });
+    await fireEvent.click(screen.getByTestId('host-attach'));
+    const items = within(screen.getByTestId('host-attach-sheet')).getAllByTestId('host-attach-item');
+    expect(items).toHaveLength(1);
+    expect(items[0].textContent).toContain('fleet-trn-scratch');
+    expect(items[0].textContent).toContain('running 2h');
+
+    await fireEvent.click(within(items[0]).getByTestId('host-attach-add'));
+    await settle();
+    const sheet = screen.getByTestId('host-attach-sheet');
+    await fireEvent.click(within(sheet).getByTestId('lost-target-submit'));
+    await tick();
+    await fireEvent.click(within(sheet).getByTestId('lost-target-confirm'));
+    await settle();
+    expect(mockedAdopt).toHaveBeenCalledWith(scratch.id, 3);
+    expect(screen.queryByTestId('host-attach-sheet')).toBeNull();
+
+    const { selectedSession } = await import('./selection');
+    await fireEvent.click(screen.getByTestId('host-attach'));
+    await fireEvent.click(screen.getByTestId('host-attach-switch'));
+    expect(get(selectedSession)?.id).toBe(scratch.id);
+    expect(screen.queryByTestId('host-attach-sheet')).toBeNull();
   });
 
   it('Restore into copies the conversation, then resumes it in the chosen project', async () => {
@@ -975,5 +1020,35 @@ describe('HostDetail hosts and accounts (G4.5)', () => {
     await fireEvent.click(screen.getByTestId('detail-add-account'));
     await tick();
     expect(document.body.textContent).toContain('Add account');
+  });
+});
+
+describe('the detail tabs (M15 G7.12)', () => {
+  it('Overview, Sessions, Lost & found and Provisioning each show their own part', async () => {
+    mount('mefistos');
+    const sessions = fleetSessions().filter((s) => s.host_alias === 'mefistos').length;
+    expect(screen.getByTestId('detail-tab-overview').getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByTestId('detail-tab-sessions').textContent).toContain(String(sessions));
+    expect(screen.getByTestId('detail-checklist').hidden).toBe(false);
+    expect(screen.getByLabelText('Integration').hidden).toBe(true);
+
+    await fireEvent.click(screen.getByTestId('detail-tab-provisioning'));
+    expect(screen.getByTestId('detail-checklist').hidden).toBe(true);
+    expect(screen.getByLabelText('Integration').hidden).toBe(false);
+
+    await fireEvent.click(screen.getByTestId('detail-tab-lost'));
+    const block = screen.getByLabelText('Sessions on mefistos');
+    expect(block.querySelector('h3')?.textContent).toContain('Lost & found');
+    expect(screen.getAllByTestId('detail-session')[0].closest('[hidden]')).not.toBeNull();
+    await fireEvent.click(screen.getByTestId('detail-tab-sessions'));
+    expect(block.querySelector('h3')?.textContent).toContain('Sessions');
+    expect(screen.getAllByTestId('detail-session')[0].closest('[hidden]')).toBeNull();
+  });
+
+  it('a host with nothing lost says so on Lost & found', async () => {
+    mount('venus', { hostSessions: [] });
+    await fireEvent.click(screen.getByTestId('detail-tab-lost'));
+    expect(screen.getByTestId('detail-tab-lost').textContent).toContain('0');
+    expect(screen.getByTestId('detail-lost-empty').closest('[hidden]')).toBeNull();
   });
 });

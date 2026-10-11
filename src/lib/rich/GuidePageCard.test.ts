@@ -56,10 +56,27 @@ function read(root: HTMLElement) {
   };
 }
 
+/** Open the card's summary into the steps (G7.15: the card starts folded). */
+async function start() {
+  await fireEvent.click(await screen.findByTestId('rich-guide-page-start'));
+  await screen.findByTestId('guide-steps');
+}
+
 describe('a guide in the chat', () => {
+  it('opens as a summary with Start, and writes nothing before it (G7.15)', async () => {
+    inChat('guide.cleanup');
+    const card = await screen.findByTestId('rich-guide-page-summary');
+    expect(card.textContent).toContain('Let fleet tidy up idle sessions');
+    expect(screen.getByTestId('rich-guide-page-count').textContent).toBe('3 steps · changes 2 settings');
+    expect(screen.queryByTestId('guide-steps')).toBeNull();
+    expect(inv.mock.calls.some(([c]) => c === 'set_fleet_setting')).toBe(false);
+    await start();
+    expect(screen.queryByTestId('rich-guide-page-summary')).toBeNull();
+  });
+
   it('is the same guide Settings shows', async () => {
     inChat('guide.cleanup');
-    await screen.findByTestId('guide-steps');
+    await start();
     const chat = read(screen.getByTestId('rich-guide-page'));
     unmount();
     render(PageView, {
@@ -71,7 +88,7 @@ describe('a guide in the chat', () => {
 
   it('walks the steps with live fields, and Done folds the card', async () => {
     inChat('guide.cleanup');
-    await screen.findByTestId('guide-steps');
+    await start();
     await fireEvent.click(screen.getByTestId('guide-next'));
     expect(screen.getByTestId('setting-row-gc.enabled').textContent).toContain(descs.get('gc.enabled')!.label);
     await fireEvent.click(screen.getByTestId('guide-next'));

@@ -638,9 +638,9 @@ impl Store {
             let routine: Option<String> = self
                 .conn
                 .prepare_cached(
-                    "SELECT r.name FROM participants p \
+                    "SELECT COALESCE(r.name, rr.routine_name) FROM participants p \
                      JOIN routine_runs rr ON rr.session_id = p.session_id \
-                     JOIN routines r ON r.id = rr.routine_id \
+                     LEFT JOIN routines r ON r.id = rr.routine_id \
                      WHERE p.id = ?1 ORDER BY rr.id DESC LIMIT 1",
                 )?
                 .query_row([p], |r| r.get(0))

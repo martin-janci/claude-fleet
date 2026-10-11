@@ -19,6 +19,7 @@
   import { CHAT_WIZARD_READS, chatWizard, type ChatWizard } from './chat_wizard_runs';
   import type { ChatWizardId } from './chat_wizard_ids';
   import type { Values } from './forms';
+  import { withDrafted } from './form_model';
 
   let {
     id,
@@ -27,6 +28,7 @@
     stateKey = null,
     report,
     onended,
+    drafted = null,
   }: {
     id: ChatWizardId;
     /** Who opened it ("Control", the session's agent). */
@@ -37,12 +39,20 @@
     /** Tell the opener in words (an agent's block: fill its composer). */
     report?: (text: string) => void;
     onended?: (ended: ChatFormEnded) => void;
+    /** Answers the opener read from the person's own message ("Set up a
+     *  new project for acme/pos on mercury"): written in as drafted
+     *  defaults the person checks before the last button (G7.4). */
+    drafted?: Values | null;
   } = $props();
+
 
   let ready = $state<ChatWizard | null>(null);
   let failed = $state<string | null>(null);
   let sending = $state<string | null>(null);
   const title = $derived(WIZARDS[id].spec.title);
+  const spec = $derived(
+    ready ? (drafted && Object.keys(drafted).length ? withDrafted(ready.wizard.spec, drafted, from, 'your message') : ready.wizard.spec) : null,
+  );
 
   onMount(() => {
     let live = true;
@@ -80,9 +90,9 @@
 <div data-testid="wizard-chat-card" data-wizard={id}>
   {#if failed}
     <p class="err" role="alert">{title} could not open: {failed}</p>
-  {:else if ready}
+  {:else if ready && spec}
     <ChatForm
-      spec={ready.wizard.spec}
+      {spec}
       {from}
       {why}
       sending={sending ?? ready.wizard.sending}

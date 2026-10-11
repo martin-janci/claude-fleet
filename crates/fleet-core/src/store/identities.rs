@@ -1,4 +1,4 @@
-//! Single-sign-on identities (migration 164): which person an OIDC account
+//! Single-sign-on identities (migration 167): which person an OIDC account
 //! is — Keycloak, or any provider that speaks OpenID Connect
 //! (`mcp::oidc`).
 //!

@@ -36,6 +36,8 @@
     loadAccountSpend,
     pausedSessions,
     routinesOn,
+    routinesRunningAs,
+    refreshedLine,
     fallbackRoutinesOn,
     spendByAccount,
     type AccountSummary,
@@ -48,7 +50,8 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { bulkTargets, sessionBlocked } from './share';
-  import { moveToHeadroom, switchTarget } from './account_limits';
+  import { moveToHeadroom, resetText, switchTarget, waitOut } from './account_limits';
+  import LimitActions from './LimitActions.svelte';
   import { push } from './toasts';
   import { displayName } from './attention';
   import { showFriendlyNames } from './sessions';
@@ -218,6 +221,28 @@
     if (!r.ok) pushError(r.error);
   }
 
+  // M15 G7.12: the header's page-wide Refresh reads every account's usage
+  // again; one failure is said once, the others still refresh.
+  const refreshed = $derived(refreshedLine(list.map((a) => a.usage?.fetched_at), now));
+  async function refreshAll() {
+    refreshing = true;
+    const results = await Promise.all(list.map((a) => refreshAccountUsage(a.uuid)));
+    refreshing = false;
+    const failed = results.find((r) => !r.ok);
+    if (failed && !failed.ok) pushError(failed.error, 'Some usage was not refreshed');
+  }
+
+  const limitOf = (uuid: string): number | null => $attentionFacts?.limited_accounts?.[uuid]?.resets_at ?? null;
+
+  /** "Wait until <reset>" on the paused panel: every paused session of the
+   *  account waits out its limit, as each row's own Wait does. */
+  function waitAll(a: AccountSummary) {
+    const at = limitOf(a.uuid);
+    if (at == null) return;
+    for (const s of pausedOf(a)) waitOut(s.id, at);
+    push({ kind: 'info', message: `Waiting until ${resetText(at)}; the paused sessions resume then.` });
+  }
+
   interface WindowView {
     kind: UsageWindowKind;
     title: string;
@@ -275,8 +300,13 @@
   <header class="head">
     <h2>Accounts</h2>
     <span class="sub" data-testid="accounts-count">
-      {list.length} {list.length === 1 ? 'account' : 'accounts'}
+      {list.length} {list.length === 1 ? 'account' : 'accounts'}{#if refreshed} · {refreshed}{/if}
     </span>
+    {#if list.length > 0}
+      <button type="button" class="btn-quiet" data-testid="accounts-refresh-all" disabled={refreshing} onclick={() => void refreshAll()}
+        >{refreshing ? 'Refreshing…' : 'Refresh'}</button
+      >
+    {/if}
     <!-- Review r08: the rail item is "Accounts & hosts", and Classic's Hosts
          tab was always in view; the Hosts view is one click from here. -->
     <button type="button" class="btn-quiet hosts-link" data-testid="accounts-all-hosts" onclick={() => requestHostsView()}
@@ -350,6 +380,17 @@
                     showPaused(a.uuid);
                   }}>{paused.length} paused {paused.length === 1 ? 'session' : 'sessions'} → Show</button
                 >
+                {#if limitOf(a.uuid) != null}
+                  <button
+                    type="button"
+                    class="btn-quiet"
+                    data-testid="account-paused-wait"
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      waitAll(a);
+                    }}>Wait until {resetText(limitOf(a.uuid) ?? 0)}</button
+                  >
+                {/if}
                 {#if target}
                   <button
                     type="button"
@@ -481,10 +522,28 @@
                   <button class="link" onclick={() => selectSessionExplicitly(s)}>
                     {displayName(s, $showFriendlyNames)}
                   </button>
-                  <span class="sub">{s.host_alias} · {s.claude_status ?? s.status}</span>
+                  <span class="sub">{s.host_alias} · {onlyPaused ? 'Paused · limit' : (s.claude_status ?? s.status)}</span>
+                  {#if onlyPaused}
+                    <LimitActions sess={s} resetsAt={limitOf(a.uuid)} accountName={(u) => ($accountByUuid.get(u) ? labelOf($accountByUuid.get(u)) : u.slice(0, 8))} />
+                  {/if}
                 </li>
               {/each}
             </ul>
+          {/if}
+          {#if onlyPaused}
+            {@const held = routinesRunningAs(a.uuid, routines, $hosts)}
+            {#if held.length > 0}
+              <ul class="rows" data-testid="account-paused-routines">
+                {#each held as r (r.id)}
+                  <li>
+                    <span>{r.name}</span>
+                    <span class="sub"
+                      >Routine · its runs meet the limit{#if limitOf(a.uuid) != null} until {resetText(limitOf(a.uuid) ?? 0)}, then run again on their own{/if}</span
+                    >
+                  </li>
+                {/each}
+              </ul>
+            {/if}
           {/if}
         </div>
       {:else if pickedMissing}

@@ -106,6 +106,10 @@ pub struct TableView {
     /// A column the rows can be grouped by, offered as a switch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_by: Option<String>,
+    /// A plain field shown in a smaller line under the record's title in its
+    /// column (M15 step G7.14: a device's "phone · fleet-mobile 0.5.4").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<String>,
 }
 
 /// One control in a `data_page`'s filter bar, bound by name to a source
@@ -397,6 +401,9 @@ pub enum Tone {
     Info,
     Warn,
     Danger,
+    /// Something the page will offer and does not yet, shown greyed with
+    /// "Not built yet" (M15 step G7.14: a debug device's live screen).
+    Later,
 }
 
 /// When an item, section or tab is shown. Exactly one form per condition:

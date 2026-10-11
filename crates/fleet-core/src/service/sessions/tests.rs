@@ -7853,6 +7853,57 @@ fn a_restart_profile_is_keep_host_login_or_a_valid_name() {
     assert_eq!(profile_switch(Some("a/b")).unwrap_err().code, "E_INVALID");
 }
 
+/// A restart's model / effort switch reads like its profile switch, so the
+/// composer can relaunch a Codex session under another model.
+#[test]
+fn a_restart_model_or_effort_is_keep_default_or_a_valid_value() {
+    use crate::service::sessions::lifecycle::launch_switch;
+    use crate::validate::{claude_model, effort_level};
+    assert_eq!(launch_switch(None, claude_model).unwrap(), None);
+    assert_eq!(launch_switch(Some(" "), claude_model).unwrap(), Some(None));
+    assert_eq!(
+        launch_switch(Some(" gpt-6.1-sol "), claude_model).unwrap(),
+        Some(Some("gpt-6.1-sol".into()))
+    );
+    assert_eq!(
+        launch_switch(Some("x'; rm -rf ~"), claude_model)
+            .unwrap_err()
+            .code,
+        "E_INVALID"
+    );
+    assert_eq!(
+        launch_switch(Some("xhigh"), effort_level).unwrap(),
+        Some(Some("xhigh".into()))
+    );
+    assert_eq!(
+        launch_switch(Some("huge"), effort_level).unwrap_err().code,
+        "E_INVALID"
+    );
+}
+
+/// The switched model reaches the relaunched Codex pane as `-m`.
+#[test]
+fn a_codex_relaunch_carries_the_switched_model_and_effort() {
+    let launch = crate::tmux::ClaudeLaunch {
+        model: Some("gpt-6-sol".into()),
+        effort: Some("high".into()),
+        profile: None,
+    };
+    let cmd = recreate_pane_command(
+        "work",
+        crate::store::AGENT_CODEX,
+        Some("0192f3a4-0000-7000-8000-000000000001"),
+        "dev-x",
+        &launch,
+    );
+    assert!(
+        cmd.contains("codex resume '0192f3a4-0000-7000-8000-000000000001'"),
+        "{cmd}"
+    );
+    assert!(cmd.contains(" -m 'gpt-6-sol'"), "{cmd}");
+    assert!(cmd.contains("model_reasoning_effort=\"high\""), "{cmd}");
+}
+
 #[test]
 fn a_new_shell_session_refuses_a_profile() {
     let mut args = NewSessionArgs {

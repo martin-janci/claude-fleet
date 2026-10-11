@@ -48,7 +48,7 @@ use std::sync::Mutex;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "OrgAdminParams")]
 pub struct OrgAdminArgs {
-    /// list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|set_org_setting|list_devices|pair_device|revoke_device|set_device_trust|rename_device|set_device_mode|bind_device|set_device_person|grant_catalog|list_people|rename_person|disable_person|list_members|set_member|remove_member|member_grants|revoke_member_grants|narrow_member_grants|set_hub_org|set_admins_see_unclaimed|rule_preview|add_project|remove_project|revoke_share|narrow_share
+    /// list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|set_org_setting|list_devices|pair_device|revoke_device|set_device_trust|rename_device|set_device_mode|bind_device|set_device_person|grant_catalog|list_people|add_person|rename_person|disable_person|list_members|set_member|remove_member|member_grants|revoke_member_grants|narrow_member_grants|set_hub_org|set_admins_see_unclaimed|rule_preview|add_project|remove_project|revoke_share|narrow_share
     pub action: String,
     /// Org name (add/update_org), or a person's or device's new name
     /// (rename_person, rename_device).
@@ -239,6 +239,9 @@ pub enum Action {
     SetDevicePerson,
     GrantCatalog,
     ListPeople,
+    /// M15 step G7.14: "+ Person" — someone the hub knows before a device
+    /// is paired to them (a member added ahead of their phone).
+    AddPerson,
     RenamePerson,
     DisablePerson,
     // Phase D: members and roles.
@@ -279,6 +282,7 @@ impl Action {
             "set_device_person" => Action::SetDevicePerson,
             "grant_catalog" => Action::GrantCatalog,
             "list_people" => Action::ListPeople,
+            "add_person" => Action::AddPerson,
             "rename_person" => Action::RenamePerson,
             "disable_person" => Action::DisablePerson,
             "list_members" => Action::ListMembers,
@@ -408,6 +412,26 @@ pub struct DeviceSummary {
     /// The device this list was read through.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub this_device: bool,
+    /// M15 step G7.14: what it is, `desktop` or `phone`, from the app's last
+    /// `X-Fleet-Client` header. Absent until it has sent one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// G7.14: what it runs, "phone · fleet-mobile 0.5.4", as the People &
+    /// devices table shows it under the name. Absent with `kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+}
+
+/// A device's kind and app line from what its app last said it runs
+/// (`update_observed`, `client:<token id>`): `None` for a component that is
+/// not a person's app.
+pub fn device_app(component: &str, version: &str) -> Option<(String, String)> {
+    let (kind, app) = match component {
+        "desktop" => ("desktop", "fleet desktop"),
+        "android" | "ios" => ("phone", "fleet-mobile"),
+        _ => return None,
+    };
+    Some((kind.to_string(), format!("{kind} · {app} {version}")))
 }
 
 /// A person this hub knows, as Settings → People lists them.
@@ -693,7 +717,7 @@ fn check(s: &Store, action: Action, args: &OrgAdminArgs, me: Me<'_>) -> Result<(
         | Action::GrantCatalog => Ok(()),
         Action::BindDevice => Err(forbidden("which org a device is bound to")),
         Action::SetDevicePerson => Err(forbidden("whose device it is")),
-        Action::RenamePerson => Err(forbidden("a person's name")),
+        Action::AddPerson | Action::RenamePerson => Err(forbidden("a person's name")),
         Action::DisablePerson => Err(forbidden("disabling a person")),
         Action::SetHubOrg => Err(forbidden("which company owns the hub")),
         Action::SetAdminsSeeUnclaimed => Err(forbidden("who sees the unclaimed count")),
@@ -879,6 +903,11 @@ pub fn list_devices(s: &Store, me: Me<'_>) -> Result<Vec<DeviceSummary>, IpcErro
             grants.entry(holder).or_default().push(c.name.clone());
         }
     }
+    let apps: std::collections::BTreeMap<String, (String, String)> = s
+        .update_observed_all()?
+        .into_iter()
+        .filter_map(|o| Some((o.target.clone(), device_app(&o.component, &o.version)?)))
+        .collect();
     Ok(s.active_client_tokens()?
         .into_iter()
         .filter(|c| crate::store::machine_token_kind(&c.mode).is_none())
@@ -892,18 +921,26 @@ pub fn list_devices(s: &Store, me: Me<'_>) -> Result<Vec<DeviceSummary>, IpcErro
                 c.org_id == Some(org) && !(c.person_id.is_some() && c.person_id == owner)
             }
         })
-        .map(|c| DeviceSummary {
-            org: c.org_id.and_then(|o| orgs.get(&o).cloned()),
-            person: c.person_id.and_then(|p| people.get(&p).cloned()),
-            catalogs: grants.remove(&c.name).unwrap_or_default(),
-            this_device: me.device == Some(c.name.as_str()),
-            name: c.name,
-            mode: c.mode,
-            trusted: c.trusted_at.is_some(),
-            org_id: c.org_id,
-            person_id: c.person_id,
-            created_at: c.created_at,
-            last_seen_at: c.last_seen_at,
+        .map(|c| {
+            let (kind, app) = apps
+                .get(&format!("client:{}", c.id))
+                .cloned()
+                .map_or((None, None), |(k, a)| (Some(k), Some(a)));
+            DeviceSummary {
+                kind,
+                app,
+                org: c.org_id.and_then(|o| orgs.get(&o).cloned()),
+                person: c.person_id.and_then(|p| people.get(&p).cloned()),
+                catalogs: grants.remove(&c.name).unwrap_or_default(),
+                this_device: me.device == Some(c.name.as_str()),
+                name: c.name,
+                mode: c.mode,
+                trusted: c.trusted_at.is_some(),
+                org_id: c.org_id,
+                person_id: c.person_id,
+                created_at: c.created_at,
+                last_seen_at: c.last_seen_at,
+            }
         })
         .collect())
 }
@@ -1339,6 +1376,14 @@ pub fn run(
                 s.set_client_catalog_grant(&row.name, id, on)?;
             }
             device_json(&s, &row.name, me)
+        }
+        Action::AddPerson => {
+            let person = need(&args.name, name, "name")?;
+            let display = args
+                .display_name
+                .as_deref()
+                .filter(|d| !d.trim().is_empty());
+            to_json(&s.create_person(person, display)?)
         }
         Action::RenamePerson => {
             let id = *need(&args.person_id, name, "person_id")?;

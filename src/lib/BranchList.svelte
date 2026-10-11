@@ -10,6 +10,7 @@
     onDelete,
     onNew,
     onDeleteMerged = () => {},
+    onDeleteMergedRemotes = () => {},
     writeBlocked = null,
   }: {
     branches: Branch[];
@@ -20,6 +21,8 @@
     onNew: () => void;
     /** The local branches flagged merged, for one confirm-and-delete. */
     onDeleteMerged?: (names: string[]) => void;
+    /** The remote branches flagged merged, deleted on their remote. */
+    onDeleteMergedRemotes?: (names: string[]) => void;
     writeBlocked?: string | null;
   } = $props();
 
@@ -30,7 +33,7 @@
   const locals = $derived(shown.filter((b) => !b.isRemote));
   const remotes = $derived(shown.filter((b) => b.isRemote));
   const mergedLocals = $derived(branches.filter((b) => !b.isRemote && b.merged).map((b) => b.name));
-  const mergedRemotes = $derived(branches.filter((b) => b.isRemote && b.merged).length);
+  const mergedRemotes = $derived(branches.filter((b) => b.isRemote && b.merged).map((b) => b.name));
   const mergedCount = $derived(branches.filter((b) => b.merged).length);
 </script>
 
@@ -84,7 +87,16 @@
     {/each}
     {#if remotes.length}
       <div class="group-label">
-        Remote {remotes.length}{#if !mergedOnly && mergedRemotes}<span class="gnote"> · {mergedRemotes} merged</span>{/if}
+        Remote {remotes.length}{#if mergedRemotes.length}<span class="gnote"
+            > · {mergedRemotes.length} merged and safe to delete</span
+          >
+          <button
+            class="new del-merged del-remote"
+            data-testid="delete-merged-remote"
+            disabled={writeBlocked !== null}
+            title={writeBlocked ?? 'Delete the remote branches the base branch already contains, on their remote'}
+            onclick={() => onDeleteMergedRemotes(mergedRemotes)}>Delete</button
+          >{/if}
       </div>
       {#each remotes as b (b.name)}
         <div class="brow" data-testid="branch-row">
@@ -121,6 +133,7 @@
     padding: 0.4rem 0.6rem 0.2rem;
   }
   .gnote { text-transform: none; }
+  .del-remote { text-transform: none; padding: 0 0.4rem; margin-left: 0.4rem; }
   .brow {
     display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0.6rem;
   }

@@ -77,6 +77,20 @@ describe('WorkPrs', () => {
     expect(openExternal).toHaveBeenCalledWith('https://github.com/o/r/pull/42');
   });
 
+  it('names the mission whose session opened it, and opens that mission (G7.8)', async () => {
+    const { missionOpenRequest } = await import('./missions');
+    rows = [pr({ mission_id: 5, mission_name: 'Hub federation v2' }), pr({ id: 3, number: 44 })];
+    render(WorkPrs);
+    await flush();
+    const [fromMission, plain] = screen.getAllByTestId('work-pr');
+    const link = within(fromMission).getByTestId('work-pr-mission');
+    expect(link.textContent).toBe('Hub federation v2');
+    expect(within(plain).queryByTestId('work-pr-mission')).toBeNull();
+    await fireEvent.click(link);
+    const { get } = await import('svelte/store');
+    expect(get(missionOpenRequest)).toEqual({ id: 5 });
+  });
+
   it('shows the diffstat when the hub knows it (gap plan G3.10)', async () => {
     rows = [pr({ additions: 18, deletions: 6 }), pr({ id: 3, number: 44 })];
     render(WorkPrs);

@@ -2112,6 +2112,11 @@ mod tests {
             parallel: false,
             decider: crate::store::Decider::Person,
             rule_id: None,
+            model: None,
+            effort: None,
+            agent: None,
+            fell_back_from: None,
+            placement_rule_id: None,
         };
         let start = async {
             at_spawn.await.unwrap();

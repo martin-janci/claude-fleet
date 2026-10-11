@@ -134,20 +134,48 @@ export function groupRows(
 export const RUNNING_CAP = 2;
 
 /** The capped groups: grouped by state, the Working group shows its first
- *  `RUNNING_CAP` rows and counts the rest, unless it was opened (`expanded`
- *  holds its key). A row in `keep` (the selected one) always shows, so the
- *  cap never hides where the person is. Every other group shows whole. */
+ *  `RUNNING_CAP` rows and counts the rest, and the Done group shows what
+ *  finished today (since local midnight, `since`) and counts the older ones
+ *  (Sessions board, "Done 6 today"; G7.9), unless the group was opened
+ *  (`expanded` holds its key). A row in `keep` (the selected one) always
+ *  shows, so the cap never hides where the person is. Every other group
+ *  shows whole. */
 export function capRows(
   g: RowGroup,
   expanded: ReadonlySet<string>,
   keep: ReadonlySet<number> = new Set(),
   cap: number = RUNNING_CAP,
+  since?: number,
 ): { shown: SessionRow[]; hidden: number } {
-  if (g.key !== 'state:working' || expanded.has(g.key) || g.rows.length <= cap + 1) {
+  if (expanded.has(g.key)) return { shown: g.rows, hidden: 0 };
+  if (g.key === 'state:done' && since != null) {
+    const shown = g.rows.filter((s) => finishedSince(s, since) || keep.has(s.id));
+    return { shown, hidden: g.rows.length - shown.length };
+  }
+  if (g.key !== 'state:working' || g.rows.length <= cap + 1) {
     return { shown: g.rows, hidden: 0 };
   }
   const shown = g.rows.filter((s, i) => i < cap || keep.has(s.id));
   return { shown, hidden: g.rows.length - shown.length };
+}
+
+/** The row's turn ended at or after `since` (unix seconds). */
+function finishedSince(s: SessionRow, since: number): boolean {
+  const at = s.last_stop_at ?? s.last_activity_at;
+  return at != null && at >= since;
+}
+
+/** The Done group's count: "6 today", how many of its rows finished since
+ *  `since`; every other group counts its rows. */
+export function groupCountText(g: RowGroup, since?: number): string {
+  if (g.key === 'state:done' && since != null) return `${g.rows.filter((s) => finishedSince(s, since)).length} today`;
+  return String(g.rows.length);
+}
+
+/** The overflow line's words for a group: "4 more running", or "3 earlier"
+ *  under Done. */
+export function groupMoreText(g: RowGroup, n: number): string {
+  return g.key === 'state:done' ? `${n} earlier` : moreRunningText(n);
 }
 
 /** The overflow line's words: "4 more running". */
