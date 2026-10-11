@@ -738,7 +738,8 @@ pub(crate) mod routed {
             None => structure::place(
                 store,
                 &internal_view(),
-                &args.task_id,
+                Some(&args.task_id),
+                None,
                 Some(&args.group),
                 args.note.as_deref(),
                 Some(args.expected_version),

@@ -3726,7 +3726,11 @@ deliberately.
   `new_worker`, `restore_host_sessions` other than a `dry_run`,
   `recreate_session`, `restart_session`, `work_link` `start` / `resume`)
   and kills approved by a person, whatever
-  `mcp.confirm_destructive` says (work graph M9.7, decision D12). On a hub
+  `mcp.confirm_destructive` says (work graph M9.7, decision D12) — and,
+  since review round 15 (F21), everything it WRITES into a session as well:
+  `send_prompt`, `run_prompt`, `queue_prompt`, and `dispatch_task` to an
+  existing worker. The toggle lifts none of it; a caller that is not the
+  operator client is ungated for the prompts (they are `confirm: false`). On a hub
   the call waits in the hub's queue until the owner approves it from a
   paired device (redesign step 9.2: a card in Control's transcript, or the
   dialog); the operator can neither list nor answer that queue.

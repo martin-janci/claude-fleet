@@ -247,7 +247,7 @@ pub struct WorkLinkArgs {
     /// item:<id> or ref:<KEY>; reject: item:<id> merges into it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
-    /// Version seen (0 none).
+    /// Version seen (0 none); place needs it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_version: Option<i64>,
     /// Primary link seen; 0 none.
@@ -260,7 +260,7 @@ pub struct WorkLinkArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "array_schema")]
     pub decisions: Option<Vec<structure::LinkDecision>>,
-    /// Group label.
+    /// A group label, or an existing group id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     /// Placement note.
@@ -544,6 +544,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "ack",
     "decide_batch",
     "place",
+    "unplace",
     "assign_org",
     "rule_save",
     "rule_delete",
@@ -1064,6 +1065,7 @@ fn work_link_locked<'a>(
             | "name"
             | "decide_batch"
             | "place"
+            | "unplace"
             | "assign_org"
             | "rule_save"
             | "rule_delete"
@@ -1529,6 +1531,20 @@ pub fn check_live_elsewhere(
     .with_details(serde_json::json!({ "live_elsewhere": found })))
 }
 
+/// A live session's own name, for a sentence that ALREADY names the task it
+/// is open on — `None` when naming it would only say the key again.
+///
+/// A start from a ticket names its session after the key, so the
+/// unconditional form said one thing twice: "TASK-230 is already open in
+/// TASK-230 on mefistos". Case-insensitive, because the same name reaches
+/// here from a branch-shaped rename (`task-230`) as readily as from the key;
+/// a parallel start's `TASK-230-2` is a different session and stays named.
+/// An empty name is nobody, not a blank in the middle of the sentence.
+pub(crate) fn name_beside_key<'a>(key: &str, name: &'a str) -> Option<&'a str> {
+    let name = name.trim();
+    (!name.is_empty() && !name.eq_ignore_ascii_case(key.trim())).then_some(name)
+}
+
 fn lifecycle_row(s: &Store, session_id: i64) -> Result<SessionRow, IpcError> {
     s.get_session_by_id(session_id)?
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
@@ -1603,6 +1619,29 @@ mod tests {
             .upsert_session("dev", "h", None, None, 1, 1, "running", None)
             .unwrap();
         (Mutex::new(s), id)
+    }
+
+    /// A session named after the key it is open on adds nothing to a
+    /// sentence that already names the key, however it is cased or padded;
+    /// every other name does, the `-N` of a parallel start included.
+    #[test]
+    fn a_session_is_named_beside_a_key_only_when_the_name_is_not_the_key() {
+        assert_eq!(name_beside_key("TASK-230", "TASK-230"), None);
+        assert_eq!(name_beside_key("TASK-230", "task-230"), None);
+        assert_eq!(name_beside_key("TASK-230", "  TASK-230 "), None);
+        assert_eq!(name_beside_key("TASK-230", ""), None, "nobody, not a blank");
+        assert_eq!(name_beside_key("TASK-230", "   "), None);
+        assert_eq!(
+            name_beside_key("TASK-230", "TASK-230-2"),
+            Some("TASK-230-2"),
+            "a parallel start is a different session"
+        );
+        assert_eq!(
+            name_beside_key("TASK-230", "TASK-230 fix the sentence"),
+            Some("TASK-230 fix the sentence"),
+            "a start's own `<key> <title>` name carries the title too"
+        );
+        assert_eq!(name_beside_key("TASK-230", " api "), Some("api"));
     }
 
     /// The served schema's `enum` is the table, in order — what the phone
