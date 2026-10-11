@@ -1828,7 +1828,10 @@ automatically on app start.
   `new_shell_session`, `new_bg_session`, `spawn_review`, `dispatch_task`
   with `new_worker`, `restore_host_sessions` (not its `dry_run`),
   `recreate_session`, `restart_session`, `work_link` `start` / `resume` —
-  its `safe_kill_session`, and every tool above return
+  its `safe_kill_session`, everything it writes into a session
+  (`send_prompt`, `run_prompt`, `queue_prompt`, and `dispatch_task` to a
+  worker that already exists: review round 15, F21 — nothing an LLM composes
+  reaches a session without a person), and every tool above return
   `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
   dialog or Control's cards, and on a hub from the owner's paired device,
   which lists the waiting calls with `mcp_confirms` (each with `nonce`,

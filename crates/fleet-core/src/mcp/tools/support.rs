@@ -1859,7 +1859,7 @@ impl FleetTools {
                 if person && !caller.is_operator() {
                     "a person approves this call whoever makes it"
                 } else if forced {
-                    "the operator's starts and kills always do"
+                    guard::operator_confirm_reason(tool)
                 } else {
                     "mcp.confirm_destructive is on"
                 },

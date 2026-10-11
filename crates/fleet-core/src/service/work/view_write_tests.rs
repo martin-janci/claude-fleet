@@ -775,7 +775,8 @@ fn placement_and_rules_through_the_writes() {
     let t2 = structure::place(
         &w.st,
         &vs(&OrgScope::All),
-        "item:2",
+        Some("item:2"),
+        None,
         Some("Security"),
         Some("why"),
         Some(0),
@@ -794,7 +795,8 @@ fn placement_and_rules_through_the_writes() {
     let err = structure::place(
         &w.st,
         &vs(&OrgScope::All),
-        "item:2",
+        Some("item:2"),
+        None,
         Some("Other"),
         None,
         Some(0),
@@ -806,7 +808,8 @@ fn placement_and_rules_through_the_writes() {
     let err = structure::place(
         &w.st,
         &vs(&OrgScope::All),
-        "item:2",
+        Some("item:2"),
+        None,
         Some("x"),
         None,
         None,
@@ -839,7 +842,8 @@ fn placement_and_rules_through_the_writes() {
     let cleared = structure::place(
         &w.st,
         &vs(&OrgScope::All),
-        "item:2",
+        Some("item:2"),
+        None,
         None,
         None,
         Some(t2.placement_version),
@@ -924,7 +928,8 @@ fn placement_and_rules_through_the_writes() {
     let t = structure::place(
         &w.st,
         &vs(&bound(w.org_a)),
-        "item:1",
+        Some("item:1"),
+        None,
         Some("Mine"),
         None,
         Some(0),
@@ -949,7 +954,8 @@ fn placement_and_rules_through_the_writes() {
     let hidden = structure::place(
         &w.st,
         &vs(&bound(w.org_a)),
-        &tid,
+        Some(&tid),
+        None,
         Some("x"),
         None,
         Some(5),
@@ -959,7 +965,8 @@ fn placement_and_rules_through_the_writes() {
     let unknown = structure::place(
         &w.st,
         &vs(&bound(w.org_a)),
-        "item:987654",
+        Some("item:987654"),
+        None,
         Some("x"),
         None,
         Some(5),
@@ -975,8 +982,17 @@ fn placement_and_rules_through_the_writes() {
         hidden.message.replace(&local_b.to_string(), "X"),
         unknown.message.replace("987654", "X")
     );
-    let err =
-        structure::place(&w.st, &vs(&host), "item:1", Some("x"), None, Some(1), "h1").unwrap_err();
+    let err = structure::place(
+        &w.st,
+        &vs(&host),
+        Some("item:1"),
+        None,
+        Some("x"),
+        None,
+        Some(1),
+        "h1",
+    )
+    .unwrap_err();
     assert_eq!(
         err.code,
         codes::E_FORBIDDEN,
@@ -1010,7 +1026,8 @@ fn a_placement_on_a_bare_key_follows_the_bind() {
     let placed = structure::place(
         &w.st,
         &vs(&OrgScope::All),
-        "ref:TK-9",
+        Some("ref:TK-9"),
+        None,
         Some("Payments"),
         None,
         Some(0),
@@ -1045,7 +1062,8 @@ fn an_items_own_placement_wins_over_the_bare_keys() {
     structure::place(
         &w.st,
         &vs(&OrgScope::All),
-        "ref:TK-9",
+        Some("ref:TK-9"),
+        None,
         Some("Payments"),
         None,
         Some(0),
@@ -1090,7 +1108,8 @@ fn a_bare_key_of_another_org_keeps_its_placement() {
     structure::place(
         &w.st,
         &vs(&OrgScope::All),
-        "ref:TK-9",
+        Some("ref:TK-9"),
+        None,
         Some("Payments"),
         None,
         Some(0),
@@ -1598,4 +1617,92 @@ fn a_switch_compares_the_primary_this_org_can_see() {
         "{err:?}"
     );
     switch(0).unwrap();
+}
+
+/// `place`'s four edges, each of them found by using it (TASK-230).
+///
+/// The task may be named by `item_id`, as `create` / `run` / `bucket_add`
+/// take it; one error names EVERYTHING missing, because learning about the
+/// `expected_version` sentinel on a second round trip is how it was found;
+/// a `group` that is an existing group's id lands in THAT group instead of
+/// a second one named `label:repo:…`; and an id naming nothing is refused
+/// rather than opening the ghost section beside the real one.
+#[test]
+fn place_takes_an_item_id_a_group_id_and_names_everything_missing() {
+    let w = world();
+    let all = vs(&OrgScope::All);
+    let place = |item: Option<i64>, group: Option<&str>, seen: Option<i64>| {
+        structure::place(&w.st, &all, None, item, group, None, seen, "me")
+    };
+
+    // One error, both complaints.
+    let err = place(None, Some("x"), None).unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
+    for want in ["item_id", "expected_version", "0 when the task has no"] {
+        assert!(err.message.contains(want), "{want}: {}", err.message);
+    }
+
+    // `item_id` names the task; free text is a label of the person's own.
+    let t = place(Some(w.t2), Some("Payroll"), Some(0)).unwrap();
+    assert_eq!(
+        (
+            t.group.id.as_str(),
+            t.group.label.as_str(),
+            t.group.source.as_str()
+        ),
+        ("label:Payroll", "Payroll", "manual")
+    );
+
+    // An existing repo group's id: that section, label and all.
+    let t = place(Some(w.t2), Some("repo:acme/api"), Some(t.placement_version)).unwrap();
+    assert_eq!(
+        (t.group.id.as_str(), t.group.label.as_str()),
+        ("repo:acme/api", "acme/api")
+    );
+    assert_eq!(
+        t.group.source, "manual",
+        "a pin is a pin, whichever group it names"
+    );
+
+    // The tracker's own group keeps its container; a key prefix is stored
+    // in the spelling `group_of` derives, so it lands in the same bucket.
+    let t = place(
+        Some(w.t2),
+        Some(&format!("tracker:{}:TP", w.tracker)),
+        Some(t.placement_version),
+    )
+    .unwrap();
+    assert_eq!(t.group.id, format!("tracker:{}:TP", w.tracker));
+    assert_eq!(t.group.label, "TP");
+    let t = place(Some(w.t2), Some("key:tk"), Some(t.placement_version)).unwrap();
+    assert_eq!(
+        (t.group.id.as_str(), t.group.label.as_str()),
+        ("key:TK", "TK")
+    );
+
+    // An id that names nothing is refused — the ghost section was the bug.
+    for bad in [
+        "repo:nobody/nothing",
+        &format!("tracker:{}:TP", w.tracker + 999),
+    ] {
+        let err = place(Some(w.t2), Some(bad), Some(t.placement_version)).unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID, "{bad}");
+        assert!(
+            err.message.contains("a group that exists"),
+            "{bad}: {}",
+            err.message
+        );
+    }
+
+    // A colon a person typed is not a prefix: unknown kinds stay labels.
+    let t = place(Some(w.t2), Some("Q3: ship it"), Some(t.placement_version)).unwrap();
+    assert_eq!(
+        (t.group.id.as_str(), t.group.label.as_str()),
+        ("label:Q3: ship it", "Q3: ship it")
+    );
+
+    // Cleared, the task goes back to what it derives — here the tracker's.
+    let cleared = place(Some(w.t2), None, Some(t.placement_version)).unwrap();
+    assert_eq!(cleared.placement_version, 0);
+    assert_eq!(cleared.group.source, "tracker");
 }

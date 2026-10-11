@@ -1607,6 +1607,21 @@ impl Graph {
         t.config.account_id.is_some() && t.config.account_id == item.assignee_id
     }
 
+    /// Every `owner/repo` a `repo:` group can be derived for — the same
+    /// projects [`Self::repo_of`] answers with, so a placement into
+    /// `repo:o/r` is refused exactly when no task could ever land there.
+    pub(crate) fn repo_groups(&self) -> impl Iterator<Item = String> + '_ {
+        self.projects
+            .values()
+            .filter(|p| p.owner != "local" && !p.owner.is_empty())
+            .map(|p| format!("{}/{}", p.owner, p.repo))
+    }
+
+    /// Whether a `tracker:<id>:…` group id names a tracker this graph has.
+    pub(crate) fn has_tracker(&self, id: i64) -> bool {
+        self.trackers.contains_key(&id)
+    }
+
     fn repo_of(&self, l: &ViewLink) -> Option<String> {
         let pid = match self.session_of(l) {
             Some(row) => row.project_id,
@@ -1818,6 +1833,88 @@ fn state_rank(st: &str) -> u8 {
     }
 }
 
+/// A group id, parsed — the kinds [`group_of`] derives below.
+///
+/// It exists so a person's `place` (and a rule's group) can name an
+/// EXISTING section instead of minting a second one beside it: `group:
+/// "repo:martin-janci/claude-fleet"` used to become
+/// `label:repo:martin-janci/claude-fleet`, with the prefix showing in the
+/// visible text, and `group: "martin-janci/claude-fleet"` became a
+/// different section carrying the repo group's own words. Neither is what
+/// anybody meant by either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GroupId<'a> {
+    Repo(&'a str),
+    Tracker(i64, &'a str),
+    Key(&'a str),
+    Label(&'a str),
+}
+
+/// `repo:<owner>/<repo>`, `tracker:<tracker id>:<container>`,
+/// `key:<PREFIX>` or `label:<text>`; `None` for free text, which is what a
+/// person typing "Payroll" means and gets a `label:` group of its own.
+///
+/// `none` (the fallback bucket's id) is deliberately NOT a form here: it
+/// carries no `<kind>:` prefix, so a group a person actually called "none"
+/// stays their own label.
+pub(crate) fn parse_group_id(raw: &str) -> Option<GroupId<'_>> {
+    let (kind, rest) = raw.split_once(':')?;
+    if rest.trim().is_empty() {
+        return None;
+    }
+    match kind {
+        "repo" => Some(GroupId::Repo(rest)),
+        "tracker" => {
+            // The container may itself hold colons: tracker:<id>:<rest>.
+            let (tid, container) = rest.split_once(':')?;
+            Some(GroupId::Tracker(tid.parse().ok()?, container))
+        }
+        "key" => Some(GroupId::Key(rest)),
+        "label" => Some(GroupId::Label(rest)),
+        _ => None,
+    }
+}
+
+/// The words a tracker group shows: an Asana project id is a number nobody
+/// reads, so it is shortened to its last six digits. One statement, three
+/// readers — the derived group, a placement into it and a rule's.
+fn container_label(provider: Option<&str>, container: &str) -> String {
+    if provider != Some("asana") {
+        return container.to_string();
+    }
+    let tail: String = container
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("Asana project …{tail}")
+}
+
+/// The id and the words a stored group VALUE stands for: an existing
+/// group's id names that group, anything else is a label of its own.
+///
+/// Both writers go through it — a person's placement and a rule's group —
+/// so a rule that says `repo:o/r` cannot land its tasks in a ghost section
+/// while a placement with the same words lands in the real one.
+fn group_ref_for(g: &Graph, raw: &str) -> (String, String) {
+    match parse_group_id(raw) {
+        Some(GroupId::Repo(r)) => (format!("repo:{r}"), r.to_string()),
+        Some(GroupId::Tracker(tid, c)) => (
+            format!("tracker:{tid}:{c}"),
+            container_label(g.trackers.get(&tid).map(|t| t.provider.as_str()), c),
+        ),
+        Some(GroupId::Key(p)) => {
+            let p = p.to_ascii_uppercase();
+            (format!("key:{p}"), p)
+        }
+        Some(GroupId::Label(t)) => (format!("label:{t}"), t.to_string()),
+        None => (format!("label:{raw}"), raw.to_string()),
+    }
+}
+
 /// The group a task sits in, and why.
 fn group_of(
     g: &Graph,
@@ -1830,14 +1927,15 @@ fn group_of(
     let tracker_value = item
         .filter(|i| i.item.tracker_id.is_some())
         .and_then(|i| i.containers.first().cloned());
-    if let Some(label) = g
+    if let Some(stored) = g
         .placements
         .get(task_id)
         .and_then(|p| p.group.clone())
         .filter(|l| !l.trim().is_empty())
     {
+        let (id, label) = group_ref_for(g, &stored);
         return GroupRef {
-            id: format!("label:{label}"),
+            id,
             label,
             source: "manual".into(),
             rule_id: None,
@@ -1849,9 +1947,10 @@ fn group_of(
         .iter()
         .find(|r| r.enabled && rule_matches(r, item, key, title, repos))
     {
+        let (id, label) = group_ref_for(g, &r.group);
         return GroupRef {
-            id: format!("label:{}", r.group),
-            label: r.group.clone(),
+            id,
+            label,
             source: "rule".into(),
             rule_id: Some(r.id),
             tracker_value,
@@ -1859,20 +1958,7 @@ fn group_of(
     }
     if let (Some(i), Some(c)) = (item, tracker_value.clone()) {
         let tid = i.item.tracker_id.unwrap_or_default();
-        let provider = g.trackers.get(&tid).map(|t| t.provider.as_str());
-        let label = if provider == Some("asana") {
-            let tail: String = c
-                .chars()
-                .rev()
-                .take(6)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            format!("Asana project …{tail}")
-        } else {
-            c.clone()
-        };
+        let label = container_label(g.trackers.get(&tid).map(|t| t.provider.as_str()), &c);
         return GroupRef {
             id: format!("tracker:{tid}:{c}"),
             label,

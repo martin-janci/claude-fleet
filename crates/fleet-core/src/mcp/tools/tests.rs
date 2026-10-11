@@ -8362,7 +8362,7 @@ async fn an_operator_start_waits_for_approval_and_a_phone_start_does_not() {
     assert!(
         asked
             .message
-            .contains("the operator's starts and kills always do"),
+            .contains("the operator's starts, kills and work decisions always do"),
         "{}",
         asked.message
     );
@@ -10372,7 +10372,7 @@ async fn the_operators_create_remote_waits_for_a_person() {
     assert!(
         asked
             .message
-            .contains("the operator's starts and kills always do"),
+            .contains("the operator's starts, kills and work decisions always do"),
         "{}",
         asked.message
     );
@@ -11928,6 +11928,9 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // `TaskLink` (it spells the host `host` and carries no `tmux_name`).
     // Same defect as `work { org_impact }`'s, in the sibling arm (T9b).
     ("work_link", "place", &["ViewScope"]),
+    // The same write with nothing to place the task in, so the same
+    // answer and the same fence.
+    ("work_link", "unplace", &["ViewScope"]),
     // Two things a start does that reach an EXISTING row, and the old
     // exemption denied both. Its `E_EXISTS` prose names the session already
     // on the key (fenced in `tickets::already_running`), and the branch slug
@@ -12063,6 +12066,12 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
     (
         "work_link",
         "place",
+        "every_view_scope_page_hides_another_persons_live_session",
+        "every_view_scope_page_hides_another_persons_ended_link",
+    ),
+    (
+        "work_link",
+        "unplace",
         "every_view_scope_page_hides_another_persons_live_session",
         "every_view_scope_page_hides_another_persons_ended_link",
     ),
@@ -16445,6 +16454,16 @@ fn view_scope_sweep_calls() -> Vec<(&'static str, &'static str, serde_json::Valu
             serde_json::json!({
                 "action": "place", "task_id": task,
                 "group": "Payments", "expected_version": 0
+            }),
+        ),
+        // The clear answers the same `WorkTask`, so it is swept too. It
+        // runs after the `place` above, whose placement it removes — the
+        // sweep's calls are ordered, and version 1 is what that left.
+        (
+            "work_link",
+            "unplace",
+            serde_json::json!({
+                "action": "unplace", "task_id": task, "expected_version": 1
             }),
         ),
     ]

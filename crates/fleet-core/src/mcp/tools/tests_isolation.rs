@@ -4202,6 +4202,29 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // `unplace` is the same write with nothing to place it in, so it passes
+    // the same gate — and it takes `item_id` as `place` now does.
+    m.row(
+        "work_link",
+        "unplace",
+        move |fx, _| {
+            json!({ "action": "unplace", "item_id": fx.item_b,
+                    "expected_version": placement_of(fx, &format!("item:{}", fx.item_b)) })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts do not place"),
+            Who::BoundA => is_code(who, a, "E_NOTFOUND", "B's task"),
+            _ => {
+                is_ok(who, a, "unplace");
+                assert!(
+                    text(a).contains("\"placement_version\":0"),
+                    "the placement is gone: {a:?}"
+                );
+            }
+        },
+    )
+    .await;
     let hidden = call(
         &fx,
         Who::BoundA,
@@ -5387,7 +5410,8 @@ fn work_changed_carries_ids_only_and_reaches_only_unbound_callers() {
     st::place(
         &store,
         &crate::service::view_scope::ViewScope::internal(),
-        &tid,
+        Some(&tid),
+        None,
         Some("Payments"),
         Some("SECRET-A note"),
         Some(0),
