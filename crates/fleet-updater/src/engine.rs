@@ -287,6 +287,7 @@ impl<D: Docker> Updater<D> {
             speaks: Speaks::default(),
             phase: self.state.phase,
             attempt: None,
+            refresh: false,
         };
         let CheckOutcome { decision, verified } = match self.channel.check(&req).await {
             Ok(o) => o,

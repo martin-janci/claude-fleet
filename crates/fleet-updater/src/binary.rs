@@ -354,6 +354,7 @@ impl<H: Host> BinaryUpdater<H> {
             speaks: self.cfg.speaks.clone(),
             phase: self.state.phase,
             attempt: None,
+            refresh: false,
         };
         let CheckOutcome { decision, verified } = match self.channel.check(&req).await {
             Ok(o) => o,
