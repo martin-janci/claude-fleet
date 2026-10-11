@@ -31,7 +31,7 @@ Today (origin/main 2a6825c49):
 |---|---|---|
 | 1 | **Realm model + hardening** (this spec) | users, hierarchical groups, realm/client/composite roles, role mappings; orgs onto groups; audit; token expiry; JWKS verification |
 | 2 | IdP core | signing keys + rotation, JWKS, discovery at `/realms/<realm>/…`, login pages (password + TOTP, lockout), token endpoint (code + PKCE, rotating refresh, client credentials, device grant), userinfo, introspection, RP-initiated + back-channel logout, client registry, Keycloak-shaped claims |
-| 3 | Fleet clients on OIDC | desktop / mobile via system browser + PKCE, CLI via device grant, MCP agents as service accounts; pairing stays as fallback |
+| 3 | Fleet clients on OIDC | desktop / mobile via system browser + PKCE, CLI via device grant, MCP agents as service accounts; pairing stays as fallback; the master and per-host tokens hashed once the CLI and provisioning have another credential |
 | 4 | Passkeys + e-mail | WebAuthn, SMTP, magic link, invitations, password reset |
 | 5 | Broker | today's `oidc.rs` becomes an upstream IdP (several at once) with group / role mappers from Keycloak |
 | 6 | Administration + environments | desktop admin pages (edit), realm export / import between hub deployments |
@@ -49,9 +49,11 @@ Shaped so that one row maps to one entry of a Keycloak `realm.json`.
 **Users are `people`.** New columns: `uuid` (Keycloak's `id`; the integer
 `id` stays internal), `email`, `email_verified`, `first_name`, `last_name`,
 `attributes` (JSON object of string arrays, as Keycloak's). `enabled` is
-derived from `disabled_at`. `person_identities` gains a foreign key to
-`people` and an `auth_epoch` trigger; it is Keycloak's *federated identity*
-once sub-project 5 lands.
+derived from `disabled_at`. `person_identities` gains the `auth_epoch`
+trigger set; it is Keycloak's *federated identity* once sub-project 5 lands.
+None of the new tables carries a foreign key to `people` or `orgs`, the
+migration-066 rationale the store already follows: a row pointing at a
+removed id fails closed, it is never cascaded into a widening.
 
 **Roles** — `roles(id, uuid, name, description, client_id NULL, composite)`:
 `client_id IS NULL` is a realm role, otherwise a client role; unique on
@@ -89,6 +91,12 @@ managed group's structure follows its org (rename, remove); only its
 membership is edited. (Keycloak 26 calls this an Organization; the export in
 sub-project 6 writes both shapes.)
 
+A Keycloak role is global, but an org role is per org, so the `fleet:org-*`
+roles are granted **only through an org's managed subgroups**: a person's
+role in org *o* is the highest `fleet:org-*` role among the managed groups
+of `/orgs/<o>` they are a member of. Mapping a `fleet:org-*` role directly
+to a user, or to a group outside `/orgs`, is refused (`E_VALIDATE`).
+
 Session grants (`watch | drive`) stay what they are: grants on a resource,
 not roles. A device's `readonly` mode stays a property of the device.
 
@@ -118,9 +126,15 @@ the effective realm role `fleet-admin`", resolved into `Caller` as
 owner keeps `fleet-admin` irrevocably (the store refuses to remove it, as it
 refuses to disable the owner).
 
-**Device privileges per person** — a device is trusted / assets-admin when
-its person has `fleet-trusted` / `assets-admin` **and** the device is `full`.
-The device columns are kept for one release, read nowhere, then dropped.
+**Device privileges per person** — a device is trusted when its person has
+`fleet-trusted` **and** the device is `full`; a device with no person is
+never trusted. `assets-admin` replaces the device's grant on the `personal`
+catalog (and the `assets_admin_at` mirror column): a device is the catalog
+admin when it is eligible as today (full, live, bound to no org) and its
+person has `assets-admin`. Grants on other catalogs stay per device. Setting
+a device's trust or assets-admin flag now maps the role to (or from) the
+device's person, so it reaches every full device of that person. The device
+columns are kept for one release, read nowhere, then dropped.
 
 **Migration** (one SQL migration plus a Rust backfill in the same
 transaction):
@@ -153,19 +167,22 @@ and trust records one row; `representation` is a JSON diff passed through
 `guard::redact_args` (no secrets). Triggers refuse `UPDATE` and `DELETE`
 except the GC's retention delete (`auth.audit_retention_days`, default 365).
 
-**Token expiry.** `client_tokens` gains `expires_at` and `last_used_at`
-(written at most once a minute). Settings `auth.device_token_ttl_days`
-(sliding idle limit, default 90) and `auth.device_token_max_age_days`
-(absolute, default off). Existing tokens start their TTL at the migration, so
-nobody is signed out by it. An expired token is refused as `E_UNAUTHORIZED`
-with a reason the clients show ("pair again").
+**Device-token expiry.** No new column: `client_tokens.last_seen_at` is
+already stamped at most once a minute. Settings `auth.device_token_ttl_days`
+(sliding idle limit, default 90, 0 = never) and
+`auth.device_token_max_age_days` (absolute from `created_at`, default 0 =
+off). The idle clock starts at `max(last_seen_at, created_at,
+auth.device_token_ttl_since)`, where the migration writes `ttl_since` = now,
+so nobody is signed out by the upgrade. Machine tokens (peer, updater) never
+expire this way. An expired token is a 401 like an unknown one; the hub logs
+the reason.
 
-**Master token hashed.** Stored as SHA-256 like client tokens.
-`fleet-hub token show` is replaced by `fleet-hub token rotate`, which prints
-the new token once. Breaking for the operator: CHANGELOG and `docs/hub.md`.
-Per-host tokens are hashed too **if** nothing re-reads them in plaintext
-after provisioning; the plan's first task checks that, and if something
-does, host-token hashing moves to sub-project 3.
+**Master and per-host tokens stay plaintext in this sub-project.** The
+`fleet-hub` CLI authenticates to the running hub with the master token read
+from the data directory (some 25 call sites), the desktop shows it and its
+local agents use it, and every (re-)provision sends a host's stored token
+back to the host. Hashing either needs another credential for those paths,
+which sub-project 3 (clients on OIDC) builds; both move there.
 
 **SSO.** `FLEET_HUB_OIDC_AUTO_PROVISION` defaults to `false`: an unknown SSO
 account signs in only if linked (`link-sso`) or invited. The ID token's
@@ -197,9 +214,11 @@ cannot be deleted.
   `org_admin`), a slim description within the tool-surface budget; prose in
   the control skill; `REGEN_DOCS=1 cargo fleet-test -- reference_is_current`;
 - `fleet-hub realm user|group|role|audit …` on the hub machine;
-- desktop: a read-only *People & groups* page (declarative pages: a person's
-  effective roles and where each comes from, the group tree, the audit
-  log). Editing is sub-project 6.
+- desktop: read-only. The *People* page (`settings.people`) gains a
+  person's groups and effective roles with where each comes from; a new
+  *Groups* page (`settings.groups`, master-detail) lists groups with their
+  path, members and roles. The audit log is read through the tool and the
+  CLI only. Editing is sub-project 6.
 
 ## 5. Testing
 
@@ -214,7 +233,7 @@ cannot be deleted.
   of the org, org-admin of another org, member, host token, master) →
   allowed or the exact `E_*`.
 - Audit: append-only triggers, redaction.
-- Tokens: sliding and absolute expiry, the master hash, `token rotate`.
+- Tokens: sliding and absolute expiry, the `ttl_since` anchor, machine tokens exempt.
 - JWKS: a signed token, a bad signature, an unknown `kid` (one refetch),
   `alg: none` and HS256 refused.
 
@@ -224,7 +243,7 @@ cannot be deleted.
 2. Tables, migration, effective roles, projection.
 3. `fleet-admin`, `fleet-trusted`, `assets-admin` wired into authorization.
 4. Audit log, `enable_person`, disable ends memberships.
-5. Token expiry, master-token hash, `token rotate`, auto-provision default.
+5. Device-token expiry and the auto-provision default.
 6. `realm_admin` (MCP + CLI) and the read-only desktop page.
 
 ## Out of scope here
