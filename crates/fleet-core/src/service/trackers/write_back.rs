@@ -1,5 +1,17 @@
 //! Write-back to trackers (work graph M13.4e, decisions D3 / D29): the PR
-//! remote link, and nothing else.
+//! remote link, and a fleet comment posted to its ticket.
+//!
+//! **Comments** (owner decision 2026-10-11, migration 170): a person who
+//! comments on a tracker ticket in fleet may ask for the comment to be
+//! posted there too (`work_link { comment, post_to_tracker }`). The comment
+//! and its outbox row (op `comment`) are written in one transaction
+//! (`Store::add_comment_posting`), only where the tracker's admin turned
+//! `write_back.comments` on (off by default; every provider). The drain
+//! re-checks the setting and the org, sends the text once — a tracker
+//! comment is not idempotent — and keeps the tracker's id for it
+//! (`remote_id`), which hides that comment from the tracker's own list
+//! while the fleet comment is live. [`nudge`] wakes the sync tick to drain
+//! at once instead of at its next pass.
 //!
 //! When a session has a pull request, [`on_pr`] queues one write per item the
 //! session is linked to — only where all of these hold:
@@ -31,8 +43,29 @@
 
 use super::{TrackerError, TrackerProvider, WriteOp};
 use crate::ipc_error::{lock, IpcError};
-use crate::store::{NewTrackerWrite, Store, TrackerRow, PERSON_SOURCES, WRITE_OP_PR_REMOTE_LINK};
-use std::sync::Mutex;
+use crate::store::{
+    NewTrackerWrite, Store, TrackerRow, PERSON_SOURCES, WRITE_OP_COMMENT, WRITE_OP_PR_REMOTE_LINK,
+};
+use std::sync::{Mutex, OnceLock};
+
+/// Wakes the sync tick to drain the outbox now (a comment just queued).
+fn nudger() -> &'static tokio::sync::Notify {
+    static N: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    N.get_or_init(tokio::sync::Notify::new)
+}
+
+/// A write was just queued: the sync tick drains the outbox at once rather
+/// than at its next pass. A no-op where no tick runs (a paired desktop:
+/// the hub queued and drains it); several nudges before the tick wakes are
+/// one drain.
+pub fn nudge() {
+    nudger().notify_one();
+}
+
+/// What the sync tick waits on beside its interval.
+pub(super) async fn nudged() {
+    nudger().notified().await
+}
 
 /// Writes one pass sends per tracker, at most.
 pub const DRAIN_BATCH: usize = 20;
@@ -113,6 +146,8 @@ pub fn on_pr(s: &Store, session_id: i64, pr_url: &str) -> Result<usize, IpcError
             link_id: Some(link.id),
             claude_session_id: claude_session_id.as_deref(),
             session_org_id: session_org,
+            body: None,
+            external_id: None,
         })? {
             queued += 1;
         }
@@ -151,6 +186,11 @@ pub fn on_enabled(s: &Store, tracker_id: i64) -> Result<usize, IpcError> {
 /// The tracker is a Jira whose admin turned the PR remote link on.
 fn writes_pr_links(t: &TrackerRow) -> bool {
     matches!(t.provider.as_str(), "jira" | "jira_dc") && t.settings.write_back.pr_remote_link
+}
+
+/// The tracker's provider posts comments and its admin turned that on.
+pub fn writes_comments(t: &TrackerRow) -> bool {
+    super::provider_caps(t).comments && t.settings.write_back.comments
 }
 
 /// Both orgs known and different: never write there.
@@ -198,27 +238,49 @@ pub async fn drain(
                 tracing::debug!(write = w.id, error = %e.message, "[write-back] not settled");
             }
         };
+        let comment = w.op == WRITE_OP_COMMENT;
         // Re-checked at send time: the admin may have turned it off, or
         // moved the tracker to another org, since the write was queued.
-        if !writes_pr_links(t) {
-            continue;
-        }
+        let op = match w.op.as_str() {
+            WRITE_OP_PR_REMOTE_LINK if writes_pr_links(t) => WriteOp::PrRemoteLink {
+                key: w.item_key.clone(),
+                url: w.url.clone(),
+                title: w.title.clone(),
+            },
+            WRITE_OP_COMMENT if writes_comments(t) => WriteOp::Comment {
+                key: w.item_key.clone(),
+                external_id: w.external_id.clone(),
+                body: w.body.clone().unwrap_or_default(),
+            },
+            // Off now (it stays queued until it is on again), or an op
+            // this build does not know.
+            _ => continue,
+        };
         if crosses(w.session_org_id, t.org_id) {
             settle(lock(store).and_then(|s| {
-                s.retry_tracker_write(w.id, "the session's org is not this tracker's", None, true)
+                s.retry_tracker_write(w.id, "the session's org is not this tracker's", None, true)?;
+                s.emit_comment_write(&w.url)
             }));
             report.given_up += 1;
             continue;
         }
-        let op = WriteOp::PrRemoteLink {
-            key: w.item_key.clone(),
-            url: w.url.clone(),
-            title: w.title.clone(),
-        };
+        if comment && w.body.as_deref().is_none_or(|b| b.trim().is_empty()) {
+            settle(lock(store).and_then(|s| {
+                s.retry_tracker_write(w.id, "nothing to post", None, true)?;
+                s.emit_comment_write(&w.url)
+            }));
+            report.given_up += 1;
+            continue;
+        }
         match provider.write(&op).await {
-            Ok(()) => {
+            Ok(outcome) => {
                 settle(lock(store).and_then(|s| {
-                    s.finish_tracker_write(w.id)?;
+                    s.finish_tracker_write_as(
+                        w.id,
+                        outcome.remote_id.as_deref(),
+                        outcome.url.as_deref(),
+                    )?;
+                    s.emit_comment_write(&w.url)?;
                     if let Some(cid) = w.claude_session_id.as_deref() {
                         let body = format!("Added {} to {} as a remote link", w.url, w.item_key);
                         let meta =
@@ -260,7 +322,10 @@ pub async fn drain(
                 } else {
                     report.retrying += 1;
                 }
-                settle(lock(store).and_then(|s| s.retry_tracker_write(w.id, &msg, next, true)));
+                settle(lock(store).and_then(|s| {
+                    s.retry_tracker_write(w.id, &msg, next, true)?;
+                    s.emit_comment_write(&w.url)
+                }));
             }
         }
     }

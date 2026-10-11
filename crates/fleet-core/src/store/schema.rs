@@ -800,6 +800,16 @@ fn work_items_has_estimate_unit(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// already_applied guard of migration 170.
+fn tracker_writes_has_remote_url(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('tracker_writes') WHERE name = 'remote_url'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// already_applied guard of migration 162.
 fn work_buckets_has_owner(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1928,6 +1938,12 @@ const MIGRATIONS: &[Migration] = &[
         version: 169,
         sql: include_str!("../../migrations/169_work_item_priority_labels_estimate.sql"),
         already_applied: Some(work_items_has_estimate_unit),
+    },
+    // Tracker comments posted back: ADD COLUMNs on the outbox, so a guard.
+    Migration {
+        version: 170,
+        sql: include_str!("../../migrations/170_tracker_comment_writes.sql"),
+        already_applied: Some(tracker_writes_has_remote_url),
     },
 ];
 

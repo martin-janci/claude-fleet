@@ -12289,6 +12289,12 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "describe",
         "one tracker item's own description, cached or fetched",
     ),
+    (
+        "work",
+        "tracker_comments",
+        "one tracker item's own comments, fetched live; no session is named \
+         or answered",
+    ),
     ("work", "trackers", "the trackers, without secrets"),
     (
         "work",

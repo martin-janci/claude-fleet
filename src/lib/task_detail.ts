@@ -8,12 +8,23 @@ import { invokeCmd, type Result } from './result';
 import type { SessionRow } from './sessions';
 import { bumpWorkChanged, ownerDueChip } from './work';
 import { prChip, prNumber, type PrChip } from './work_row';
-import { occurrenceKind, taskSpend, type LastOutcome, type TaskComment, type TaskDetail, type WorkTask, type WorkTaskLink } from './work_view';
+import {
+  occurrenceKind,
+  taskSpend,
+  type LastOutcome,
+  type TaskComment,
+  type TaskDetail,
+  type TrackerComment,
+  type TrackerComments,
+  type TrackerPost,
+  type WorkTask,
+  type WorkTaskLink,
+} from './work_view';
 import type { StartRule } from './start_rules';
 
 /** The Task detail's tabs. Comments came back (G3.4 had cut them): fleet
- *  keeps a task's comments itself (migration 161) and never writes one to a
- *  tracker. */
+ *  keeps a task's comments itself (migration 161), shows the tracker's own
+ *  beside them, and posts one there when a person asks (migration 170). */
 export const TASK_TABS = ['overview', 'sessions', 'activity', 'comments'] as const;
 export type TaskTab = (typeof TASK_TABS)[number];
 export const TASK_TAB_LABELS: Record<TaskTab, string> = {
@@ -26,10 +37,45 @@ export const TASK_TAB_LABELS: Record<TaskTab, string> = {
 /** Longest comment, in characters (the hub's `COMMENT_MAX_CHARS`). */
 export const COMMENT_MAX = 4000;
 
-export async function commentOnWork(itemId: number, body: string): Promise<Result<TaskComment>> {
-  const r = await invokeCmd<TaskComment>('comment_on_work', { args: { item_id: itemId, body: body.trim() } });
+export async function commentOnWork(itemId: number, body: string, postToTracker = false): Promise<Result<TaskComment>> {
+  const args: Record<string, unknown> = { item_id: itemId, body: body.trim() };
+  if (postToTracker) args.post_to_tracker = true;
+  const r = await invokeCmd<TaskComment>('comment_on_work', { args });
   if (r.ok) bumpWorkChanged();
   return r;
+}
+
+/** A ticket's comments as its tracker holds them, read live. */
+export function workTrackerComments(key: string): Promise<Result<TrackerComments>> {
+  return invokeCmd<TrackerComments>('work_tracker_comments', { args: { key } });
+}
+
+/** One entry of the Comments tab: a fleet comment or the tracker's. */
+export type TimelineEntry = { kind: 'fleet'; at: number; comment: TaskComment } | { kind: 'tracker'; at: number; comment: TrackerComment };
+
+/** Fleet's comments and the tracker's as one timeline, oldest first; a
+ *  tie keeps fleet's first. */
+export function commentTimeline(fleet: readonly TaskComment[], tracker: readonly TrackerComment[]): TimelineEntry[] {
+  const out: TimelineEntry[] = [
+    ...fleet.map((c) => ({ kind: 'fleet' as const, at: c.created_at, comment: c })),
+    ...tracker.map((c) => ({ kind: 'tracker' as const, at: c.created_at, comment: c })),
+  ];
+  return out.sort((a, b) => a.at - b.at || (a.kind === b.kind ? 0 : a.kind === 'fleet' ? -1 : 1));
+}
+
+/** What a fleet comment's post to the tracker says beside it. */
+export function postStateLabel(post: TrackerPost | null | undefined, tracker: string): string | null {
+  if (!post) return null;
+  switch (post.state) {
+    case 'done':
+      return `Sent to ${tracker}`;
+    case 'pending':
+      return post.error ? `Sending… (retrying: ${post.error})` : 'Sending…';
+    case 'failed':
+      return `Not sent: ${post.error ?? 'the tracker refused it'}`;
+    default:
+      return null;
+  }
 }
 
 export async function deleteWorkComment(commentId: number): Promise<Result<TaskComment>> {

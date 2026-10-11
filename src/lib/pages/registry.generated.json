@@ -4651,17 +4651,21 @@
           "items": [
             {
               "key": "pr_remote_link",
+              "type": "field",
+              "when": {
+                "in": [
+                  "jira",
+                  "jira_dc"
+                ],
+                "key": "provider"
+              }
+            },
+            {
+              "key": "post_comments",
               "type": "field"
             }
           ],
-          "title": "Write-back",
-          "when": {
-            "in": [
-              "jira",
-              "jira_dc"
-            ],
-            "key": "provider"
-          }
+          "title": "Write-back"
         },
         {
           "items": [
@@ -6873,6 +6877,20 @@
           "merge_path": [
             "write_back",
             "pr_remote_link"
+          ],
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "confirm": "Fleet will write to this tracker: a comment a person posts from fleet appears on the ticket under this credential's account.",
+          "default": false,
+          "edit": "settings",
+          "help": "Let a person who comments on a ticket in fleet also post the comment to it, signed with their name. Only when they tick it; agents never post. The token needs permission to comment.",
+          "id": "post_comments",
+          "label": "Post comments",
+          "merge_path": [
+            "write_back",
+            "comments"
           ],
           "on_off": false,
           "type": "bool"

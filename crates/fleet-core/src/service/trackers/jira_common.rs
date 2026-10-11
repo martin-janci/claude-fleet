@@ -24,6 +24,79 @@ pub fn pr_remote_link_body(url: &str, title: &str) -> Value {
     })
 }
 
+/// PURE: plain text as an Atlassian Document (Jira Cloud's comment body):
+/// a paragraph per blank-line-separated block, a hard break per single
+/// newline. No markup is read: the text is posted as written.
+pub fn text_to_adf(text: &str) -> Value {
+    let text = text.replace("\r\n", "\n");
+    let mut paragraphs = Vec::new();
+    for block in text.split("\n\n") {
+        let block = block.trim_matches('\n');
+        if block.trim().is_empty() {
+            continue;
+        }
+        let mut content = Vec::new();
+        for (i, line) in block.split('\n').enumerate() {
+            if i > 0 {
+                content.push(serde_json::json!({ "type": "hardBreak" }));
+            }
+            if !line.is_empty() {
+                content.push(serde_json::json!({ "type": "text", "text": line }));
+            }
+        }
+        paragraphs.push(serde_json::json!({ "type": "paragraph", "content": content }));
+    }
+    serde_json::json!({ "type": "doc", "version": 1, "content": paragraphs })
+}
+
+/// A Jira comment listing (`GET …/issue/{key}/comment`, API v2 or v3) as
+/// fleet's comments: the body is ADF (v3) or a string (v2), flattened by
+/// the same walk as a description. `key` must already be a validated key:
+/// the URL to each comment is built from it on `site`, never read from the
+/// answer.
+pub(crate) fn comments_of(v: &Value, site: &str, key: &str) -> Vec<super::TrackerComment> {
+    v["comments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let id = match &c["id"] {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                _ => return None,
+            };
+            let body = adf_capped(&c["body"], super::TRACKER_COMMENT_MAX_CHARS)
+                .map(|(t, _)| t)
+                .unwrap_or_default();
+            let url = format!("{site}/browse/{key}?focusedCommentId={id}");
+            super::TrackerComment::from_parts(
+                &id,
+                c["author"]["displayName"].as_str().unwrap_or_default(),
+                &body,
+                c["created"].as_str().unwrap_or_default(),
+                Some(&url),
+                site,
+            )
+        })
+        .collect()
+}
+
+/// The new comment's id and URL from a `POST …/comment` answer.
+pub(crate) fn posted_comment(v: &Value, site: &str, key: &str) -> super::WriteOutcome {
+    let id = match &v["id"] {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+    .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()));
+    super::WriteOutcome {
+        url: id
+            .as_ref()
+            .map(|id| format!("{site}/browse/{key}?focusedCommentId={id}")),
+        remote_id: id,
+    }
+}
+
 /// The sprint field's `schema.custom`.
 pub const SPRINT_FIELD_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-sprint";
 /// The Epic Link field's `schema.custom` (Data Center; Cloud uses `parent`).

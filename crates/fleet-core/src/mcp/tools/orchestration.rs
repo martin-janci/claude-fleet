@@ -929,6 +929,7 @@ impl FleetTools {
         context|resume_plan {key}; purge_impact; tickets (cached); lookup \
         {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; \
         describe {key} (the tracker's whole description, cached); \
+        tracker_comments {key} (the ticket's own comments, live); \
         tidy; reopened. Work view: tree {filters, cursor} (archived: false hides \
         archived tasks); task {task_id}; \
         session_tasks; review; rules; rule_preview {rule}; views; org_impact. \
@@ -1055,6 +1056,24 @@ impl FleetTools {
                     .ok_or_else(|| mcp_err("E_INVALID", "describe needs key", None))?;
                 ok_json(
                     &w::describe::describe(
+                        &self.store,
+                        &scope,
+                        key,
+                        &crate::service::trackers::default_net(),
+                    )
+                    .await
+                    .map_err(to_mcp_err)?,
+                )
+            }
+            // A ticket's comments at its tracker: describe's fence, one
+            // live read, bodies fenced for an agent inside.
+            WorkAction::TrackerComments => {
+                let key = args
+                    .key
+                    .as_deref()
+                    .ok_or_else(|| mcp_err("E_INVALID", "tracker_comments needs key", None))?;
+                ok_json_compact(
+                    &w::tracker_comments::tracker_comments(
                         &self.store,
                         &scope,
                         key,

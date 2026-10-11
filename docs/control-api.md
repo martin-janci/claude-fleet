@@ -663,7 +663,15 @@ Index by area (names only; see the reference for details):
   linked to one of the tracker's items is added to that item once as a
   remote link, `globalId` `fleet:pr:<url>`, through an outbox drained by the
   sync pass; `fleet_health.trackers[].write_failures` counts the writes
-  given up). `update` replaces the whole `settings` object. Keys are
+  given up), and for every provider `write_back: { comments }` (off by
+  default: a person's `work_link { comment, item_id, notes,
+  post_to_tracker: true }` on a ticket also posts the comment there, signed
+  `— <name> via fleet`, through the same outbox, drained at once; refused
+  for a per-host token, fleet's own work, or with the setting off, and then
+  nothing is written). `work { action: "tracker_comments", key }` reads a
+  ticket's own comments live (newest 50, oldest first, no cache; the ones
+  fleet posted from a live comment left out; bodies fenced for a per-host
+  token; `can_post` says whether the caller may post there). `update` replaces the whole `settings` object. Keys are
   the tracker's own: `ABC-123` (Jira, Linear team keys), `owner/repo#42`
   (GitHub), `asana:<task gid>` (Asana, which has no human keys — detection is
   by URL); `lookup` and `start` take any of them, or the item's URL.

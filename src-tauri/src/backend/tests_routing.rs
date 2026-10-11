@@ -1427,14 +1427,16 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             "comment_on_work",
             "work_link",
             json!({ "session_id": null, "action": "comment", "key": null, "item_id": 9,
-                    "link_id": null, "source": null, "notes": "Looks good" }),
-            r#"{"id":3,"item_id":9,"author":"client:desk","body":"Looks good","created_at":1}"#,
+                    "link_id": null, "source": null, "notes": "Looks good",
+                    "post_to_tracker": true }),
+            r#"{"id":3,"item_id":9,"author":"client:desk","body":"Looks good","created_at":1,"tracker_post":{"state":"pending"}}"#,
             Box::new(|b, s, _| {
                 block_on(commands::work_view::routed::comment_on_work(
                     b,
                     commands::work_view::CommentOnWorkArgs {
                         item_id: 9,
                         body: "Looks good".into(),
+                        post_to_tracker: Some(true),
                     },
                     s,
                 ))
@@ -1503,6 +1505,22 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 block_on(commands::work_view::routed::work_attachment(
                     b,
                     commands::work_view::WorkAttachmentArgs { attachment_id: 4 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_tracker_comments",
+            "work",
+            json!({ "session_id": null, "key": "ABC-1", "action": "tracker_comments" }),
+            r#"{"key":"ABC-1","tracker":"Acme Jira","provider":"jira","comments":[{"id":"10","author":"Ann","body":"Looks good","created_at":1}],"can_post":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_tracker_comments(
+                    b,
+                    commands::work_view::WorkTrackerCommentsArgs {
+                        key: "ABC-1".into(),
+                    },
                     s,
                 ))
                 .map(|_| ())

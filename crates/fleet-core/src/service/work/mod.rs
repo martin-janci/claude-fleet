@@ -34,6 +34,7 @@ pub mod structure;
 pub mod summary;
 pub mod tidy;
 pub mod today;
+pub mod tracker_comments;
 pub mod usage;
 pub mod verify;
 pub mod view;
@@ -242,6 +243,9 @@ pub struct WorkLinkArgs {
     /// comment_delete: which.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment_id: Option<i64>,
+    /// comment: also post it to the ticket's tracker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_to_tracker: Option<bool>,
     /// create/propose/edit/comment: text (edit: "" clears).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
@@ -498,6 +502,8 @@ pub enum WorkAction {
     Mission,
     /// One task attachment with its bytes.
     Attachment,
+    /// A ticket's comments as its tracker holds them, on demand.
+    TrackerComments,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -533,6 +539,7 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("missions", WorkAction::Missions),
     ("mission", WorkAction::Mission),
     ("attachment", WorkAction::Attachment),
+    ("tracker_comments", WorkAction::TrackerComments),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -650,6 +657,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("attach_to_work", "work_link", "attach"),
     ("delete_work_attachment", "work_link", "attachment_delete"),
     ("work_attachment", "work", "attachment"),
+    ("work_tracker_comments", "work", "tracker_comments"),
     ("accept_work_proposal", "work_link", "accept"),
     ("reject_work_proposal", "work_link", "reject"),
     ("summarize_past_work", "work_link", "summarize"),

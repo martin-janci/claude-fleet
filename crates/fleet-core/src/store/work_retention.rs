@@ -61,8 +61,10 @@
 //!   liveness rule beyond that: a done row that goes lets the same PR queue
 //!   again (the tracker upserts the same remote link — one call, no change),
 //!   and a failed row stays for the whole window, so `fleet_health`'s
-//!   `write_failures` still counts it. Its status `rows` count EVERY outbox
-//!   row, pending included, like the journal's.
+//!   `write_failures` still counts it. One liveness rule: a sent `comment`
+//!   (migration 170) stays while its fleet comment is live, since its
+//!   `remote_id` keeps the tracker's copy from showing twice. Its status
+//!   `rows` count EVERY outbox row, pending included, like the journal's.
 //!
 //! There is no pinned-note concept in the schema; a note is kept by the
 //! journal rules above. `0` days keeps a table forever.
@@ -145,11 +147,17 @@ impl RetentionTable {
                 WITH eligible(id) AS ( \
                   SELECT item_id FROM work_item_descriptions WHERE fetched_at < ?1)"
                 .to_string(),
-            // Settled rows only: a pending write is never swept.
+            // Settled rows only: a pending write is never swept. A sent
+            // comment stays while its fleet comment is live: its
+            // `remote_id` is what keeps the tracker's copy out of the
+            // tracker's own list beside it.
             RetentionTable::TrackerWrites => "\
                 WITH eligible(id) AS ( \
-                  SELECT id FROM tracker_writes \
-                  WHERE state IN ('done', 'failed') AND updated_at < ?1)"
+                  SELECT id FROM tracker_writes w \
+                  WHERE state IN ('done', 'failed') AND updated_at < ?1 \
+                    AND NOT (w.op = 'comment' AND w.state = 'done' AND EXISTS ( \
+                      SELECT 1 FROM work_item_comments c \
+                      WHERE w.url = 'fleet-comment:' || c.id AND c.deleted_at IS NULL)))"
                 .to_string(),
         }
     }

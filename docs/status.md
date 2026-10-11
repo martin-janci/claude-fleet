@@ -363,6 +363,26 @@ task page's Activity tab also lists each session that started, was
 suggested, turned down or stopped, and each comment. Not yet: comments on
 the phone.
 
+Tracker comments (owner decision 2026-10-11, changing D29; migration 170):
+the Comments tab shows the ticket's own comments beside fleet's, read live
+when the tab opens (`work { tracker_comments, key }`, routed desktop
+`work_tracker_comments`; newest 50, no cache, bodies fenced for a per-host
+token; the ones fleet posted from a live comment left out) for Jira Cloud,
+Jira DC, GitHub, Linear and Asana. `work_link { comment, post_to_tracker }`
+(`comment_on_work`) also queues the comment for the tracker, in the same
+transaction, as the outbox's `comment` op (`url` `fleet-comment:<id>`,
+`body`, `external_id`; the tracker's id and URL kept as `remote_id` /
+`remote_url`). Per tracker `settings.write_back.comments`, **off by
+default** (Settings → Trackers → Write-back → *Post comments*, confirm-gated,
+every provider; the PR link stays Jira-only). Refused with nothing written
+for a per-host token (`E_FORBIDDEN`), fleet's own work (`E_UNSUPPORTED`) or
+the setting off (`E_INVALID_STATE`). Queuing nudges the sync tick, which
+drains at once. Deleting a comment cancels a pending post; a sent one stays
+at the tracker. `CommentRow.tracker_post` carries the post's state, error
+and URL; `TaskDetail.comments_tracker` / `can_post_to_tracker` say whose
+comments the tab reads and whether the reader may post. Not yet: the phone,
+editing a posted comment, a tracker's attachments.
+
 Task attachments (migration 168, `work_item_attachments` and the
 content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept
 in SQLite so a hub backup carries them; a blob goes with the last live

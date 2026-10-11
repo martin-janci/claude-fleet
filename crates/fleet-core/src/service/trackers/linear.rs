@@ -23,8 +23,8 @@
 
 use super::{
     check_http, description_and_len, map_transport, retry_after, CallKind, Caps, Fetched,
-    Incremental, ItemRef, Page, RefCtx, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider,
-    ViewDef, WorkItemSnapshot, NOT_FOUND_OR_NO_PERMISSION,
+    Incremental, ItemRef, Page, RefCtx, StatusSnapshot, TrackerComment, TrackerError, TrackerInfo,
+    TrackerProvider, ViewDef, WorkItemSnapshot, WriteOp, WriteOutcome, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
 use crate::store::{Estimate, TrackerConfig, TrackerCredential};
@@ -44,6 +44,16 @@ const ISSUE_FIELDS: &str = "fragment I on Issue { id identifier title url update
      previousIdentifiers state { name type } team { key } assignee { id name } \
      parent { id identifier } cycle { number name isActive } projectMilestone { name } \
      priority estimate labels(first: 20) { nodes { name } } }";
+
+/// Where Linear shows things: a comment URL from an answer is kept only
+/// under it.
+pub const WEB_PREFIX: &str = "https://linear.app/";
+
+/// PURE: an issue id or identifier fleet may send as a GraphQL variable (a
+/// uuid, or `ENG-123`).
+fn issue_ref_ok(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 100 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
 
 pub struct Linear {
     /// The workspace `urlKey` the site names.
@@ -388,10 +398,11 @@ impl TrackerProvider for Linear {
             repo_relative: false,
             multi_container: false,
             incremental: Incremental::Watermark,
-            write: false,
+            write: true,
             // Linear keeps the default here: it degrades to "open the
             // ticket", which is what the capability is for.
             describe: false,
+            comments: true,
         }
     }
 
@@ -569,6 +580,88 @@ impl TrackerProvider for Linear {
             }
         }
         out
+    }
+
+    async fn comments(
+        &self,
+        r: &ItemRef,
+        limit: usize,
+    ) -> Result<Vec<TrackerComment>, TrackerError> {
+        let limit = limit.clamp(1, super::TRACKER_COMMENTS_MAX);
+        let Some(id) = self.lookup_id(r).filter(|id| issue_ref_ok(id)) else {
+            return Err(TrackerError::Invalid("not a Linear issue".into()));
+        };
+        let data = self
+            .gql(
+                &format!(
+                    "query($id: String!) {{ issue(id: $id) {{ comments(last: {limit}) \
+                     {{ nodes {{ id body url createdAt user {{ name }} }} }} }} }}"
+                ),
+                json!({ "id": id }),
+                CallKind::Other,
+            )
+            .await?;
+        if data["issue"].is_null() {
+            return Err(TrackerError::NotFound);
+        }
+        let out = data["issue"]["comments"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| {
+                TrackerComment::from_parts(
+                    c["id"].as_str()?,
+                    c["user"]["name"].as_str().unwrap_or("Linear"),
+                    c["body"].as_str().unwrap_or_default(),
+                    c["createdAt"].as_str()?,
+                    c["url"].as_str(),
+                    WEB_PREFIX,
+                )
+            })
+            .collect();
+        Ok(super::newest_comments(out, limit))
+    }
+
+    async fn write(&self, op: &WriteOp) -> Result<WriteOutcome, TrackerError> {
+        let WriteOp::Comment {
+            key,
+            external_id,
+            body,
+        } = op
+        else {
+            return Err(TrackerError::Refused(
+                "Linear takes comments only from fleet".into(),
+            ));
+        };
+        let id = external_id
+            .clone()
+            .or_else(|| self.lookup_id(&ItemRef::parse(key)))
+            .filter(|id| issue_ref_ok(id))
+            .ok_or_else(|| TrackerError::Invalid("not a Linear issue".into()))?;
+        let data = self
+            .gql(
+                "mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, \
+                 body: $body }) { success comment { id url } } }",
+                json!({ "id": id, "body": body }),
+                CallKind::Other,
+            )
+            .await?;
+        let created = &data["commentCreate"];
+        if created["success"].as_bool() != Some(true) {
+            return Err(TrackerError::Invalid(
+                "Linear did not add the comment".into(),
+            ));
+        }
+        Ok(WriteOutcome {
+            remote_id: created["comment"]["id"]
+                .as_str()
+                .filter(|id| issue_ref_ok(id))
+                .map(str::to_string),
+            url: created["comment"]["url"]
+                .as_str()
+                .filter(|u| u.starts_with(WEB_PREFIX) && u.len() <= 2048)
+                .map(str::to_string),
+        })
     }
 }
 

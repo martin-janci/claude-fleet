@@ -128,17 +128,21 @@
     },
     {
       "title": "Write-back",
-      "when": {
-        "key": "provider",
-        "in": [
-          "jira",
-          "jira_dc"
-        ]
-      },
       "items": [
         {
           "type": "field",
-          "key": "pr_remote_link"
+          "key": "pr_remote_link",
+          "when": {
+            "key": "provider",
+            "in": [
+              "jira",
+              "jira_dc"
+            ]
+          }
+        },
+        {
+          "type": "field",
+          "key": "post_comments"
         }
       ]
     },

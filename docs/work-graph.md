@@ -633,8 +633,9 @@ write is queued when the PR probe sees the PR (or its state change), when a
 person links or confirms work on a session that already has a PR (also when
 the sync binds a key typed before the tracker was connected), and when you
 turn the setting on, for every PR already open on a session linked to one of
-the tracker's tickets. Nothing else is ever written: no transition, no
-worklog, no comment (D29), and nothing a transcript or a tracker wrote.
+the tracker's tickets. Besides this link, fleet writes only a comment a
+person chose to post (next section): no transition, no worklog (D29), and
+nothing a transcript or a tracker wrote.
 
 - **Only work a person linked.** The link must be confirmed and made by
   hand or by *Start* (`manual` / `started`). A detection guess, an agent's
@@ -659,6 +660,49 @@ worklog, no comment (D29), and nothing a transcript or a tracker wrote.
 Turning it off stops sending at once; writes already queued wait, and go
 out if you turn it on again. Settled writes are dropped after the journal's
 retention window (`work.retention.journal_days`).
+
+### Comments: the tracker's, and posting one back (off by default)
+
+A ticket's **Comments** tab shows the tracker's own comments beside fleet's,
+in one timeline: each with the tracker's name as a badge, its author, when,
+and **Open in …** where the tracker gives a link. They are read live when the
+tab opens (`work { action: "tracker_comments", key }`, desktop
+`work_tracker_comments`): the newest 50, nothing cached or stored, every
+provider (Jira Cloud and Data Center, GitHub, Linear, Asana's comment
+stories). If the tracker cannot be reached the tab says so and still shows
+fleet's own comments. An agent (a per-host token) reads each body fenced as
+untrusted text, like a description.
+
+With **Post comments** on (Settings → Trackers → Write-back, any provider,
+off by default, behind a confirm: it is the tracker admin's call), the
+composer on a ticket has **Also post to <tracker>**, ticked by default. The
+comment is saved in fleet and queued for the tracker in one step, then sent
+as the tracker credential's account with the text, a blank line and
+`— <your name> via fleet` (your display name when the hub knows who you
+are, otherwise just `— via fleet`; never a device name). Jira Cloud gets it
+as rich text (paragraphs and line breaks, no markup read), Data Center as
+plain text, GitHub through `gh` (`addComment`), Linear (`commentCreate`)
+and Asana (a story). Under the comment fleet shows *Sending…*, *Sent to
+<tracker>* (a link to it) or *Not sent: <why>*. Only a person posts: an
+agent's `post_to_tracker` is refused, and so is a post where the setting is
+off or the task has no ticket — then nothing is saved at all.
+
+- **When it goes.** Queuing wakes the tracker sync, which sends it within
+  seconds on the desktop or hub that owns the trackers (not at the next
+  pass), on the tracker's own credential. Failures retry like a PR link's
+  and give up after five tries, or at once on a refusal (403, 404).
+- **Once.** A tracker comment is not idempotent, so each fleet comment is
+  posted at most once; fleet keeps the tracker's id for it and leaves that
+  comment out of the tracker's list while the fleet comment is live.
+- **Deleting.** Deleting a fleet comment whose post is still waiting cancels
+  the post. Once sent, deleting it in fleet does not delete it at the
+  tracker; it then shows there as the tracker's own.
+- **The token needs permission to comment** (Jira: *Add comments*; GitHub:
+  `gh` logged in with `repo` scope; Linear and Asana: a key that may
+  comment).
+
+This changes D29 on the owner's word (2026-10-11): comments a person posts
+are written back; transitions and worklogs still are not.
 
 ### Sync
 

@@ -1019,6 +1019,102 @@ describe('WorkTaskDetail', () => {
       expect(calls('delete_work_comment')).toEqual([{ comment_id: 2 }]);
     });
 
+    it('Comments: a ticket’s tracker comments load when the tab opens, merged by time, with post states', async () => {
+      const comments = [
+        { id: 1, item_id: 12, author: 'desktop', body: 'Posted one', created_at: 1_790_000_100, mine: true, tracker_post: { state: 'done', url: 'https://acme.atlassian.net/browse/ABC-12?focusedCommentId=9' } },
+        { id: 2, item_id: 12, author: 'desktop', body: 'Queued one', created_at: 1_790_000_300, mine: true, tracker_post: { state: 'pending' } },
+        { id: 3, item_id: 12, author: 'desktop', body: 'Refused one', created_at: 1_790_000_400, mine: true, tracker_post: { state: 'failed', error: 'not permitted: 403' } },
+      ];
+      handlers.work_task = () => ({ ...trackerTask, comments, comments_tracker: 'Jira (acme)', can_post_to_tracker: true });
+      handlers.work_tracker_comments = () => ({
+        key: 'ABC-12',
+        tracker: 'Jira (acme)',
+        provider: 'jira',
+        comments: [{ id: '7', author: 'Ann Lee', body: 'From Jira', created_at: 1_790_000_200, url: 'https://acme.atlassian.net/browse/ABC-12?focusedCommentId=7' }],
+      });
+      let next = 4;
+      handlers.comment_on_work = (a) => ({ id: next++, item_id: a.item_id, author: 'desktop', body: a.body, created_at: 1_790_000_500, tracker_post: { state: 'pending' } });
+      render(WorkTaskDetail, { taskId: 'ABC-12' });
+      await flush();
+      // Lazily: nothing is asked of the tracker before the tab opens.
+      expect(calls('work_tracker_comments')).toHaveLength(0);
+      await fireEvent.click(screen.getByTestId('work-task-tab-comments'));
+      await flush();
+      expect(calls('work_tracker_comments')).toEqual([{ key: 'ABC-12' }]);
+      const list = document.querySelector('.comments') as HTMLElement;
+      const order = Array.from(list.querySelectorAll('[data-testid=work-task-comment], [data-testid=work-task-tracker-comment]')).map(
+        (li) => li.querySelector('.cbody')?.textContent?.trim(),
+      );
+      expect(order).toEqual(['Posted one', 'From Jira', 'Queued one', 'Refused one']);
+      const theirs = screen.getByTestId('work-task-tracker-comment');
+      expect(theirs.querySelector('strong')?.textContent).toBe('Ann Lee');
+      expect(theirs.querySelector('.badge')?.textContent).toBe('Jira (acme)');
+      expect(within(theirs).queryByTestId('work-task-comment-delete')).toBeNull();
+      await fireEvent.click(within(theirs).getByText('Open in Jira (acme)'));
+      expect(vi.mocked(openExternal)).toHaveBeenCalledWith('https://acme.atlassian.net/browse/ABC-12?focusedCommentId=7');
+      expect(screen.getAllByTestId('work-task-comment-post-state').map((e) => e.textContent?.trim())).toEqual([
+        'Sent to Jira (acme)',
+        'Sending…',
+        'Not sent: not permitted: 403',
+      ]);
+      expect(screen.getByTestId('work-task-tab-comments').textContent).toBe('Comments4');
+
+      // The box is there, ticked by default; posting asks for the post.
+      const box = screen.getByTestId('work-task-post-to-tracker') as HTMLInputElement;
+      expect(box.checked).toBe(true);
+      expect(box.closest('label')?.textContent).toContain('Also post to Jira (acme)');
+      await fireEvent.input(screen.getByTestId('work-task-comment-input'), { target: { value: 'Ship it' } });
+      await fireEvent.click(screen.getByTestId('work-task-comment-post'));
+      await flush();
+      expect(calls('comment_on_work')).toEqual([{ item_id: 12, body: 'Ship it', post_to_tracker: true }]);
+      // Unticked: a comment kept in fleet only.
+      await fireEvent.click(box);
+      await fireEvent.input(screen.getByTestId('work-task-comment-input'), { target: { value: 'Just here' } });
+      await fireEvent.click(screen.getByTestId('work-task-comment-post'));
+      await flush();
+      expect(calls('comment_on_work')[1]).toEqual({ item_id: 12, body: 'Just here' });
+      expectOnePrimary(screen.getByTestId('work-task-detail'));
+      await expectAccessible(screen.getByTestId('work-task-detail'));
+    });
+
+    it('Comments: the tracker’s failing never hides fleet’s own, and Retry asks again', async () => {
+      handlers.work_task = () => ({
+        ...trackerTask,
+        comments: [{ id: 1, item_id: 12, author: 'client:phone', body: 'Ours', created_at: 1_790_000_000 }],
+        comments_tracker: 'Jira (acme)',
+      });
+      let fail = true;
+      handlers.work_tracker_comments = () => {
+        if (fail) throw { code: 'E_TRACKER', message: 'the tracker could not be reached' };
+        return { key: 'ABC-12', tracker: 'Jira (acme)', provider: 'jira', comments: [] };
+      };
+      render(WorkTaskDetail, { taskId: 'ABC-12' });
+      await flush();
+      await fireEvent.click(screen.getByTestId('work-task-tab-comments'));
+      await flush();
+      const state = screen.getByTestId('work-task-tracker-comments');
+      expect(state.textContent).toContain('Couldn\'t load the comments on Jira (acme)');
+      expect(screen.getAllByTestId('work-task-comment')).toHaveLength(1);
+      // Posting is off for this tracker: no box.
+      expect(screen.queryByTestId('work-task-post-to-tracker')).toBeNull();
+      fail = false;
+      await fireEvent.click(within(state).getByText('Retry'));
+      await flush();
+      expect(calls('work_tracker_comments')).toHaveLength(2);
+      expect(screen.getByTestId('work-task-tracker-comments').textContent?.trim()).toBe('');
+    });
+
+    it('Comments: fleet’s own work asks no tracker and offers no post', async () => {
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      await fireEvent.click(screen.getByTestId('work-task-tab-comments'));
+      await flush();
+      expect(calls('work_tracker_comments')).toHaveLength(0);
+      expect(screen.queryByTestId('work-task-tracker-comments')).toBeNull();
+      expect(screen.queryByTestId('work-task-post-to-tracker')).toBeNull();
+      expect(screen.getByTestId('work-task-comments-empty').textContent).toContain('They stay in fleet');
+    });
+
     it('Attachments: a local task shows the section in Overview; a ticket key with no item does not', async () => {
       handlers.work_task = (a) =>
         a.task_id === 'item:77'

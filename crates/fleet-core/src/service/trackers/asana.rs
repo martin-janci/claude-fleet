@@ -31,8 +31,8 @@
 
 use super::{
     check_http, description_and_len, map_transport, CallKind, Caps, Changes, Fetched, Incremental,
-    ItemRef, Page, RefCtx, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef,
-    WorkItemSnapshot, NOT_FOUND_OR_NO_PERMISSION,
+    ItemRef, Page, RefCtx, StatusSnapshot, TrackerComment, TrackerError, TrackerInfo,
+    TrackerProvider, ViewDef, WorkItemSnapshot, WriteOp, WriteOutcome, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerCredential, TrackerSettings};
@@ -50,6 +50,8 @@ pub const MAX_PROJECT_VIEWS: usize = 10;
 pub const MAX_CHANGED: usize = 20;
 /// `/batch` actions per call (Asana's limit).
 pub const BATCH_MAX: usize = 10;
+/// Story pages a comment read takes, at most (each [`PAGE_SIZE`]).
+pub const STORY_PAGES: usize = 5;
 /// Unclassified section names the probe keeps (`config.unmapped_sections`).
 pub const MAX_UNMAPPED_SECTIONS: usize = 200;
 /// Section names the probe keeps per project, in board order.
@@ -142,6 +144,20 @@ impl Asana {
     async fn get(&self, path_and_query: &str, call: CallKind) -> Result<Value, TrackerError> {
         let cred = self.cred.as_ref().ok_or(TrackerError::Unconfigured)?;
         let req = Request::get(format!("{API}{path_and_query}"))
+            .header("Authorization", cred.authorization().expose());
+        let resp = self.transport.send(req).await.map_err(map_transport)?;
+        check_http(&resp, call)?;
+        let v: Value = resp.parse_json().map_err(TrackerError::Invalid)?;
+        if !v.is_object() {
+            return Err(TrackerError::Invalid("not an Asana answer".into()));
+        }
+        Ok(v)
+    }
+
+    /// `POST` `body` (JSON) to `path`: the answer, as [`Self::get`] reads it.
+    async fn post(&self, path: &str, body: &Value, call: CallKind) -> Result<Value, TrackerError> {
+        let cred = self.cred.as_ref().ok_or(TrackerError::Unconfigured)?;
+        let req = Request::post_json(format!("{API}{path}"), body)
             .header("Authorization", cred.authorization().expose());
         let resp = self.transport.send(req).await.map_err(map_transport)?;
         check_http(&resp, call)?;
@@ -401,10 +417,11 @@ impl TrackerProvider for Asana {
             repo_relative: false,
             multi_container: true,
             incremental: Incremental::SyncToken,
-            write: false,
+            write: true,
             // Asana keeps the default here: it degrades to "open the
             // ticket", which is what the capability is for.
             describe: false,
+            comments: true,
         }
     }
 
@@ -683,6 +700,94 @@ impl TrackerProvider for Asana {
             items,
             mark: next,
             expired: false,
+        })
+    }
+
+    /// A task's stories, oldest first, a page at a time; only the comments
+    /// (`resource_subtype: comment_added`) are kept. Asana has no newest-
+    /// first order, so at most [`STORY_PAGES`] pages are read and the
+    /// newest `limit` comments of them kept.
+    async fn comments(
+        &self,
+        r: &ItemRef,
+        limit: usize,
+    ) -> Result<Vec<TrackerComment>, TrackerError> {
+        let limit = limit.clamp(1, super::TRACKER_COMMENTS_MAX);
+        let Some(gid) = self.gid_of(r) else {
+            return Err(TrackerError::Invalid("not an Asana task".into()));
+        };
+        let mut out = Vec::new();
+        let mut offset: Option<String> = None;
+        for _ in 0..STORY_PAGES {
+            let mut q = format!(
+                "/tasks/{gid}/stories?limit={PAGE_SIZE}\
+                 &opt_fields=resource_subtype,text,created_by.name,created_at"
+            );
+            if let Some(o) = &offset {
+                q.push_str(&format!("&offset={o}"));
+            }
+            let v = self.get(&q, CallKind::Other).await?;
+            for st in v["data"].as_array().into_iter().flatten() {
+                if st["resource_subtype"].as_str() != Some("comment_added") {
+                    continue;
+                }
+                let Some(c) = TrackerComment::from_parts(
+                    st["gid"].as_str().unwrap_or_default(),
+                    st["created_by"]["name"].as_str().unwrap_or("Asana"),
+                    st["text"].as_str().unwrap_or_default(),
+                    st["created_at"].as_str().unwrap_or_default(),
+                    None,
+                    "",
+                ) else {
+                    continue;
+                };
+                out.push(c);
+            }
+            offset = v["next_page"]["offset"]
+                .as_str()
+                .filter(|c| {
+                    c.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':' | b'=')
+                    })
+                })
+                .map(str::to_string);
+            if offset.is_none() {
+                break;
+            }
+        }
+        Ok(super::newest_comments(out, limit))
+    }
+
+    async fn write(&self, op: &WriteOp) -> Result<WriteOutcome, TrackerError> {
+        let WriteOp::Comment {
+            key,
+            external_id,
+            body,
+        } = op
+        else {
+            return Err(TrackerError::Refused(
+                "Asana takes comments only from fleet".into(),
+            ));
+        };
+        let gid = external_id
+            .as_deref()
+            .filter(|g| gid_ok(g))
+            .map(str::to_string)
+            .or_else(|| self.gid_of(&ItemRef::parse(key)))
+            .ok_or_else(|| TrackerError::Invalid("not an Asana task".into()))?;
+        let v = self
+            .post(
+                &format!("/tasks/{gid}/stories"),
+                &json!({ "data": { "text": body } }),
+                CallKind::Other,
+            )
+            .await?;
+        Ok(WriteOutcome {
+            remote_id: v["data"]["gid"]
+                .as_str()
+                .filter(|g| gid_ok(g))
+                .map(str::to_string),
+            url: None,
         })
     }
 }

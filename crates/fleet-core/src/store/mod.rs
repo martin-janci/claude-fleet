@@ -211,7 +211,8 @@ pub use task_report::{
 pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use tracker_writes::{
-    NewTrackerWrite, TrackerWriteRow, WRITE_MAX_ATTEMPTS, WRITE_OP_PR_REMOTE_LINK,
+    comment_write_url, NewTrackerWrite, TrackerWriteRow, WRITE_MAX_ATTEMPTS, WRITE_OP_COMMENT,
+    WRITE_OP_PR_REMOTE_LINK,
 };
 pub use trackers::{
     ghes_host_ok, ghes_host_part, github_site, is_allowed_tracker_host, normalize_dc_site,
@@ -238,7 +239,10 @@ pub use work_buckets::{
     bucket_states, BucketMemberRow, BucketMembership, BucketPatch, BucketRefRow, BucketRow,
     ItemBucketRow, NewBucket, SprintClosed, BUCKET_KINDS,
 };
-pub use work_comments::{validate_comment, CommentRow, COMMENTS_SERVED_MAX, COMMENT_MAX_CHARS};
+pub use work_comments::{
+    posted_body, validate_comment, CommentPost, CommentRow, TrackerPost, COMMENTS_SERVED_MAX,
+    COMMENT_MAX_CHARS,
+};
 pub use work_detect::{
     DetectionState, WITHDRAWN_CARRIED, WITHDRAWN_DECAY, WITHDRAWN_REASONS, WITHDRAWN_WITHDRAW,
     WORK_SUGGESTION_WITHDRAWN,

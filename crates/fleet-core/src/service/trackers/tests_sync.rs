@@ -1890,6 +1890,8 @@ fn queue_pr_link(fx: &Fx) -> i64 {
             link_id: None,
             claude_session_id: None,
             session_org_id: None,
+            body: None,
+            external_id: None,
         })
         .unwrap());
     s.conn_ref()
@@ -1906,6 +1908,7 @@ fn opt_in(fx: &Fx) {
             &crate::store::TrackerSettings {
                 write_back: crate::store::WriteBack {
                     pr_remote_link: true,
+                    comments: false,
                 },
                 ..Default::default()
             },

@@ -428,8 +428,16 @@ export interface TaskDetail {
   jobs?: JobView[];
   /** The steps agents took, per conversation. */
   steps?: StepGroup[];
-  /** What people and agents said about the task in fleet, oldest first. */
+  /** What people and agents said about the task in fleet, oldest first,
+   *  each with its post to the tracker when one was asked for. */
   comments?: TaskComment[];
+  /** The task's tracker by name, when fleet reads its comments
+   *  (`work_tracker_comments`). Absent: fleet's own work, or a provider that
+   *  serves none. */
+  comments_tracker?: string | null;
+  /** The reader may also post a comment to that tracker (its admin turned
+   *  "Post comments" on). */
+  can_post_to_tracker?: boolean;
   /** Files and images on the task, newest first: metadata only (the bytes
    *  are `work_attachment`'s). */
   attachments?: TaskAttachment[];
@@ -453,7 +461,7 @@ export interface TaskAttachment {
   mine?: boolean;
 }
 
-/** One comment on a task (`store::CommentRow`). Kept in fleet, never a tracker's. */
+/** One comment on a task (`store::CommentRow`), written in fleet. */
 export interface TaskComment {
   id: number;
   item_id: number;
@@ -464,6 +472,39 @@ export interface TaskComment {
   created_at: number;
   /** This reader wrote it, so may delete it. */
   mine?: boolean;
+  /** Its post to the tracker, when one was asked for. */
+  tracker_post?: TrackerPost | null;
+}
+
+/** A fleet comment's post to its tracker (`store::TrackerPost`). */
+export interface TrackerPost {
+  state: 'pending' | 'done' | 'failed';
+  /** Why the last attempt failed. */
+  error?: string | null;
+  /** Where the tracker shows it, once sent. */
+  url?: string | null;
+}
+
+/** One comment as the tracker holds it (`trackers::TrackerComment`). */
+export interface TrackerComment {
+  id: string;
+  /** The author's name at the tracker. */
+  author: string;
+  /** Plain text (Jira's rich text flattened). */
+  body: string;
+  created_at: number;
+  url?: string | null;
+}
+
+/** `work_tracker_comments`'s answer. */
+export interface TrackerComments {
+  key: string;
+  /** The tracker's name, as Settings shows it. */
+  tracker: string;
+  provider: string;
+  /** The newest 50, oldest first, without the ones fleet posted. */
+  comments: TrackerComment[];
+  can_post?: boolean;
 }
 
 /** A native subtask on a task page. */

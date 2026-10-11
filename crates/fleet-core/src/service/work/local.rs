@@ -735,9 +735,12 @@ fn required_title(args: &WorkLinkArgs) -> Result<String, IpcError> {
     )
 }
 
-/// `work_link { action: comment, item_id, notes }`: a comment on a task the
-/// caller sees — fleet's own or a tracker's ticket (the comment stays in
-/// fleet). An item outside the scope answers as an unknown id.
+/// `work_link { action: comment, item_id, notes, post_to_tracker? }`: a
+/// comment on a task the caller sees — fleet's own or a tracker's ticket.
+/// An item outside the scope answers as an unknown id. With
+/// `post_to_tracker`, the comment is also queued for the ticket's tracker in
+/// the same transaction ([`comment_post`] says when that is refused, and
+/// then nothing is written at all).
 pub fn comment(
     args: &WorkLinkArgs,
     store: &Mutex<Store>,
@@ -754,9 +757,109 @@ pub fn comment(
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "comment needs notes: its text"))?;
     let s = lock(store)?;
     visible_parent(&s, scope, id)?;
-    let mut c = s.add_comment(id, author, person, body)?;
+    let post = match args.post_to_tracker {
+        Some(true) => Some(comment_post(&s, scope, id, person)?),
+        _ => None,
+    };
+    let mut c = s.add_comment_posting(
+        id,
+        author,
+        person,
+        body,
+        post.as_ref()
+            .map(|p| crate::store::CommentPost {
+                tracker_id: p.tracker_id,
+                item_key: &p.item_key,
+                external_id: p.external_id.as_deref(),
+                tracker_org_id: p.tracker_org_id,
+                signature: &p.signature,
+            })
+            .as_ref(),
+    )?;
+    drop(s);
+    if post.is_some() {
+        crate::service::trackers::write_back::nudge();
+    }
     c.mine = true;
     Ok(c)
+}
+
+/// What a comment's post to its tracker needs, owned.
+struct PostSpec {
+    tracker_id: i64,
+    item_key: String,
+    external_id: Option<String>,
+    tracker_org_id: Option<i64>,
+    signature: String,
+}
+
+/// May a comment on item `id` be posted to its tracker, and as what. Refused
+/// — and then the comment is not written either — for a per-host token (an
+/// agent never posts outside fleet: `E_FORBIDDEN`), for fleet's own work or
+/// a tracker that does not take comments (`E_UNSUPPORTED`), and where the
+/// tracker's admin has not turned `write_back.comments` on
+/// (`E_INVALID_STATE`). The signature names the person when the caller
+/// proves one, never a device: a device name is its person's own.
+fn comment_post(
+    s: &Store,
+    scope: &OrgScope,
+    id: i64,
+    person: Option<i64>,
+) -> Result<PostSpec, IpcError> {
+    use crate::service::trackers;
+    if !crate::service::work::tracker_comments::may_post(scope) {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            "only a person posts a comment to the tracker",
+        ));
+    }
+    let item = s
+        .get_work_item(id)?
+        .ok_or_else(|| orgs::not_found("work item", id))?;
+    let tracker = match item.tracker_id {
+        Some(t) if item.source != "local" => s.get_tracker(t)?,
+        _ => None,
+    };
+    let Some(t) = tracker.filter(|t| trackers::provider_caps(t).comments) else {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            "this task has no tracker ticket to post a comment to",
+        ));
+    };
+    if !trackers::write_back::writes_comments(&t) {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "posting comments to {} is off; a tracker admin turns it on in Settings → \
+                 Trackers → Write-back",
+                t.name
+            ),
+        ));
+    }
+    let Some(item_key) = crate::service::work::tracker_comments::outbox_key(&item) else {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            "this ticket has no key or tracker id to post to",
+        ));
+    };
+    let name = match person {
+        Some(p) => s
+            .get_person(p)?
+            .map(|p| p.display_name.unwrap_or(p.name))
+            .map(|n| n.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|n| !n.is_empty()),
+        None => None,
+    };
+    Ok(PostSpec {
+        tracker_id: t.id,
+        item_key,
+        external_id: item.external_id.clone(),
+        tracker_org_id: t.org_id,
+        signature: match name {
+            Some(n) => format!("— {n} via fleet"),
+            None => "— via fleet".into(),
+        },
+    })
 }
 
 /// `work_link { action: comment_delete, comment_id }`: its author's alone.

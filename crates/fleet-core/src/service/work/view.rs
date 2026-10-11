@@ -873,9 +873,19 @@ pub struct TaskDetail {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<StepGroup>,
     /// What people and agents said about the task in fleet, oldest first
-    /// (the newest `COMMENTS_SERVED_MAX`). Never a tracker's comments.
+    /// (the newest `COMMENTS_SERVED_MAX`), each with its post to the
+    /// tracker when one was asked for. The tracker's own comments are
+    /// `work { tracker_comments }`'s, read on demand.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<crate::store::CommentRow>,
+    /// The task's tracker, by the name Settings gives it, when its provider
+    /// reads comments (`work { tracker_comments }` answers for it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comments_tracker: Option<String>,
+    /// The reader may ask for a comment to be posted to that tracker too:
+    /// its admin turned `write_back.comments` on and the reader is a person.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_post_to_tracker: bool,
     /// Files and images on the task in fleet, newest first (at most
     /// `ATTACHMENTS_SERVED_MAX`): metadata only, the bytes are
     /// `work { attachment }`'s.
@@ -3647,6 +3657,14 @@ pub fn task(
     let flat_key = item
         .and_then(|i| i.item.key.as_deref())
         .map(|k| k.split_whitespace().collect::<Vec<_>>().join(" "));
+    // Whose comments the Comments tab may read beside fleet's, and whether
+    // this reader may post there.
+    let comments_tracker = tracker.filter(|t| crate::service::trackers::provider_caps(t).comments);
+    let can_post_to_tracker = comments_tracker.is_some_and(|t| {
+        crate::service::work::tracker_comments::may_post(scope)
+            && crate::service::trackers::write_back::writes_comments(t)
+    });
+    let comments_tracker = comments_tracker.map(|t| t.name.clone());
     let excerpt = meta.description.clone().filter(|d| !d.trim().is_empty());
     // The full length and whether the answer shows less of it, for every
     // caller: a person's screen has no fence notice to read it from. The
@@ -3813,6 +3831,8 @@ pub fn task(
         jobs,
         steps,
         comments,
+        comments_tracker,
+        can_post_to_tracker,
         attachments,
     })
 }
