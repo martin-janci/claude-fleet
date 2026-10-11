@@ -609,8 +609,12 @@ export async function restartSession(
   name: string,
   profile?: string,
   launch: { model?: string; effort?: string } = {},
+  opts: { force?: boolean } = {},
 ): Promise<Result<SessionRow>> {
   const args: Record<string, unknown> = { host_alias: hostAlias, name };
+  // Only ever set by the "Restart anyway" a person clicks after the backend
+  // refused the registered fleet controller (`restart.ts`).
+  if (opts.force) args.force = true;
   if (profile !== undefined) args.profile = profile;
   if (launch.model !== undefined) args.model = launch.model;
   if (launch.effort !== undefined) args.effort = launch.effort;
