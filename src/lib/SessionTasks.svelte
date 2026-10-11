@@ -30,7 +30,7 @@
     type WorkRef,
     workChanged,
   } from './work';
-  import { workTickets, type TicketRow } from './trackers';
+  import { workTickets, type TicketRow, shownKey } from './trackers';
   import { timeAgo } from './session_status';
   import {
     conflictNotice,
@@ -265,7 +265,7 @@
     <div class="head">
       <span class="mark" aria-hidden="true">{l.primary ? '★' : kind === 'suggested' ? '?' : kind === 'active' ? '○' : '·'}</span>
       <span class="label" class:unavailable={l.task.unavailable}>
-        {#if l.task.key}<span class="key">{l.task.key}</span>{/if}
+        {#if l.task.key}<span class="key" title={l.task.key}>{shownKey(l.task)}</span>{/if}
         <span class="title">{l.task.title || (l.task.key ? '' : l.task.task_id)}</span>
       </span>
       {#if l.task.status_name || l.task.status_category}<span class="muted">{l.task.status_name ?? l.task.status_category}</span>{/if}

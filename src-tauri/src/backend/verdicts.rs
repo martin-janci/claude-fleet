@@ -109,6 +109,13 @@ const TRACKERS_ARE_ADMIN: &str = "trackers and their credentials are fleet admin
      hub's work_admin is master-only, and a paired client is never the fleet's administrator; \
      configure them on the hub with `fleet-hub tracker add|set-credential|test`";
 
+/// Ticket keys (`store::ticket_keys`): a project's prefix is fleet
+/// administration, `work_admin`, master-only.
+const TICKET_PREFIXES_ARE_ADMIN: &str = "which prefix a project's ticket keys carry is fleet \
+     administration: the hub's work_admin is master-only, and a paired client is never the \
+     fleet's administrator; set them on the hub with `fleet-hub tracker prefixes` and \
+     `fleet-hub tracker prefix <PREFIX> --project <id>`";
+
 /// Jev's section proposals (Asana `status_map`): applying one writes the
 /// tracker's settings, which is `work_admin`, master-only.
 const SECTION_PROPOSALS_ARE_ADMIN: &str = "the decision model's Asana section proposals are \
@@ -500,6 +507,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "tracker_sync_metrics",
         Verdict::LocalOnly {
             instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    // Ticket keys: which prefix a project's tickets carry is
+    // `work_admin { ticket_prefixes | set_ticket_prefix }`, master-only.
+    (
+        "ticket_prefixes",
+        Verdict::LocalOnly {
+            instead: TICKET_PREFIXES_ARE_ADMIN,
+        },
+    ),
+    (
+        "set_ticket_prefix",
+        Verdict::LocalOnly {
+            instead: TICKET_PREFIXES_ARE_ADMIN,
         },
     ),
     // Jev `status_map` in assist: reading and deciding the section

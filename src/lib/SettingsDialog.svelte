@@ -38,6 +38,7 @@
   import { WIZARDS } from './forms/wizards';
   import type { Values } from './forms/forms';
   import McpSettings from './McpSettings.svelte';
+  import TicketKeys from './TicketKeys.svelte';
   import AppearanceSettings from './AppearanceSettings.svelte';
   import { loadHostTokens } from './host_actions';
   import { hostsChordLabel, requestHostsView, settingsKey, settingsOpen, settingsSection } from './app_views';
@@ -973,6 +974,12 @@
     <div class="panel" hidden={panel !== 'work'} data-testid="settings-panel-work">
     <WorkSettings onopen={(id) => select(id)} />
     </div>
+
+    {#if panel === 'ticket-keys'}
+      <div class="panel" data-testid="settings-panel-ticket-keys">
+        <TicketKeys />
+      </div>
+    {/if}
 
     <div class="panel" hidden={panel !== 'mcp'} data-testid="settings-panel-mcp">
     {#if !ownsFleet}

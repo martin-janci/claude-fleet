@@ -8,7 +8,7 @@
   import StatusDot from './kit/StatusDot.svelte';
   import { STATE_WORD } from './kit/status';
   import { sessions } from './sessions';
-  import { unavailableLabel } from './trackers';
+  import { unavailableLabel, shownKey } from './trackers';
   import { costChip, linkTone, liveLinks, occurrenceTitle, prChip, taskLine, taskTone } from './work_row';
   import { isOccurrenceOf, taskLabel, trackerDown, trackerDownLabel, type WorkTask, type WorkTaskLink } from './work_view';
 
@@ -62,7 +62,7 @@
       onclick={onselect}
     >
       <span class="l1">
-        {#if t.key}<span class="key">{t.key}</span>{/if}
+        {#if t.key}<span class="key" title={t.key}>{shownKey(t)}</span>{/if}
         <span class="title" class:unavailable={t.unavailable} class:derived={t.title_derived}>{shown}</span>
         {#if t.needs_you}<span class="sr" data-testid="work-task-needs-you">needs you</span>{/if}
         {#if t.review}<span class="review" data-testid="work-task-review" title="Something to review">?</span>{/if}

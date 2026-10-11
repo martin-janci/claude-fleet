@@ -68,6 +68,7 @@ mod tasks;
 mod test_support;
 #[cfg(test)]
 pub(crate) mod testgen;
+mod ticket_keys;
 mod timeline;
 mod tracker_items;
 mod tracker_writes;
@@ -207,6 +208,10 @@ pub use start_rules::{StartRuleLaunch, StartRuleRow, START_RULE_STATES};
 pub use task_report::{
     EvidenceCommit, EvidenceFile, TaskEvidence, TaskReport, EVIDENCE_COMMITS_MAX,
     EVIDENCE_FILES_MAX, REPORT_ENTRY_MAX_CHARS, REPORT_LIST_MAX, REPORT_OUTCOMES,
+};
+pub use ticket_keys::{
+    derive_ticket_prefix, parse_ticket_prefix, valid_ticket_prefix, TicketPrefixRow, TicketSpace,
+    TICKET_PREFIX_MAX, TICKET_PREFIX_MIN,
 };
 pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};

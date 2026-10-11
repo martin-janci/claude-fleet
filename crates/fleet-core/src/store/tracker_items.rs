@@ -657,6 +657,12 @@ impl Store {
                 )
             }
         };
+        // A GitHub or Asana item draws its ticket key (`FLT-12`) once; an
+        // item cached before migration 169 draws it on its next sync.
+        let drew_key = self.ensure_tracker_ticket_key(id, tracker_id, after.key.as_deref())?;
+        if drew_key && !changed {
+            self.emit_work_item(id, SessionChange::ALL)?;
+        }
         if changed {
             // Sprints and releases linked to what the item now reports
             // (design 2026-09-28 §5). Only on a change: the sprint and the
@@ -996,13 +1002,19 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {ITEM_COLUMNS} FROM work_items \
              WHERE tracker_id IN (SELECT id FROM trackers) AND \
-               (key = ?1 OR EXISTS (SELECT 1 FROM json_each(COALESCE(aliases, '[]')) \
-                                    WHERE value = ?1)) \
-             ORDER BY (key = ?1) DESC, id"
+               (key = ?1 OR display_key = ?1 \
+                OR EXISTS (SELECT 1 FROM json_each(COALESCE(aliases, '[]')) WHERE value = ?1)) \
+             ORDER BY (key = ?1) DESC, (display_key = ?1) DESC, id"
         ))?;
         let rows = stmt
             .query_map(rusqlite::params![key], map_item)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        // A ticket key under a prefix a rename replaced (`OLD-7` → `NEW-7`).
+        if rows.is_empty() {
+            if let Some(current) = self.current_ticket_key(&key)? {
+                return self.tracker_items_for_key(&current);
+            }
+        }
         Ok(rows)
     }
 

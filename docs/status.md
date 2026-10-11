@@ -38,6 +38,21 @@ and the composer's context help on a shared session
 nothing saved, nothing proposed or "the hub needs updating", so a desktop
 accepts a revision-16 or 17 hub.
 
+Ticket keys (2026-10, migration 169, `store/ticket_keys.rs`). Fleet
+administers Jira-style keys: each ticket space (a project, a GitHub
+repository no project claims, an Asana tracker) has an upper-case prefix
+derived from its name (`claude-fleet` → `CF`) and its own counter. A native
+task written in a project draws `CF-12` as its key (outside a project it is
+still `TASK-<id>`; items keyed before 169 keep their keys); a GitHub issue or
+Asana task keeps its tracker key as identity and carries `display_key`, which
+the UI shows and every key lookup answers to. A project's GitHub issues share
+its numbering. A prefix is set or renamed Jira-like (keys follow; the old
+prefix still resolves once a ticket used it) in Settings → Ticket keys, by
+`work_admin { ticket_prefixes | set_ticket_prefix }` (master-only), or with
+`fleet-hub tracker prefixes` / `tracker prefix <P> --project <id>`; a paired
+desktop shows the panel read-only (`LocalOnly`). fleet-mobile shows
+`display_key` wherever it shows a key, and groups and acts on `key`.
+
 Search (2026-10, three phases). Every search box ignores case and accents
 through one fold (`search_text.rs`, `src/lib/text_fold.ts`, fleet-mobile's
 `TextFold.kt`: one table); ⌘K finds the person's own tasks and searches the
