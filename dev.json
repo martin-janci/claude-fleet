@@ -1,16 +1,21 @@
 {
   "schema": 1,
   "track": "dev",
-  "sequence": 21,
-  "generated_at": "2026-10-11T16:51:56Z",
-  "expires_at": "2026-10-25T16:51:56Z",
-  "current": "0.6.3-dev.155.desktop.g888874e",
-  "recommended": "0.6.3-dev.155.desktop.g888874e",
+  "sequence": 22,
+  "generated_at": "2026-10-11T17:44:21Z",
+  "expires_at": "2026-10-25T17:44:21Z",
+  "current": "0.6.3-dev.157.desktop.g92139b3",
+  "recommended": "0.6.3-dev.157.desktop.g92139b3",
   "minimum_supported": {},
   "mandatory": [],
   "rollback": null,
   "withdrawn": [],
   "releases": [
+    {
+      "version": "0.6.3-dev.157.desktop.g92139b3",
+      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.157.desktop.g92139b3/release-manifest.json",
+      "manifest_sha256": "adf7549b038ee6ba95ec03d26108ee16d27eabd9b6411d7e288be7ee99025a93"
+    },
     {
       "version": "0.6.3-dev.155.desktop.g888874e",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.155.desktop.g888874e/release-manifest.json",
@@ -87,11 +92,6 @@
       "version": "0.6.2-dev.104.desktop.g46b055b",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.2-dev.104.desktop.g46b055b/release-manifest.json",
       "manifest_sha256": "55f554b5c47c5e58c4e6c8a8b99ab63ee0a646bb9178261f4259daa2c6683098"
-    },
-    {
-      "version": "0.6.2-dev.62.desktop.g1e42ad5",
-      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.2-dev.62.desktop.g1e42ad5/release-manifest.json",
-      "manifest_sha256": "ae5421b8917a944529d2178ff80c0e2516372bf8fd29a412ae3f6953de17cb82"
     }
   ],
   "next_keys": []
