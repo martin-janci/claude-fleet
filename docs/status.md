@@ -512,9 +512,9 @@ from its pane (per-host token + `X-Fleet-Pane`, `FleetTools::own_session`):
 `list_tasks { mine | worker_session_id }`; `session_tasks`, `work { task }`
 and `list_tasks` mark the caller's own rows (`is_self`,
 `is_self_requester` / `is_self_worker`). An agent sets the status of,
-edits and comments on a local task its own session is on (a confirmed, live
-link) even when the task is shared with sessions it cannot drive
-(`own_session_works_on`); rename keeps the full gate. Not yet: the new task's brief
+edits, comments on and renames a local task its own session is on (a
+confirmed, live link) even when the task is shared with sessions it cannot
+drive (`own_session_works_on`). Not yet: the new task's brief
 waiting for the next prompt (J3), own tasks in ⌘K.
 C0: the operator is born with the `fleet-brainstorm` skill
 (`skills/fleet-brainstorm/SKILL.md`, written to its directory's

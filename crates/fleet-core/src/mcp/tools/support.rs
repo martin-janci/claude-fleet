@@ -2239,9 +2239,10 @@ impl FleetTools {
     /// True when the caller's OWN session (proven by its pane, see
     /// `FleetTools::own_session`) is on `item_id` through a confirmed, live
     /// link. What it lets through is narrow: `work_link { set_status, edit,
-    /// comment }` on a task the agent itself works on, even when the task is
-    /// shared with sessions it may not drive. The org fence inside each of
-    /// them still runs; rename and the planning writes do not read this.
+    /// comment }` and rename (`name` with `item_id`) on a task the agent
+    /// itself works on, even when the task is shared with sessions it may not
+    /// drive. The org fence inside each of them still runs; the planning
+    /// writes do not read this.
     pub(super) fn own_session_works_on(
         &self,
         caller: &Caller,
