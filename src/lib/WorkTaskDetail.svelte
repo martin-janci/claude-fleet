@@ -416,53 +416,28 @@
      placement). The rail drops under the column in a narrow pane. -->
 <section class="task-detail" data-testid="work-task-detail" aria-label="Task" bind:this={pageEl}>
   <header class="head">
-    {#if task}
-      <nav class="crumbs" aria-label="Where this task lives" data-testid="work-task-crumbs">
-        <span>{orgName(task.org_id)}</span>
-        {#if task.group && task.group.source !== 'none' && task.group.label}<span class="sep" aria-hidden="true">/</span><span
-            >{task.group.label}</span
-          >{/if}
-        {#if task.mission}<span class="sep" aria-hidden="true">/</span><span data-testid="work-task-mission"
-            >{task.mission.name}{#if task.mission.wave != null}&nbsp;· W{task.mission.wave}{/if}</span
-          >{/if}
-        {#if task.parent_task_id}<span class="sep" aria-hidden="true">/</span><button
-            class="crumb-link"
-            type="button"
-            data-testid="work-task-parent"
-            onclick={() => task.parent_task_id && selectedTaskId.set(task.parent_task_id)}>Parent task</button
-          >{/if}
-      </nav>
-    {/if}
-    <div class="head-row">
-      <div class="titlebox">
-        {#if task}
-          <div class="keyline">
-            {#if task.key}
-              <span class="key" data-testid="work-task-key" title={task.key}>{shownKey(task)}</span>
-              <button class="icon-btn" type="button" data-testid="work-task-copy-key" title="Copy {task.display_key || task.key}" onclick={() => void copyKey()}
-                >{#if keyCopied}<Icon name="check" size={12} label="Copied" />{:else}<Icon name="copy" size={12} label="Copy key" />{/if}</button
-              >
-            {/if}
-            <span class="badge" title={task.provider ?? task.kind}>{sourceLabel}</span>
-            {#if task.tracker_name}<span class="muted">{task.tracker_name}</span>{/if}
-          </div>
-        {/if}
-        <h2>
-          <span class="title" class:unavailable={task?.unavailable}>{task ? task.title || (task.key ? '' : task.task_id) : 'Task'}</span>
-        </h2>
-      </div>
-      <div class="head-actions">
-        {#if task}<WorkButton {task} variant="bar" />{/if}
-        {#if task?.kind === 'local' && task.item_id != null}
-          <button
-            class="btn"
-            type="button"
-            data-testid="work-task-edit"
-            disabled={editBlocked !== null}
-            title={editBlocked ?? 'Edit the title, description, status and assignees'}
-            onclick={() => (editing = true)}><Icon name="edit" size={12} />Edit…</button
-          >
-        {/if}
+    <div class="topbar">
+      {#if onclose}
+        <button class="back" type="button" data-testid="work-task-close" title={closeLabel} onclick={onclose}>{closeLabel}</button>
+      {/if}
+      {#if task}
+        <nav class="crumbs" aria-label="Where this task lives" data-testid="work-task-crumbs">
+          <span>{orgName(task.org_id)}</span>
+          {#if task.group && task.group.source !== 'none' && task.group.label}<span class="sep" aria-hidden="true">/</span><span
+              >{task.group.label}</span
+            >{/if}
+          {#if task.mission}<span class="sep" aria-hidden="true">/</span><span data-testid="work-task-mission"
+              >{task.mission.name}{#if task.mission.wave != null}&nbsp;· W{task.mission.wave}{/if}</span
+            >{/if}
+          {#if task.parent_task_id}<span class="sep" aria-hidden="true">/</span><button
+              class="crumb-link"
+              type="button"
+              data-testid="work-task-parent"
+              onclick={() => task.parent_task_id && selectedTaskId.set(task.parent_task_id)}>Parent task</button
+            >{/if}
+        </nav>
+      {/if}
+      <div class="tools">
         {#if task?.url}
           <button
             class="btn btn--quiet"
@@ -481,8 +456,36 @@
           aria-label="Refresh"
           onclick={() => void load(taskId)}><Icon name="retry" size={14} /></button
         >
-        {#if onclose}
-          <button class="btn btn--quiet" type="button" data-testid="work-task-close" onclick={onclose}>{closeLabel}</button>
+      </div>
+    </div>
+    <div class="head-row">
+      <div class="titlebox">
+        {#if task}
+          <div class="keyline">
+            {#if task.key}
+              <span class="key" data-testid="work-task-key" title={task.key}>{shownKey(task)}</span>
+              <button class="icon-btn" type="button" data-testid="work-task-copy-key" title="Copy {task.display_key || task.key}" onclick={() => void copyKey()}
+                >{#if keyCopied}<Icon name="check" size={12} label="Copied" />{:else}<Icon name="copy" size={12} label="Copy key" />{/if}</button
+              >
+            {/if}
+            <span class="badge" title={task.tracker_name ?? task.provider ?? task.kind}>{sourceLabel}</span>
+          </div>
+        {/if}
+        <h2>
+          <span class="title" class:unavailable={task?.unavailable}>{task ? task.title || (task.key ? '' : task.task_id) : 'Task'}</span>
+        </h2>
+      </div>
+      <div class="head-actions">
+        {#if task}<WorkButton {task} variant="bar" />{/if}
+        {#if task?.kind === 'local' && task.item_id != null}
+          <button
+            class="btn"
+            type="button"
+            data-testid="work-task-edit"
+            disabled={editBlocked !== null}
+            title={editBlocked ?? 'Edit the title, description, status and assignees'}
+            onclick={() => (editing = true)}><Icon name="edit" size={12} />Edit…</button
+          >
         {/if}
       </div>
     </div>
@@ -1022,11 +1025,14 @@
     align-items: center;
     gap: 8px;
   }
+  /* The page's own gutter, as the session Details tab has (16px 24px). */
   .task-detail {
     display: flex;
     flex-direction: column;
     font-size: var(--text-sm);
     container-type: inline-size;
+    padding: var(--space-4) var(--space-6) var(--space-6);
+    max-width: 1280px;
   }
   .pad {
     margin: var(--space-2) 0 0;
@@ -1037,9 +1043,50 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-1);
-    padding-bottom: var(--space-3);
+    padding-bottom: var(--space-4);
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: var(--control-h-sm);
+    margin-bottom: var(--space-2);
+  }
+  .back {
+    flex: 0 1 auto;
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    background: none;
+    color: var(--fg-muted);
+    font: inherit;
+    font-size: var(--text-xs);
+    cursor: pointer;
+  }
+  .back:hover {
+    background: var(--bg-hover);
+    color: var(--fg);
+  }
+  .tools {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex: none;
+  }
+  .tools .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
   }
   .crumbs {
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow-wrap: anywhere;
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
@@ -1117,9 +1164,10 @@
   }
   .head-actions {
     display: flex;
-    gap: var(--space-1);
-    align-items: flex-start;
+    gap: var(--space-2);
+    align-items: center;
     flex-wrap: wrap;
+    padding-top: 18px;
   }
   .head-actions .btn {
     display: inline-flex;
@@ -1218,14 +1266,17 @@
   /* ── body: reading column + properties rail ── */
   .body {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
     gap: var(--space-6);
-    padding-top: var(--space-4);
+    padding-top: var(--space-6);
   }
   @container (max-width: 720px) {
     .body {
       grid-template-columns: minmax(0, 1fr);
       gap: var(--space-4);
+    }
+    .rail {
+      position: static;
     }
   }
   .main,
@@ -1233,24 +1284,43 @@
   .pane-body {
     display: flex;
     flex-direction: column;
-    gap: var(--space-4);
+    gap: var(--space-6);
     min-width: 0;
   }
   .pane-body {
-    padding-top: var(--space-3);
-    gap: var(--space-2);
+    padding-top: var(--space-4);
+    gap: var(--space-3);
+  }
+  /* Description, subtasks, attachments…: one rule between each block,
+     the shared-work sections' own blocks included. */
+  .main {
+    gap: var(--space-4);
+  }
+  .main > :global(* + *),
+  .main > :global(.tws > * + *) {
+    border-top: 1px solid var(--border);
+    padding-top: var(--space-4);
+  }
+  .main > :global(.tws) {
+    margin: 0;
+    gap: var(--space-4);
+  }
+  .main > :global(.tws:empty) {
+    display: none;
   }
   .rail {
-    gap: var(--space-3);
+    gap: var(--space-4);
     align-self: start;
-    padding: var(--space-3);
+    position: sticky;
+    top: var(--space-4);
+    padding: var(--space-4);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     background: var(--bg-raise);
   }
   .rail > section + section {
     border-top: 1px solid var(--border);
-    padding-top: var(--space-3);
+    padding-top: var(--space-4);
   }
   h3 {
     display: flex;
@@ -1301,8 +1371,8 @@
   }
   .props {
     display: grid;
-    grid-template-columns: max-content minmax(0, 1fr);
-    gap: 6px 10px;
+    grid-template-columns: 88px minmax(0, 1fr);
+    gap: 8px 12px;
     margin: 0;
     font-size: var(--text-xs);
   }
@@ -1322,7 +1392,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
-    margin-top: var(--space-2);
+    margin-top: var(--space-3);
   }
   .ok {
     color: var(--status-done);
