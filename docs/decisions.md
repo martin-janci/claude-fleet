@@ -1091,6 +1091,10 @@ redesign's transition plan.
 | `decide.jev.breaker_open_secs` | `300` | 10–86400 seconds | fleet | How long an open breaker refuses calls. |
 | `decide.jev.daily_token_budget` | `2000000` | 0–1000000000 tokens, `0` = none | fleet | Input tokens the decision model may be sent per UTC day. At $0.042 per million, the default is under $0.09 a day. |
 | `decide.jev.model` | `jev-1.13.0` | `jev-1.13.0` / `jev-latest` | fleet | The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe. |
+| `decide.haiku.shadow` | `false` | on / off | fleet | Also ask Claude every question a Jev use case in shadow or assist asks, on the host below, and record its answer beside Jev's to compare them. Nothing acts on it. Experimental. Asks to confirm. |
+| `decide.haiku.host` | `` | text, up to 64 characters | fleet | The host whose Claude account answers. Only questions about its own organisation are sent to it. Experimental. |
+| `decide.haiku.model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet | The Claude model the second opinion asks. Experimental. |
+| `decide.haiku.daily_calls` | `200` | 0–10000, `0` = none | fleet | Questions the second opinion may ask per UTC day. One at a time; a question that comes while one is running is not asked. Experimental. |
 | `decide.retention_days` | `90` | 0–3650 days, `0` = forever | fleet | Days a decision record (ids and numbers, never text) is kept. |
 | `decide.jev.floors` | `` | text, up to 8192 characters | fleet | Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against. |
 <!-- END GENERATED: settings decide. -->
@@ -1639,8 +1643,8 @@ recorded cases (no `# synthetic` line) passes.
 
 `--provider haiku` answers each benchmark question with a Claude model in
 print mode, so the cards' haiku lines can be judged. D33 also names it the
-later generative fallback for *asynchronous* decisions only; nothing live
-calls it yet.
+later generative fallback for *asynchronous* decisions only. Live, it
+answers only as the second opinion below, which never acts.
 
 ```bash
 fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host gpu1
@@ -1653,8 +1657,8 @@ the host `--haiku-host` names and reaches Anthropic through **that host's
 Claude account** — the processor its sessions already use, which is why D33
 chose it. The host is required (there is no default), and before the first
 call the benchmark prints a note on stderr naming it and its org (kept in
-the report's notes). Nothing about a haiku call is recorded in
-`decision_runs`: that record is the envelope's, for Jev. The call does not
+the report's notes). Nothing about a benchmark's haiku call is recorded in
+`decision_runs`. The call does not
 pass the envelope's gate (flag, mode, org consent): naming the host is the
 consent — **but never across the org boundary**.
 
@@ -1701,6 +1705,47 @@ counted as usage unknown and left out of the totals. A timeout, an
 unreachable host, a missing `claude` or an error result is skipped with
 that reason (`timeout`, `ssh_error`, `noclaude`, `call_failed`,
 `signed_out` when the host's Claude login has expired).
+
+## The second opinion: haiku beside Jev, live
+
+With `decide.haiku.shadow` on and `decide.haiku.host` naming a host, every
+question a live use case asks Jev is also asked of Claude in print mode on
+that host, the same way the baseline above asks it (the redacted request on
+stdin, no tools, no MCP, no hooks, no transcript), and the answer recorded
+beside Jev's. Nothing acts on it: it is there so Jev and haiku can be
+compared on real traffic, not only on a benchmark set.
+
+* **Which questions.** Only a use case whose mode is `shadow` or `assist`
+  (one that is `off` is never asked about), only a Choice, never a use case
+  that sends Claude's reply text (`turn_outcome`, `routine_run_outcome`,
+  `summary_check`), never a benchmark's call, and only in the process that
+  owns the fleet. It does not need Jev's flag, key or an org's Jev consent:
+  the data goes to the host's own Claude account, not to TypeSafe.
+* **The org boundary.** As for the baseline: a question goes to the host
+  only when its org is the host's org (no org on both sides counts as the
+  same). A host the database does not know is never asked.
+* **Never on the caller's path.** The call runs in a task of its own after
+  Jev's answer is recorded, so what the use case does and how long it waits
+  are what they were.
+* **Bounded.** `decide.haiku.daily_calls` calls per UTC day (default 200),
+  one at a time per host (a question that comes while one runs is not
+  asked), each under 120 s, and the envelope's breaker over the haiku runs
+  (`decide.jev.breaker_failures` failed calls in a row stop it for
+  `decide.jev.breaker_open_secs`).
+* **What is recorded.** One `decision_runs` row per call: provider
+  `haiku`, mode `shadow`, `model_version` the model alias, and the same
+  question version, fingerprint, candidates and baseline as Jev's run, so
+  the two pair up by subject and fingerprint. A failed call is `timeout`
+  or `http_error` (SSH, a missing or signed-out `claude`), an answer
+  outside the options `invalid_answer`, one under the use case's floor
+  `low_confidence`. These rows never withdraw or supersede Jev's
+  proposal, an adapter's own lookups leave them out, and the envelope's
+  health does not count them; `fleet-hub decide status` and `decide runs`
+  show them under their own provider.
+
+On a hub it is turned on with `fleet-hub decide set decide.haiku.host
+ALIAS` and `fleet-hub decide set decide.haiku.shadow true`; on a standalone
+desktop in Settings → *Decisions (Jev)*.
 
 ## How to run phase 0
 
