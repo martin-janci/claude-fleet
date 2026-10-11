@@ -1688,10 +1688,22 @@ fn with_native_defaults(
     args: &StartArgs,
     scope: &OrgScope,
 ) -> Result<StartArgs, IpcError> {
+    let s = lock(store)?;
+    let local = match (args.item_id, args.reference.as_deref()) {
+        (None, Some(r)) => local_item_for_key(&s, r, scope)?,
+        _ => None,
+    };
+    let args = &match local {
+        Some(id) => StartArgs {
+            item_id: Some(id),
+            reference: None,
+            ..args.clone()
+        },
+        None => args.clone(),
+    };
     let Some(id) = args.item_id else {
         return Ok(args.clone());
     };
-    let s = lock(store)?;
     let Some(item) = s.get_work_item(id)? else {
         return Ok(args.clone());
     };
@@ -1758,6 +1770,33 @@ fn with_native_defaults(
         });
     }
     Ok(out)
+}
+
+/// The fleet task a bare key names (`TASK-12`), when no tracker holds the
+/// key: started by key, it would resolve as a key no tracker knows, so the
+/// session was linked to the key alone and briefed with nothing but it,
+/// never the task's title and notes.
+fn local_item_for_key(
+    s: &Store,
+    reference: &str,
+    scope: &OrgScope,
+) -> Result<Option<i64>, IpcError> {
+    if reference.contains("://") {
+        return Ok(None);
+    }
+    let Ok(key) = crate::store::normalize_work_ref(reference) else {
+        return Ok(None);
+    };
+    let items = s.work_items_by_key(&key)?;
+    if items.iter().any(|i| i.tracker_id.is_some()) {
+        return Ok(None);
+    }
+    for item in items {
+        if item_visible(scope, s, &item)? {
+            return Ok(Some(item.id));
+        }
+    }
+    Ok(None)
 }
 
 /// `work_link { action: start }` end to end over the real `new_session`.
