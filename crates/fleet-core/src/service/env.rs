@@ -60,7 +60,16 @@ pub fn resolve(
             EnvSource::Ref(r) => {
                 let kind = r.split_once(':').map(|(k, _)| k).unwrap_or("ref");
                 match read_credential_ref(&r) {
-                    Some(v) => Secret::new(v),
+                    Some(v) => {
+                        // The message names the variable, never the value.
+                        if let Err(e) = check_env_value(&v) {
+                            return Err(IpcError::new(
+                                codes::E_INVALID,
+                                format!("{name}: its {kind}: reference: {}", e.message),
+                            ));
+                        }
+                        Secret::new(v)
+                    }
                     None => {
                         return Err(IpcError::new(
                             codes::E_ENV_UNRESOLVED,
@@ -94,7 +103,7 @@ pub fn wrap(tilde_path: &str, pane_cmd: &str) -> String {
         .strip_prefix("~/")
         .expect("env file paths are under ~/");
     format!(
-        "f=\"$HOME\"/{}; if [ -r \"$f\" ]; then . \"$f\"; fi; unset f; {pane_cmd}",
+        "__fleet_env_file=\"$HOME\"/{}; if [ -r \"$__fleet_env_file\" ]; then . \"$__fleet_env_file\"; fi; unset __fleet_env_file; {pane_cmd}",
         crate::shell::quote(rest)
     )
 }
@@ -198,7 +207,7 @@ mod tests {
         let w = wrap("~/.claude-fleet/env/abc.sh", "cl --name 'x'");
         assert_eq!(
             w,
-            "f=\"$HOME\"/'.claude-fleet/env/abc.sh'; if [ -r \"$f\" ]; then . \"$f\"; fi; unset f; cl --name 'x'"
+            "__fleet_env_file=\"$HOME\"/'.claude-fleet/env/abc.sh'; if [ -r \"$__fleet_env_file\" ]; then . \"$__fleet_env_file\"; fi; unset __fleet_env_file; cl --name 'x'"
         );
     }
 
@@ -219,6 +228,49 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8(out.stdout).unwrap(), "hi there");
+    }
+
+    #[test]
+    fn a_user_variable_named_f_survives_the_wrap() {
+        let home = tempfile::tempdir().unwrap();
+        let envdir = home.path().join(".claude-fleet/env");
+        std::fs::create_dir_all(&envdir).unwrap();
+        let file = EnvFile {
+            lines: vec![("f".into(), Secret::new("keep"))],
+        };
+        std::fs::write(envdir.join("n.sh"), file.render()).unwrap();
+        let cmd = wrap("~/.claude-fleet/env/n.sh", "printf %s \"$f\"");
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "keep");
+    }
+
+    #[test]
+    fn a_referenced_value_is_checked_and_the_refusal_names_only_the_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cred");
+        std::fs::write(&path, "sec\0ret-tail").unwrap();
+        let s = store();
+        s.lock()
+            .unwrap()
+            .set_env_var(
+                "global",
+                "",
+                "NULLY",
+                &EnvValue::Ref(format!("file:{}", path.display())),
+            )
+            .unwrap();
+        let e = resolve(&s, "local", None, None, &BTreeMap::new()).unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert!(
+            e.message.contains("NULLY") && !e.message.contains("ret-tail"),
+            "{}",
+            e.message
+        );
     }
 
     #[test]
