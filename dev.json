@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "track": "dev",
-  "sequence": 22,
-  "generated_at": "2026-10-11T17:44:21Z",
-  "expires_at": "2026-10-25T17:44:21Z",
+  "sequence": 23,
+  "generated_at": "2026-10-11T18:19:16Z",
+  "expires_at": "2026-10-25T18:19:16Z",
   "current": "0.6.3-dev.157.desktop.g92139b3",
   "recommended": "0.6.3-dev.157.desktop.g92139b3",
   "minimum_supported": {},
@@ -14,7 +14,14 @@
     {
       "version": "0.6.3-dev.157.desktop.g92139b3",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.157.desktop.g92139b3/release-manifest.json",
-      "manifest_sha256": "adf7549b038ee6ba95ec03d26108ee16d27eabd9b6411d7e288be7ee99025a93"
+      "manifest_sha256": "adf7549b038ee6ba95ec03d26108ee16d27eabd9b6411d7e288be7ee99025a93",
+      "amendments": [
+        {
+          "component": "android",
+          "manifest": "https://raw.githubusercontent.com/martin-janci/claude-fleet/update-channels/amendments/0.6.3-dev.157.desktop.g92139b3/android.json",
+          "manifest_sha256": "ab15baa6f14c5478c26a83c14e94a5fe397816ef8123097f545c3979a560ceb4"
+        }
+      ]
     },
     {
       "version": "0.6.3-dev.155.desktop.g888874e",
