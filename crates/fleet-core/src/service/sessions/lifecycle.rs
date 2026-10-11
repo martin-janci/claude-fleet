@@ -1000,6 +1000,23 @@ pub(super) async fn new_session_inner(
             args.new_worktree.as_deref(),
         )?
     };
+    // The session's environment, resolved and written before any workspace
+    // step: an unresolved or invalid variable refuses the create with no
+    // worktree or branch left behind. Both launchers below
+    // (`ensure_for_new_session` and `new_session`) get the wrapped command.
+    // No store guard is held here (`prepare` locks and awaits).
+    let (claude_id, pane_cmd) = claude_id_and_pane_cmd(&args);
+    let env_extra = args.env.clone().unwrap_or_default();
+    let pane_cmd = crate::service::env::prepare(
+        store,
+        &**ssh,
+        &args.host_alias,
+        Some(args.project_id),
+        None,
+        &env_extra,
+        &pane_cmd,
+    )
+    .await?;
     let path: PathBuf = if let Some(p) = fixed.clone() {
         PathBuf::from(p)
     } else if args.host_alias == "local" {
@@ -1123,21 +1140,6 @@ pub(super) async fn new_session_inner(
     // A "shell" session runs a plain login shell in the pane instead of
     // Claude Code. Any other value (incl. None) is treated as a "work" session.
     let is_shell = args.kind.as_deref() == Some("shell");
-    let (claude_id, pane_cmd) = claude_id_and_pane_cmd(&args);
-    // The session's environment, before either launcher sees the command:
-    // `ensure_for_new_session` and `new_session` both get the wrapped one.
-    // No store guard is held here (`prepare` locks and awaits).
-    let env_extra = args.env.clone().unwrap_or_default();
-    let pane_cmd = crate::service::env::prepare(
-        store,
-        &**ssh,
-        &args.host_alias,
-        Some(args.project_id),
-        None,
-        &env_extra,
-        &pane_cmd,
-    )
-    .await?;
 
     // Automatic self-repair for an EXISTING worktree row / main checkout: the
     // row may point at a directory that was deleted since it was written.
@@ -1210,6 +1212,15 @@ pub(super) async fn new_session_inner(
             )
         })?;
 
+    // The row's project comes from reconcile's cwd match, which finds none
+    // for a cwd outside the host's project layout (a system project on a
+    // remote host, a custom root). The session was created against
+    // `args.project_id`; pin it, so a relaunch resolves the same project-scope
+    // environment as this launch did. Reconcile keeps a started row's project
+    // when its own match is empty.
+    if row.project_id.is_none() {
+        s.set_session_project(row.id, args.project_id)?;
+    }
     // `new_session { env }` was used in memory for this launch; from now on
     // it is the session's own scope, read by every relaunch.
     for (name, value) in &env_extra {

@@ -8221,10 +8221,12 @@ mod env_launch {
                      case \"$*\" in *'-O check'*|*'-O exit'*) exit 0;; esac\n\
                      while [ \"$#\" -gt 0 ] && [ \"$1\" != \"--\" ]; do shift; done\n\
                      shift 2\n\
+                     printf '%s\\n' \"$*\" >> '{d}/ssh-calls.log'\n\
                      case \"$*\" in *FLEET-TC*) printf 'FLEET-TC home=%s\\nFLEET-TC path=%s\\nFLEET-TC tmux=%s\\n' '{home}' '{bin}:/usr/bin:/bin' '{bin}/tmux'; exit 0;; esac\n\
                      HOME='{home}' PATH='{bin}':\"$PATH\" exec sh -c \"$*\"\n",
                     home = home.display(),
                     bin = bin.display(),
+                    d = d,
                 ),
             );
             let s = Store::open_in_memory().unwrap();
@@ -8289,6 +8291,52 @@ mod env_launch {
                         .collect()
                 }),
             }
+        }
+    }
+
+    impl Harness {
+        /// Every remote command the fake ssh ran.
+        pub fn ssh_calls(&self) -> String {
+            std::fs::read_to_string(self.dir.path().join("ssh-calls.log")).unwrap_or_default()
+        }
+
+        /// `owner/repo` as a git checkout at the remote layout's default
+        /// root under the harness HOME, so a remote create needs no clone.
+        pub fn remote_checkout(&self, owner: &str, repo: &str) -> i64 {
+            let root = self
+                .home()
+                .join("projects/github.com")
+                .join(owner)
+                .join(repo);
+            std::fs::create_dir_all(&root).unwrap();
+            let git = |args: &[&str]| {
+                let out = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&root)
+                    .env_remove("GIT_DIR")
+                    .env_remove("GIT_WORK_TREE")
+                    .env_remove("GIT_INDEX_FILE")
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "git {args:?}: {out:?}");
+            };
+            git(&["init", "-q"]);
+            git(&[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ]);
+            self.store
+                .lock()
+                .unwrap()
+                .upsert_project(owner, repo, &root.display().to_string())
+                .unwrap()
         }
     }
 
@@ -8378,5 +8426,88 @@ mod env_launch {
             std::fs::read_to_string(h.dir.path().join("tmux-calls.log")).unwrap_or_default();
         assert!(!calls.contains("new-session"), "{calls}");
         assert!(h.panes().is_empty());
+    }
+
+    /// The environment refuses BEFORE the workspace step: a create that asks
+    /// for a new worktree leaves no worktree or branch behind to collide
+    /// with on a retry.
+    #[tokio::test]
+    async fn an_unresolved_reference_refuses_before_a_new_worktree_is_added() {
+        let h = Harness::new();
+        let pid = h.remote_checkout("acme", "wtproj");
+        h.set_global(
+            "R",
+            EnvValue::Ref("file:/nonexistent/fleet-env-launch-test".into()),
+        );
+        let mut args = h.args("dev-env-wt", None);
+        args.project_id = pid;
+        args.kind = None;
+        args.new_worktree = Some("feat-env".into());
+        let err = new_session(args, &h.store, &h.ssh, &h.reg)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_ENV_UNRESOLVED, "{err:?}");
+        let calls = h.ssh_calls();
+        assert!(!calls.contains("worktree add"), "{calls}");
+        let wt_dir = h
+            .home()
+            .join("projects/github.com/acme/wtproj/.worktrees/feat-env");
+        assert!(!wt_dir.exists(), "{wt_dir:?}");
+        assert!(h.panes().is_empty());
+    }
+
+    /// A project-scope variable reaches the restart too: the row keeps the
+    /// project it was created against even where reconcile's cwd match
+    /// finds none (here a system project on a remote host).
+    #[tokio::test]
+    async fn a_restart_keeps_the_project_scope() {
+        let h = Harness::new();
+        h.store
+            .lock()
+            .unwrap()
+            .set_env_var(
+                "project",
+                "acme/envproj",
+                "P",
+                &EnvValue::Plain("proj-v".into()),
+            )
+            .unwrap();
+        let row = new_session(h.args("dev-env-proj", None), &h.store, &h.ssh, &h.reg)
+            .await
+            .expect("create");
+        assert_eq!(row.project_id, Some(h.project_id), "{row:?}");
+        let restart = serde_json::from_value(serde_json::json!({
+            "host_alias": "h", "name": "dev-env-proj"
+        }))
+        .unwrap();
+        restart_session(restart, &h.store, &h.ssh)
+            .await
+            .expect("restart");
+        let panes = h.panes();
+        assert_eq!(panes.len(), 2, "{panes:?}");
+        for pane in &panes {
+            let body = std::fs::read_to_string(env_file_of(&h.home(), pane)).unwrap();
+            assert!(body.contains("export P='proj-v'"), "{pane}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_recreate_sources_its_environment() {
+        let h = Harness::new();
+        let row = new_session(h.args("dev-env-recreate", None), &h.store, &h.ssh, &h.reg)
+            .await
+            .expect("create");
+        h.set_global("G", EnvValue::Plain("gv".into()));
+        let recreate = serde_json::from_value(serde_json::json!({ "session_id": row.id })).unwrap();
+        recreate_session(recreate, &h.store, &h.ssh)
+            .await
+            .expect("recreate");
+        let panes = h.panes();
+        assert_eq!(panes.len(), 2, "{panes:?}");
+        let pane = &panes[1];
+        assert!(pane.starts_with(PREFIX), "{pane}");
+        assert!(!pane.contains("gv"), "{pane}");
+        let body = std::fs::read_to_string(env_file_of(&h.home(), pane)).unwrap();
+        assert!(body.contains("export G='gv'"), "{body}");
     }
 }
