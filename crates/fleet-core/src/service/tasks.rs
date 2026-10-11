@@ -903,6 +903,15 @@ pub fn liveness_verdict(
     if task.detached_at.is_some() && task.worker_session_id.is_none() {
         return Some("the worker session is gone (killed or dismissed)".to_string());
     }
+    // A mission's headless check (`orchestrate::checks`) has no worker
+    // session: its own task closes it, and one a restart lost is failed once
+    // it outlived the longest run.
+    if task.worker_session_id.is_none()
+        && task.work_item_id.is_some()
+        && now - since > crate::service::work::orchestrate::checks::DEADLINE_SECS
+    {
+        return Some("the headless check never finished".to_string());
+    }
     let wid = task.worker_session_id?;
     let Some(w) = worker else {
         return Some(format!(

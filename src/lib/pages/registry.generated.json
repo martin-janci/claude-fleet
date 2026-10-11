@@ -253,6 +253,54 @@
         "level": "none"
       },
       "default": "false",
+      "help": "Run a mission's review and its test commands as one Claude run in the implementer's checkout, with read-only tools and only those commands, instead of opening a session for each. Falls back to a session when the checkout moved or a command is not a plain one.",
+      "key": "orchestrator.headless_checks",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Headless reviews and tests",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "sonnet",
+      "help": "The Claude model headless reviews and tests run.",
+      "key": "orchestrator.headless_model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Headless check model",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "advanced"
+      ],
+      "unit": "none",
+      "value": "sonnet"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
       "help": "Press Enter for sessions stuck on a \"Press Enter\" prompt. Auth menus, trust prompts and reconnects are always notify-only.",
       "key": "playbooks.press_enter",
       "kind": {
@@ -4330,6 +4378,22 @@
                   "type": "field",
                   "when": {
                     "key": "orchestrator.enabled",
+                    "truthy": true
+                  }
+                },
+                {
+                  "key": "orchestrator.headless_checks",
+                  "type": "field",
+                  "when": {
+                    "key": "orchestrator.enabled",
+                    "truthy": true
+                  }
+                },
+                {
+                  "key": "orchestrator.headless_model",
+                  "type": "field",
+                  "when": {
+                    "key": "orchestrator.headless_checks",
                     "truthy": true
                   }
                 }

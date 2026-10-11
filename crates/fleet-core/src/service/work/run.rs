@@ -154,6 +154,24 @@ pub fn record_run(
     tasks::start_task(s, &task)
 }
 
+/// Write a headless attempt (orchestration F3, `orchestrate::checks`): a
+/// `running` task with no worker session, naming the item, its attempt
+/// number and role.
+pub fn record_headless_run(
+    s: &Store,
+    prompt: &str,
+    item_id: i64,
+    attempt: i64,
+    role: &str,
+) -> Result<TaskRow, IpcError> {
+    let task = tasks::create_task(s, None, None, prompt)?;
+    s.set_task_run(task.id, item_id, attempt, role)?;
+    let task = s
+        .get_task(task.id)?
+        .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "task vanished after insert"))?;
+    tasks::start_task(s, &task)
+}
+
 /// Whether a live session is already on the item: a run then starts beside
 /// it, in its own `-N` checkout, instead of being refused with "jump to it".
 pub fn has_live_work(s: &Store, item_id: i64) -> Result<bool, IpcError> {
@@ -165,6 +183,20 @@ pub fn has_live_work(s: &Store, item_id: i64) -> Result<bool, IpcError> {
 
 /// The runs between their check and their task row, by item and role.
 static STARTING: crate::rt::KeySet = std::sync::Mutex::new(None);
+
+/// Claim the start of `role` on `item_id` against a session start racing it
+/// ([`run_item_with`]); released on drop. `None`: one is already starting.
+pub(crate) fn claim_start(
+    store: &Arc<Mutex<Store>>,
+    item_id: i64,
+    role: &str,
+) -> Option<crate::rt::KeyedClaim> {
+    crate::rt::claim(
+        &STARTING,
+        Arc::as_ptr(store) as usize,
+        format!("{item_id}:{role}"),
+    )
+}
 
 /// `work_link { run }` end to end over the real start path.
 pub async fn run_item(
