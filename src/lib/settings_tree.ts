@@ -17,6 +17,7 @@ export type PanelId =
   | 'composer'
   | 'projects'
   | 'work'
+  | 'ticket-keys'
   | 'hub'
   | 'mcp'
   | 'diagnostics';
@@ -91,6 +92,7 @@ export const SETTINGS_TREE: readonly SettingsGroup[] = [
     items: [
       { id: 'work', label: 'Work & trackers', panel: 'work', page: 'settings.work' },
       { id: 'trackers', label: 'Trackers', page: 'settings.trackers' },
+      { id: 'ticket-keys', label: 'Ticket keys', panel: 'ticket-keys' },
       { id: 'decisions', label: 'Decisions', page: 'settings.decisions' },
       { id: 'playbooks', label: 'Playbooks', page: 'settings.automation', section: 'Playbooks' },
       { id: 'catalogs', label: 'Catalogs', page: 'settings.catalogs' },

@@ -107,6 +107,15 @@ fn worktrees_has_updated_at(conn: &Connection) -> rusqlite::Result<bool> {
 /// `already_applied` guard of migration 027: `projects` already has its
 /// `adopted` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
+fn work_items_has_display_key(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'display_key'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_adopted(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'adopted'",
@@ -790,7 +799,7 @@ fn work_items_has_due_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// already_applied guard of migration 169.
+/// already_applied guard of migration 170.
 fn work_items_has_estimate_unit(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'estimate_unit'",
@@ -800,7 +809,7 @@ fn work_items_has_estimate_unit(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// already_applied guard of migration 170.
+/// already_applied guard of migration 171.
 fn tracker_writes_has_remote_url(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('tracker_writes') WHERE name = 'remote_url'",
@@ -1933,16 +1942,24 @@ const MIGRATIONS: &[Migration] = &[
         168,
         include_str!("../../migrations/168_work_item_attachments.sql"),
     ),
-    // A task's priority, labels and estimate: ADD COLUMNs, so a guard.
+    // Jira-style ticket keys (`store::ticket_keys`): `ticket_spaces` and the
+    // items' `ticket_space_id` / `ticket_seq` / `display_key`. `ALTER TABLE
+    // ADD COLUMN` cannot be re-run, so guarded.
     Migration {
         version: 169,
-        sql: include_str!("../../migrations/169_work_item_priority_labels_estimate.sql"),
+        sql: include_str!("../../migrations/169_ticket_keys.sql"),
+        already_applied: Some(work_items_has_display_key),
+    },
+    // A task's priority, labels and estimate: ADD COLUMNs, so a guard.
+    Migration {
+        version: 170,
+        sql: include_str!("../../migrations/170_work_item_priority_labels_estimate.sql"),
         already_applied: Some(work_items_has_estimate_unit),
     },
     // Tracker comments posted back: ADD COLUMNs on the outbox, so a guard.
     Migration {
-        version: 170,
-        sql: include_str!("../../migrations/170_tracker_comment_writes.sql"),
+        version: 171,
+        sql: include_str!("../../migrations/171_tracker_comment_writes.sql"),
         already_applied: Some(tracker_writes_has_remote_url),
     },
 ];

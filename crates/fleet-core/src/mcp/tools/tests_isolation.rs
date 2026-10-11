@@ -1885,7 +1885,7 @@ async fn run_matrix(isolate: bool) {
                 Who::Master => {
                     if matches!(
                         name,
-                        "list" | "list_orgs" | "status" | "sweep_now" | "usage"
+                        "list" | "list_orgs" | "status" | "sweep_now" | "usage" | "ticket_prefixes"
                     ) {
                         is_ok(who, a, name);
                     }

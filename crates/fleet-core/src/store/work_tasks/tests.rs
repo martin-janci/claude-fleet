@@ -12,7 +12,7 @@ fn native(title: &str) -> NativeItem<'_> {
 }
 
 #[test]
-fn a_native_task_gets_a_task_key_its_project_and_notes() {
+fn a_native_task_gets_its_projects_ticket_key_its_project_and_notes() {
     let s = Store::open_in_memory().unwrap();
     let pid = s.upsert_project("acme", "api", "/src/api").unwrap();
     let t = s
@@ -27,7 +27,8 @@ fn a_native_task_gets_a_task_key_its_project_and_notes() {
         (t.source.as_str(), t.origin.as_deref()),
         ("local", Some("manual"))
     );
-    assert_eq!(t.key.as_deref(), Some(format!("TASK-{}", t.id).as_str()));
+    // In a project: the project's next ticket key (`store::ticket_keys`).
+    assert_eq!(t.key.as_deref(), Some("API-1"));
     assert_eq!(
         (t.title.as_str(), t.project_id, t.notes.as_deref()),
         ("Fix login", Some(pid), Some("CI run 12"))

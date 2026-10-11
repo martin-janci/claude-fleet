@@ -233,6 +233,7 @@ describe('ticketBriefPreview fence (M3 review)', () => {
 import {
   inferProvider,
   displayKey,
+  shownKey,
   trackerClaims,
   showProviderBadges,
   sectionMapRows,
@@ -310,6 +311,13 @@ describe('keys across providers', () => {
   it('an Asana key shows short; badges appear with a second provider', () => {
     expect(displayKey('asana:1207000000000001')).toBe('Asana …000001');
     expect(displayKey('ABC-12')).toBe('ABC-12');
+    // A fleet ticket key, when the item drew one, wins over the tracker's.
+    expect(displayKey('asana:1207000000000001', 'CB-4')).toBe('CB-4');
+    expect(displayKey('acme/web#7', 'WEB-3')).toBe('WEB-3');
+    expect(displayKey('acme/web#7', null)).toBe('acme/web#7');
+    expect(shownKey({ key: 'acme/web#7', display_key: 'WEB-3' })).toBe('WEB-3');
+    expect(shownKey({ key: 'asana:1207000000000001' })).toBe('Asana …000001');
+    expect(shownKey({ key: null })).toBeNull();
     expect(showProviderBadges([tracker(), tracker({ id: 9 })])).toBe(false);
     expect(showProviderBadges([tracker(), gh])).toBe(true);
   });

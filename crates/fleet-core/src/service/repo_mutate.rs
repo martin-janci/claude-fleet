@@ -386,6 +386,7 @@ mod tests {
         assert_eq!(local_branches(dir), names(&["side", "trunk"]));
     }
 
+    #[cfg(unix)]
     fn remote_branches(dir: &std::path::Path) -> Vec<String> {
         let out = git_fixture::run_body(
             dir,

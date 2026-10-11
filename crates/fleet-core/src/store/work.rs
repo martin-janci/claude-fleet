@@ -228,14 +228,21 @@ pub struct WorkItemRow {
     /// on a native item, the tracker's (Jira `duedate`) on a ticket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<String>,
-    /// `urgent | high | medium | low` (migration 169): a person's on a
+    /// Its fleet ticket key (`FLT-12`, migration 169): a native item's in a
+    /// project (then the same as `key`), or a GitHub or Asana item's, whose
+    /// tracker key is no name for a person. The UI shows it in place of
+    /// `key`; a key lookup answers to it. `None` for an item that drew none
+    /// (a Jira key is human; a native item outside a project is `TASK-<id>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_key: Option<String>,
+    /// `urgent | high | medium | low` (migration 170): a person's on a
     /// native item, the tracker's normalised on a ticket. `None` = none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
-    /// Its labels, in order, each once (migration 169).
+    /// Its labels, in order, each once (migration 170).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
-    /// How big the work is, in [`Self::estimate_unit`] (migration 169).
+    /// How big the work is, in [`Self::estimate_unit`] (migration 170).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate: Option<Estimate>,
     /// `points | hours`; set exactly when `estimate` is.
@@ -243,7 +250,7 @@ pub struct WorkItemRow {
     pub estimate_unit: Option<String>,
 }
 
-/// A task's estimate (migration 169): a finite, positive number, rounded to
+/// A task's estimate (migration 170): a finite, positive number, rounded to
 /// two decimals by every writer ([`Estimate::new`]). A newtype so the rows
 /// that carry it stay `Eq`: a NaN never gets in, so equality is total.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
@@ -356,6 +363,10 @@ pub struct WorkSummary {
     /// The item's key, else the link's `ref_key`.
     #[serde(default)]
     pub key: Option<String>,
+    /// The item's fleet ticket key (`FLT-12`, migration 169), which the UI
+    /// shows in place of `key`; absent when it drew none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_key: Option<String>,
     /// The item's title (empty for a bare key).
     #[serde(default)]
     pub title: String,
@@ -604,13 +615,13 @@ pub(super) const ITEM_COLUMNS: &str =
      tracker_id, external_id, aliases, kind, hierarchy_level, status_name, resolution, parent_id, \
      assignees, iteration, updated_ext, status_changed_at, fetched_at, unavailable_at, \
      unavailable_reason, status_set_by, status_set_at, origin, project_id, notes, task_id, \
-     proposal_state, proposed_by, proposal_why, held_at, done_when, due_at, priority, labels, \
-     estimate, estimate_unit";
+     proposal_state, proposed_by, proposal_why, held_at, done_when, due_at, display_key, priority, \
+     labels, estimate, estimate_unit";
 
 /// How many columns [`ITEM_COLUMNS`] names. A query that appends its own
 /// columns after the list indexes them as `ITEM_COLUMN_COUNT + n` — never a
 /// literal, because a literal silently shifts when a column is added here.
-pub(super) const ITEM_COLUMN_COUNT: usize = 39;
+pub(super) const ITEM_COLUMN_COUNT: usize = 40;
 
 /// A JSON array column as a list; anything unreadable is empty.
 fn json_list(raw: Option<String>) -> Vec<String> {
@@ -655,10 +666,11 @@ pub(super) fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
         held_at: r.get(32)?,
         done_when: json_list(r.get(33)?),
         due_at: r.get(34)?,
-        priority: r.get(35)?,
-        labels: json_list(r.get(36)?),
-        estimate: r.get::<_, Option<f64>>(37)?.and_then(Estimate::new),
-        estimate_unit: r.get(38)?,
+        display_key: r.get(35)?,
+        priority: r.get(36)?,
+        labels: json_list(r.get(37)?),
+        estimate: r.get::<_, Option<f64>>(38)?.and_then(Estimate::new),
+        estimate_unit: r.get(39)?,
     })
 }
 
@@ -800,17 +812,28 @@ impl Store {
     }
 
     /// The local item that carries `key` (normalised), if any.
+    /// A ticket key under a prefix a rename replaced finds the item under
+    /// its current one.
     pub fn local_work_item_by_key(&self, key: &str) -> Result<Option<WorkItemRow>, IpcError> {
-        self.conn
-            .query_row(
-                &format!(
-                    "SELECT {ITEM_COLUMNS} FROM work_items WHERE source = 'local' AND key = ?1"
-                ),
-                rusqlite::params![key],
-                map_item,
-            )
-            .optional()
-            .map_err(IpcError::from)
+        let find = |k: &str| {
+            self.conn
+                .query_row(
+                    &format!(
+                        "SELECT {ITEM_COLUMNS} FROM work_items WHERE source = 'local' AND key = ?1"
+                    ),
+                    rusqlite::params![k],
+                    map_item,
+                )
+                .optional()
+                .map_err(IpcError::from)
+        };
+        if let Some(item) = find(key)? {
+            return Ok(Some(item));
+        }
+        match self.current_ticket_key(key)? {
+            Some(k) => find(&k),
+            None => Ok(None),
+        }
     }
 
     /// Resolve a target to `(item_id, ref_key)`: an item must exist; a key
@@ -2013,7 +2036,7 @@ impl Store {
                          ELSE 'local' END, \
                     CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
                     {effective}, \
-                    i.status_name, i.url, i.unavailable_at IS NOT NULL \
+                    i.status_name, i.url, i.unavailable_at IS NOT NULL, i.display_key \
              FROM work_links l \
              JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
              LEFT JOIN work_items i ON i.id = l.item_id \
@@ -2036,6 +2059,7 @@ impl Store {
                     status_name: r.get(9)?,
                     url: r.get(10)?,
                     unavailable: r.get::<_, Option<bool>>(11)?.unwrap_or(false),
+                    display_key: r.get(12)?,
                     state: "confirmed".into(),
                     ..Default::default()
                 },

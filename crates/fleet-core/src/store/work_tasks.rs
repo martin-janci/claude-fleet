@@ -1,7 +1,8 @@
 //! Native work items (design 2026-09-29, shared work context): tasks and
 //! subtasks written in fleet (`origin = 'manual'`), agent proposals
 //! (`'proposed'`) and the mirror of a dispatched job (`'agent'`). Every one is
-//! a local item with a `TASK-<id>` key, so the key-driven start path and
+//! a local item with a key — its project's next ticket key (`FLT-12`,
+//! `store::ticket_keys`), or `TASK-<id>` outside a project — so the key-driven start path and
 //! branch detection work on them unchanged. A chain of local items is at
 //! most [`LOCAL_DEPTH_MAX`] deep (epic → task → subtask; owner decision
 //! 2026-10-10), kept by `parent_for_new_child` and
@@ -104,7 +105,7 @@ pub struct ItemEdit<'a> {
     pub estimate_unit: Option<&'a str>,
 }
 
-/// A task's priorities, most pressing first (migration 169).
+/// A task's priorities, most pressing first (migration 170).
 pub const PRIORITIES: [&str; 4] = ["urgent", "high", "medium", "low"];
 /// Most labels one item keeps.
 pub const LABELS_MAX: usize = 20;
@@ -395,7 +396,7 @@ impl Store {
         Ok(())
     }
 
-    /// Insert one native row and give it its `TASK-<id>` key, in one
+    /// Insert one native row and give it its key (`FLT-12` or `TASK-<id>`), in one
     /// transaction; emits the row.
     pub(super) fn insert_native(&self, r: &NativeRow<'_>) -> Result<WorkItemRow, IpcError> {
         let now = now_unix();
@@ -422,10 +423,41 @@ impl Store {
             ],
         )?;
         let id = self.conn.last_insert_rowid();
-        self.conn.execute(
-            "UPDATE work_items SET key = ?1 WHERE id = ?2",
-            rusqlite::params![format!("{TASK_KEY_PREFIX}-{id}"), id],
-        )?;
+        // In a project it draws the project's next ticket key (`FLT-12`), a
+        // child outside one its parent's numbering; else it is the
+        // fleet-wide `TASK-<id>`.
+        let space = match (r.project_id, r.parent_id) {
+            (Some(pid), _) => Some(self.project_ticket_space(pid)?),
+            (None, Some(parent)) => {
+                let sid: Option<i64> = self
+                    .conn
+                    .query_row(
+                        "SELECT ticket_space_id FROM work_items WHERE id = ?1",
+                        rusqlite::params![parent],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                sid.map(|sid| self.ticket_space(sid)).transpose()?.flatten()
+            }
+            (None, None) => None,
+        };
+        match space {
+            Some(space) => {
+                let (seq, key) = self.draw_ticket_number(&space)?;
+                self.conn.execute(
+                    "UPDATE work_items SET key = ?1, display_key = ?1, ticket_space_id = ?2, \
+                       ticket_seq = ?3 WHERE id = ?4",
+                    rusqlite::params![key, space.id, seq, id],
+                )?;
+            }
+            None => {
+                self.conn.execute(
+                    "UPDATE work_items SET key = ?1 WHERE id = ?2",
+                    rusqlite::params![format!("{TASK_KEY_PREFIX}-{id}"), id],
+                )?;
+            }
+        }
         tx.commit()?;
         self.emit_work_item(
             id,

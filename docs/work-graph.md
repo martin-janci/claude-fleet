@@ -87,7 +87,7 @@ The Work tab opens in **List** layout; the header, filters and saved views are u
 
 ### Priority, labels and estimate
 
-A task carries a **priority** (`urgent`, `high`, `medium` or `low`, or none), up to 20 **labels** and an **estimate** in story **points** or **hours** (`work_items.priority`, `labels`, `estimate`, `estimate_unit`; migration 169). The task page's rail shows them under *Details* (a row only when it is set: the priority as a coloured dot and its word, the labels as chips, the estimate as "3 pts" or "4 h"), and its header adds a chip for an urgent or high one.
+A task carries a **priority** (`urgent`, `high`, `medium` or `low`, or none), up to 20 **labels** and an **estimate** in story **points** or **hours** (`work_items.priority`, `labels`, `estimate`, `estimate_unit`; migration 170). The task page's rail shows them under *Details* (a row only when it is set: the priority as a coloured dot and its word, the labels as chips, the estimate as "3 pts" or "4 h"), and its header adds a chip for an urgent or high one.
 
 On a task written in fleet a person sets them in **Edit task** or with `work_link { action: edit, item_id, priority?, labels?, estimate?, estimate_unit? }`: a priority from the four, labels of at most 40 characters each (trimmed, each once), an estimate from 0 to 1000. `priority: ""`, `labels: []` and `estimate: 0` clear them, the unit going with the estimate; `estimate_unit` alone re-units the estimate the task has, and a first estimate without one is in points. A bad value refuses the whole edit.
 

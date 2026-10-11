@@ -632,7 +632,7 @@ export interface WorkItemEdit {
   estimate_unit?: EstimateUnit;
 }
 
-/** A task's priority, most pressing first (migration 169). */
+/** A task's priority, most pressing first (migration 170). */
 export type WorkPriority = 'urgent' | 'high' | 'medium' | 'low';
 export const WORK_PRIORITIES: { value: WorkPriority; label: string }[] = [
   { value: 'urgent', label: 'Urgent' },

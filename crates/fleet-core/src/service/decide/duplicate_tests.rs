@@ -189,6 +189,7 @@ fn row(id: i64, title: &str) -> WorkItemRow {
         labels: vec![],
         estimate: None,
         estimate_unit: None,
+        display_key: None,
     }
 }
 

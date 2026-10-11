@@ -1,7 +1,7 @@
 //! Write-back to trackers (work graph M13.4e, decisions D3 / D29): the PR
 //! remote link, and a fleet comment posted to its ticket.
 //!
-//! **Comments** (owner decision 2026-10-11, migration 170): a person who
+//! **Comments** (owner decision 2026-10-11, migration 171): a person who
 //! comments on a tracker ticket in fleet may ask for the comment to be
 //! posted there too (`work_link { comment, post_to_tracker }`). The comment
 //! and its outbox row (op `comment`) are written in one transaction

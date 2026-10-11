@@ -18,4 +18,4 @@ ALTER TABLE work_items ADD COLUMN labels TEXT;
 ALTER TABLE work_items ADD COLUMN estimate REAL;
 ALTER TABLE work_items ADD COLUMN estimate_unit TEXT;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (169);
+INSERT OR IGNORE INTO schema_version (version) VALUES (170);

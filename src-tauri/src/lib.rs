@@ -511,6 +511,8 @@ pub fn run() {
             commands::trackers::test_tracker,
             commands::trackers::remove_tracker,
             commands::trackers::tracker_sync_metrics,
+            commands::trackers::ticket_prefixes,
+            commands::trackers::set_ticket_prefix,
             commands::trackers::status_map_proposals,
             commands::trackers::decide_status_map_proposal,
             commands::trackers::work_retention_status,

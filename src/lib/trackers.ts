@@ -88,6 +88,9 @@ export interface WorkItemRow {
   id: number;
   source: string;
   key?: string | null;
+  /** Its fleet ticket key (`FLT-12`), shown in place of `key`; absent when
+   *  it drew none (a Jira key, a hub older than migration 169). */
+  display_key?: string | null;
   title: string;
   url?: string | null;
   /** todo | in_progress | done */
@@ -729,11 +732,22 @@ function ghesFromUrl(
   };
 }
 
-/** A key as the UI shows it: an Asana task's opaque `asana:<gid>` becomes a
- *  short `Asana …123456` (never used for matching); every other key as is. */
-export function displayKey(key: string): string {
+/** A key as the UI shows it: the item's fleet ticket key (`FLT-12`,
+ *  `store::ticket_keys`) when it drew one — a GitHub issue's or an Asana
+ *  task's, whose own keys are no name for a person — else an Asana task's
+ *  opaque `asana:<gid>` as a short `Asana …123456` (never used for matching),
+ *  and every other key as is. */
+export function displayKey(key: string, ticketKey?: string | null): string {
+  if (ticketKey) return ticketKey;
   const gid = key.startsWith('asana:') ? key.slice('asana:'.length) : null;
   return gid ? `Asana …${gid.slice(-6)}` : key;
+}
+
+/** [`displayKey`] of a row that carries both (`WorkItemRow`, `WorkTask`,
+ *  a session's `work`); `null` when it has no key at all. */
+export function shownKey(row: { key?: string | null; display_key?: string | null }): string | null {
+  if (row.display_key) return row.display_key;
+  return row.key ? displayKey(row.key) : null;
 }
 
 /** `owner/repo#n` → the lower-case `owner/repo`; an enterprise
