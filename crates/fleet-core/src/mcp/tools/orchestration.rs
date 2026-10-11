@@ -1253,16 +1253,27 @@ impl FleetTools {
             // Missions (orchestration O1): a mission is a PERSON's, so the
             // whole `view_scope` — its owner, its org's members, the org
             // boundary first (`missions::sees_mission`).
+            // The operator reads them as the hub's owner, whose missions it
+            // saves (`operator_owner_scope`).
             WorkAction::Missions => ok_json_compact(
-                &w::missions::missions(&self.store, &view_scope).map_err(to_mcp_err)?,
+                &w::missions::missions(
+                    &self.store,
+                    &self.mission_read_scope(&caller, &view_scope)?,
+                )
+                .map_err(to_mcp_err)?,
             ),
             WorkAction::Mission => {
                 let id = args
                     .mission_id
                     .ok_or_else(|| mcp_err("E_INVALID", "mission needs mission_id", None))?;
                 ok_json_compact(
-                    &w::missions::mission(&self.store, &view_scope, id, args.before_event)
-                        .map_err(to_mcp_err)?,
+                    &w::missions::mission(
+                        &self.store,
+                        &self.mission_read_scope(&caller, &view_scope)?,
+                        id,
+                        args.before_event,
+                    )
+                    .map_err(to_mcp_err)?,
                 )
             }
             // A task attachment's bytes: its item's org fence (outside it,
@@ -1962,9 +1973,17 @@ impl FleetTools {
         // The org and person fences are inside (`missions::changeable`), on
         // the whole `view_scope`; adding an item also passes the item's own
         // sessions' person gate, as a sprint does.
+        //
+        // The operator is the one agent that may write here, and only a
+        // mission's definition: it saves one for the hub's owner, with that
+        // person's approval (`operator_mission_scope`).
         if args.action.starts_with("mission_") {
-            mission_caller(&caller)?;
-            let view_scope = self.view_scope(&caller)?;
+            let view_scope = if caller.is_operator() {
+                self.operator_mission_scope(&caller, &args)?
+            } else {
+                mission_caller(&caller)?;
+                self.view_scope(&caller)?
+            };
             use crate::service::work::missions as ms;
             use crate::service::work::orchestrate as orch;
             return match args.action.as_str() {
@@ -2778,6 +2797,61 @@ impl FleetTools {
         }
         Ok(self.view_scope(caller)?.proven_session)
     }
+
+    /// The scope the operator reads missions with: the hub's owner's
+    /// (`operator_owner_scope`). Everyone else keeps their own.
+    fn mission_read_scope(
+        &self,
+        caller: &Caller,
+        own: &crate::service::view_scope::ViewScope,
+    ) -> Result<crate::service::view_scope::ViewScope, McpError> {
+        if caller.is_operator() {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            operator_owner_scope(&s).map_err(to_mcp_err)
+        } else {
+            Ok(own.clone())
+        }
+    }
+
+    /// The operator's `mission_*` call: `mission_save` only, approved by a
+    /// person, then run as the hub's owner.
+    ///
+    /// The operator's own client proves no person, so without this it could
+    /// not save the mission it had just talked through with its person — and
+    /// every other `mission_*` action stays theirs: starting, planning,
+    /// granting, the state and deleting run sessions or decide for the loop,
+    /// which the operator never does ("Where AI never decides"). A save
+    /// spends nothing and starts nothing; the approval is what makes it the
+    /// person's act, as it is for the operator's starts (D12).
+    fn operator_mission_scope(
+        &self,
+        caller: &Caller,
+        args: &crate::service::work::WorkLinkArgs,
+    ) -> Result<crate::service::view_scope::ViewScope, McpError> {
+        if args.action != "mission_save" {
+            return Err(mcp_err(
+                "E_FORBIDDEN",
+                format!(
+                    "{} is a person's, from the desktop or the phone; the operator \
+                     may only save a mission (mission_save), with their approval",
+                    args.action
+                ),
+                None,
+            ));
+        }
+        let input = args
+            .mission
+            .as_ref()
+            .ok_or_else(|| mcp_err("E_INVALID", "mission_save needs mission", None))?;
+        self.confirm_gate(
+            "work_link",
+            args.confirm_nonce.as_deref(),
+            &operator_mission_summary(args.mission_id, args.item_id, input),
+            caller,
+        )?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        operator_owner_scope(&s).map_err(to_mcp_err)
+    }
 }
 
 /// A coded [`McpError`] (built by `mcp_err` / `to_mcp_err`) back as the
@@ -2823,6 +2897,40 @@ impl super::FleetTools {
 /// Refuse a `work_link { mission_* }` from a per-host or peer token: a
 /// mission is a person's plan, and a session or another hub does not run
 /// one (orchestration O1).
+/// The scope the operator acts in for missions: the hub's personal owner's,
+/// built as the master's is (`Caller::view_scope`).
+///
+/// One operator serves the hub, born from its owner's Control, so the owner
+/// is the person it speaks for. Only the mission paths ask for this —
+/// everywhere else the operator stays the person-less client it is — and a
+/// hub that cannot name its owner answers a refusing scope, so the save is
+/// refused as before (T1's fail-closed rule).
+fn operator_owner_scope(
+    s: &crate::store::Store,
+) -> Result<crate::service::view_scope::ViewScope, crate::ipc_error::IpcError> {
+    Caller::master().view_scope(s)
+}
+
+/// What the person approves when the operator saves a mission: every field
+/// it sets, so the approval covers the whole change (the nonce is bound to
+/// this text).
+fn operator_mission_summary(
+    mission_id: Option<i64>,
+    item_id: Option<i64>,
+    m: &crate::service::work::missions::MissionInput,
+) -> String {
+    let head = match (mission_id, m.name.as_deref()) {
+        (Some(id), _) => format!("Change mission {id}"),
+        (None, Some(name)) => format!("Create mission {:?}", name),
+        (None, None) => "Create a mission".to_string(),
+    };
+    let fields = serde_json::to_string(m).unwrap_or_default();
+    match (mission_id, item_id) {
+        (None, Some(item)) => format!("{head} rooted at task {item}: {fields}"),
+        _ => format!("{head}: {fields}"),
+    }
+}
+
 fn mission_caller(caller: &Caller) -> Result<(), McpError> {
     if caller.host_alias.is_some() || caller.mode == crate::mcp::auth::TokenMode::Peer {
         return Err(mcp_err(
