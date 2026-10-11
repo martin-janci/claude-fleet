@@ -171,9 +171,36 @@ impl UseCase {
         self.fixture_pair().1
     }
 
-    /// What the bench's Jev runs are recorded under.
+    /// The live adapter's question version (`control_route.v2`, …).
+    pub fn adapter_question_version(self) -> &'static str {
+        use crate::service::decide::lost_target::LostKind;
+        use crate::service::decide::{
+            control_route, duplicate, host_placement, main_ticket, related_session,
+            routine_run_outcome, tracker_duplicate, work_placement,
+        };
+        match self {
+            UseCase::ControlRoute => control_route::QUESTION_VERSION,
+            UseCase::Duplicate => duplicate::QUESTION_VERSION,
+            UseCase::RelatedSession => related_session::QUESTION_VERSION,
+            UseCase::WorkPlacement => work_placement::QUESTION_VERSION,
+            UseCase::HostPlacement => host_placement::QUESTION_VERSION,
+            UseCase::RoutineRunOutcome => routine_run_outcome::QUESTION_VERSION,
+            UseCase::AdoptTarget => LostKind::Pane.question_version(),
+            UseCase::RestoreTarget => LostKind::Transcript.question_version(),
+            UseCase::MainTicket => main_ticket::QUESTION_VERSION,
+            UseCase::TrackerDuplicate => tracker_duplicate::QUESTION_VERSION,
+        }
+    }
+
+    /// What the bench's Jev runs are recorded under: the adapter's version
+    /// with `bench` in it (`control_route.v2` → `control_route.bench.v2`),
+    /// so a bump of the adapter's question moves the bench's too.
     pub fn question_version(self) -> String {
-        format!("{}.bench.v1", self.name())
+        let v = self.adapter_question_version();
+        match v.rsplit_once('.') {
+            Some((name, ver)) => format!("{name}.bench.{ver}"),
+            None => format!("{v}.bench"),
+        }
     }
 
     /// Answers that show nothing (they are right or wrong, but never a

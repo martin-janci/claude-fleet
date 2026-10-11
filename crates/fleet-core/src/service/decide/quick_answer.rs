@@ -45,7 +45,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 /// The question's version: bump it when the question below changes.
-pub const QUESTION_VERSION: &str = "quick_answer.v1";
+pub const QUESTION_VERSION: &str = "quick_answer.v2";
 /// An agent's question, on its session (the subject 2.8's row proposals read).
 pub const SUBJECT_SESSION: &str = "session";
 /// A chat form's first choice.
@@ -319,11 +319,14 @@ pub fn form_choice(
 }
 
 /// The instruction, read literally: the exact condition and what to use.
-pub const INSTRUCTIONS: &str = "state.question is a question an AI coding agent asked the \
+pub const INSTRUCTIONS: &str = concat!(
+    "state.question is a question an AI coding agent asked the \
      person it works for, or a form it asked them to fill in. Each option except unsure is one \
      of the answers offered, in the agent's words. Decide which answer the person is most \
      likely to choose, using only the question's text and the options' words. Choose unsure \
-     when the text does not make one answer clearly the likely one.";
+     when the text does not make one answer clearly the likely one.",
+    super::quoted_data!()
+);
 
 /// PURE: the question over `choices`.
 pub fn question(choices: &[Choice]) -> Question {
