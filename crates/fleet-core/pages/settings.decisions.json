@@ -143,6 +143,46 @@
       ]
     },
     {
+      "title": "Second opinion",
+      "advanced": true,
+      "collapsible": true,
+      "items": [
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "Asks Claude the same questions as the use cases that are on, on one of your hosts, and records its answer beside Jev's to compare them. Nothing acts on it."
+        },
+        {
+          "type": "field",
+          "key": "decide.haiku.shadow"
+        },
+        {
+          "type": "field",
+          "key": "decide.haiku.host",
+          "when": {
+            "key": "decide.haiku.shadow",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
+          "key": "decide.haiku.model",
+          "when": {
+            "key": "decide.haiku.shadow",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
+          "key": "decide.haiku.daily_calls",
+          "when": {
+            "key": "decide.haiku.shadow",
+            "truthy": true
+          }
+        }
+      ]
+    },
+    {
       "title": "Today",
       "when": {
         "key": "decide.jev.enabled",

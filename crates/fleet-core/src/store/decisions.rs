@@ -72,7 +72,9 @@ pub const DECISION_NO_BASELINE: &str = "none";
 /// `unsure`, and at or above `PROPOSAL_MIN_CONFIDENCE` (0.5, spelled out
 /// in [`proposal_keep_sql!`] because `concat!` takes literals;
 /// `tests::the_proposal_floor_is_the_constant` keeps them equal). A later shadow run or fallback about the same subject
-/// therefore withdraws an earlier proposal, as a confirm or a change does.
+/// therefore withdraws an earlier proposal, as a confirm or a change does;
+/// the second opinion's runs (provider `haiku`) are never the latest, so
+/// they withdraw nothing.
 /// `$subject` is an SQL expression over the outer row (`CAST(sessions.id AS
 /// TEXT)`); the `decision_runs_subject` index (migration 129) serves both
 /// lookups. Decoded by `rows::decode_proposals`.
@@ -95,7 +97,8 @@ macro_rules! proposals_sql {
             " AND d.id = (SELECT MAX(d2.id) FROM decision_runs d2 \
                             WHERE d2.subject_kind = d.subject_kind \
                               AND d2.subject_id = d.subject_id \
-                              AND d2.feature = d.feature) \
+                              AND d2.feature = d.feature \
+                              AND d2.provider <> 'haiku') \
                 AND ",
             $crate::proposal_keep_sql!(),
             ")"
@@ -447,7 +450,8 @@ impl Store {
                FROM decision_runs d \
               WHERE d.subject_kind = ?1 \
                 AND d.id IN (SELECT MAX(id) FROM decision_runs \
-                              WHERE subject_kind = ?1 GROUP BY subject_id, feature) \
+                              WHERE subject_kind = ?1 AND provider <> 'haiku' \
+                              GROUP BY subject_id, feature) \
                 AND ",
             crate::proposal_keep_sql!(),
             " ORDER BY d.subject_id, d.feature"
@@ -543,7 +547,8 @@ impl Store {
     /// of `feature` in `mode` about the same subject, older than run
     /// `newer_id`, that has no follow-up yet: a newer answer took its place
     /// before anyone decided it. Never overwrites a follow-up (a person's
-    /// decision racing this one wins). Returns the runs marked; when it
+    /// decision racing this one wins; the second opinion's runs are left
+    /// alone). Returns the runs marked; when it
     /// marked any, the subject's row is re-emitted, since a withdrawn
     /// proposal must leave the screen (`quick_answer::withdraw`).
     pub fn supersede_decision_runs(
@@ -558,7 +563,7 @@ impl Store {
         let n = self.conn.execute(
             "UPDATE decision_runs SET followup = 'ignored', followup_at = ?6 \
              WHERE feature = ?1 AND subject_kind = ?2 AND subject_id = ?3 AND mode = ?4 \
-               AND id < ?5 AND followup IS NULL AND fallback IS NULL AND answer IS NOT NULL",
+               AND provider <> 'haiku' AND id < ?5 AND followup IS NULL AND fallback IS NULL AND answer IS NOT NULL",
             rusqlite::params![feature, subject_kind, subject_id, mode, newer_id, at],
         )?;
         if n > 0 {
@@ -593,7 +598,8 @@ impl Store {
     /// `subject_prefix` (an adapter's own namespace, e.g. `3:` for tracker
     /// 3's sections), at or after `since` when given, newest first, at most
     /// [`DECISION_SUBJECT_RUNS_MAX`]. What an adapter reads to skip a
-    /// question it asked recently, and to list its proposals.
+    /// question it asked recently, and to list its proposals. The second
+    /// opinion's runs (provider `haiku`) are not the adapter's and are left out.
     pub fn decision_runs_for_subjects(
         &self,
         feature: &str,
@@ -603,7 +609,7 @@ impl Store {
     ) -> Result<Vec<DecisionRunRow>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {RUN_COLUMNS} FROM decision_runs \
-             WHERE feature = ?1 AND subject_kind = ?2 \
+             WHERE feature = ?1 AND subject_kind = ?2 AND provider <> 'haiku' \
                AND substr(subject_id, 1, length(?3)) = ?3 \
                AND (?4 IS NULL OR at >= ?4) \
              ORDER BY id DESC LIMIT ?5"
@@ -678,6 +684,22 @@ impl Store {
                AND (?3 = 1 OR subject_kind != ?4)",
             rusqlite::params![provider, since, scope.with_bench(), DECISION_BENCH_SUBJECT],
             |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
+    /// How many of `provider`'s runs in `scope` since `since` sent a request
+    /// (the second opinion's daily cap).
+    pub fn decision_calls_since(
+        &self,
+        provider: &str,
+        since: i64,
+        scope: RunScope,
+    ) -> Result<i64, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM decision_runs WHERE provider = ?1 AND at >= ?2 AND called = 1 \
+               AND (?3 = 1 OR subject_kind != ?4)",
+            rusqlite::params![provider, since, scope.with_bench(), DECISION_BENCH_SUBJECT],
+            |r| r.get(0),
         )?)
     }
 

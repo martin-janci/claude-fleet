@@ -3,8 +3,9 @@
 //! mode on a host the operator names, so the benchmarks' acceptance lines
 //! "beats / ties claude -p haiku" (card J3) and "not worse than haiku by more
 //! than 3 points" (card J1) can be judged. D33 also names it as the later
-//! generative fallback for asynchronous decisions only; nothing live calls
-//! it yet — only `fleet-hub decide bench … --provider haiku`.
+//! generative fallback for asynchronous decisions only. `fleet-hub decide
+//! bench … --provider haiku` calls it, and live only the second opinion
+//! ([`super::haiku_shadow`]), which records beside Jev and never acts.
 //!
 //! * **The same question.** [`prompt_for`] renders the request's
 //!   **redacted** form ([`JevRequest::redacted`], exactly what the envelope
@@ -47,8 +48,8 @@
 //!   calibration. Tokens and cost come from the `--output-format json`
 //!   envelope when it has them, else they are unknown.
 //!
-//! Nothing is recorded in `decision_runs`: that record is the envelope's,
-//! for Jev only.
+//! A benchmark's call records nothing in `decision_runs`; the second
+//! opinion records its own runs (provider [`PROVIDER_HAIKU`]).
 
 use super::{canonical_json, JevRequest, Question};
 use crate::ipc_error::codes;
@@ -539,8 +540,10 @@ impl Haiku<'_> {
     }
 }
 
-/// Used by the benchmarks' tests (behind `nl-detect`, like `bench`).
-#[cfg(all(test, feature = "nl-detect"))]
+/// Used by the benchmarks' tests (behind `nl-detect`, like `bench`) and the
+/// second opinion's ([`super::haiku_shadow`]).
+#[cfg(test)]
+#[cfg_attr(not(feature = "nl-detect"), allow(dead_code))]
 pub(crate) mod testing;
 #[cfg(test)]
 mod tests;

@@ -753,6 +753,18 @@ pub const DECIDE_JEV_MODEL: &str = "decide.jev.model";
 pub const DECIDE_JEV_MODELS: &[&str] = &["jev-1.13.0", "jev-latest"];
 /// Days a `decision_runs` row is kept (`0` = forever).
 pub const DECIDE_RETENTION_DAYS: &str = "decide.retention_days";
+/// A second opinion: every question a use case in `shadow` or `assist`
+/// asks Jev is also asked of Claude in print mode on
+/// [`DECIDE_HAIKU_HOST`], and its answer recorded beside Jev's (provider
+/// `haiku`, mode `shadow`). Nothing acts on it. Off by default.
+pub const DECIDE_HAIKU_SHADOW: &str = "decide.haiku.shadow";
+/// The host whose Claude account answers the second opinion (`""`: none,
+/// so nothing is asked).
+pub const DECIDE_HAIKU_HOST: &str = "decide.haiku.host";
+/// The model the second opinion asks (one of [`SUMMARY_MODELS`]).
+pub const DECIDE_HAIKU_MODEL: &str = "decide.haiku.model";
+/// Second-opinion calls per UTC day (`0` = none).
+pub const DECIDE_HAIKU_DAILY_CALLS: &str = "decide.haiku.daily_calls";
 
 /// What `hub.tls` holds (`fleet-hub`'s `TlsMode`).
 pub const HUB_TLS_MODES: &[&str] = &["off", "cert"];
@@ -1787,6 +1799,44 @@ pub const SPECS: &[Spec] = &[
         "The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe.",
     )
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        DECIDE_HAIKU_SHADOW,
+        "false",
+        Kind::Bool,
+        "Second opinion from Claude",
+        "Also ask Claude every question a Jev use case in shadow or assist asks, on the host below, and record its answer beside Jev's to compare them. Nothing acts on it.",
+    )
+    .tags(&[Tag::Experimental, Tag::Network])
+    .danger("Each question's redacted state goes over SSH to the host below and on to Anthropic through that host's Claude account."),
+    Spec::new(
+        DECIDE_HAIKU_HOST,
+        "",
+        Kind::Text { max: 64 },
+        "Second opinion: host",
+        "The host whose Claude account answers. Only questions about its own organisation are sent to it.",
+    )
+    .tags(&[Tag::Experimental]),
+    Spec::new(
+        DECIDE_HAIKU_MODEL,
+        "haiku",
+        Kind::Choice(SUMMARY_MODELS),
+        "Second opinion: model",
+        "The Claude model the second opinion asks.",
+    )
+    .tags(&[Tag::Experimental, Tag::Advanced]),
+    Spec::new(
+        DECIDE_HAIKU_DAILY_CALLS,
+        "200",
+        Kind::Int {
+            min: 0,
+            max: 10_000,
+        },
+        "Second opinion: calls a day",
+        "Questions the second opinion may ask per UTC day. One at a time; a question that comes while one is running is not asked.",
+    )
+    .unit(Unit::Count)
+    .tags(&[Tag::Experimental, Tag::Advanced])
+    .zero("none"),
     Spec::new(
         DECIDE_RETENTION_DAYS,
         "90",

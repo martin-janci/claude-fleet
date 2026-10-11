@@ -2977,6 +2977,103 @@
       "value": "jev-1.13.0"
     },
     {
+      "ai": "never",
+      "danger": {
+        "level": "confirm",
+        "message": "Each question's redacted state goes over SSH to the host below and on to Anthropic through that host's Claude account."
+      },
+      "default": "false",
+      "help": "Also ask Claude every question a Jev use case in shadow or assist asks, on the host below, and record its answer beside Jev's to compare them. Nothing acts on it.",
+      "key": "decide.haiku.shadow",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Second opinion from Claude",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "network"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "",
+      "help": "The host whose Claude account answers. Only questions about its own organisation are sent to it.",
+      "key": "decide.haiku.host",
+      "kind": {
+        "max": 64,
+        "type": "text"
+      },
+      "label": "Second opinion: host",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental"
+      ],
+      "unit": "none",
+      "value": ""
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "haiku",
+      "help": "The Claude model the second opinion asks.",
+      "key": "decide.haiku.model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Second opinion: model",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "advanced"
+      ],
+      "unit": "none",
+      "value": "haiku"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "200",
+      "help": "Questions the second opinion may ask per UTC day. One at a time; a question that comes while one is running is not asked.",
+      "key": "decide.haiku.daily_calls",
+      "kind": {
+        "max": 10000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Second opinion: calls a day",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "advanced"
+      ],
+      "unit": "count",
+      "value": "200",
+      "zero": "none"
+    },
+    {
       "ai": "suggest",
       "danger": {
         "level": "none"
@@ -4364,6 +4461,46 @@
             "key": "decide.jev.enabled",
             "truthy": true
           }
+        },
+        {
+          "advanced": true,
+          "collapsible": true,
+          "items": [
+            {
+              "text": "Asks Claude the same questions as the use cases that are on, on one of your hosts, and records its answer beside Jev's to compare them. Nothing acts on it.",
+              "tone": "info",
+              "type": "notice"
+            },
+            {
+              "key": "decide.haiku.shadow",
+              "type": "field"
+            },
+            {
+              "key": "decide.haiku.host",
+              "type": "field",
+              "when": {
+                "key": "decide.haiku.shadow",
+                "truthy": true
+              }
+            },
+            {
+              "key": "decide.haiku.model",
+              "type": "field",
+              "when": {
+                "key": "decide.haiku.shadow",
+                "truthy": true
+              }
+            },
+            {
+              "key": "decide.haiku.daily_calls",
+              "type": "field",
+              "when": {
+                "key": "decide.haiku.shadow",
+                "truthy": true
+              }
+            }
+          ],
+          "title": "Second opinion"
         },
         {
           "items": [
