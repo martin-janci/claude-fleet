@@ -144,6 +144,9 @@ pub const DECISION_MAX_CANDIDATES: usize = 255;
 /// Most runs [`Store::decision_runs_for_subjects`] returns.
 pub const DECISION_SUBJECT_RUNS_MAX: usize = 5_000;
 
+/// The most labelled runs [`Store::labelled_decision_runs`] returns.
+pub const DECISION_LABELLED_RUNS_MAX: usize = 20_000;
+
 /// Longest id or vocabulary word a run records.
 pub const DECISION_WORD_MAX_CHARS: usize = 80;
 
@@ -616,6 +619,22 @@ impl Store {
                 since,
                 DECISION_SUBJECT_RUNS_MAX as i64
             ],
+            map_run,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// A feature's runs a person followed up ([`DECISION_PERSON_FOLLOWUPS`]),
+    /// newest first, at most [`DECISION_LABELLED_RUNS_MAX`]: what
+    /// `decide::floor` fits on.
+    pub fn labelled_decision_runs(&self, feature: &str) -> Result<Vec<DecisionRunRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {RUN_COLUMNS} FROM decision_runs \
+             WHERE feature = ?1 AND followup IN ('confirmed', 'corrected', 'rejected') \
+             ORDER BY id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![feature, DECISION_LABELLED_RUNS_MAX as i64],
             map_run,
         )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
