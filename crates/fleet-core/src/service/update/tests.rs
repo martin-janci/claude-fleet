@@ -833,6 +833,22 @@ async fn on_dev_every_target_asks_again_when_the_hub_next_reads_the_channel() {
 }
 
 #[test]
+fn only_the_hubs_own_install_wakes_its_updater() {
+    for st in [
+        Status::UpdateAvailable,
+        Status::UpdateRequired,
+        Status::Rollback,
+    ] {
+        assert!(wakes_hub_updater("hub:self", st), "{st:?}");
+        assert!(!wakes_hub_updater("client:1", st), "{st:?}");
+        assert!(!wakes_hub_updater("agent:box1", st), "{st:?}");
+    }
+    for st in [Status::UpToDate, Status::Hold, Status::Unknown] {
+        assert!(!wakes_hub_updater("hub:self", st), "{st:?}");
+    }
+}
+
+#[test]
 fn an_asked_for_refresh_runs_once_a_minute() {
     assert!(asked_refresh_due(i64::MIN, NOW));
     assert!(!asked_refresh_due(NOW, NOW));

@@ -140,9 +140,13 @@ impl Platform {
 }
 
 /// An inclusive protocol window, `[min, max]` on the wire — the shape the
-/// code's own `MIN_*` / `MAX_*` constants already have.
+/// code's own `MIN_*` / `MAX_*` constants already have. `{"min", "max"}` is
+/// read too: fleet-mobile's phones up to 0.6.3-dev.183 sent that, every
+/// `/update/check` of theirs was refused as unreadable, and those phones can
+/// only be told about the build that fixes it if the hub reads what they send.
+/// Written always as the array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "[u32; 2]", into = "[u32; 2]")]
+#[serde(from = "WindowWire", into = "[u32; 2]")]
 pub struct Window {
     pub min: u32,
     pub max: u32,
@@ -155,6 +159,22 @@ impl Window {
 
     pub fn contains(&self, v: u32) -> bool {
         self.min <= v && v <= self.max
+    }
+}
+
+/// Either spelling of a [`Window`] on the way in.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WindowWire {
+    Pair([u32; 2]),
+    Named { min: u32, max: u32 },
+}
+
+impl From<WindowWire> for Window {
+    fn from(w: WindowWire) -> Self {
+        match w {
+            WindowWire::Pair([min, max]) | WindowWire::Named { min, max } => Window { min, max },
+        }
     }
 }
 
@@ -173,6 +193,18 @@ impl From<Window> for [u32; 2] {
 #[cfg(test)]
 mod tests {
     use super::Component;
+
+    #[test]
+    fn a_window_reads_either_spelling_and_writes_the_array() {
+        let w = super::Window::new(5, 17);
+        assert_eq!(serde_json::from_str::<super::Window>("[5,17]").unwrap(), w);
+        assert_eq!(
+            serde_json::from_str::<super::Window>(r#"{"min":5,"max":17}"#).unwrap(),
+            w
+        );
+        assert_eq!(serde_json::to_string(&w).unwrap(), "[5,17]");
+        assert!(serde_json::from_str::<super::Window>(r#"{"min":5}"#).is_err());
+    }
 
     #[test]
     fn component_parses_what_it_prints_and_what_serde_prints() {

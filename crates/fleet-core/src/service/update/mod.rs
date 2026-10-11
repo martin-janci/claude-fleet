@@ -235,6 +235,12 @@ pub fn push_decisions(store: &Mutex<Store>, keys: &TrustedKeys, now: i64) -> Vec
             if let Ok(s) = lock(store) {
                 s.emit_update_decision(&o.target, &status, version.as_deref());
             }
+            // `fleet-updater` hears nothing pushed: wake it, so a release
+            // the hub just verified is decided on now rather than at its
+            // next poll. It still installs only what its decision says.
+            if wakes_hub_updater(&o.target, d.status) {
+                wake_hub_updater();
+            }
             pushed.push(o.target);
         }
     }
@@ -1425,6 +1431,16 @@ pub fn update_now(
         agents,
         hub_woken,
     })
+}
+
+/// Whether a moved decision for `target` should wake the hub's own
+/// updater: its own target, and something for it to act on.
+fn wakes_hub_updater(target: &str, status: Status) -> bool {
+    target == "hub:self"
+        && matches!(
+            status,
+            Status::UpdateAvailable | Status::UpdateRequired | Status::Rollback
+        )
 }
 
 /// Write `<data_dir>/update-now`; false when this process has no data dir.
