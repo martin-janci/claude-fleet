@@ -129,6 +129,7 @@ pub fn request(title: &str, key: Option<&str>, options: &[(String, String)]) -> 
     JevRequest {
         state: json!({ "task": { "title": title, "key": key.unwrap_or("") } }),
         question: question(options),
+        order_salt: None,
     }
 }
 

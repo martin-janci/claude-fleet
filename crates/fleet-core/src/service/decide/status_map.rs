@@ -212,6 +212,7 @@ pub fn question_for(section: &str, project_sections: &[String]) -> JevRequest {
     JevRequest {
         state: state(section, &board_window(project_sections, section)),
         question: question(),
+        order_salt: None,
     }
 }
 

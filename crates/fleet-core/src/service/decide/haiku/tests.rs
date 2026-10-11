@@ -30,6 +30,7 @@ fn leaky_request() -> JevRequest {
             instructions: json!("Which item?"),
             criteria,
         },
+        order_salt: None,
     }
 }
 
@@ -133,6 +134,7 @@ fn only_a_choice_is_asked() {
             instructions: json!("is it?"),
             criteria: None,
         },
+        order_salt: None,
     };
     assert!(prompt_for(&req).is_err());
 }
@@ -510,6 +512,7 @@ async fn a_prompt_over_the_cap_is_not_sent() {
             instructions: json!("which?"),
             criteria,
         },
+        order_salt: None,
     };
     let r = Haiku {
         exec: &fake,

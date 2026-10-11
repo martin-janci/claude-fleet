@@ -114,9 +114,10 @@ pub enum BenchCmd {
         /// Also ask every asked case with its first prompt perturbed
         /// (dataset C) and compare each variant with its original at the
         /// provider's raw pick: fold (no diacritics), typo, code (fenced
-        /// blocks replaced by `[code: <lang>, N lines]`, D42). Repeat it.
+        /// blocks replaced by `[code: <lang>, N lines]`, D42), option-order
+        /// (the same request, its options in another order). Repeat it.
         /// Each perturbation is its own pass of at most --max-calls calls.
-        #[arg(long = "perturb", value_parser = ["fold", "typo", "code"], conflicts_with = "export_unlinked")]
+        #[arg(long = "perturb", value_parser = ["fold", "typo", "code", "option-order"], conflicts_with = "export_unlinked")]
         perturb: Vec<String>,
     },
     /// Card J3: an Asana section's status category. Cases are labeled
@@ -147,10 +148,11 @@ pub enum BenchCmd {
         paired_fixture: bool,
         /// Also ask every case perturbed (dataset C) and compare each
         /// variant with its original: fold (no diacritics), typo, emoji,
-        /// no-board, shuffle-board (repeat it). Only cases the perturbation
-        /// changes are asked; each perturbation is its own pass of at most
-        /// --max-calls calls.
-        #[arg(long = "perturb", value_parser = ["fold", "typo", "emoji", "no-board", "shuffle-board"])]
+        /// no-board, shuffle-board, option-order (the same request, its
+        /// options in another order) (repeat it). Only cases the
+        /// perturbation changes are asked; each perturbation is its own pass
+        /// of at most --max-calls calls.
+        #[arg(long = "perturb", value_parser = ["fold", "typo", "emoji", "no-board", "shuffle-board", "option-order"])]
         perturb: Vec<String>,
         /// Report jev's and haiku's numbers at every confidence floor
         /// (0-0.95); with --split all, also the lowest floor the dev boards
@@ -158,11 +160,13 @@ pub enum BenchCmd {
         /// call: the answers under the floor are kept already.
         #[arg(long)]
         floor_sweep: bool,
-        /// A provider to run: none, todo, rule, jev, haiku (repeat it).
-        /// [default: todo and rule]. jev sends each section's name and its
-        /// board's names to TypeSafe through the envelope's gate; haiku
-        /// sends the same to claude -p on --haiku-host.
-        #[arg(long = "provider", value_parser = ["none", "todo", "rule", "jev", "haiku"])]
+        /// A provider to run: none, todo, rule, jev, haiku, jev-split
+        /// (repeat it). [default: todo and rule]. jev sends each section's
+        /// name and its board's names to TypeSafe through the envelope's
+        /// gate; jev-split sends the same as four narrow yes/no questions
+        /// combined in code (four calls a section); haiku sends the same
+        /// to claude -p on --haiku-host.
+        #[arg(long = "provider", value_parser = ["none", "todo", "rule", "jev", "haiku", "jev-split"])]
         providers: Vec<String>,
         #[command(flatten)]
         haiku: HaikuArgs,
@@ -965,7 +969,10 @@ async fn status_map_with(
     let (cases, dropped) = sm::cases(&rows);
     let (cases, split_sizes) = sm::split_cases(cases, split);
     let note = haiku.as_ref().map(Haiku::consent_note);
-    let ctx = if providers.contains(&sm::Provider::Jev) {
+    let ctx = if providers
+        .iter()
+        .any(|p| matches!(p, sm::Provider::Jev | sm::Provider::JevSplit))
+    {
         let path = db_path(db, opts, env)?;
         let store = Store::open_with_bus(&path, Arc::new(fleet_core::events::NoopEventBus))
             .map_err(|e| format!("open {}: {e}", path.display()))?;

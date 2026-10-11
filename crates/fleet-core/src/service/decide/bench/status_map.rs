@@ -30,6 +30,8 @@
 //! the same redacted state and options — of `claude -p` on a host the
 //! operator names ([`crate::service::decide::haiku`]), at the same floor;
 //! an answer outside the options is an abstention counted as `invalid`.
+//! `jev-split` asks Jev four narrow Nouls instead of the Choice and
+//! combines them in code ([`super::status_map_split`], four calls a case).
 //!
 //! **A question file** (`--question FILE`, [`parse_question`]) rewords the
 //! question — the instructions and each option's criterion — for both `jev`
@@ -118,15 +120,20 @@ pub enum Provider {
     /// `claude -p --model haiku` on a named host (D33; network, through
     /// that host's Claude account).
     Haiku,
+    /// Jev asked four narrow Nouls instead of the Choice, combined in code
+    /// ([`super::status_map_split`]; network, four calls a case).
+    #[serde(rename = "jev-split")]
+    JevSplit,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 5] = [
+    pub const ALL: [Provider; 6] = [
         Provider::None,
         Provider::Todo,
         Provider::Rule,
         Provider::Jev,
         Provider::Haiku,
+        Provider::JevSplit,
     ];
 
     pub fn parse(s: &str) -> Option<Provider> {
@@ -140,12 +147,13 @@ impl Provider {
             Provider::Rule => "rule",
             Provider::Jev => "jev",
             Provider::Haiku => "haiku",
+            Provider::JevSplit => "jev-split",
         }
     }
 
     /// Asks a model over the network (its latency, tokens and cost count).
     pub fn is_model(self) -> bool {
-        matches!(self, Provider::Jev | Provider::Haiku)
+        matches!(self, Provider::Jev | Provider::Haiku | Provider::JevSplit)
     }
 }
 
@@ -520,6 +528,7 @@ pub fn request_for(c: &SectionCase, question: Option<&QuestionOverride>) -> JevR
     if let Some(q) = question {
         r.question = q.question();
     }
+    r.order_salt = super::perturb::order_salt(&c.id);
     r
 }
 
@@ -576,7 +585,7 @@ pub fn offline_outcome(p: Provider, c: &SectionCase) -> Outcome {
         Provider::None => Outcome::answers(None),
         Provider::Todo => Outcome::answers(Some("todo")),
         Provider::Rule => Outcome::answers(c.rule),
-        Provider::Jev | Provider::Haiku => Outcome::skipped("no_backend"),
+        Provider::Jev | Provider::Haiku | Provider::JevSplit => Outcome::skipped("no_backend"),
     }
 }
 
@@ -727,6 +736,11 @@ pub async fn run_providers_with(
     for &p in providers {
         let v = match (p, jev, haiku) {
             (Provider::Jev, Some(ctx), _) => run_jev(ctx, cases, max_calls, question).await,
+            // The split question has its own wording: a question file
+            // rewords the Choice only.
+            (Provider::JevSplit, Some(ctx), _) => {
+                super::status_map_split::run(ctx, cases, max_calls).await
+            }
             (Provider::Haiku, _, Some(h)) => run_haiku(h, cases, max_calls, question).await,
             _ => cases.iter().map(|c| offline_outcome(p, c)).collect(),
         };
@@ -799,6 +813,9 @@ pub struct ProviderMetrics {
     pub latency_p95_ms: Option<i64>,
     pub input_tokens: i64,
     pub cost_microusd: i64,
+    /// Jev / haiku: the spend per right category answer
+    /// ([`super::cost_per_correct`]); `None` for a rule.
+    pub cost_per_correct_microusd: Option<i64>,
 }
 
 fn applied(c: &str) -> Option<&'static str> {
@@ -862,11 +879,16 @@ pub fn provider_metrics(p: Provider, rows: &[(&SectionCase, &Outcome)]) -> Provi
             }
         }
     }
+    let all = all.finish();
     ProviderMetrics {
         provider: p.as_str(),
+        cost_per_correct_microusd: p
+            .is_model()
+            .then(|| super::cost_per_correct(cost, all.correct))
+            .flatten(),
         cases: all.cases,
         skipped,
-        all: all.finish(),
+        all,
         rule_abstained: abst.finish(),
         applied_accuracy: pct(app_k, app_n),
         done_answers: done_n,
@@ -1309,7 +1331,11 @@ pub fn report(
             "the built-in set is synthetic ({FIXTURE_PATH}): LLM-written (D43), not yet spot-checked by the owner — its verdicts are indicative; the card's gate is the owner's hand set (--labels)"
         ));
     }
-    if providers.contains(&Provider::Jev) && cases.iter().all(|c| c.org_id.is_none()) {
+    if providers
+        .iter()
+        .any(|p| matches!(p, Provider::Jev | Provider::JevSplit))
+        && cases.iter().all(|c| c.org_id.is_none())
+    {
         notes.push("no case has an org: a jev call's consent is decide.jev.unassigned".to_string());
     }
     Report {
@@ -1397,7 +1423,7 @@ impl Report {
             format!("providers: {}", self.providers.join(", ")),
             String::new(),
             format!(
-                "  {:<5} {:>5} {:>8} {:>8} {:>8} {:>15} {:>9} {:>14} {:>7} {:>11} {:>7} {:>10}  skipped",
+                "  {:<5} {:>5} {:>8} {:>8} {:>8} {:>15} {:>9} {:>14} {:>7} {:>11} {:>7} {:>10} {:>10}  skipped",
                 "",
                 "cases",
                 "answered",
@@ -1409,7 +1435,8 @@ impl Report {
                 "strict",
                 "p50/p95 ms",
                 "tokens",
-                "cost"
+                "cost",
+                "cost/right"
             ),
         ];
         for m in &self.metrics {
@@ -1419,7 +1446,7 @@ impl Report {
                 join(&m.skipped)
             };
             v.push(format!(
-                "  {:<5} {:>5} {:>8} {:>8} {:>8} {:>15} {:>9} {:>14} {:>7} {:>11} {:>7} {:>10}  {}",
+                "  {:<5} {:>5} {:>8} {:>8} {:>8} {:>15} {:>9} {:>14} {:>7} {:>11} {:>7} {:>10} {:>10}  {}",
                 m.provider,
                 m.cases,
                 m.all.answered,
@@ -1439,6 +1466,7 @@ impl Report {
                 },
                 m.input_tokens,
                 crate::service::decide::fmt_usd(m.cost_microusd),
+                super::fmt_cost_per_correct(m.cost_per_correct_microusd),
                 skipped
             ));
         }

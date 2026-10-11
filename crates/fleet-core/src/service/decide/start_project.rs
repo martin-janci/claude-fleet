@@ -199,6 +199,7 @@ pub fn question_for(input: &StartInput) -> JevRequest {
     JevRequest {
         state: state(input),
         question: question(&input.candidates),
+        order_salt: None,
     }
 }
 

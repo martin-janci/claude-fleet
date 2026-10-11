@@ -198,6 +198,7 @@ pub fn request(prompt: &str, keys: &[KeyCandidate]) -> JevRequest {
     JevRequest {
         state: json!({ "prompt": masked(prompt, keys) }),
         question: question(keys),
+        order_salt: None,
     }
 }
 

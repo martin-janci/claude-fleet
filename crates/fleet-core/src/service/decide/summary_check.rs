@@ -91,6 +91,7 @@ pub fn request(summary: &str, transcript: &str) -> JevRequest {
             "transcript": tail_bytes(transcript, TRANSCRIPT_MAX_BYTES),
         }),
         question: question(),
+        order_salt: None,
     }
 }
 

@@ -165,6 +165,7 @@ pub fn request(proposed: &WorkItemRow, candidates: &[WorkItemRow]) -> JevRequest
     JevRequest {
         state: state(proposed),
         question: question(candidates),
+        order_salt: None,
     }
 }
 

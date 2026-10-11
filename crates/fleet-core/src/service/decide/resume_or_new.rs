@@ -303,6 +303,7 @@ pub fn question_for(input: &ResumeInput, now: i64) -> JevRequest {
     JevRequest {
         state: state(input, now),
         question: question(input),
+        order_salt: None,
     }
 }
 

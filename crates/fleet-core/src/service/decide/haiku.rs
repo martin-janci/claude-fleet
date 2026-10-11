@@ -3,8 +3,9 @@
 //! mode on a host the operator names, so the benchmarks' acceptance lines
 //! "beats / ties claude -p haiku" (card J3) and "not worse than haiku by more
 //! than 3 points" (card J1) can be judged. D33 also names it as the later
-//! generative fallback for asynchronous decisions only; nothing live calls
-//! it yet — only `fleet-hub decide bench … --provider haiku`.
+//! generative fallback for asynchronous decisions only. `fleet-hub decide
+//! bench … --provider haiku` calls it, and live only the second opinion
+//! ([`super::haiku_shadow`]), which records beside Jev and never acts.
 //!
 //! * **The same question.** [`prompt_for`] renders the request's
 //!   **redacted** form ([`JevRequest::redacted`], exactly what the envelope
@@ -47,8 +48,8 @@
 //!   calibration. Tokens and cost come from the `--output-format json`
 //!   envelope when it has them, else they are unknown.
 //!
-//! Nothing is recorded in `decision_runs`: that record is the envelope's,
-//! for Jev only.
+//! A benchmark's call records nothing in `decision_runs`; the second
+//! opinion records its own runs (provider [`PROVIDER_HAIKU`]).
 
 use super::{canonical_json, JevRequest, Question};
 use crate::ipc_error::codes;
@@ -236,15 +237,17 @@ pub fn prompt_for(req: &JevRequest) -> Result<(String, Vec<String>), String> {
 /// `claude` reads the prompt from the command's stdin.
 pub fn haiku_script(model: &str, host_timeout_secs: u64) -> Result<String, String> {
     use crate::service::claude_print;
-    use crate::shell::quote;
+    use crate::service::headless::{self, HeadlessJob};
     if !MODELS.contains(&model) {
         return Err(format!("refusing model {model:?}"));
     }
-    let claude = format!(
-        "claude -p --model {} --output-format json {}",
-        quote(model),
-        claude_print::isolation_flags()
-    );
+    let agent = headless::default_agent();
+    let claude = agent.command(&HeadlessJob {
+        model,
+        prompt: None,
+        stdin_file: None,
+        fork_of: None,
+    });
     let t = HAIKU_TAG;
     Ok(format!(
         "set -o pipefail; \
@@ -254,7 +257,7 @@ pub fn haiku_script(model: &str, host_timeout_secs: u64) -> Result<String, Strin
          {run}; s=$?; \
          if [ -n \"$d\" ]; then cd / && rmdir -- \"$d\" 2>/dev/null; fi; \
          exit $s",
-        noclaude = claude_print::noclaude_check(t),
+        noclaude = agent.missing_check(t),
         run = claude_print::run_capped(t, &claude, host_timeout_secs, OUTPUT_CAP_BYTES, false),
     ))
 }
@@ -541,8 +544,10 @@ impl Haiku<'_> {
     }
 }
 
-/// Used by the benchmarks' tests (behind `nl-detect`, like `bench`).
-#[cfg(all(test, feature = "nl-detect"))]
+/// Used by the benchmarks' tests (behind `nl-detect`, like `bench`) and the
+/// second opinion's ([`super::haiku_shadow`]).
+#[cfg(test)]
+#[cfg_attr(not(feature = "nl-detect"), allow(dead_code))]
 pub(crate) mod testing;
 #[cfg(test)]
 mod tests;
