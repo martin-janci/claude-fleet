@@ -1337,6 +1337,23 @@ describe('SessionDetails reviews block (gap plan G4.3)', () => {
     expect(get(selectedSession)?.id).toBe(2);
   });
 
+  it("shows a finished run's verdict line from the reviewer's last reply (G7.10)", async () => {
+    const done = { ...sampleSession, id: 2, tmux_name: 'review-a', kind: 'review', reviews_session_id: 1, claude_status: 'idle' as const, last_turn_at: 50 };
+    const silent = { ...sampleSession, id: 3, tmux_name: 'review-b', kind: 'review', reviews_session_id: 1, claude_status: 'idle' as const, last_turn_at: 60 };
+    vi.mocked(mockedInvoke).mockImplementation(async (cmd: string, a?: unknown) => {
+      if (cmd !== 'session_conversation') return null;
+      const id = (a as { args: { session_id: number } }).args.session_id;
+      const text = id === 2 ? 'All good.\nVerdict: approve-with-fixes · 0 blocking · 2 nits' : 'Looks fine.';
+      return { turns: [{ prompt: 'p', at: null, ended_at: null, items: [{ kind: 'text', text }] }], context: null };
+    });
+    sessions.set([source, done, silent]);
+    render(SessionDetails, { props: { session: source } });
+    const line = await screen.findByTestId('reviews-verdict');
+    expect(line.textContent?.trim()).toBe('approve with fixes · no blocking findings · 2 nits');
+    expect(screen.getAllByTestId('reviews-verdict')).toHaveLength(1);
+    expect(mockedInvoke).toHaveBeenCalledWith('session_conversation', { args: { session_id: 3, turns: 1 } });
+  });
+
   it('shows the PR review decision GitHub reports', async () => {
     const withPr = {
       ...source,
@@ -1348,6 +1365,18 @@ describe('SessionDetails reviews block (gap plan G4.3)', () => {
     await tick();
     expect(screen.getByTestId('reviews-pr-decision').textContent).toContain('PR #476 · changes requested');
     expect(screen.queryByTestId('reviews-empty')).toBeNull();
+  });
+
+  it('the PR line reads checks passed and the review decision (G7.9)', async () => {
+    const withPr = {
+      ...source,
+      pr_url: 'https://github.com/o/r/pull/476',
+      pr_evidence: { draft: false, checks: { total: 16, pending: 0, skipped: 1, failing_total: 0 } },
+    } as unknown as SessionRow;
+    sessions.set([withPr]);
+    render(SessionDetails, { props: { session: withPr } });
+    await tick();
+    expect(screen.getAllByTestId('details-pr-line')[0].textContent).toBe('15/15 checks · no reviews');
   });
 
   it('with no run yet says so, and Start a review run opens the review dialog', async () => {

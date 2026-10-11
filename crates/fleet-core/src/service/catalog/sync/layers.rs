@@ -4,6 +4,7 @@ use crate::ipc_error::codes;
 #[cfg(test)]
 use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
+use crate::service::catalog::layer::Axis;
 use crate::service::catalog::repo::Catalog;
 use crate::service::catalog::resolve::{resolve, Resolution};
 use crate::store::HostLayerRow;
@@ -61,6 +62,20 @@ pub fn resolve_rows(
     host_alias: &str,
     rows: &[HostLayerRow],
 ) -> Result<Resolution, IpcError> {
+    resolve_rows_for(catalog, host_alias, rows, None)
+}
+
+/// [`resolve_rows`] for a host in the org named `host_org`: after its own
+/// contexts, the host also takes every context layer that applies by that
+/// organisation (`Layer::orgs`), in name order. Only a host that has rows
+/// in this catalog takes them — with none it keeps the whole catalog, since
+/// layer membership is a union and an org layer alone would narrow it.
+pub fn resolve_rows_for(
+    catalog: &Catalog,
+    host_alias: &str,
+    rows: &[HostLayerRow],
+    host_org: Option<&str>,
+) -> Result<Resolution, IpcError> {
     if rows.is_empty() {
         return Ok(resolve(catalog, &[], &[]));
     }
@@ -117,6 +132,27 @@ pub fn resolve_rows(
                 .any(|c: &&crate::service::catalog::layer::Layer| c.name == l.name)
             {
                 contexts.push(l);
+            }
+        }
+    }
+    if let Some(org) = host_org {
+        let by_org: Vec<&str> = catalog
+            .layers
+            .iter()
+            .filter(|l| {
+                l.axis == Axis::Context && l.orgs.iter().any(|o| o.eq_ignore_ascii_case(org))
+            })
+            .map(|l| l.name.as_str())
+            .collect();
+        for name in by_org {
+            for l in catalog
+                .layers
+                .chain_for(name)
+                .map_err(|e| IpcError::new(codes::E_INVALID, e))?
+            {
+                if !contexts.iter().any(|c| c.name == l.name) {
+                    contexts.push(l);
+                }
             }
         }
     }
@@ -354,6 +390,54 @@ mod tests {
         }
         // `cat()` has id 0: the personal catalog, which has no rows here.
         let r = resolve_for_host(&store, &cat(), "local").unwrap();
+        assert!(!r.layered);
+        assert_eq!(names(&r), vec!["a", "b", "c", "d", "e", "f"]);
+    }
+
+    fn row(layer: &str, axis: &str) -> HostLayerRow {
+        HostLayerRow {
+            host_alias: "local".into(),
+            catalog_id: 0,
+            layer_name: layer.into(),
+            axis: axis.into(),
+            position: 0,
+            active: true,
+        }
+    }
+
+    fn with_org_layer() -> Catalog {
+        let mut c = cat();
+        let mut layers: Vec<Layer> = c.layers.iter().cloned().collect();
+        layers.push(
+            Layer::from_yaml(
+                "kind: layer\nname: papaya\naxis: context\norgs:\n  - Papaya\n\
+                 extends: extra_base\nmembers:\n  - skill/f\n",
+            )
+            .unwrap(),
+        );
+        let (set, errs) = LayerSet::from_layers(layers);
+        assert!(errs.is_empty(), "{errs:?}");
+        c.layers = set;
+        c
+    }
+
+    #[test]
+    fn an_org_layer_adds_to_every_layered_host_of_that_org() {
+        let c = with_org_layer();
+        let rows = [row("core", "role")];
+        let r = resolve_rows_for(&c, "local", &rows, Some("Papaya")).unwrap();
+        // core's `a`, plus the org layer's `f` and its parent's `d`.
+        assert_eq!(names(&r), vec!["a", "d", "f"]);
+        // Another org, or no org, does not take it.
+        let other = resolve_rows_for(&c, "local", &rows, Some("Acme")).unwrap();
+        assert_eq!(names(&other), vec!["a"]);
+        assert_eq!(names(&resolve_rows(&c, "local", &rows).unwrap()), vec!["a"]);
+    }
+
+    #[test]
+    fn an_org_layer_never_narrows_a_host_that_takes_the_whole_catalog() {
+        let c = with_org_layer();
+        let r = resolve_rows_for(&c, "local", &[], Some("Papaya")).unwrap();
         assert!(!r.layered);
         assert_eq!(names(&r), vec!["a", "b", "c", "d", "e", "f"]);
     }

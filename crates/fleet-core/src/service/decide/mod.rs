@@ -64,6 +64,9 @@ mod quick_answer_tests;
 pub mod related_session;
 #[cfg(test)]
 mod related_session_tests;
+pub mod resume_or_new;
+#[cfg(test)]
+mod resume_or_new_tests;
 pub mod routine_run_outcome;
 #[cfg(test)]
 mod routine_run_outcome_tests;
@@ -166,6 +169,9 @@ pub enum Feature {
     /// A local task that may be the same work as a tracker ticket (J7,
     /// redesign step 6.8).
     TrackerDuplicate,
+    /// Resume a past session of the work key a new session plans, or start
+    /// fresh (N2, gap plan G7.10).
+    ResumeOrNew,
 }
 
 impl Feature {
@@ -189,6 +195,7 @@ impl Feature {
         Feature::PrTriage,
         Feature::MainTicket,
         Feature::TrackerDuplicate,
+        Feature::ResumeOrNew,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -212,6 +219,7 @@ impl Feature {
             Feature::PrTriage => "pr_triage",
             Feature::MainTicket => "main_ticket",
             Feature::TrackerDuplicate => "tracker_duplicate",
+            Feature::ResumeOrNew => "resume_or_new",
         }
     }
 
@@ -241,6 +249,7 @@ impl Feature {
             Feature::PrTriage => settings::DECIDE_JEV_PR_TRIAGE,
             Feature::MainTicket => settings::DECIDE_JEV_MAIN_TICKET,
             Feature::TrackerDuplicate => settings::DECIDE_JEV_TRACKER_DUPLICATE,
+            Feature::ResumeOrNew => settings::DECIDE_JEV_RESUME_OR_NEW,
         }
     }
 
@@ -1118,6 +1127,45 @@ pub struct DecideHealth {
     /// `breaker_open` or `failure_rate` when degraded.
     #[serde(default)]
     pub reason: Option<String>,
+    /// The last seven days' live proposals and how people answered them
+    /// (gap plan G7.3, the phone's decision stats). Not sent when `None`
+    /// (an older hub, or a read that failed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub week: Option<DecideWeek>,
+}
+
+/// [`DecideHealth::week`]: live runs only, benchmarks left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecideWeek {
+    /// Live runs that answered (no fallback).
+    pub proposals: u32,
+    /// A person kept the answer.
+    pub kept: u32,
+    /// A person changed it to something else.
+    pub changed: u32,
+    /// A person turned it down.
+    pub rejected: u32,
+    /// Nobody acted on it.
+    pub ignored: u32,
+}
+
+/// What [`DecideHealth::week`] counts over.
+pub const WEEK_SECS: i64 = 7 * 86_400;
+
+/// PURE: [`DecideWeek`] from rows of [`Store::decision_stats`].
+pub fn week_of(stats: &[DecisionStatRow]) -> DecideWeek {
+    let n = |v: i64| u32::try_from(v).unwrap_or(u32::MAX);
+    let mut w = DecideWeek::default();
+    for r in stats.iter().filter(|r| !r.bench) {
+        if r.fallback.is_none() {
+            w.proposals = w.proposals.saturating_add(n(r.runs));
+        }
+        w.kept = w.kept.saturating_add(n(r.confirmed));
+        w.changed = w.changed.saturating_add(n(r.corrected));
+        w.rejected = w.rejected.saturating_add(n(r.rejected));
+        w.ignored = w.ignored.saturating_add(n(r.ignored));
+    }
+    w
 }
 
 /// PURE: the judgement over the live `stats` of the window (rows of
@@ -1164,6 +1212,7 @@ pub fn health_of(
         budget_spent,
         degraded: reason.is_some(),
         reason: reason.map(str::to_string),
+        week: None,
     }
 }
 
@@ -1201,13 +1250,9 @@ pub fn health(s: &Store, now: i64) -> Option<DecideHealth> {
         .decision_usage_since(PROVIDER_JEV, day_start(now), RunScope::Live)
         .ok()?;
     let budget_spent = cfg.daily_token_budget > 0 && used >= cfg.daily_token_budget;
-    Some(health_of(
-        enabled,
-        modes,
-        &stats,
-        breaker.open,
-        budget_spent,
-    ))
+    let mut h = health_of(enabled, modes, &stats, breaker.open, budget_spent);
+    h.week = s.decision_stats(now - WEEK_SECS).ok().map(|w| week_of(&w));
+    Some(h)
 }
 
 impl DecideHealth {
@@ -1494,5 +1539,51 @@ impl DecideStatus {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod week_tests {
+    use super::*;
+
+    fn row(fallback: Option<&str>, bench: bool, runs: i64) -> DecisionStatRow {
+        DecisionStatRow {
+            feature: "host_placement".into(),
+            bench,
+            provider: "jev".into(),
+            fallback: fallback.map(str::to_string),
+            org_id: None,
+            runs,
+            called: runs,
+            input_tokens: 0,
+            cost_microusd: 0,
+            confirmed: 3,
+            rejected: 1,
+            corrected: 2,
+            ignored: 1,
+            compared: 0,
+            agreed: 0,
+        }
+    }
+
+    /// The phone's "Jev this week": answered proposals and how people met
+    /// them; a fallback is not a proposal and a benchmark is not counted.
+    #[test]
+    fn the_week_counts_live_answers_and_their_follow_ups() {
+        let w = week_of(&[
+            row(None, false, 7),
+            row(Some("timeout"), false, 4),
+            row(None, true, 50),
+        ]);
+        assert_eq!(
+            w,
+            DecideWeek {
+                proposals: 7,
+                kept: 6,
+                changed: 4,
+                rejected: 2,
+                ignored: 2,
+            }
+        );
     }
 }

@@ -9,8 +9,7 @@ import {
   peakUsed,
   planLabel,
   sparkPath,
-  type UsageSnapshotRow,
-} from './accounts_page';
+  type UsageSnapshotRow, refreshedLine, routinesRunningAs } from './accounts_page';
 import {
   ADMIN,
   GMAIL,
@@ -136,5 +135,26 @@ describe('fallback role (G4.5)', () => {
     expect(fallbackRoutinesOn(WORK.uuid, routines, hosts)).toBe(0);
     expect(countLine(2, 1, null, 1)).toBe('2 sessions · 1 routine · fallback for 1 routine');
     expect(countLine(2, 0, '$1.00', 0)).toBe('2 sessions · $1.00 today');
+  });
+});
+
+describe('the page header and paused panel (M15 G7.12)', () => {
+  it('names the newest reading of any account', () => {
+    expect(refreshedLine([], 1000)).toBeNull();
+    expect(refreshedLine([null, undefined], 1000)).toBeNull();
+    expect(refreshedLine([900, 970], 1000)).toBe('usage refreshed just now');
+    expect(refreshedLine([400, 100], 1000)).toBe('usage refreshed 10m ago');
+    expect(refreshedLine([1000 - 7200], 1000)).toBe('usage refreshed 2h ago');
+  });
+
+  it('lists the switched-on routines that run as the account', () => {
+    const hosts = [{ alias: 'mac', account_uuid: 'A', claude_profiles: [{ name: 'work', account_uuid: 'B' }] }] as never;
+    const routines = [
+      { id: 1, host_alias: 'mac', profile: null, enabled: true },
+      { id: 2, host_alias: 'mac', profile: null, enabled: false },
+      { id: 3, host_alias: 'mac', profile: 'work', enabled: true },
+    ];
+    expect(routinesRunningAs('A', routines, hosts).map((r) => r.id)).toEqual([1]);
+    expect(routinesRunningAs('B', routines, hosts).map((r) => r.id)).toEqual([3]);
   });
 });

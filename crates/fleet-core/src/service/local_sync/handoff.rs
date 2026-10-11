@@ -54,6 +54,8 @@ pub struct AskAiArgs {
     /// `resolve` (needs `paths` = the one conflicting path) or `custom`
     /// (needs `question`).
     pub intent: String,
+    /// The question for `custom`; for any other intent an optional note
+    /// appended to the ask.
     #[serde(default)]
     pub question: Option<String>,
     /// The files to talk about; the link's unhanded local changes when
@@ -472,8 +474,27 @@ fn changes_paragraph(link: &LocalWorkspaceRow, files: &[(String, String)]) -> St
     }
 }
 
-/// The prompt for `intent`. `files` are (path, change) pairs.
+/// The prompt for `intent`. `files` are (path, change) pairs. `question` is
+/// the whole ask for "custom"; for any other intent it is an optional note
+/// the person adds ("and check the error paths"), appended after the ask.
 pub fn compose(
+    link: &LocalWorkspaceRow,
+    intent: &str,
+    question: Option<&str>,
+    files: &[(String, String)],
+) -> Result<String, IpcError> {
+    let base = compose_intent(link, intent, question, files)?;
+    let note = question.map(str::trim).filter(|q| !q.is_empty());
+    Ok(match note {
+        Some(q) if intent != "custom" => format!(
+            "{base}
+Also: {q}"
+        ),
+        _ => base,
+    })
+}
+
+fn compose_intent(
     link: &LocalWorkspaceRow,
     intent: &str,
     question: Option<&str>,
@@ -830,6 +851,20 @@ mod tests {
             compose(&link(), "dance", None, &[]).unwrap_err().code,
             codes::E_INVALID
         );
+    }
+
+    #[test]
+    fn any_intent_takes_an_optional_question() {
+        let files = [f("a.rs", "modified")];
+        let p = compose(&link(), "review", Some(" check the error paths "), &files).unwrap();
+        assert!(p.contains("Review these changes"), "{p}");
+        assert!(p.ends_with("\nAlso: check the error paths"), "{p}");
+        let p = compose(&link(), "merge", Some("keep main's lockfile"), &files).unwrap();
+        assert!(p.ends_with("\nAlso: keep main's lockfile"), "{p}");
+        let p = compose(&link(), "review", Some("   "), &files).unwrap();
+        assert!(!p.contains("Also:"), "{p}");
+        let p = compose(&link(), "custom", Some("Why this?"), &files).unwrap();
+        assert!(!p.contains("Also:"), "{p}");
     }
 
     #[test]

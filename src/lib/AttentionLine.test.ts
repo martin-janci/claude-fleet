@@ -83,7 +83,8 @@ describe('the attention line (redesign 1.2)', () => {
     await tick();
     const buttons = [
       ...Array.from(screen.getByTestId('link-review-sheet').querySelectorAll('button')),
-      ...Array.from(screen.getByTestId('tidy-sheet').querySelectorAll('button')),
+      // The Reopened group's Resume is its own split control (ResumeButton).
+      ...Array.from(screen.getByTestId('tidy-sheet').querySelectorAll('button')).filter((b) => !b.closest('.resume')),
     ];
     expect(buttons.length).toBeGreaterThan(3);
     for (const b of buttons) {

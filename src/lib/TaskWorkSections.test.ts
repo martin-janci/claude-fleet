@@ -54,6 +54,17 @@ describe('TaskWorkSections', () => {
     expect(screen.getByTestId('task-steps').textContent).toContain('per the agent');
   });
 
+  it('counts subtasks done of all, "2 / 4", each with its ✓ ◐ ○ mark (G7.6)', () => {
+    const sub = (id: number, status: string) => ({ ...detail.subtasks![0], task_id: `item:${id}`, item_id: id, title: `S${id}`, status });
+    render(TaskWorkSections, {
+      detail: { ...detail, subtasks: [sub(1, 'done'), sub(2, 'done'), sub(3, 'in_progress'), sub(4, 'todo')] },
+    });
+    expect(screen.getByTestId('task-subtask-progress').textContent).toBe('2 / 4');
+    const marks = screen.getAllByTestId('task-subtask-mark');
+    expect(marks.map((m) => m.textContent)).toEqual(['✓', '✓', '◐', '○']);
+    expect(marks.map((m) => m.getAttribute('aria-label'))).toEqual(['done', 'done', 'in progress', 'to do']);
+  });
+
   it('accepts and rejects a proposal', async () => {
     render(TaskWorkSections, { detail });
     await fireEvent.click(screen.getByTestId('task-proposal-accept'));

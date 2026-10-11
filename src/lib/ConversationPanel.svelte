@@ -106,6 +106,7 @@
     CONV_MAX_TURNS,
     PROBE_TTL_MS,
     isQuietStatus,
+    daySeparator,
     shouldFetchTranscript,
     CONVERSATION_POLL_MS,
     ACTIVITY_POLL_MS,
@@ -144,6 +145,7 @@
   import { push as pushToast } from './toasts';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { projectSkills } from './project_skills';
+  import { completeTaskLink, matchTaskLinks, taskLinkQuery, type TaskLink } from './control_task_link';
   import { overflowMark } from './overflow_mark';
 
   let {
@@ -201,6 +203,13 @@
     // (Control: "# task · @ host · / command").
     composerHint = '↵ send · ⇧↵ newline · ↑ history',
     placeholder = 'Send a prompt…',
+    // Gap plan G7.8: "# link a task". A host that hands its tasks here
+    // (Control) gets a menu on `#` that puts a task's key in the box
+    // (`control_task_link.ts`). Read once, the first time `#` is typed.
+    linkTasks,
+    // Gap plan G7.8: a line naming the day ("Today", "Yesterday",
+    // "Thu 8 Oct") above the first row of each day (Control's chat).
+    daySeparators = false,
   }: {
     session: SessionRow;
     visible: boolean;
@@ -217,6 +226,8 @@
     runCommand?: (text: string) => boolean;
     composerHint?: string;
     placeholder?: string;
+    linkTasks?: () => Promise<TaskLink[]>;
+    daySeparators?: boolean;
   } = $props();
 
   // Raw: replaced whole on each read and never mutated, so a deep proxy only
@@ -1443,6 +1454,33 @@
     histIndex = null;
   }
   const slashOpen = $derived(slashMatches.length > 0);
+
+  // ── # link a task (G7.8) ──
+  let taskLinks = $state.raw<TaskLink[] | null>(null);
+  let taskIndex = $state(0);
+  let taskDismissedFor = $state<string | null>(null);
+  const taskQuery = $derived(linkTasks && !slashOpen ? taskLinkQuery(draft) : null);
+  $effect(() => {
+    if (taskQuery === null || taskLinks !== null || !linkTasks) return;
+    taskLinks = [];
+    void linkTasks().then((list) => (taskLinks = list));
+  });
+  const taskMatches = $derived(
+    taskQuery === null || taskDismissedFor === draft ? [] : matchTaskLinks(taskQuery, taskLinks ?? []),
+  );
+  const taskOpen = $derived(taskMatches.length > 0);
+  $effect(() => {
+    if (taskIndex >= taskMatches.length) taskIndex = 0;
+  });
+  const TASK_LIST_ID = `conv-task-list-${hlSuffix}`;
+  const taskOptionId = (i: number) => `conv-task-opt-${hlSuffix}-${i}`;
+
+  function acceptTask(t: TaskLink) {
+    draft = completeTaskLink(draft, t);
+    taskDismissedFor = draft;
+    histIndex = null;
+    box?.focus();
+  }
   // Keep the highlight inside the list as the prefix narrows it.
   $effect(() => {
     if (slashIndex >= slashMatches.length) slashIndex = 0;
@@ -1634,6 +1672,25 @@
     // WebKit fires the composition-confirming Enter with isComposing false
     // and keyCode 229; treat it as composition too.
     if (e.isComposing || e.keyCode === 229) return;
+    if (taskOpen) {
+      const highlighted = taskMatches[taskIndex] ?? taskMatches[0];
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const n = taskMatches.length;
+        taskIndex = (taskIndex + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+        return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.altKey)) {
+        e.preventDefault();
+        acceptTask(highlighted);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        taskDismissedFor = draft;
+        return;
+      }
+    }
     if (slashOpen) {
       const highlighted = slashMatches[slashIndex] ?? slashMatches[0];
       if (e.key === 'ArrowDown') {
@@ -2175,8 +2232,10 @@
           </p>
         {/if}
         {#if conv}
-          {#each thread as row (rowKey(row))}
+          {#each thread as row, ri (rowKey(row))}
             {@const key = rowKey(row)}
+            {@const day = daySeparators ? daySeparator(thread, ri, nowMs) : null}
+            {#if day}<div class="day-sep" data-testid="conv-day-separator" role="separator" aria-label={day}><span>{day}</span></div>{/if}
             {#if row.kind === 'event'}
               <div
                 class="event"
@@ -2612,6 +2671,26 @@
           {/each}
         </ul>
       {/if}
+      {#if taskOpen}
+        <ul class="slash-menu" role="listbox" id={TASK_LIST_ID} aria-label="Link a task" data-testid="conv-task-menu">
+          {#each taskMatches as t, i (t.key)}
+            <li role="presentation" class:active={i === taskIndex} data-testid="conv-task-item">
+              <button
+                type="button"
+                role="option"
+                id={taskOptionId(i)}
+                aria-selected={i === taskIndex}
+                tabindex="-1"
+                onmousedown={(e) => e.preventDefault()}
+                onclick={() => acceptTask(t)}>
+                <span class="slash-name">#{t.key}</span>
+                <span class="slash-desc">{t.title}</span>
+                {#if t.status}<span class="slash-source">{t.status}</span>{/if}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
       {#if helpOpen}
         <ContextHelp
           model={helpModel($fleetSettings)}
@@ -2730,8 +2809,12 @@
           class="composer-input"
           data-testid="conv-composer-input"
           aria-label="Prompt"
-          aria-controls={slashOpen ? SLASH_LIST_ID : undefined}
-          aria-activedescendant={slashOpen ? slashOptionId(Math.min(slashIndex, slashMatches.length - 1)) : undefined}
+          aria-controls={slashOpen ? SLASH_LIST_ID : taskOpen ? TASK_LIST_ID : undefined}
+          aria-activedescendant={slashOpen
+            ? slashOptionId(Math.min(slashIndex, slashMatches.length - 1))
+            : taskOpen
+              ? taskOptionId(Math.min(taskIndex, taskMatches.length - 1))
+              : undefined}
           aria-describedby={COMPOSER_HINT_ID}
           bind:this={box}
           bind:value={draft}
@@ -3138,6 +3221,20 @@
   .composer-pick:disabled {
     opacity: 0.5;
   }
+  .day-sep {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: var(--space-2) 0;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
+  .day-sep::before,
+  .day-sep::after {
+    content: '';
+    flex: 1;
+    border-top: 1px solid var(--border);
+  }
   .composer-hint {
     flex: 1 1 auto;
     min-width: 0;
@@ -3473,7 +3570,7 @@
        they sit a step above the tool rows, receipts and footers around
        them, which stay at text-2xs/xs. 1.6 rather than the token's 1.5:
        a reply runs to many lines, and the extra lead keeps the eye on the
-       right one at 80ch (WCAG 1.4.12 asks for at least 1.5). */
+       right one across the reading column (WCAG 1.4.12 asks for at least 1.5). */
     font-size: var(--text-md);
     line-height: 1.6;
     color: var(--fg);

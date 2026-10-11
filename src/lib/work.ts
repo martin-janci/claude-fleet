@@ -485,6 +485,24 @@ export function nameSessionWork(
   });
 }
 
+/** The other sessions on `row`'s branch that have no work yet (G7.6, the
+ *  "Also name the N other sessions on this branch" box): the same host and
+ *  checkout (`worktree_id`), not lost. A row with no checkout has none. */
+export function branchMates<R extends Pick<SessionRow, 'id' | 'host_alias' | 'worktree_id' | 'lost_at' | 'work'>>(
+  row: Pick<SessionRow, 'id' | 'host_alias' | 'worktree_id'>,
+  all: readonly R[],
+): R[] {
+  if (row.worktree_id == null) return [];
+  return all.filter(
+    (s) =>
+      s.id !== row.id &&
+      s.host_alias === row.host_alias &&
+      s.worktree_id === row.worktree_id &&
+      s.lost_at == null &&
+      s.work?.item_id == null,
+  );
+}
+
 /** Name one piece of work for several sessions (a group header's "Name
  *  this work…"): the first session names it, the rest link to the new item.
  *  Stops at the first failure; answers the rows it updated. */

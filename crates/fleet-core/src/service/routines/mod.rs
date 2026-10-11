@@ -932,6 +932,71 @@ pub fn skip_next(
         .ok_or_else(|| not_found(id))
 }
 
+/// `routines { action: set_run_outcome, routine_id, run_id, outcome }`: a
+/// person says what a finished run came to (G7.9, Automation board: a run
+/// Jev read as "Nothing to do" offers Change and Send to Inbox). One of
+/// `did_work`, `nothing` or `needs_person`; a failed run stays failed.
+///
+/// The answer is stored with the `rule` source: migration 139's `CHECK`
+/// knows no person source, and `rule` is the one that outranks Jev's
+/// reading, so Jev's answer is recorded as corrected. `needs_person` also
+/// forgets that the run's session was viewed, so its turn lands in the
+/// Inbox; `nothing` marks it seen, as Jev's own answer does.
+pub fn set_run_outcome(
+    store: &Mutex<Store>,
+    scope: &ViewScope,
+    id: i64,
+    run_id: i64,
+    outcome: &str,
+    now: i64,
+) -> Result<RoutineRunRow, IpcError> {
+    let s = lock(store)?;
+    changeable(&s, scope, id)?;
+    let run = s
+        .get_routine_run(run_id)?
+        .filter(|r| r.routine_id == id)
+        .ok_or_else(|| {
+            IpcError::new(
+                codes::E_NOTFOUND,
+                format!("routine {id} has no run {run_id}"),
+            )
+        })?;
+    let said = match outcome::RunOutcome::parse(outcome) {
+        Some(
+            o @ (outcome::RunOutcome::DidWork
+            | outcome::RunOutcome::Nothing
+            | outcome::RunOutcome::NeedsPerson),
+        ) => o,
+        _ => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("outcome is one of did_work, nothing, needs_person, not {outcome:?}"),
+            ))
+        }
+    };
+    if run.state == "running" {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            "the run is still running; it has no outcome yet",
+        ));
+    }
+    if run.state == "failed"
+        || run.outcome_source.as_deref() == Some(outcome::OutcomeSource::Exit.as_str())
+    {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            "a failed run stays failed; Retry it instead",
+        ));
+    }
+    outcome::record(&s, &run, said, outcome::OutcomeSource::Rule, now)?;
+    if said == outcome::RunOutcome::NeedsPerson {
+        if let Some(sid) = run.session_id {
+            s.clear_session_viewed(sid)?;
+        }
+    }
+    s.get_routine_run(run_id)?.ok_or_else(|| not_found(id))
+}
+
 /// `routines { action: run_now, routine_id }`: a person starts a run now,
 /// whatever its trigger, and whether or not it is on. Pause all does not
 /// stop a person; the overlap rule and the day budget do.

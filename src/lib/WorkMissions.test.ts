@@ -13,6 +13,9 @@ import { expectLastButton, expectOnePrimary } from './action_hierarchy_check';
 import { hosts } from './hosts';
 import { projects } from './projects';
 import {
+  filterMissions,
+  missionFilterChoices,
+  missionFilterCount,
   doneWhenRows,
   finalMoveQuestion,
   splitMoves,
@@ -986,6 +989,28 @@ describe('missions helpers', () => {
   });
 });
 
+describe('mission filters (G7.7)', () => {
+  const m = (over: Partial<Mission>) => mission(over);
+  const list = [
+    m({ id: 1, org_id: 1, owner_person_id: 7, mode: 'finite', waiting_on: { reason: 'question', since: 1, open_cards: 1 } }),
+    m({ id: 2, org_id: null, owner_person_id: 8, mode: 'continuous', repos: [{ project_id: 3, name: 'api', created_at: 1 }] }),
+  ];
+  it('lets every mission through with no filter, and each filter narrows', () => {
+    expect(filterMissions(list, {}).map((x) => x.id)).toEqual([1, 2]);
+    expect(filterMissions(list, { needsYou: true }).map((x) => x.id)).toEqual([1]);
+    expect(filterMissions(list, { mine: true }, 8).map((x) => x.id)).toEqual([2]);
+    expect(filterMissions(list, { mine: true }, null)).toEqual([]);
+    expect(filterMissions(list, { orgId: 0 }).map((x) => x.id)).toEqual([2]);
+    expect(filterMissions(list, { orgId: 1 }).map((x) => x.id)).toEqual([1]);
+    expect(filterMissions(list, { projectId: 3 }).map((x) => x.id)).toEqual([2]);
+    expect(filterMissions(list, { mode: 'finite' }).map((x) => x.id)).toEqual([1]);
+    expect(missionFilterCount({ needsYou: true, orgId: 0, mode: null })).toBe(2);
+  });
+  it('offers the organisations, repositories and modes the list names', () => {
+    expect(missionFilterChoices(list)).toEqual({ orgIds: [0, 1], repos: [{ project_id: 3, name: 'api' }], modes: ['continuous', 'finite'] });
+  });
+});
+
 describe('splitMoves and finalMoveQuestion (parity P19)', () => {
   it('keeps Start, Pause and Resume inline and puts the ending moves in ⋯', () => {
     expect(splitMoves('active')).toEqual({ inline: ['paused'], menu: ['completed', 'failed', 'cancelled'] });
@@ -1174,6 +1199,42 @@ describe('the Missions board (gap G3.6)', () => {
     await fireEvent.click(fold);
     expect(rowNames()).toContain('Shipped thing');
     expect(rowNames()).toContain('Dropped thing');
+  });
+
+  it('Filters narrow the list by needs you, organisation, repository and mode, and say what they hide (G7.7)', async () => {
+    const repo = (project_id: number, name: string) => ({ project_id, name, created_at: 1 });
+    handlers.work_missions = () => [
+      { ...fed, org_id: 1, waiting_on: { reason: 'confirm', since: 1, open_cards: 2 }, repos: [repo(3, 'claude-fleet')] },
+      { ...demo, org_id: 2, repos: [repo(4, 'fleet-mobile')] },
+      { ...receipts, org_id: 1, repos: [repo(4, 'fleet-mobile')] },
+      installer,
+    ];
+    render(WorkMissions);
+    await flush();
+    expect(screen.queryByTestId('missions-filters-panel')).toBeNull();
+    await fireEvent.click(screen.getByTestId('missions-filters'));
+    await fireEvent.click(screen.getByTestId('missions-filter-needs-you'));
+    await flush();
+    expect(rowNames()).toEqual(['Hub federation v2']);
+    expect(screen.getByTestId('missions-filters-count').textContent).toBe('1');
+    expect(screen.getByTestId('missions-hidden').textContent).toContain('3 hidden by filters');
+    await fireEvent.click(screen.getByTestId('missions-filter-needs-you'));
+    await fireEvent.change(screen.getByTestId('missions-filter-repo'), { target: { value: '4' } });
+    await flush();
+    expect(rowNames()).toEqual(['Demo mission', 'Receipt documents']);
+    await fireEvent.change(screen.getByTestId('missions-filter-org'), { target: { value: '1' } });
+    await flush();
+    expect(rowNames()).toEqual(['Receipt documents']);
+    expect(screen.getByTestId('missions-filters-count').textContent).toBe('2');
+    await fireEvent.change(screen.getByTestId('missions-filter-org'), { target: { value: '0' } });
+    await fireEvent.change(screen.getByTestId('missions-filter-repo'), { target: { value: '' } });
+    await flush();
+    expect(rowNames()).toEqual(['Windows installer polish']);
+    await fireEvent.click(screen.getByTestId('missions-hidden-show'));
+    await flush();
+    expect(rowNames()).toHaveLength(4);
+    expect(screen.queryByTestId('missions-filters-count')).toBeNull();
+    expect(screen.queryByTestId('missions-hidden')).toBeNull();
   });
 
   it('reads only the missions still going for their reasons', async () => {

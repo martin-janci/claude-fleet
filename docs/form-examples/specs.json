@@ -166,6 +166,36 @@
         "steps": [{ "title": "A", "fields": [{ "name": "s", "type": "select", "label": "S", "options": [{ "value": "x", "label": "X", "colour": "red" }] }] }]
       },
       "problems": ["not a fleet.form/1 spec: data did not match any variant of untagged enum FormOption"]
+    },
+    {
+      "name": "host checks (G7.4)",
+      "spec": {
+        "spec": "fleet.form/1", "title": "New project",
+        "steps": [{ "title": "A", "fields": [
+          { "name": "host", "type": "select", "label": "Host", "options": [["mercury", "mercury"], ["venus", "venus"]] },
+          { "name": "db", "type": "bool", "label": "Needs a database" } ] }],
+        "checks": [
+          { "label": "Postgres", "needs": "disk_free_gb", "at_least": 2, "host_field": "host", "when": { "field": "db", "truthy": true } },
+          { "label": "The build", "needs": "mem_free_gb", "at_least": 0.5 } ]
+      },
+      "problems": []
+    },
+    {
+      "name": "host checks that name no host field, no amount or a text field",
+      "spec": {
+        "spec": "fleet.form/1", "title": "T",
+        "steps": [{ "title": "A", "fields": [ { "name": "t", "type": "text", "label": "T" } ] }],
+        "checks": [
+          { "label": "", "needs": "disk_free_gb", "at_least": 0, "host_field": "nope" },
+          { "label": "X", "needs": "mem_free_gb", "at_least": 1, "host_field": "t", "when": { "field": "zz", "truthy": true } } ]
+      },
+      "problems": [
+        "check 1: label must not be empty",
+        "check 1: at_least must be a number above 0",
+        "check 1: host_field `nope` is not a field",
+        "check 2: host_field `t` must be a select field",
+        "check 2 › when: `zz` is not an earlier field"
+      ]
     }
   ]
 }

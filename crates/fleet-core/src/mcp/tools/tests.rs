@@ -1999,6 +1999,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 args: sessions::SpawnReviewArgs {
                     source_session_id: on_b,
                     prompt: "review".into(),
+                    agent: None,
                     call_id: None,
                     origin: None,
                 },
@@ -2782,6 +2783,7 @@ fn router_sum_serves_every_tool() {
         include_str!("add_account.rs"),
         include_str!("routines.rs"),
         include_str!("start_rules.rs"),
+        include_str!("wizard_state.rs"),
         include_str!("presence.rs"),
         include_str!("library.rs"),
         include_str!("runs.rs"),
@@ -4380,8 +4382,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// (`present::drop_optional_null`) measured 106,006 bytes for 135 tools
     /// (785 a tool), down from 110,022. Raise it only from a measurement the
     /// failure prints, and say in the commit message what was measured and
-    /// when.
-    const BYTES_PER_TOOL: usize = 795;
+    /// when. Raised to 809 on 2026-10-11: merging main's `search` tool into
+    /// gap plan batch 3 (`wizard_state`, `resume_or_new`) measured 111,954
+    /// bytes for 140 tools (799 a tool).
+    const BYTES_PER_TOOL: usize = 809;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -8545,6 +8549,53 @@ async fn control_route_is_the_persons_and_quiet_by_default() {
     }
 }
 
+/// Gap plan G7.10: `resume_or_new` proposes nothing for a key with no past
+/// work, refuses the operator, and checks its action and its pick.
+#[tokio::test]
+async fn resume_or_new_is_the_persons_and_quiet_without_past_work() {
+    let (s, _, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    let phone = client_caller("phone", TokenMode::Full);
+    let p = |action: &str, chosen: Option<&str>| ResumeOrNewParams {
+        action: action.into(),
+        key: "PD-2412".into(),
+        chosen: chosen.map(str::to_string),
+    };
+    let r = t
+        .resume_or_new(Extension(phone.clone()), Parameters(p("propose", None)))
+        .await
+        .unwrap();
+    assert_eq!(result_json(&r), serde_json::json!({ "unsure": false }));
+    let r = t
+        .resume_or_new(
+            Extension(phone.clone()),
+            Parameters(p("follow", Some("new"))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_json(&r), false, "nothing proposed, nothing marked");
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    let e = t
+        .resume_or_new(Extension(op), Parameters(p("propose", None)))
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    for (action, chosen) in [("follow", None), ("follow", Some("l999")), ("resume", None)] {
+        let e = t
+            .resume_or_new(Extension(phone.clone()), Parameters(p(action, chosen)))
+            .await
+            .unwrap_err();
+        assert!(
+            e.message.starts_with("E_INVALID"),
+            "{action} {chosen:?}: {}",
+            e.message
+        );
+    }
+}
+
 #[tokio::test]
 async fn an_operator_new_session_or_kill_is_gated_before_anything_runs() {
     let (s, pid, on_b) = two_host_store();
@@ -11270,6 +11321,10 @@ const REVIEWED_WITHOUT_A_SESSION: &[(&str, &str)] = &[
     (
         "remove_download",
         "one DOWNLOAD, by `{id}` — a `downloads` row id, not a session id, which is why the schema clause below cannot see this tool at all. It is reviewed rather than silent: the row it names did come out of a session, so the fence is the same `own` tier `send_file` and `list_downloads` carry (`service::downloads::remove` -> `visible_row` -> `visible` -> `ViewScope::may_own`), and a row this caller may not see answers `Ok(false)` — a no-op, never an `E_NOTFOUND` that would tell it the id exists. A per-host token is additionally refused the tool outright by `NOT_FOR_HOST_TOKENS`",
+    ),
+    (
+        "pause_download",
+        "one DOWNLOAD's copy in flight, by `{id, paused}` — a `downloads` row id, as `remove_download` takes, under the same fence: `service::downloads::pause` -> `visible_row` -> `visible` -> `ViewScope::may_own`, so a row this caller may not see answers `E_NOTFOUND` exactly as an id that does not exist does. It only holds or releases this process's copy between slices; the row's bytes and path are not in its answer beyond what `list_downloads` already shows the same caller. A per-host token is additionally refused the tool outright by `NOT_FOR_HOST_TOKENS`",
     ),
     (
         "my_grants",

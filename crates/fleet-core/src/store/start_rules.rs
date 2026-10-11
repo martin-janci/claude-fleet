@@ -7,6 +7,18 @@ use crate::ipc_error::IpcError;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
+/// How a rule's starts run beyond the project and host (migration 164): the
+/// fallback host, the account, the model and effort, the agent. `None`
+/// everywhere = the host's defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartRuleLaunch {
+    pub fallback_host: Option<String>,
+    pub profile: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub agent: Option<String>,
+}
+
 /// `start_rules.state` values. Only `active` decides a start.
 pub const START_RULE_STATES: [&str; 4] = ["counting", "offered", "active", "dismissed"];
 
@@ -24,6 +36,22 @@ pub struct StartRuleRow {
     /// `None` = the project's last host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_alias: Option<String>,
+    /// Where a start lands when `host_alias` is unreachable (migration 164).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_host: Option<String>,
+    /// The credential profile the session bills (the Account); `None` = the
+    /// host's own login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// `claude --model`; `None` = the host's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Reasoning effort; `None` = the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// `claude` | `codex`; `None` = Claude Code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     /// counting | offered | active | dismissed
     pub state: String,
     /// Identical person starts in a row.
@@ -39,7 +67,8 @@ pub struct StartRuleRow {
 }
 
 const COLS: &str = "id, org_id, owner_person_id, pattern, project_id, host_alias, state, \
-                    confirmations, hits, last_hit_at, created_at, updated_at";
+                    confirmations, hits, last_hit_at, created_at, updated_at, \
+                    fallback_host, profile, model, effort, agent";
 
 fn rule(r: &rusqlite::Row<'_>) -> rusqlite::Result<StartRuleRow> {
     Ok(StartRuleRow {
@@ -55,6 +84,11 @@ fn rule(r: &rusqlite::Row<'_>) -> rusqlite::Result<StartRuleRow> {
         last_hit_at: r.get(9)?,
         created_at: r.get(10)?,
         updated_at: r.get(11)?,
+        fallback_host: r.get(12)?,
+        profile: r.get(13)?,
+        model: r.get(14)?,
+        effort: r.get(15)?,
+        agent: r.get(16)?,
     })
 }
 
@@ -153,19 +187,32 @@ impl Store {
         })
     }
 
-    /// Rewrite a rule's pattern, project and host.
+    /// Rewrite a rule's pattern, project, host and how its starts run.
     pub fn update_start_rule(
         &self,
         id: i64,
         pattern: &str,
         project_id: i64,
         host_alias: Option<&str>,
+        launch: &StartRuleLaunch,
         now: i64,
     ) -> Result<(), IpcError> {
         self.conn.execute(
             "UPDATE start_rules SET pattern = ?2, project_id = ?3, host_alias = ?4, \
-               updated_at = ?5 WHERE id = ?1",
-            rusqlite::params![id, pattern, project_id, host_alias, now],
+               updated_at = ?5, fallback_host = ?6, profile = ?7, model = ?8, effort = ?9, \
+               agent = ?10 WHERE id = ?1",
+            rusqlite::params![
+                id,
+                pattern,
+                project_id,
+                host_alias,
+                now,
+                launch.fallback_host,
+                launch.profile,
+                launch.model,
+                launch.effort,
+                launch.agent
+            ],
         )?;
         Ok(())
     }

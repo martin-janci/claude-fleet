@@ -3,6 +3,7 @@ import { invokeCmd, type Result } from './result';
 import type { ProposalLike } from './ai_proposal';
 import { outbox } from './outbox';
 import { sessions } from './sessions';
+import { decideMissionCard, getMission } from './missions';
 
 /**
  * Jev K2, redesign step 9.9: where a message just sent in Control goes.
@@ -19,8 +20,11 @@ import { sessions } from './sessions';
  * case learns from. Gap plan G3.9: a receipt about a session can hand the
  * message on — "Send to <session>" puts the same text in that session's
  * outbox, on the person's press, never on the proposal alone; the receipt
- * then reads "Sent to session …". A mission has no inbox to hand text to,
- * so its receipt only opens it.
+ * then reads "Sent to session …". G7.8: a mission takes the message as the
+ * answer to its open question (its oldest open `ask` card, through
+ * `decide_mission_card`), and the receipt then reads "Sent to mission …";
+ * a mission with no open question has nothing to hand text to, so its
+ * receipt says so and opens it.
  */
 
 export type TargetKind = 'mission' | 'session';
@@ -114,10 +118,26 @@ export async function handOn(key: string): Promise<string | null> {
   if (!r) return 'That receipt is gone.';
   if (r.handed) return null;
   const t = targetOf(r.route, shownOption(r));
-  if (!t || t.kind !== 'session') return 'Only a session can take the message.';
+  if (!t) return 'Pick a mission or session first.';
+  if (t.kind === 'mission') return handOnToMission(key, r, t);
   const row = get(sessions).find((s) => s.id === t.id);
   if (!row || row.lost_at != null) return `${t.name} is no longer running.`;
   outbox.enqueue({ id: row.id, host_alias: row.host_alias, tmux_name: row.tmux_name }, { kind: 'prompt', text: r.text });
+  receipts.update((rs) => rs.map((x) => (x.key === key ? { ...x, handed: t } : x)));
+  if (r.chosen === null) await choose(key, optionOf(t));
+  return null;
+}
+
+/** A mission takes the message as the answer to its oldest open question. */
+async function handOnToMission(key: string, r: Receipt, t: RouteTarget): Promise<string | null> {
+  const m = await getMission(t.id);
+  if (!m.ok) return m.error.message ?? `${t.name} could not be read.`;
+  const ask = (m.value.plan?.cards ?? [])
+    .filter((c) => c.state === 'open' && c.kind === 'ask')
+    .sort((a, b) => a.created_at - b.created_at)[0];
+  if (!ask) return `${t.name} has no open question to answer; open it to steer it.`;
+  const d = await decideMissionCard(ask.id, true, r.text);
+  if (!d.ok) return d.error.message ?? `${t.name} did not take the answer.`;
   receipts.update((rs) => rs.map((x) => (x.key === key ? { ...x, handed: t } : x)));
   if (r.chosen === null) await choose(key, optionOf(t));
   return null;

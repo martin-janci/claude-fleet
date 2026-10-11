@@ -26,6 +26,10 @@
             {
               "type": "field",
               "key": "color"
+            },
+            {
+              "type": "field",
+              "key": "my_role"
             }
           ]
         },
@@ -48,6 +52,10 @@
             {
               "type": "field",
               "key": "session_count"
+            },
+            {
+              "type": "field",
+              "key": "member_count"
             }
           ]
         },

@@ -18,7 +18,13 @@
   // rename a local item. Both go through Routed commands, so a paired
   // desktop names the work on its hub.
   type Target =
-    | { mode: 'name'; sessions: { id: number; label: string }[] }
+    | {
+        mode: 'name';
+        sessions: { id: number; label: string }[];
+        /** G7.6: the other sessions on the same branch with no work yet,
+         *  offered as one "Also name…" box, ticked. */
+        branchMates?: { id: number; label: string }[];
+      }
     | { mode: 'rename'; itemId: number; title: string; key?: string | null };
 
   let {
@@ -49,14 +55,17 @@
   let chosen = $state<Set<number>>(
     untrack(() => new Set(target.mode === 'name' ? target.sessions.map((s) => s.id) : [])),
   );
+  /** "Also name the N other sessions on this branch" (G7.6), ticked. */
+  const mates = untrack(() => (target.mode === 'name' ? (target.branchMates ?? []) : []));
+  let alsoMates = $state(true);
   let busy = $state(false);
   let failure = $state<string | null>(null);
 
   /**
    * The drafted name (G2.1, rule 7): the label the session's own agent gave
-   * it (`set_friendly_name`), offered and never filled in until the person
-   * asks. Using it shows "Drafted" until they edit it, with Undo back to what
-   * they had typed.
+   * it (`set_friendly_name`). G7.6 prefills it, as the board does, when the
+   * title is still empty: it shows "Drafted" until the person edits it, Undo
+   * empties the field again, and nothing is written before Name.
    */
   const draft = $derived.by(() => {
     if (!naming || target.mode !== 'name') return null;
@@ -79,6 +88,13 @@
     title = beforeDraft ?? '';
     beforeDraft = null;
   }
+  // Once: the sessions store may answer after the dialog opens.
+  let prefilled = false;
+  $effect(() => {
+    if (prefilled || draft === null) return;
+    prefilled = true;
+    if (untrack(() => title.trim() === '')) untrack(useDraft);
+  });
 
   const titleError = $derived(title.trim() === '' ? null : workTitleError(title));
   /**
@@ -104,11 +120,17 @@
    * narrows the write instead of refusing the whole dialog.
    */
   const writableIds = $derived(
-    new Set([...chosen].filter((id) => $sessionIdBlocked(id, 'name_session_work') === null)),
+    new Set(
+      [...chosen, ...(alsoMates ? mates.map((m) => m.id) : [])].filter(
+        (id) => $sessionIdBlocked(id, 'name_session_work') === null,
+      ),
+    ),
   );
   /** Sessions the person ticked that are somebody else's — named below rather
    *  than dropped in silence. */
-  const notMine = $derived([...chosen].filter((id) => !writableIds.has(id)).length);
+  const notMine = $derived(
+    [...chosen, ...(alsoMates ? mates.map((m) => m.id) : [])].filter((id) => !writableIds.has(id)).length,
+  );
   const hubBlocked = $derived(
     hubActionBlocked(naming ? 'name_session_work' : 'rename_work_item', $hubStatus, $hubConnection),
   );
@@ -145,7 +167,7 @@
     const r =
       t.mode === 'name'
         ? await nameWorkForSessions(
-            t.sessions.map((s) => s.id).filter((id) => writableIds.has(id)),
+            [...t.sessions, ...(alsoMates ? mates : [])].map((s) => s.id).filter((id) => writableIds.has(id)),
             title,
             key,
           )
@@ -223,6 +245,12 @@
             </label>
           {/each}
         </fieldset>
+      {/if}
+      {#if mates.length > 0}
+        <label class="sess" title={mates.map((m) => m.label).join(', ')}>
+          <input type="checkbox" bind:checked={alsoMates} data-testid="name-work-branch-mates" />
+          Also name the {mates.length === 1 ? 'other session' : `${mates.length} other sessions`} on this branch
+        </label>
       {/if}
     {:else if target.key}
       <p class="note">Key {target.key} stays; only the title changes.</p>

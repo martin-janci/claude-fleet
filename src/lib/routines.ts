@@ -187,7 +187,44 @@ export interface RoutinePreview {
   logins: RoutineAccount[];
 }
 
-type Args = { action: string; routine_id?: number; routine?: RoutineInput; enabled?: boolean; skip?: boolean; limit?: number };
+/** A saved routine as `save` takes it back, unchanged: what the editor
+ *  opens on, and what Undo writes after an edit (G7.4). */
+export function routineInputOf(r: RoutineRow): RoutineInput {
+  return {
+    name: r.name,
+    enabled: r.enabled,
+    trigger: (r.trigger as RoutineTrigger) ?? 'cron',
+    cron: r.cron,
+    utc_offset_min: r.utc_offset_min,
+    event: r.event,
+    host_alias: r.host_alias,
+    project_id: r.project_id,
+    profile: r.profile,
+    prompt: r.prompt,
+    budget_run_micros: r.budget_run_micros,
+    budget_day_micros: r.budget_day_micros,
+    overlap: r.overlap === 'parallel' ? 'parallel' : 'skip',
+    event_repo: r.event_repo,
+    event_author: r.event_author === 'anyone' ? 'anyone' : undefined,
+    event_rate_secs: r.event_rate_secs,
+    time_zone: r.time_zone,
+    run_max_secs: r.run_max_secs,
+    fallback_host: r.fallback_host,
+    retry_once: r.retry_once,
+    autonomy: r.autonomy,
+  };
+}
+
+type Args = {
+  action: string;
+  routine_id?: number;
+  routine?: RoutineInput;
+  enabled?: boolean;
+  skip?: boolean;
+  limit?: number;
+  run_id?: number;
+  outcome?: string;
+};
 
 function call<T>(args: Args): Promise<Result<T>> {
   return invokeCmd<T>('routines', { args });
@@ -206,6 +243,19 @@ export const setRoutineEnabled = (id: number, enabled: boolean) =>
   call<RoutineRow>({ action: 'set_enabled', routine_id: id, enabled });
 export const skipNextRun = (id: number, skip = true) => call<RoutineRow>({ action: 'skip_next', routine_id: id, skip });
 export const runRoutineNow = (id: number) => call<RoutineRunRow>({ action: 'run_now', routine_id: id });
+/** A person's answer to what a finished run came to (G7.9): Send to Inbox
+ *  is `needs_person`, Change picks any of the three. A failed run stays
+ *  failed (E_INVALID_STATE). */
+export type PersonOutcome = 'did_work' | 'nothing' | 'needs_person';
+export const setRunOutcome = (id: number, runId: number, outcome: PersonOutcome) =>
+  call<RoutineRunRow>({ action: 'set_run_outcome', routine_id: id, run_id: runId, outcome });
+
+/** The Change menu's choices, in the run list's words. */
+export const PERSON_OUTCOMES: readonly { value: PersonOutcome; label: string }[] = [
+  { value: 'did_work', label: 'Did work' },
+  { value: 'nothing', label: 'Nothing to do' },
+  { value: 'needs_person', label: 'Needs you' },
+];
 
 // ---- the Inbox ------------------------------------------------------------
 
@@ -217,6 +267,41 @@ export const failing = writable<FailingRoutine[]>([]);
 export async function loadFailing(): Promise<void> {
   const r = await failingRoutines();
   failing.set(r.ok && Array.isArray(r.value) ? r.value : []);
+}
+
+/** The scheduled routine that runs next (G7.15, States board "Inbox
+ *  empty"): the calm Inbox names it. Null when none is scheduled or the
+ *  read failed; the line is then left out. */
+export const nextRoutine = writable<RoutineRow | null>(null);
+
+export async function loadNextRoutine(nowSec = Math.floor(Date.now() / 1000)): Promise<void> {
+  const r = await listRoutines();
+  nextRoutine.set(r.ok && Array.isArray(r.value) ? soonestRoutine(r.value, nowSec) : null);
+}
+
+/** The enabled, scheduled routine whose next run comes first, after `nowSec`. */
+export function soonestRoutine<T extends Pick<RoutineRow, 'enabled' | 'trigger' | 'next_run_at' | 'skip_next'>>(
+  rows: readonly T[],
+  nowSec: number,
+): T | null {
+  let best: T | null = null;
+  for (const r of rows) {
+    if (!r.enabled || r.trigger !== 'cron' || r.skip_next || !r.next_run_at || r.next_run_at <= nowSec) continue;
+    if (!best || r.next_run_at < best.next_run_at!) best = r;
+  }
+  return best;
+}
+
+/** "The next routine is Morning PR sweep at 07:30." — today's runs by the
+ *  time alone, a later day's with its date ("on Fri 23 Oct, 07:30"). */
+export function nextRoutineLine(r: Pick<RoutineRow, 'name' | 'next_run_at'>, nowSec: number, timeZone?: string): string | null {
+  if (!r.next_run_at) return null;
+  const day = (sec: number) => new Intl.DateTimeFormat('en-GB', { timeZone, dateStyle: 'short' }).format(new Date(sec * 1000));
+  const when =
+    day(r.next_run_at) === day(nowSec)
+      ? `at ${new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(r.next_run_at * 1000))}`
+      : `on ${nextRunLabel(r.next_run_at, timeZone)}`;
+  return `The next routine is ${r.name} ${when}.`;
 }
 
 /** How many failed runs the Inbox shows: added to its Needs you count. */
@@ -748,6 +833,29 @@ export function zoneOffsetMin(sec: number, timeZone?: string): number {
   const m = /GMT([+-])(\d{2}):?(\d{2})?/.exec(name ?? '');
   if (!m) return 0;
   return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] ?? 0));
+}
+
+/** Zones a routine's Time zone select offers: every zone this runtime
+ *  knows (`Intl.supportedValuesOf`), else a short list of common ones,
+ *  always with UTC, the device's zone and `keep` (the routine's own, so
+ *  editing never drops it). Sorted, each once. */
+export function zoneChoices(keep?: string | null): string[] {
+  let all: string[] = [];
+  try {
+    const sv = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf;
+    all = sv ? sv('timeZone') : [];
+  } catch {
+    all = [];
+  }
+  if (all.length === 0) {
+    all = ['Europe/London', 'Europe/Berlin', 'Europe/Bratislava', 'Europe/Prague', 'America/New_York', 'America/Chicago', 'America/Los_Angeles', 'Asia/Tokyo', 'Australia/Sydney'];
+  }
+  const set = new Set(all);
+  set.add('UTC');
+  const device = deviceZone();
+  if (device) set.add(device);
+  if (keep) set.add(keep);
+  return [...set].sort((a, b) => a.localeCompare(b));
 }
 
 /** "UTC+02:00" from minutes east. */

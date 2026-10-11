@@ -18,6 +18,7 @@
   import { defaultHost, hosts, isPickableHost } from './hosts';
   import { hubStatus } from './hub';
   import { readPref, writePref } from './prefs';
+  import { clearWizard, getWizard, saveWizard, startedWhere, type WizardState } from './wizard_state';
   import { isComponent, parseRepoUrl } from './repo_url';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -41,6 +42,7 @@
     initialCloneUrl,
     initialMode,
     blocked = null,
+    saveDelayMs = 800,
   }: {
     /** `host` is the host the project was actually added on (folder mode
      *  forces `local` whatever chip was chosen), so the follow-up session
@@ -56,6 +58,9 @@
     /** Why Add project cannot work from this window right now (a hub client
      *  whose link is down); disables Create and says why. */
     blocked?: string | null;
+    /** How long the fields must be still before they are saved for a
+     *  resume on another device, ms; injectable for tests. */
+    saveDelayMs?: number;
   } = $props();
 
   // ── Modes ────────────────────────────────────────────────────────────
@@ -248,6 +253,77 @@
     }
   }
 
+  // ── Resume on another device (gap plan G7.2) ────────────────────────
+  // What the person typed is kept on the hub as the `add_project` wizard,
+  // so the dialog opened on another of their devices offers to carry on.
+  // A dialog opened with a prefill (the switcher's Add row) starts fresh
+  // and offers nothing. The draft goes once a project is added or the
+  // person chooses Start over; Cancel keeps it.
+  const prefilled = untrack(() => initialCloneUrl !== undefined || initialMode !== undefined);
+  let resumable = $state<WizardState | null>(null);
+  /** No save until the offer is answered (or there is none), so a dialog
+   *  opened here never overwrites what the other device kept. */
+  let resumeSettled = $state(untrack(() => prefilled));
+  onMount(() => {
+    if (prefilled) return;
+    void getWizard('add_project').then((r) => {
+      if (destroyed) return;
+      if (r.ok && r.value) resumable = r.value;
+      else resumeSettled = true;
+    });
+  });
+  const answers = $derived<Record<string, unknown>>({
+    mode,
+    host: chosenHost,
+    ...(url.trim() ? { url: url.trim() } : {}),
+    ...(owner ? { owner } : {}),
+    ...(repo ? { repo } : {}),
+    ...(createRemote ? { create_remote: true } : {}),
+    ...(ghOwner.trim() ? { gh_owner: ghOwner.trim() } : {}),
+    ...(ghSelected.length ? { gh_selected: ghSelected } : {}),
+    ...(alsoHosts.length ? { also_hosts: alsoHosts } : {}),
+    ...(orgPick !== undefined ? { org_id: orgPick } : {}),
+    ...(trackerId != null ? { tracker_id: trackerId } : {}),
+  });
+  /** Worth keeping: something to add has been typed or ticked. */
+  const worthKeeping = $derived(url.trim() !== '' || owner !== '' || repo !== '' || ghSelected.length > 0);
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const snapshot = JSON.stringify(answers);
+    const keep = worthKeeping && resumeSettled && !busy;
+    const label = firstTarget ? `${firstTarget.owner}/${firstTarget.repo}` : undefined;
+    clearTimeout(saveTimer);
+    if (!keep) return;
+    saveTimer = setTimeout(() => void saveWizard('add_project', 1, JSON.parse(snapshot), { label }), saveDelayMs);
+  });
+  onMount(() => () => clearTimeout(saveTimer));
+
+  function resume(w: WizardState) {
+    const a = w.answers ?? {};
+    const str = (v: unknown) => (typeof v === 'string' ? v : '');
+    const m = str(a.mode);
+    if (MODES.some((x) => x.id === m)) mode = m as Mode;
+    if (str(a.host) && pickable(str(a.host))) chosenHost = str(a.host);
+    url = str(a.url);
+    owner = str(a.owner);
+    repo = str(a.repo);
+    createRemote = a.create_remote === true;
+    ghOwner = str(a.gh_owner);
+    ghOwnerShown = ghOwner;
+    ghSelected = Array.isArray(a.gh_selected) ? a.gh_selected.filter((x): x is string => typeof x === 'string') : [];
+    alsoHosts = Array.isArray(a.also_hosts) ? a.also_hosts.filter((x): x is string => typeof x === 'string') : [];
+    if (a.org_id === null || typeof a.org_id === 'number') orgPick = a.org_id;
+    if (typeof a.tracker_id === 'number') trackerId = a.tracker_id;
+    resumable = null;
+    resumeSettled = true;
+  }
+
+  function startOver() {
+    resumable = null;
+    resumeSettled = true;
+    void clearWizard('add_project');
+  }
+
   // ── Create ───────────────────────────────────────────────────────────
   let busy = $state(false);
   let stopping = $state(false);
@@ -359,6 +435,8 @@
     for (const { row } of done.slice(1)) {
       void setProjectPick(row.project.owner, row.project.repo, { vis: 'keep' }, { quiet: true });
     }
+    clearTimeout(saveTimer);
+    void clearWizard('add_project');
     onCreated(done[0].row, h);
   }
 
@@ -445,6 +523,17 @@
       Bring a repository into the fleet so sessions can start in it.
     </p>
   </header>
+
+  {#if resumable}
+    <div class="resume" role="status" data-testid="add-resume">
+      <span
+        >You started adding <strong>{resumable.label ?? 'a project'}</strong>
+        {startedWhere(resumable, Math.floor(Date.now() / 1000))}.</span
+      >
+      <button type="button" class="btn btn--primary" data-testid="add-resume-go" onclick={() => resumable && resume(resumable)}>Resume</button>
+      <button type="button" class="btn btn--quiet" data-testid="add-resume-over" onclick={startOver}>Start over</button>
+    </div>
+  {/if}
 
   <div class="fields">
     <SegmentedControl
@@ -657,6 +746,17 @@
   header { display: flex; flex-direction: column; gap: var(--space-1); flex: 0 0 auto; }
   .dialog h3 { margin: 0; font-size: var(--text-lg); font-weight: var(--text-lg-weight); }
   .lead { margin: 0 0 0.3rem 0; color: var(--fg-muted); font-size: var(--text-sm); }
+  .resume {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
+  }
+  .resume > span { flex: 1 1 12rem; }
   .fields {
     display: flex;
     flex-direction: column;

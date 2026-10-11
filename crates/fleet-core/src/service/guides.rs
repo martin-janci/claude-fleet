@@ -73,6 +73,26 @@ pub struct GuidesView {
     pub guides: Vec<Page>,
     pub proposals: Vec<GuideProposal>,
     pub can_write: bool,
+    /// Where each live guide came from (Guide board, "proposed by a session,
+    /// approved by Martin on 6 Oct"), one per entry of `guides`. Absent from
+    /// a hub that predates it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvals: Vec<GuideApproval>,
+}
+
+/// Who proposed a live guide and who approved it, when.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GuideApproval {
+    pub page_id: String,
+    /// `agent` | `person`, as on the proposal.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<i64>,
+    /// The approver as the decision recorded it (`person`, `person (pixel)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_by: Option<String>,
 }
 
 fn invalid(msg: impl Into<String>) -> IpcError {
@@ -252,11 +272,30 @@ pub fn pending(s: &Store) -> Result<Vec<GuideProposal>, IpcError> {
 }
 
 pub fn view(s: &Store, can_write: bool) -> Result<GuidesView, IpcError> {
+    let guides = live(s);
+    let approvals = approvals(s, &guides)?;
     Ok(GuidesView {
-        guides: live(s),
+        guides,
         proposals: pending(s)?,
         can_write,
+        approvals,
     })
+}
+
+/// The provenance of each guide in `guides`, from its approved row.
+fn approvals(s: &Store, guides: &[Page]) -> Result<Vec<GuideApproval>, IpcError> {
+    let rows = s.guide_proposals_in("approved").map_err(IpcError::from)?;
+    Ok(rows
+        .into_iter()
+        .filter(|r| guides.iter().any(|g| g.id == r.page_id))
+        .map(|r| GuideApproval {
+            page_id: r.page_id,
+            source: r.source,
+            source_detail: r.source_detail,
+            approved_at: r.decided_at,
+            approved_by: r.decided_by,
+        })
+        .collect())
 }
 
 /// Approve (or reject) a pending proposal as `actor`, a person. Approving

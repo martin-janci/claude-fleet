@@ -8,6 +8,8 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { open as mockedOpen } from '@tauri-apps/plugin-dialog';
 import AssetEditor from './AssetEditor.svelte';
 import type { EditableAsset } from './assets';
+import { get } from 'svelte/store';
+import { clearToasts, toasts } from './toasts';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 const open = mockedOpen as ReturnType<typeof vi.fn>;
@@ -405,5 +407,48 @@ describe('AssetEditor: Toolkit forms', () => {
     await fireEvent.click(screen.getByTestId('editor-save'));
     await waitFor(() => expect(onsaved).toHaveBeenCalled());
     expect(saved().targets).toEqual({ codex: { enabled: false } });
+  });
+
+  it('the saved toast offers Undo, which writes back what the editor opened with (G7.4)', async () => {
+    clearToasts();
+    byCmd({
+      catalog_lint_asset: { errors: [], warnings: [] },
+      catalog_update_asset: { commit: 'sha123', lint: { errors: [], warnings: [] } },
+    });
+    const onsaved = vi.fn();
+    render(AssetEditor, { asset: skillAsset(), onsaved, oncancel: () => {} });
+    await fireEvent.input(screen.getByTestId('editor-description'), { target: { value: 'Changed.' } });
+    await fireEvent.click(screen.getByTestId('editor-save'));
+    await waitFor(() => expect(onsaved).toHaveBeenCalledTimes(1));
+    const t = get(toasts).at(-1)!;
+    expect(t.message).toBe('Saved worktree.');
+    t.action!.run();
+    await waitFor(() => expect(onsaved).toHaveBeenCalledTimes(2));
+    const writes = invoke.mock.calls.filter((c) => c[0] === 'catalog_update_asset');
+    expect((writes[1][1] as { args: { asset: EditableAsset } }).args.asset.description).toBe('Create an isolated git worktree.');
+  });
+
+  it('Discard drops the staged edits and goes back to what the editor opened with (G7.5)', async () => {
+    byCmd({ catalog_lint_asset: { errors: [], warnings: [] } });
+    render(AssetEditor, { asset: skillAsset(), onsaved: () => {}, oncancel: () => {} });
+    expect(screen.getByTestId('editor-discard')).toBeDisabled();
+    await fireEvent.input(screen.getByTestId('editor-description'), { target: { value: 'Changed.' } });
+    expect(screen.getByTestId('editor-discard')).not.toBeDisabled();
+    await fireEvent.click(screen.getByTestId('editor-discard'));
+    expect((screen.getByTestId('editor-description') as HTMLTextAreaElement).value).toBe('Create an isolated git worktree.');
+    expect(screen.getByTestId('editor-save')).toBeDisabled();
+    expect(screen.getByTestId('editor-discard')).toBeDisabled();
+  });
+
+  it('Lint runs the server lint on demand and says what it found (G7.5)', async () => {
+    byCmd({ catalog_lint_asset: { errors: [], warnings: [{ field: 'body', message: 'has a TODO' }] } });
+    render(AssetEditor, { asset: skillAsset(), onsaved: () => {}, oncancel: () => {} });
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    await fireEvent.click(screen.getByTestId('editor-lint-run'));
+    await waitFor(() => expect(screen.getByTestId('editor-lint-note').textContent).toBe('0 errors, 1 warning.'));
+    expect(invoke.mock.calls.filter((c) => c[0] === 'catalog_lint_asset')).toHaveLength(2);
+    await fireEvent.input(screen.getByTestId('editor-version'), { target: { value: '2' } });
+    await fireEvent.click(screen.getByTestId('editor-lint-run'));
+    await waitFor(() => expect(screen.getByTestId('editor-lint-note').textContent).toBe('0 errors, 1 warning in the saved version. Save to lint your changes.'));
   });
 });

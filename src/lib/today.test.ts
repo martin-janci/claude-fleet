@@ -3,6 +3,7 @@
 import { describe, it, expect } from 'vitest';
 import { session } from './hosts_fixture';
 import {
+  shippedWhen,
   bucketOf,
   localMidnight,
   scopeToday,
@@ -163,5 +164,18 @@ describe('G1.6: missions waiting on you and Jev proposals', () => {
   it('cuts the missions to an org scope', () => {
     const v = scopeToday(t, 'org:2' as never, [], () => ALL_SCOPES);
     expect(v.missions?.map((m) => m.id)).toEqual([2]);
+  });
+});
+
+describe('shippedWhen and the standup provenance (G7.9)', () => {
+  it('says how it shipped and the local time', () => {
+    const at = new Date(2026, 9, 10, 9, 12).getTime() / 1000;
+    expect(shippedWhen({ how: 'pr', at })).toBe('PR 09:12');
+    expect(shippedWhen({ how: 'done', at })).toBe('done 09:12');
+  });
+
+  it('the standup names where a shipped entry came from', () => {
+    const t = { since: 0, now: 10, groups: [], shipped: [{ how: 'pr', key: 'A-1', title: 'Sweep', at: 5, from: 'Morning PR sweep' }] };
+    expect(standupText(scopeToday(t, ALL_SCOPES, [], () => ALL_SCOPES))).toContain('· from Morning PR sweep');
   });
 });

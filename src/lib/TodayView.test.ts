@@ -379,6 +379,10 @@ describe('TodayView: tiles, date line, inline limit, provenance (G3.2)', () => {
     expect(screen.getAllByTestId('today-group')).toHaveLength(6);
     expect(screen.queryByTestId('today-more')).toBeNull();
     expect(screen.getByTestId('today-shipped-from').textContent).toBe('from Morning PR sweep');
+    // G7.9: how it shipped and when, in local time.
+    const at = new Date(150 * 1000);
+    const hm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+    expect(screen.getByTestId('today-shipped-when').textContent).toBe(`PR ${hm}`);
   });
 
   it('a waiting row paused on a limit offers Switch account and Wait right there, and Open', async () => {

@@ -216,16 +216,20 @@ describe('shell terminals strip (step 5.3)', () => {
     terminalOpensOn.set('worktree');
   });
 
-  it('Ctrl+Alt+T opens a terminal and Ctrl+` walks the tabs, neither reaching the pty', async () => {
+  it('Ctrl+Alt+T opens a terminal and Ctrl+Alt+` walks the tabs, neither reaching the pty', async () => {
     render(TerminalView);
     selectSession(row);
     await settle();
     await fireEvent.keyDown(window, { key: 't', ctrlKey: true, altKey: true });
     await settle();
     expect(screen.getByTestId('terminal-tab-1').getAttribute('aria-selected')).toBe('true');
-    await fireEvent.keyDown(window, { key: '`', ctrlKey: true });
+    await fireEvent.keyDown(window, { key: '`', ctrlKey: true, altKey: true });
     await settle();
     expect(screen.getByTestId('terminal-tab-agent').getAttribute('aria-selected')).toBe('true');
+    // The older plain Ctrl+` still walks them.
+    await fireEvent.keyDown(window, { key: '`', ctrlKey: true });
+    await settle();
+    expect(screen.getByTestId('terminal-tab-1').getAttribute('aria-selected')).toBe('true');
     expect(calls('pty_write')).toHaveLength(0);
   });
 });

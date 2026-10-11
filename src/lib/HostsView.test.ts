@@ -764,6 +764,7 @@ describe('HostsView: detail sections', () => {
     mount({ preselect: 'mefistos' });
     await waitFor(() => expect(screen.getByTestId('detail-token-mode')).toBeInTheDocument());
     await fireEvent.change(screen.getByTestId('detail-token-mode'), { target: { value: 'readonly' } });
+    await fireEvent.click(screen.getByTestId('detail-integrations-save'));
     await waitFor(() => expect(calls('set_host_token_mode')).toHaveLength(1));
     expect(calls('set_host_token_mode')[0][1]).toEqual({ hostAlias: 'mefistos', mode: 'readonly' });
   });
@@ -901,6 +902,17 @@ describe('HostsView: the Hosts table', () => {
     expect(cell('mefistos', 'hosts-table-accounts').textContent).toBe('admin-janci');
     expect(cell('local', 'hosts-table-disk').textContent).toMatch(/ of /);
     expect(document.activeElement).toBe(table());
+  });
+
+  it('an older Claude Code reads "update" as an action that opens the host (M15 G7.12)', async () => {
+    hosts.set(fleetHosts().map((h) => (h.alias === 'mefistos' ? { ...h, claude_version: '2.1.140' } : h)));
+    mount();
+    await tick();
+    const row = screen.getAllByTestId('hosts-table-row').find((r) => r.dataset.alias === 'mefistos')!;
+    await fireEvent.click(within(row).getByTestId('hosts-table-update'));
+    await tick();
+    await tick();
+    expect(detailAlias()).toBe('mefistos');
   });
 
   it('Open shows the detail; Esc goes back to the table, and Esc there closes', async () => {

@@ -5,13 +5,15 @@
   import { onMount, tick, untrack } from 'svelte';
 
   let {
-    title, pinned, hidden, groups, currentGroup, manualGroup, startIn,
+    title, pinned, hidden, groups, counts = {}, currentGroup, manualGroup, startIn,
     onpin, onhide, ongroup, onclose,
   }: {
     title: string;
     pinned: boolean;
     hidden: boolean;
     groups: readonly string[];
+    /** Projects per group name (M15 G7.12: "3 projects" beside each). */
+    counts?: Readonly<Record<string, number>>;
     currentGroup: string | null;
     manualGroup: boolean;
     startIn: 'main' | 'groups';
@@ -41,7 +43,12 @@
       .sort((a, b) => a.r - b.r || a.i - b.i)
       .slice(0, 6)
       .map((x) => x.g);
-    const out: { label: string; value: string | null; current: boolean }[] = list.map((g) => ({ label: g, value: g, current: g === currentGroup }));
+    const out: { label: string; value: string | null; current: boolean; count?: number }[] = list.map((g) => ({
+      label: g,
+      value: g,
+      current: g === currentGroup,
+      count: counts[g],
+    }));
     if (d && !groups.some((g) => g.toLowerCase() === d.toLowerCase())) out.push({ label: `New group “${d}”`, value: d, current: false });
     if (!d && manualGroup) out.push({ label: 'Back to automatic', value: null, current: false });
     return out;
@@ -111,8 +118,11 @@
       }}
     />
     {#each shown as g (g.label)}
-      <button type="button" role="menuitemradio" aria-checked={g.current} class="mi" onclick={() => ongroup(g.value)}>{g.label}</button>
+      <button type="button" role="menuitemradio" aria-checked={g.current} class="mi" onclick={() => ongroup(g.value)}
+        >{g.label}{#if g.count}<span class="count" data-testid="project-group-count">{g.count} project{g.count === 1 ? '' : 's'}</span>{/if}</button
+      >
     {/each}
+    <button type="button" role="menuitem" class="mi cancel" data-testid="project-group-cancel" onclick={onclose}>Cancel<kbd>Esc</kbd></button>
   {/if}
 </div>
 
@@ -139,6 +149,8 @@
   /* Keyboard focus keeps the ring; the tint alone is ~1.1:1 (review r11). */
   .mi:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: calc(-1 * var(--ring-w)); }
   .mi[aria-checked='true'] { font-weight: 600; }
+  .count { margin-left: auto; color: var(--fg-muted); font-weight: 400; }
+  .cancel { color: var(--fg-muted); }
   kbd { margin-left: auto; font: inherit; font-size: var(--text-2xs); color: var(--fg-muted); }
   .gi { width: 100%; box-sizing: border-box; margin-bottom: 0.3rem; padding: 0.3rem 0.5rem; font: inherit; font-size: var(--text-2xs); }
 </style>

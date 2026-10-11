@@ -35,8 +35,9 @@
     sessionId?: number | null;
     initialMode?: Mode;
     onclose: () => void;
-    /** Called with the new session once a resume started. */
-    onresumed?: () => void;
+    /** Called once a resume started, with the past session's link it
+     *  re-opened (when the plan named one). */
+    onresumed?: (linkId: number | null) => void;
   } = $props();
 
   const LABELS: Record<Mode, string> = {
@@ -207,10 +208,11 @@
     }
     busy = true;
     error = null;
+    const usedLink = plan?.link_id ?? linkId;
     const r = await resumeWork({
       key: workKey,
       mode,
-      linkId: plan?.link_id ?? linkId,
+      linkId: usedLink,
       hostAlias: hostOverride,
       brief: mode === 'brief' ? brief : null,
     });
@@ -220,7 +222,7 @@
       return;
     }
     selectSessionExplicitly(r.value);
-    onresumed?.();
+    onresumed?.(usedLink ?? null);
     onclose();
   }
 

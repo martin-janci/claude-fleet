@@ -438,6 +438,10 @@ fn sample_health() -> Health {
         // out of the contract (empty and false are not sent).
         loops: Vec::new(),
         automation_paused: false,
+        // Gap plan G7.3: the phone's Settings › Hub and playbook counts; no
+        // desktop reads them, so they stay out of the contract.
+        devices: None,
+        playbooks_week: Default::default(),
     }
 }
 
@@ -455,6 +459,8 @@ fn sample_decide_health() -> fleet_core::service::decide::DecideHealth {
         budget_spent: true,
         degraded: true,
         reason: Some("breaker_open".into()),
+        // Gap plan G7.3: the phone's decision stats; not read on a desktop.
+        week: None,
     }
 }
 
@@ -818,6 +824,8 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         updated_at: 2,
         additions: None,
         deletions: None,
+        mission_id: None,
+        mission_name: None,
     };
     put("PullRequestRow", wire_keys(&pr));
     put(
@@ -869,6 +877,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             latency_ms: Some(5),
             messages_today: 1,
             messages_total: 2,
+            retry_every_s: Some(30),
         }),
     );
     put(
@@ -1008,6 +1017,22 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
                 source: "rule".into(),
                 reason: "r".into(),
             }),
+        }),
+    );
+    // Gap plan G7.10 (additive at revision 16: a hub without the tool
+    // answers E_HUB_PROTOCOL and the dialog keeps its plain notice).
+    put(
+        "ResumeOrNew",
+        wire_keys(&fleet_core::service::decide::resume_or_new::ResumeOrNew {
+            value: Some("l7".into()),
+            link_id: Some(7),
+            session_id: Some(3),
+            name: Some("receipt-totals".into()),
+            source: Some("jev".into()),
+            reason: Some("r".into()),
+            confidence_pct: Some(82),
+            run_id: Some(1),
+            unsure: false,
         }),
     );
     put(

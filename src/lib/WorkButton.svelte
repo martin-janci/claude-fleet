@@ -18,7 +18,7 @@
   import { hubConnection } from './hub_connection';
   import { sessionIdBlocked } from './share';
   import { copyText } from './clipboard';
-  import { startWork } from './trackers';
+  import { startWork, type StartWorkArgs } from './trackers';
   import StartPopover from './StartPopover.svelte';
   import { startAskRequest, takeStartAsk } from './new_task';
   import StartProgressStrip from './StartProgressStrip.svelte';
@@ -29,12 +29,14 @@
   import {
     PRIMARY_LABEL,
     baseStartArgs,
+    lastStartSettings,
     previewIsClean,
     previewStartWork,
     previewUnsupported,
     primaryAction,
     registerWorkButton,
     startFromPreview,
+    taskBriefDrafts,
     type StartPreview,
   } from './start_preview';
 
@@ -86,6 +88,12 @@
   let mainBtn: HTMLButtonElement | undefined = $state();
 
   const base = $derived(baseStartArgs(task));
+  /** G7.6: the last session's host and repository, for "Start with last
+   *  settings" in the menu. */
+  const lastSettings = $derived(lastStartSettings(task, $sessions));
+  /** The arguments the open popover was read with (the base, or the base
+   *  with the last settings). */
+  let popBase = $state<StartWorkArgs | null>(null);
   const attachTarget = $derived<AttachTarget | null>(
     task.item_id != null || task.key
       ? {
@@ -183,8 +191,9 @@
     else fail(r.error);
   }
 
-  /** Start: the preview first. `ask` opens the popover whatever it says. */
-  async function start(ask: boolean) {
+  /** Start: the preview first. `ask` opens the popover whatever it says;
+   *  `over` (the last settings) fixes the host and repository. */
+  async function start(ask: boolean, over?: Partial<StartWorkArgs>) {
     if (!canStart || busy) return;
     if (startBlocked) {
       error = startBlocked;
@@ -194,7 +203,8 @@
     error = null;
     existing = null;
     const forTask = task.task_id;
-    const p = await previewStartWork(base);
+    const args: StartWorkArgs = over ? { ...base, ...over } : base;
+    const p = await previewStartWork(args);
     // Another task was opened meanwhile (the task page keeps this button):
     // this preview is not its (review r07), so neither its popover nor a
     // start from it.
@@ -204,7 +214,7 @@
     }
     if (!p.ok && previewUnsupported(p.error)) {
       // An older hub: start as before, its refusals shown as they come.
-      const r = await startWork(base);
+      const r = await startWork(args);
       busy = false;
       if (r.ok) started(r.value);
       else fail(r.error);
@@ -216,19 +226,30 @@
       return;
     }
     if (!ask && previewIsClean(p.value)) {
-      const r = await startFromPreview(base, p.value);
+      // A brief drafted in the task page goes with it (G7.6).
+      const brief = args.with_brief ? get(taskBriefDrafts).get(task.task_id)?.brief : undefined;
+      const r = await startFromPreview(brief ? { ...args, brief } : args, p.value);
       busy = false;
       if (r.ok) started(r.value);
       else fail(r.error);
       return;
     }
     busy = false;
-    await openPopover(p.value);
+    await openPopover(p.value, args);
   }
 
-  async function openPopover(p: StartPreview) {
+  /** The Continue menu's "Start with last settings": a new session where
+   *  the last one ran, without asking when nothing is in the way. */
+  function startWithLast() {
+    if (!lastSettings) return;
+    menuOpen = false;
+    void start(false, lastSettings);
+  }
+
+  async function openPopover(p: StartPreview, args: StartWorkArgs = base) {
     menuOpen = false;
     place();
+    popBase = args;
     popover = p;
     await tick();
   }
@@ -315,7 +336,20 @@
     >
   </span>
   {#if menuOpen}
-    <span class="menu" role="menu" data-testid="work-button-menu-list">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <span
+      class="menu"
+      role="menu"
+      tabindex="-1"
+      data-testid="work-button-menu-list"
+      onkeydown={(e) => {
+        if (e.key === 's' && !e.metaKey && !e.ctrlKey && !e.altKey && lastSettings && canStart && !startBlocked) {
+          e.preventDefault();
+          e.stopPropagation();
+          startWithLast();
+        }
+      }}
+    >
       <button
         type="button"
         role="menuitem"
@@ -337,6 +371,18 @@
           }}>Continue {l.name ?? `session ${l.link_id}`}</button
         >
       {/each}
+      {#if lastSettings}
+        <button
+          type="button"
+          role="menuitem"
+          class="with-key"
+          data-testid="work-button-start-last"
+          disabled={!canStart || startBlocked !== null}
+          title={startBlocked ??
+            `A new session on ${lastSettings.host_alias}, where the last one ran`}
+          onclick={startWithLast}><span>Start with last settings</span><kbd>s</kbd></button
+        >
+      {/if}
       {#if attachTarget}
         <button
           type="button"
@@ -394,7 +440,7 @@
 
 {#if popover}
   <div class="pop-anchor" style:top="{popPos.top}px" style:left="{popPos.left}px">
-    <StartPopover base={base} preview={popover} {heading} blocked={startBlocked} onclose={closePopover} onstarted={started} />
+    <StartPopover base={popBase ?? base} preview={popover} held={$taskBriefDrafts.get(task.task_id) ?? null} {heading} blocked={startBlocked} onclose={closePopover} onstarted={started} />
   </div>
 {/if}
 
@@ -451,6 +497,15 @@
   .menu button:hover:not(:disabled),
   .menu button:focus-visible {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .menu .with-key {
+    display: flex;
+    gap: 12px;
+    justify-content: space-between;
+  }
+  .menu kbd {
+    color: var(--fg-muted);
+    font: inherit;
   }
   .menu button:disabled {
     color: var(--fg-muted);

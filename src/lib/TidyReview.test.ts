@@ -686,36 +686,57 @@ describe('TidyReview', () => {
     }
   });
 
-  it('the Reopened pill closes the tidy sheet and toggles its own list; the Tidy pill closes the list', async () => {
+  it('Reopened is a group of the tidy sheet: both pills open the one sheet (G7.9)', async () => {
     candidates = [cand(1)];
     reopened = [{ item_id: 7, key: 'PAY-7', title: 'Retry', reopened_at: 5, past_sessions: 2 }];
     await mount();
-    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await fireEvent.click(await screen.findByTestId('reopened-pill'));
     await tick();
-    expect(screen.getByTestId('tidy-sheet')).toBeTruthy();
-    await fireEvent.click(screen.getByTestId('reopened-pill'));
+    const sheet = screen.getByTestId('tidy-sheet');
+    const group = screen.getByTestId('reopened-list');
+    expect(sheet.contains(group)).toBe(true);
+    expect(screen.getAllByTestId('tidy-group').map((g) => g.textContent)).toContain('Reopened · 1');
+    // The reopened rows are not tidied: the footer counts the candidates only.
+    expect(screen.getByTestId('tidy-apply')).toHaveTextContent('Tidy 1');
+    await fireEvent.click(screen.getByTestId('tidy-cancel'));
     await tick();
     expect(screen.queryByTestId('tidy-sheet')).toBeNull();
-    expect(screen.getByTestId('reopened-list')).toBeTruthy();
-    // The pill is a toggle; so is the list's own close.
-    await fireEvent.click(screen.getByTestId('reopened-pill'));
-    await tick();
-    expect(screen.queryByTestId('reopened-list')).toBeNull();
-    await fireEvent.click(screen.getByTestId('reopened-pill'));
-    await tick();
-    expect(screen.getByTestId('reopened-list')).toBeTruthy();
-    await fireEvent.click(screen.getByText('Close'));
-    await tick();
-    expect(screen.queryByTestId('reopened-list')).toBeNull();
-    // Opening the tidy sheet puts the list away, so only one sheet shows.
-    await fireEvent.click(screen.getByTestId('reopened-pill'));
-    await tick();
     await fireEvent.click(screen.getByTestId('tidy-pill'));
     await tick();
-    expect(screen.getByTestId('tidy-sheet')).toBeTruthy();
-    expect(screen.queryByTestId('reopened-list')).toBeNull();
+    expect(screen.getByTestId('tidy-sheet').contains(screen.getByTestId('reopened-list'))).toBe(true);
     expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
     expect(invoke).not.toHaveBeenCalledWith('dismiss_reopened', expect.anything());
+  });
+
+  it('with only reopened work the sheet still opens, and empties away when it is dismissed', async () => {
+    reopened = [{ item_id: 7, key: 'PAY-7', title: 'Retry', reopened_at: 5, past_sessions: 2 }];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('reopened-pill'));
+    await tick();
+    expect(screen.getByTestId('reopened-row')).toHaveTextContent('PAY-7');
+    reopenedWork.set([]);
+    await tick();
+    expect(screen.queryByTestId('tidy-sheet')).toBeNull();
+  });
+
+  it('Expire forgets a stopped session through dismiss_ghost_session; the rest go to tidy_apply (G7.9)', async () => {
+    candidates = [
+      cand(1),
+      cand(3, { reason: 'ghost_expiring', action: 'resume_or_expire', expires_at: 2_000_000_000 }),
+    ];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    const rows = screen.getAllByTestId('tidy-row');
+    const ghostRow = rows.find((r) => r.getAttribute('data-session-id') === '3')!;
+    const select = ghostRow.querySelector('[data-testid="tidy-choice"]') as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.textContent)).toContain('Expire');
+    await fireEvent.change(select, { target: { value: 'expire' } });
+    await fireEvent.click(ghostRow.querySelector('[data-testid="tidy-check"]')!);
+    await fireEvent.click(screen.getByTestId('tidy-apply'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('dismiss_ghost_session', { args: { session_id: 3 } }));
+    const tidyCall = vi.mocked(invoke).mock.calls.find((c) => c[0] === 'tidy_apply');
+    expect((tidyCall?.[1] as { args: { items: { session_id: number }[] } }).args.items.map((i) => i.session_id)).toEqual([1]);
   });
 
   describe('idle, no work linked (work graph M11.3)', () => {

@@ -49,6 +49,15 @@
   import { creatingStart } from './session_starting';
   import { correctionLine, preselect, type ProposalLike } from './ai_proposal';
   import { HOST_PLACEMENT_FLOOR, hostProposal, proposeHostPlacement, recordHostPlacement } from './host_placement';
+  import {
+    RESUME_OR_NEW_FLOOR,
+    START_FRESH,
+    followResumeOrNew,
+    proposeResumeOrNew,
+    resumeChoice,
+    resumeProposal,
+    type ResumeOrNew,
+  } from './resume_or_new';
   import DraftField from './DraftField.svelte';
   import { draftBrief, draftSource, previewStartWork, siblingProposal, type BriefDraft } from './start_preview';
   import { openNewSessionPicker } from './switcher_request';
@@ -210,6 +219,8 @@
   function answerHostProposal(host: string) {
     writePref('last-host', host);
     if (hostProposalShown) void recordHostPlacement(project.project.id, host);
+    // Starting a session here is starting fresh: the N2 proposal's answer.
+    answerResumeProposal(START_FRESH);
   }
 
   // "work" runs Claude Code in the pane; "shell" runs a plain login shell.
@@ -658,17 +669,57 @@
   // answer and the note stays the plain one.
   let pastOfKey = $state<{ key: string; links: WorkLink[] } | null>(null);
   let resumeOpen = $state(false);
+  // Gap plan G7.10 (Jev N2): which to do with that past work — resume one
+  // past session or start fresh. A rule answers for one recent past
+  // session; Jev only at assist (off by default). Asked once the key's past
+  // work is known; with no proposal the notice stays the plain one.
+  let resumeAsk = $state<{ key: string; p: ResumeOrNew } | null>(null);
+  /** The key whose proposal the person set aside ("Start fresh instead"). */
+  let resumeDismissed = $state<string | null>(null);
+  /** The past session the resume flow opens on (the proposal's), or none. */
+  let resumeLink = $state<{ link: number; session: number | null } | null>(null);
   $effect(() => {
     const key = plannedKey;
     if (!key || duplicateOf) return;
     void endedWorkLinks(key).then((r) => {
       if (plannedKey !== key) return;
       pastOfKey = r.ok && Array.isArray(r.value) && r.value.length > 0 ? { key, links: r.value } : null;
+      if (!pastOfKey || resumeAsk?.key === key) return;
+      void proposeResumeOrNew(key).then((p) => {
+        if (plannedKey === key && p?.ok && p.value) resumeAsk = { key, p: p.value };
+      });
     });
   });
   const pastWork = $derived(
     pastOfKey && pastOfKey.key === plannedKey && !duplicateOf ? pastOfKey.links : null,
   );
+  /** The proposal the notice shows, as ProposedBy reads it; null below the
+   *  floor, on unsure, once set aside, or for another key. */
+  const resumeShown = $derived.by(() => {
+    if (!pastWork || !resumeAsk || resumeAsk.key !== plannedKey || resumeDismissed === plannedKey) return null;
+    const p = resumeProposal(resumeAsk.p);
+    return preselect('resume', p, RESUME_OR_NEW_FLOOR) != null ? p : null;
+  });
+  const resumeShownName = $derived(resumeShown ? (resumeAsk?.p.name ?? plannedKey) : null);
+  /** Tell the hub what the person picked over a Jev proposal they saw (a
+   *  rule's has nothing to mark). Best effort. */
+  function answerResumeProposal(chosen: string) {
+    if (!plannedKey || resumeShown?.source !== 'jev') return;
+    void followResumeOrNew(plannedKey, chosen);
+  }
+  function openResume(proposed: boolean) {
+    const p = resumeAsk?.p;
+    resumeLink = proposed && p?.link_id != null ? { link: p.link_id, session: p.session_id ?? null } : null;
+    resumeOpen = true;
+  }
+  function startFreshInstead() {
+    answerResumeProposal(START_FRESH);
+    resumeDismissed = plannedKey;
+  }
+  function onResumed(link: number | null) {
+    if (link != null) answerResumeProposal(resumeChoice(link));
+    onCancel();
+  }
   function openDuplicate() {
     if (!duplicateOf) return;
     selectSessionExplicitly(duplicateOf);
@@ -1335,10 +1386,17 @@
               >Open it</button
             >
           </span>
+        {:else if pastWork && resumeShown && resumeShown.value !== START_FRESH}
+          <span class="dup" data-testid="work-past">
+            — has previous work:
+            <button type="button" class="linkish" data-testid="resume-proposed" onclick={() => openResume(true)}
+              >Resume {resumeShownName}</button
+            >
+          </span>
         {:else if pastWork}
           <span class="dup" data-testid="work-past">
             — has previous work ({pastWorkSummary(pastWork, now * 1000)}).
-            <button type="button" class="linkish" data-testid="resume-past" onclick={() => (resumeOpen = true)}
+            <button type="button" class="linkish" data-testid="resume-past" onclick={() => openResume(false)}
               >Resume</button
             >
           </span>
@@ -1346,6 +1404,27 @@
           <span class="muted">— sessions on this branch group under it (sidebar: by work)</span>
         {/if}
       </p>
+      {#if pastWork && !duplicateOf && resumeShown}
+        {#if resumeShown.value === START_FRESH}
+          <ProposedBy
+            proposal={{ ...resumeShown, reason: 'start fresh' }}
+            field="resume"
+            floor={RESUME_OR_NEW_FLOOR}
+            changeLabel="Resume instead"
+            onchange={() => openResume(false)}
+            testid="resume-proposed-by"
+          />
+        {:else}
+          <ProposedBy
+            proposal={resumeShown}
+            field="resume"
+            floor={RESUME_OR_NEW_FLOOR}
+            changeLabel="Start fresh instead"
+            onchange={startFreshInstead}
+            testid="resume-proposed-by"
+          />
+        {/if}
+      {/if}
     {/if}
     {#if ticket}
       <div class="ticket-box" data-testid="ticket-box">
@@ -1427,7 +1506,13 @@
       </div>
     {/if}
     {#if resumeOpen && plannedKey}
-      <ResumeDialog workKey={plannedKey} onclose={() => (resumeOpen = false)} onresumed={onCancel} />
+      <ResumeDialog
+        workKey={plannedKey}
+        linkId={resumeLink?.link ?? null}
+        sessionId={resumeLink?.session ?? null}
+        onclose={() => (resumeOpen = false)}
+        onresumed={onResumed}
+      />
     {/if}
 
       <!-- A group, not a labelable control: it is named by aria-labelledby. -->

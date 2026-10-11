@@ -92,6 +92,10 @@ describe('AddHostWizard', () => {
       expect(screen.getAllByTestId('wizard-check').map((r) => r.dataset.state)).toEqual(['ok', 'ok', 'ok', 'na', 'ok', 'ok']),
     );
     expect(screen.getByText('SSH as martin@mercury')).toBeTruthy();
+    // The round trip the check measured sits on its row (Wizard board,
+    // "SSH as martin@mercury · 18 ms": `host_setup::parse`'s detail).
+    const ssh = screen.getAllByTestId('wizard-check').find((r) => r.dataset.key === 'ssh')!;
+    expect(ssh.querySelector('.detail')?.textContent).toBe('18 ms');
     expect(screen.getByText('Check mercury')).toBeTruthy();
     expect((screen.getByTestId('wizard-next') as HTMLButtonElement).disabled).toBe(false);
   });
@@ -137,6 +141,7 @@ describe('AddHostWizard', () => {
       'claude',
       'codex',
     ]);
+    expect(screen.getByTestId('wizard-agents-lead').textContent).toContain('Fleet runs Claude Code and Codex sessions');
     await fireEvent.click(screen.getByTestId('wizard-next')); // → Accounts
     expect((await screen.findByTestId('wizard-account')).textContent).toContain('m.janci@32bit.sk');
     await fireEvent.click(screen.getByTestId('wizard-next')); // → Done

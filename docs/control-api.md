@@ -330,11 +330,19 @@ Index by area (names only; see the reference for details):
 - **Fleet & hosts** — `fleet_health` (with `trackers`: each tracker's sync
   health and the detection backlog, from cached sync state; a per-host token
   sees its own org's trackers; and `org_budgets`, the orgs at or over a
-  daily or monthly budget, for a caller that sees every session),
+  daily or monthly budget, for a caller that sees every session; `devices`,
+  the paired device count with the caller's last seen and the hub's last
+  sync; `playbooks_week`, playbook runs this week per kind; `decide.week`,
+  this week's decision counts),
   `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
-  `probe_host`, `hide_host`, `provision_hosts`,
+  `probe_host`, `hide_host`, `provision_hosts`, `wizard_state` (a wizard
+  left half-way, Add host or Add a project, kept on the hub so it resumes
+  on the person's other device; not served to a per-host token),
+  `propose_host_placement` (the decision model's host for a new session of
+  a project: `{host_alias, confidence_pct, run_id}` or null; a person's
+  device only, never a per-host token; hub contract 17),
   `list_accounts`, `account_usage` (each account's latest plan usage: the
   5-hour and weekly windows with their reset times, status and when it was
   fetched, as the hub's usage poll last answered; never fetches; hub
@@ -444,7 +452,9 @@ Index by area (names only; see the reference for details):
   `repair_session` (explicit repair, same as the Repair workspace button:
   may unregister this worktree's stale entry, adopt a moved checkout,
   recreate the branch and respawn the pane; behind the desktop confirmation
-  when `mcp.confirm_destructive` is on), `kill_session`, `safe_kill_session`,
+  when `mcp.confirm_destructive` is on; a `progress_token` streams its
+  check / fix / verify / pane steps as `repair:progress` events of kind
+  `repair`), `kill_session`, `safe_kill_session`,
   `dismiss_ghost_session`, `adopt_session` (a live tmux session fleet did
   not start, `started_at` null, becomes fleet's: `started_at` is set and the
   caller owns it when nobody did; the pane is untouched; `project_id` puts it
@@ -908,7 +918,9 @@ Index by area (names only; see the reference for details):
   worktree root, ≤ `downloads.max_file_mb`, folders refused (zip them). It
   answers the row in state `fetching` at once; the copy runs in the
   background. A per-host token sends from its OWN host only — that is how a
-  session's Claude hands over what it made. `list_downloads` (a read) and
+  session's Claude hands over what it made. `list_downloads` (a read),
+  `pause_download` (`{ id, paused }`: hold a copy in flight between slices,
+  or let it go on; the row answers `paused: true` while held) and
   `remove_download` are a person's, never served to a per-host token; the
   bytes are `GET /downloads/<id>` (bearer, not a tool result). Events:
   `download:changed { id }`, ids only, never on a host- or org-bound
@@ -953,7 +965,12 @@ Index by area (names only; see the reference for details):
   `utc_offset_min`, which a daylight-saving change does not move), the
   `account` its login bills and the host's `logins` for the Account
   picker; `delete`; `set_enabled
-  { enabled }`; `skip_next { skip? }`; `run_now`. Each run's session has
+  { enabled }`; `skip_next { skip? }`; `run_now`; `set_run_outcome {
+  run_id, outcome }` (gap plan G7.9), a person's answer to what a finished
+  run came to (`did_work`, `nothing` or `needs_person`; a failed run stays
+  failed): it outranks Jev's reading and is stored as `rule`, and
+  `needs_person` clears the session's `last_viewed_at` so its turn lands in
+  the Inbox. Each run's session has
   origin `routine` and is the routine's owner's; the prompt is its
   handover, typed into the session once Claude's REPL is ready (a run
   whose prompt could not be typed fails with `E_PROMPT_NOT_DELIVERED`,
@@ -1820,7 +1837,15 @@ automatically on app start.
   `decide.jev.control_route`) tells the owner's device where a message just
   sent in Control goes: `propose {text}` answers `{outcome: proposed | ask |
   none, target?, proposal?, targets, run_id?}` over the active missions and
-  running sessions, and `follow {run_id, chosen}` records the person's pick. Both are the owner's own device only, never the
+  running sessions, and `follow {run_id, chosen}` records the person's pick.
+  `resume_or_new` (gap plan G7.10, Jev N2, `decide.jev.resume_or_new`)
+  answers the New session dialog's past-work notice for a work key:
+  `propose {key}` answers `{value?: l<link id> | new, link_id?, session_id?,
+  name?, source?: rule | jev, reason?, confidence_pct?, run_id?, unsure}` —
+  a rule's when the key has exactly one recent resumable past session,
+  else Jev's at assist, else nothing — and `follow {key, chosen}` records
+  the person's Resume (`l<link id>`) or "Start fresh instead" (`new`). Both
+  are a person's own device only, never the
   operator; each change sends an empty `confirm:changed` event. Every
   other caller is unaffected: for them these tools are not gated.
 - **Handoff receipts.** Each successful call of the operator that hands

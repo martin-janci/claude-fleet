@@ -45,6 +45,30 @@ describe('ReviewDialog', () => {
     const payload = call![1] as { args: { source_session_id: number; prompt: string } };
     expect(payload.args.source_session_id).toBe(1);
     expect(payload.args.prompt).toContain('Pass 1');
+    expect('agent' in payload.args).toBe(false);
+  });
+
+  it('Codex as the reviewer sends agent codex; Claude Code sends none (M15 G7.12)', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'spawn_review') return { ...source, id: 2, tmux_name: 'dev-source--review-abc', kind: 'review', reviews_session_id: 1 };
+      if (cmd === 'assets_inventory')
+        return [
+          { host_alias: 'local', kind: 'skill', harness: 'claude', name: 'pr-review', state: 'ok' },
+          { host_alias: 'local', kind: 'skill', harness: 'codex', name: 'codex-review', state: 'ok' },
+        ];
+      return null;
+    });
+    render(ReviewDialog, { props: { source, onClose: () => {} } });
+    for (let i = 0; i < 4; i++) await tick();
+    const skillOpts = () => Array.from((screen.getByTestId('review-skill') as HTMLSelectElement).options, (o) => o.value);
+    expect(skillOpts()).toContain('pr-review');
+    await fireEvent.change(screen.getByTestId('review-agent'), { target: { value: 'codex' } });
+    await tick();
+    expect(skillOpts()).toEqual(['', 'codex-review']);
+    await fireEvent.click(screen.getByTestId('review-start'));
+    for (let i = 0; i < 6; i++) await tick();
+    const call = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0] === 'spawn_review');
+    expect((call![1] as { args: { agent?: string } }).args.agent).toBe('codex');
   });
 
   it('Start is disabled when prompt is emptied', async () => {

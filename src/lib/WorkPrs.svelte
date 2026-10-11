@@ -12,6 +12,7 @@
   import { selectSessionExplicitly } from './selection';
   import { timeAgo } from './session_status';
   import { openExternal } from './open_external';
+  import { openMission } from './missions';
   import { readErrorText } from './work_view';
   import type { IpcError } from './result';
   import { listPullRequests, prChecksLabel, prDiffstat, prRef, prStateLabel, type PrFilter, type PullRequestRow } from './prs';
@@ -131,6 +132,15 @@
             {#if checks}<span class="checks checks--{pr.ci_status ?? 'none'}" data-testid="work-pr-checks">· {checks}</span>{/if}
             {#if pr.state === 'MERGED' && pr.merged_at}<span data-testid="work-pr-merged">· merged {timeAgo(pr.merged_at)}</span>{/if}
           </div>
+          {#if pr.mission_id != null && pr.mission_name}
+            <div class="sub muted">
+              <!-- G7.8 (MCViews board): "from <mission>", opening it. -->
+              from
+              <button class="link muted" type="button" title="Open the mission" data-testid="work-pr-mission" onclick={() => openMission(pr.mission_id!)}
+                >{pr.mission_name}</button
+              >
+            </div>
+          {/if}
           {#if pr.session_name}
             <div class="sub muted">
               Opened by

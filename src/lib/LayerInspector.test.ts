@@ -18,11 +18,11 @@ const mount = (o: Record<string, unknown> = {}) => {
 };
 
 describe('LayerInspector', () => {
-  it('names the layer and its catalog, with Members and Hosts tabs', () => {
+  it('names the layer and its catalog, with Assets · Changeset · Hosts · Source tabs (M15 G7.13)', () => {
     mount();
     expect(screen.getByText('Layer · catalog personal')).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'base' })).toBeTruthy();
-    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Members', 'Hosts']);
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Assets 2', 'Changeset', 'Hosts', 'Source']);
     expect(screen.getByTestId('layer-member-skill/w')).toBeTruthy();
     expect(screen.getByTestId('layer-member-skill/v')).toBeTruthy();
   });
@@ -33,6 +33,32 @@ describe('LayerInspector', () => {
     await fireEvent.change(screen.getByTestId('layer-form-to'), { target: { value: 'extra' } });
     await fireEvent.click(screen.getByTestId('layer-form-submit'));
     expect(onchange).toHaveBeenCalledWith({ op: 'move', catalog: 'personal', member: 'skill/w', layer: 'base', to: 'extra' });
+  });
+  it('the Changeset tab lists the proposed cards that change the layer, and opens one', async () => {
+    const onopencard = vi.fn();
+    const card = (id: number, kind: string, summary: string, over: Record<string, unknown> = {}) => ({
+      id, kind, summary, state: 'proposed', created_at: 1, catalogs: ['personal'], ...over,
+    });
+    mount({
+      onopencard,
+      cards: [
+        card(1, 'layer', 'Move skill/w into base'),
+        card(2, 'layer', 'Rename baseline to core'),
+        card(3, 'rollout', 'Roll out base to oci', { state: 'applied' }),
+        card(4, 'rollout', 'Roll out base to oci', { catalogs: ['team'] }),
+      ],
+    });
+    expect(screen.getAllByRole('tab')[1].textContent).toBe('Changeset 1');
+    await fireEvent.click(screen.getByTestId('inspector-tab-changeset'));
+    expect(screen.getByTestId('layer-card-1')).toBeTruthy();
+    expect(screen.queryByTestId('layer-card-2')).toBeNull();
+    await fireEvent.click(screen.getByTestId('layer-card-open-1'));
+    expect(onopencard).toHaveBeenCalledWith(1);
+  });
+  it('the Source tab shows the layer as the catalog defines it', async () => {
+    mount({ layer: listing.layers[1] });
+    await fireEvent.click(screen.getByTestId('inspector-tab-source'));
+    expect(screen.getByTestId('layer-source').textContent).toBe('name: server\naxis: role\nextends: base\nmembers: []');
   });
   it('the Hosts tab answers “why is it on oci?” with the chain', async () => {
     mount();

@@ -39,6 +39,12 @@ pub const CHAT_WIZARDS: &[&str] = &[
 const TONES: &[&str] = &["info", "tip", "success", "warning", "danger"];
 pub const PROGRESS_STATES: &[&str] = &["running", "waiting", "done", "failed"];
 pub const PROGRESS_STEP_STATES: &[&str] = &["pending", "running", "done", "failed", "skipped"];
+/// What an error's next step may do itself instead of filling the composer
+/// (G7.4): open a login on a host, open a host, open the accounts. The app
+/// runs it; the block names only which one and the host.
+pub const NEXT_ACTIONS: &[&str] = &["login", "open_host", "open_accounts"];
+/// The next-step actions that name a `host`.
+const NEXT_ACTIONS_ON_HOST: &[&str] = &["login", "open_host"];
 /// The page data sources' column types (`ColType` in pages.ts).
 pub const RESULT_TYPES: &[&str] = &["text", "int", "tokens", "usd_micros", "day", "time"];
 pub const RESULT_CHARTS: &[&str] = &["line", "bar", "sparkline"];
@@ -152,6 +158,10 @@ pub enum BlockKind {
         steps: Option<Vec<ProgressStep>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        /// When the job started, unix seconds: the card counts the time
+        /// since ("4 min 12 s") while it runs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<u64>,
     },
     /// Numbers, a chart and a table, drawn with the page widgets.
     Results {
@@ -171,7 +181,7 @@ pub enum BlockKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        next: Vec<Choice>,
+        next: Vec<NextStep>,
     },
     /// A settings change waiting for a person: the id `set_setting` with
     /// `propose: true` answered. The card reads the key and both values
@@ -192,6 +202,12 @@ pub enum BlockKind {
         /// Why the agent opens it, in one sentence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         why: Option<String>,
+        /// Answers read from the person's own words ("Set up a new project
+        /// for acme/pos on mercury"), by field name: written in as drafted
+        /// defaults the person checks (G7.4). A name the wizard does not
+        /// have, a secret, or a value its field refuses is dropped.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        values: Option<Map<String, Value>>,
     },
 }
 
@@ -245,6 +261,25 @@ pub struct Choice {
     pub hint: Option<String>,
 }
 
+/// An error's next step: a choice that fills the composer, or, with an
+/// `action`, one the app runs itself ([`NEXT_ACTIONS`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct NextStep {
+    pub label: String,
+    /// What a click puts in the composer, as the person's instruction; with
+    /// an `action`, what it fills where the action cannot run.
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// login, open_host or open_accounts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// The host a `login` or `open_host` acts on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ProgressStep {
@@ -252,6 +287,9 @@ pub struct ProgressStep {
     /// pending (default), running, done, failed or skipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// One line under the step while it runs: "attempt 2 of 10".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -416,10 +454,12 @@ pub fn check(v: &Value) -> Result<(), Vec<String>> {
                 p.each(&steps, "step", |p, s, at| {
                     p.str(s, "title", at, true, 200);
                     p.one_of(s, "state", at, PROGRESS_STEP_STATES, false);
+                    p.str(s, "detail", at, false, 120);
                 });
             }
             p.str(o, "unit", "", false, 20);
             p.str(o, "note", "", false, 2000);
+            p.num(o, "started_at", "", 0);
         }
         "results" => {
             p.str(o, "title", "", false, 120);
@@ -431,7 +471,7 @@ pub fn check(v: &Value) -> Result<(), Vec<String>> {
             p.key(o, "code", "");
             p.str(o, "title", "", true, 120);
             let next = p.opt_arr(o, "next", "", 1, 4).unwrap_or_default();
-            p.each(&next, "next", choice);
+            p.each(&next, "next", next_step);
             p.str(o, "body", "", false, 4000);
             p.str(o, "detail", "", false, 8000);
         }
@@ -446,6 +486,7 @@ pub fn check(v: &Value) -> Result<(), Vec<String>> {
         "wizard" => {
             p.one_of(o, "wizard", "", CHAT_WIZARDS, true);
             p.str(o, "why", "", false, 500);
+            drafted_values(&mut p, o.get("values"));
         }
         _ => unreachable!("kind is one of KINDS"),
     }
@@ -460,6 +501,53 @@ fn choice(p: &mut Problems, o: &Map<String, Value>, at: &str) {
     p.str(o, "label", at, true, 80);
     p.str(o, "prompt", at, true, 4000);
     p.str(o, "hint", at, false, 200);
+}
+
+/// The most drafted answers a `wizard` block carries.
+const MAX_DRAFTED: usize = 20;
+
+fn drafted_values(p: &mut Problems, v: Option<&Value>) {
+    let o = match v {
+        None | Some(Value::Null) => return,
+        Some(Value::Object(o)) => o,
+        Some(_) => {
+            p.add("", "`values` must be an object of answers by field name");
+            return;
+        }
+    };
+    if o.len() > MAX_DRAFTED {
+        p.add("", format!("`values` has more than {MAX_DRAFTED} answers"));
+    }
+    for (k, x) in o {
+        let at = format!("values › {k}");
+        let named = k.len() <= 40
+            && k.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+            && k.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        if !named {
+            p.add(&at, "must be a field name: lowercase letters, digits and _");
+        }
+        match x {
+            Value::String(t) if t.chars().count() > 500 => {
+                p.add(&at, "is longer than 500 characters")
+            }
+            Value::String(_) | Value::Bool(_) => {}
+            Value::Number(n) if n.as_f64().is_some_and(f64::is_finite) => {}
+            _ => p.add(&at, "must be text, a number or true/false"),
+        }
+    }
+}
+
+fn next_step(p: &mut Problems, o: &Map<String, Value>, at: &str) {
+    choice(p, o, at);
+    p.one_of(o, "action", at, NEXT_ACTIONS, false);
+    let on_host = o
+        .get("action")
+        .and_then(Value::as_str)
+        .is_some_and(|a| NEXT_ACTIONS_ON_HOST.contains(&a));
+    if on_host {
+        p.key(o, "host", at);
+    }
 }
 
 fn axis(p: &mut Problems, v: Option<&Value>, at: &str) {

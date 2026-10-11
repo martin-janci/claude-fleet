@@ -176,6 +176,70 @@ async fn a_client_is_offered_a_decision_it_can_verify_itself() {
     );
 }
 
+/// A desktop or phone a contract behind this hub (it accepts only the
+/// previous revision) still reaches the hub and is offered the release that
+/// speaks it: no lockstep upgrade (the owner's requirement, 2026-10-10). The
+/// hub refuses no client for its contract; only the update decision reads it.
+#[tokio::test]
+async fn a_client_a_contract_behind_is_offered_the_release_that_speaks_it() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let c = crate::wire_contract::CONTRACT_REVISION;
+    let behind = |mut req: CheckRequest, window: Window| {
+        req.speaks.contract_accepts = Some(window);
+        req
+    };
+    let phone_req = CheckRequest {
+        update_proto: 1,
+        component: Component::Android,
+        platform: Platform::new("android", "aarch64", "apk"),
+        installed: Installed::version(Version::new(0, 3, 3)),
+        speaks: Speaks::default(),
+        phase: UpdatePhase::Idle,
+        attempt: None,
+    };
+    for (who, req) in [
+        (
+            "desktop",
+            behind(desktop_req("0.3.3"), Window::new(c - 1, c - 1)),
+        ),
+        ("phone", behind(phone_req, Window::new(0, c - 1))),
+    ] {
+        let d = check(
+            &store,
+            &client(1, TokenMode::Full, None),
+            &req,
+            &keys(&key),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            (d.status, d.reason.code),
+            (
+                Status::UpdateRequired,
+                fleet_update::wire::ReasonCode::Incompatible
+            ),
+            "{who}: {:?}",
+            d.reason
+        );
+        let v = verify_target(&d, &keys(&key), &req.platform, 0, NOW)
+            .unwrap()
+            .unwrap();
+        assert_eq!(v.version, Version::new(0, 3, 4), "{who}");
+    }
+    // This build's desktop takes the previous revision too, so it is merely
+    // offered the update, never cut off.
+    let d = check(
+        &store,
+        &client(1, TokenMode::Full, None),
+        &behind(desktop_req("0.3.3"), Window::new(c - 1, c)),
+        &keys(&key),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(d.status, Status::UpdateAvailable, "{:?}", d.reason);
+}
+
 #[tokio::test]
 async fn nothing_is_offered_without_a_trusted_key() {
     let key = TestKey::new(9);

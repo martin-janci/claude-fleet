@@ -83,6 +83,7 @@ mod tests_runs;
 mod tests_sessions_isolation;
 mod updates;
 mod views;
+mod wizard_state;
 
 // `rmcp::model::*` also exports a `CancelTaskParams`. Name ours explicitly:
 // an explicit import outranks both globs, here and in every child module
@@ -390,6 +391,7 @@ impl FleetTools {
             + Self::api_tokens_router()
             + Self::routines_router()
             + Self::start_rules_router()
+            + Self::wizard_state_router()
             + Self::presence_router()
             + Self::library_router()
             + Self::runs_router()

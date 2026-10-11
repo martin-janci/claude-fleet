@@ -48,11 +48,19 @@
   import ControlCommandReceipts from './ControlCommandReceipts.svelte';
   import ControlSuggestions from './ControlSuggestions.svelte';
   import { takeControlCommand } from './control_slash';
+  import { linkableTasks, type TaskLink } from './control_task_link';
+  import { workTree } from './work_view';
 
   // Gap plan G3.9: the box's words in Control. `#KEY` names a task and
   // `@name` a host or session in Control's commands; `/` opens them.
   const CONTROL_HINT = '# task · @ host · / command · ↵ send';
   const CONTROL_PLACEHOLDER = 'Ask the fleet, or start a task…';
+
+  /** G7.8: the tasks `#` offers, read from the Work tree when first typed. */
+  async function linkTasks(): Promise<TaskLink[]> {
+    const r = await workTree({ filters: {}, limit: 200, per_task: 1 });
+    return r.ok ? linkableTasks(r.value.tasks) : [];
+  }
 
   let { contextInput = null }: { contextInput?: AgentContextInput | null } = $props();
 
@@ -256,6 +264,8 @@
       runCommand={takeControlCommand}
       composerHint={CONTROL_HINT}
       placeholder={CONTROL_PLACEHOLDER}
+      {linkTasks}
+      daySeparators={true}
     />
   {/if}
 </div>

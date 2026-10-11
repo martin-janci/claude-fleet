@@ -42,7 +42,8 @@
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { devices, loadDevices } from './devices';
-  import { readOnlyRecipient } from './share_devices';
+  import { limitedRecipient, trustDeviceForShare } from './share_devices';
+  import type { DeviceSummary } from './devices';
   import { errorSentence } from './error_copy';
   import { accessRequests, answerAccessRequest, askerName, loadAccessRequests } from './access_requests';
   import { LEVEL_NAMES } from './shared_view';
@@ -145,10 +146,36 @@
   });
 
   /** Step 5.8: a drive share to someone whose every paired device is
-   *  read-only can never send a prompt — say so before it is made. */
+   *  read-only can never send a prompt — say so before it is made. G7.11:
+   *  an answer share too, and "Trust now" makes their device full. */
   const readOnlyWarning = $derived(
-    kind === 'person' && level === 'drive' ? readOnlyRecipient(person, $devices) : null,
+    kind === 'person' ? limitedRecipient(person, $devices, level) : null,
   );
+  /** The same line on a grant already made ("reads only until his iPhone is
+   *  trusted · Trust now", Sharing and presence board). */
+  function grantLimit(g: SessionGrant) {
+    if (g.org_id != null || !g.person_name) return null;
+    return limitedRecipient(g.person_name, $devices, g.level);
+  }
+
+  /** G7.11 "Trust now": make a recipient's read-only device full, after a
+   *  second click naming what that gives it. Org device administration
+   *  (`update_device`) decides whether this person may. */
+  const trustBlocked = $derived(hubActionBlocked('update_device', $hubStatus, $hubConnection));
+  let trusting = $state<string | null>(null);
+  async function doTrust(d: DeviceSummary) {
+    if (busy || trustBlocked !== null) return;
+    busy = true;
+    error = null;
+    const r = await trustDeviceForShare(d.name);
+    busy = false;
+    trusting = null;
+    if (!r.ok) {
+      error = errorSentence(r.error);
+      return;
+    }
+    await loadDevices();
+  }
 
   // Nothing to show: the row left the store (killed, reaped, or — on a paired
   // desktop — revoked out from under us).
@@ -234,6 +261,34 @@
   }
 </script>
 
+{#snippet trustNow(list: DeviceSummary[])}
+  {#each list as d (d.name)}
+    {#if trusting === d.name}
+      <span class="confirm" data-testid="share-trust-confirm">
+        {d.name} becomes a full device: it can send prompts wherever its person may.
+        <button
+          type="button"
+          class="primary"
+          data-testid="share-trust-yes"
+          disabled={busy || trustBlocked !== null}
+          title={trustBlocked ?? `Make ${d.name} a full device`}
+          onclick={() => void doTrust(d)}>Trust</button
+        >
+        <button type="button" data-testid="share-trust-no" disabled={busy} onclick={() => (trusting = null)}>Keep</button>
+      </span>
+    {:else}
+      <button
+        type="button"
+        class="linkish"
+        data-testid="share-trust-now"
+        disabled={busy || trustBlocked !== null}
+        title={trustBlocked ?? `Let ${d.name} send prompts`}
+        onclick={() => (trusting = d.name)}>{list.length === 1 ? 'Trust now' : `Trust ${d.name}`}</button
+      >
+    {/if}
+  {/each}
+{/snippet}
+
 {#if id !== null && session}
   <Modal
     title="Share {label}"
@@ -273,9 +328,9 @@
             disabled={busy}
           />
           <select data-testid="share-level" aria-label="Level" bind:value={level} disabled={busy}>
-            <option value="watch">watch — read only</option>
-            <option value="answer">answer — can answer its questions</option>
-            <option value="drive">drive — can send prompts</option>
+            <option value="watch">{LEVEL_NAMES.watch} — can read it</option>
+            <option value="answer">{LEVEL_NAMES.answer} — can answer its questions</option>
+            <option value="drive">{LEVEL_NAMES.drive} — can send prompts</option>
           </select>
           <button
             type="button"
@@ -287,7 +342,10 @@
           >
         </div>
         {#if readOnlyWarning}
-          <p class="warn" role="status" data-testid="share-readonly-warning">{readOnlyWarning}</p>
+          <p class="warn" role="status" data-testid="share-readonly-warning">
+            {readOnlyWarning.message}
+            {@render trustNow(readOnlyWarning.devices)}
+          </p>
         {/if}
         <!-- Phase D: an org share is a grant to the org's members of today
              (see the comment at the top of this file). -->
@@ -309,7 +367,8 @@
           <p class="note" data-testid="share-list-loading">Reading the grants…</p>
         {:else if grants.length === 0}
           <p class="note" data-testid="share-list-empty">
-            Not shared with anyone. Only you can see this session.
+            <strong data-testid="share-private">Private · only you</strong>. Not shared with anyone:
+            only you can see this session.
           </p>
         {:else}
           <ul class="grants" data-testid="share-list">
@@ -317,7 +376,14 @@
               {@const name = recipientOf(g)}
               <li class="grant" data-testid="share-grant">
                 <span class="who" data-testid="share-grant-who">{recipientLabel(g)}</span>
-                <span class="level" data-testid="share-grant-level">{g.level}</span>
+                <span class="level" data-testid="share-grant-level">{LEVEL_NAMES[g.level as GrantLevel] ?? g.level}</span>
+                {#if grantLimit(g)}
+                  {@const lim = grantLimit(g)!}
+                  <span class="limit" data-testid="share-grant-limit"
+                    >reads only until their {lim.devices.length === 1 ? lim.devices[0].name : 'device'} is trusted
+                    {@render trustNow(lim.devices)}</span
+                  >
+                {/if}
                 {#if confirming !== null && confirming === keyOf(name) && name !== null}
                   <span class="confirm" data-testid="share-revoke-confirm">
                     Revoke?
@@ -345,8 +411,8 @@
                       disabled={busy || name === null || narrowBlocked !== null}
                       title={name === null
                         ? 'This hub did not name the recipient, so this app cannot act on the grant — use fleet-hub'
-                        : (narrowBlocked ?? 'Lower this grant to watch (read-only)')}
-                      onclick={() => name !== null && doNarrow(name)}>Narrow to watch</button
+                        : (narrowBlocked ?? `Lower this grant to ${LEVEL_NAMES.watch} (read-only)`)}
+                      onclick={() => name !== null && doNarrow(name)}>Narrow to {LEVEL_NAMES.watch}</button
                     >
                   {/if}
                   <button
@@ -382,7 +448,7 @@
                   class="primary"
                   data-testid="share-ask-grant"
                   disabled={busy || answerBlocked !== null}
-                  title={answerBlocked ?? `Share at ${a.level} with ${askerName(a)}`}
+                  title={answerBlocked ?? `Share at ${LEVEL_NAMES[a.level as GrantLevel] ?? a.level} with ${askerName(a)}`}
                   onclick={() => doAnswer(a.id, true)}>Grant</button
                 >
                 <button
@@ -408,7 +474,7 @@
           the session — there is no "from this moment on" share.
         </p>
         <p data-testid="share-enforcement-note">
-          <strong>Watch and drive are enforced by Fleet, not by SSH.</strong> A
+          <strong>Read, Answer and Steer are enforced by Fleet, not by SSH.</strong> A
           share never gives a terminal: attaching is a direct SSH session into
           this host that Fleet is not in the path of and could never revoke, so
           the person you share with gets a read-only snapshot of the pane
@@ -501,6 +567,26 @@
   .grant button + button,
   .confirm button {
     margin-left: 0;
+  }
+  .limit {
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
+  .grant .limit button {
+    margin-left: var(--space-1);
+  }
+  .linkish {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
+    font: inherit;
+  }
+  .linkish:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .consequences p {
     margin: 0 0 0.45rem;

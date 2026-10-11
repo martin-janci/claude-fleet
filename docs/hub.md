@@ -373,12 +373,14 @@ upgrade before the hub is touched (point `FLEET_HUB_DATA` at the right
 directory) — it never migrates without a backup. An upgrade never prunes an older
 version's `pre-<version>-*.db` (see *Backups*).
 
-**Order across the three binaries.** Today (the hub serves contract 16, the desktop accepts 16,
+**Order across the three binaries.** Today (the hub serves contract 17, the desktop accepts 16–17,
 proto 1 on both sides; `fleet-hub compat` prints a build's windows) the order is a habit: hub, then desktop, then the
 agents. When a release bumps `CONTRACT_REVISION`, upgrade the **hub first,
 then the desktop in the same window** — there is no mixed window, the desktop
 refuses with `E_HUB_CONTRACT` until it is updated, hooks and the phone keep
-working meanwhile. When a release bumps `PROTO_VERSION`, upgrade the **hub
+working meanwhile. Revision 17 is the exception: it keeps the desktop's minimum at 16,
+so a desktop that updates first keeps working against a revision-16 hub
+(wizard resume and the host proposal stay empty until the hub updates). When a release bumps `PROTO_VERSION`, upgrade the **hub
 first**; the release holds `MIN_SUPPORTED_PROTO` at the previous value so an
 older `fleet-agent` keeps connecting until it is reinstalled. A hub upgrade
 never needs the agents restarted.
@@ -1295,6 +1297,9 @@ desktop's *⤓ Downloads* (footer) list it for you to save, share or open.
 The copy runs in the background in 8 MiB pieces over the same SSH (or
 agent) link the hub already uses; the row shows *copying…* until it is
 ready, and a toast says so. Folders are refused: zip them first.
+*Pause* on a copy in flight (`pause_download`) holds it after the piece
+being read; *Resume* goes on from there. A paused copy is still marked
+failed if the hub stops.
 
 | setting | default | |
 |---|---|---|
@@ -3341,7 +3346,6 @@ Every command below refuses in hub client mode; the full table, with the command
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
 | `merge_host` | merging one host's rows into another is fleet administration, which the hub reserves for its own operator — run it there with `fleet-hub host merge <from> <into>` |
 | `probe_ssh_alias` | it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it |
-| `propose_host_placement` | the decision model and the account usage are the hub's while it owns the fleet; pick the host as usual |
 | `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub provision [--host <alias>] [--content-only]` |
 | `purge_project` | it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub |
 | `record_host_placement` | the decision model's runs are recorded on the hub that owns the fleet; nothing to record here |

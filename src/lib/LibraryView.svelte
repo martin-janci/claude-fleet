@@ -9,6 +9,11 @@
   header press), a grid of tiles instead, Type ▾, and "Link a repo on a
   host", which opens Add project. The board's "Add a Google Drive folder"
   is cut: fleet has no Drive connection to list.
+
+  Gap plan G7.8: folders instead of one table per host. "Session outputs"
+  (with how many are from today), "Uploads" and "Repos", each folding
+  open and shut; every row names its host. The board's "Artifacts today"
+  folder is cut with Drive: fleet does not list claude.ai artifacts.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -18,8 +23,12 @@
   import { selectedSession } from './selection';
   import { fmtSize, saveDownload } from './downloads';
   import { timeAgo } from './session_status';
+  import { localMidnight } from './today';
   import {
     ENTRY_LABEL,
+    folderCountText,
+    libraryFolders,
+    type LibraryFolderId,
     libraryEntryList,
     matchesFilter,
     nextSort,
@@ -76,7 +85,15 @@
   }
 
   const shown = $derived(sortEntries($libraryEntryList.filter((e) => matchesFilter(e, filter)), sort));
-  const hosts = $derived([...new Set(shown.map((e) => e.host))]);
+  const folders = $derived(libraryFolders(shown, localMidnight()));
+  /** Folders folded shut (G7.8); every one starts open. */
+  let shut = $state<Set<LibraryFolderId>>(new Set());
+  function toggleFolder(id: LibraryFolderId) {
+    const next = new Set(shut);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    shut = next;
+  }
 
   onMount(() => {
     void load();
@@ -152,17 +169,26 @@
       {filter === 'repos' ? 'No repos yet: they appear once a session works in one.' : 'Nothing here yet. Files a session sends, and files you upload, land here.'}
     </p>
   {:else}
-    {#each hosts as host (host)}
-      {@const rows = shown.filter((e) => e.host === host)}
-      <section class="host" aria-label={host}>
-        <h3>{host}</h3>
-        {#if layout === 'grid'}
+    {#each folders as f (f.id)}
+      {@const rows = f.entries}
+      {@const open = !shut.has(f.id)}
+      <section class="folder" aria-label={f.label} data-testid="library-folder" data-folder={f.id}>
+        <h3>
+          <button type="button" class="folder-head" aria-expanded={open} data-testid="library-folder-toggle" onclick={() => toggleFolder(f.id)}
+            ><span class="caret" aria-hidden="true">{open ? '▾' : '▸'}</span> {f.label}
+            <span class="meta" data-testid="library-folder-count">{folderCountText(f)}</span></button
+          >
+        </h3>
+        {#if !open}
+          <!-- folded shut -->
+        {:else if layout === 'grid'}
           <ul class="grid" data-testid="library-grid">
             {#each rows as e (e.key)}
               <li class="tile" data-testid="library-row" data-kind={e.kind}>
                 <span class="glyph" aria-hidden="true">{e.kind === 'repo' ? '⑂' : '▤'}</span>
                 <span class="name" title={e.detail}>{e.name}</span>
                 <span class="meta">{ENTRY_LABEL[e.kind]}{#if e.size != null}{' '}· {fmtSize(e.size)}{/if}</span>
+                <span class="meta host-of">{e.host}</span>
                 {@render act(e)}
               </li>
             {/each}
@@ -187,6 +213,7 @@
                   <td class="col-name">
                     <span class="name" title={e.detail}>{e.name}</span>
                     <span class="meta">{ENTRY_LABEL[e.kind]}{#if e.session}{' '}· {e.session}{/if}</span>
+                    <span class="meta host-of">{e.host}</span>
                   </td>
                   <td class="col-modified meta">{e.at ? timeAgo(e.at) : ''}</td>
                   <td class="col-size meta">{e.size != null ? fmtSize(e.size) : ''}</td>
@@ -326,12 +353,30 @@
     outline: 2px solid var(--accent);
     outline-offset: 1px;
   }
-  .host h3 {
+  .folder h3 {
     margin: 0;
     padding: var(--space-2) var(--space-3) var(--space-1);
     font-size: var(--text-xs);
     font-weight: 500;
     color: var(--fg-muted);
+  }
+  .folder-head {
+    display: inline-flex;
+    align-items: baseline;
+    gap: var(--space-1);
+    border: none;
+    background: none;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
+  .folder-head:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .host-of {
+    margin-left: var(--space-1);
   }
   ul {
     list-style: none;

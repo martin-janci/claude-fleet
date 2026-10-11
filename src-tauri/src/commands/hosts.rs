@@ -119,7 +119,7 @@ pub async fn agent_installs(
 /// app's own SSH, which a paired client does not administer.
 #[tauri::command]
 pub async fn check_host(
-    args: HostAliasArgs,
+    args: fleet_core::service::host_check::CheckHostArgs,
     backend: State<'_, Arc<FleetBackend>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<fleet_core::service::host_check::HostCheck, IpcError> {
@@ -128,7 +128,14 @@ pub async fn check_host(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    Ok(fleet_core::service::host_check::check_host(&ssh, &args.alias, now).await)
+    // M15 G7.12: Settings › Projects asks about a base path too.
+    fleet_core::service::host_check::check_host_with(
+        &ssh,
+        &args.alias,
+        args.base_path.as_deref(),
+        now,
+    )
+    .await
 }
 
 // ---- Orbit Fleet 4.9: the add-host wizard ------------------------------

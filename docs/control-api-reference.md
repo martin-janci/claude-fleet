@@ -175,7 +175,7 @@ Ensure the UX agent's operator session exists on a reachable host; returns its r
 
 ### `fleet_health`
 
-Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hub: uptime and last reconcile pass; tunnels_mode none|reverse; peer_links_total. hosts[]: per host disk_home_pct/disk_low, claude_behind, agent_behind, hooks_silent. decide (master only): Jev's last hour, degraded if its breaker is open or >20% failed. loops[]: each background job's last and next run and result (ok/error/paused); automation_paused.
+Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hub: uptime and last reconcile pass; tunnels_mode none|reverse; peer_links_total. devices: {paired, last_seen_at, last_sync_at}. playbooks_week: runs per kind. hosts[]: per host disk_home_pct/disk_low, claude_behind, agent_behind, hooks_silent. decide (master only): Jev's last hour, degraded if its breaker is open or >20% failed; week: 7 days' answers. loops[]: each background job's last and next run and result (ok/error/paused); automation_paused.
 
 ### `forget_project`
 
@@ -345,7 +345,7 @@ Who you are on this fleet and every live grant TO you: { person_id, grants: [{ s
 
 ### `new_bg_session`
 
-Launch a supervised headless (background) Claude session on a host with an initial prompt, which becomes its default friendly name. Returns the claude_session_id AND the fleet row (`session`; absent until reconcile matches it, on the next tick) for session_transcript { session_id }.
+Launch a supervised headless (background) Claude session on a host with an initial prompt, which becomes its default friendly name. Returns the claude_session_id AND the fleet row (`session`; absent until reconcile matches it, on the next tick) for session_transcript { session_id }. agent "codex" needs project_id and takes no read_only or stop limits.
 
 Parameters: `agent`, `confirm_nonce`, `host_alias`, `name`, `project_id`, `prompt`, `read_only`, `requester_session_id`, `stop_after_secs`, `stop_after_usd`
 
@@ -376,6 +376,12 @@ Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigne
 Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange), updater is fleet-updater's (/update only); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). person names whose device it is; the default is this hub's owner, and its sessions are private to that person. Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id, person }.
 
 Parameters: `mode`, `name`, `org_id`, `person`, `trusted`, `ttl_s`
+
+### `pause_download`
+
+Pause (paused: true) or resume a sent file's copy in flight; it stops between slices. Answers the row. E_INVALID_STATE when it is not being copied.
+
+Parameters: `id`, `paused`
 
 ### `peer_exchange`
 
@@ -416,6 +422,12 @@ Parameters: `alias`
 ### `project_picks`
 
 The New session picker's choices per project: pinned, vis (hide|keep), group.
+
+### `propose_host_placement`
+
+Jev's host for a new session of project_id: {host_alias, confidence_pct, run_id}, or null (off, one candidate, unsure). E_FORBIDDEN for an org-bound client.
+
+Parameters: `project_id`
 
 ### `propose_layers`
 
@@ -493,9 +505,9 @@ Parameters: `host_alias`, `new_name`, `old_name`, `session_id`
 
 ### `repair_session`
 
-Repair a session workspace (the Repair workspace button): make its directory a healthy git worktree on its branch with its tmux session running there. Goes past the automatic checks: may unregister a stale worktree entry, adopt its branch checkout elsewhere, recreate the branch from base once origin confirms it is gone, and respawn a pane whose directory vanished. No-op when healthy. Call it after any tool answers E_REPAIR_REQUIRED, then retry that tool. Returns a RepairReport. Errors: E_REPO_MISSING, E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE, E_CONFIRM_REQUIRED (gated by mcp.confirm_destructive).
+Repair a session workspace (the Repair workspace button): make its directory a healthy git worktree on its branch with its tmux session running there. Goes past the automatic checks: may unregister a stale worktree entry, adopt its branch checkout elsewhere, recreate the branch from base once origin confirms it is gone, and respawn a pane whose directory vanished. No-op when healthy. Call it after any tool answers E_REPAIR_REQUIRED, then retry that tool. progress_token: steps arrive as repair:progress. Returns a RepairReport. Errors: E_REPO_MISSING, E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE, E_CONFIRM_REQUIRED (gated by mcp.confirm_destructive).
 
-Parameters: `confirm_nonce`, `host_alias`, `name`, `session_id`
+Parameters: `confirm_nonce`, `host_alias`, `name`, `progress_token`, `session_id`
 
 ### `repo_blame`
 
@@ -587,6 +599,12 @@ Restore sessions a host lost to a reboot or tmux restart: resume each one's conv
 
 Parameters: `confirm_nonce`, `dry_run`, `host_alias`, `session_ids`
 
+### `resume_or_new`
+
+Whether a new session on a work key should resume a past session or start fresh (propose {key}), or record the person's pick (follow {key, chosen}).
+
+Parameters: `action`, `chosen`, `key`
+
 ### `revoke_client`
 
 Revoke a paired client's token by name: its next request is refused and the name is free to pair again; the row is kept, revoked, for the audit trail. E_NOTFOUND when no live client has that name. Master token only.
@@ -601,9 +619,9 @@ Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 
 ### `routines`
 
-Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
+Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; set_run_outcome {run_id, outcome}: a person's did_work | nothing | needs_person (needs_person lands it in the Inbox). Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
 
-Parameters: `action`, `enabled`, `limit`, `routine`, `routine_id`, `skip`
+Parameters: `action`, `enabled`, `limit`, `outcome`, `routine`, `routine_id`, `run_id`, `skip`
 
 ### `run_prompt`
 
@@ -811,11 +829,11 @@ Parameters: `action`, `at`, `n`, `session_id`
 
 Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns its row.
 
-Parameters: `confirm_nonce`, `prompt`, `source_session_id`
+Parameters: `agent`, `confirm_nonce`, `prompt`, `source_session_id`
 
 ### `start_rules`
 
-Start rules: a task key pattern (PD-*) that names the project, and optionally the host, a start lands in, before the key's history and Jev. Fleet offers one after five identical starts. list: offers, active and dismissed rules; save {rule, rule_id?}: the whole rule, active; accept {rule_id}: an offer, replacing the pattern's other rule; dismiss {rule_id}: never offered again; delete {rule_id}. E_NOTFOUND, E_INVALID, E_EXISTS.
+Start rules: a task key pattern (PD-*) that names the project, and optionally the host (with a fallback host for when it is offline), the account, model, effort and agent (claude | codex) of a start, decided before the key's history and Jev. Fleet offers one after five identical starts. list: offers, active and dismissed rules; save {rule, rule_id?}: the whole rule, active; accept {rule_id}: an offer, replacing the pattern's other rule; dismiss {rule_id}: never offered again; delete {rule_id}. E_NOTFOUND, E_INVALID, E_EXISTS.
 
 Parameters: `action`, `rule`, `rule_id`
 
@@ -878,6 +896,12 @@ Parameters: `task_id`, `timeout_s`
 Find your own fleet row from your tmux session name (`tmux display-message -p '#S'`). E_NOTFOUND until fleet has reconciled it; E_AMBIGUOUS when the name exists on several hosts: pick yours from the error's {session_id, host_alias} candidates and use session_id from then on.
 
 Parameters: `tmux_name`
+
+### `wizard_state`
+
+A wizard left half-way, to resume on another of your devices: list {kind?} | get {kind, key?} | save {kind, key?, step, answers, label?} | clear {kind, key?}. Rows name the device that saved last. E_INVALID.
+
+Parameters: `action`, `answers`, `key`, `kind`, `label`, `step`
 
 ### `work`
 
@@ -955,6 +979,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::dismiss_reopened`
 - `commands::work::set_work_project_trust`
 - `commands::work::work_resume_plan`
+- `commands::work::resume_or_new_propose`
+- `commands::work::resume_or_new_follow`
 - `commands::work::resume_work`
 - `commands::work::work_purge_impact`
 - `commands::work::work_today`
@@ -1065,6 +1091,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::org_devices::set_device_person`
 - `commands::org_devices::grant_device_catalog`
 - `commands::org_devices::list_people`
+- `commands::org_devices::add_person`
 - `commands::org_devices::rename_person`
 - `commands::org_devices::disable_person`
 - `commands::sessions::session_history`
@@ -1109,6 +1136,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::library::add_library_items`
 - `commands::library::remove_library_item`
 - `commands::downloads::send_file`
+- `commands::downloads::pause_download`
 - `commands::downloads::remove_download`
 - `commands::downloads::save_download`
 - `commands::pages::get_fleet_settings`
@@ -1147,6 +1175,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::debug_device_screenshot`
 - `commands::prs::list_pull_requests`
 - `commands::start_rules::start_rules`
+- `commands::wizard_state::wizard_state`
 - `commands::api_tokens::api_tokens`
 - `commands::add_account::add_account`
 - `commands::presence::session_presence`

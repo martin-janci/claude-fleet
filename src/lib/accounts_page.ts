@@ -197,6 +197,28 @@ export function routinesOn(
   return routines.filter((r) => r.enabled && loginAccount(r.host_alias, r.profile, hosts) === uuid).length;
 }
 
+/** The switched-on routines that run as `uuid` (M15 G7.12: the paused
+ *  panel lists them while the account is at its limit; each resumes on its
+ *  own once the limit resets). */
+export function routinesRunningAs<R extends { host_alias: string; profile?: string | null; enabled: boolean }>(
+  uuid: string,
+  routines: readonly R[],
+  hosts: readonly HostRow[],
+): R[] {
+  return routines.filter((r) => r.enabled && loginAccount(r.host_alias, r.profile, hosts) === uuid);
+}
+
+/** "usage refreshed 1m ago" for the page header: the newest reading of
+ *  any account; `null` before any. */
+export function refreshedLine(fetched: readonly (number | null | undefined)[], now: number): string | null {
+  const newest = fetched.reduce<number | null>((m, t) => (t != null && (m === null || t > m) ? t : m), null);
+  if (newest === null) return null;
+  const age = Math.max(0, now - newest);
+  if (age < 60) return 'usage refreshed just now';
+  if (age < 3600) return `usage refreshed ${Math.floor(age / 60)}m ago`;
+  return `usage refreshed ${Math.floor(age / 3600)}h ago`;
+}
+
 /** The fallback role (gap plan G4.5): how many switched-on routines fall
  *  back to `uuid` when their own host cannot run them (`fallback_host`,
  *  same profile), not counting the ones that already run as it. */

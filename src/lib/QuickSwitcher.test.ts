@@ -676,6 +676,26 @@ describe('QuickSwitcher — New session mode', () => {
     expect(get(newSessionRequest)?.initialHost).toBe('mefistos');
   });
 
+  it('a named request names the new session (G7.15: no-results carries the search)', async () => {
+    render(QuickSwitcher);
+    openNewSessionPicker(undefined, undefined, undefined, 'receipt totals');
+    await tick();
+    const input = screen.getByTestId('switcher-input') as HTMLInputElement;
+    expect(input.value).toBe('');
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(newSessionRequest)?.initialName).toBe('receipt totals');
+    clearNewSessionRequest();
+    const again = await openNew();
+    await fireEvent.input(again, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(again, { key: 'Enter' });
+    await tick();
+    expect(get(newSessionRequest)?.initialName).toBeUndefined();
+  });
+
   it('Ctrl+1 opens the first numbered row', async () => {
     projectPicks.set(new Map([['pp/openmarket-app', { owner: 'pp', repo: 'openmarket-app', pinned: true, vis: null, grp: null }]]));
     render(QuickSwitcher);

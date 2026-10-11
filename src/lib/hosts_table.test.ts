@@ -139,4 +139,9 @@ describe('Tidy hint and Move to host facts (G4.5)', () => {
     expect(moveTargetFacts(h, { [WORK.uuid]: { resets_at: NOW - 60 } }, NOW)).toBe('50 GB free · load 0.4');
     expect(moveTargetFacts(host('x', { disk_home_free_kb: null, load_1m: null }), undefined, NOW)).toBe('');
   });
+
+  it('leads with the latency the last probe measured (M15 G7.12)', () => {
+    const h = host('mercury', { latency_ms: 18, disk_home_free_kb: 50 * 1024 * 1024, load_1m: null });
+    expect(moveTargetFacts(h, {}, NOW)).toBe('18 ms · 50 GB free');
+  });
 });

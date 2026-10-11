@@ -8,6 +8,7 @@ import { matchShortcut, shortcutLabel, type KeyEventLike } from './shortcuts';
 import { writable } from 'svelte/store';
 import { destinationFlag } from './destination';
 import type { AssetsCommand } from './quick_switcher';
+import type { AssetKind } from './assets';
 
 export interface HostsViewRequest {
   /** Host alias to preselect; `null` lets App pick (selected session's host,
@@ -35,6 +36,8 @@ export function requestHostsView(host: string | null = null): void {
 export interface AssetsViewRequest {
   select?: string;
   command?: AssetsCommand;
+  /** Open New asset on this kind (M15 G7.13: Toolkit's "+ Add skill"). */
+  newKind?: AssetKind;
   at: number;
 }
 

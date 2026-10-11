@@ -70,6 +70,8 @@ describe('ChatForm: a wizard in the chat (redesign step 10.12)', () => {
     const outcome = await screen.findByTestId('chat-form-outcome');
     expect(outcome.dataset.state).toBe('answered');
     expect(outcome.textContent).toContain('answered by you');
+    // G7.4: where and when, like a receipt from the hub.
+    expect(outcome.textContent).toMatch(/answered by you on the desktop · \d\d:\d\d/);
     expect(screen.getByTestId('chat-form-summary').textContent).toBe('papaya-receipts-v2 · mercury · open a draft PR on');
     expect(screen.getByTestId('chat-form-starting').textContent).toContain('Starting papaya-receipts-v2');
     expect(screen.queryByTestId('chat-form')).toBeNull();

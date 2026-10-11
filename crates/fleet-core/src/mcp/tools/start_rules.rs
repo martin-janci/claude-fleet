@@ -10,8 +10,9 @@ use crate::service::start_rules;
 #[tool_router(router = start_rules_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(description = "Start rules: a task key pattern (PD-*) that names \
-        the project, and optionally the host, a start lands in, before the \
-        key's history and Jev. Fleet offers one after five identical starts. \
+        the project, and optionally the host (with a fallback host for when \
+        it is offline), the account, model, effort and agent (claude | \
+        codex) of a start, decided before the key's history and Jev. Fleet offers one after five identical starts. \
         list: offers, active and dismissed rules; save {rule, rule_id?}: \
         the whole rule, active; accept {rule_id}: an offer, replacing the \
         pattern's other rule; dismiss {rule_id}: never offered again; delete \

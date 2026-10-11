@@ -168,6 +168,7 @@ fn the_most_specific_active_rule_decides_and_accept_replaces_the_patterns_other(
         project_id: project,
         host_alias: None,
         org_id: None,
+        ..Default::default()
     };
     let wide = save(&w.store, &scope, None, &input("PD-*", w.app)).unwrap();
     let narrow = save(&w.store, &scope, None, &input("PD-1*", w.pos)).unwrap();
@@ -211,6 +212,7 @@ fn save_checks_the_project_and_the_host() {
                 project_id: project,
                 host_alias: host.map(str::to_string),
                 org_id: None,
+                ..Default::default()
             },
         )
         .unwrap_err()
@@ -227,6 +229,7 @@ fn save_checks_the_project_and_the_host() {
             project_id: w.pos,
             host_alias: Some("h".into()),
             org_id: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -255,6 +258,7 @@ fn an_org_member_reads_a_rule_only_an_admin_changes_it_and_others_see_nothing() 
         project_id: w.pos,
         host_alias: None,
         org_id: Some(org),
+        ..Default::default()
     };
     let e = save(&w.store, &as_person(member), None, &input).unwrap_err();
     assert_eq!(
@@ -451,6 +455,7 @@ async fn a_rule_match_records_no_jev_call() {
             project_id: w.pos,
             host_alias: None,
             org_id: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -487,6 +492,7 @@ async fn a_rule_beats_the_keys_history() {
             project_id: w.pos,
             host_alias: Some("h".into()),
             org_id: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -525,4 +531,239 @@ async fn five_person_starts_put_the_offer_on_the_next_preview_and_an_agents_coun
     let p = w.preview(&fake, next).await;
     assert_eq!(p.rule_offer, None);
     assert_eq!(p.plan.unwrap().rule_id, Some(offer.id));
+}
+
+// --- how a rule's starts run (gap plan G7.1) ---------------------------------
+
+impl W {
+    /// A preview that names no host: the rules pick it.
+    async fn preview_unhosted(&self, item: i64) -> tickets::StartPreview {
+        let net = crate::service::trackers::TrackerNet::fake(Arc::new(
+            crate::net::https::FakeTransport::new(),
+        ));
+        tickets::preview_start_decided(
+            &self.store,
+            &StartArgs {
+                item_id: Some(item),
+                ..Default::default()
+            },
+            &ViewScope::internal(),
+            &net,
+            None,
+        )
+        .await
+        .unwrap()
+    }
+    fn host(&self, alias: &str, reachable: bool) {
+        let s = self.store.lock().unwrap();
+        s.upsert_host(alias).unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE hosts SET reachable = ?2 WHERE alias = ?1",
+                rusqlite::params![alias, reachable as i64],
+            )
+            .unwrap();
+    }
+    fn rule(&self, input: StartRuleInput) -> StartRuleView {
+        save(&self.store, &ViewScope::internal(), None, &input).unwrap()
+    }
+}
+
+#[tokio::test]
+async fn a_rule_names_the_account_model_effort_and_agent_of_its_starts() {
+    let w = w();
+    let rule = w.rule(StartRuleInput {
+        pattern: "PD-*".into(),
+        project_id: w.pos,
+        host_alias: Some("h".into()),
+        profile: Some("work".into()),
+        model: Some("opus".into()),
+        effort: Some("high".into()),
+        ..Default::default()
+    });
+    assert_eq!(rule.rule.profile.as_deref(), Some("work"));
+    assert_eq!(rule.rule.model.as_deref(), Some("opus"));
+    assert_eq!(rule.rule.effort.as_deref(), Some("high"));
+    let item = w.item("PD-7");
+    let plan = w
+        .preview_unhosted(item)
+        .await
+        .plan
+        .expect("the rule plans it");
+    assert_eq!(plan.host_alias, "h");
+    assert_eq!(plan.profile.as_deref(), Some("work"));
+    assert_eq!(plan.model.as_deref(), Some("opus"));
+    assert_eq!(plan.effort.as_deref(), Some("high"));
+    assert_eq!(plan.agent, None);
+    // The plan reaches the spawn: the session runs with them.
+    let seen = Arc::new(Mutex::new(None));
+    let seen2 = Arc::clone(&seen);
+    let store = Arc::clone(&w.store);
+    tickets::start_one(&w.store, &plan, None, &ViewScope::internal(), move |a| {
+        *seen2.lock().unwrap() = Some((a.profile.clone(), a.model.clone(), a.effort.clone()));
+        let s = store.lock().unwrap();
+        let id = s
+            .upsert_session("pd-7", &a.host_alias, None, None, 1, 1, "running", None)
+            .unwrap();
+        std::future::ready(Ok(s.get_session_by_id(id).unwrap().unwrap()))
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        seen.lock().unwrap().clone(),
+        Some((
+            Some("work".into()),
+            Some("opus".into()),
+            Some("high".into())
+        ))
+    );
+    // The answer a client reads carries them; one it hands back names none.
+    let wire = serde_json::to_value(&plan).unwrap();
+    assert_eq!(wire["profile"], "work");
+    assert_eq!(wire["model"], "opus");
+    let back: tickets::StartPlan = serde_json::from_value(wire).unwrap();
+    assert_eq!((back.profile, back.model, back.effort), (None, None, None));
+}
+
+#[tokio::test]
+async fn a_start_takes_the_rules_fallback_host_while_its_host_is_offline() {
+    let w = w();
+    w.host("mac", false);
+    w.host("mercury", true);
+    w.rule(StartRuleInput {
+        pattern: "PD-*".into(),
+        project_id: w.pos,
+        host_alias: Some("mac".into()),
+        fallback_host: Some("mercury".into()),
+        ..Default::default()
+    });
+    let item = w.item("PD-8");
+    let plan = w.preview_unhosted(item).await.plan.unwrap();
+    assert_eq!(plan.host_alias, "mercury", "mac is offline");
+    assert_eq!(plan.fell_back_from.as_deref(), Some("mac"));
+    w.host("mac", true);
+    let plan = w.preview_unhosted(item).await.plan.unwrap();
+    assert_eq!(plan.host_alias, "mac", "mac is back");
+    assert_eq!(plan.fell_back_from, None);
+}
+
+#[test]
+fn save_checks_the_fallback_account_model_effort_and_agent() {
+    let w = w();
+    w.host("g", true);
+    let base = || StartRuleInput {
+        pattern: "PD-*".into(),
+        project_id: w.pos,
+        host_alias: Some("h".into()),
+        ..Default::default()
+    };
+    let bad = |input: StartRuleInput| {
+        save(&w.store, &ViewScope::internal(), None, &input)
+            .unwrap_err()
+            .code
+    };
+    assert_eq!(
+        bad(StartRuleInput {
+            fallback_host: Some("h".into()),
+            ..base()
+        }),
+        codes::E_INVALID,
+        "the fallback is the rule's own host"
+    );
+    assert_eq!(
+        bad(StartRuleInput {
+            fallback_host: Some("nowhere".into()),
+            ..base()
+        }),
+        codes::E_NOTFOUND
+    );
+    assert_eq!(
+        bad(StartRuleInput {
+            effort: Some("loud".into()),
+            ..base()
+        }),
+        codes::E_INVALID
+    );
+    assert_eq!(
+        bad(StartRuleInput {
+            profile: Some("../x".into()),
+            ..base()
+        }),
+        codes::E_INVALID
+    );
+    assert_eq!(
+        bad(StartRuleInput {
+            agent: Some("agy".into()),
+            ..base()
+        }),
+        codes::E_INVALID,
+        "agy has no launch yet"
+    );
+    assert_eq!(
+        bad(StartRuleInput {
+            agent: Some("codex".into()),
+            profile: Some("work".into()),
+            ..base()
+        }),
+        codes::E_INVALID,
+        "Codex keeps its own login"
+    );
+    let ok = w.rule(StartRuleInput {
+        agent: Some("codex".into()),
+        fallback_host: Some(" g ".into()),
+        model: Some("  ".into()),
+        ..base()
+    });
+    assert_eq!(ok.rule.agent.as_deref(), Some("codex"));
+    assert_eq!(ok.rule.fallback_host.as_deref(), Some("g"));
+    assert_eq!(ok.rule.model, None, "blank is none");
+    // An edit that leaves a field out clears it: the save is the whole rule.
+    let edited = save(&w.store, &ViewScope::internal(), Some(ok.rule.id), &base()).unwrap();
+    assert_eq!((edited.rule.agent, edited.rule.fallback_host), (None, None));
+}
+
+#[tokio::test]
+async fn a_placement_rule_names_the_host_and_account_when_no_start_rule_does() {
+    let w = w();
+    w.host("g", true);
+    // PD ran on h in pos: history alone puts the next start there.
+    let first = w.item("PD-1");
+    w.start(first, w.pos, Decider::Person).await;
+    let placement = crate::service::work::structure::rule_save(
+        &w.store,
+        &crate::service::orgs::OrgScope::All,
+        &crate::service::work::structure::RuleInput {
+            name: "Payments".into(),
+            group: "Payments".into(),
+            conditions: crate::store::RuleConditions {
+                key_prefix: Some("PD".into()),
+                ..Default::default()
+            },
+            host_alias: Some("g".into()),
+            profile: Some("work".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(placement.host_alias.as_deref(), Some("g"));
+    let second = w.item("PD-2");
+    let plan = w.preview_unhosted(second).await.plan.unwrap();
+    assert_eq!(plan.project_id, w.pos);
+    assert_eq!(plan.host_alias, "g", "its sessions start here");
+    assert_eq!(plan.profile.as_deref(), Some("work"));
+    assert_eq!(plan.placement_rule_id, Some(placement.id));
+    // A start rule that names a host decides instead.
+    w.rule(StartRuleInput {
+        pattern: "PD-*".into(),
+        project_id: w.pos,
+        host_alias: Some("h".into()),
+        ..Default::default()
+    });
+    let plan = w.preview_unhosted(second).await.plan.unwrap();
+    assert_eq!(plan.host_alias, "h");
+    assert_eq!(
+        plan.profile.as_deref(),
+        Some("work"),
+        "the account still applies"
+    );
 }

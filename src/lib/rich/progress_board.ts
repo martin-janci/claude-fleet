@@ -41,3 +41,12 @@ export function peers(el: HTMLElement, id: string): { blocks: ProgressBlock[]; h
     .sort((a, b) => (a.el === b.el ? 0 : a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
   return { blocks: all.map((e) => e.block), home: all.length === 0 || all[0].el === el };
 }
+
+/** How long a job has run, as the progress card says it: "12 s",
+ *  "4 min 12 s", "1 h 05 min". A clock behind the job's start reads 0 s. */
+export function elapsedWords(secs: number): string {
+  const s = Math.max(0, Math.floor(secs));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, '0')} s`;
+  return `${Math.floor(s / 3600)} h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')} min`;
+}

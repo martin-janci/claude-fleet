@@ -7,7 +7,9 @@
     the chip with ✦, "Proposed by Jev · from the first prompt · 82%", and
     Link / Not this — a person's click, nothing links by itself;
   * the session's primary link that started as one: who proposed it, kept
-    after the person confirmed it.
+    after the person confirmed it, as the AI patterns board's "When AI
+    changed something" line with its Undo (G7.15), which puts the link back
+    to a suggestion, and Unlink (G7.10), which removes it.
 
   The gating is the backend's: a J1 answer becomes a suggestion only in
   assist mode (`service/decide/work_link.rs`); shadow records it and writes
@@ -15,6 +17,7 @@
 -->
 <script lang="ts">
   import ProposedBy from './ProposedBy.svelte';
+  import AiChangeLine from './AiChangeLine.svelte';
   import WorkChip from './WorkChip.svelte';
   import Button from './kit/Button.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
@@ -25,11 +28,13 @@
     confirmSessionWork,
     rejectWorkLink,
     sessionWorkLinks,
+    unlinkSessionWork,
     linkProposal,
     workWhy,
     JEV_RULE,
     type WorkLink,
   } from './work';
+  import { reconsiderWorkLink, workSessionTasks } from './work_view';
   import type { ProposalLike } from './ai_proposal';
   import type { SessionRow } from './sessions';
 
@@ -79,6 +84,30 @@
     busy = false;
     if (!r.ok) pushError(r.error, confirm ? 'Link failed' : 'Not this failed');
   }
+
+  /** Undo the confirmed link: back to a suggestion, a compare-and-set on
+   *  the version the link has now (a link someone moved on meanwhile is
+   *  refused, not overwritten). */
+  async function undo(): Promise<void> {
+    const l = linked;
+    if (!l || busy || blocked !== null) return;
+    busy = true;
+    const t = await workSessionTasks(session.id);
+    const v = t.ok ? (t.value?.links ?? []).find((x) => x.link_id === l.link_id)?.link_version : undefined;
+    const r = await reconsiderWorkLink(session.id, l.link_id, typeof v === 'number' ? v : undefined);
+    busy = false;
+    if (!r.ok) pushError(r.error, 'Undo failed');
+  }
+
+  /** Unlink a confirmed link: not a rejection, so it may be suggested again. */
+  async function unlink(): Promise<void> {
+    const l = linked;
+    if (!l || busy || blocked !== null) return;
+    busy = true;
+    const r = await unlinkSessionWork(session.id, l.link_id);
+    busy = false;
+    if (!r.ok) pushError(r.error, 'Unlink failed');
+  }
 </script>
 
 {#if shown && key}
@@ -93,15 +122,25 @@
           testid="timeline-work-chip"
         />
       {:else}
-        <span>Linked to</span>
-        <WorkChip
-          workKey={{ key, source: 'link', from: shown.title, why: workWhy(shown) }}
-          testid="timeline-work-chip"
+        <AiChangeLine
+          what="Linked to {key}"
+          source={proposal?.source ?? 'jev'}
+          onundo={() => void undo()}
+          undoing={busy}
+          undoBlocked={blocked}
+          testid="timeline-ai-change"
         />
-        <span class="muted">· you confirmed</span>
+        <Button
+          size="sm"
+          variant="quiet"
+          testid="timeline-work-unlink"
+          disabled={busy || blocked !== null}
+          title={blocked ?? 'Unlink this task (not a rejection: it may be suggested again)'}
+          onclick={() => void unlink()}>Unlink</Button
+        >
       {/if}
     </div>
-    <ProposedBy {proposal} field="work_link" testid="timeline-proposed-by" />
+    {#if suggestion}<ProposedBy {proposal} field="work_link" testid="timeline-proposed-by" />{/if}
     {#if suggestion}
       <div class="acts">
         <Button
@@ -140,9 +179,6 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 6px;
-  }
-  .muted {
-    color: var(--fg-muted);
   }
   .acts {
     display: flex;

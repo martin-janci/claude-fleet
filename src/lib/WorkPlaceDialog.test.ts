@@ -13,6 +13,8 @@ import { task } from './work_view_fixture';
 import { workTreeMeta, type WorkRuleDraft, type WorkTask } from './work_view';
 import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
+import { get } from 'svelte/store';
+import { clearToasts, toasts } from './toasts';
 
 type Handler = (args: Record<string, unknown>) => unknown;
 let handlers: Record<string, Handler>;
@@ -211,5 +213,23 @@ describe('WorkPlaceDialog', () => {
       expect((input as HTMLInputElement).value).toBe('Pay');
       expect(screen.getByTestId('work-place-existing').textContent).toBe('new group');
     });
+  });
+
+  it('the placed toast offers Undo, which puts the task back over the new version (G7.4)', async () => {
+    clearToasts();
+    render(WorkPlaceDialog, {
+      task: task({ placement_version: 2, group: { id: 'label:Old', label: 'Old', source: 'manual' } }),
+      currentNote: 'why',
+      onclose,
+      ondone,
+    });
+    await placeIn('Payments');
+    const t = get(toasts).at(-1)!;
+    expect(t.message).toContain('placed in Payments');
+    t.action!.run();
+    await flush();
+    expect(calls('place_work')[1]).toEqual({ task_id: 'item:12', group: 'Old', note: 'why', expected_version: 3 });
+    expect(ondone).toHaveBeenCalledTimes(2);
+    expect(ondone.mock.calls[1][1]).toBe('why');
   });
 });

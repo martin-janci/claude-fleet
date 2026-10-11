@@ -436,6 +436,41 @@ pub fn input_for(
     project_id: i64,
     now: i64,
 ) -> Result<Option<PlacementInput>, IpcError> {
+    input_with(store, project_id, now, |accounts| {
+        let c = cache.lock().unwrap_or_else(|e| e.into_inner());
+        accounts.iter().map(|a| c.snapshot(&a.uuid)).collect()
+    })
+}
+
+/// [`input_for`] from the usage the hub's bus followed (what its
+/// `account_usage` tool serves), for the hub's own `propose_host_placement`
+/// tool: an account the bus has no answer for reads as never fetched.
+pub fn served_input_for(
+    store: &Mutex<Store>,
+    project_id: i64,
+    now: i64,
+) -> Result<Option<PlacementInput>, IpcError> {
+    let served = lock(store)?.bus_account_usage();
+    input_with(store, project_id, now, |accounts| {
+        accounts
+            .iter()
+            .map(|a| {
+                served
+                    .iter()
+                    .find(|u| u.account_uuid == a.uuid)
+                    .cloned()
+                    .unwrap_or_else(|| AccountUsageSnapshot::never_fetched(&a.uuid))
+            })
+            .collect()
+    })
+}
+
+fn input_with(
+    store: &Mutex<Store>,
+    project_id: i64,
+    now: i64,
+    usage_of: impl FnOnce(&[crate::store::AccountRow]) -> Vec<AccountUsageSnapshot>,
+) -> Result<Option<PlacementInput>, IpcError> {
     let (project, hosts, pause_at, accounts, counts, org, host_orgs, disk_low_pct, fenced) = {
         let s = lock(store)?;
         let Some(project) = s.get_project(project_id)? else {
@@ -472,10 +507,7 @@ pub fn input_for(
             fenced,
         )
     };
-    let usage: Vec<AccountUsageSnapshot> = {
-        let c = cache.lock().unwrap_or_else(|e| e.into_inner());
-        accounts.iter().map(|a| c.snapshot(&a.uuid)).collect()
-    };
+    let usage: Vec<AccountUsageSnapshot> = usage_of(&accounts);
     let mut candidates = candidates(
         &hosts,
         &usage,
@@ -495,8 +527,10 @@ pub fn input_for(
     }))
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "ProposeHostPlacementParams")]
 pub struct ProposeHostArgs {
+    /// The project the new session starts in.
     pub project_id: i64,
 }
 
@@ -509,7 +543,25 @@ pub async fn propose(
     cache: &Mutex<UsageCache>,
     args: &ProposeHostArgs,
 ) -> Result<Option<SuggestedHost>, IpcError> {
-    let Some(input) = input_for(&ctx.store, cache, args.project_id, ctx.now())? else {
+    let input = input_for(&ctx.store, cache, args.project_id, ctx.now())?;
+    propose_from(ctx, input).await
+}
+
+/// [`propose`] on the hub, from the usage its bus followed: the
+/// `propose_host_placement` tool a phone calls (gap plan G7.3).
+pub async fn propose_served(
+    ctx: &DecideCtx,
+    args: &ProposeHostArgs,
+) -> Result<Option<SuggestedHost>, IpcError> {
+    let input = served_input_for(&ctx.store, args.project_id, ctx.now())?;
+    propose_from(ctx, input).await
+}
+
+async fn propose_from(
+    ctx: &DecideCtx,
+    input: Option<PlacementInput>,
+) -> Result<Option<SuggestedHost>, IpcError> {
+    let Some(input) = input else {
         return Ok(None);
     };
     Ok(match mode_for(ctx, &input) {

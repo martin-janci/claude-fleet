@@ -119,12 +119,15 @@ export function repoDeleteBranch(
   });
 }
 
+/** Delete merged branches: `names` are local, `remotes` (`origin/feat`) are
+ *  deleted on their remote. Each is re-checked against the base first. */
 export function repoDeleteMergedBranches(
   sessionId: number,
   names: string[],
+  remotes: string[] = [],
 ): Promise<Result<DeleteMergedResult>> {
   return invokeCmd<DeleteMergedResult>('repo_delete_merged_branches', {
-    args: { session_id: sessionId, names },
+    args: { session_id: sessionId, names, remotes },
   });
 }
 

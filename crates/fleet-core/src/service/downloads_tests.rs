@@ -449,3 +449,70 @@ fn a_reaped_sessions_download_stays_the_owners() {
     assert!(!remove(&s, &device(eve), row.id).unwrap());
     assert!(visible(&s, &device(ada), &row), "the owner keeps it");
 }
+
+/// Gap plan G7.15 (Toasts board, "Pause" on a copy in flight): a person
+/// pauses a copy between slices and lets it go on; a removed copy stops.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_copy_in_flight_pauses_goes_on_and_stops_when_removed() {
+    // The controls are the process's, keyed by row id, and the chunked
+    // copy test reads them for the same ids: never at the same time.
+    let _files = files_guard();
+    let s = Store::open_in_memory().unwrap();
+    let row = insert(&s, "web-1", None, 10);
+    let all = ViewScope::internal();
+    let args = |paused| PauseDownloadArgs { id: row.id, paused };
+
+    // No copy of it runs here (a restart failed it, or it never started).
+    let e = pause(&s, &all, &args(true)).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID_STATE);
+
+    control::begin(row.id);
+    let shown = pause(&s, &all, &args(true)).unwrap();
+    assert_eq!(shown.paused, Some(true));
+    let listed = list(&s, &all, &ListDownloadsArgs::default()).unwrap();
+    assert_eq!(listed.downloads[0].paused, Some(true));
+    let held = tokio::time::timeout(PAUSE_POLL * 3, hold_while_paused(row.id)).await;
+    assert!(held.is_err(), "a paused copy reads no slice");
+
+    assert_eq!(pause(&s, &all, &args(false)).unwrap().paused, None);
+    hold_while_paused(row.id).await.unwrap();
+
+    // Removed while paused: the copy stops instead of waiting for ever.
+    pause(&s, &all, &args(true)).unwrap();
+    assert!(remove(&s, &all, row.id).unwrap());
+    let e = hold_while_paused(row.id).await.unwrap_err();
+    assert_eq!(e.code, codes::E_CANCELLED);
+    control::clear(row.id);
+
+    // Another person's row is not found; a finished one does not pause.
+    let other = insert(&s, "web-2", Some(2), 1);
+    let org_view = all.clone().with_org(OrgScope::Host {
+        alias: "web-1".into(),
+        org: Some(1),
+        isolated: Default::default(),
+    });
+    let e = pause(
+        &s,
+        &org_view,
+        &PauseDownloadArgs {
+            id: other.id,
+            paused: true,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_NOTFOUND);
+    s.finish_download(other.id, "ab").unwrap();
+    control::begin(other.id);
+    let e = pause(
+        &s,
+        &all,
+        &PauseDownloadArgs {
+            id: other.id,
+            paused: true,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID_STATE);
+    control::clear(other.id);
+}

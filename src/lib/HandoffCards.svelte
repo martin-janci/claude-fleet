@@ -14,7 +14,11 @@
   backend can take it back, and every task card is a status card (its
   live session, Move to Done, Mark verified, Open in Work). Cut: an agent
   per task and drag to reorder (a work item has no agent field and no
-  order), the Group picker, and Start review run (no review-run action).
+  order).
+
+  Gap plan G7.8: the status card's "Start review run" opens the review
+  dialog for the task's live session (`spawn_review`, the Reviews block's
+  action); the created-task card says who proposed it and takes a group.
 -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
@@ -51,11 +55,17 @@
   import { leave } from './destination';
   import { editWorkItem, mergeWorkProposal, parseAssignees, setWorkStatus } from './work';
   import { undoWorkAccept, verifyWorkItem } from './missions';
-  import { workTask, type DuplicateHint } from './work_view';
+  import { placeWork, workTask, workTreeMeta, type DuplicateHint } from './work_view';
+  import { proposedByLabel } from './ai_proposal';
   import { sessions } from './sessions';
   import { focusSession } from './session_focus';
   import { openMission } from './missions';
   import { showTaskInWorkView, sidebarView } from './work_view';
+  import ReviewDialog from './ReviewDialog.svelte';
+  import { hubActionBlocked, hubStatus } from './hub';
+  import { hubConnection } from './hub_connection';
+  import { sessionBlocked } from './share';
+  import type { SessionRow } from './sessions';
 
   let { mac = false }: { mac?: boolean } = $props();
 
@@ -180,20 +190,40 @@
   /** A task receipt is new for this long: its card asks owner and due. */
   const FRESH_SECS = 600;
   let owner = $state<Record<number, string>>({});
+  /** G7.8: the group a new task goes under (`place_work`). */
+  let group = $state<Record<number, string>>({});
+  /** The Work view's groups, each once, for the Group field's list. */
+  const groupLabels = $derived([
+    ...new Set($workTreeMeta.groups.filter((g) => g.group.source !== 'none').map((g) => g.group.label)),
+  ]);
   let due = $state<Record<number, string>>({});
   let saved = $state<Record<number, string>>({});
 
   async function saveDraft(h: ControlHandoff, item: HandoffItem) {
     const who = parseAssignees(owner[h.id] ?? '');
     const when = due[h.id] ?? '';
+    const into = (group[h.id] ?? '').trim();
     busy = h.id;
-    const r = await editWorkItem(item.id, { ...(who.length ? { assignees: who } : {}), ...(when ? { due_at: when } : {}) });
-    busy = null;
-    if (!r.ok) errors[h.id] = r.error.message;
-    else {
-      delete errors[h.id];
-      saved[h.id] = [who.join(', '), when].filter(Boolean).join(' · ');
+    if (who.length || when) {
+      const r = await editWorkItem(item.id, { ...(who.length ? { assignees: who } : {}), ...(when ? { due_at: when } : {}) });
+      if (!r.ok) {
+        busy = null;
+        errors[h.id] = r.error.message;
+        return;
+      }
     }
+    if (into) {
+      // A task Control just created has never been placed: version 0.
+      const r = await placeWork(`item:${item.id}`, into, 0);
+      if (!r.ok) {
+        busy = null;
+        errors[h.id] = r.error.message;
+        return;
+      }
+    }
+    busy = null;
+    delete errors[h.id];
+    saved[h.id] = [who.join(', '), when, into].filter(Boolean).join(' · ');
   }
 
   async function taskAction(h: ControlHandoff, run: () => Promise<{ ok: boolean; error?: { message: string } }>) {
@@ -205,6 +235,12 @@
       delete errors[h.id];
       await refreshHandoffs();
     }
+  }
+
+  /** The live session a review run reads (G7.8), while its dialog is open. */
+  let reviewing = $state<SessionRow | null>(null);
+  function reviewBlockedFor(s: SessionRow): string | null {
+    return hubActionBlocked('spawn_review', $hubStatus, $hubConnection) ?? $sessionBlocked(s, 'spawn_review');
   }
 
   // ── Control chat UX (2026-10-10): the task group ──
@@ -324,6 +360,8 @@
                 {/each}
               </ul>
             {/each}
+            <!-- G7.8 (MCTasks board): what an untick means, said once. -->
+            <p class="sub" data-testid="handoff-tree-skip">Unticked: skipped, not created</p>
             {#if h.item}
               <Button variant="quiet" size="sm" onclick={() => editInWork(h)} testid="handoff-tree-edit">Edit in Work</Button>
             {/if}
@@ -397,6 +435,17 @@
                     >Move to Done</Button
                   >
                 {/if}
+                {#if live.length > 0}
+                  {@const why = reviewBlockedFor(live[0])}
+                  <Button
+                    variant="quiet"
+                    size="sm"
+                    disabled={why !== null}
+                    title={why ?? `A read-only session reviews ${displayName(live[0], true)}`}
+                    onclick={() => (reviewing = live[0])}
+                    testid="handoff-task-review">Start review run</Button
+                  >
+                {/if}
                 {#if (item.done_when ?? []).includes('person')}
                   <Button
                     variant="quiet"
@@ -410,7 +459,11 @@
               </div>
               {#if fresh || when || errors[h.id]}
                 <div class="more">
-                  {#if fresh}<p class="sub" data-testid="handoff-task-drafted">Drafted from your message</p>{/if}
+                  {#if fresh}
+                    <p class="sub" data-testid="handoff-task-drafted">
+                      Drafted from your message <span class="ai" data-testid="handoff-task-proposed-by">{proposedByLabel('llm')}</span>
+                    </p>
+                  {/if}
                   {#if when}<p class="sub" data-testid="handoff-task-when">{when}</p>{/if}
                   {#if fresh}
                     <form
@@ -422,11 +475,22 @@
                     >
                       <label>Owner <input bind:value={owner[h.id]} placeholder="You, or a name" data-testid="handoff-task-owner" /></label>
                       <label>Due <input type="date" bind:value={due[h.id]} data-testid="handoff-task-due" /></label>
+                      <label
+                        >Group <input
+                          bind:value={group[h.id]}
+                          list="handoff-groups-{h.id}"
+                          placeholder="Ungrouped"
+                          data-testid="handoff-task-group-field"
+                        /></label
+                      >
+                      <datalist id="handoff-groups-{h.id}">
+                        {#each groupLabels as g (g)}<option value={g}></option>{/each}
+                      </datalist>
                       <Button
                         variant="quiet"
                         size="sm"
                         type="submit"
-                        disabled={busy === h.id || (!parseAssignees(owner[h.id] ?? '').length && !due[h.id])}
+                        disabled={busy === h.id || (!parseAssignees(owner[h.id] ?? '').length && !due[h.id] && !(group[h.id] ?? '').trim())}
                         testid="handoff-task-save">Save</Button
                       >
                       {#if saved[h.id]}<span class="sub" role="status">Saved {saved[h.id]}</span>{/if}
@@ -441,6 +505,10 @@
       </section>
     {/if}
   </div>
+{/if}
+
+{#if reviewing}
+  <ReviewDialog source={reviewing} onClose={() => (reviewing = null)} />
 {/if}
 
 <style>
@@ -664,6 +732,15 @@
     margin: 0;
     color: var(--fg-muted);
     font-size: var(--text-xs);
+  }
+  .ai {
+    margin-left: 4px;
+    font-size: var(--text-2xs);
+    font-weight: 500;
+    color: var(--accent);
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    background: var(--accent-soft);
   }
   .wave {
     font-weight: 500;

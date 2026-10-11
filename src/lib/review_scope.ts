@@ -40,15 +40,23 @@ export function reviewPrompt(skill: string | null, scope: ReviewScope, text: str
   return `${reviewPreamble(skill, scope)}\n\n${text.trim()}`;
 }
 
-/** Claude Code skills present on `host`, review skills first, then by name. */
-export function reviewerSkills(rows: AssetInventoryRow[], host: string): string[] {
+/** Who runs a review (M15 G7.12): `spawn_review`'s `agent`. */
+export type ReviewerAgent = 'claude' | 'codex';
+export const REVIEWER_AGENTS: { value: ReviewerAgent; label: string }[] = [
+  { value: 'claude', label: 'Claude Code' },
+  { value: 'codex', label: 'Codex' },
+];
+
+/** The skills of `agent`'s harness present on `host`, review skills first,
+ *  then by name. */
+export function reviewerSkills(rows: AssetInventoryRow[], host: string, agent: ReviewerAgent = 'claude'): string[] {
   const names = new Set(
     rows
       .filter(
         (r) =>
           r.host_alias === host &&
           r.kind === 'skill' &&
-          r.harness === 'claude' &&
+          r.harness === agent &&
           r.state !== 'missing' &&
           r.state !== 'unsupported',
       )

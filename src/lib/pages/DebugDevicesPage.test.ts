@@ -81,8 +81,38 @@ describe('Debug devices: claim, install, logs, screenshot (11.6)', () => {
     expect(Array.from(host.options).map((o) => o.value)).toEqual(['', 'mac', 'mercury']);
     await fireEvent.input(screen.getByTestId('param-debug_device.install-path'), { target: { value: '~/app.apk' } });
     await fireEvent.click(screen.getByTestId('run-debug_device.install'));
-    await waitFor(() => expect(argsOf('install_debug_device')).toEqual({ id: 3, path: '~/app.apk', host: null }));
+    // M15 G7.14: claimed while installing unless switched off.
+    await waitFor(() =>
+      expect(argsOf('install_debug_device')).toEqual({ id: 3, path: '~/app.apk', host: null, claim: true, note: null }),
+    );
     expect((await screen.findByTestId('action-result-output')).textContent).toBe('Success');
+  });
+
+  it('installs without a claim when switched off, and sends the claim’s note otherwise', async () => {
+    await open();
+    await fireEvent.click(screen.getByTestId('record-action-debug_device.install'));
+    await fireEvent.input(screen.getByTestId('param-debug_device.install-path'), { target: { value: '~/app.apk' } });
+    await fireEvent.input(screen.getByTestId('param-debug_device.install-note'), { target: { value: 'login flow' } });
+    await fireEvent.click(screen.getByTestId('run-debug_device.install'));
+    await waitFor(() =>
+      expect(argsOf('install_debug_device')).toEqual({ id: 3, path: '~/app.apk', host: null, claim: true, note: 'login flow' }),
+    );
+    await fireEvent.click(screen.getByTestId('record-action-debug_device.install'));
+    await fireEvent.input(screen.getByTestId('param-debug_device.install-path'), { target: { value: '~/b.apk' } });
+    await fireEvent.click(screen.getByTestId('param-debug_device.install-claim'));
+    await fireEvent.click(screen.getByTestId('run-debug_device.install'));
+    await waitFor(() =>
+      expect(argsOf('install_debug_device')).toEqual({ id: 3, path: '~/b.apk', host: null, claim: false, note: null }),
+    );
+  });
+
+  it('shows what is not built yet greyed, not as controls', async () => {
+    await open();
+    const later = screen.getAllByTestId('notice-later');
+    expect(later.map((n) => n.textContent?.trim().slice(0, 30))).toEqual([
+      'Not built yetLive screen and i',
+      'Not built yetA device on anoth',
+    ]);
   });
 
   it('shows the logs in a block that says when it was cut, until dismissed', async () => {

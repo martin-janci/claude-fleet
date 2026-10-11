@@ -3,6 +3,8 @@ import { describe, it, expect } from 'vitest';
 import {
   CHECK_KEYS,
   agentLines,
+  agentDetail,
+  agentsLead,
   attentionChecks,
   canAdvance,
   checkLoader,
@@ -63,6 +65,20 @@ describe('add-host wizard', () => {
       ['gemini', false],
     ]);
     expect(lines[0].required).toBe(true);
+  });
+
+  it('says which agents fleet starts, Codex with Claude Code (G7.15)', () => {
+    expect(agentsLead('mercury')).toBe(
+      'The agents fleet can start on mercury. Fleet runs Claude Code and Codex sessions; the others are listed as they arrive.',
+    );
+    const [claude, codex, agy, gemini] = agentLines([ok('agents', 'Claude Code, Codex, Agy on PATH')]);
+    expect([claude, codex, agy, gemini].map(agentDetail)).toEqual([
+      'on PATH',
+      'on PATH',
+      'on PATH · sessions coming',
+      'not installed',
+    ]);
+    expect(agentDetail(agentLines([])[0])).toBe('not found');
   });
 
   it('says where a saved draft was left', () => {

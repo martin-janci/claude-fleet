@@ -83,7 +83,7 @@
   function ask() {
     void run(async () => {
       const r = await askAiAboutLocalChanges(link.id, intent, {
-        question: intent === 'custom' ? question.trim() : undefined,
+        question: question.trim() || undefined,
         paths,
       });
       if (r) {
@@ -173,14 +173,15 @@
           onclick={ask}
         >Ask AI</button>
       </div>
-      {#if intent === 'custom'}
-        <textarea
-          rows="2"
-          bind:value={question}
-          placeholder="What should the agent look at in these changes?"
-          data-testid="lw-ask-question"
-        ></textarea>
-      {/if}
+      <textarea
+        rows="2"
+        bind:value={question}
+        placeholder={intent === 'custom'
+          ? 'What should the agent look at in these changes?'
+          : 'Anything to add? (optional)'}
+        aria-label={intent === 'custom' ? 'Question' : 'Optional question'}
+        data-testid="lw-ask-question"
+      ></textarea>
       <div class="row">
         <input
           class="msg"

@@ -14,7 +14,9 @@ import { projects } from './projects';
 import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
 import type { StartPreview } from './start_preview';
-import { patternProblem, ruleLine, type StartRuleView } from './start_rules';
+import { accountChoices, patternProblem, ruleLaunchLine, ruleLine, startRuleWire, type StartRuleView } from './start_rules';
+import { hosts } from './hosts';
+import { planLaunchLine } from './start_preview';
 
 async function flush() {
   for (let i = 0; i < 10; i++) await tick();
@@ -147,7 +149,7 @@ describe('Automation › Rules', () => {
     await fireEvent.change(screen.getByTestId('start-rules-project'), { target: { value: '4' } });
     await fireEvent.click(screen.getByTestId('start-rules-save'));
     await flush();
-    expect(ruleCalls()).toContainEqual({ action: 'save', rule_id: 2, rule: { pattern: 'OM-1*', project_id: 4, host_alias: null } });
+    expect(ruleCalls()).toContainEqual({ action: 'save', rule_id: 2, rule: { pattern: 'OM-1*', project_id: 4, host_alias: null, fallback_host: null, profile: null, model: null, effort: null, agent: null } });
     await fireEvent.click(screen.getByTestId('start-rules-delete'));
     await flush();
     expect(ruleCalls()).toContainEqual({ action: 'delete', rule_id: 2 });
@@ -167,7 +169,57 @@ describe('Automation › Rules', () => {
     await flush();
     await fireEvent.click(screen.getByTestId('start-rules-save'));
     await flush();
-    expect(ruleCalls()).toContainEqual({ action: 'save', rule: { pattern: 'PD-*', project_id: 3, host_alias: null } });
+    expect(ruleCalls()).toContainEqual({ action: 'save', rule: { pattern: 'PD-*', project_id: 3, host_alias: null, fallback_host: null, profile: null, model: null, effort: null, agent: null } });
+  });
+
+  it('a rule names the fallback host, account, model, effort and agent (G7.1)', async () => {
+    hosts.set([
+      { alias: 'mac', claude_profiles: [{ name: 'work', email: 'w@x.com' }] },
+      { alias: 'mercury', claude_profiles: [] },
+    ] as never);
+    render(StartRules);
+    await flush();
+    await fireEvent.click(screen.getByTestId('start-rules-new'));
+    await flush();
+    await fireEvent.input(screen.getByTestId('start-rules-pattern'), { target: { value: 'PD-*' } });
+    await fireEvent.change(screen.getByTestId('start-rules-project'), { target: { value: '3' } });
+    await fireEvent.change(screen.getByTestId('start-rules-host'), { target: { value: 'mac' } });
+    await flush();
+    // The fallback offers every host but the rule's own.
+    const fallback = screen.getByTestId('start-rules-fallback') as HTMLSelectElement;
+    expect(Array.from(fallback.options).map((o) => o.value)).toEqual(['', 'mercury']);
+    await fireEvent.change(fallback, { target: { value: 'mercury' } });
+    const account = screen.getByTestId('start-rules-account') as HTMLSelectElement;
+    expect(Array.from(account.options).map((o) => o.textContent)).toEqual(["The host's own login", 'work · w@x.com']);
+    await fireEvent.change(account, { target: { value: 'work' } });
+    await fireEvent.change(screen.getByTestId('start-rules-model'), { target: { value: 'opus' } });
+    await fireEvent.change(screen.getByTestId('start-rules-effort'), { target: { value: 'high' } });
+    await flush();
+    await fireEvent.click(screen.getByTestId('start-rules-save'));
+    await flush();
+    expect(ruleCalls()).toContainEqual({
+      action: 'save',
+      rule: { pattern: 'PD-*', project_id: 3, host_alias: 'mac', fallback_host: 'mercury', profile: 'work', model: 'opus', effort: 'high', agent: null },
+    });
+    hosts.set([]);
+  });
+
+  it('Codex hides the account and the wire drops it', async () => {
+    render(StartRules);
+    await flush();
+    await fireEvent.click(screen.getByTestId('start-rules-new'));
+    await flush();
+    await fireEvent.change(screen.getByTestId('start-rules-agent'), { target: { value: 'codex' } });
+    await flush();
+    expect(screen.queryByTestId('start-rules-account')).toBeNull();
+    expect(startRuleWire({ pattern: 'PD-*', project_id: 3, agent: 'codex', profile: 'work' }).profile).toBeNull();
+  });
+
+  it('lists how an active rule starts', async () => {
+    listed = [{ ...offer, id: 2, state: 'active', project: 'acme/pos', may_change: true, host_alias: 'mac', fallback_host: 'mercury', profile: 'work', model: 'opus', effort: 'high' }];
+    render(StartRules);
+    await flush();
+    expect(screen.getByTestId('start-rules-launch').textContent).toBe('mac, else mercury · work · opus · effort high');
   });
 
   it('shows a rule it may not change without its buttons', async () => {
@@ -176,5 +228,23 @@ describe('Automation › Rules', () => {
     await flush();
     expect(screen.queryByTestId('start-rules-edit')).toBeNull();
     expect(screen.queryByTestId('start-rules-delete')).toBeNull();
+  });
+});
+
+describe('rule launch lines (G7.1)', () => {
+  it('reads a rule and a plan', () => {
+    expect(ruleLaunchLine({ host_alias: null })).toBe('');
+    expect(ruleLaunchLine({ fallback_host: 'g', effort: 'max', agent: 'codex' })).toBe('its last host, else g · effort max · Codex');
+    expect(planLaunchLine({ profile: 'work', model: 'opus', fell_back_from: 'mac' })).toBe('account work · opus · mac is offline');
+  });
+
+  it('offers the accounts of the chosen host, or of every host, and keeps the current one', () => {
+    const hs = [
+      { alias: 'a', claude_profiles: [{ name: 'work', email: null }] },
+      { alias: 'b', claude_profiles: [{ name: 'home', email: 'h@x' }, { name: 'work' }] },
+    ];
+    expect(accountChoices(hs, 'a').map((c) => c.value)).toEqual(['work']);
+    expect(accountChoices(hs, '').map((c) => c.label)).toEqual(['work', 'home · h@x']);
+    expect(accountChoices(hs, 'a', 'gone').map((c) => c.value)).toEqual(['work', 'gone']);
   });
 });

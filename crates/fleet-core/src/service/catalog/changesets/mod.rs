@@ -184,6 +184,9 @@ pub struct ItemParams {
     /// create_layer — its description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// create_layer — the orgs it applies by (`Layer::orgs`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orgs: Vec<String>,
 }
 
 impl ItemParams {

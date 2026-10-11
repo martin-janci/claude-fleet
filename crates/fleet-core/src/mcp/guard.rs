@@ -298,6 +298,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Gap plan G7.3: Jev's host for a new session, for the phone's New
+    // session. Reads the store and asks the decision model; writes only the
+    // decision record. A per-host token does not place sessions.
+    ToolPolicy {
+        name: "propose_host_placement",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     // The composer's shared chip row. One tool both reads and replaces the
     // list, so it is classified as a write and a `readonly` client cannot
     // call it at all — not even to read. That is deliberate: a readonly
@@ -503,6 +513,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Gap plan G7.10 (Jev N2): the New session dialog's "Resume or start
+    // fresh" proposal and the person's pick. A person's own device, as
+    // `control_route`: the follow-up records a person's choice.
+    ToolPolicy {
+        name: "resume_or_new",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "answer_mcp_confirm",
         access: Access::PersonDevice,
@@ -580,6 +600,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Gap plan G7.15: Pause on a copy in flight, a person's like removing.
+    ToolPolicy {
+        name: "pause_download",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Routines (Orbit Fleet 8.5): a person's own scheduled prompts. Its
     // run_now starts a session, hence the lifecycle deadline; a host's token
     // is not served it (`NOT_FOR_HOST_TOKENS`).
@@ -594,6 +622,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     // before history and Jev. A person's; a host's token is not served it.
     ToolPolicy {
         name: "start_rules",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Wizard state (M15 G7.2): a person's wizard, kept to resume on their
+    // other device. A person's; a host's token is not served it.
+    ToolPolicy {
+        name: "wizard_state",
         access: Access::Client,
         readonly: false,
         confirm: false,
@@ -1681,12 +1718,14 @@ pub fn is_client_tool(name: &str) -> bool {
 /// another host and write into — the catalog is what the master gate exists
 /// to prevent. `changesets` (Assets M4) applies and undoes those same
 /// catalog edits and rolls layers out to hosts, so it is refused alike, its
-/// `list` included (R25 amended). `list_downloads` / `remove_download` are a
-/// person's: a host's Claude only sends files.
+/// `list` included (R25 amended). `list_downloads` / `remove_download` /
+/// `pause_download` are a person's: a host's Claude only sends files.
 /// `routines` (Orbit Fleet 8.5) is a person's too: a session does not
 /// schedule sessions. `library` (9.7) is the index beside the downloads, a
 /// person's for the same reason. So is `start_rules` (8.11): a session does
-/// not decide where everyone's tasks start.
+/// not decide where everyone's tasks start. And `wizard_state` (G7.2): a
+/// session runs no wizard, and a row is a person's; nor does it ask Jev
+/// where a person's new session goes (`propose_host_placement`, G7.3).
 ///
 /// The five sharing surfaces joined them in multi-user M1 (T12) for a
 /// different reason: a per-host token proves no PERSON
@@ -1701,8 +1740,11 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "library",
     "list_downloads",
     "remove_download",
+    "pause_download",
     "routines",
     "start_rules",
+    "wizard_state",
+    "propose_host_placement",
     "session_share",
     "session_unshare",
     "session_narrow",

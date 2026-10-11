@@ -18,7 +18,7 @@ use tauri::State;
 /// The `routines` tool's arguments, as the tool reads them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoutinesArgs {
-    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now
+    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine_id: Option<i64>,
@@ -30,6 +30,10 @@ pub struct RoutinesArgs {
     pub skip: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 /// One `routines` action; the answer is the tool's JSON.
@@ -117,11 +121,28 @@ pub(crate) mod routed {
                 let deps = Deps::live(Arc::clone(store), Arc::clone(ssh), Arc::clone(reg));
                 json(svc::run_now(&deps, &scope, id()?, fleet_core::store::now_unix()).await?)
             }
+            "set_run_outcome" => {
+                let run_id = args
+                    .run_id
+                    .ok_or_else(|| IpcError::new(codes::E_INVALID, "set_run_outcome needs run_id"))?;
+                let outcome = args
+                    .outcome
+                    .as_deref()
+                    .ok_or_else(|| IpcError::new(codes::E_INVALID, "set_run_outcome needs outcome"))?;
+                json(svc::set_run_outcome(
+                    store,
+                    &scope,
+                    id()?,
+                    run_id,
+                    outcome,
+                    fleet_core::store::now_unix(),
+                )?)
+            }
             other => Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
                     "action must be list | get | runs | failing | budget | save | preview | delete | \
-                     set_enabled | skip_next | run_now, got {other:?}"
+                     set_enabled | skip_next | run_now | set_run_outcome, got {other:?}"
                 ),
             )),
         }

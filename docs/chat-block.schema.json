@@ -270,6 +270,15 @@
             "null"
           ]
         },
+        "started_at": {
+          "description": "When the job started, unix seconds: the card counts the time\nsince (\"4 min 12 s\") while it runs.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
         "state": {
           "description": "running (default), waiting (on a person), done or failed.",
           "type": [
@@ -370,7 +379,7 @@
         "next": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Choice"
+            "$ref": "#/$defs/NextStep"
           }
         },
         "title": {
@@ -416,6 +425,14 @@
         "kind": {
           "type": "string",
           "const": "wizard"
+        },
+        "values": {
+          "description": "Answers read from the person's own words (\"Set up a new project\nfor acme/pos on mercury\"), by field name: written in as drafted\ndefaults the person checks (G7.4). A name the wizard does not\nhave, a secret, or a value its field refuses is dropped.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
         },
         "why": {
           "description": "Why the agent opens it, in one sentence.",
@@ -720,6 +737,13 @@
     "FormSpec": {
       "type": "object",
       "properties": {
+        "checks": {
+          "description": "What the answers need from a host, checked before the form is sent:\na shortfall is a warning above the last button (\"Postgres needs\n2 GB free, mercury has 1.4 GB\"), never a refusal (G7.4).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HostCheck"
+          }
+        },
         "intro": {
           "type": [
             "string",
@@ -820,6 +844,100 @@
         "body"
       ]
     },
+    "HostCheck": {
+      "description": "One thing the answers need from a host.",
+      "type": "object",
+      "properties": {
+        "at_least": {
+          "description": "The least it needs, in GB.",
+          "type": "number",
+          "format": "double"
+        },
+        "host_field": {
+          "description": "The select field whose answer is the host. Absent: the session's host.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "description": "What needs it, in words: \"Postgres\".",
+          "type": "string"
+        },
+        "needs": {
+          "$ref": "#/$defs/HostFact"
+        },
+        "when": {
+          "description": "Checked only while this holds, like a field's `when`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FieldCondition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "needs",
+        "at_least"
+      ]
+    },
+    "HostFact": {
+      "description": "A host fact a [`HostCheck`] reads, from the host's last health probe.",
+      "oneOf": [
+        {
+          "description": "Free space in the home directory, GB.",
+          "type": "string",
+          "const": "disk_free_gb"
+        },
+        {
+          "description": "Available memory, GB.",
+          "type": "string",
+          "const": "mem_free_gb"
+        }
+      ]
+    },
+    "NextStep": {
+      "description": "An error's next step: a choice that fills the composer, or, with an\n`action`, one the app runs itself ([`NEXT_ACTIONS`]).",
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "login, open_host or open_accounts.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host": {
+          "description": "The host a `login` or `open_host` acts on.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "prompt": {
+          "description": "What a click puts in the composer, as the person's instruction; with\nan `action`, what it fills where the action cannot run.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "prompt"
+      ]
+    },
     "OptionProposal": {
       "description": "Who proposes an option, and why.",
       "type": "object",
@@ -886,6 +1004,13 @@
     "ProgressStep": {
       "type": "object",
       "properties": {
+        "detail": {
+          "description": "One line under the step while it runs: \"attempt 2 of 10\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "state": {
           "description": "pending (default), running, done, failed or skipped.",
           "type": [

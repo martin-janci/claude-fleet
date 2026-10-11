@@ -41,6 +41,7 @@
   import { AGENT_LABELS } from './row_groups';
   import { prChip } from './work_row';
   import { workButtonFor } from './start_preview';
+  import { finishesWhen } from './handoffs';
   import WorkButton from './WorkButton.svelte';
   import {
     openTask,
@@ -76,6 +77,8 @@
     BOARD_COLUMN_STATUS,
     boardLaneOf,
     boardLiveSession,
+    boardMissionChip,
+    boardOffersStart,
     boardMoveRefusal,
     boardStep,
     displayTitle,
@@ -142,7 +145,7 @@
   async function load() {
     const mine = ++seq;
     const want = liveScope(get(boardScope), sprints);
-    const r = await workTree({ filters: boardFilters(get(workViewFilters), want), limit: 200, per_task: 3 });
+    const r = await workTree({ filters: boardFilters(get(workViewFilters), want), limit: 200, per_task: 3, with_missions: true });
     if (mine !== seq) return;
     loaded = true;
     if (!r.ok) {
@@ -591,6 +594,8 @@
   {@const owner = ownerDueChip(t)}
   {@const pr = prChip(t, rowsById)}
   {@const liveRow = live ? rowsById.get(live.session_id) : undefined}
+  {@const mission = boardMissionChip(t)}
+  {@const finishes = finishesWhen(t.done_when)}
   <li role="listitem">
     <button
       class="card"
@@ -622,6 +627,7 @@
         {#if (t.children_total ?? 0) > 0}<span data-testid="work-board-rollup">{t.children_done ?? 0}/{t.children_total} done</span>
         {:else if n.children.length > 0}<span>{n.children.length} subtask{n.children.length === 1 ? '' : 's'}</span>{/if}
         {#if (t.open_proposals ?? 0) > 0}<span class="prop">{t.open_proposals} to review</span>{/if}
+        {#if mission}<span class="mission" data-testid="work-board-mission">{mission}</span>{/if}
         <TaskBlockedSpend task={t} lookup={taskById} testid="work-board-card" />
       </span>
       {#if owner}
@@ -661,12 +667,27 @@
     {/if}
     {#if err}<p class="card-err" role="alert" data-testid="work-board-card-error">{err}</p>{/if}
     {#if $selectedTaskId === t.task_id}
+      {#if finishes}
+        <p class="finishes" data-testid="work-board-finishes">{finishes.charAt(0).toUpperCase()}{finishes.slice(1)}</p>
+      {/if}
       <div class="card-work" data-testid="work-board-card-work"><WorkButton task={t} /></div>
+    {:else if boardOffersStart(t)}
+      <div class="card-work" data-testid="work-board-card-start"><WorkButton task={t} /></div>
     {/if}
   </li>
 {/snippet}
 
 <style>
+  .mission {
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+  .finishes {
+    margin: 4px 0 0;
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+  }
   .scope {
     font: inherit;
     font-size: var(--text-xs);

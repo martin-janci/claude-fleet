@@ -24,6 +24,9 @@ pub const MAX_NAME: usize = 40;
 /// A step's `name`, the word on its step chip.
 pub const MAX_STEP_NAME: usize = 24;
 const MAX_SUBMIT: usize = 40;
+/// Host checks a form may carry (G7.4).
+pub const MAX_CHECKS: usize = 8;
+const MAX_CHECK_LABEL: usize = 80;
 const TEXT_LEN: (u32, u32) = (500, 2000);
 const TEXTAREA_LEN: (u32, u32) = (5000, 20000);
 
@@ -48,6 +51,40 @@ pub struct FormSpec {
     #[serde(default, skip_serializing_if = "is_false")]
     pub save_later: bool,
     pub steps: Vec<FormStep>,
+    /// What the answers need from a host, checked before the form is sent:
+    /// a shortfall is a warning above the last button ("Postgres needs
+    /// 2 GB free, mercury has 1.4 GB"), never a refusal (G7.4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<HostCheck>,
+}
+
+/// A host fact a [`HostCheck`] reads, from the host's last health probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum HostFact {
+    /// Free space in the home directory, GB.
+    DiskFreeGb,
+    /// Available memory, GB.
+    MemFreeGb,
+}
+
+/// One thing the answers need from a host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+pub struct HostCheck {
+    /// What needs it, in words: "Postgres".
+    pub label: String,
+    pub needs: HostFact,
+    /// The least it needs, in GB.
+    pub at_least: f64,
+    /// The select field whose answer is the host. Absent: the session's host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_field: Option<String>,
+    /// Checked only while this holds, like a field's `when`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<FieldCondition>,
 }
 
 /// What a step is: fields to fill (the default), or a review of the steps
@@ -409,6 +446,26 @@ pub fn validate(form: &FormSpec) -> Vec<String> {
             if seen.insert(f.name.as_str(), f).is_some() {
                 v.bad(&fat, "another field has this name");
             }
+        }
+    }
+    if form.checks.len() > MAX_CHECKS {
+        v.bad("", format!("a form has at most {MAX_CHECKS} checks"));
+    }
+    for (i, c) in form.checks.iter().enumerate() {
+        let at = format!("check {}", i + 1);
+        v.text(&at, "label", &c.label, MAX_CHECK_LABEL);
+        if !(c.at_least.is_finite() && c.at_least > 0.0) {
+            v.bad(&at, "at_least must be a number above 0");
+        }
+        if let Some(h) = &c.host_field {
+            match seen.get(h.as_str()) {
+                Some(f) if f.kind == FieldType::Select => {}
+                Some(_) => v.bad(&at, format!("host_field `{h}` must be a select field")),
+                None => v.bad(&at, format!("host_field `{h}` is not a field")),
+            }
+        }
+        if let Some(w) = &c.when {
+            check_condition(&mut v, &format!("{at} › when"), w, &seen);
         }
     }
     v.0

@@ -1060,6 +1060,39 @@ describe('ConversationPanel model / effort pickers', () => {
   });
 });
 
+describe('ConversationPanel # link a task (G7.8)', () => {
+  it('a host that hands its tasks gets a # menu that puts the key in the box', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    const linkTasks = vi.fn(async () => [
+      { key: 'TASK-219', title: 'Fix login', status: 'In progress' },
+      { key: 'PD-2592', title: 'Support access' },
+    ]);
+    render(ConversationPanel, { session: session(), visible: true, linkTasks });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: '/done #pd' } });
+    await settle();
+    expect(linkTasks).toHaveBeenCalledTimes(1);
+    const menu = screen.getByTestId('conv-task-menu');
+    expect(box.getAttribute('aria-controls')).toBe(menu.id);
+    expect(within(menu).getAllByRole('option').map((o) => o.textContent)).toEqual([expect.stringContaining('#PD-2592')]);
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    expect(box.value).toBe('/done #PD-2592 ');
+    expect(screen.queryByTestId('conv-task-menu')).toBeNull();
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+
+  it('without a host that hands tasks, # is plain text', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: '#' } });
+    await settle();
+    expect(screen.queryByTestId('conv-task-menu')).toBeNull();
+  });
+});
+
 describe('ConversationPanel slash commands', () => {
   async function mountWithDraft(text: string) {
     mockedConv.mockReturnValue(ok(conv()));

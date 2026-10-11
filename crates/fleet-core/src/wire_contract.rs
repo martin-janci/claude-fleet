@@ -239,4 +239,25 @@
 //!   org's project catalog, a rule's live impact and the Sharing tab's
 //!   revoke and narrow actions, which a revision-15 hub refuses as unknown.
 //!   Every row change is additive.
-pub const CONTRACT_REVISION: u32 = 16;
+//!   Gap plan G7.10 added the `resume_or_new` tool (Jev N2) at this
+//!   revision without a bump: the desktop's `resume_or_new_propose` treats
+//!   an older hub's `E_HUB_PROTOCOL` as "nothing proposed" and keeps the
+//!   plain past-work notice, as `control_route_propose` does. The golden
+//!   file pins `ResumeOrNew`.
+//! - **17** — *the phone's batch-3 data* (gap plan G7.2, G7.3). New tools:
+//!   `wizard_state` (a wizard resumes on another device) and
+//!   `propose_host_placement` (Jev's host for a new session); the desktop
+//!   routes both, and a revision-16 hub serves neither: the desktop reads
+//!   its `E_HUB_PROTOCOL` as nothing saved and nothing proposed, so the
+//!   desktop's minimum stays 16 and it may update before its hub.
+//!   `pause_download` (G7.15: Pause on a copy in flight; a download row
+//!   carries `paused`) is new too; against a revision-16 hub the desktop's
+//!   Pause says the hub needs updating and the copy goes on. `send_prompt` keys
+//!   take Meta chords (`M-a`..`M-z`, `M-Enter`, `M-BSpace`, `M-Left`,
+//!   `M-Right`), which a revision-16 hub refuses. `new_bg_session` takes
+//!   `agent: "codex"` (a Codex session in `project_id`, prompt queued),
+//!   which a revision-16 hub refuses. `repair_session` takes
+//!   `progress_token` and reports `repair:progress` frames (event kind
+//!   `repair`). Additive: `fleet_health` carries `devices`,
+//!   `playbooks_week` and `decide.week`.
+pub const CONTRACT_REVISION: u32 = 17;

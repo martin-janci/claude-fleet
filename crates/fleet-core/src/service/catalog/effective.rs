@@ -13,7 +13,7 @@ use crate::service::catalog::model::{Asset, Kind, Scope};
 use crate::service::catalog::registry;
 use crate::service::catalog::repo::{Catalog, CatalogRef, ProblemHolds};
 use crate::service::catalog::resolve::Provenance;
-use crate::service::catalog::sync::layers::resolve_rows;
+use crate::service::catalog::sync::layers::resolve_rows_for;
 use crate::store::{CatalogRow, HostLayerRow, Store};
 use serde::{Deserialize, Serialize};
 use std::collections::btree_map::Entry;
@@ -186,6 +186,8 @@ pub(crate) fn label_of(org_id: Option<i64>, name: &str) -> String {
 /// Everything the store says about one host, read under one guard.
 struct StorePhase {
     host_org: Option<i64>,
+    /// The org's name, for layers that apply by organisation (`Layer::orgs`).
+    host_org_name: Option<String>,
     personal_id: Option<i64>,
     configured: Vec<CatalogRow>,
     admitted: Vec<i64>,
@@ -195,6 +197,10 @@ struct StorePhase {
 fn read_store(store: &Mutex<Store>, host_alias: &str) -> Result<StorePhase, IpcError> {
     let s = lock(store)?;
     let host_org = s.host_org(host_alias)?;
+    let host_org_name = match host_org {
+        Some(id) => s.get_org(id)?.map(|o| o.name),
+        None => None,
+    };
     let configured = s.list_catalogs()?;
     let admitted = s.host_admissions(host_alias)?;
     let mut personal_id = None;
@@ -207,6 +213,7 @@ fn read_store(store: &Mutex<Store>, host_alias: &str) -> Result<StorePhase, IpcE
     }
     Ok(StorePhase {
         host_org,
+        host_org_name,
         personal_id,
         configured,
         admitted,
@@ -224,6 +231,7 @@ fn compose_from(
         &st.configured,
         host_alias,
         st.host_org,
+        st.host_org_name.as_deref(),
         &st.admitted,
         |cat: &Catalog| {
             // A hand-built catalog with id 0 stands for the personal one.
@@ -318,6 +326,7 @@ fn compose<'r>(
     configured: &[CatalogRow],
     host_alias: &str,
     host_org: Option<i64>,
+    host_org_name: Option<&str>,
     admitted: &[i64],
     rows_for: impl Fn(&Catalog) -> &'r [HostLayerRow],
 ) -> Result<EffectiveSet, IpcError> {
@@ -354,7 +363,7 @@ fn compose<'r>(
             held_back.insert(label.clone(), failed_to_load_reason(&label));
             continue;
         }
-        let res = match resolve_rows(cat, host_alias, rows_for(cat)) {
+        let res = match resolve_rows_for(cat, host_alias, rows_for(cat), host_org_name) {
             Ok(res) => res,
             // Rulings R7: an org catalog that cannot resolve for this host is
             // held back for it; personal keeps failing the host (M1/M2).

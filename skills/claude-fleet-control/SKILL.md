@@ -63,7 +63,7 @@ orient     fleet_health list_hosts list_projects list_worktrees list_sessions
            whoami peer_status related_sessions usage_report agent_status
            account_usage check_account_headroom session_activity search
 spawn      new_session new_shell_session new_bg_session spawn_review
-           shell_terminals adopt_session
+           shell_terminals adopt_session propose_host_placement
 steer      send_prompt run_prompt queue_prompt queued_prompts wait_for_session
            capture_session session_transcript session_conversation
            session_conversations session_tool_detail session_summary_since
@@ -81,8 +81,8 @@ review     repo_changes repo_diff repo_file repo_tree repo_log repo_blame
            repo_commit_diff
 share      session_share session_narrow session_unshare session_access
            session_presence my_grants session_ask_access access_requests
-files      send_file list_downloads remove_download library get_clipboard
-           set_clipboard
+files      send_file list_downloads pause_download remove_download library
+           get_clipboard set_clipboard
 devices    debug_devices
 assets     list_assets scan_assets import_assets plan_sync apply_sync
            changesets catalog_admin list_layers propose_layers resolve_preview
@@ -97,8 +97,9 @@ admin      add_host remove_host probe_host hide_host merge_host discover_hosts
            update_status update_admin link_peer unlink_peer list_peer_links
 device     pr_shepherd mcp_confirms answer_mcp_confirm setting_proposals
            decide_setting_proposals setting_history control_route
-           control_handoffs list_pages project_picks set_project_pick
-           org_admin update_policy session_claim
+           resume_or_new control_handoffs list_pages project_picks
+           set_project_pick
+           org_admin update_policy session_claim wizard_state
 ```
 
 ## Status vocabulary
@@ -263,9 +264,18 @@ first card updates in place), `results` (stats, a chart, a table), `error`
 (a code, what failed, next steps) or `setting` (a settings change to apply:
 propose it first with `set_setting { key, value, why, propose: true }`, then
 write `{"kind": "setting", "proposal": <its id>, "note"?}`; the person
-confirms Apply, you never apply it yourself). Each is one JSON object, `{"spec": "fleet.ui/1", "kind": …}`; a
+confirms Apply, you never apply it yourself) or `wizard` (one of the app's
+own forms: `add_host`, `add_project`, `get_started`, `new_session`,
+`pair_device`). Each is one JSON object, `{"spec": "fleet.ui/1", "kind": …}`; a
 broken one shows as code with the reason. Format: `docs/chat-blocks.md`.
 Use `ask` instead when you need the answers before you continue.
+
+When the person asks in their own words for what a wizard does ("set up a
+new project for acme/pos on mercury"), answer with its `wizard` block and
+put what their message already says in `values`, by the wizard's field
+names (`{"repo": "acme/pos", "host": "mercury"}`). The form opens with
+those answers marked Drafted; the person checks them and presses its last
+button. Never guess a value the message does not say.
 
 ## Tasks, subtasks and proposals (shared work context)
 

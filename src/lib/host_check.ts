@@ -19,10 +19,43 @@ export interface HostCheck {
   agents_on_path: string[] | null;
   fleet_hooks: boolean | null;
   guard_hook: boolean | null;
+  /** The projects base path asked about (M15 G7.12); absent when none was. */
+  base_path?: BasePathCheck;
 }
 
-export function checkHost(alias: string): Promise<Result<HostCheck>> {
-  return invokeCmd<HostCheck>("check_host", { args: { alias } });
+/** Mirrors `fleet_core::service::host_check::BasePathCheck`. */
+export interface BasePathCheck {
+  path: string;
+  state: "ok" | "creatable" | "unwritable" | "not_dir";
+  user?: string;
+}
+
+export function checkHost(alias: string, basePath?: string): Promise<Result<HostCheck>> {
+  return invokeCmd<HostCheck>("check_host", {
+    args: basePath ? { alias, base_path: basePath } : { alias },
+  });
+}
+
+/** Settings › Projects: what a host said about a base path, as the line
+ *  under its field. `problem` marks the ones that stop a clone there. */
+export function basePathLine(
+  alias: string,
+  c: HostCheck,
+): { text: string; problem: boolean } | null {
+  if (c.error) return { text: `${alias} did not answer: ${c.error}`, problem: true };
+  const b = c.base_path;
+  if (!b) return null;
+  const who = b.user ? ` by user ${b.user}` : "";
+  switch (b.state) {
+    case "ok":
+      return { text: `${b.path} is writable${who} on ${alias}.`, problem: false };
+    case "creatable":
+      return { text: `${b.path} does not exist yet; fleet can create it on ${alias}.`, problem: false };
+    case "not_dir":
+      return { text: `${b.path} on ${alias} is a file, not a folder.`, problem: true };
+    default:
+      return { text: `${b.path} is not writable${who} on ${alias}.`, problem: true };
+  }
 }
 
 export type CheckState = "ok" | "warn" | "fail" | "unknown" | "na";

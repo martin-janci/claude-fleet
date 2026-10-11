@@ -33,7 +33,7 @@ pub struct NewBgSessionArgs {
     /// Start in this project's checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<i64>,
-    /// "claude" only.
+    /// "claude" (default) or "codex" (a Codex session in project_id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     /// No edit, commit or push.
@@ -52,10 +52,14 @@ pub const STOP_AFTER_SECS_RANGE: std::ops::RangeInclusive<i64> = 60..=7 * 24 * 3
 /// Upper bound on [`NewBgSessionArgs::stop_after_usd`].
 pub const STOP_AFTER_USD_MAX: f64 = 1000.0;
 
-/// Why a Codex background agent is refused: `claude --bg` is the only
-/// tracked background mode, and a Codex pane takes no initial prompt.
-pub const CODEX_BG_REFUSED: &str =
-    "a background agent runs Claude Code; start Codex as a session (new_session agent \"codex\")";
+/// Why a Codex background agent needs a project: it runs as a Codex
+/// session in that checkout (gap plan G7.3), and a session starts in one.
+pub const CODEX_BG_NEEDS_PROJECT: &str =
+    "a Codex background agent runs in a project's checkout: pass project_id";
+/// What a Codex background agent does not take: `read_only` is Claude's
+/// plan mode, and the stop limits are read off `claude agents`.
+pub const CODEX_BG_CLAUDE_ONLY: &str =
+    "read_only and the stop limits apply to a Claude background agent, not to Codex";
 
 impl NewBgSessionArgs {
     pub fn validate(&self) -> Result<(), IpcError> {
@@ -72,12 +76,20 @@ impl NewBgSessionArgs {
         validate::not_blank("prompt", &self.prompt)?;
         match self.agent.as_deref() {
             None | Some("claude") => {}
-            Some("codex") => return Err(IpcError::new(codes::E_INVALID, CODEX_BG_REFUSED)),
+            Some("codex") => {
+                if self.project_id.is_none() {
+                    return Err(IpcError::new(codes::E_INVALID, CODEX_BG_NEEDS_PROJECT));
+                }
+                if self.read_only || self.stop_after_secs.is_some() || self.stop_after_usd.is_some()
+                {
+                    return Err(IpcError::new(codes::E_INVALID, CODEX_BG_CLAUDE_ONLY));
+                }
+            }
             Some(other) => {
                 return Err(IpcError::new(
                     codes::E_INVALID,
                     format!(
-                        "unknown agent {:?}: a background agent runs \"claude\"",
+                        "unknown agent {:?}: a background agent runs \"claude\" or \"codex\"",
                         other
                     ),
                 ))
@@ -100,6 +112,11 @@ impl NewBgSessionArgs {
             }
         }
         Ok(())
+    }
+
+    /// Whether this launch runs Codex rather than `claude --bg`.
+    pub fn is_codex(&self) -> bool {
+        self.agent.as_deref() == Some("codex")
     }
 
     /// The limits to record for this launch, or `None` when it has none.
@@ -234,8 +251,12 @@ pub async fn new_bg_session_tracked(
     args: NewBgSessionArgs,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
+    reg: &Arc<crate::cancel::CancellationRegistry>,
     owner: Option<i64>,
 ) -> Result<NewBgSessionResult, IpcError> {
+    if args.is_codex() {
+        return new_codex_bg_session(args, store, ssh, reg, owner).await;
+    }
     let host_alias = args.host_alias.clone();
     let name = args.name.clone();
     let prompt = args.prompt.clone();
@@ -305,6 +326,82 @@ pub async fn new_bg_session_tracked(
     }
     res.session = stamp_bg_row(store, claude_id, &prompt, requester, owner);
     Ok(res)
+}
+
+/// A Codex background agent (gap plan G7.3): Codex has no `--bg` mode, so
+/// it runs as a Codex session in the project's checkout, named `name`, with
+/// the prompt queued as its first message (delivered once the pane reads
+/// input, as a routine's is). The row is the person's like any session's;
+/// `requester_session_id` becomes its parent. No `claude_session_id`:
+/// Codex picks its own, which reconcile reads off its rollout.
+async fn new_codex_bg_session(
+    args: NewBgSessionArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    reg: &Arc<crate::cancel::CancellationRegistry>,
+    owner: Option<i64>,
+) -> Result<NewBgSessionResult, IpcError> {
+    args.validate()?;
+    let project_id = args
+        .project_id
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, CODEX_BG_NEEDS_PROJECT))?;
+    let over = {
+        let s = lock(store)?;
+        crate::service::account_limits::over_limit(&s, &args.host_alias, None, now_unix())?
+    };
+    let session_args = crate::service::sessions::NewSessionArgs {
+        host_alias: args.host_alias.clone(),
+        project_id,
+        worktree_id: None,
+        name: String::new(),
+        call_id: None,
+        new_worktree: None,
+        base_branch: None,
+        kind: None,
+        start_command: None,
+        friendly_name: validate::friendly_name(&args.name)
+            .is_ok()
+            .then(|| args.name.clone()),
+        resume_claude_session_id: None,
+        model: None,
+        effort: None,
+        profile: None,
+        agent: Some(crate::store::AGENT_CODEX.to_string()),
+        origin: Some(crate::store::SessionOrigin::background(
+            args.requester_session_id,
+        )),
+        over_limit_ok: true,
+        owner_person_id: owner,
+        start_token: None,
+    };
+    let row = crate::service::sessions::new_session(session_args, store, ssh, reg).await?;
+    let mut warning = over.map(|o| format!("{}; it may stall at the limit", o.reason()));
+    let row = {
+        let s = lock(store)?;
+        // Parentage and the requester's work, as `stamp_bg_row` gives a
+        // `claude --bg` agent.
+        if let Some(req) = args.requester_session_id {
+            let _ = s.set_parent_session_id(row.id, Some(req));
+            let _ = s.inherit_worker_work(row.id, req);
+        }
+        if let Err(e) = s.enqueue_handover(row.id, &args.prompt, None) {
+            let line = format!(
+                "the prompt was not queued ({}); type it into the session",
+                e.message
+            );
+            warning = Some(match warning.take() {
+                Some(w) => format!("{w}; {line}"),
+                None => line,
+            });
+        }
+        let _ = s.set_last_prompt(row.id, &args.prompt);
+        s.get_session_by_id(row.id)?.unwrap_or(row)
+    };
+    Ok(NewBgSessionResult {
+        claude_session_id: None,
+        warning,
+        session: Some(row),
+    })
 }
 
 /// How many times `new_bg_session_tracked` lists `claude agents` looking for
@@ -1267,6 +1364,14 @@ mod tests {
         assert!(projects.iter().any(|p| p.id == pid), "row must survive");
     }
 
+    fn in_project_args() -> NewBgSessionArgs {
+        NewBgSessionArgs {
+            agent: Some("codex".into()),
+            project_id: Some(7),
+            ..bg_args()
+        }
+    }
+
     fn bg_args() -> NewBgSessionArgs {
         NewBgSessionArgs {
             host_alias: "mac".into(),
@@ -1277,14 +1382,36 @@ mod tests {
     }
 
     #[test]
-    fn a_codex_background_agent_is_refused_with_the_way_to_start_one() {
+    fn a_codex_background_agent_runs_in_a_project_without_claude_only_options() {
         let codex = NewBgSessionArgs {
             agent: Some("codex".into()),
             ..bg_args()
         };
         let err = codex.validate().unwrap_err();
         assert_eq!(err.code, "E_INVALID");
-        assert_eq!(err.message, CODEX_BG_REFUSED);
+        assert_eq!(err.message, CODEX_BG_NEEDS_PROJECT);
+        let in_project = NewBgSessionArgs {
+            project_id: Some(7),
+            ..codex
+        };
+        in_project.validate().unwrap();
+        assert!(in_project.is_codex());
+        for bad in [
+            NewBgSessionArgs {
+                read_only: true,
+                ..in_project_args()
+            },
+            NewBgSessionArgs {
+                stop_after_secs: Some(600),
+                ..in_project_args()
+            },
+            NewBgSessionArgs {
+                stop_after_usd: Some(1.0),
+                ..in_project_args()
+            },
+        ] {
+            assert_eq!(bad.validate().unwrap_err().message, CODEX_BG_CLAUDE_ONLY);
+        }
         let other = NewBgSessionArgs {
             agent: Some("gpt".into()),
             ..bg_args()
