@@ -60,7 +60,7 @@ async fn call(t: &FleetTools, tool: &str) -> Result<CallToolResult, McpError> {
             t.whoami(
                 Extension(host_caller()),
                 Parameters(WhoamiParams {
-                    tmux_name: "dev".to_string(),
+                    tmux_name: Some("dev".to_string()),
                 }),
             )
             .await

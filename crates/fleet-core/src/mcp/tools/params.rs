@@ -59,8 +59,10 @@ pub struct ListSessionsParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct WhoamiParams {
-    /// Your tmux session name — `tmux display-message -p '#S'`.
-    pub tmux_name: String,
+    /// Your tmux session name — `tmux display-message -p '#S'`. Omit it
+    /// from inside a fleet session: your pane (`X-Fleet-Pane`) names you.
+    #[serde(default)]
+    pub tmux_name: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -847,6 +849,15 @@ pub struct ListTasksParams {
     /// Only tasks dispatched by this session.
     #[serde(default)]
     pub requester_session_id: Option<i64>,
+    /// Only tasks given to this session to do (it is their worker).
+    #[serde(default)]
+    pub worker_session_id: Option<i64>,
+    /// Only YOUR tasks: the ones your own session dispatched or works on.
+    /// Needs a call from inside a fleet session (its per-host token and
+    /// `X-Fleet-Pane`); each row then says `is_self_requester` /
+    /// `is_self_worker`.
+    #[serde(default)]
+    pub mine: Option<bool>,
     /// queued | running | done | failed | cancelled.
     #[serde(default)]
     pub state: Option<String>,

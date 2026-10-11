@@ -226,6 +226,11 @@ pub struct TaskLink {
     /// A person kept this conflict on purpose (`work_link { ack }`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_ack_at: Option<i64>,
+    /// The link's session is the CALLER's own (an agent in its pane, proven
+    /// by its per-host token and `X-Fleet-Pane`). Set by the tool layer,
+    /// never by the graph: the graph does not know who asks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_self: bool,
 }
 
 /// A task's counts.
@@ -906,6 +911,9 @@ pub struct SessionTasks {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_link_id: Option<i64>,
     pub links: Vec<SessionTaskLink>,
+    /// `session_id` is the caller's own session (see [`TaskLink::is_self`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_self: bool,
 }
 
 /// One item of the review inbox.
@@ -2152,6 +2160,7 @@ fn task_link(
             t.iter().filter(|x| x.as_str() != task_id).count() as u32
         }),
         review_ack_at: l.review_ack_at,
+        is_self: false,
     }
 }
 
@@ -4172,6 +4181,7 @@ pub fn session_tasks(
         org_id: row.org_id,
         primary_link_id: primary,
         links,
+        is_self: false,
     })
 }
 
