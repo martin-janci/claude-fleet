@@ -304,3 +304,20 @@ fn the_stamp_can_be_made_again_once_the_link_is_confirmed() {
     assert_eq!(row.status_category, "done");
     assert_eq!(row.status_set_by.as_deref(), Some("derived"));
 }
+
+/// Migration 170: every status change leaves a row, written by the
+/// triggers, so a dashboard can rebuild a burn-up later; a write that keeps
+/// the status adds none.
+#[test]
+fn every_status_change_is_logged_by_the_triggers() {
+    let s = store();
+    let item = s.create_local_work_item(Some("LOG-1"), "logged").unwrap();
+    s.set_item_status(item.id, "in_progress").unwrap();
+    s.set_item_status(item.id, "in_progress").unwrap();
+    s.set_item_status(item.id, "done").unwrap();
+    let log = s.status_log(item.id).unwrap();
+    let cats: Vec<&str> = log.iter().map(|r| r.category.as_str()).collect();
+    assert_eq!(cats, vec!["todo", "in_progress", "done"]);
+    assert_eq!(log[2].set_by.as_deref(), Some("person"));
+    assert!(log.windows(2).all(|w| w[0].at <= w[1].at));
+}

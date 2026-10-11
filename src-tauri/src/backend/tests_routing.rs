@@ -2123,6 +2123,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        (
+            "work_stats",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "stats", "filters": { "group_by": "sprint" } }),
+            r#"{"group_by":"sprint","total":0,"stages":{"backlog":0,"in_progress":0,"in_review":0,"blocked":0,"done":0},"pct_done":0,"needs_you":0,"cost_micros":0,"groups":[],"generated_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_stats(
+                    b,
+                    commands::work_view::WorkStatsArgs {
+                        filters: Some(fleet_core::service::work::view::WorkTreeFilters {
+                            group_by: Some("sprint".into()),
+                            ..Default::default()
+                        }),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // Sprints and releases (design 2026-09-28 §6a).
         (
             "work_buckets",

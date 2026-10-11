@@ -76,7 +76,7 @@ describe('AppRail accessibility (7.2)', () => {
     await tick();
     expect(r.queryByTestId('workspace-menu')).toBeNull();
     expect(r.getByTestId('workspace-tile').textContent).toContain('PO');
-    expect(order().slice(0, 3)).toEqual(['inbox', 'work', 'control']);
-    expect(order()).toHaveLength(8);
+    expect(order().slice(0, 3)).toEqual(['inbox', 'dashboards', 'work']);
+    expect(order()).toHaveLength(9);
   });
 });

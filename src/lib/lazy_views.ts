@@ -9,6 +9,7 @@ export const lazyViews = {
   accounts: () => import('./AccountsPage.svelte'),
   control: () => import('./ControlView.svelte'),
   automation: () => import('./AutomationView.svelte'),
+  dashboard: () => import('./DashboardView.svelte'),
   board: () => import('./WorkBoard.svelte'),
 } satisfies Record<string, Loader>;
 
