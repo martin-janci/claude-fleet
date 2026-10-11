@@ -204,10 +204,13 @@ pub fn check_line(
             from_run(c, &t)
         }
         Cond::Test(command) => {
-            let Some(t) = s.latest_item_task(item.id, "test")? else {
+            let all = s.item_tasks(item.id, "test")?;
+            if all.is_empty() {
                 return Ok(check(line, kind, "pending", "no test run yet"));
-            };
-            if stale(&t) {
+            }
+            // Only runs that tested the current work count.
+            let runs: Vec<&TaskRow> = all.iter().filter(|t| !stale(t)).collect();
+            let Some(newest) = runs.first() else {
                 // No `by`: the loop reads a pending line without one as
                 // "start a run".
                 return Ok(check(
@@ -216,37 +219,87 @@ pub fn check_line(
                     "pending",
                     "the work changed since the test run",
                 ));
-            }
-            let c = match (t.state.as_str(), t.report.as_ref()) {
-                ("queued" | "running", _) => {
-                    check(line, kind, "pending", "the test run is running")
-                }
-                ("done", Some(r)) if r.outcome != "done" => check(
-                    line,
-                    kind,
-                    "fail",
-                    format!(
-                        "the tester answered {}: {}",
-                        r.outcome,
-                        clip(&r.summary, 200)
-                    ),
-                ),
-                ("done", Some(r)) => match command.as_deref() {
-                    Some(cmd) if !r.tests_run.iter().any(|x| x.contains(cmd)) => check(
-                        line,
-                        kind,
-                        "pending",
-                        format!("the test run did not report running {cmd}"),
-                    ),
-                    Some(cmd) => check(line, kind, "pass", format!("ran {cmd}")),
-                    None => check(line, kind, "pass", "the test run passed"),
-                },
-                ("done", None) => check(line, kind, "pending", "the tester gave no verdict"),
-                _ => check(line, kind, "fail", "the test run did not finish"),
             };
-            from_run(c, &t)
+            if matches!(newest.state.as_str(), "queued" | "running") {
+                return Ok(from_run(
+                    check(line, kind, "pending", "the test run is running"),
+                    newest,
+                ));
+            }
+            test_check(line, command.as_deref(), &runs)
         }
     })
+}
+
+/// How many finished test runs may leave a `test:<command>` line unreported
+/// before it fails: one to ask, one to ask again with only the missing
+/// commands. A line that waited on a run nobody starts again was stuck for
+/// good (the loop starts a run only for a pending line with no `by`).
+const UNREPORTED_TEST_RUNS: usize = 2;
+
+/// PURE: a test line over the runs that tested the current work, newest
+/// first, the newest finished. Each command is judged by the newest run that
+/// reported running it, so two `test:` lines answered by two runs both
+/// pass; a line no run reported waits for a run of its own.
+fn test_check(line: &str, command: Option<&str>, runs: &[&TaskRow]) -> CondCheck {
+    let kind = "test";
+    let verdict = |t: &TaskRow| -> CondCheck {
+        let c = match (t.state.as_str(), t.report.as_ref()) {
+            ("done", Some(r)) if r.outcome != "done" => check(
+                line,
+                kind,
+                "fail",
+                format!(
+                    "the tester answered {}: {}",
+                    r.outcome,
+                    clip(&r.summary, 200)
+                ),
+            ),
+            ("done", Some(_)) => match command {
+                Some(cmd) => check(line, kind, "pass", format!("ran {cmd}")),
+                None => check(line, kind, "pass", "the test run passed"),
+            },
+            ("done", None) => check(line, kind, "pending", "the tester gave no verdict"),
+            _ => check(line, kind, "fail", "the test run did not finish"),
+        };
+        from_run(c, t)
+    };
+    let newest = runs[0];
+    let Some(cmd) = command else {
+        return verdict(newest);
+    };
+    let reported = |t: &&&TaskRow| {
+        t.report
+            .as_ref()
+            .is_some_and(|r| r.tests_run.iter().any(|x| x.contains(cmd)))
+    };
+    if let Some(t) = runs.iter().find(reported) {
+        return verdict(t);
+    }
+    // No run reported this command. A run that failed or broke still
+    // fails the item; a passing one that skipped it asks for another.
+    let v = verdict(newest);
+    if v.state == "fail" {
+        return v;
+    }
+    let finished = runs.len();
+    if finished >= UNREPORTED_TEST_RUNS {
+        return from_run(
+            check(
+                line,
+                kind,
+                "fail",
+                format!("{finished} test runs did not report running {cmd}"),
+            ),
+            newest,
+        );
+    }
+    check(
+        line,
+        kind,
+        "pending",
+        format!("the test run did not report running {cmd}"),
+    )
 }
 
 fn ci_check(

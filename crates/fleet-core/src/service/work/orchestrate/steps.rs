@@ -402,6 +402,7 @@ fn verify_steps(
         }
         return out;
     }
+    let mut test_planned = false;
     for c in v.checks.iter().filter(|c| c.state == "pending") {
         match parse_cond(&c.line) {
             Cond::Review if !open_role("review") && c.by.is_none() && take() => {
@@ -412,8 +413,20 @@ fn verify_steps(
                     format!("{title} waits for its review"),
                 ));
             }
-            Cond::Test(cmd) if !open_role("test") && c.by.is_none() && take() => {
+            Cond::Test(cmd) if !test_planned && !open_role("test") && c.by.is_none() && take() => {
+                test_planned = true;
                 let what = cmd.clone().unwrap_or_else(|| "its tests".into());
+                // One run answers every command still waiting, so two
+                // `test:` lines do not need two runs.
+                let cmds: Vec<String> = v
+                    .checks
+                    .iter()
+                    .filter(|c| c.state == "pending" && c.by.is_none())
+                    .filter_map(|c| match parse_cond(&c.line) {
+                        Cond::Test(Some(c)) => Some(c),
+                        _ => None,
+                    })
+                    .collect();
                 out.push(
                     Step::new(
                         "test",
@@ -421,9 +434,13 @@ fn verify_steps(
                         Some("test"),
                         format!("{title} waits for {what}"),
                     )
-                    .with_context(match cmd {
-                        Some(c) => format!("Run exactly: {c}"),
-                        None => "Run the project's tests.".into(),
+                    .with_context(if cmds.is_empty() {
+                        "Run the project's tests.".into()
+                    } else {
+                        cmds.iter()
+                            .map(|c| format!("Run exactly: {c}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
                     }),
                 );
             }

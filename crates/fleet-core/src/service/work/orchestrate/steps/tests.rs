@@ -194,6 +194,20 @@ fn finished_work_goes_to_review_and_test_and_closes_once_verified() {
     );
     assert_eq!(kinds(&s), vec!["review:11", "test:11"]);
     assert_eq!(s[1].context.as_deref(), Some("Run exactly: cargo test"));
+    let mut both = n.clone();
+    both.verification = Some(Verification {
+        state: "unverified".into(),
+        checks: vec![
+            check("test:cargo test", "test", "pending"),
+            check("test:pnpm test", "test", "pending"),
+        ],
+    });
+    let s = plan(&m, vec![node(10, "waiting"), both], &items, done.clone(), 0);
+    assert_eq!(kinds(&s), vec!["test:11"], "one run for both commands");
+    assert_eq!(
+        s[0].context.as_deref(),
+        Some("Run exactly: cargo test\nRun exactly: pnpm test")
+    );
     n.verification = Some(Verification {
         state: "failed".into(),
         checks: vec![CondCheck {

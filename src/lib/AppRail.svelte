@@ -5,7 +5,8 @@
   shortcuts, and the Inbox's Needs you count. The shortcuts themselves stay
   where they were (`shortcuts.ts`). The Work item can carry one saved view's
   task count, quietly, when the person chose "Show its count on the rail"
-  (gap plan G2.2, `work_rail_view.ts`).
+  (gap plan G2.2, `work_rail_view.ts`). The workspace tile sits at its head
+  and the active workspace orders it (`workspace.ts`); no item is hidden.
 -->
 <script lang="ts">
   import { destination } from './destination';
@@ -18,6 +19,8 @@
   import { hintAnchor } from './hints';
   import { onMount } from 'svelte';
   import { railWorkView, startRailWorkView } from './work_rail_view';
+  import { workspace, workspaceRailItems } from './workspace';
+  import WorkspaceSwitcher from './WorkspaceSwitcher.svelte';
 
   interface Props {
     isMac: boolean;
@@ -25,7 +28,7 @@
   }
   let { isMac, onselect }: Props = $props();
 
-  const items = visibleRailItems();
+  const items = $derived(workspaceRailItems($workspace, visibleRailItems()));
 
   const current = $derived($settingsOpen ? 'settings' : currentRailItem($destination, $sidebarView));
 
@@ -65,6 +68,7 @@
 </script>
 
 <div class="rail-host" use:controlHint>
+  <WorkspaceSwitcher />
   <Rail items={entries} current={current ?? undefined} onselect={(id) => onselect(id as RailId)} testid="rail" />
 </div>
 
@@ -72,13 +76,15 @@
   /* Layout only: the rail fills its grid row and keeps Settings at the bottom. */
   .rail-host {
     display: flex;
+    flex-direction: column;
     height: 100%;
     min-width: 0;
     overflow: hidden;
   }
   .rail-host > :global(.of-rail) {
     box-sizing: border-box;
-    height: 100%;
+    flex: 1 1 auto;
+    min-height: 0;
     overflow: hidden;
   }
 </style>
