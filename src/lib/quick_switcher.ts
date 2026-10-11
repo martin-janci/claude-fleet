@@ -185,7 +185,7 @@ export function ticketEntries(
     seen.add(key);
     const live = (t.live_session_ids ?? []).length;
     const assignee = (t.assignees ?? []).join(', ');
-    const shown = displayKey(key);
+    const shown = displayKey(key, t.display_key);
     out.push({
       kind: 'ticket',
       key: `ticket:${key}`,
@@ -194,7 +194,9 @@ export function ticketEntries(
         .filter((x): x is string => !!x)
         .join(' · '),
       meta: live > 0 ? 'jump' : 'start',
-      fields: [key, t.title, t.status_name ?? '', assignee, ...(t.aliases ?? [])].filter(Boolean),
+      fields: [key, t.display_key ?? '', t.title, t.status_name ?? '', assignee, ...(t.aliases ?? [])].filter(
+        Boolean,
+      ),
       ticket: t,
       section,
       badge: t.tracker_id != null ? badges.get(t.tracker_id) : undefined,

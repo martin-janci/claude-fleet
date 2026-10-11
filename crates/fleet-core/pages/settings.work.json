@@ -170,6 +170,15 @@
               "action": "work.retention_sweep"
             }
           ]
+        },
+        {
+          "title": "Attachments",
+          "items": [
+            {
+              "type": "field",
+              "key": "work.attachment_max_mb"
+            }
+          ]
         }
       ]
     },

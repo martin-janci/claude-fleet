@@ -107,6 +107,15 @@ fn worktrees_has_updated_at(conn: &Connection) -> rusqlite::Result<bool> {
 /// `already_applied` guard of migration 027: `projects` already has its
 /// `adopted` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
+fn work_items_has_display_key(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'display_key'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_adopted(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'adopted'",
@@ -1907,6 +1916,20 @@ const MIGRATIONS: &[Migration] = &[
         167,
         include_str!("../../migrations/167_person_identities.sql"),
     ),
+    // Task attachments and their content-addressed blobs: new tables,
+    // idempotent.
+    Migration::plain(
+        168,
+        include_str!("../../migrations/168_work_item_attachments.sql"),
+    ),
+    // Jira-style ticket keys (`store::ticket_keys`): `ticket_spaces` and the
+    // items' `ticket_space_id` / `ticket_seq` / `display_key`. `ALTER TABLE
+    // ADD COLUMN` cannot be re-run, so guarded.
+    Migration {
+        version: 169,
+        sql: include_str!("../../migrations/169_ticket_keys.sql"),
+        already_applied: Some(work_items_has_display_key),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -6339,7 +6362,7 @@ mod tests {
     /// `host_setups` into `wizard_state` as `add_host` rows, and the old
     /// table goes; the store still reads them as drafts.
     #[test]
-    fn migration_165_moves_the_add_host_drafts_into_wizard_state() {
+    fn migration_168_moves_the_add_host_drafts_into_wizard_state() {
         let s = store_at_version(164);
         s.conn
             .execute_batch(

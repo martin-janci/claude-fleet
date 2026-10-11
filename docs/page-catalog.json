@@ -3702,6 +3702,20 @@
     },
     {
       "default_widget": "number",
+      "key": "work.attachment_max_mb",
+      "kind": {
+        "max": 16,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Largest attachment",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
       "key": "work.tidy_done_days",
       "kind": {
         "max": 365,
@@ -4395,6 +4409,19 @@
       "label": "Jev: keep runs",
       "widgets": [
         "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "text",
+      "key": "decide.jev.floors",
+      "kind": {
+        "max": 8192,
+        "type": "text"
+      },
+      "label": "Jev: fitted floors",
+      "widgets": [
+        "text",
         "readonly"
       ]
     },

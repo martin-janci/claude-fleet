@@ -2297,10 +2297,14 @@ curl -s --compressed https://fleet.example.com/mcp/json \
 (The `Accept` header still offers both types — rmcp requires the pair on
 either mount.)
 
-Both mounts read a request body of at most 8 MiB and answer `413` past it (a
-declared `Content-Length` over the cap is refused before a byte is read). No
-tool call comes near it; the cap is what stops one oversized POST from any
-valid token buffering until the hub runs out of memory.
+Both mounts read a request body of at most ~23.4 MiB and answer `413` past
+it (a declared `Content-Length` over the cap is refused before a byte is
+read). The one tool call that comes near it is `work_link { attach }`, a task
+attachment as base64 at its 16 MiB ceiling (`store::ATTACHMENT_WIRE_BYTES`;
+`work.attachment_max_mb` defaults to 10); the desktop reads a hub answer up
+to the same size, for `work { attachment }`. The cap is what stops one
+oversized POST from any valid token buffering until the hub runs out of
+memory.
 
 What it is worth, measured on a 44-session fleet: `list_sessions`
 `{summary:false}` is 51 968 B unframed and 7 767 B gzipped, `list_projects`
@@ -3461,9 +3465,11 @@ Every command below refuses in hub client mode; the full table, with the command
 | `run_host_setup_check` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `save_host_setup` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
+| `set_ticket_prefix` | which prefix a project's ticket keys carry is fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; set them on the hub with `fleet-hub tracker prefixes` and `fleet-hub tracker prefix <PREFIX> --project <id>` |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `status_map_proposals` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
 | `test_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `ticket_prefixes` | which prefix a project's ticket keys carry is fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; set them on the hub with `fleet-hub tracker prefixes` and `fleet-hub tracker prefix <PREFIX> --project <id>` |
 | `tracker_sync_metrics` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |
 | `update_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |

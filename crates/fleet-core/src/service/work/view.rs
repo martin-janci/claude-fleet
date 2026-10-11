@@ -250,6 +250,10 @@ pub struct WorkTask {
     pub item_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The item's fleet ticket key (`FLT-12`, migration 169), shown in
+    /// place of `key`; absent when it drew none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_key: Option<String>,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -871,6 +875,11 @@ pub struct TaskDetail {
     /// (the newest `COMMENTS_SERVED_MAX`). Never a tracker's comments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<crate::store::CommentRow>,
+    /// Files and images on the task in fleet, newest first (at most
+    /// `ATTACHMENTS_SERVED_MAX`): metadata only, the bytes are
+    /// `work { attachment }`'s.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::store::AttachmentRow>,
 }
 
 /// The task one of a session's links points at, briefly.
@@ -879,6 +888,9 @@ pub struct TaskBrief {
     pub task_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The item's fleet ticket key (`FLT-12`), shown in place of `key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_key: Option<String>,
     pub title: String,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1030,6 +1042,9 @@ pub struct ReviewAlternative {
     pub task_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The item's fleet ticket key (`FLT-12`), shown in place of `key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_key: Option<String>,
     pub title: String,
 }
 
@@ -2493,6 +2508,7 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         task_id: b.task_id.clone(),
         item_id: item.map(|i| i.item.id),
         key,
+        display_key: item.and_then(|i| i.item.display_key.clone()),
         title,
         url: item.and_then(|i| i.item.url.clone()),
         kind: task_kind(item).into(),
@@ -3601,7 +3617,7 @@ pub fn task(
     // that journal; its native children, their jobs, live sessions and
     // the steps of every conversation of the task and its subtasks: a
     // second, short lock.
-    let (meta, journal, work, comments) = {
+    let (meta, journal, work, comments, attachments) = {
         let s = lock(store)?;
         let meta = item
             .map(|i| s.work_item_meta(i.item.id))
@@ -3621,7 +3637,11 @@ pub fn task(
             Some(i) => s.item_comments(i.item.id)?,
             None => Vec::new(),
         };
-        (meta, journal, work, comments)
+        let attachments = match item {
+            Some(i) => s.item_attachments(i.item.id)?,
+            None => Vec::new(),
+        };
+        (meta, journal, work, comments, attachments)
     };
     // The tracker that might serve the whole description, and the key to name
     // it by — flattened as every other `fence_ticket` call site flattens it
@@ -3769,6 +3789,19 @@ pub fn task(
             c
         })
         .collect();
+    // An attachment's author is the same device label, withheld the same
+    // way; the bytes are never in this answer.
+    let attachments = attachments
+        .into_iter()
+        .map(|mut a| {
+            let own = matches!((a.author_person_id, view.person), (Some(x), Some(p)) if x == p);
+            if !(sees_any_device || own) {
+                a.author = String::new();
+                a.author_person_id = None;
+            }
+            a
+        })
+        .collect();
     Ok(TaskDetail {
         task,
         aliases,
@@ -3786,6 +3819,7 @@ pub fn task(
         jobs,
         steps,
         comments,
+        attachments,
     })
 }
 
@@ -4076,6 +4110,7 @@ fn brief_of(g: &Graph, task_id: &str, item: Option<&ViewItem>, ref_key: Option<&
         key: item
             .and_then(|i| i.item.key.clone())
             .or_else(|| ref_key.map(str::to_string)),
+        display_key: item.and_then(|i| i.item.display_key.clone()),
         title: item.map(|i| i.item.title.clone()).unwrap_or_default(),
         kind: task_kind(item).into(),
         // The same live precedence `to_task` projects (§2, fix round 1):
@@ -4355,6 +4390,7 @@ pub(crate) fn review_of(
                                 .item
                                 .and_then(|i| i.item.key.clone())
                                 .or_else(|| b.ref_key.clone()),
+                            display_key: b.item.and_then(|i| i.item.display_key.clone()),
                             title: b.item.map(|i| i.item.title.clone()).unwrap_or_default(),
                         })
                     })
