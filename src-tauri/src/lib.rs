@@ -772,6 +772,7 @@ pub fn run() {
             commands::editor::open_session_in_editor,
             commands::windows::open_terminal_window,
             commands::context_help::context_help,
+            commands::context_help::session_context_help,
             commands::voice::voice_claim,
             commands::voice::voice_release,
             cancel_command,

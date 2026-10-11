@@ -15,6 +15,7 @@ import TerminalView from './TerminalView.svelte';
 import { sessions, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectSession, clearSelection } from './selection';
 import { clearToasts } from './toasts';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { get } from 'svelte/store';
 import {
   nextTerminalTab,
@@ -373,6 +374,20 @@ describe('pop out (step 5.4)', () => {
 });
 
 describe('context help on a shell', () => {
+  beforeEach(() => fleetSettings.set({ ...SETTING_DEFAULTS, 'work.context_help': 'true' }));
+  afterEach(() => fleetSettings.set({ ...SETTING_DEFAULTS }));
+
+  it('offers nothing while Writing help\'s Context help is off', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    open = [1];
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-tab-1'));
+    await settle();
+    expect(screen.queryByTestId('terminal-help')).toBeNull();
+  });
+
   /** Answer `context_help` with `reply`; every other command as before. */
   function helpAnswers(reply: unknown) {
     const base = inv().getMockImplementation() as (cmd: string, payload?: unknown) => unknown;

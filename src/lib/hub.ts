@@ -386,6 +386,8 @@ export const ROUTED_ACTIONS = [
   'queue_prompt',
   'queued_prompts',
   'cancel_queued_prompt',
+  // The composer's context help: one claude -p the hub runs and books.
+  'session_context_help',
   'recreate_session',
   // `restore_host_sessions` batches `recreate_session` over a host's lost
   // rows and is `routed` in `verdicts.rs` like it — it was missing here, so
