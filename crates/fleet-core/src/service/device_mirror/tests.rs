@@ -1,0 +1,386 @@
+use super::*;
+use crate::ipc_error::codes;
+use crate::service::debug_devices::DebugDevice;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+fn device(platform: &str, kind: &str, ready: bool, host: &str) -> DebugDevice {
+    serde_json::from_value(serde_json::json!({
+        "id": 7, "title": "bench pixel", "host": host, "platform": platform, "kind": kind,
+        "key": "R5CT1", "serial": "R5CT1", "name": "Pixel 7",
+        "state": if ready { "online" } else { "offline" }, "ready": ready, "shared": false,
+        "first_seen_at": 0, "last_seen_at": 0
+    }))
+    .expect("DebugDevice fields changed: update this fixture")
+}
+
+#[derive(Default)]
+struct CountingLease {
+    renewed: AtomicUsize,
+    released: AtomicUsize,
+}
+#[async_trait::async_trait]
+impl Lease for CountingLease {
+    async fn renew(&self) -> Result<(), IpcError> {
+        self.renewed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn release(&self) {
+        self.released.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn only_a_ready_android_device_with_a_serial_can_be_mirrored() {
+    assert_eq!(
+        validate(&device("android", "physical", true, "h")).unwrap(),
+        "R5CT1"
+    );
+    assert_eq!(
+        validate(&device("ios", "physical", true, "h"))
+            .unwrap_err()
+            .code,
+        codes::E_UNSUPPORTED
+    );
+    assert_eq!(
+        validate(&device("android", "emulator", false, "h"))
+            .unwrap_err()
+            .code,
+        codes::E_INVALID_STATE
+    );
+}
+
+#[test]
+fn local_is_this_machine_only_when_standalone() {
+    assert!(matches!(choose_route("local", true).unwrap(), Route::Local));
+    assert!(matches!(
+        choose_route("mefistos", true).unwrap(),
+        Route::Ssh
+    ));
+    assert!(matches!(
+        choose_route("mefistos", false).unwrap(),
+        Route::Ssh
+    ));
+    let e = choose_route("local", false).unwrap_err();
+    assert_eq!(e.code, codes::E_NO_ROUTE);
+    assert!(e.message.contains("hub"), "{}", e.message);
+}
+
+#[test]
+fn the_remote_scrcpy_command_points_adb_and_the_tunnel_at_the_relays() {
+    let tools = tools::Tools {
+        scrcpy: "/bin/scrcpy".into(),
+        adb: "/sdk/adb".into(),
+    };
+    let cmd = scrcpy_command(
+        &tools,
+        "R5CT1",
+        "bench pixel @ mefistos",
+        Some(SpawnPorts {
+            adb: 41000,
+            forward: 27184,
+            tunnel: 41001,
+        }),
+    );
+    let std = cmd.as_std();
+    let args: Vec<String> = std
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        args,
+        [
+            "--serial",
+            "R5CT1",
+            "--window-title",
+            "bench pixel @ mefistos",
+            "--force-adb-forward",
+            "--port",
+            "27184",
+            "--tunnel-host",
+            "127.0.0.1",
+            "--tunnel-port",
+            "41001",
+        ]
+    );
+    let env: Vec<(String, String)> = std
+        .get_envs()
+        .filter_map(|(k, v)| {
+            Some((
+                k.to_string_lossy().into_owned(),
+                v?.to_string_lossy().into_owned(),
+            ))
+        })
+        .collect();
+    assert!(
+        env.contains(&("ADB_SERVER_SOCKET".into(), "tcp:127.0.0.1:41000".into())),
+        "{env:?}"
+    );
+    assert!(env.contains(&("ADB".into(), "/sdk/adb".into())), "{env:?}");
+}
+
+#[test]
+fn the_local_scrcpy_command_has_no_tunnel() {
+    let tools = tools::Tools {
+        scrcpy: "/bin/scrcpy".into(),
+        adb: "/sdk/adb".into(),
+    };
+    let cmd = scrcpy_command(&tools, "emulator-5554", "e @ local", None);
+    let args: Vec<String> = cmd
+        .as_std()
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        args,
+        ["--serial", "emulator-5554", "--window-title", "e @ local"]
+    );
+    assert!(cmd
+        .as_std()
+        .get_envs()
+        .all(|(k, _)| k != "ADB_SERVER_SOCKET"));
+}
+
+#[cfg(unix)]
+mod lifecycle {
+    use super::*;
+    use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
+
+    /// A stub scrcpy: logs argv and env to `<dir>/scrcpy.log`, then sleeps
+    /// (a running mirror) or exits with `code` at once.
+    fn stub_scrcpy(dir: &std::path::Path, exit: Option<i32>) -> std::path::PathBuf {
+        let log = crate::shell::quote(&dir.join("scrcpy.log").display().to_string());
+        let tail = match exit {
+            Some(c) => format!("echo 'ERROR: Could not open video stream' >&2\nexit {c}\n"),
+            None => "exec sleep 600\n".to_string(),
+        };
+        write_exec(dir, "scrcpy", &format!(
+            "#!/bin/sh\n{PROBE_GUARD}echo \"$@\" > {log}\necho \"ADB_SERVER_SOCKET=$ADB_SERVER_SOCKET\" >> {log}\n{tail}"
+        ))
+    }
+
+    fn stub_adb(dir: &std::path::Path, version: u32) -> std::path::PathBuf {
+        write_exec(
+            dir,
+            "adb",
+            &format!("#!/bin/sh\n{PROBE_GUARD}echo 'Android Debug Bridge version 1.0.{version}'\n"),
+        )
+    }
+
+    /// A fake adb server: answers host:version with `version`, list-forward
+    /// with 27183 taken, killforward with OKAY; counts connections.
+    async fn fake_adb_server(
+        version: u32,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<AtomicUsize>,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = l.local_addr().unwrap();
+        let conns = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (c2, s2) = (conns.clone(), seen.clone());
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                c2.fetch_add(1, Ordering::SeqCst);
+                let seen = s2.clone();
+                tokio::spawn(async move {
+                    let mut len = [0u8; 4];
+                    if s.read_exact(&mut len).await.is_err() {
+                        return;
+                    }
+                    let n = usize::from_str_radix(std::str::from_utf8(&len).unwrap(), 16).unwrap();
+                    let mut body = vec![0u8; n];
+                    s.read_exact(&mut body).await.unwrap();
+                    let req = String::from_utf8(body).unwrap();
+                    seen.lock().unwrap().push(req.clone());
+                    let reply = match req.as_str() {
+                        "host:version" => format!("OKAY0004{version:04x}"),
+                        "host:list-forward" => {
+                            let p = "R5CT1 tcp:27183 localabstract:x\n";
+                            format!("OKAY{:04x}{p}", p.len())
+                        }
+                        _ => "OKAY".to_string(),
+                    };
+                    s.write_all(reply.as_bytes()).await.unwrap();
+                });
+            }
+        });
+        (addr, conns, seen)
+    }
+
+    fn remote(addr: std::net::SocketAddr) -> Remote {
+        Remote {
+            dialer: Arc::new(crate::relay::tests::FixedDialer {
+                addr,
+                asked: Default::default(),
+            }),
+            // The fake adb server answers, so nothing runs over ssh.
+            ssh: Arc::new(crate::ssh_fake::FakeSsh::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_remote_mirror_runs_scrcpy_on_the_relays_and_cleans_up_on_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = tools::Tools {
+            scrcpy: stub_scrcpy(dir.path(), None),
+            adb: stub_adb(dir.path(), 41),
+        };
+        let (addr, _conns, seen) = fake_adb_server(41).await;
+        let lease = Arc::new(CountingLease::default());
+        let mirrors = Mirrors::new();
+        let info = mirrors
+            .start(
+                &device("android", "physical", true, "mefistos"),
+                true,
+                tools,
+                remote(addr),
+                lease.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(info.route, Route::Ssh));
+        assert_eq!(mirrors.list().len(), 1);
+        let log = std::fs::read_to_string(dir.path().join("scrcpy.log")).unwrap();
+        assert!(
+            log.contains("--port 27184"),
+            "27183 is taken on the host: {log}"
+        );
+        assert!(log.contains("ADB_SERVER_SOCKET=tcp:127.0.0.1:"), "{log}");
+
+        mirrors.stop(7).await.unwrap();
+        for _ in 0..50 {
+            if mirrors.list().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(mirrors.list().is_empty());
+        assert_eq!(lease.released.load(Ordering::SeqCst), 1);
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r == "host-serial:R5CT1:killforward:tcp:27184"));
+    }
+
+    #[tokio::test]
+    async fn a_second_mirror_of_the_same_device_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = tools::Tools {
+            scrcpy: stub_scrcpy(dir.path(), None),
+            adb: stub_adb(dir.path(), 41),
+        };
+        let (addr, _, _) = fake_adb_server(41).await;
+        let mirrors = Mirrors::new();
+        let d = device("android", "physical", true, "mefistos");
+        mirrors
+            .start(
+                &d,
+                true,
+                tools.clone(),
+                remote(addr),
+                Arc::new(CountingLease::default()),
+            )
+            .await
+            .unwrap();
+        let lease = Arc::new(CountingLease::default());
+        let e = mirrors
+            .start(&d, true, tools, remote(addr), lease.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_EXISTS);
+        assert_eq!(
+            lease.released.load(Ordering::SeqCst),
+            1,
+            "a refused start releases its lease"
+        );
+        mirrors.kill_all();
+    }
+
+    #[tokio::test]
+    async fn a_version_mismatch_never_spawns_scrcpy() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = tools::Tools {
+            scrcpy: stub_scrcpy(dir.path(), None),
+            adb: stub_adb(dir.path(), 41),
+        };
+        let (addr, _, _) = fake_adb_server(40).await;
+        let lease = Arc::new(CountingLease::default());
+        let e = Mirrors::new()
+            .start(
+                &device("android", "physical", true, "mefistos"),
+                true,
+                tools,
+                remote(addr),
+                lease.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_ADB_VERSION_MISMATCH);
+        assert!(!dir.path().join("scrcpy.log").exists());
+        assert_eq!(lease.released.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn scrcpy_failing_at_once_is_reported_with_its_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = tools::Tools {
+            scrcpy: stub_scrcpy(dir.path(), Some(1)),
+            adb: stub_adb(dir.path(), 41),
+        };
+        let (addr, _, _) = fake_adb_server(41).await;
+        let lease = Arc::new(CountingLease::default());
+        let mirrors = Mirrors::new();
+        let e = mirrors
+            .start(
+                &device("android", "physical", true, "mefistos"),
+                true,
+                tools,
+                remote(addr),
+                lease.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_MIRROR_FAILED);
+        assert!(
+            e.message.contains("Could not open video stream"),
+            "{}",
+            e.message
+        );
+        assert!(mirrors.list().is_empty());
+        assert_eq!(lease.released.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_local_mirror_needs_no_relay_and_no_adb_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = tools::Tools {
+            scrcpy: stub_scrcpy(dir.path(), None),
+            adb: stub_adb(dir.path(), 41),
+        };
+        // A dead address: any dial would fail the test.
+        let dead = remote("127.0.0.1:9".parse().unwrap());
+        let mirrors = Mirrors::new();
+        let info = mirrors
+            .start(
+                &device("android", "emulator", true, "local"),
+                true,
+                tools,
+                dead,
+                Arc::new(CountingLease::default()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(info.route, Route::Local));
+        let log = std::fs::read_to_string(dir.path().join("scrcpy.log")).unwrap();
+        assert!(!log.contains("--tunnel-port"), "{log}");
+        mirrors.kill_all();
+    }
+}
