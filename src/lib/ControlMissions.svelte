@@ -8,9 +8,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import Loader from './Loader.svelte';
-  import { getMission, listMissions, missionNow, type MissionNow } from './missions';
+  import { getMission, listMissions, missionNow, openMission, type MissionNow } from './missions';
   import { onWorkChangedDebounced } from './work';
-  import { openElsewhere } from './control_views';
 
   /** Most missions listed; the rest are in Work. */
   const MAX = 3;
@@ -43,7 +42,7 @@
     <ul>
       {#each running as m (m.id)}
         <li data-testid="control-mission" data-waiting={m.waiting}>
-          <button type="button" class="link" onclick={() => openElsewhere('missions')}>{m.name}</button>
+          <button type="button" class="link" onclick={() => openMission(m.id)}>{m.name}</button>
           {#if m.waiting}
             <span class="muted">Waits for you</span>
           {:else if m.step}

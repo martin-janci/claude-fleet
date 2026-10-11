@@ -1,13 +1,15 @@
 // Redesign step 9.12, Control part: running missions in the Views panel with
 // Comet trails beside the current step; none while a mission waits on a
 // person.
-import { render, screen } from '@testing-library/svelte';
+import { fireEvent, render, screen } from '@testing-library/svelte';
+import { get } from 'svelte/store';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import ControlMissions from './ControlMissions.svelte';
-import { missionNow, type MissionDetail } from './missions';
+import { missionNow, missionOpenRequest, type MissionDetail } from './missions';
+import { destination } from './destination';
 import { expectAccessible } from './a11y_check';
 
 const mission = (id: number, name: string, state = 'active') => ({
@@ -80,5 +82,19 @@ describe('ControlMissions', () => {
     expect(trails).toHaveLength(1);
     expect(rows[0].contains(trails[0])).toBe(true);
     await expectAccessible(container);
+  });
+
+  it("a mission's name opens that mission in Work, off Control", async () => {
+    missionOpenRequest.set(null);
+    destination.set('control');
+    render(ControlMissions);
+    const rows = await vi.waitFor(() => {
+      const r = screen.getAllByTestId('control-mission');
+      expect(r).toHaveLength(2);
+      return r;
+    });
+    await fireEvent.click(rows[1].querySelector('button')!);
+    expect(get(missionOpenRequest)).toEqual({ id: 2 });
+    expect(get(destination)).toBe('session');
   });
 });

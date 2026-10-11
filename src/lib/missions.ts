@@ -8,6 +8,7 @@ import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import type { WorkItemRow } from './trackers';
 import { bumpWorkChanged } from './work';
+import { showWorkView } from './work_view';
 import type { StatusWord } from './kit/status';
 import type { PullRequestRow } from './prs';
 
@@ -623,13 +624,22 @@ export function eventSentence(e: MissionEvent): string {
   }
 }
 
-/** A request to show one mission in the Work view's Missions tab (a
- *  "Sent to a mission" chip in Control, redesign 9.3). WorkTree switches to
- *  the tab; WorkMissions opens the mission and clears the request. */
-export const missionOpenRequest = writable<{ id: number } | null>(null);
+/** A request to show the Work view's Missions tab, and one mission in it
+ *  when `id` is set (a "Sent to a mission" chip in Control, redesign 9.3).
+ *  WorkTree switches to the tab; WorkMissions opens the mission and clears
+ *  the request. */
+export const missionOpenRequest = writable<{ id: number | null } | null>(null);
 
+/** Open one mission in Work, from wherever it is named (Control, Today). */
 export function openMission(id: number): void {
+  showWorkView();
   missionOpenRequest.set({ id });
+}
+
+/** The Missions tab in Work, no mission picked. */
+export function openMissionsTab(): void {
+  showWorkView();
+  missionOpenRequest.set({ id: null });
 }
 
 export function listMissions(): Promise<Result<Mission[]>> {

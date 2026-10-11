@@ -80,6 +80,17 @@ export function leave(d: Destination): void {
   destination.update((cur) => (cur === d ? 'session' : cur));
 }
 
+/** The destinations that cover the Work view: the fleet pages and Files
+ *  take the whole right column (App.svelte's `wideMode`), so a task picked
+ *  or a mission opened under one of them stays out of sight. */
+export const COVERS_WORK: readonly Destination[] = ['files', 'hosts', 'assets', 'accounts', 'control', 'automation', 'dashboard'];
+
+/** Off whatever covers the Work view, to the Session tab; any other
+ *  destination (the board, Details) stays. */
+export function uncoverWork(): void {
+  destination.update((cur) => (COVERS_WORK.includes(cur) ? 'session' : cur));
+}
+
 /** A boolean view of one destination that can also be written: `true` goes
  *  there, `false` leaves it (and leaves any other destination alone). Lets a
  *  store that used to be a flag of its own keep its shape for its callers. */
