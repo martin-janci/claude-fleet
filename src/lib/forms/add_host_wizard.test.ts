@@ -6,11 +6,15 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import type { Wizard } from './wizards';
 import { addHostTarget, addHostWizard, runAddHost, TYPED } from './add_host_wizard';
 import type { SetupCheck } from '../add_host_wizard';
+import { hubStatus, STANDALONE } from '../hub';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 const fieldOf = (w: Wizard, name: string) => w.spec.steps.flatMap((s) => s.fields).find((f) => f.name === name);
 
-beforeEach(() => inv.mockReset());
+beforeEach(() => {
+  inv.mockReset();
+  hubStatus.set({ ...STANDALONE });
+});
 
 describe('add_host wizard', () => {
   it('offers the discovered hosts, then "Another alias"', () => {
@@ -84,5 +88,26 @@ describe('add_host as a dialog', () => {
     expect(screen.queryByTestId('form-field-ssh_alias')).toBeNull();
     await fireEvent.click(screen.getByTestId('form-submit'));
     expect(run).toHaveBeenCalledWith(expect.objectContaining({ pick: 'mercury' }));
+  });
+
+  // Paired, the hub's add_host probes over the HUB's SSH: this machine's
+  // checks would test the wrong route (and refuse), so none run, and no
+  // local draft is dropped.
+  it('paired with a hub, adds through the hub without local checks', async () => {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://fleet.example.com' });
+    inv.mockImplementation(async (cmd: string) => (cmd === 'add_host' ? { alias: 'm' } : null));
+    const lines: string[] = [];
+    const r = await runAddHost({ pick: 'mercury', alias: 'm' }, (t) => lines.push(t));
+    expect(r).toEqual({ ok: true, summary: 'm added on the hub' });
+    expect(inv.mock.calls).toEqual([['add_host', { args: { alias: 'm', ssh_alias: 'mercury' } }]]);
+    expect(lines).toEqual(['The hub is checking mercury…']);
+  });
+
+  it('paired, the hub’s refusal is the outcome', async () => {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://fleet.example.com' });
+    inv.mockRejectedValue({ code: 'E_FORBIDDEN', message: 'adding a host from a device needs the hub’s operator to trust it' });
+    const r = await runAddHost({ pick: 'mercury' });
+    expect(r.ok).toBe(false);
+    expect(inv.mock.calls.map((c) => c[0])).toEqual(['add_host']);
   });
 });

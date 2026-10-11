@@ -658,7 +658,7 @@ impl Store {
             }
         };
         // A GitHub or Asana item draws its ticket key (`FLT-12`) once; an
-        // item cached before migration 168 draws it on its next sync.
+        // item cached before migration 169 draws it on its next sync.
         let drew_key = self.ensure_tracker_ticket_key(id, tracker_id, after.key.as_deref())?;
         if drew_key && !changed {
             self.emit_work_item(id, SessionChange::ALL)?;

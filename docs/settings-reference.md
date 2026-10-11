@@ -175,6 +175,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `work.draft_briefs` | `false` | on / off | fleet | Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host. |
 | `work.draft_release_notes` | `false` | on / off | fleet | Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host. |
 | `work.catch_up_summaries` | `false` | on / off | fleet | A watched session offers "Since 13:20": what it did since you last looked, summarised on its own host and account. |
+| `work.attachment_max_mb` | `10` | 1–16 MiB | fleet | The largest file or image a task takes. At most 16 MiB: what one call between the desktop and the hub carries. |
 | `work.tidy_done_days` | `2` | 1–365 days | fleet | Days a linked ticket must be done before Tidy up suggests its session. |
 | `work.tidy_idle_hours` | `4` | 1–720 hours | fleet | Hours a session must be idle before any tidy reason suggests it. |
 | `work.tidy_idle_unlinked_days` | `7` | 1–90 days | fleet, per org | Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied. |
@@ -237,6 +238,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `decide.jev.daily_token_budget` | `2000000` | 0–1000000000 tokens, `0` = none | fleet | Input tokens the decision model may be sent per UTC day. At $0.042 per million, the default is under $0.09 a day. |
 | `decide.jev.model` | `jev-1.13.0` | `jev-1.13.0` / `jev-latest` | fleet | The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe. |
 | `decide.retention_days` | `90` | 0–3650 days, `0` = forever | fleet | Days a decision record (ids and numbers, never text) is kept. |
+| `decide.jev.floors` | `` | text, up to 8192 characters | fleet | Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against. |
 
 ## Hub daemon (read-only)
 

@@ -1916,12 +1916,18 @@ const MIGRATIONS: &[Migration] = &[
         167,
         include_str!("../../migrations/167_person_identities.sql"),
     ),
+    // Task attachments and their content-addressed blobs: new tables,
+    // idempotent.
+    Migration::plain(
+        168,
+        include_str!("../../migrations/168_work_item_attachments.sql"),
+    ),
     // Jira-style ticket keys (`store::ticket_keys`): `ticket_spaces` and the
     // items' `ticket_space_id` / `ticket_seq` / `display_key`. `ALTER TABLE
     // ADD COLUMN` cannot be re-run, so guarded.
     Migration {
-        version: 168,
-        sql: include_str!("../../migrations/168_ticket_keys.sql"),
+        version: 169,
+        sql: include_str!("../../migrations/169_ticket_keys.sql"),
         already_applied: Some(work_items_has_display_key),
     },
 ];
@@ -6356,7 +6362,7 @@ mod tests {
     /// `host_setups` into `wizard_state` as `add_host` rows, and the old
     /// table goes; the store still reads them as drafts.
     #[test]
-    fn migration_165_moves_the_add_host_drafts_into_wizard_state() {
+    fn migration_168_moves_the_add_host_drafts_into_wizard_state() {
         let s = store_at_version(164);
         s.conn
             .execute_batch(

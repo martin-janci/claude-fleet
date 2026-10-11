@@ -545,7 +545,13 @@ async fn the_owners_trusted_phone_administers_hosts_and_trackers_only() {
             e.message
         );
     }
-    for t in ["add_host", "install_agent", "work_admin"] {
+    for t in [
+        "add_host",
+        "install_agent",
+        "work_admin",
+        "set_account_nickname",
+        "check_host",
+    ] {
         assert!(guard::access_allows(&phone, t), "{t}");
         assert!(
             !guard::access_allows(&another_person(phone.clone()), t),
@@ -4435,8 +4441,11 @@ fn the_served_definition_budget_stays_bounded() {
     /// failure prints, and say in the commit message what was measured and
     /// when. Raised to 809 on 2026-10-11: merging main's `search` tool into
     /// gap plan batch 3 (`wizard_state`, `resume_or_new`) measured 111,954
-    /// bytes for 140 tools (799 a tool).
-    const BYTES_PER_TOOL: usize = 809;
+    /// bytes for 140 tools (799 a tool). Raised to 814 on 2026-10-11 when
+    /// work_link gained task attachments (`attach`, `attachment_delete`,
+    /// `mime`, `data_base64`, `attachment_id`) and `work` its `attachment`
+    /// read: measured 113,486 bytes for 141 tools (804 a tool).
+    const BYTES_PER_TOOL: usize = 814;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -8362,7 +8371,7 @@ async fn an_operator_start_waits_for_approval_and_a_phone_start_does_not() {
     assert!(
         asked
             .message
-            .contains("the operator's starts and kills always do"),
+            .contains("the operator's starts, kills and work decisions always do"),
         "{}",
         asked.message
     );
@@ -10372,7 +10381,7 @@ async fn the_operators_create_remote_waits_for_a_person() {
     assert!(
         asked
             .message
-            .contains("the operator's starts and kills always do"),
+            .contains("the operator's starts, kills and work decisions always do"),
         "{}",
         asked.message
     );
@@ -11895,6 +11904,8 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     ("work_link", "set_parent", &["Drive"]),
     // A comment is written into the owner's task: `edit`'s gate.
     ("work_link", "comment", &["Drive"]),
+    // So is an attachment: `edit`'s gate, as a comment.
+    ("work_link", "attach", &["Drive"]),
     // Sprint and release membership: `set_status`'s person gate, on the
     // item planned.
     ("work_link", "bucket_add", &["Drive"]),
@@ -11928,6 +11939,9 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // `TaskLink` (it spells the host `host` and carries no `tmux_name`).
     // Same defect as `work { org_impact }`'s, in the sibling arm (T9b).
     ("work_link", "place", &["ViewScope"]),
+    // The same write with nothing to place the task in, so the same
+    // answer and the same fence.
+    ("work_link", "unplace", &["ViewScope"]),
     // Two things a start does that reach an EXISTING row, and the old
     // exemption denied both. Its `E_EXISTS` prose names the session already
     // on the key (fenced in `tickets::already_running`), and the branch slug
@@ -12066,6 +12080,12 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
         "every_view_scope_page_hides_another_persons_live_session",
         "every_view_scope_page_hides_another_persons_ended_link",
     ),
+    (
+        "work_link",
+        "unplace",
+        "every_view_scope_page_hides_another_persons_live_session",
+        "every_view_scope_page_hides_another_persons_ended_link",
+    ),
     // The three ticket-cache arms are NOT in the sweep: their one
     // session-derived field is an id (or a one-word status), and
     // `ADA_SECRETS` is string-matched — `2` matches everything. They are
@@ -12126,6 +12146,19 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
 /// a reviewer can check, not an exemption: each says what the arm acts on
 /// INSTEAD of a session.
 const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
+    (
+        "work_link",
+        "attachment_delete",
+        "an attachment, by id: its item's org fence first (outside it, \
+         unknown), then its author's alone; no session is named or answered",
+    ),
+    (
+        "work",
+        "attachment",
+        "an attachment's bytes, by id: its item's org fence (outside it, \
+         unknown), its author withheld as `task` withholds a comment's; no \
+         session is named or answered",
+    ),
     (
         "work_link",
         "comment_delete",
@@ -16447,6 +16480,16 @@ fn view_scope_sweep_calls() -> Vec<(&'static str, &'static str, serde_json::Valu
                 "group": "Payments", "expected_version": 0
             }),
         ),
+        // The clear answers the same `WorkTask`, so it is swept too. It
+        // runs after the `place` above, whose placement it removes — the
+        // sweep's calls are ordered, and version 1 is what that left.
+        (
+            "work_link",
+            "unplace",
+            serde_json::json!({
+                "action": "unplace", "task_id": task, "expected_version": 1
+            }),
+        ),
     ]
 }
 
@@ -19659,4 +19702,69 @@ async fn update_policy_is_an_org_admins_for_their_own_org() {
     assert_eq!(v["policies"].as_array().unwrap().len(), 2);
     let v = result_json(&call(admin.clone(), clear).await.expect("her own"));
     assert_eq!(v["removed"], true);
+}
+
+/// An account's nickname set through the hub: every device reads the same
+/// label, and blank clears it. Before the tool a paired desktop refused the
+/// edit and the phone could not make it at all.
+#[tokio::test]
+async fn set_account_nickname_names_and_clears_through_the_hub() {
+    let (tools, store) = quick_replies_tools();
+    store
+        .lock()
+        .unwrap()
+        .upsert_account(&crate::store::AccountRow {
+            uuid: "u1".into(),
+            email: Some("a@b.c".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let named = tools
+        .set_account_nickname(Parameters(crate::service::hosts::SetAccountNicknameArgs {
+            uuid: "u1".into(),
+            nickname: Some("  Work ".into()),
+        }))
+        .await
+        .expect("named");
+    assert_eq!(result_json(&named)["nickname"], "Work");
+    let cleared = tools
+        .set_account_nickname(Parameters(crate::service::hosts::SetAccountNicknameArgs {
+            uuid: "u1".into(),
+            nickname: None,
+        }))
+        .await
+        .expect("cleared");
+    assert!(result_json(&cleared)["nickname"].is_null());
+    let err = tools
+        .set_account_nickname(Parameters(crate::service::hosts::SetAccountNicknameArgs {
+            uuid: "nobody".into(),
+            nickname: Some("x".into()),
+        }))
+        .await
+        .expect_err("unknown uuid");
+    assert!(err.message.starts_with("E_NOTFOUND"), "{}", err.message);
+}
+
+/// `check_host` answers about a host of this fleet only: an alias the store
+/// does not know is refused before any SSH, so the hub never dials wherever
+/// a caller names.
+#[tokio::test]
+async fn check_host_refuses_a_host_the_fleet_does_not_have() {
+    let (tools, _store) = quick_replies_tools();
+    let err = tools
+        .check_host(Parameters(crate::service::host_check::CheckHostArgs {
+            alias: "elsewhere".into(),
+            base_path: None,
+        }))
+        .await
+        .expect_err("not a fleet host");
+    assert!(err.message.starts_with("E_NOTFOUND"), "{}", err.message);
+    let err = tools
+        .check_host(Parameters(crate::service::host_check::CheckHostArgs {
+            alias: "-oProxyCommand=x".into(),
+            base_path: None,
+        }))
+        .await
+        .expect_err("hostile alias");
+    assert!(err.message.starts_with("E_INVALID"), "{}", err.message);
 }

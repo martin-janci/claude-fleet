@@ -551,6 +551,31 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             "[]",
             Box::new(|b, s, _| block_on(commands::hosts::routed::list_accounts(b, s)).map(|_| ())),
         ),
+        // The hub's ~/.ssh/config: the candidates its own add_host can reach.
+        (
+            "discover_hosts",
+            "discover_hosts",
+            json!({}),
+            "[]",
+            Box::new(|b, _, _| block_on(commands::hosts::routed::discover_hosts(b)).map(|_| ())),
+        ),
+        (
+            "check_host",
+            "check_host",
+            json!({ "alias": "trn", "base_path": null }),
+            r#"{"alias":"trn","checked_at":1,"error":null,"tmux_version":"3.4","agents_on_path":["claude"],"fleet_hooks":true,"guard_hook":true}"#,
+            Box::new(|b, _, h| {
+                block_on(commands::hosts::routed::check_host(
+                    b,
+                    fleet_core::service::host_check::CheckHostArgs {
+                        alias: "trn".into(),
+                        base_path: None,
+                    },
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "list_account_usage",
             "account_usage",
@@ -1426,6 +1451,58 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 block_on(commands::work_view::routed::delete_work_comment(
                     b,
                     commands::work_view::DeleteWorkCommentArgs { comment_id: 3 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Task attachments.
+        (
+            "attach_to_work",
+            "work_link",
+            json!({ "session_id": null, "action": "attach", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "name": "a.png", "mime": "image/png",
+                    "data_base64": "iVBORw0KGgo=" }),
+            r#"{"id":4,"item_id":9,"name":"a.png","mime":"image/png","size":8,"sha256":"ab","author":"client:desk","source":"fleet","created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::attach_to_work(
+                    b,
+                    commands::work_view::AttachToWorkArgs {
+                        item_id: 9,
+                        name: "a.png".into(),
+                        mime: "image/png".into(),
+                        data_base64: "iVBORw0KGgo=".into(),
+                        comment_id: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "delete_work_attachment",
+            "work_link",
+            json!({ "session_id": null, "action": "attachment_delete", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "attachment_id": 4 }),
+            r#"{"id":4,"item_id":9,"name":"a.png","mime":"image/png","size":8,"sha256":"ab","author":"client:desk","source":"fleet","created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::delete_work_attachment(
+                    b,
+                    commands::work_view::WorkAttachmentArgs { attachment_id: 4 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_attachment",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "attachment", "attachment_id": 4 }),
+            r#"{"attachment":{"id":4,"item_id":9,"name":"a.png","mime":"image/png","size":8,"sha256":"ab","author":"","source":"fleet","created_at":1},"data_base64":"iVBORw0KGgo="}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_attachment(
+                    b,
+                    commands::work_view::WorkAttachmentArgs { attachment_id: 4 },
                     s,
                 ))
                 .map(|_| ())
@@ -4009,6 +4086,43 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             TASK_PAYLOAD,
             Box::new(|b, s, _| {
                 block_on(commands::tasks::routed::cancel_task(b, 11, s)).map(|_| ())
+            }),
+        ),
+        // Contract 13: the hub owner's trusted full device adds a host.
+        (
+            "add_host",
+            "add_host",
+            json!({ "alias": "trn", "ssh_alias": "trn-ssh", "transport": null }),
+            HOST_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::hosts::routed::add_host(
+                    b,
+                    fleet_core::service::hosts::AddHostArgs {
+                        alias: "trn".into(),
+                        ssh_alias: "trn-ssh".into(),
+                        transport: None,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_account_nickname",
+            "set_account_nickname",
+            json!({ "uuid": "u1", "nickname": "Work" }),
+            r#"{"uuid":"u1","nickname":"Work"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::hosts::routed::set_account_nickname(
+                    b,
+                    fleet_core::service::hosts::SetAccountNicknameArgs {
+                        uuid: "u1".into(),
+                        nickname: Some("Work".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
             }),
         ),
         (

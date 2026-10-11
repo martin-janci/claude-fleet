@@ -2,7 +2,9 @@
 // answers of `wizards/add_host.json` checked the way 4.9's guided wizard
 // checks a host, in its order, then added. Nothing runs before the button;
 // a host SSH cannot reach is not added, every other check only informs.
+import { get } from 'svelte/store';
 import { addHost, type SshHost } from '../hosts';
+import { hubStatus } from '../hub';
 import { CHECK_KEYS, checkLoader, discardHostSetup, runHostSetupCheck, type SetupCheck } from '../add_host_wizard';
 import type { ChatFormOutcome } from './ChatForm.svelte';
 import type { Values } from './forms';
@@ -31,10 +33,21 @@ export function addHostTarget(v: Values): { sshAlias: string; alias: string } {
 }
 
 /** Check, then add. `onprogress` gets the line beside the wizard's loader
- *  while each check waits. */
+ *  while each check waits.
+ *
+ *  A desktop paired with a hub adds through the hub's `add_host`, which
+ *  probes the alias over the HUB's SSH and keeps the host only if it
+ *  answers: this machine's checks would test the wrong route (and refuse,
+ *  `E_LOCAL_ONLY`), so they are left to that probe, as on the phone. */
 export async function runAddHost(v: Values, onprogress?: (text: string) => void): Promise<ChatFormOutcome> {
   const { sshAlias, alias } = addHostTarget(v);
   if (!sshAlias) return { ok: false, problems: [{ field: 'ssh_alias', problem: 'Name the SSH alias to add.' }] };
+  if (get(hubStatus).remote) {
+    onprogress?.(`The hub is checking ${sshAlias}…`);
+    const added = await addHost(alias, sshAlias);
+    if (!added.ok) return { ok: false, error: added.error.message };
+    return { ok: true, summary: `${alias} added on the hub` };
+  }
   const checks: SetupCheck[] = [];
   for (const key of CHECK_KEYS) {
     onprogress?.(checkLoader(key, sshAlias)!.text);

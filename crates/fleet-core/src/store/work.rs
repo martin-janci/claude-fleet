@@ -228,7 +228,7 @@ pub struct WorkItemRow {
     /// on a native item, the tracker's (Jira `duedate`) on a ticket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<String>,
-    /// Its fleet ticket key (`FLT-12`, migration 168): a native item's in a
+    /// Its fleet ticket key (`FLT-12`, migration 169): a native item's in a
     /// project (then the same as `key`), or a GitHub or Asana item's, whose
     /// tracker key is no name for a person. The UI shows it in place of
     /// `key`; a key lookup answers to it. `None` for an item that drew none
@@ -329,7 +329,7 @@ pub struct WorkSummary {
     /// The item's key, else the link's `ref_key`.
     #[serde(default)]
     pub key: Option<String>,
-    /// The item's fleet ticket key (`FLT-12`, migration 168), which the UI
+    /// The item's fleet ticket key (`FLT-12`, migration 169), which the UI
     /// shows in place of `key`; absent when it drew none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_key: Option<String>,

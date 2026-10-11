@@ -264,4 +264,11 @@
 //!   session is shared with at `answer` or `drive` too) is new as well; a
 //!   revision-16 hub has no such tool, and the desktop says the hub needs
 //!   updating for context help.
+//!   `set_account_nickname` (an account's label, the hub owner's) and
+//!   `check_host` (a host's health checklist over the hub's SSH) are new
+//!   tools at this revision without a bump: the desktop routes them where it
+//!   used to refuse, and a hub without them answers `E_HUB_PROTOCOL`, shown
+//!   as the edit's or the checklist's error. A paired desktop also routes
+//!   `discover_hosts` and `add_host` (the hub owner's trusted full device
+//!   since revision 13, as the phone's Add host does).
 pub const CONTRACT_REVISION: u32 = 17;

@@ -30,7 +30,9 @@ use crate::out;
 use crate::serve;
 use clap::{Subcommand, ValueEnum};
 use fleet_core::service::decide;
+use fleet_core::service::decide::floor;
 use fleet_core::service::decide::status_map::{self, ProposalAction, ProposalOutcome};
+use fleet_core::service::settings;
 use fleet_core::store::{now_unix, DecisionRunFilter, DecisionRunRow, Secret};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -122,6 +124,14 @@ pub enum DecideCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Per-feature confidence floors fitted from the runs a person
+    /// confirmed, corrected or rejected (`decide.jev.floors`). A fitted
+    /// floor only raises a feature's built-in one, and only for the question
+    /// version and model it was fitted against.
+    Floor {
+        #[command(subcommand)]
+        cmd: FloorCmd,
+    },
     /// The status_map proposals (J3): per Asana tracker, the latest assist
     /// answer per section as `section → category (confidence)`, with the
     /// command a person runs to apply them, and in shadow the agreement
@@ -140,6 +150,52 @@ pub enum DecideCmd {
         /// Print JSON instead of lines.
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum FloorCmd {
+    /// The stored floors.
+    Show {
+        /// Read this database file instead of the hub's (a desktop's).
+        #[arg(long, value_name = "FILE")]
+        db: Option<PathBuf>,
+        /// Print JSON instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fit a feature's floor: the older half of its labelled runs picks the
+    /// lowest floor reaching --precision, the newer half must reach it too.
+    /// Prints the numbers; --apply stores the floor when it holds. Needs a
+    /// pinned decide.jev.model.
+    Fit {
+        /// A feature (status_map, work_link, …).
+        feature: String,
+        /// The precision the floor must reach on both halves (0.5-1).
+        #[arg(long, default_value_t = 0.95)]
+        precision: f64,
+        /// Runs each half must still answer at the floor (1-10000).
+        #[arg(long, default_value_t = 30)]
+        min_answered: u64,
+        /// The question version to fit [default: the newest labelled run's].
+        #[arg(long)]
+        question_version: Option<String>,
+        /// Store the floor when it holds (over the running hub, like
+        /// `fleet-hub decide set`).
+        #[arg(long, conflicts_with = "db")]
+        apply: bool,
+        /// Read this database file instead of the hub's (a desktop's).
+        #[arg(long, value_name = "FILE")]
+        db: Option<PathBuf>,
+        /// Print JSON instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forget a feature's fitted floor: its built-in floor stands again.
+    /// Needs a running hub.
+    Clear {
+        /// A feature (status_map, work_link, …).
+        feature: String,
     },
 }
 
@@ -511,6 +567,7 @@ pub async fn run(
                 }
             }
         }
+        DecideCmd::Floor { cmd } => floor_cmd(cmd, opts, env).await?,
         DecideCmd::Proposals {
             action: Some(cmd),
             json,
@@ -543,6 +600,165 @@ pub async fn run(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn feature_arg(f: &str) -> Result<decide::Feature, String> {
+    decide::Feature::parse(f).ok_or_else(|| {
+        format!(
+            "the feature is one of {}, not {f:?}",
+            decide::Feature::ALL
+                .iter()
+                .map(|f| f.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })
+}
+
+/// The floors' lines for `show`.
+fn floor_lines(floors: &floor::Floors) -> Vec<String> {
+    if floors.is_empty() {
+        return vec!["no fitted floors: every feature uses its built-in floor".into()];
+    }
+    floors
+        .iter()
+        .map(|(f, x)| {
+            format!(
+                "{f}: {} for {} on {} (target {}, {} labelled runs, fitted at {})",
+                x.floor, x.question_version, x.model, x.target, x.labelled, x.fitted_at
+            )
+        })
+        .collect()
+}
+
+/// Write `decide.jev.floors` over the running hub's `set_setting`, like
+/// every other `decide.*` setting: validated and audited there.
+async fn set_floors(
+    floors: &floor::Floors,
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+) -> Result<(), String> {
+    let conn = crate::pair::hub_conn(opts, env)?;
+    crate::pair::call_tool(
+        &conn,
+        "set_setting",
+        serde_json::json!({ "key": settings::DECIDE_JEV_FLOORS, "value": floor::render(floors) }),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn floor_cmd(
+    cmd: FloorCmd,
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+) -> Result<(), String> {
+    match cmd {
+        FloorCmd::Show { db, json } => {
+            let store = open_read_only(&db_path(db.as_deref(), opts, env)?)?;
+            let floors = floor::read(&store);
+            if json {
+                out::line(&serde_json::to_string_pretty(&floors).map_err(|e| e.to_string())?);
+            } else {
+                for l in floor_lines(&floors) {
+                    out::line(&l);
+                }
+            }
+        }
+        FloorCmd::Fit {
+            feature,
+            precision,
+            min_answered,
+            question_version,
+            apply,
+            db,
+            json,
+        } => {
+            let feature = feature_arg(&feature)?;
+            if !(0.5..=1.0).contains(&precision) {
+                return Err(format!(
+                    "--precision must be between 0.5 and 1, got {precision}"
+                ));
+            }
+            if !(1..=10_000).contains(&min_answered) {
+                return Err(format!(
+                    "--min-answered must be between 1 and 10000, got {min_answered}"
+                ));
+            }
+            let store = open_read_only(&db_path(db.as_deref(), opts, env)?)?;
+            let model = settings::get_string(&store, settings::DECIDE_JEV_MODEL);
+            if model == "jev-latest" {
+                return Err(
+                    "decide.jev.model is jev-latest: pin a version first (fleet-hub decide set \
+                     decide.jev.model jev-1.13.0), a floor holds for one model"
+                        .into(),
+                );
+            }
+            let rows = store
+                .labelled_decision_runs(feature.as_str())
+                .map_err(|e| e.message)?;
+            let Some(version) = question_version.or_else(|| {
+                rows.iter()
+                    .filter(|r| r.model_version.as_deref() == Some(model.as_str()))
+                    .max_by_key(|r| r.at)
+                    .map(|r| r.question_version.clone())
+            }) else {
+                out::line(&format!(
+                    "{}: no run a person followed up under {model}: nothing to fit",
+                    feature.as_str()
+                ));
+                return Ok(());
+            };
+            let labelled = floor::labelled(&rows, &version, &model);
+            let fit = floor::fit(&labelled, precision, min_answered);
+            if json {
+                out::line(&serde_json::to_string_pretty(&fit).map_err(|e| e.to_string())?);
+            } else {
+                for l in fit.lines(feature) {
+                    out::line(&l);
+                }
+            }
+            match (apply, fit.holds, fit.floor) {
+                (true, true, Some(f)) => {
+                    let mut floors = floor::read(&store);
+                    floors.insert(
+                        feature.as_str().to_string(),
+                        floor::FittedFloor {
+                            question_version: version,
+                            model,
+                            floor: f,
+                            target: precision,
+                            labelled: fit.labelled,
+                            fitted_at: now_unix(),
+                        },
+                    );
+                    set_floors(&floors, opts, env).await?;
+                    out::line(&format!(
+                        "stored: {} is held to {f} from its next call",
+                        feature.as_str()
+                    ));
+                }
+                (true, _, _) => return Err("the fit does not hold: nothing stored".into()),
+                (false, true, Some(_)) => out::line("--apply stores it"),
+                _ => {}
+            }
+        }
+        FloorCmd::Clear { feature } => {
+            let feature = feature_arg(&feature)?;
+            let store = open_read_only(&db_path(None, opts, env)?)?;
+            let mut floors = floor::read(&store);
+            if floors.remove(feature.as_str()).is_none() {
+                out::line(&format!("{} has no fitted floor", feature.as_str()));
+                return Ok(());
+            }
+            set_floors(&floors, opts, env).await?;
+            out::line(&format!(
+                "cleared: {} is held to its built-in floor again",
+                feature.as_str()
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

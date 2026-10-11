@@ -77,7 +77,7 @@ The Work tab opens in **List** layout; the header, filters and saved views are u
 
 - **List** sorts every task the filters match into **To do**, **Doing** (in progress) and **Done** (the last 7 days, collapsed). A ticket keeps its tracker's own status name in its row; its section follows fleet's effective status, by the same rule as the Board: only a bare key, which has no status, follows its live sessions.
 - **+ New task** writes a task in fleet itself (`TASK-<id>`); ▾ opens the **New task** dialog, which ⌘N (Ctrl+Shift+N) also opens anywhere in Work: title, project, notes, and **Start a session for it now**, which opens the new task's start menu next. A new task stays in fleet: fleet creates no ticket in a tracker. Its **Work** button (below) opens a session in that project with the title and notes as its first prompt.
-- **The Work button** (2026-10-06) is on every task row. Its main half reads **Open** (a live session: select it), **Continue** (no live session but a past one: resume its last conversation) or **Start**. Start asks fleet first where it would land; when everything is known and nothing is in the way it starts at once, with the brief on — for a Jira, Asana, Linear or GitHub ticket too. Otherwise it opens the *start popover*: pick the **Repo**, the **Host** (an offline one says so), edit the **Branch**, turn the **Brief** off or preview it as text, and see what is in the way: a live session on the task (Start then makes a *parallel* session in a checkout of its own, `<branch>-2`, never the same tree; *Open it* jumps there), a task that is done, a proposal (*Accept & start*), another organisation (tick *Start across organisations* if it is meant). ▾ offers *Start new…* (always the popover), *Continue* one of the last past sessions, *Attach running session…* and *Copy key*; Alt-click on Start opens the popover as well. In the list, `j` / `k` move the selection, `s` runs the selected task's Work button and ⇧S opens its popover. The task page's **Start new** asks the same way.
+- **The Work button** (2026-10-06) is on every task row. Its main half reads **Open** (a live session: select it), **Continue** (no live session but a past one: resume its last conversation) or **Start**. Start asks fleet first where it would land; when everything is known and nothing is in the way it starts at once, with the brief on — for a Jira, Asana, Linear or GitHub ticket too. Otherwise it opens the *start popover*: pick the **Repo**, the **Host** (an offline one says so), edit the **Branch**, turn the **Brief** off or preview it as text, and see what is in the way: a live session on the task (Start then makes a *parallel* session in a checkout of its own, `<branch>-2`, never the same tree; *Open it* jumps there — the warning names that session, unless its name is the task's key over again, which says nothing twice), a task that is done, a proposal (*Accept & start*), another organisation (tick *Start across organisations* if it is meant). ▾ offers *Start new…* (always the popover), *Continue* one of the last past sessions, *Attach running session…* and *Copy key*; Alt-click on Start opens the popover as well. In the list, `j` / `k` move the selection, `s` runs the selected task's Work button and ⇧S opens its popover. The task page's **Start new** asks the same way.
 - **Attach running session…** (2026-10-06) puts a session that is already running on the task. The picker lists every session not on it yet — the same repository first, then sessions with no task, then idle ones — with a filter. A session already on another task offers **Switch** (that task's link ends and this one becomes its primary; the old task keeps the conversation, and *Continue* there resumes it) or **Add** (this task is a secondary link and the other stays primary). Add is the default while the session is mid-turn or when its checkout is named after the other key, Switch otherwise. When the task is already open in another session the picker says so (naming it when it is yours to see, "someone" otherwise) and the button becomes *Attach anyway*. For ten seconds after, *Undo* puts things back: a Switch switches back, an attach to a session with no task removes the link.
 - **The task page** adds *Brief*, *Subtasks* (+ Add subtask, Start), *Proposals* (an agent's suggested subtasks — Accept / Reject; rejected ones behind a toggle), *Delegated jobs* with their result, and *Agent steps* — the agent's own `TaskCreate` / `TaskUpdate` todos per session, labelled "per the agent", never a status. Placement and rules sit under *Placement & rules*.
 - A subtask started from the list gets the parent ticket's brief (only when you may see that ticket) followed by its own title and notes.
@@ -172,6 +172,18 @@ says so:
   name; a note is optional). Clearing it returns the task to where it would
   sit by itself. If someone else placed it meanwhile you are told, with the
   current value, instead of overwriting it.
+  Over the API (`work_link { action: place }`) the task is `task_id`
+  (`item:<id>` / `ref:<KEY>`) **or** `item_id`, and `expected_version` is
+  the placement's version you saw — **`0` when it has none**. `group` is
+  normally a name of your own, but it may also be an existing group's **id**
+  — `repo:<owner>/<repo>`, `tracker:<tracker id>:<container>`,
+  `key:<PREFIX>`, `label:<text>` — which puts the task in *that* section
+  instead of opening a second one named after the id; an id that names no
+  such group is refused. Remember that a placement outranks every rule and
+  every derived grouping until it is cleared, so pinning a task to the
+  repository it sits in today keeps it there after its session moves.
+  `work_link { action: unplace, task_id | item_id, expected_version }`
+  clears a placement (so does `place` with an empty `group` and no note).
 - **Make a rule for similar tasks…** is a separate step after a placement:
   choose the conditions (tracker, project/container, key prefix, words in
   the title, repository) and the group, **Preview** the tasks it would move
@@ -1140,7 +1152,12 @@ tools like any client, with one rule (decision D12): **its starts and kills
 always wait for you**, whatever `mcp.confirm_destructive` says. That covers
 `work_link` start and resume, new and restarted sessions, safe kill, and
 tidy-up kills: each returns `E_CONFIRM_REQUIRED` until you approve it in the
-desktop's dialog. On a hub there is nobody to approve, so the operator's
+desktop's dialog. Since review round 15 (F21) **what it writes waits too**:
+`send_prompt`, `run_prompt`, `queue_prompt` and a `dispatch_task` to a
+worker that already exists, because nothing an agent composes should reach a
+session without you reading it first. The toggle does not lift any of this —
+only a different token does: these tools are `confirm: false`, so the master
+token and your other paired clients send prompts ungated. On a hub there is nobody to approve, so the operator's
 starts and kills are refused (`E_FORBIDDEN`); there it offers archive or
 snooze instead. The agent panel's **Tidy up done tickets** chip fills the
 operator's composer with that request; it never sends it.
@@ -1196,6 +1213,7 @@ in [the settings reference](settings-reference.md).
 | `work.draft_briefs` | `false` | on / off | fleet | Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host. |
 | `work.draft_release_notes` | `false` | on / off | fleet | Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host. |
 | `work.catch_up_summaries` | `false` | on / off | fleet | A watched session offers "Since 13:20": what it did since you last looked, summarised on its own host and account. |
+| `work.attachment_max_mb` | `10` | 1–16 MiB | fleet | The largest file or image a task takes. At most 16 MiB: what one call between the desktop and the hub carries. |
 | `work.tidy_done_days` | `2` | 1–365 days | fleet | Days a linked ticket must be done before Tidy up suggests its session. |
 | `work.tidy_idle_hours` | `4` | 1–720 hours | fleet | Hours a session must be idle before any tidy reason suggests it. |
 | `work.tidy_idle_unlinked_days` | `7` | 1–90 days | fleet, per org | Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied. |

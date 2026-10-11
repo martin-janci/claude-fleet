@@ -276,7 +276,7 @@ export interface SessionWork {
   item_id: number | null;
   key: string | null;
   /** The item's fleet ticket key (`FLT-12`), shown in place of `key`;
-   *  absent when it drew none or from a hub older than migration 168. */
+   *  absent when it drew none or from a hub older than migration 169. */
   display_key?: string | null;
   title: string;
   /** `manual` | `started` | `agent` | `agent_started` … — tolerant: a newer hub may add more. */
