@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 /// A PR as a remote link on the item.
 pub const WRITE_OP_PR_REMOTE_LINK: &str = "pr_remote_link";
-/// A fleet comment posted to the item (migration 171): `url` is
+/// A fleet comment posted to the item (migration 172): `url` is
 /// [`comment_write_url`], `body` the text posted.
 pub const WRITE_OP_COMMENT: &str = "comment";
 
@@ -52,7 +52,7 @@ pub struct TrackerWriteRow {
     pub created_at: i64,
     pub updated_at: i64,
     pub done_at: Option<i64>,
-    /// The text a `comment` write posts (migration 171).
+    /// The text a `comment` write posts (migration 172).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     /// The item's tracker id, for a provider that addresses an item by it.

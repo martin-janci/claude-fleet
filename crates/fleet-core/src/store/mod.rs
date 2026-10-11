@@ -95,8 +95,9 @@ pub use access_requests::{AccessRequestRow, ACCESS_REQUEST_COOLDOWN_SECS};
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
 pub use aux_usage::{
     AuxUsageRow, NewAuxUsage, AUX_ORIGINS, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE,
-    AUX_ORIGIN_CONTEXT_HELP, AUX_ORIGIN_MORNING_BRIEF, AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE,
-    AUX_ORIGIN_SUMMARY, AUX_ORIGIN_TRIAGE, AUX_ORIGIN_WATCH_SUMMARY,
+    AUX_ORIGIN_CONTEXT_HELP, AUX_ORIGIN_HEADLESS_CHECK, AUX_ORIGIN_MORNING_BRIEF,
+    AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE, AUX_ORIGIN_SUMMARY, AUX_ORIGIN_TRIAGE,
+    AUX_ORIGIN_WATCH_SUMMARY,
 };
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use changesets::{
@@ -259,7 +260,7 @@ pub use work_journal::{
 };
 pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_MAX_CHARS};
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
-pub use work_status::STATUS_CATEGORIES;
+pub use work_status::{StatusLogRow, STATUS_CATEGORIES};
 pub use work_tasks::{
     is_epic, job_status, parse_due_date, tidy_labels, validate_assignees, validate_due_date,
     validate_estimate, validate_estimate_unit, validate_labels, validate_priority, ItemEdit,

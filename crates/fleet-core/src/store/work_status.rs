@@ -269,5 +269,40 @@ impl Store {
     }
 }
 
+/// One change of an item's stored status (`work_status_log`, migration
+/// 170): written by triggers, read by dashboards.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StatusLogRow {
+    pub item_id: i64,
+    pub at: i64,
+    /// todo | in_progress | done
+    pub category: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_name: Option<String>,
+    /// NULL (a sync or the default) | person | derived
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_by: Option<String>,
+}
+
+impl Store {
+    /// An item's status history, oldest first.
+    pub fn status_log(&self, item_id: i64) -> Result<Vec<StatusLogRow>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT item_id, at, category, status_name, set_by FROM work_status_log \
+             WHERE item_id = ?1 ORDER BY at, id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![item_id], |r| {
+            Ok(StatusLogRow {
+                item_id: r.get(0)?,
+                at: r.get(1)?,
+                category: r.get(2)?,
+                status_name: r.get(3)?,
+                set_by: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+}
+
 #[cfg(test)]
 mod tests;

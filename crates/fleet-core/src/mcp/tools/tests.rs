@@ -9026,6 +9026,121 @@ async fn the_operator_never_makes_start_rules_or_routines() {
     .expect("the operator may list routines");
 }
 
+/// The operator saves a mission for the hub's owner — created rooted at a
+/// task, with its policy, or changed — only once a person approves the exact
+/// save, and reads the owner's missions; every other `mission_*` action stays
+/// a person's, and a hub with no approver refuses the save. Its own client
+/// proves no person, which used to refuse the save outright ("a mission is a
+/// person's; this caller proves no person", 2026-10-11).
+#[tokio::test]
+async fn the_operator_saves_a_mission_for_the_owner_with_their_approval() {
+    let s = Store::open_in_memory().unwrap();
+    let owner = s
+        .personal_owner_id()
+        .unwrap()
+        .expect("a fresh hub has an owner");
+    let root = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "Planner test",
+            ..Default::default()
+        })
+        .unwrap();
+    let t = guarded_tools(s, true);
+    let call = async |args: serde_json::Value| {
+        t.work_link(
+            Extension(production_operator()),
+            Parameters(serde_json::from_value(args).unwrap()),
+        )
+        .await
+    };
+    let create = serde_json::json!({
+        "action": "mission_save",
+        "item_id": root.id,
+        "mission": {
+            "name": "Planner test",
+            "goal": "Test the mission planner end to end.",
+            "policy": { "planner_host": "mefistos" },
+        },
+    });
+    let asked = call(create.clone()).await.unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let mut approved = create.clone();
+    approved["confirm_nonce"] = nonce.clone().into();
+    let saved = result_json(&call(approved.clone()).await.unwrap());
+    assert_eq!(saved["owner_person_id"], owner, "{saved}");
+    assert_eq!(saved["root_item_id"], root.id, "{saved}");
+    assert_eq!(saved["policy"]["planner_host"], "mefistos", "{saved}");
+    let id = saved["id"].as_i64().unwrap();
+    // The approval was for that save, once.
+    assert_ne!(confirm_nonce_of(&call(approved).await.unwrap_err()), nonce);
+
+    // It reads the owner's missions, so it can check what it saved.
+    let listed = t
+        .work(
+            Extension(production_operator()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({ "action": "missions" })).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    let listed = result_json(&listed).to_string();
+    assert!(listed.contains("Planner test"), "{listed}");
+
+    // A change is approved the same way.
+    let change = serde_json::json!({
+        "action": "mission_save",
+        "mission_id": id,
+        "mission": { "policy": { "planner_host": "hostb" } },
+    });
+    let nonce = confirm_nonce_of(&call(change.clone()).await.unwrap_err());
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let mut approved = change;
+    approved["confirm_nonce"] = nonce.into();
+    let changed = result_json(&call(approved).await.unwrap());
+    assert_eq!(changed["policy"]["planner_host"], "hostb", "{changed}");
+
+    // Starting, planning, granting, the state and deleting are a person's.
+    for action in [
+        "mission_start",
+        "mission_plan",
+        "mission_grant",
+        "mission_state",
+        "mission_delete",
+    ] {
+        let e = call(serde_json::json!({ "action": action, "mission_id": id }))
+            .await
+            .unwrap_err();
+        assert!(
+            e.message.starts_with("E_FORBIDDEN") && e.message.contains("may only save"),
+            "{action}: {}",
+            e.message
+        );
+    }
+
+    // A hub, with no one to approve, refuses the save.
+    let hub = guarded_tools(Store::open_in_memory().unwrap(), false);
+    let e = hub
+        .work_link(
+            Extension(production_operator()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action": "mission_save",
+                    "mission": { "name": "N", "goal": "g" },
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        e.message.starts_with("E_FORBIDDEN") && e.message.contains("no approver"),
+        "{}",
+        e.message
+    );
+}
+
 fn operator() -> Caller {
     client_caller(
         crate::service::operator::OPERATOR_CLIENT_NAME,
@@ -11815,6 +11930,8 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // writes" — so another person's shipped PRs were in your digest (T9b).
     ("work", "today", &["ViewScope"]),
     ("work", "tree", &["ViewScope"]),
+    // The tree's own tasks, counted (persona dashboards).
+    ("work", "stats", &["ViewScope"]),
     ("work", "task", &["ViewScope"]),
     ("work", "review", &["ViewScope"]),
     ("work", "context", &["ViewScope"]),
@@ -12016,6 +12133,12 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
     (
         "work",
         "tree",
+        "every_view_scope_page_hides_another_persons_live_session",
+        "every_view_scope_page_hides_another_persons_ended_link",
+    ),
+    (
+        "work",
+        "stats",
         "every_view_scope_page_hides_another_persons_live_session",
         "every_view_scope_page_hides_another_persons_ended_link",
     ),
@@ -16606,6 +16729,11 @@ fn view_scope_sweep_calls() -> Vec<(&'static str, &'static str, serde_json::Valu
         ("work", "tree", serde_json::json!({ "action": "tree" })),
         (
             "work",
+            "stats",
+            serde_json::json!({ "action": "stats", "filters": { "group_by": "repo" } }),
+        ),
+        (
+            "work",
             "task",
             serde_json::json!({ "action": "task", "task_id": task }),
         ),
@@ -17912,6 +18040,76 @@ async fn a_local_items_status_is_not_another_persons_to_set() {
             .await
             .unwrap_or_else(|e| panic!("ended={ended}: her own item: {e:?}"));
     }
+}
+
+/// An agent sets the status of, edits and comments on a task its OWN
+/// session is on, even when the task is shared with a session it cannot
+/// drive (another person's). The exception is that narrow: without its own
+/// link it is refused as before, and rename keeps the full gate.
+#[tokio::test]
+async fn an_agent_writes_its_own_shared_task() {
+    let g = gate_fixture();
+    let (a_row, b_row) = (g.a_row, g.b_row);
+    let shared = g
+        .store
+        .name_session_work(a_row, Some("LOC-1"), "Shared work")
+        .unwrap()
+        .0
+        .id;
+    let bobs = g
+        .store
+        .name_session_work(b_row, Some("LOC-2"), "Bob's alone")
+        .unwrap()
+        .0
+        .id;
+    let t = test_tools(g.store);
+    let call = |who: Caller, args: serde_json::Value| {
+        t.work_link(
+            Extension(who),
+            Parameters(serde_json::from_value(args).unwrap()),
+        )
+    };
+    // Bob's session works on the shared task too.
+    call(
+        device_of(g.bob, g.ada),
+        serde_json::json!({
+            "action": "link", "session_id": b_row, "item_id": shared, "primary": false,
+        }),
+    )
+    .await
+    .expect("Bob links his own session");
+    let write = |who: Caller, action: &str, item: i64| {
+        let args = match action {
+            "set_status" => {
+                serde_json::json!({ "action": action, "item_id": item, "status": "done" })
+            }
+            "edit" => serde_json::json!({ "action": action, "item_id": item, "title": "Renamed" }),
+            "comment" => {
+                serde_json::json!({ "action": action, "item_id": item, "notes": "progress" })
+            }
+            _ => serde_json::json!({ "action": action, "item_id": item, "title": "Renamed" }),
+        };
+        call(who, args)
+    };
+    let me = pane_caller(Some("%7"));
+
+    for action in ["set_status", "edit", "comment"] {
+        write(me.clone(), action, shared)
+            .await
+            .unwrap_or_else(|e| panic!("{action}: its own task, shared with Bob's: {e:?}"));
+        for (who, item, what) in [
+            (pane_caller(None), shared, "no pane proven"),
+            (me.clone(), bobs, "a task its session is not on"),
+        ] {
+            let e = format!("{:?}", write(who, action, item).await.expect_err(what));
+            assert!(e.contains("E_NOTFOUND"), "{action}, {what}: {e}");
+        }
+    }
+    // Rename keeps the full gate.
+    let e = write(me, "name", shared)
+        .await
+        .expect_err("rename keeps the full gate");
+    assert!(format!("{e:?}").contains("E_NOTFOUND"), "{e:?}");
 }
 
 /// **A local item whose only link was UNLINKED is nobody's to write**

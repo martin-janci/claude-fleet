@@ -799,7 +799,7 @@ fn work_items_has_due_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// already_applied guard of migration 170.
+/// already_applied guard of migration 171.
 fn work_items_has_estimate_unit(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'estimate_unit'",
@@ -809,7 +809,7 @@ fn work_items_has_estimate_unit(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// already_applied guard of migration 171.
+/// already_applied guard of migration 172.
 fn tracker_writes_has_remote_url(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('tracker_writes') WHERE name = 'remote_url'",
@@ -1950,16 +1950,22 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/169_ticket_keys.sql"),
         already_applied: Some(work_items_has_display_key),
     },
+    // Status history for persona dashboards (`work_status_log`), written by
+    // triggers on `work_items`. All `IF NOT EXISTS`, so idempotent.
+    Migration::plain(
+        170,
+        include_str!("../../migrations/170_work_status_log.sql"),
+    ),
     // A task's priority, labels and estimate: ADD COLUMNs, so a guard.
     Migration {
-        version: 170,
-        sql: include_str!("../../migrations/170_work_item_priority_labels_estimate.sql"),
+        version: 171,
+        sql: include_str!("../../migrations/171_work_item_priority_labels_estimate.sql"),
         already_applied: Some(work_items_has_estimate_unit),
     },
     // Tracker comments posted back: ADD COLUMNs on the outbox, so a guard.
     Migration {
-        version: 171,
-        sql: include_str!("../../migrations/171_tracker_comment_writes.sql"),
+        version: 172,
+        sql: include_str!("../../migrations/172_tracker_comment_writes.sql"),
         already_applied: Some(tracker_writes_has_remote_url),
     },
 ];

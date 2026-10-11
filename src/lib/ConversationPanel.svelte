@@ -24,6 +24,7 @@
   import { pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
   import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
+  import { chipsThatFit } from './composer_chips';
   import { contextLevel } from './attention';
   import { shortAge } from './session_status';
   import { onTimelineEvent, onConversationsChanged } from './live_events';
@@ -147,6 +148,8 @@
   import { projectSkills } from './project_skills';
   import { completeTaskLink, matchTaskLinks, taskLinkQuery, type TaskLink } from './control_task_link';
   import { overflowMark } from './overflow_mark';
+  import AutoContinueBar from './AutoContinueBar.svelte';
+  import { recommendedPick } from './auto_continue';
 
   let {
     session,
@@ -210,6 +213,9 @@
     // Gap plan G7.8: a line naming the day ("Today", "Yesterday",
     // "Thu 8 Oct") above the first row of each day (Control's chat).
     daySeparators = false,
+    // Control's chat: send a `choices` card's recommended option when
+    // nobody answers in time (`auto_continue.ts`).
+    autoContinue = false,
   }: {
     session: SessionRow;
     visible: boolean;
@@ -228,6 +234,7 @@
     placeholder?: string;
     linkTasks?: () => Promise<TaskLink[]>;
     daySeparators?: boolean;
+    autoContinue?: boolean;
   } = $props();
 
   // Raw: replaced whole on each read and never mutated, so a deep proxy only
@@ -1222,6 +1229,7 @@
   // read yet is the mangled line the gate exists to prevent.
   const outboxBusy = $derived(outgoing.some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'));
   const busyBlocked = $derived(blockWhileBusy && (busyNote !== null || outboxBusy));
+  const autoPick = $derived(autoContinue ? recommendedPick(conv) : null);
 
   // ── May this client write into this session at all? (multi-user M1) ─────
   //
@@ -1378,8 +1386,10 @@
   const ctxLevel = $derived(contextLevel(session.context_pct));
   const suggestCompact = $derived(ctxLevel === 'warn' || ctxLevel === 'crit');
   const isCompactPreset = (p: ComposerPreset) => /^\/compact\b/.test(p.text.trim());
-  // The composer shows three quick prompts and puts the rest under ⋯
-  // (redesign 5.9); a suggested Compact stays out in front.
+  // The composer shows the quick prompts that fit on one line and puts the
+  // rest under ⋯ (redesign 5.9); a suggested Compact stays out in front.
+  // Three until the row has been measured (and always under jsdom, which
+  // lays nothing out).
   const CHIPS_SHOWN = 3;
   // Each chip as this agent takes it: a Codex session drops a chip for a
   // Claude-only command and spells `/clear` as `/new` (`presetForAgent`).
@@ -1388,12 +1398,78 @@
       .map((p) => presetForAgent(p, agent))
       .filter((p): p is ComposerPreset => p !== null && !!p.label.trim() && !!p.text.trim()),
   );
+  let chipsRow: HTMLDivElement | undefined = $state();
+  let chipsMeasure: HTMLSpanElement | undefined = $state();
+  let chipsSep: HTMLSpanElement | undefined = $state();
+  /** The indices of `validPresets` that fit on the collapsed row; null
+   *  until measured. */
+  let chipsFit = $state<number[] | null>(null);
+  const outerWidth = (el: Element) => {
+    const cs = getComputedStyle(el);
+    return el.getBoundingClientRect().width + (parseFloat(cs.marginLeft) || 0) + (parseFloat(cs.marginRight) || 0);
+  };
+  function measureChips() {
+    const row = chipsRow;
+    const m = chipsMeasure;
+    if (!row || !m) return;
+    const width = row.clientWidth;
+    const kids = Array.from(m.children);
+    let next: number[] | null = null;
+    if (width > 0 && kids.length === validPresets.length + 1) {
+      const gap = parseFloat(getComputedStyle(row).columnGap) || 0;
+      // The host's chips (Control's operator commands) share the line.
+      let tools = 0;
+      for (let el: Element | null = chipsSep ?? null; el; el = el.nextElementSibling) tools += gap + outerWidth(el);
+      const pinned = suggestCompact ? validPresets.flatMap((p, i) => (isCompactPreset(p) ? [i] : [])) : [];
+      next = chipsThatFit(
+        kids.slice(0, -1).map(outerWidth),
+        width - tools,
+        outerWidth(kids[kids.length - 1]),
+        gap,
+        pinned,
+      );
+    }
+    if (next?.join() !== chipsFit?.join()) chipsFit = next;
+  }
+  $effect(() => {
+    const row = chipsRow;
+    const m = chipsMeasure;
+    if (!row || !m) return;
+    const ro = new ResizeObserver(() => measureChips());
+    ro.observe(row);
+    ro.observe(m);
+    // A host chip coming or going changes the room left, not the row's size.
+    const mo = new MutationObserver(() => measureChips());
+    mo.observe(row, { childList: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+    };
+  });
+  $effect(() => {
+    // Re-measure when the presets or the suggestion change.
+    void validPresets;
+    void suggestCompact;
+    untrack(measureChips);
+  });
   const chipList = $derived(
-    !chipsExpanded
-      ? validPresets.filter((p, i) => i < CHIPS_SHOWN || (suggestCompact && isCompactPreset(p)))
-      : validPresets,
+    chipsExpanded
+      ? validPresets
+      : chipsFit
+        ? validPresets.filter((_, i) => chipsFit!.includes(i))
+        : validPresets.filter((p, i) => i < CHIPS_SHOWN || (suggestCompact && isCompactPreset(p))),
   );
   const chipsHidden = $derived(!chipsExpanded ? validPresets.length - chipList.length : 0);
+  const chipsToggle = $derived(chipsExpanded || chipsHidden > 0);
+  /** ⋯ / Less. The toggle rides with the last chip, so expanding or
+   *  collapsing re-creates it: hand focus to the new one. */
+  async function toggleChips(e: MouseEvent) {
+    const hadFocus = document.activeElement === e.currentTarget;
+    preserveThread(() => (chipsExpanded = !chipsExpanded));
+    if (!hadFocus) return;
+    await tick();
+    chipsRow?.querySelector<HTMLButtonElement>('[data-testid="conv-chips-more"]')?.focus();
+  }
   // The project's own skills and commands join the built-ins in the New
   // layout (redesign 5.9), read once the draft starts a slash command.
   let projectCmds = $state<SlashCommand[]>([]);
@@ -2634,6 +2710,15 @@
       {@render composerAbove()}
     </div>
   {/if}
+  {#if autoContinue && showComposer && canPrompt && bgEntry === null}
+    <AutoContinueBar
+      sessionId={session.id}
+      pick={autoPick}
+      ready={busyNote === null && !outboxBusy && viewing === null && writeBlocked === null}
+      typing={draft.trim() !== ''}
+      onSend={(text) => void sendText(text)}
+    />
+  {/if}
   {#if showComposer && canPrompt && bgEntry === null}
     <form
       class="composer"
@@ -2722,31 +2807,39 @@
             onclick={() => void sendText('')}>⏎ Press Enter</button>
         </div>
       {/if}
-      <div class="chips" data-testid="conv-chips">
-        {#each chipList as p, i (i)}
-          {#if p.label.trim() && p.text.trim()}
-            {@const suggested = suggestCompact && isCompactPreset(p)}
-            <button
-              type="button"
-              class="btn btn--chip"
-              class:btn--warn={suggested}
-              data-testid="conv-chip"
-              data-suggested={suggested || undefined}
-              data-auto-send={p.auto_send || undefined}
-              title={`${suggested
-                ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.`
-                : p.text}\n\n${p.auto_send
-                ? 'Click sends now; Shift+click fills the box.'
-                : 'Click fills the box; Shift+click sends now.'}`}
-              aria-label={p.auto_send ? `${p.label}, sends immediately` : undefined}
-              disabled={viewing !== null || shareBlocked !== null}
-              onclick={(e) => usePreset(p, presetSendsNow(p, e.shiftKey))}
-              >{p.label}{#if p.auto_send}<span class="chip-send" aria-hidden="true">&nbsp;↵</span>{/if}</button
+      <div class="chips" data-testid="conv-chips" bind:this={chipsRow}>
+        <!-- Every chip at its natural width, out of the flow, so the
+             collapsed row can tell how many fit (measureChips). -->
+        <span class="chips-measure" aria-hidden="true" bind:this={chipsMeasure}>
+          {#each validPresets as p, i (i)}
+            <span class="btn btn--chip"
+              >{p.label}{#if p.auto_send}<span class="chip-send">&nbsp;↵</span>{/if}</span
             >
-          {/if}
-        {/each}
-        {#if chipsExpanded || chipsHidden > 0}
-          <!-- Redesign 5.9: three chips, the rest under ⋯. -->
+          {/each}
+          <span class="btn btn--chip">⋯</span>
+        </span>
+        {#snippet chipButton(p: ComposerPreset)}
+          {@const suggested = suggestCompact && isCompactPreset(p)}
+          <button
+            type="button"
+            class="btn btn--chip"
+            class:btn--warn={suggested}
+            data-testid="conv-chip"
+            data-suggested={suggested || undefined}
+            data-auto-send={p.auto_send || undefined}
+            title={`${suggested
+              ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.`
+              : p.text}\n\n${p.auto_send
+              ? 'Click sends now; Shift+click fills the box.'
+              : 'Click fills the box; Shift+click sends now.'}`}
+            aria-label={p.auto_send ? `${p.label}, sends immediately` : undefined}
+            disabled={viewing !== null || shareBlocked !== null}
+            onclick={(e) => usePreset(p, presetSendsNow(p, e.shiftKey))}
+            >{p.label}{#if p.auto_send}<span class="chip-send" aria-hidden="true">&nbsp;↵</span>{/if}</button
+          >
+        {/snippet}
+        {#snippet moreToggle()}
+          <!-- Redesign 5.9: the chips that fit, the rest under ⋯. -->
           <button
             type="button"
             class="btn btn--chip chips-more"
@@ -2754,10 +2847,22 @@
             aria-expanded={chipsExpanded}
             aria-label={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
             title={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
-            onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : '⋯'}</button>
+            onclick={toggleChips}>{chipsExpanded ? 'Less' : '⋯'}</button>
+        {/snippet}
+        {#each chipList as p, i (i)}
+          {#if chipsToggle && i === chipList.length - 1}
+            <!-- The toggle never wraps onto a line by itself: it rides with
+                 the last chip. -->
+            <span class="chips-tail">{@render chipButton(p)}{@render moreToggle()}</span>
+          {:else}
+            {@render chipButton(p)}
+          {/if}
+        {/each}
+        {#if chipsToggle && chipList.length === 0}
+          {@render moreToggle()}
         {/if}
         {#if composerTools}
-          <span class="chips-sep" aria-hidden="true"></span>
+          <span class="chips-sep" aria-hidden="true" bind:this={chipsSep}></span>
           {@render composerTools()}
         {/if}
       </div>
@@ -3061,11 +3166,33 @@
     justify-content: flex-start;
   }
   .chips {
+    position: relative;
     display: flex;
     align-items: center;
     gap: var(--control-gap);
     margin: 0 0 6px;
     flex-wrap: wrap;
+  }
+  /* Zero-sized and clipped, so it adds no scroll overflow; its chips keep
+     their natural width inside it (flex: none). */
+  .chips-measure {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: flex;
+    width: 0;
+    height: 0;
+    overflow: hidden;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .chips-measure > :global(*) {
+    flex: none;
+  }
+  .chips-tail {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--control-gap);
   }
   /* Between the quick prompts and the chips a host adds (Control's
      operator commands). */

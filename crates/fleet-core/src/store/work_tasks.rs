@@ -105,7 +105,7 @@ pub struct ItemEdit<'a> {
     pub estimate_unit: Option<&'a str>,
 }
 
-/// A task's priorities, most pressing first (migration 170).
+/// A task's priorities, most pressing first (migration 171).
 pub const PRIORITIES: [&str; 4] = ["urgent", "high", "medium", "low"];
 /// Most labels one item keeps.
 pub const LABELS_MAX: usize = 20;

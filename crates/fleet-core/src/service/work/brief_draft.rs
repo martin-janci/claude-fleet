@@ -243,6 +243,7 @@ pub fn draft_script(model: &str, prompt: &str) -> Result<String, String> {
         prompt: Some(prompt),
         stdin_file: None,
         fork_of: None,
+        ..Default::default()
     });
     let t = DRAFT_TAG;
     Ok(format!(

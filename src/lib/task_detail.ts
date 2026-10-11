@@ -24,7 +24,7 @@ import type { StartRule } from './start_rules';
 
 /** The Task detail's tabs. Comments came back (G3.4 had cut them): fleet
  *  keeps a task's comments itself (migration 161), shows the tracker's own
- *  beside them, and posts one there when a person asks (migration 171). */
+ *  beside them, and posts one there when a person asks (migration 172). */
 export const TASK_TABS = ['overview', 'sessions', 'activity', 'comments'] as const;
 export type TaskTab = (typeof TASK_TABS)[number];
 export const TASK_TAB_LABELS: Record<TaskTab, string> = {

@@ -53,6 +53,7 @@ pub const RUN_KINDS: &[&str] = &[
     "watch_summary",
     "triage",
     "context_help",
+    "headless_check",
     "routine",
 ];
 

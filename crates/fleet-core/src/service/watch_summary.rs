@@ -217,6 +217,7 @@ pub fn since_script(model: &str, profile: Option<&str>, excerpt: &str) -> Result
         prompt: Some(SINCE_PROMPT),
         stdin_file: Some("d"),
         fork_of: None,
+        ..Default::default()
     });
     let t = SINCE_TAG;
     Ok(format!(

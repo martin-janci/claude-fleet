@@ -259,6 +259,11 @@ pub struct Choice {
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// The option you would pick. At most one per block; Control's chat
+    /// sends it after `control.auto_continue_minutes` when nobody answers
+    /// (`src/lib/auto_continue.ts`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recommended: bool,
 }
 
 /// An error's next step: a choice that fills the composer, or, with an
@@ -435,6 +440,13 @@ pub fn check(v: &Value) -> Result<(), Vec<String>> {
         "choices" => {
             let options = p.arr(o, "options", "", 1, 8);
             p.each(&options, "option", choice);
+            let picked = options
+                .iter()
+                .filter(|x| x.get("recommended") == Some(&Value::Bool(true)))
+                .count();
+            if picked > 1 {
+                p.add("", "only one option may be `recommended`");
+            }
             p.str(o, "title", "", false, 120);
             p.str(o, "question", "", false, 500);
         }
@@ -501,6 +513,12 @@ fn choice(p: &mut Problems, o: &Map<String, Value>, at: &str) {
     p.str(o, "label", at, true, 80);
     p.str(o, "prompt", at, true, 4000);
     p.str(o, "hint", at, false, 200);
+    if !matches!(
+        o.get("recommended"),
+        None | Some(Value::Null | Value::Bool(_))
+    ) {
+        p.add(at, "`recommended` must be true or false");
+    }
 }
 
 /// The most drafted answers a `wizard` block carries.

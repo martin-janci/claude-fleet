@@ -235,14 +235,14 @@ pub struct WorkItemRow {
     /// (a Jira key is human; a native item outside a project is `TASK-<id>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_key: Option<String>,
-    /// `urgent | high | medium | low` (migration 170): a person's on a
+    /// `urgent | high | medium | low` (migration 171): a person's on a
     /// native item, the tracker's normalised on a ticket. `None` = none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
-    /// Its labels, in order, each once (migration 170).
+    /// Its labels, in order, each once (migration 171).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
-    /// How big the work is, in [`Self::estimate_unit`] (migration 170).
+    /// How big the work is, in [`Self::estimate_unit`] (migration 171).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate: Option<Estimate>,
     /// `points | hours`; set exactly when `estimate` is.
@@ -250,7 +250,7 @@ pub struct WorkItemRow {
     pub estimate_unit: Option<String>,
 }
 
-/// A task's estimate (migration 170): a finite, positive number, rounded to
+/// A task's estimate (migration 171): a finite, positive number, rounded to
 /// two decimals by every writer ([`Estimate::new`]). A newtype so the rows
 /// that carry it stay `Eq`: a NaN never gets in, so equality is total.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]

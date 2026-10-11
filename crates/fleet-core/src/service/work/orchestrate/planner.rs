@@ -343,6 +343,7 @@ pub fn planner_script(model: &str, prompt: &str) -> String {
         prompt: Some(prompt),
         stdin_file: None,
         fork_of: None,
+        ..Default::default()
     });
     format!(
         "{} {}",

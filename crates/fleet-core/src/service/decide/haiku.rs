@@ -247,6 +247,7 @@ pub fn haiku_script(model: &str, host_timeout_secs: u64) -> Result<String, Strin
         prompt: None,
         stdin_file: None,
         fork_of: None,
+        ..Default::default()
     });
     let t = HAIKU_TAG;
     Ok(format!(

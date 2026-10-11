@@ -386,7 +386,7 @@ a ticket start's brief ends with the ticket's attachments and newest 10
 comments, read live by the hub (`work::tracker_comments::brief_extras`), so
 the session's Claude needs no tracker access of its own.
 
-Tracker comments (owner decision 2026-10-11, changing D29; migration 171):
+Tracker comments (owner decision 2026-10-11, changing D29; migration 172):
 the Comments tab shows the ticket's own comments beside fleet's, read live
 when the tab opens (`work { tracker_comments, key }`, routed desktop
 `work_tracker_comments`; newest 50, no cache, bodies fenced for a per-host
@@ -404,7 +404,7 @@ drains at once. Deleting a comment cancels a pending post; a sent one stays
 at the tracker. `CommentRow.tracker_post` carries the post's state, error
 and URL; `TaskDetail.comments_tracker` / `can_post_to_tracker` say whose
 comments the tab reads and whether the reader may post. Not yet: the phone,
-editing a posted comment, a tracker's attachments.
+editing a posted comment, attachments from trackers other than Asana.
 
 Task attachments (migration 168, `work_item_attachments` and the
 content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept
@@ -429,7 +429,7 @@ images open in a lightbox, other files download); an image pasted into the
 comment composer is attached there. Not yet: attachments on the phone, a
 tracker's own attachments (`source`/`external_id` are reserved for them).
 
-A task's priority, labels and estimate (migration 170, `work_items.priority`
+A task's priority, labels and estimate (migration 171, `work_items.priority`
 / `labels` / `estimate` / `estimate_unit`): set on a native task through
 `work_link { edit }` and Edit task, read from every tracker on sync (Jira's
 priority name and story-points field or original estimate, Linear's
@@ -548,7 +548,10 @@ from its pane (per-host token + `X-Fleet-Pane`, `FleetTools::own_session`):
 `whoami {}`, `work { session_tasks }` without `session_id`, and
 `list_tasks { mine | worker_session_id }`; `session_tasks`, `work { task }`
 and `list_tasks` mark the caller's own rows (`is_self`,
-`is_self_requester` / `is_self_worker`). Not yet: the new task's brief
+`is_self_requester` / `is_self_worker`). An agent sets the status of,
+edits and comments on a local task its own session is on (a confirmed, live
+link) even when the task is shared with sessions it cannot drive
+(`own_session_works_on`); rename keeps the full gate. Not yet: the new task's brief
 waiting for the next prompt (J3), own tasks in ⌘K.
 C0: the operator is born with the `fleet-brainstorm` skill
 (`skills/fleet-brainstorm/SKILL.md`, written to its directory's
@@ -587,7 +590,10 @@ mission), a repo allow-list and a capped event log (`store/orchestration.rs`).
 `work { missions | mission }` and `work_link { mission_save | mission_state |
 mission_repo | mission_item | mission_delete }` (`service/work/missions.rs`)
 fence by the mission's org first, then its owner or the org's members (only
-an org admin changes one); per-host and peer tokens are refused. Seven routed
+an org admin changes one); per-host and peer tokens are refused. The operator
+may `mission_save` (create or change) for the hub's owner, each save approved
+by a person, and reads the owner's missions; every other `mission_*` action
+refuses it. Seven routed
 desktop commands (`commands/missions.rs`) back the Work view's Missions tab.
 Projects carry no org, so the repo allow-list is not org-checked yet. O2 is built: `work_item_deps` and
 `work_items.held_at` (migration 116), drawn by `work_link { dep | hold }`
@@ -651,6 +657,22 @@ run when the hub does not answer. Hosts get it on re-provisioning
 In the New layout, Jev K3 (off) proposes a stuck mission's outcome and next
 step, and Control shows a "Sent to a mission" receipt for what the operator
 handed over (`control_handoffs`, migration 140, redesign 9.3).
+Built but OFF by default: `orchestrator.headless_checks` runs a member's
+`review` and `test` steps as one `claude -p` run in the implementer's
+finished checkout (`orchestrate/checks.rs`, F3) instead of a session of
+their own: a review gets Read/Grep/Glob and the diff, a test also exactly
+its `test:<command>` lines as `Bash(<command>)`, everything else denied
+(`--permission-mode dontAsk`). The result is the same task and report, so
+`done_when` reads it unchanged; its cost is booked as `headless_check` on
+the mission. A checkout that moved or is dirty, a command with shell syntax,
+or a host outside the grant takes the session path.
+Control's chat goes on by itself (ON by default, `control.auto_continue`):
+when the agent's reply ends on a `choices` card with an option marked
+`recommended`, the desktop sends it after `control.auto_continue_minutes`
+(10) of nobody answering, with a countdown, *Send now* and *Cancel* above
+the box (`src/lib/auto_continue.ts`). Never a risky option, never a card
+more than a day old, only while the app is open; fleet-mobile does not do
+it.
 
 Routines are landed (`service/routines/`, migrations 131 and 139, redesign
 8.5 to 8.10): a saved prompt that starts a session on a cron schedule, on a

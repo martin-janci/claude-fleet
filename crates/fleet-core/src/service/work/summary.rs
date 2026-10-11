@@ -125,6 +125,7 @@ pub fn summary_script(
         prompt: Some(SUMMARY_PROMPT),
         stdin_file: None,
         fork_of: Some(claude_session_id),
+        ..Default::default()
     });
     let t = SUMMARY_TAG;
     Ok(format!(

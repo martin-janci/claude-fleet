@@ -282,7 +282,7 @@ pub struct WorkTask {
     /// The date the work is due, `YYYY-MM-DD` (the Board card's "You · Fri").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<String>,
-    /// `urgent | high | medium | low` (migration 170).
+    /// `urgent | high | medium | low` (migration 171).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1663,6 +1663,32 @@ impl Graph {
     /// Whether a `tracker:<id>:…` group id names a tracker this graph has.
     pub(crate) fn has_tracker(&self, id: i64) -> bool {
         self.trackers.contains_key(&id)
+    }
+
+    /// Every group [`group_of`] DERIVES, as lower-cased label → its id.
+    ///
+    /// A section is bucketed by its id (`tree`'s `groups.entry`) and ordered
+    /// by its LABEL ([`sort_key`]), so two groups that merely share a label
+    /// render as two sections with one name. Free text equal to a derived
+    /// group's name is the way left into that, and `structure::group_value`
+    /// refuses it by naming the id to pass instead — which is why this
+    /// answers the id and not just the names.
+    pub(crate) fn derived_group_labels(&self) -> HashMap<String, String> {
+        let mut out: HashMap<String, String> = HashMap::new();
+        for repo in self.repo_groups() {
+            out.insert(repo.to_lowercase(), format!("repo:{repo}"));
+        }
+        for i in self.items.values() {
+            if let (Some(tid), Some(c)) = (i.item.tracker_id, i.containers.first()) {
+                let label =
+                    container_label(self.trackers.get(&tid).map(|t| t.provider.as_str()), c);
+                out.insert(label.to_lowercase(), format!("tracker:{tid}:{c}"));
+            }
+            if let Some(p) = i.item.key.as_deref().and_then(key_prefix) {
+                out.insert(p.to_lowercase(), format!("key:{p}"));
+            }
+        }
+        out
     }
 
     fn repo_of(&self, l: &ViewLink) -> Option<String> {
@@ -3486,11 +3512,23 @@ pub fn tree(
     view: &crate::service::view_scope::ViewScope,
     args: &TreeArgs,
 ) -> Result<TreePage, IpcError> {
+    let g = load_tree_graph(store, view, &args.filters, args.with_missions)?;
+    tree_of(&g, &view.org, args)
+}
+
+/// The graph a tree read over `filters` needs: the caller's, plus the
+/// missions, buckets or account names its grouping names.
+fn load_tree_graph(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    filters: &WorkTreeFilters,
+    with_missions: bool,
+) -> Result<Graph, IpcError> {
     let scope = &view.org;
     // A group by mission names only the missions this caller may read
     // (`missions::sees_mission`); read before the graph, which takes the
     // lock itself.
-    let by_mission = args.with_missions || args.filters.group_by.as_deref() == Some("mission");
+    let by_mission = with_missions || filters.group_by.as_deref() == Some("mission");
     let readable_missions: HashMap<i64, String> = if by_mission {
         super::missions::missions(store, view)?
             .into_iter()
@@ -3510,7 +3548,7 @@ pub fn tree(
             }
             fill_mission_waves(&mut g);
         }
-        if let Some(kind @ ("sprint" | "release")) = args.filters.group_by.as_deref() {
+        if let Some(kind @ ("sprint" | "release")) = filters.group_by.as_deref() {
             // A personal bucket shows to its person alone, and wins over
             // the team's: the reader's own plan is the one they group by.
             let (mine, team): (Vec<_>, Vec<_>) = s
@@ -3532,7 +3570,7 @@ pub fn tree(
                 }
             }
         }
-        if args.filters.group_by.as_deref() == Some("account") {
+        if filters.group_by.as_deref() == Some("account") {
             for a in s.list_accounts()? {
                 let label = a
                     .nickname
@@ -3546,7 +3584,52 @@ pub fn tree(
         }
         g
     };
-    tree_of(&g, scope, args)
+    Ok(g)
+}
+
+/// Every task `view` sees that matches `filters` (the tree's own filtering:
+/// the grouping, the archived switch and `filters.group`), unpaged, each
+/// with its group set by `filters.group_by` and no sessions. What a
+/// dashboard counts, so its numbers agree with the Work board's.
+pub(crate) fn matching_tasks(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    filters: &WorkTreeFilters,
+) -> Result<(Vec<WorkTask>, i64), IpcError> {
+    check_filters(filters)?;
+    let g = load_tree_graph(store, view, filters, false)?;
+    Ok((matching_of(&g, &view.org, filters), g.now))
+}
+
+/// [`matching_tasks`] over a graph already loaded.
+pub(crate) fn matching_of(g: &Graph, scope: &OrgScope, filters: &WorkTreeFilters) -> Vec<WorkTask> {
+    let with_archived = WorkTreeFilters {
+        archived: Some(true),
+        ..filters.clone()
+    };
+    let built = build_tasks(g, scope);
+    let mut out = Vec::new();
+    for b in &built {
+        let mut summary = summarize(g, b, false);
+        if let Some(by) = filters.group_by.as_deref() {
+            if let Some(group) = regroup(g, &summary, by) {
+                summary.task.group = group;
+            }
+        }
+        let t = summary.task;
+        if !matches_filters(&t, &with_archived, false) || hidden_as_archived(&t, filters) {
+            continue;
+        }
+        if filters
+            .group
+            .as_deref()
+            .is_some_and(|gid| gid != t.group.id)
+        {
+            continue;
+        }
+        out.push(t);
+    }
+    out
 }
 
 /// Parse a task id: `item:<n>` or `ref:<KEY>` (normalised).
