@@ -74,7 +74,7 @@ describe('dashboards', () => {
 
   it('groups can leave out the "No …" group and are capped', () => {
     const s = answer({ groups: [group('a'), group('none'), group('b'), group('c')] });
-    const w = { kind: 'groups' as const, title: 'x', query: { group_by: 'epic' as const }, show: 'done' as const, limit: 2, hideNone: true };
+    const w = { kind: 'groups' as const, title: 'x', query: { group_by: 'epic' as const }, show: 'done' as const, limit: 2, hide_none: true };
     expect(groupsShown(s, w).map((g) => g.group.id)).toEqual(['a', 'b']);
   });
 

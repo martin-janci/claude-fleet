@@ -1,11 +1,18 @@
 import { render, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import DashboardView from './DashboardView.svelte';
 import { workspace } from './workspace';
 import { expectAccessible } from './a11y_check';
+import { pinnedDashboards, shownDashboard } from './dashboards';
+import { operatorSession } from './operator';
+import { composerDrafts } from './conversation';
+import { destination } from './destination';
+import { fireEvent } from '@testing-library/svelte';
+import type { SessionRow } from './sessions';
 
 const mock = invoke as ReturnType<typeof vi.fn>;
 const stages = { backlog: 2, in_progress: 1, in_review: 1, blocked: 1, done: 3 };
@@ -39,7 +46,13 @@ beforeEach(() => {
     };
   });
 });
-afterEach(() => workspace.set('developer'));
+afterEach(() => {
+  workspace.set('developer');
+  pinnedDashboards.set([]);
+  shownDashboard.set(null);
+  operatorSession.set(null);
+  composerDrafts.clear();
+});
 
 describe('DashboardView', () => {
   it('draws the scrum master’s sprint health from work stats', async () => {
@@ -65,5 +78,48 @@ describe('DashboardView', () => {
     const r = render(DashboardView);
     await waitFor(() => expect(r.getByText(/Could not read/)).toBeTruthy());
     expect(r.getAllByTestId('widget-stat').length).toBe(4);
+  });
+
+  it('shows a pinned dashboard, and hands it to the agent to change a widget', async () => {
+    workspace.set('pm');
+    pinnedDashboards.set([
+      {
+        id: 'dash.release-42',
+        title: 'Release 4.2',
+        intro: 'What the release still holds.',
+        pinned_at: 1_760_000_000,
+        widgets: [{ kind: 'groups', title: 'By person', query: { group_by: 'person' }, show: 'stages' }],
+      },
+    ]);
+    shownDashboard.set({ id: 'dash.release-42', workspace: 'pm' });
+    operatorSession.set({ id: 99 } as SessionRow);
+    const r = render(DashboardView);
+    await waitFor(() => expect(r.getByText('Ana')).toBeTruthy());
+    expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Release 4.2');
+    expect(r.getByText(/Pinned on .* from the agent's proposal/)).toBeTruthy();
+
+    await fireEvent.click(r.getByTestId('widget-change'));
+    await waitFor(() => expect(composerDrafts.get(99)).toBeTruthy());
+    const draft = composerDrafts.get(99)!;
+    expect(draft).toContain('"id": "dash.release-42"');
+    expect(draft.endsWith('Change the widget "By person": ')).toBe(true);
+    expect(get(destination)).toBe('control');
+
+    // A pick holds only in the workspace it was made in.
+    workspace.set('scrum');
+    await waitFor(() => expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Sprint health'));
+  });
+
+  it('unpins, and falls back to the workspace’s own dashboard', async () => {
+    workspace.set('po');
+    pinnedDashboards.set([
+      { id: 'dash.x', title: 'Mine', intro: '', pinned_at: 1, widgets: [{ kind: 'stat', title: 'Open', query: {}, value: 'open' }] },
+    ]);
+    shownDashboard.set({ id: 'dash.x', workspace: 'po' });
+    const r = render(DashboardView);
+    expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Mine');
+    await fireEvent.click(r.getByTestId('dashboard-unpin'));
+    expect(get(pinnedDashboards)).toEqual([]);
+    expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Epics and releases');
   });
 });

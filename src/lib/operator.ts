@@ -2,6 +2,8 @@
 // Follows `app_views.ts`: Control and the panel talk through these stores
 // instead of prop-drilling through App.svelte.
 import { derived, get, writable, type Readable, type Writable } from 'svelte/store';
+import { openControl } from './control';
+import { insertIntoComposer } from './conversation';
 import { invokeCmd } from './result';
 import { killSession, restartSession, sessions, type SessionRow } from './sessions';
 import { sessionActionBlocked } from './share';
@@ -329,3 +331,19 @@ export const OPERATOR_COMMANDS: readonly OperatorCommand[] = [
   },
 ];
 
+
+/**
+ * Hand `text` to the agent (persona design, step 5: "Change with the
+ * agent" on a dashboard): wake it when it is absent, put the text in its
+ * composer unsent, and open Control's Chat tab on it. The person finishes
+ * the ask and presses Enter. False when the agent could not be reached;
+ * Control then shows why, as it does on any visit.
+ */
+export async function askAgent(text: string): Promise<boolean> {
+  if (!get(operatorSession)) await ensureAgent();
+  const row = get(operatorSession);
+  openControl('chat');
+  if (!row) return false;
+  insertIntoComposer(row.id, text);
+  return true;
+}

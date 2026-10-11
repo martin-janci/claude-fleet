@@ -12,12 +12,14 @@ it are drawn as cards instead:
 - **A `fleet.ui/1` block.** A fenced ```` ```fleet-ui ```` block (or a
   ```` ```json ```` block whose object has `"spec": "fleet.ui/1"`) holding one
   block: a tutorial, a guide, a callout, facts, choices, a form, a report,
-  a job's progress, results, an error or a settings change.
+  a job's progress, results, an error, a settings change, a wizard or a
+  dashboard.
 
 A card is a view of the reply. Nothing is stored and nothing is sent from
 one, with two exceptions: a `setting` card applies a settings change an
 agent proposed, after the person confirms it, and a `wizard` card runs one of
-the app's wizards when the person presses its last button. A card that acts (choices, a form, a follow-up) only fills the
+the app's wizards when the person presses its last button, and a
+`dashboard` card pins a dashboard on a click. A card that acts (choices, a form, a follow-up) only fills the
 session's composer, and the person presses Enter. It acts only when the
 composer is on screen for the conversation shown. An earlier conversation
 or a row with no REPL draws the card with its actions turned off.
@@ -44,6 +46,7 @@ it closes.
 | see what failed and pick what to do about it | `error` |
 | apply a settings change you proposed | `setting` |
 | run one of the app's wizards (add a project, a host, a session, …) | `wizard` |
+| keep a view of work to come back to (a sprint, a release, an epic) | `dashboard` |
 
 A block's form is not `ask`: you do not wait for it, and its answers arrive
 as the person's next prompt. Use it when the answers can wait for the next
@@ -288,6 +291,68 @@ label (*by the agent · from your message*), and the person checks it before
 the last button. A name the wizard does not have, a secret field, or a value
 its field refuses (a host it does not offer) is dropped, and that field
 starts empty.
+
+### `dashboard`: a dashboard to pin
+
+| Key | Required | Meaning |
+|---|---|---|
+| `id` | yes | Letters, digits and `. _ : -`, ≤ 64; the same id again is a new version |
+| `title` | yes | ≤ 80 chars |
+| `intro` | no | ≤ 300 chars, one line on what it answers |
+| `why` | no | ≤ 500 chars, why you propose it |
+| `widgets` | yes | 1–12 widgets |
+
+Each widget has a `kind`, a `title` (≤ 80) and a `query`:
+
+- `{ "kind": "stat", "title", "query"?, "value", "warn"? }`: one number of
+  the answer. `value` is `total`, `open`, `needs_you`, `pct_done`, `cost`
+  or a stage (`backlog`, `in_progress`, `in_review`, `blocked`, `done`).
+  With `warn`, a number above zero is drawn in the warning colour.
+- `{ "kind": "groups", "title", "query", "show"?, "limit"?, "hide_none"? }`:
+  one row per group of `query.group_by` (required), a bar split by stage
+  (`show: "stages"`, the default) or the done share (`"done"`). `limit`
+  is 1–20 (default 10); `hide_none` leaves the "No …" group out.
+- `{ "kind": "buckets", "title", "query", "states"? }`: sprints or
+  releases (`query.group_by` is `sprint` or `release`) with their health:
+  done against time gone, the dates, the goal and the scope change since
+  the start. `states` keeps only `planned`, `active`, `closed` or
+  `released` ones.
+
+A `query` is the Work view's filters (`work { tree }`'s `filters`): `org`
+(an id or `none`), `status` (`any`, `open`, `todo`, `in_progress`, `done`),
+`mine`, `has`, `review`, `query` (words), `assignee`, `status_name`,
+`group_by`, `stages` (a list), `iteration` (`current`, `none` or a name),
+`epic` (a key or `item:<id>`) and `item_type`. Any other key is a problem:
+a misspelt filter would count the wrong tasks. Absent, a stat counts
+every task the person can open.
+
+The block names filters and never a number. The card reads each query
+with `work { stats }` under the person's own access and draws the answer,
+as the Dashboards page draws its built-ins; two widgets with the same query
+cost one read. A card in the transcript reads once (with *Refresh*); the
+page re-reads when work changes.
+
+*Pin to Dashboards* keeps it on this device, in the Dashboards page's
+picker. A block whose `id` is a pinned dashboard's is offered as its
+replacement and says what it changes (`adds “Spent”, removes “By person”`);
+one the same as the pinned one says *Pinned*. A block may not take a
+built-in's id (`dash.developer`, `dash.tester`, `dash.pm`, `dash.scrum`,
+`dash.po`). A device keeps at most 20.
+
+On the page, *Change with the agent* (or a widget's *Change*) puts the
+dashboard, as this block, in the agent's composer in Control, followed by
+`Change the widget "<title>": `; the person finishes the sentence and
+presses Enter, and the agent answers with a block of the same `id`. A
+built-in goes as a copy with the id `<its id>.mine`.
+
+```json
+{ "spec": "fleet.ui/1", "kind": "dashboard", "id": "dash.release-42", "title": "Release 4.2",
+  "why": "You asked how 4.2 is going.",
+  "widgets": [
+    { "kind": "stat", "title": "Open", "query": { "status": "open", "epic": "PAY-12" }, "value": "open" },
+    { "kind": "groups", "title": "By person", "query": { "group_by": "person", "epic": "PAY-12" }, "show": "stages" },
+    { "kind": "buckets", "title": "Release", "query": { "group_by": "release" }, "states": ["planned"] } ] }
+```
 
 ## Checking a block
 
