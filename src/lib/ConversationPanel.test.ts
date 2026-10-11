@@ -1767,7 +1767,13 @@ describe('ConversationPanel live indicator', () => {
       expect(more.getAttribute('aria-label')).toBe('2 more quick prompts');
       await fireEvent.click(more);
       expect(screen.getAllByTestId('conv-chip').map((c) => c.textContent?.trim())).toEqual(['A', 'B', 'C', 'D', 'E']);
-      await fireEvent.click(more);
+      // Less rides with the last chip, so it never wraps onto a line alone.
+      expect(screen.getByTestId('conv-chips-more').previousElementSibling?.textContent?.trim()).toBe('E');
+      screen.getByTestId('conv-chips-more').focus();
+      await fireEvent.click(screen.getByTestId('conv-chips-more'));
+      await tick();
+      // The re-created toggle keeps keyboard focus.
+      expect(document.activeElement).toBe(screen.getByTestId('conv-chips-more'));
       expect(screen.getAllByTestId('conv-chip').map((c) => c.textContent?.trim())).toEqual(['A', 'B', 'C']);
       expect(screen.getByTestId('conv-chips-more').getAttribute('aria-expanded')).toBe('false');
     });

@@ -1453,6 +1453,16 @@
         : validPresets.filter((p, i) => i < CHIPS_SHOWN || (suggestCompact && isCompactPreset(p))),
   );
   const chipsHidden = $derived(!chipsExpanded ? validPresets.length - chipList.length : 0);
+  const chipsToggle = $derived(chipsExpanded || chipsHidden > 0);
+  /** ⋯ / Less. The toggle rides with the last chip, so expanding or
+   *  collapsing re-creates it: hand focus to the new one. */
+  async function toggleChips(e: MouseEvent) {
+    const hadFocus = document.activeElement === e.currentTarget;
+    preserveThread(() => (chipsExpanded = !chipsExpanded));
+    if (!hadFocus) return;
+    await tick();
+    chipsRow?.querySelector<HTMLButtonElement>('[data-testid="conv-chips-more"]')?.focus();
+  }
   // The project's own skills and commands join the built-ins in the New
   // layout (redesign 5.9), read once the draft starts a slash command.
   let projectCmds = $state<SlashCommand[]>([]);
@@ -2792,29 +2802,27 @@
           {/each}
           <span class="btn btn--chip">⋯</span>
         </span>
-        {#each chipList as p, i (i)}
-          {#if p.label.trim() && p.text.trim()}
-            {@const suggested = suggestCompact && isCompactPreset(p)}
-            <button
-              type="button"
-              class="btn btn--chip"
-              class:btn--warn={suggested}
-              data-testid="conv-chip"
-              data-suggested={suggested || undefined}
-              data-auto-send={p.auto_send || undefined}
-              title={`${suggested
-                ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.`
-                : p.text}\n\n${p.auto_send
-                ? 'Click sends now; Shift+click fills the box.'
-                : 'Click fills the box; Shift+click sends now.'}`}
-              aria-label={p.auto_send ? `${p.label}, sends immediately` : undefined}
-              disabled={viewing !== null || shareBlocked !== null}
-              onclick={(e) => usePreset(p, presetSendsNow(p, e.shiftKey))}
-              >{p.label}{#if p.auto_send}<span class="chip-send" aria-hidden="true">&nbsp;↵</span>{/if}</button
-            >
-          {/if}
-        {/each}
-        {#if chipsExpanded || chipsHidden > 0}
+        {#snippet chipButton(p: ComposerPreset)}
+          {@const suggested = suggestCompact && isCompactPreset(p)}
+          <button
+            type="button"
+            class="btn btn--chip"
+            class:btn--warn={suggested}
+            data-testid="conv-chip"
+            data-suggested={suggested || undefined}
+            data-auto-send={p.auto_send || undefined}
+            title={`${suggested
+              ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.`
+              : p.text}\n\n${p.auto_send
+              ? 'Click sends now; Shift+click fills the box.'
+              : 'Click fills the box; Shift+click sends now.'}`}
+            aria-label={p.auto_send ? `${p.label}, sends immediately` : undefined}
+            disabled={viewing !== null || shareBlocked !== null}
+            onclick={(e) => usePreset(p, presetSendsNow(p, e.shiftKey))}
+            >{p.label}{#if p.auto_send}<span class="chip-send" aria-hidden="true">&nbsp;↵</span>{/if}</button
+          >
+        {/snippet}
+        {#snippet moreToggle()}
           <!-- Redesign 5.9: the chips that fit, the rest under ⋯. -->
           <button
             type="button"
@@ -2823,7 +2831,19 @@
             aria-expanded={chipsExpanded}
             aria-label={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
             title={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
-            onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : '⋯'}</button>
+            onclick={toggleChips}>{chipsExpanded ? 'Less' : '⋯'}</button>
+        {/snippet}
+        {#each chipList as p, i (i)}
+          {#if chipsToggle && i === chipList.length - 1}
+            <!-- The toggle never wraps onto a line by itself: it rides with
+                 the last chip. -->
+            <span class="chips-tail">{@render chipButton(p)}{@render moreToggle()}</span>
+          {:else}
+            {@render chipButton(p)}
+          {/if}
+        {/each}
+        {#if chipsToggle && chipList.length === 0}
+          {@render moreToggle()}
         {/if}
         {#if composerTools}
           <span class="chips-sep" aria-hidden="true" bind:this={chipsSep}></span>
@@ -3152,6 +3172,11 @@
   }
   .chips-measure > :global(*) {
     flex: none;
+  }
+  .chips-tail {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--control-gap);
   }
   /* Between the quick prompts and the chips a host adds (Control's
      operator commands). */
