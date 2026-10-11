@@ -12,6 +12,8 @@ pub struct SupportFingerprintRow {
     pub fingerprint: String,
     pub exception: String,
     pub bug_key: Option<String>,
+    /// The error as the scanner found it (JSON), when a scan saw it first.
+    pub sample: Option<String>,
     pub first_job_id: Option<i64>,
     pub last_job_id: Option<i64>,
     pub seen: i64,
@@ -19,8 +21,8 @@ pub struct SupportFingerprintRow {
     pub last_seen: i64,
 }
 
-const COLS: &str = "scope, fingerprint, exception, bug_key, first_job_id, last_job_id, seen, \
-                    first_seen, last_seen";
+const COLS: &str = "scope, fingerprint, exception, bug_key, sample, first_job_id, last_job_id, \
+                    seen, first_seen, last_seen";
 
 impl Store {
     pub fn support_fingerprint(
@@ -40,11 +42,12 @@ impl Store {
                         fingerprint: r.get(1)?,
                         exception: r.get(2)?,
                         bug_key: r.get(3)?,
-                        first_job_id: r.get(4)?,
-                        last_job_id: r.get(5)?,
-                        seen: r.get(6)?,
-                        first_seen: r.get(7)?,
-                        last_seen: r.get(8)?,
+                        sample: r.get(4)?,
+                        first_job_id: r.get(5)?,
+                        last_job_id: r.get(6)?,
+                        seen: r.get(7)?,
+                        first_seen: r.get(8)?,
+                        last_seen: r.get(9)?,
                     })
                 },
             )
@@ -58,17 +61,20 @@ impl Store {
         scope: &str,
         fingerprint: &str,
         exception: &str,
-        job_id: i64,
+        job_id: Option<i64>,
+        sample: Option<&str>,
         now: i64,
     ) -> Result<Option<SupportFingerprintRow>, rusqlite::Error> {
         let before = self.support_fingerprint(scope, fingerprint)?;
         self.conn.execute(
             "INSERT INTO support_fingerprints \
-               (scope, fingerprint, exception, first_job_id, last_job_id, seen, first_seen, last_seen) \
-             VALUES (?1, ?2, ?3, ?4, ?4, 1, ?5, ?5) \
+               (scope, fingerprint, exception, sample, first_job_id, last_job_id, seen, first_seen, \
+                last_seen) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 1, ?6, ?6) \
              ON CONFLICT (scope, fingerprint) DO UPDATE SET \
-               seen = seen + 1, last_job_id = excluded.last_job_id, last_seen = excluded.last_seen",
-            params![scope, fingerprint, exception, job_id, now],
+               seen = seen + 1, last_job_id = COALESCE(excluded.last_job_id, last_job_id), \
+               sample = COALESCE(sample, excluded.sample), last_seen = excluded.last_seen",
+            params![scope, fingerprint, exception, sample, job_id, now],
         )?;
         Ok(before)
     }
@@ -97,12 +103,12 @@ mod tests {
     fn a_fingerprint_is_counted_and_learns_its_bug() {
         let s = Store::open_in_memory().unwrap();
         assert_eq!(
-            s.see_support_fingerprint("jira:1:L2S", "ab", "NPE", 7, 100)
+            s.see_support_fingerprint("jira:1:L2S", "ab", "NPE", Some(7), Some("{}"), 100)
                 .unwrap(),
             None
         );
         let before = s
-            .see_support_fingerprint("jira:1:L2S", "ab", "NPE", 9, 200)
+            .see_support_fingerprint("jira:1:L2S", "ab", "NPE", Some(9), None, 200)
             .unwrap()
             .unwrap();
         assert_eq!((before.seen, before.last_job_id), (1, Some(7)));

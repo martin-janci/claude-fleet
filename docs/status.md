@@ -789,7 +789,11 @@ comment and the link alone and a new bug only when the rule lists it in
 outside the rule's projects or over `max_body_chars`. Step 8 in part: the
 reviewer labels its pull requests (`labels`), describes an empty one
 (`auto_description`) and answers an author who argues a missing-test
-finding (test debate, migration 176), each an action like the review.
+finding (test debate, migration 176), each an action like the review;
+the support agent scans a catalog MCP server (`graylog`) for new errors
+(`scan`) and proposes known-error entries for its KB repo (`kb`). Not
+built: outbound Slack/Teams notifications (a new channel of the 11.9
+matrix, the owner's call).
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

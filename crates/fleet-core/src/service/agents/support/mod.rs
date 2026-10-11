@@ -36,6 +36,7 @@
 
 pub mod fingerprint;
 pub mod output;
+pub mod scan;
 #[cfg(test)]
 mod tests;
 pub mod writes;
@@ -95,6 +96,10 @@ pub struct SupportConfig {
     pub app_frame_prefix: String,
     /// Minutes in which a repeated fingerprint is linked to its bug.
     pub incident_window_mins: i64,
+    /// The error scanner (step 8): off unless set.
+    pub scan: Option<scan::ScanConfig>,
+    /// The support KB to teach (step 8): off unless set.
+    pub kb: Option<writes::KbConfig>,
 }
 
 impl Default for SupportConfig {
@@ -122,6 +127,8 @@ impl Default for SupportConfig {
             max_body_chars: 5000,
             app_frame_prefix: String::new(),
             incident_window_mins: 120,
+            scan: None,
+            kb: None,
         }
     }
 }
@@ -185,6 +192,12 @@ impl SupportConfig {
             || !(0..=10_080).contains(&c.incident_window_mins)
         {
             return Err("max_body_chars or incident_window_mins is out of range".into());
+        }
+        if let Some(sc) = &c.scan {
+            sc.check()?;
+        }
+        if let Some(kb) = &c.kb {
+            kb.check()?;
         }
         Ok(c)
     }
@@ -332,6 +345,13 @@ pub trait SupportHost: Send + Sync {
     async fn prune(&self, host: &str, root: &str);
     /// A write to the tracker, with its own credential.
     async fn write(&self, tracker_id: i64, op: &WriteOp) -> Result<WriteOutcome, String>;
+    /// A script's stdout on the host, within `wall_clock_secs`.
+    async fn run_script(
+        &self,
+        host: &str,
+        script: &str,
+        wall_clock_secs: u64,
+    ) -> Result<String, String>;
 }
 
 /// The production host: the tracker through its provider, the rest over
@@ -376,6 +396,31 @@ impl SupportHost for LiveSupportHost {
             .issue_threads(jql, max)
             .await
             .map_err(|e| e.to_ipc().message)
+    }
+
+    async fn run_script(
+        &self,
+        host: &str,
+        script: &str,
+        wall_clock_secs: u64,
+    ) -> Result<String, String> {
+        let out = crate::ssh::run_shell_bounded(
+            &*self.ssh,
+            host,
+            script,
+            CONNECT,
+            Duration::from_secs(wall_clock_secs),
+        )
+        .await
+        .map_err(|e| e.message)?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!(
+                "the script failed: {}",
+                err.trim().chars().take(300).collect::<String>()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     async fn write(&self, tracker_id: i64, op: &WriteOp) -> Result<WriteOutcome, String> {
@@ -459,6 +504,7 @@ pub fn agent(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> AgentImpl {
     AgentImpl {
         name: "support",
         poller: Some(Box::new(SupportPoller {
+            store: Arc::clone(store),
             host: Arc::clone(&host),
         })),
         runner: Some(Box::new(SupportRunner {
@@ -473,7 +519,71 @@ pub fn agent(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> AgentImpl {
 }
 
 pub struct SupportPoller {
+    pub store: Arc<Mutex<Store>>,
     pub host: Arc<dyn SupportHost>,
+}
+
+/// Seconds a scan's MCP call may take.
+const SCAN_CALL_SECS: u64 = 120;
+
+impl SupportPoller {
+    /// One scan: the server's errors of the last window, the new ones as jobs.
+    async fn scan(
+        &self,
+        rule: &AgentRuleRow,
+        cfg: &SupportConfig,
+        sc: &scan::ScanConfig,
+        now: i64,
+    ) -> Result<Vec<NewAgentJob>, String> {
+        let host = rule.host_alias.as_str();
+        let home = self.host.home(host).await?;
+        let file = self
+            .host
+            .read_file(host, &format!("{home}/.claude.json"))
+            .await?
+            .ok_or("the host has no ~/.claude.json: sync the catalog there")?;
+        let v: serde_json::Value =
+            serde_json::from_str(&file).map_err(|e| format!("~/.claude.json: {e}"))?;
+        let entry = v
+            .get("mcpServers")
+            .and_then(|m| m.get(&sc.server))
+            .ok_or_else(|| format!("MCP server {} is not installed on {host}", sc.server))?;
+        let mut args = sc.arguments.clone();
+        args["from"] = (now - sc.window_mins * 60).into();
+        args["to"] = now.into();
+        let script = scan::call_script(entry, &sc.tool, &args, SCAN_CALL_SECS)?;
+        let stdout = self
+            .host
+            .run_script(host, &script, SCAN_CALL_SECS + 30)
+            .await?;
+        let found = scan::errors_in(&scan::tool_text(&stdout)?, &cfg.app_frame_prefix)?;
+        let s = self.store.lock().map_err(|_| "store lock".to_string())?;
+        let mut jobs = Vec::new();
+        for (fp, e) in found {
+            let sample = serde_json::to_string(&e).unwrap_or_default();
+            let before = s
+                .see_support_fingerprint(
+                    &rule.scope,
+                    &fp,
+                    &e.exception_class,
+                    None,
+                    Some(&sample),
+                    now,
+                )
+                .map_err(|e| e.to_string())?;
+            if before.is_none() && jobs.len() < sc.max_jobs {
+                jobs.push(NewAgentJob {
+                    rule_id: rule.id,
+                    agent: "support".into(),
+                    subject: format!("scan:{}", &fp[..16]),
+                    trigger: scan::TRIGGER.into(),
+                    dedup_key: format!("scan:{fp}"),
+                    not_before: now,
+                });
+            }
+        }
+        Ok(jobs)
+    }
 }
 
 #[async_trait::async_trait]
@@ -486,24 +596,38 @@ impl AgentPoller for SupportPoller {
     ) -> Result<Polled, String> {
         let (tracker_id, project) = parse_scope(&rule.scope).ok_or("not a support scope")?;
         let cfg = SupportConfig::parse(&rule.config)?;
-        let next = Some(now.to_string());
-        // The first poll only sets the cursor.
-        let Some(since) = cursor
-            .and_then(|c| c.cursor.as_deref())
-            .and_then(|c| c.parse::<i64>().ok())
-        else {
+        let (since, last_scan) = scan::read_cursor(cursor.and_then(|c| c.cursor.as_deref()));
+        // The first poll only sets the cursor (and the scan's clock).
+        let Some(since) = since else {
             return Ok(Polled {
                 jobs: Vec::new(),
-                cursor: next,
+                cursor: Some(scan::write_cursor(now, cfg.scan.as_ref().map(|_| now))),
             });
         };
         let minutes = ((now - since + POLL_SLACK_SECS).max(60) + 59) / 60;
         let jql =
             format!("project = \"{project}\" AND updated >= -{minutes}m ORDER BY updated DESC");
         let threads = self.host.threads(tracker_id, &jql, POLL_MAX_ISSUES).await?;
+        let mut jobs = plan_jobs(rule.id, &threads, &cfg, since, now);
+        let mut scanned_at = last_scan;
+        if let Some(sc) = &cfg.scan {
+            if last_scan.is_none_or(|t| now - t >= sc.every_mins * 60) {
+                match self.scan(rule, &cfg, sc, now).await {
+                    Ok(found) => jobs.extend(found),
+                    // A failed scan waits for its next turn; the comments still count.
+                    Err(e) => {
+                        tracing::warn!(scope = %rule.scope, error = %e, "[agents] support: scan failed")
+                    }
+                }
+                scanned_at = Some(now);
+            }
+        }
         Ok(Polled {
-            jobs: plan_jobs(rule.id, &threads, &cfg, since, now),
-            cursor: next,
+            jobs,
+            cursor: Some(scan::write_cursor(
+                now,
+                scanned_at.filter(|_| cfg.scan.is_some()),
+            )),
         })
     }
 }
@@ -532,12 +656,14 @@ fn failed(kind: ErrorKind, message: impl Into<String>) -> RunOutcome {
 
 impl SupportRunner {
     async fn investigate(&self, job: &AgentJobRow, rule: &AgentRuleRow) -> RunOutcome {
-        let Some(key) = key_of_subject(&job.subject) else {
+        let scanned = job.trigger == scan::TRIGGER;
+        let key = key_of_subject(&job.subject);
+        if key.is_none() && !scanned {
             return failed(
                 ErrorKind::Permanent,
                 format!("not a support subject: {}", job.subject),
             );
-        };
+        }
         let Some((tracker_id, _)) = parse_scope(&rule.scope) else {
             return failed(ErrorKind::Permanent, "not a support scope");
         };
@@ -555,18 +681,40 @@ impl SupportRunner {
         };
         if last.is_some_and(|at| at + cfg.cooldown_secs > crate::store::now_unix()) {
             return skipped(format!(
-                "cooldown: {key} was investigated less than {}s ago",
-                cfg.cooldown_secs
+                "cooldown: {} was investigated less than {}s ago",
+                job.subject, cfg.cooldown_secs
             ));
         }
-        let thread = match self
-            .host
-            .threads(tracker_id, &format!("key = \"{key}\""), 1)
-            .await
-        {
-            Ok(mut t) if !t.is_empty() => t.remove(0),
-            Ok(_) => return failed(ErrorKind::Permanent, format!("{key} is not on the tracker")),
-            Err(e) => return failed(vehicle::classify_failure(&e), e),
+        // A scan job's "ticket" is the error the scanner recorded.
+        let mut sample: Option<(String, scan::ScannedError)> = None;
+        let thread = match key {
+            Some(key) => match self
+                .host
+                .threads(tracker_id, &format!("key = \"{key}\""), 1)
+                .await
+            {
+                Ok(mut t) if !t.is_empty() => t.remove(0),
+                Ok(_) => {
+                    return failed(ErrorKind::Permanent, format!("{key} is not on the tracker"))
+                }
+                Err(e) => return failed(vehicle::classify_failure(&e), e),
+            },
+            None => {
+                let fp = job.dedup_key.trim_start_matches("scan:").to_string();
+                let row = match self.store.lock() {
+                    Ok(s) => s.support_fingerprint(&rule.scope, &fp).ok().flatten(),
+                    Err(_) => return failed(ErrorKind::Transient, "store lock"),
+                };
+                let Some(e) = row
+                    .and_then(|r| r.sample)
+                    .and_then(|t| serde_json::from_str::<scan::ScannedError>(&t).ok())
+                else {
+                    return failed(ErrorKind::Permanent, "the scanned error is not recorded");
+                };
+                let t = scan::as_thread(&fp, &e);
+                sample = Some((fp, e));
+                t
+            }
         };
         let host = rule.host_alias.as_str();
         let home = match self.host.home(host).await {
@@ -689,14 +837,29 @@ impl SupportRunner {
             Err(e) => return failed(ErrorKind::Permanent, e.to_string()),
         };
         result["key"] = key.into();
+        if let Some((fp, _)) = &sample {
+            result["scanned"] = fp.clone().into();
+        }
         if rule.level == "watch" {
             return RunOutcome::Done {
                 result: Some(result.to_string()),
                 cost_micros: cost,
             };
         }
-        self.propose_writes(job, rule, &cfg, tracker_id, key, &inv, result, cost)
-            .await
+        let mut inv = inv;
+        if let Some((_, e)) = &sample {
+            // The scanner saw the exception; the model need not repeat it.
+            if inv.exception_class.is_empty() {
+                inv.exception_class = e.exception_class.clone();
+                inv.error_message = e.message.clone();
+                inv.stack_trace = e.stack_trace.clone();
+            }
+        }
+        let scanned_fp = sample.map(|(fp, _)| fp);
+        self.propose_writes(
+            job, rule, &cfg, tracker_id, key, scanned_fp, &inv, result, cost,
+        )
+        .await
     }
 
     /// The investigation's writes, queued as actions: the ones `act` runs
@@ -708,17 +871,21 @@ impl SupportRunner {
         rule: &AgentRuleRow,
         cfg: &SupportConfig,
         tracker_id: i64,
-        key: &str,
+        key: Option<&str>,
+        scanned_fp: Option<String>,
         inv: &output::Investigation,
         mut result: serde_json::Value,
         cost: i64,
     ) -> RunOutcome {
-        let fp = fingerprint::fingerprint(
-            &inv.exception_class,
-            &inv.error_message,
-            &inv.stack_trace,
-            &cfg.app_frame_prefix,
-        );
+        let scanned = scanned_fp.is_some();
+        let fp = scanned_fp.or_else(|| {
+            fingerprint::fingerprint(
+                &inv.exception_class,
+                &inv.error_message,
+                &inv.stack_trace,
+                &cfg.app_frame_prefix,
+            )
+        });
         let now = crate::store::now_unix();
         let known_bug = match &fp {
             None => None,
@@ -727,7 +894,19 @@ impl SupportRunner {
                     let Ok(s) = self.store.lock() else {
                         return failed(ErrorKind::Transient, "store lock");
                     };
-                    s.see_support_fingerprint(&rule.scope, fp, &inv.exception_class, job.id, now)
+                    if scanned {
+                        // The scan counted it already.
+                        s.support_fingerprint(&rule.scope, fp)
+                    } else {
+                        s.see_support_fingerprint(
+                            &rule.scope,
+                            fp,
+                            &inv.exception_class,
+                            Some(job.id),
+                            None,
+                            now,
+                        )
+                    }
                 };
                 match before {
                     Ok(b) => b
@@ -769,6 +948,7 @@ impl SupportRunner {
             fingerprint: fp.as_deref(),
             known_bug: known_bug.as_deref(),
             candidates: &candidates,
+            now,
         });
         let mut ids = Vec::new();
         let mut waiting = Vec::new();
@@ -943,10 +1123,11 @@ impl super::AgentExecutor for SupportExecutor {
             }
             writes::JIRA_CREATE_BUG => {
                 let b = payload!(writes::CreateBugPayload);
-                if !allowed(&b.project) || !allowed(&b.source_key) {
+                if !allowed(&b.project) || b.source_key.as_deref().is_some_and(|k| !allowed(k)) {
                     return refuse(format!(
                         "{} or {} is outside the rule's projects",
-                        b.project, b.source_key
+                        b.project,
+                        b.source_key.as_deref().unwrap_or("-")
                     ));
                 }
                 if !fits(&b.body) {
@@ -973,16 +1154,51 @@ impl super::AgentExecutor for SupportExecutor {
                     Err(e) => return ActionResult::Failed(e),
                 };
                 self.record_bug(&rule.scope, b.fingerprint.as_deref(), &bug_key);
-                let link = WriteOp::LinkIssues {
-                    link_type: b.link_type.clone(),
-                    inward: bug_key.clone(),
-                    outward: b.source_key.clone(),
-                };
-                // The bug exists either way; a failed link is said, not retried.
-                if let Err(e) = self.host.write(tracker_id, &link).await {
-                    tracing::warn!(bug = %bug_key, source = %b.source_key, error = %e, "[agents] support: bug filed, not linked");
+                if let Some(source) = &b.source_key {
+                    let link = WriteOp::LinkIssues {
+                        link_type: b.link_type.clone(),
+                        inward: bug_key.clone(),
+                        outward: source.clone(),
+                    };
+                    // The bug exists either way; a failed link is said, not retried.
+                    if let Err(e) = self.host.write(tracker_id, &link).await {
+                        tracing::warn!(bug = %bug_key, source = %source, error = %e, "[agents] support: bug filed, not linked");
+                    }
                 }
                 ActionResult::Executed
+            }
+            writes::KB_LEARN => {
+                let k: writes::KbLearnPayload = match serde_json::from_str(&action.payload) {
+                    Ok(k) => k,
+                    Err(e) => return ActionResult::Failed(format!("payload: {e}")),
+                };
+                let Some(kb) = &cfg.kb else {
+                    return refuse("the rule keeps no KB".into());
+                };
+                if k.repo_path != kb.repo_path || k.branch != kb.branch {
+                    return refuse(format!("{} is not the rule's KB", k.repo_path));
+                }
+                let file_ok = k.path.starts_with("errors/")
+                    && k.path.ends_with(".yaml")
+                    && !k.path.contains("..")
+                    && k.path.matches('/').count() == 1;
+                if !file_ok {
+                    return refuse(format!("{} is not an errors/*.yaml file", k.path));
+                }
+                if !fits(&k.body) {
+                    return refuse(format!(
+                        "the entry is over {} characters",
+                        cfg.max_body_chars
+                    ));
+                }
+                match self
+                    .host
+                    .run_script(&rule.host_alias, &writes::kb_learn_script(&k), 120)
+                    .await
+                {
+                    Ok(_) => ActionResult::Executed,
+                    Err(e) => ActionResult::Failed(e),
+                }
             }
             other => ActionResult::Failed(format!("the support agent does not do {other}")),
         }

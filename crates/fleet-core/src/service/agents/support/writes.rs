@@ -17,7 +17,171 @@ use serde_json::{json, Value};
 pub const JIRA_COMMENT: &str = "jira_comment";
 pub const JIRA_CREATE_BUG: &str = "jira_create_bug";
 pub const JIRA_LINK: &str = "jira_link";
-pub const KINDS: [&str; 3] = [JIRA_COMMENT, JIRA_CREATE_BUG, JIRA_LINK];
+/// A known-error entry written into the support KB's git repo (step 8).
+pub const KB_LEARN: &str = "kb_learn";
+pub const KINDS: [&str; 4] = [JIRA_COMMENT, JIRA_CREATE_BUG, JIRA_LINK, KB_LEARN];
+
+/// Where the support KB lives (`kb` in a rule's config): a git checkout
+/// on the rule's host whose `errors/*.yaml` the `support-kb` MCP server
+/// indexes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct KbConfig {
+    pub repo_path: String,
+    pub branch: String,
+    /// `high` or `medium`: the least confidence an entry is learnt at.
+    pub min_confidence: String,
+}
+
+impl Default for KbConfig {
+    fn default() -> Self {
+        KbConfig {
+            repo_path: String::new(),
+            branch: "main".into(),
+            min_confidence: "high".into(),
+        }
+    }
+}
+
+impl KbConfig {
+    pub fn check(&self) -> Result<(), String> {
+        if !self.repo_path.starts_with('/') && !self.repo_path.starts_with("~/") {
+            return Err("kb.repo_path is an absolute path (or ~/…)".into());
+        }
+        if self.branch.is_empty()
+            || !self
+                .branch
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))
+            || self.branch.starts_with('-')
+        {
+            return Err("kb.branch is not a branch name".into());
+        }
+        if !["high", "medium"].contains(&self.min_confidence.as_str()) {
+            return Err("kb.min_confidence is high or medium".into());
+        }
+        Ok(())
+    }
+}
+
+/// A `kb_learn` action's payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KbLearnPayload {
+    pub repo_path: String,
+    pub branch: String,
+    /// `errors/<file>.yaml`.
+    pub path: String,
+    /// The YAML written there: what a person reads before approving it.
+    pub body: String,
+    pub message: String,
+}
+
+/// One known error, as `support-kb` reads it (`kb-git-sync`).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KbEntry<'a> {
+    id: String,
+    fingerprint: &'a str,
+    exception: &'a str,
+    component: &'a str,
+    root_cause: &'a str,
+    solution: &'a str,
+    severity: &'a str,
+    confidence: &'a str,
+    investigation_id: String,
+    issue_key: &'a str,
+    created_at: String,
+    tags: Vec<String>,
+}
+
+fn slug(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .chars()
+        .take(60)
+        .collect()
+}
+
+/// PURE: the KB entry an investigation teaches (the original's `autoLearnToKB`).
+pub fn kb_learn(
+    inv: &Investigation,
+    kb: &KbConfig,
+    fp: &str,
+    job_id: i64,
+    key: Option<&str>,
+    now: i64,
+) -> KbLearnPayload {
+    let short = inv
+        .exception_class
+        .rsplit('.')
+        .next()
+        .unwrap_or(&inv.exception_class);
+    let entry = KbEntry {
+        id: format!("kb-fleet-{job_id}"),
+        fingerprint: fp,
+        exception: &inv.exception_class,
+        component: &inv.affected_component,
+        root_cause: &inv.root_cause,
+        solution: &inv.suggested_fix,
+        severity: &inv.severity,
+        confidence: &inv.confidence,
+        investigation_id: format!("fleet-job-{job_id}"),
+        issue_key: key.unwrap_or_default(),
+        created_at: crate::service::agents::review::rfc3339(now),
+        tags: [inv.affected_component.clone(), short.to_string()]
+            .into_iter()
+            .filter(|t| !t.is_empty())
+            .collect(),
+    };
+    KbLearnPayload {
+        repo_path: kb.repo_path.clone(),
+        branch: kb.branch.clone(),
+        path: format!(
+            "errors/{}-{}-{job_id}.yaml",
+            slug(&inv.affected_component),
+            slug(short)
+        ),
+        body: serde_yaml::to_string(&entry).unwrap_or_default(),
+        message: format!(
+            "autolearn: {} in {}",
+            inv.exception_class, inv.affected_component
+        ),
+    }
+}
+
+/// PURE: the script that commits the entry: in a detached worktree of
+/// the branch's tip (the checkout itself is not touched), pushed to the
+/// branch.
+pub fn kb_learn_script(p: &KbLearnPayload) -> String {
+    let q = crate::shell::quote;
+    let repo = match p.repo_path.strip_prefix("~/") {
+        Some(rest) => format!("\"$HOME\"/{}", q(rest)),
+        None => q(&p.repo_path),
+    };
+    format!(
+        "set -e\nrepo={repo}\nwt=$(mktemp -d)\n\
+         trap 'git -C \"$repo\" worktree remove --force \"$wt\" >/dev/null 2>&1 || rm -rf \"$wt\"' EXIT\n\
+         git -C \"$repo\" fetch -q origin {branch}\n\
+         git -C \"$repo\" worktree add -q --detach \"$wt\" FETCH_HEAD\n\
+         mkdir -p \"$wt\"/errors\n\
+         printf '%s' {body} > \"$wt\"/{path}\n\
+         git -C \"$wt\" add -- {path}\n\
+         git -C \"$wt\" -c user.name=claude-fleet -c user.email=support-agent@claude-fleet commit -q -m {message}\n\
+         git -C \"$wt\" push -q origin HEAD:refs/heads/{branch}\n",
+        branch = q(&p.branch),
+        body = q(&p.body),
+        path = q(&p.path),
+        message = q(&p.message),
+    )
+}
 
 /// A comment on the ticket.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -34,7 +198,8 @@ pub struct CommentPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateBugPayload {
     pub tracker_id: i64,
-    pub source_key: String,
+    /// The ticket the bug is linked to; none for an error the scanner found.
+    pub source_key: Option<String>,
     pub project: String,
     pub issue_type: String,
     pub summary: String,
@@ -250,7 +415,7 @@ pub fn bug(
     cfg: &SupportConfig,
     tracker_id: i64,
     project: &str,
-    source_key: &str,
+    source_key: Option<&str>,
     fp: Option<&str>,
     related: Option<&str>,
 ) -> CreateBugPayload {
@@ -284,7 +449,10 @@ pub fn bug(
     }
     b.push(Block::Heading(2, "Context".into()));
     let mut ctx = vec![
-        format!("Incident ticket: {source_key}"),
+        format!(
+            "Incident ticket: {}",
+            source_key.unwrap_or("none (found in the logs by the scanner)")
+        ),
         format!("Component: {}", inv.affected_component),
         format!(
             "Version: {}",
@@ -311,7 +479,7 @@ pub fn bug(
     labels.retain(|l| !l.is_empty());
     CreateBugPayload {
         tracker_id,
-        source_key: source_key.into(),
+        source_key: source_key.map(str::to_string),
         project: project.into(),
         issue_type: cfg.bug_type.clone(),
         summary,
@@ -366,13 +534,15 @@ pub struct PlanInput<'a> {
     pub cfg: &'a SupportConfig,
     pub level: &'a str,
     pub tracker_id: i64,
-    pub key: &'a str,
+    /// The ticket; none for a scan job.
+    pub key: Option<&'a str>,
     pub job_id: i64,
     pub fingerprint: Option<&'a str>,
     /// The bug the fingerprint's record names, inside the incident window.
     pub known_bug: Option<&'a str>,
     /// Open bugs the search found.
     pub candidates: &'a [Candidate],
+    pub now: i64,
 }
 
 /// PURE: the writes an investigation asks for, at `propose` or `act`.
@@ -388,11 +558,44 @@ pub fn plan(p: &PlanInput) -> Vec<Planned> {
         auto: auto(kind),
     };
     let mut out = Vec::new();
+    let Some(key) = p.key else {
+        // A scan job has no ticket: a new bug is all it may write.
+        if let (Some(project), None, false) = (
+            &p.cfg.bug_project,
+            p.known_bug,
+            p.inv.exception_class.is_empty() || !p.inv.needs_more_info.is_empty(),
+        ) {
+            let matched = p.candidates.iter().any(|c| {
+                fingerprint::similarity(
+                    &c.summary,
+                    &p.inv.exception_class,
+                    &p.inv.affected_component,
+                    &p.inv.error_message,
+                ) >= REUSE_AT
+            });
+            if !matched {
+                let b = bug(
+                    p.inv,
+                    p.cfg,
+                    p.tracker_id,
+                    project,
+                    None,
+                    p.fingerprint,
+                    None,
+                );
+                out.push(planned(JIRA_CREATE_BUG, json_text(&b)));
+            }
+        }
+        if let Some(l) = learn(p, None) {
+            out.push(planned(KB_LEARN, l));
+        }
+        return out;
+    };
     if !p.inv.needs_more_info.is_empty() {
         let (body, adf) = needs_info_comment(&p.inv.needs_more_info, p.cfg);
         let c = CommentPayload {
             tracker_id: p.tracker_id,
-            key: p.key.into(),
+            key: key.into(),
             body,
             adf,
         };
@@ -419,11 +622,11 @@ pub fn plan(p: &PlanInput) -> Vec<Planned> {
         let link = |bug_key: &str, why: String| {
             let l = LinkPayload {
                 tracker_id: p.tracker_id,
-                source_key: p.key.into(),
+                source_key: key.into(),
                 bug_key: bug_key.into(),
                 link_type: p.cfg.link_type.clone(),
                 fingerprint: p.fingerprint.map(str::to_string),
-                body: format!("{} {} {}", bug_key, p.cfg.link_type.to_lowercase(), p.key),
+                body: format!("{} {} {}", bug_key, p.cfg.link_type.to_lowercase(), key),
                 why,
             };
             (JIRA_LINK, json_text(&l))
@@ -446,7 +649,7 @@ pub fn plan(p: &PlanInput) -> Vec<Planned> {
                 p.cfg,
                 p.tracker_id,
                 project,
-                p.key,
+                Some(key),
                 p.fingerprint,
                 related,
             );
@@ -454,10 +657,11 @@ pub fn plan(p: &PlanInput) -> Vec<Planned> {
             bug_action = Some((JIRA_CREATE_BUG, json_text(&b)));
         }
     }
+    let learnt = learn(p, Some(key));
     let (body, adf) = investigation_comment(p.inv, p.cfg, p.job_id, p.fingerprint, note);
     let c = CommentPayload {
         tracker_id: p.tracker_id,
-        key: p.key.into(),
+        key: key.into(),
         body,
         adf,
     };
@@ -465,5 +669,21 @@ pub fn plan(p: &PlanInput) -> Vec<Planned> {
     if let Some((kind, payload)) = bug_action {
         out.push(planned(kind, payload));
     }
+    if let Some(payload) = learnt {
+        out.push(planned(KB_LEARN, payload));
+    }
     out
+}
+
+/// PURE: the KB entry a sure investigation of an exception teaches, when
+/// the rule keeps a KB.
+fn learn(p: &PlanInput, key: Option<&str>) -> Option<String> {
+    let kb = p.cfg.kb.as_ref()?;
+    let fp = p.fingerprint?;
+    let sure = p.inv.confidence == "high"
+        || (kb.min_confidence == "medium" && p.inv.confidence == "medium");
+    if !sure || p.inv.exception_class.is_empty() || !p.inv.needs_more_info.is_empty() {
+        return None;
+    }
+    Some(json_text(&kb_learn(p.inv, kb, fp, p.job_id, key, p.now)))
 }

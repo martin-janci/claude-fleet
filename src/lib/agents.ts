@@ -53,7 +53,7 @@ export interface AgentJob {
 export interface AgentAction {
   id: number;
   job_id: number;
-  /** `post_review`, `pr_labels`, `pr_description`, `debate_reply`, `jira_comment`, `jira_create_bug`, `jira_link`. */
+  /** `post_review`, `pr_labels`, `pr_description`, `debate_reply`, `jira_comment`, `jira_create_bug`, `jira_link`, `kb_learn`. */
   kind: string;
   /** Exactly what will be sent, JSON text. */
   payload: string;
@@ -156,8 +156,12 @@ export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>): string {
   if (a.kind === 'pr_description' && p) return `Describe ${p.repo}#${p.number}`;
   if (a.kind === 'debate_reply' && p) return `Answer the test debate on ${p.repo}#${p.number}: ${p.decision}`;
   if (a.kind === 'jira_comment' && p) return `Comment on ${p.key}`;
-  if (a.kind === 'jira_create_bug' && p) return `File a bug in ${p.project} for ${p.source_key}: ${p.summary}`;
+  if (a.kind === 'jira_create_bug' && p)
+    return p.source_key
+      ? `File a bug in ${p.project} for ${p.source_key}: ${p.summary}`
+      : `File a bug in ${p.project} for a logged error: ${p.summary}`;
   if (a.kind === 'jira_link' && p) return `Link ${p.bug_key} to ${p.source_key} (${String(p.link_type ?? '').toLowerCase()})`;
+  if (a.kind === 'kb_learn' && p) return `Teach the support KB: ${p.path}`;
   return a.kind.replace(/_/g, ' ');
 }
 

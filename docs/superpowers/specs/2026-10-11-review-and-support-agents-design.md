@@ -1,8 +1,8 @@
 # Reviewer and Support agents: design
 
 Status: steps 1 to 7 built (the runtime, the run vehicle, the reviewer at
-every level, the desktop UI, the support agent at every level), step 8 in
-part (below), 2026-10-11.
+every level, the desktop UI, the support agent at every level), step 8 but
+outbound Slack/Teams (below), 2026-10-11.
 Asked for by the owner: bring the functionality of
 [`claude-code-reviewer`](https://github.com/martin-janci/claude-code-reviewer)
 and [`support-agent`](https://github.com/martin-janci/support-agent) into
@@ -566,6 +566,28 @@ dashboard pieces of the reviewer.
      resolves the thread, and later reviews are told not to raise it
      again; the reviewer answers at most `debate_max_rounds` (2) times a
      thread.
+   - **Graylog scanner** (`support/scan.rs`): a support rule's `scan`
+     (`server` `graylog`, `tool` `search_logs`, `every_mins` 30,
+     `window_mins` 35, `max_jobs` 5) makes its poll call that catalog MCP
+     server on the rule's host every `every_mins`, the way `claude` would
+     (stdio, the command, arguments and env from `~/.claude.json`; stdin
+     held open until the answer is in). Each error with an exception class
+     is fingerprinted and recorded with the error as its sample
+     (`support_fingerprints.sample`); one never seen before becomes a
+     `scan` job, an investigation of the logged error with no ticket whose
+     only Jira write is a new bug (no comment, no link). Countly is not
+     ported: a server answering the same `entries` shape scans the same
+     way;
+   - **KB write-back** (`kb_learn`): a rule's `kb` (`repo_path`, `branch`,
+     `min_confidence`) makes a sure investigation of an exception propose
+     a known-error entry (`errors/<component>-<Exception>-<job>.yaml`, the
+     shape `support-kb` indexes), committed from a detached worktree of
+     the branch's tip and pushed; the executor refuses another repo or a
+     path outside `errors/`. Like a new bug, it runs at `act` only when
+     listed in `auto`;
+   - **not built**: outbound Slack/Teams. The notifications matrix (11.9)
+     has the desktop, the phone and sound as channels; a Slack or Teams
+     webhook is a new channel with a secret URL, an owner's decision.
 
 ## Not in scope
 

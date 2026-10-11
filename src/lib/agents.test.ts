@@ -96,6 +96,12 @@ describe('agents (design step 5)', () => {
       'Link PD-4 to L2S-7 (causes)',
     );
     expect(actionBody({ payload: '{"body":"h3. x"}' })).toBe('h3. x');
+    expect(actionTitle({ kind: 'kb_learn', payload: '{"path":"errors/pay-NPE-3.yaml"}' })).toBe(
+      'Teach the support KB: errors/pay-NPE-3.yaml',
+    );
+    expect(actionTitle({ kind: 'jira_create_bug', payload: '{"project":"PD","source_key":null,"summary":"x"}' })).toBe(
+      'File a bug in PD for a logged error: x',
+    );
     expect(actionTitle({ kind: 'pr_labels', payload: '{"repo":"o/r","number":4,"add":["core"],"remove":["lgtm"]}' })).toBe(
       'Label o/r#4: +core −lgtm',
     );

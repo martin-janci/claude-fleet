@@ -161,6 +161,9 @@ struct FakeHost {
     writes: StdMutex<Vec<WriteOp>>,
     /// What writing answers, in turn (default: ok, a created issue is PD-9).
     write_answers: StdMutex<Vec<Result<WriteOutcome, String>>>,
+    /// Scripts run, and what they print.
+    scripts: StdMutex<Vec<String>>,
+    script_out: StdMutex<String>,
 }
 
 impl FakeHost {
@@ -221,6 +224,10 @@ impl SupportHost for FakeHost {
     }
     async fn prune(&self, _: &str, _: &str) {
         self.log("prune");
+    }
+    async fn run_script(&self, _: &str, script: &str, _: u64) -> Result<String, String> {
+        self.scripts.lock().unwrap().push(script.to_string());
+        Ok(self.script_out.lock().unwrap().clone())
     }
     async fn write(&self, _: i64, op: &WriteOp) -> Result<WriteOutcome, String> {
         self.writes.lock().unwrap().push(op.clone());
@@ -284,6 +291,7 @@ fn fx_at(config: &str, project: bool, level: &str) -> Fx {
 impl Fx {
     fn poller(&self) -> SupportPoller {
         SupportPoller {
+            store: Arc::clone(&self.store),
             host: self.host.clone(),
         }
     }
@@ -537,11 +545,12 @@ fn plan_with(
         cfg,
         level,
         tracker_id: 3,
-        key: "L2S-1",
+        key: Some("L2S-1"),
         job_id: 11,
         fingerprint: Some("f00d"),
         known_bug,
         candidates,
+        now: 1_791_700_000,
     })
 }
 
@@ -613,12 +622,12 @@ fn a_new_exception_proposes_a_bug_that_act_files_only_when_sure() {
         (
             b.project.as_str(),
             b.summary.as_str(),
-            b.source_key.as_str()
+            b.source_key.as_deref()
         ),
         (
             "PD",
             "[payments] NullPointerException: key is null",
-            "L2S-1"
+            Some("L2S-1")
         )
     );
     assert_eq!(b.labels, ["payments", "v4.0.2.8"]);
@@ -764,8 +773,15 @@ async fn a_repeat_inside_the_window_is_linked_to_its_bug_at_act() {
     {
         let s = f.store.lock().unwrap();
         let now = crate::store::now_unix();
-        s.see_support_fingerprint("jira:3:L2S", &fp, "NullPointerException", 1, now)
-            .unwrap();
+        s.see_support_fingerprint(
+            "jira:3:L2S",
+            &fp,
+            "NullPointerException",
+            Some(1),
+            None,
+            now,
+        )
+        .unwrap();
         s.set_support_fingerprint_bug("jira:3:L2S", &fp, "PD-4", now)
             .unwrap();
     }
@@ -887,4 +903,186 @@ async fn the_executor_refuses_what_the_rule_does_not_allow() {
         f.executor().execute(&comment).await,
         ActionResult::Expired(_)
     ));
+}
+
+// ── Step 8: the scanner ─────────────────────────────────────────────────────
+
+const SCAN_CFG: &str = r#"{"write_projects":["PD"],"bug_project":"PD","scan":{"every_mins":30}}"#;
+
+fn scan_answer(messages: &[&str]) -> String {
+    let entries: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| serde_json::json!({ "timestamp": "2026-10-11T09:00:00Z", "level": "3", "source": "pay-api", "message": m }))
+        .collect();
+    let text = serde_json::json!({ "entries": entries }).to_string();
+    serde_json::json!({ "jsonrpc": "2.0", "id": 2, "result": { "content": [{ "type": "text", "text": text }], "isError": false } })
+        .to_string()
+}
+
+impl Fx {
+    fn install_graylog(&self) {
+        self.host.files.lock().unwrap().push((
+            "/home/u/.claude.json".into(),
+            r#"{"mcpServers":{"graylog":{"type":"stdio","command":"node","args":["/sa/dist/mcp/graylog/index.js"],"env":{"GRAYLOG_API_TOKEN":"t"}}}}"#.into(),
+        ));
+    }
+    async fn poll_at(&self, cursor: Option<&str>, now: i64) -> Polled {
+        let c = cursor.map(|c| AgentCursorRow {
+            rule_id: self.rule.id,
+            polled_at: 0,
+            cursor: Some(c.into()),
+        });
+        self.poller()
+            .poll(&self.rule, c.as_ref(), now)
+            .await
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn the_scanner_turns_a_new_error_into_one_job() {
+    let f = fx_at(SCAN_CFG, false, "propose");
+    f.install_graylog();
+    *f.host.threads.lock().unwrap() = Vec::new();
+    *f.host.script_out.lock().unwrap() = scan_answer(&[
+        "com.p.GatewayException: key 1 expired\n\tat com.p.Gateway.charge(Gateway.java:4)",
+        "com.p.GatewayException: key 2 expired\n\tat com.p.Gateway.charge(Gateway.java:4)",
+        "GET /health 200",
+    ]);
+    let first = f.poll_at(None, 10_000).await;
+    assert_eq!(first.cursor.as_deref(), Some("10000;scan=10000"));
+    let early = f.poll_at(Some("10000;scan=10000"), 10_600).await;
+    assert!(f.host.scripts.lock().unwrap().is_empty(), "not due yet");
+    assert_eq!(early.cursor.as_deref(), Some("10600;scan=10000"));
+    let due = f.poll_at(Some("10600;scan=10000"), 11_800).await;
+    assert_eq!(due.cursor.as_deref(), Some("11800;scan=11800"));
+    assert_eq!(due.jobs.len(), 1, "two lines, one fingerprint");
+    assert_eq!(due.jobs[0].trigger, "scan");
+    let script = f.host.scripts.lock().unwrap()[0].clone();
+    assert!(
+        script.contains(r#""from":9700"#) && script.contains(r#""to":11800"#),
+        "{script}"
+    );
+    assert!(script.contains("'/sa/dist/mcp/graylog/index.js'"));
+    let again = f.poll_at(Some("11800;scan=11800"), 13_700).await;
+    assert!(
+        again.jobs.is_empty(),
+        "a known fingerprint is not scanned again"
+    );
+}
+
+#[tokio::test]
+async fn a_scanned_error_is_investigated_and_may_only_propose_a_bug() {
+    let f = fx_at(SCAN_CFG, false, "propose");
+    f.install_graylog();
+    *f.host.threads.lock().unwrap() = Vec::new();
+    *f.host.script_out.lock().unwrap() = scan_answer(&[
+        "com.p.GatewayException: key 1 expired\n\tat com.p.Gateway.charge(Gateway.java:4)",
+    ]);
+    let polled = f.poll_at(Some("10000;scan=1"), 11_800).await;
+    {
+        let s = f.store.lock().unwrap();
+        s.record_agent_poll(f.rule.id, 11_800, None, &polled.jobs)
+            .unwrap();
+    }
+    let job = f
+        .store
+        .lock()
+        .unwrap()
+        .claim_agent_jobs(&["support"], 20_000, 1, 60)
+        .unwrap()
+        .remove(0);
+    f.answer(r#"{"summary":"Gateway key expired","rootCause":"The key was not rotated","confidence":"high","severity":"major","affectedComponent":"pay-api"}"#);
+    let out = f.runner().run(&job, Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::NeedsPerson { .. }), "{out:?}");
+    let (_, prompt) = f.host.last.lock().unwrap().clone().unwrap();
+    assert!(
+        prompt.contains("found in the logs") || prompt.contains("scanner found"),
+        "{prompt}"
+    );
+    let a = f.actions();
+    assert_eq!(
+        a.iter().map(|a| a.kind.as_str()).collect::<Vec<_>>(),
+        ["jira_create_bug"]
+    );
+    let b: writes::CreateBugPayload = serde_json::from_str(&a[0].payload).unwrap();
+    assert_eq!(b.source_key, None);
+    assert!(
+        b.summary.contains("GatewayException"),
+        "the scanner's exception fills in: {}",
+        b.summary
+    );
+    assert_eq!(f.executor().execute(&a[0]).await, ActionResult::Executed);
+    let sent = f.host.writes.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "no ticket, no link");
+}
+
+// ── Step 8: KB write-back ───────────────────────────────────────────────────
+
+#[test]
+fn a_sure_investigation_teaches_the_kb() {
+    let cfg = SupportConfig::parse(r#"{"kb":{"repo_path":"~/kb","branch":"main"}}"#).unwrap();
+    let p = plan_with(
+        &cfg,
+        &inv("high", "com.p.NullPointerException"),
+        "act",
+        None,
+        &[],
+    );
+    assert_eq!(
+        kinds(&p),
+        [("jira_comment", true), ("kb_learn", false)],
+        "kb_learn waits unless in auto"
+    );
+    let k: writes::KbLearnPayload = serde_json::from_str(&p[1].payload).unwrap();
+    assert_eq!(k.path, "errors/payments-NullPointerException-11.yaml");
+    let y: serde_yaml::Value = serde_yaml::from_str(&k.body).unwrap();
+    assert_eq!(y["exception"].as_str(), Some("com.p.NullPointerException"));
+    assert_eq!(y["rootCause"].as_str(), Some("The gateway key expired"));
+    assert_eq!(y["issueKey"].as_str(), Some("L2S-1"));
+    assert_eq!(y["fingerprint"].as_str(), Some("f00d"));
+    let script = writes::kb_learn_script(&k);
+    assert!(script.contains(r#"repo="$HOME"/'kb'"#), "{script}");
+    assert!(script.contains("push -q origin HEAD:refs/heads/'main'"));
+    assert!(script.contains("worktree add -q --detach"));
+    let medium = plan_with(&cfg, &inv("medium", "X"), "act", None, &[]);
+    assert!(medium.iter().all(|p| p.kind != "kb_learn"));
+    for bad in [
+        r#"{"kb":{"repo_path":"kb"}}"#,
+        r#"{"kb":{"repo_path":"/kb","branch":"-x"}}"#,
+    ] {
+        assert!(SupportConfig::parse(bad).is_err(), "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn the_executor_writes_only_into_the_rules_kb() {
+    let f = fx_at(
+        r#"{"kb":{"repo_path":"/srv/kb"},"auto":["jira_comment","kb_learn"]}"#,
+        false,
+        "act",
+    );
+    f.answer(BUG_ANSWER);
+    let job = f.job().await;
+    f.runner().run(&job, Some(&f.rule)).await;
+    let mut kb = f
+        .actions()
+        .into_iter()
+        .find(|a| a.kind == "kb_learn")
+        .expect("kb_learn");
+    assert_eq!(kb.state, "approved");
+    assert_eq!(f.executor().execute(&kb).await, ActionResult::Executed);
+    assert!(f.host.scripts.lock().unwrap()[0].contains("repo='/srv/kb'"));
+    let mut k: writes::KbLearnPayload = serde_json::from_str(&kb.payload).unwrap();
+    k.repo_path = "/etc".into();
+    kb.payload = serde_json::to_string(&k).unwrap();
+    assert!(
+        matches!(f.executor().execute(&kb).await, ActionResult::Failed(e) if e.contains("not the rule's KB"))
+    );
+    k.repo_path = "/srv/kb".into();
+    k.path = "errors/../../x.yaml".into();
+    kb.payload = serde_json::to_string(&k).unwrap();
+    assert!(
+        matches!(f.executor().execute(&kb).await, ActionResult::Failed(e) if e.contains("errors/*.yaml"))
+    );
 }
