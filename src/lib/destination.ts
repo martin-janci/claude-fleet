@@ -27,7 +27,8 @@ export type Destination =
   | 'accounts'
   | 'details'
   | 'control'
-  | 'automation';
+  | 'automation'
+  | 'dashboard';
 
 export const DESTINATIONS: readonly Destination[] = [
   'session',
@@ -39,6 +40,7 @@ export const DESTINATIONS: readonly Destination[] = [
   'details',
   'control',
   'automation',
+  'dashboard',
 ];
 
 export const destination = writable<Destination>('session');

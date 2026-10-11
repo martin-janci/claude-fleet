@@ -667,6 +667,8 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     // Sprints and releases (design 2026-09-28 §6a/§6b).
     ("work_buckets", "work", "buckets"),
     ("work_bucket", "work", "bucket"),
+    // Persona dashboards: the Work view's tasks counted.
+    ("work_stats", "work", "stats"),
     ("add_work_to_bucket", "work_link", "bucket_add"),
     ("remove_work_from_bucket", "work_link", "bucket_remove"),
     ("work_bucket_admin", "work_link", "bucket_admin"),

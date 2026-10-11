@@ -552,6 +552,7 @@
     // Automation is a fleet page like Control: an opened session replaces
     // it (review r07).
     leave('automation');
+    leave('dashboard');
   });
   // "View sessions" (host_actions.ts, called from anywhere: the `s` key,
   // HostDetail's header button) can't reach `closeHosts` directly — it asks
@@ -665,7 +666,8 @@
       $destination === 'assets' ||
       $destination === 'accounts' ||
       $destination === 'control' ||
-      $destination === 'automation',
+      $destination === 'automation' ||
+      $destination === 'dashboard',
   );
   // What covers the session's own view (the terminal or the conversation):
   // a fleet page, which needs no selected session.
@@ -674,7 +676,8 @@
       $destination === 'assets' ||
       $destination === 'accounts' ||
       $destination === 'control' ||
-      $destination === 'automation',
+      $destination === 'automation' ||
+      $destination === 'dashboard',
   );
   const effectiveView = $derived(
     resolveSessionView($sessionView, selNoPane, selHasClaudeId, selOwned),
@@ -789,6 +792,9 @@
     } else if (id === 'control') {
       closeHosts();
       goTo('control');
+    } else if (id === 'dashboards') {
+      closeHosts();
+      goTo('dashboard');
     } else if (id === 'automation') {
       closeHosts();
       goTo('automation');
@@ -1051,6 +1057,11 @@
       leave('automation');
       return;
     }
+    if ($destination === 'dashboard') {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      leave('dashboard');
+      return;
+    }
     // Inside the Hosts view, HostsView owns Esc (back to the list, clear the
     // filter, close from the list). This catches only an Esc with focus lost
     // to the page or left on the right column's chrome; a dialog, an input
@@ -1275,6 +1286,11 @@
       {#if $destination === 'automation'}
         <div class="view-slot overlay" data-testid="automation-overlay">
           <Lazy load={lazyViews.automation} />
+        </div>
+      {/if}
+      {#if $destination === 'dashboard'}
+        <div class="view-slot overlay" data-testid="dashboard-overlay">
+          <Lazy load={lazyViews.dashboard} />
         </div>
       {/if}
       {#if boardShown}
