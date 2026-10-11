@@ -622,6 +622,16 @@ cat "$f"; rm -f "$f"
     format!("# cf-devices:screenshot\n{PREAMBLE}{}{take}", needs(target))
 }
 
+/// Start the host's adb server (a no-op when it runs), for the device
+/// mirror, which talks to the server over a relay and cannot start it.
+pub fn start_server_script() -> String {
+    format!(
+        "# cf-devices:start-server\n{PREAMBLE}\
+         [ -n \"$ADB\" ] || cf_fail 'adb is not installed on this host'\n\
+         \"$ADB\" start-server >/dev/null 2>&1 || cf_fail 'adb start-server failed'\n"
+    )
+}
+
 /// A screenshot larger than this is refused rather than relayed.
 pub const MAX_SCREENSHOT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -1004,6 +1014,49 @@ mod tests {
     /// The scripts against stub tools: a fake `adb` on PATH answers like
     /// the real one, so the bash itself (quoting, PIPESTATUS, the marker)
     /// is exercised, not only the parsers.
+    #[cfg(unix)]
+    #[test]
+    fn the_start_server_script_starts_adb_or_says_it_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let log = dir.path().join("log");
+        crate::tmux::fake_exec::write_exec(
+            &bin,
+            "adb",
+            &format!(
+                "#!/bin/bash\n{}echo \"$@\" >> {}\nexit 0\n",
+                crate::tmux::fake_exec::PROBE_GUARD,
+                quote(&log.display().to_string())
+            ),
+        );
+        let run = |path: String| {
+            crate::proc::std_command("bash")
+                .arg("-c")
+                .arg(start_server_script())
+                .env("PATH", path)
+                .env("HOME", dir.path())
+                .env_remove("ANDROID_HOME")
+                .env_remove("ANDROID_SDK_ROOT")
+                .output()
+                .unwrap()
+        };
+        let out = run(format!("{}:/usr/bin:/bin", bin.display()));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap().trim(),
+            "start-server"
+        );
+
+        let out = run("/usr/bin:/bin".into());
+        assert_eq!(out.status.code(), Some(5));
+        assert!(failure(&out.stderr).unwrap().contains("adb"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_scan_and_run_scripts_work_against_a_stub_adb() {
