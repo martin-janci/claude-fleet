@@ -308,7 +308,10 @@ on also takes `work_link { action: "set_status", item_id, status }`, `edit`
 and `comment` by `item_id`; a tracker ticket's status changes in the tracker.
 `set_status`, `edit`, `comment` and renaming it (`name` with `item_id`) work
 on any local task your own session is on, even one shared with other people's
-sessions.
+sessions. So does planning it: `set_parent { item_id, parent }` files it under
+an epic or task, and `bucket_add` / `bucket_remove { bucket_id, item_id }` puts
+it in or takes it out of a sprint or release. A task your session is not on is
+the team's plan: a person sprints it.
 
 ## Tasks, subtasks and proposals (shared work context)
 
