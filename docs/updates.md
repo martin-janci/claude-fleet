@@ -85,9 +85,14 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   `action: unpin` removes the pin. A pin below the installed version is a
   rollback. A pin the publisher does not permit (withdrawn, below its signed
   minimum) is held, never served.
-- **Re-read the channel now.** `update_admin { action: refresh }`. The hub
-  also re-reads it every `update.check_interval_secs`, and at once when
-  `update.track` or `update.check_interval_secs` changes. A failed read
+- **Re-read the channel now.** `update_admin { action: refresh }`, or a
+  person's **Check for updates** (Settings → About on the desktop, Settings →
+  Updates on the phone): that check carries `refresh: true` and the hub
+  re-reads the channel before it answers, at most once a minute. The hub
+  also re-reads it every `update.check_interval_secs` — on the `dev` and
+  `nightly` tracks every 15 minutes at most, since they move with every
+  green push to main — and at once when `update.track` or
+  `update.check_interval_secs` changes. A failed read
   keeps the last good copy, is logged at `warn`, and
   `update_status.last_refresh` says why it failed.
   `FLEET_UPDATE_CHANNEL_URL` points the hub at a mirror. It changes only

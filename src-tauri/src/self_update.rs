@@ -94,6 +94,7 @@ fn check_request() -> CheckRequest {
         },
         phase: UpdatePhase::Idle,
         attempt: None,
+        refresh: false,
     }
 }
 
@@ -280,9 +281,15 @@ impl SelfUpdate {
         backend: &Arc<FleetBackend>,
         store: &Mutex<Store>,
         data_dir: &Path,
+        force: bool,
     ) -> Result<DesktopUpdate, IpcError> {
         self.finish_pending(backend, data_dir).await;
-        let req = check_request();
+        // A person's "Check for updates": the hub re-reads its channel first.
+        // Standalone, the published channel is read on every check anyway.
+        let req = CheckRequest {
+            refresh: force,
+            ..check_request()
+        };
         let outcome = match hub_channel(backend, data_dir) {
             Some(ch) => ch.check(&req).await.map_err(update_error)?,
             None => {

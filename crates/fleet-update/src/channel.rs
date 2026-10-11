@@ -576,6 +576,7 @@ mod tests {
             speaks: Speaks::default(),
             phase: UpdatePhase::Idle,
             attempt: None,
+            refresh: false,
         }
     }
 

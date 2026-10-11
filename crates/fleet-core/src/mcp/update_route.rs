@@ -48,10 +48,13 @@ pub async fn handle_check(
     if let Err(e) = update::identity(&caller) {
         return refusal(e);
     }
-    let req = match parse(&body) {
+    let req: fleet_update::wire::CheckRequest = match parse(&body) {
         Ok(r) => r,
         Err(e) => return refusal(e),
     };
+    if req.refresh {
+        update::refresh_asked(state.store(), crate::store::now_unix()).await;
+    }
     let keys = update::trusted_keys();
     match update::check(
         state.store(),
