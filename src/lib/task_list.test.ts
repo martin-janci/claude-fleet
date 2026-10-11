@@ -12,6 +12,8 @@ import {
   groupTasksByStatus,
   groupTasksForBoard,
   taskColumnOf,
+  unplacedCount,
+  unplacedNote,
   type StatusSections,
 } from './task_list';
 
@@ -81,9 +83,13 @@ describe('List and Board share one status rule', () => {
     const board = groupTasksForBoard(cases.map((t) => ({ ...t, last_activity_at: NOW })), NOW);
     for (const t of cases) {
       expect(where(list, t.task_id), t.task_id).toBe(onBoard(board, t.task_id));
-      expect(where(list, t.task_id), t.task_id).toBe(taskColumnOf(t));
+      expect(where(list, t.task_id) ?? null, t.task_id).toBe(taskColumnOf(t));
     }
     expect(where(list, 'jira:TASK-224')).toBe('todo');
+    // A bare key with no live session is on neither, and both count it.
+    expect(where(list, 'ref:A-2')).toBeUndefined();
+    expect(board.unplaced).toBe(1);
+    expect(unplacedCount(cases)).toBe(1);
   });
 });
 
@@ -105,7 +111,34 @@ describe('the board', () => {
     expect(boardColumnOf(task({ status_category: 'in_progress', counts: idle }))).toBe('doing');
     expect(boardColumnOf(task({ status_category: 'done' }))).toBe('done');
     expect(boardColumnOf(task({ kind: 'ref', status_category: null, counts: { active: 1, ended: 0, suggested: 0 } }))).toBe('doing');
-    expect(boardColumnOf(task({ kind: 'ref', status_category: null, counts: idle }))).toBe('todo');
+    // No status and no live session: nothing says where it stands, so no column.
+    expect(boardColumnOf(task({ kind: 'ref', status_category: null, counts: idle }))).toBeNull();
+    expect(boardColumnOf(task({ kind: 'ref', status_category: null, counts: { active: 0, ended: 3, suggested: 1 } }))).toBeNull();
+    expect(boardColumnOf(task({ kind: 'tracker', status_category: null, counts: idle }))).toBeNull();
+    expect(boardColumnOf(task({ kind: 'tracker', status_category: null, counts: { active: 1, ended: 0, suggested: 0 } }))).toBe('doing');
+  });
+
+  it('leaves a statusless task with no live session off every column, and counts it', () => {
+    const cols = groupTasksForBoard(
+      [
+        task({ task_id: 'ref:KUK-174', kind: 'ref', status_category: null, counts: { active: 0, ended: 2, suggested: 0 }, last_activity_at: NOW }),
+        task({ task_id: 'ref:KUK-220', kind: 'ref', status_category: null, counts: { active: 1, ended: 0, suggested: 0 }, last_activity_at: NOW }),
+        native({ task_id: 'item:1', status_category: 'todo', last_activity_at: NOW }),
+      ],
+      NOW,
+      // A stale override never brings it back.
+      new Map([['ref:KUK-174', 'todo']]),
+    );
+    expect(cols.cards.todo.map((n) => n.task.task_id)).toEqual(['item:1']);
+    expect(cols.cards.doing.map((n) => n.task.task_id)).toEqual(['ref:KUK-220']);
+    expect(cols.unplaced).toBe(1);
+    expect(cols.doneHidden).toBe(0);
+  });
+
+  it('says how many it left out, and only when it left some', () => {
+    expect(unplacedNote(0)).toBeNull();
+    expect(unplacedNote(1)).toBe('1 task not shown: it has no status and no live session. Grouped lists it.');
+    expect(unplacedNote(4)).toContain('4 tasks not shown');
   });
 
   it('hides old Done cards but keeps the ones moved here, and honours a pending move', () => {
@@ -165,8 +198,8 @@ describe('the board', () => {
   });
 
   it('a status name on a native task or a bare key makes no column', () => {
-    expect(boardLaneOf(task({ kind: 'local', status_name: 'Blocked', status_category: 'todo' })).id).toBe('todo');
-    expect(boardLaneOf(task({ kind: 'ref', status_name: 'Blocked', status_category: null, counts: idle })).id).toBe('todo');
+    expect(boardLaneOf(task({ kind: 'local', status_name: 'Blocked', status_category: 'todo' }))?.id).toBe('todo');
+    expect(boardLaneOf(task({ kind: 'ref', status_name: 'Blocked', status_category: null, counts: { active: 1, ended: 0, suggested: 0 } }))?.id).toBe('doing');
     expect(boardLaneOf(task({ kind: 'tracker', status_name: 'Blocked', status_category: 'todo' }))).toEqual({
       id: 'todo:blocked',
       label: 'Blocked',
