@@ -105,6 +105,7 @@ fn summary(org: Option<i64>) -> WorkSummary {
         link_id: 1,
         item_id: None,
         key: Some("ABC-1".into()),
+        display_key: None,
         title: "Secret title".into(),
         source: "manual".into(),
         kind: String::new(),

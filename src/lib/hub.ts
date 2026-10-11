@@ -183,6 +183,11 @@ const REASONS = {
     'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker remove`',
   tracker_sync_metrics:
     'sync metrics live in the hub’s memory, and a client is never the fleet’s administrator — use `fleet-hub tracker status`',
+  // Ticket keys: a project's prefix is `work_admin`, master-only.
+  ticket_prefixes:
+    'which prefix a project’s ticket keys carry is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker prefixes`',
+  set_ticket_prefix:
+    'which prefix a project’s ticket keys carry is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker prefix <PREFIX> --project <id>`',
   // Jev's Asana section proposals: applying one is `work_admin update`.
   status_map_proposals:
     'section proposals are tracker administration, and a client is never the fleet’s administrator — use `fleet-hub decide proposals`',
@@ -430,6 +435,9 @@ export const ROUTED_ACTIONS = [
   // Task comments: kept in fleet; deleting is the author's own.
   'comment_on_work',
   'delete_work_comment',
+  // Task attachments: kept in fleet; deleting is the author's own.
+  'attach_to_work',
+  'delete_work_attachment',
   // Sprints and releases: the hub decides who plans (a person's own; an
   // org's as its admin, or member when the org allows it).
   'work_bucket_admin',

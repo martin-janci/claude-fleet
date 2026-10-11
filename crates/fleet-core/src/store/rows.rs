@@ -668,8 +668,8 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
      model, context_tokens, context_window, context_source, context_at, context_stale, tmux_pane_id, \
      pending_input, row_version, lost_reason, \
      (SELECT json_object('link_id', l.id, 'item_id', l.item_id, \
-                         'key', COALESCE(i.key, l.ref_key), 'title', COALESCE(i.title, ''), \
-                         'source', l.source, \
+                         'key', COALESCE(i.key, l.ref_key), 'display_key', i.display_key, \
+                         'title', COALESCE(i.title, ''), 'source', l.source, \
                          'kind', \
                            CASE WHEN i.id IS NULL THEN 'ref' \
                                 WHEN i.tracker_id IS NOT NULL THEN 'tracker' \
@@ -696,8 +696,8 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
        WHERE p.session_id = sessions.id AND p.retired_at IS NULL \
          AND COALESCE(i.key, l.ref_key) IS NOT NULL) AS work_rejected, \
      (SELECT json_object('link_id', l.id, 'item_id', l.item_id, \
-                         'key', COALESCE(i.key, l.ref_key), 'title', COALESCE(i.title, ''), \
-                         'source', l.source, 'state', l.state, 'strength', l.strength, \
+                         'key', COALESCE(i.key, l.ref_key), 'display_key', i.display_key, \
+                         'title', COALESCE(i.title, ''), 'source', l.source, 'state', l.state, 'strength', l.strength, \
                          'rule', l.rule, \
                          'preselected', json(CASE WHEN l.preselected = 1 \
                                                   THEN 'true' ELSE 'false' END), \

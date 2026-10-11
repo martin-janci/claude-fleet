@@ -184,7 +184,8 @@ fn text_of(v: &Value) -> String {
     }
 }
 
-/// PURE: the prompt for `req` and its option ids (in the order shown). The
+/// PURE: the prompt for `req` and its option ids (in the order shown: the
+/// order Jev is sent, [`JevRequest::option_order`]). The
 /// request is redacted first ([`JevRequest::redacted`]): the text holds the
 /// same state and options the envelope would send, and nothing else. Only a
 /// Choice is rendered.
@@ -208,8 +209,11 @@ pub fn prompt_for(req: &JevRequest) -> Result<(String, Vec<String>), String> {
     text.push_str("\n</state>\n\nQuestion: ");
     text.push_str(&text_of(instructions));
     text.push_str("\n\nOptions (answer with the id before the colon):\n");
+    // Jev's order (`JevRequest::option_order`): the baseline reads the
+    // options as Jev does, so a position bias cannot favour either side.
+    let order = r.option_order();
     let mut ids = Vec::with_capacity(criteria.len());
-    for (id, desc) in criteria {
+    for (id, desc) in order.iter().filter_map(|k| criteria.get_key_value(k)) {
         text.push_str("- ");
         text.push_str(id);
         let d = desc.as_ref().map(text_of).unwrap_or_default();

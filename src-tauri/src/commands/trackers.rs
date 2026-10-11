@@ -27,7 +27,7 @@ use fleet_core::service::trackers::tickets::{MultiStart, StartPreview, Ticket};
 use fleet_core::service::work::abandon::AbandonOutcome;
 use fleet_core::service::work::retention;
 use fleet_core::ssh::SshClient;
-use fleet_core::store::{SessionRow, Store, TrackerRow};
+use fleet_core::store::{SessionRow, Store, TicketPrefixRow, TrackerRow};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -209,6 +209,61 @@ pub fn tracker_sync_metrics(
     )?;
     serde_json::from_value(v)
         .map_err(|e| IpcError::new(fleet_core::ipc_error::codes::E_SERIALIZE, e.to_string()))
+}
+
+// --- Ticket keys (`fleet_core::store::ticket_keys`) ------------------------------
+//
+// Which prefix a project's tickets carry is fleet administration, the hub's
+// master-only `work_admin { ticket_prefixes | set_ticket_prefix }`, so both
+// are `LocalOnly` on a paired desktop.
+
+#[derive(Deserialize)]
+pub struct SetTicketPrefixArgs {
+    /// The space to rename; or `project_id` for a project's (made if new).
+    #[serde(default)]
+    pub space_id: Option<i64>,
+    #[serde(default)]
+    pub project_id: Option<i64>,
+    pub prefix: String,
+}
+
+fn prefix_rows(v: serde_json::Value) -> Result<Vec<TicketPrefixRow>, IpcError> {
+    serde_json::from_value(v)
+        .map_err(|e| IpcError::new(fleet_core::ipc_error::codes::E_SERIALIZE, e.to_string()))
+}
+
+#[tauri::command(async)]
+pub fn ticket_prefixes(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<TicketPrefixRow>, IpcError> {
+    backend.refuse_local_only("ticket_prefixes")?;
+    prefix_rows(admin::admin_sync(
+        &WorkAdminArgs {
+            action: "ticket_prefixes".into(),
+            ..Default::default()
+        },
+        &store,
+    )?)
+}
+
+#[tauri::command(async)]
+pub fn set_ticket_prefix(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: SetTicketPrefixArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<TicketPrefixRow>, IpcError> {
+    backend.refuse_local_only("set_ticket_prefix")?;
+    prefix_rows(admin::admin_sync(
+        &WorkAdminArgs {
+            action: "set_ticket_prefix".into(),
+            space_id: args.space_id,
+            project_id: args.project_id,
+            prefix: Some(args.prefix),
+            ..Default::default()
+        },
+        &store,
+    )?)
 }
 
 // --- Jev J3 `status_map` in assist: a person decides the proposals --------------
