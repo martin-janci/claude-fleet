@@ -79,4 +79,19 @@ describe('AppRail accessibility (7.2)', () => {
     expect(order().slice(0, 3)).toEqual(['inbox', 'dashboards', 'work']);
     expect(order()).toHaveLength(9);
   });
+
+  it('opens the workspace menu beside the tile, outside the rail that clips it', async () => {
+    const r = render(AppRail, { isMac: true, onselect: () => {} });
+    const tile = r.getByTestId('workspace-tile');
+    vi.spyOn(tile, 'getBoundingClientRect').mockReturnValue(new DOMRect(8, 60, 110, 90));
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+    await fireEvent.click(tile);
+    await tick();
+    const menu = r.getByTestId('workspace-menu');
+    expect(menu.style.left).toBe('128px');
+    expect(menu.style.top).toBe('58px');
+    // Focusing the checked item must not scroll the clipping rail sideways.
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    focus.mockRestore();
+  });
 });
