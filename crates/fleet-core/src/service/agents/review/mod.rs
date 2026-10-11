@@ -14,15 +14,25 @@
 //!    tools `Read,Grep,Glob`, the skill as system prompt), parse and place
 //!    the answer ([`output`]), and record it (`review_records`).
 //!
-//! Step 3 records the review only, whatever the rule's level: posting it
-//! (`propose` queues it for a person, `act` posts it) is step 4.
+//! 3. **post** by the rule's level: `watch` records the review only;
+//!    `propose` queues it as a `post_review` action a person approves;
+//!    `act` queues it approved, and the run pass's executor
+//!    (`ReviewExecutor`) posts it ([`post`], [`format`]) unless the head
+//!    moved on meanwhile.
+//!
+//! The poll also verifies posted reviews (a deleted or dismissed one is
+//! reviewed again) and reads new PR comments for the `/review` trigger
+//! (`comment_trigger`): either is a forced job, keyed apart from the head's
+//! own so it runs even at a reviewed head.
 //!
 //! Every call on the host goes through [`ReviewHost`], so the poller and the
 //! runner are tested against a fake one.
 
 pub mod diff;
+pub mod format;
 pub mod output;
 pub mod plan;
+pub mod post;
 pub mod prompt;
 #[cfg(test)]
 mod tests;
@@ -65,6 +75,12 @@ pub struct ReviewConfig {
     pub require_tests: bool,
     /// medium | high | critical.
     pub test_blocking_importance: String,
+    /// Post `REQUEST_CHANGES` as a blocking review; off, it is a comment.
+    pub request_changes_event: bool,
+    /// A PR comment matching this (a regex, per line) forces a review.
+    pub comment_trigger: String,
+    /// Minutes between two checks that a posted review is still there.
+    pub verify_interval_mins: i64,
 }
 
 impl Default for ReviewConfig {
@@ -93,6 +109,9 @@ impl Default for ReviewConfig {
             focus_paths: Vec::new(),
             require_tests: true,
             test_blocking_importance: "high".into(),
+            request_changes_event: true,
+            comment_trigger: r"^\s*/review\s*$".into(),
+            verify_interval_mins: 60,
         }
     }
 }
@@ -116,7 +135,23 @@ impl ReviewConfig {
         if !["medium", "high", "critical"].contains(&c.test_blocking_importance.as_str()) {
             return Err("test_blocking_importance must be medium, high or critical".into());
         }
+        if c.verify_interval_mins < 1 {
+            return Err("verify_interval_mins must be at least 1".into());
+        }
+        c.trigger().map_err(|e| format!("comment_trigger: {e}"))?;
         Ok(c)
+    }
+
+    /// The `/review` trigger, matched per line; empty turns it off.
+    pub fn trigger(&self) -> Result<Option<regex::Regex>, regex::Error> {
+        if self.comment_trigger.is_empty() {
+            return Ok(None);
+        }
+        regex::RegexBuilder::new(&self.comment_trigger)
+            .multi_line(true)
+            .size_limit(1 << 16)
+            .build()
+            .map(Some)
     }
 }
 
@@ -150,6 +185,74 @@ pub trait ReviewHost: Send + Sync {
         -> Result<PrintOutcome, IpcError>;
     async fn cleanup(&self, host: &str, root: &str, job_id: i64);
     async fn prune(&self, host: &str, root: &str);
+    /// Post a review with `event`; GitHub's id for it.
+    async fn post_review(&self, req: &post::ReviewRequest, event: &str) -> Result<i64, String>;
+    /// A posted review's state (`COMMENTED`, `DISMISSED` …); `None` when
+    /// GitHub no longer has it.
+    async fn review_state(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+        review_id: i64,
+    ) -> Result<Option<String>, String>;
+    /// The repo's issue and PR comments updated since `since` (RFC 3339).
+    async fn comments_since(
+        &self,
+        host: &str,
+        repo: &str,
+        since: &str,
+    ) -> Result<Vec<PrComment>, String>;
+}
+
+/// One comment on a pull request (or an issue: its number is then not a
+/// tracked pull request's, and nothing comes of it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrComment {
+    pub id: i64,
+    pub number: i64,
+    pub body: String,
+    /// `User` or `Bot`.
+    pub user_type: String,
+}
+
+/// PURE: `gh api …/issues/comments --jq …`'s lines as comments.
+pub fn parse_comments(stdout: &str) -> Vec<PrComment> {
+    stdout
+        .lines()
+        .filter_map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l.trim()).ok()?;
+            let number = v
+                .get("issue_url")?
+                .as_str()?
+                .rsplit_once("/issues/")?
+                .1
+                .parse()
+                .ok()?;
+            Some(PrComment {
+                id: v.get("id")?.as_i64()?,
+                number,
+                body: v.get("body")?.as_str()?.to_string(),
+                user_type: v
+                    .get("user_type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("User")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+/// PURE: unix seconds as RFC 3339 UTC (`2026-10-11T09:30:00Z`).
+pub fn rfc3339(unix: i64) -> String {
+    let (y, m, d) = crate::service::routines::cron::civil_from_days(unix.div_euclid(86_400));
+    let secs = unix.rem_euclid(86_400);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        secs / 3600,
+        secs % 3600 / 60,
+        secs % 60
+    )
 }
 
 const CONNECT: Duration = Duration::from_secs(15);
@@ -322,6 +425,83 @@ impl ReviewHost for SshReviewHost {
     async fn prune(&self, host: &str, root: &str) {
         workspace::prune(&self.ssh, host, root).await
     }
+
+    async fn post_review(&self, req: &post::ReviewRequest, event: &str) -> Result<i64, String> {
+        let script = format!(
+            "gh api --method POST {} --input - --jq .id",
+            quote(&format!("repos/{}/pulls/{}/reviews", req.repo, req.number))
+        );
+        let out = self
+            .ssh
+            .run_with_stdin(
+                &req.host,
+                &["bash", "-lc", &quote(&script)],
+                post::api_body(req, event).into_bytes(),
+                CONNECT,
+                GH_WALL_CLOCK,
+                64 * 1024,
+            )
+            .await
+            .map_err(|e| e.message)?;
+        if !out.status.success() {
+            return Err(gh_error(&out));
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .map_err(|_| "GitHub answered no review id".to_string())
+    }
+
+    async fn review_state(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+        review_id: i64,
+    ) -> Result<Option<String>, String> {
+        let out = self
+            .sh(
+                host,
+                &format!(
+                    "gh api {} --jq .state",
+                    quote(&format!("repos/{repo}/pulls/{number}/reviews/{review_id}"))
+                ),
+            )
+            .await?;
+        if !out.status.success() {
+            let err = gh_error(&out);
+            if err.contains("Not Found") || err.contains("404") {
+                return Ok(None);
+            }
+            return Err(err);
+        }
+        Ok(Some(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        ))
+    }
+
+    async fn comments_since(
+        &self,
+        host: &str,
+        repo: &str,
+        since: &str,
+    ) -> Result<Vec<PrComment>, String> {
+        let out = self
+            .sh(
+                host,
+                &format!(
+                    "gh api -X GET {} -f since={} -f per_page=100 --paginate \
+                     --jq '.[] | {{id, body, issue_url, user_type: .user.type}}'",
+                    quote(&format!("repos/{repo}/issues/comments")),
+                    quote(since)
+                ),
+            )
+            .await?;
+        if !out.status.success() {
+            return Err(gh_error(&out));
+        }
+        Ok(parse_comments(&String::from_utf8_lossy(&out.stdout)))
+    }
 }
 
 /// The reviewer as the runtime registers it.
@@ -338,6 +518,10 @@ pub fn agent(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> AgentImpl {
         })),
         runner: Some(Box::new(ReviewRunner {
             store: Arc::clone(store),
+            host: Arc::clone(&host),
+        })),
+        executor: Some(Box::new(ReviewExecutor {
+            store: Arc::clone(store),
             host,
         })),
     }
@@ -353,7 +537,7 @@ impl AgentPoller for ReviewPoller {
     async fn poll(
         &self,
         rule: &AgentRuleRow,
-        _cursor: Option<&AgentCursorRow>,
+        cursor: Option<&AgentCursorRow>,
         now: i64,
     ) -> Result<Polled, String> {
         let repo = repo_of_scope(&rule.scope).ok_or("not a review scope")?;
@@ -394,10 +578,152 @@ impl AgentPoller for ReviewPoller {
                 s.put_review_pr(&row).map_err(|e| e.to_string())?;
             }
         }
-        Ok(Polled {
-            jobs: p.jobs,
-            cursor: None,
-        })
+        let mut jobs = p.jobs;
+        jobs.extend(self.verify(rule, repo, &cfg, now).await);
+        let (forced, cursor) = self.comment_triggers(rule, repo, &cfg, cursor, now).await;
+        jobs.extend(forced);
+        Ok(Polled { jobs, cursor })
+    }
+}
+
+/// Posted reviews checked per poll.
+pub const MAX_VERIFIES: usize = 5;
+
+/// Seconds a comment cursor reaches back past the last poll, for clocks
+/// that disagree a little; the job keys keep a comment from counting twice.
+const COMMENT_SLACK_SECS: i64 = 120;
+
+impl ReviewPoller {
+    /// Check posted reviews not seen for `verify_interval_mins`: one GitHub
+    /// deleted or dismissed is reviewed again (a forced job).
+    async fn verify(
+        &self,
+        rule: &AgentRuleRow,
+        repo: &str,
+        cfg: &ReviewConfig,
+        now: i64,
+    ) -> Vec<crate::store::NewAgentJob> {
+        let due: Vec<crate::store::ReviewPrRow> = {
+            let Ok(s) = self.store.lock() else {
+                return Vec::new();
+            };
+            s.list_review_prs(repo)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| {
+                    r.status == "reviewed"
+                        && r.review_id.is_some()
+                        && r.review_verified_at.unwrap_or(0) + cfg.verify_interval_mins * 60 <= now
+                })
+                .take(MAX_VERIFIES)
+                .collect()
+        };
+        let mut jobs = Vec::new();
+        for mut row in due {
+            let Some(review_id) = row.review_id else {
+                continue;
+            };
+            let gone = match self
+                .host
+                .review_state(&rule.host_alias, repo, row.number, review_id)
+                .await
+            {
+                Ok(None) => true,
+                Ok(Some(state)) => state == "DISMISSED",
+                Err(e) => {
+                    tracing::warn!(repo, number = row.number, error = %e, "[agents] review: verify failed");
+                    continue;
+                }
+            };
+            row.review_verified_at = Some(now);
+            if gone {
+                row.review_id = None;
+                row.status = "pending_review".into();
+                jobs.push(crate::store::NewAgentJob {
+                    rule_id: rule.id,
+                    agent: "review".into(),
+                    subject: plan::subject(repo, row.number),
+                    trigger: "reverify".into(),
+                    dedup_key: plan::forced_key(
+                        repo,
+                        row.number,
+                        &row.head_sha,
+                        &format!("r{review_id}"),
+                    ),
+                    not_before: now,
+                });
+            }
+            if let Ok(s) = self.store.lock() {
+                if let Err(e) = s.put_review_pr(&row) {
+                    tracing::warn!(repo, number = row.number, error = %e, "[agents] review: verify not recorded");
+                }
+            }
+        }
+        jobs
+    }
+
+    /// The `/review` comments since the last poll, as forced jobs, and the
+    /// cursor for the next poll. The first poll of a rule only sets the
+    /// cursor: a comment from before the rule asks nothing of it.
+    async fn comment_triggers(
+        &self,
+        rule: &AgentRuleRow,
+        repo: &str,
+        cfg: &ReviewConfig,
+        cursor: Option<&AgentCursorRow>,
+        now: i64,
+    ) -> (Vec<crate::store::NewAgentJob>, Option<String>) {
+        let next = Some(rfc3339(now - COMMENT_SLACK_SECS));
+        let Ok(Some(trigger)) = cfg.trigger() else {
+            return (Vec::new(), next);
+        };
+        let Some(since) = cursor.and_then(|c| c.cursor.clone()) else {
+            return (Vec::new(), next);
+        };
+        let comments = match self
+            .host
+            .comments_since(&rule.host_alias, repo, &since)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(repo, error = %e, "[agents] review: reading comments failed");
+                // Keep the cursor: the next poll asks again from it.
+                return (Vec::new(), Some(since));
+            }
+        };
+        let Ok(s) = self.store.lock() else {
+            return (Vec::new(), Some(since));
+        };
+        let jobs = comments
+            .into_iter()
+            .filter(|c| {
+                c.user_type != "Bot"
+                    && !c.body.contains(format::MARKER)
+                    && !c.body.contains(format::LEGACY_MARKER)
+                    && trigger.is_match(&c.body)
+            })
+            .filter_map(|c| {
+                let row = s.review_pr(repo, c.number).ok().flatten()?;
+                // A forced review still waits out a draft or a WIP title,
+                // as the original's did.
+                let held = matches!(row.skip_reason.as_deref(), Some("draft" | "wip_title"));
+                (row.is_open() && !held).then(|| crate::store::NewAgentJob {
+                    rule_id: rule.id,
+                    agent: "review".into(),
+                    subject: plan::subject(repo, c.number),
+                    trigger: "comment".into(),
+                    dedup_key: plan::forced_key(
+                        repo,
+                        c.number,
+                        &row.head_sha,
+                        &format!("c{}", c.id),
+                    ),
+                    not_before: now,
+                })
+            })
+            .collect();
+        (jobs, next)
     }
 }
 
@@ -482,7 +808,14 @@ impl ReviewRunner {
         if row.head_sha != sha {
             return skipped("the head moved on; a newer job reviews it");
         }
-        if row.status == "skipped" {
+        // A forced review (`/review`, a vanished posted review) looks again
+        // past a size skip; nothing looks past a draft or a WIP title.
+        let forced = job.trigger == "comment" || job.trigger == "reverify";
+        let size_skip = matches!(
+            row.skip_reason.as_deref(),
+            Some("diff_too_large" | "empty_diff")
+        );
+        if row.status == "skipped" && !(forced && size_skip) {
             return skipped(format!(
                 "skipped: {}",
                 row.skip_reason.as_deref().unwrap_or("held")
@@ -553,6 +886,10 @@ impl ReviewRunner {
                 findings: placed.inline.into_iter().chain(placed.orphans).collect(),
             })
         });
+        let previous_findings: Vec<output::Finding> = previous
+            .as_ref()
+            .map(|p| p.findings.clone())
+            .unwrap_or_default();
         let security: Vec<String> = diff::diff_paths(&filtered)
             .into_iter()
             .filter(|p| cfg.security_paths.iter().any(|g| diff::glob_match(g, p)))
@@ -633,19 +970,62 @@ impl ReviewRunner {
                 Err(e) => return failed(ErrorKind::Transient, e.to_string()),
             }
         };
-        RunOutcome::Done {
-            result: Some(
-                serde_json::json!({
-                    "record_id": record_id,
-                    "verdict": placed.verdict,
-                    "summary": placed.summary,
-                    "inline": placed.inline.len(),
-                    "orphans": placed.orphans.len(),
-                    "dropped": placed.dropped,
-                })
-                .to_string(),
-            ),
-            cost_micros: cost,
+        let req = post::build(&post::BuildInput {
+            placed: &placed,
+            previous: &previous_findings,
+            host,
+            repo,
+            number,
+            sha,
+            record_id,
+            request_changes_event: cfg.request_changes_event,
+        });
+        let mut result = serde_json::json!({
+            "record_id": record_id,
+            "verdict": placed.verdict,
+            "event": req.event,
+            "summary": placed.summary,
+            "inline": placed.inline.len(),
+            "orphans": placed.orphans.len(),
+            "dropped": placed.dropped,
+        });
+        if rule.level == "watch" {
+            return RunOutcome::Done {
+                result: Some(result.to_string()),
+                cost_micros: cost,
+            };
+        }
+        let payload = match serde_json::to_string(&req) {
+            Ok(p) => p,
+            Err(e) => return failed(ErrorKind::Permanent, e.to_string()),
+        };
+        let now = crate::store::now_unix();
+        let queued = {
+            let Ok(s) = self.store.lock() else {
+                return failed(ErrorKind::Transient, "store lock");
+            };
+            if rule.level == "act" {
+                s.insert_approved_agent_action(job.id, post::POST_REVIEW, &payload, "rule:act", now)
+            } else {
+                s.insert_agent_action(job.id, post::POST_REVIEW, &payload, now)
+            }
+        };
+        let action_id = match queued {
+            Ok(id) => id,
+            Err(e) => return failed(ErrorKind::Transient, e.to_string()),
+        };
+        result["action_id"] = action_id.into();
+        if rule.level == "act" {
+            RunOutcome::Done {
+                result: Some(result.to_string()),
+                cost_micros: cost,
+            }
+        } else {
+            RunOutcome::NeedsPerson {
+                result: Some(result.to_string()),
+                reason: format!("review ready: approve action {action_id} to post it"),
+                cost_micros: cost,
+            }
         }
     }
 
@@ -667,5 +1047,59 @@ impl AgentRunner for ReviewRunner {
             None => skipped("the rule was revoked"),
             Some(rule) => self.review(job, rule).await,
         }
+    }
+}
+
+/// Posts an approved `post_review` action: unless the pull request closed
+/// or its head moved on since the review (expired), as the action's event,
+/// once more as a comment when GitHub refuses the event because the poster
+/// authored the pull request.
+pub struct ReviewExecutor {
+    pub store: Arc<Mutex<Store>>,
+    pub host: Arc<dyn ReviewHost>,
+}
+
+#[async_trait::async_trait]
+impl super::AgentExecutor for ReviewExecutor {
+    async fn execute(&self, action: &crate::store::AgentActionRow) -> super::ActionResult {
+        use super::ActionResult;
+        if action.kind != post::POST_REVIEW {
+            return ActionResult::Failed(format!("the reviewer does not do {}", action.kind));
+        }
+        let req: post::ReviewRequest = match serde_json::from_str(&action.payload) {
+            Ok(r) => r,
+            Err(e) => return ActionResult::Failed(format!("payload: {e}")),
+        };
+        let row = match self.store.lock() {
+            Ok(s) => s.review_pr(&req.repo, req.number).ok().flatten(),
+            Err(_) => return ActionResult::Failed("store lock".into()),
+        };
+        match row {
+            None => return ActionResult::Expired("the pull request is not tracked".into()),
+            Some(r) if !r.is_open() => {
+                return ActionResult::Expired(format!("the pull request is {}", r.status))
+            }
+            Some(r) if r.head_sha != req.sha => {
+                return ActionResult::Expired("the head moved on since the review".into())
+            }
+            Some(_) => {}
+        }
+        let posted = match self.host.post_review(&req, &req.event).await {
+            Err(e) if req.event != "COMMENT" && post::is_self_review_refusal(&e) => {
+                self.host.post_review(&req, "COMMENT").await
+            }
+            other => other,
+        };
+        let review_id = match posted {
+            Ok(id) => id,
+            Err(e) => return ActionResult::Failed(e),
+        };
+        if let Ok(s) = self.store.lock() {
+            if let Err(e) = s.mark_review_posted(req.record_id, review_id, crate::store::now_unix())
+            {
+                tracing::warn!(record = req.record_id, error = %e, "[agents] review: posted, not recorded");
+            }
+        }
+        ActionResult::Executed
     }
 }

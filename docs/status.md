@@ -686,9 +686,9 @@ Jev's `pr_triage` (`decide.jev.pr_triage`, off by default) records in
 shadow what each new episode most likely needs. Not built: the Inbox
 card, the UI.
 
-The agent runtime (reviewer and support agents, steps 1 to 3 of 8) is
-built, and the PR reviewer works under a granted rule but posts nothing yet
-(spec `docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`).
+The agent runtime (reviewer and support agents, steps 1 to 4 of 8) is
+built, and the PR reviewer works end to end under a granted rule (spec
+`docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`).
 Migration 170 (`agent_rules`, `agent_cursors`, `agent_jobs`,
 `agent_actions`), `service/agents/` with the loops `agents_poll` and
 `agents_run` (stopped by `automation.paused`), the settings
@@ -699,13 +699,15 @@ owner's own paired device. The run vehicle (step 2): a locked-down
 `claude -p` with read-only tools (`claude_print::isolation_flags_with`,
 `service/agents/vehicle.rs`), its MCP config and system prompt carried on
 stdin, in a detached worktree beside the checkout
-(`service/agents/workspace.rs`). The reviewer (step 3, migration 171,
-`service/agents/review/`): polls a granted repo's open PRs, reviews each
-new head with read-only tools and records the placed review in
-`review_records`; its jobs are in the Runs list (source `agent`). Not
-built: posting a review (step 4), the UI (step 5), the support agent
-(steps 6 and 7); until an agent's executor lands an approved action stays
-`approved`.
+(`service/agents/workspace.rs`). The reviewer (steps 3 and 4, migration
+171, `service/agents/review/`): polls a granted repo's open PRs, reviews
+each new head with read-only tools, records the placed review in
+`review_records`, and by the rule's level keeps it (`watch`), queues it
+for a person (`propose`, an action the `agents` tool or `fleet-hub agents
+approve` answers) or posts it (`act`); it re-reviews a posted review
+GitHub lost and answers a `/review` comment. Its jobs are in the Runs
+list (source `agent`). Not built: the UI (step 5), the support agent
+(steps 6 and 7).
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

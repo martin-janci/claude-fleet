@@ -79,11 +79,18 @@ pub fn dedup_key(repo: &str, number: i64, sha: &str) -> String {
     format!("{}@{sha}", subject(repo, number))
 }
 
-/// PURE: the head a job's key names (`…@<sha>`).
+/// PURE: the head a job's key names (`…@<sha>`, or `…@<sha>#<why>` for a
+/// forced review).
 pub fn sha_of_key(key: &str) -> Option<&str> {
     key.rsplit_once('@')
-        .map(|(_, sha)| sha)
+        .map(|(_, rest)| rest.split('#').next().unwrap_or(rest))
         .filter(|s| !s.is_empty())
+}
+
+/// The key of a forced review of `sha`: a `/review` comment (`c<id>`) or a
+/// posted review gone from GitHub (`r<id>`), so it runs at a reviewed head.
+pub fn forced_key(repo: &str, number: i64, sha: &str, why: &str) -> String {
+    format!("{}#{why}", dedup_key(repo, number, sha))
 }
 
 /// PURE: `gh:<owner>/<repo>#<n>` as `(owner/repo, n)`.
@@ -135,6 +142,8 @@ pub fn plan(
             first_seen_at: now,
             updated_at: now,
             closed_at: None,
+            review_id: None,
+            review_verified_at: None,
         });
         row.title = pr.title.clone();
         row.author = pr.author.clone();
@@ -375,5 +384,8 @@ mod tests {
         assert_eq!(parse_subject("gh:o/r#x"), None);
         assert_eq!(parse_subject("jira:L2S-1"), None);
         assert_eq!(sha_of_key("gh:o/r#1@"), None);
+        let forced = forced_key("o/r", 1, "abc", "c42");
+        assert_eq!(forced, "gh:o/r#1@abc#c42");
+        assert_eq!(sha_of_key(&forced), Some("abc"));
     }
 }

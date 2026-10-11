@@ -53,6 +53,19 @@ impl AgentRunner for FakeRunner {
     }
 }
 
+struct FakeExecutor;
+
+#[async_trait::async_trait]
+impl AgentExecutor for FakeExecutor {
+    async fn execute(&self, action: &crate::store::AgentActionRow) -> ActionResult {
+        match action.kind.as_str() {
+            "ok" => ActionResult::Executed,
+            "late" => ActionResult::Expired("moved".into()),
+            _ => ActionResult::Failed("boom".into()),
+        }
+    }
+}
+
 /// A registry with one fake `review` agent, and its runner's run count.
 fn registry(
     found: Vec<(&'static str, &'static str)>,
@@ -70,6 +83,7 @@ fn registry(
                 runs: Arc::clone(&runs),
                 outcome,
             })),
+            executor: Some(Box::new(FakeExecutor)),
         }],
     };
     (reg, runs)
@@ -271,4 +285,43 @@ fn plan_end_follows_the_error_kind() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[tokio::test]
+async fn approved_actions_are_carried_out_and_pending_ones_wait() {
+    let (st, _) = store_with_rule(None);
+    let (reg, _) = registry(vec![("gh:o/r#1", "a")], done());
+    poll_with(&st, &reg, NOW).await;
+    let ids = {
+        let s = st.lock().unwrap();
+        let jid = s.list_agent_jobs(None, 1).unwrap()[0].id;
+        let ok = s
+            .insert_approved_agent_action(jid, "ok", "{}", "rule:act", NOW)
+            .unwrap();
+        let late = s
+            .insert_approved_agent_action(jid, "late", "{}", "rule:act", NOW)
+            .unwrap();
+        let bad = s
+            .insert_approved_agent_action(jid, "bad", "{}", "rule:act", NOW)
+            .unwrap();
+        let waiting = s.insert_agent_action(jid, "ok", "{}", NOW).unwrap();
+        [ok, late, bad, waiting]
+    };
+    settings::set(&st.lock().unwrap(), settings::AUTOMATION_PAUSED, "true").unwrap();
+    assert_eq!(execute_approved(&st, &reg).await, 0, "Pause all holds them");
+    settings::set(&st.lock().unwrap(), settings::AUTOMATION_PAUSED, "false").unwrap();
+    assert_eq!(execute_approved(&st, &reg).await, 3);
+    let s = st.lock().unwrap();
+    let state = |id: i64| {
+        s.list_agent_actions(None, 10)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.id == id)
+            .unwrap()
+            .state
+    };
+    assert_eq!(
+        ids.map(state),
+        ["executed", "expired", "failed", "pending"].map(String::from)
+    );
 }

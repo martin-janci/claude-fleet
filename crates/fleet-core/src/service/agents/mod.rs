@@ -40,7 +40,9 @@ pub mod workspace;
 
 use crate::service::settings;
 use crate::ssh::SshClient;
-use crate::store::{AgentCursorRow, AgentJobEnd, AgentJobRow, AgentRuleRow, NewAgentJob, Store};
+use crate::store::{
+    AgentActionRow, AgentCursorRow, AgentJobEnd, AgentJobRow, AgentRuleRow, NewAgentJob, Store,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -135,11 +137,29 @@ pub trait AgentRunner: Send + Sync {
     async fn run(&self, job: &AgentJobRow, rule: Option<&AgentRuleRow>) -> RunOutcome;
 }
 
+/// What an executor did with an approved action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionResult {
+    Executed,
+    /// It ran and failed; the reason is kept.
+    Failed(String),
+    /// It no longer applies (the head moved, the ticket closed); not run.
+    Expired(String),
+}
+
+/// One agent's way of carrying out an approved action (post a review,
+/// comment on a ticket).
+#[async_trait::async_trait]
+pub trait AgentExecutor: Send + Sync {
+    async fn execute(&self, action: &AgentActionRow) -> ActionResult;
+}
+
 /// One registered agent.
 pub struct AgentImpl {
     pub name: &'static str,
     pub poller: Option<Box<dyn AgentPoller>>,
     pub runner: Option<Box<dyn AgentRunner>>,
+    pub executor: Option<Box<dyn AgentExecutor>>,
 }
 
 /// The agents this process runs.
@@ -169,6 +189,13 @@ impl Registry {
             .iter()
             .find(|a| a.name == agent)
             .and_then(|a| a.runner.as_deref())
+    }
+
+    fn executor(&self, agent: &str) -> Option<&dyn AgentExecutor> {
+        self.agents
+            .iter()
+            .find(|a| a.name == agent)
+            .and_then(|a| a.executor.as_deref())
     }
 
     fn runnable(&self) -> Vec<&'static str> {
@@ -371,16 +398,58 @@ pub async fn run_with(store: &Mutex<Store>, reg: &Registry, now: i64) -> usize {
     });
     let outcomes = futures_util::future::join_all(runs).await;
     let ended = crate::store::now_unix().max(now);
-    let Ok(s) = store.lock() else {
-        return 0;
-    };
-    for (job, outcome) in jobs.iter().zip(&outcomes) {
-        let end = plan_end(outcome, job.attempts, max_retries, ended);
-        if let Err(e) = s.finish_agent_job(job.id, &end, cost_of(outcome), ended) {
-            tracing::warn!(job_id = job.id, error = %e, "[agents] recording a run failed");
+    {
+        let Ok(s) = store.lock() else {
+            return 0;
+        };
+        for (job, outcome) in jobs.iter().zip(&outcomes) {
+            let end = plan_end(outcome, job.attempts, max_retries, ended);
+            if let Err(e) = s.finish_agent_job(job.id, &end, cost_of(outcome), ended) {
+                tracing::warn!(job_id = job.id, error = %e, "[agents] recording a run failed");
+            }
         }
     }
-    jobs.len()
+    jobs.len() + execute_approved(store, reg).await
+}
+
+/// Most approved actions one pass carries out.
+pub const ACTIONS_PER_PASS: usize = 10;
+
+/// Carry out the approved actions (a person's approval, or an `act`
+/// rule's own): each by its agent's executor, recorded executed, failed or
+/// expired. An action whose agent has no executor waits. Returns how many
+/// were carried out.
+pub async fn execute_approved(store: &Mutex<Store>, reg: &Registry) -> usize {
+    let due = {
+        let Ok(s) = store.lock() else {
+            return 0;
+        };
+        if crate::service::loops::paused(&s) {
+            return 0;
+        }
+        s.approved_agent_actions(ACTIONS_PER_PASS)
+            .unwrap_or_default()
+    };
+    let mut done = 0;
+    for (agent, action) in due {
+        let Some(exec) = reg.executor(&agent) else {
+            continue;
+        };
+        let result = exec.execute(&action).await;
+        let (state, error) = match &result {
+            ActionResult::Executed => ("executed", None),
+            ActionResult::Failed(e) => ("failed", Some(e.as_str())),
+            ActionResult::Expired(e) => ("expired", Some(e.as_str())),
+        };
+        let Ok(s) = store.lock() else {
+            return done;
+        };
+        if let Err(e) = s.finish_agent_action(action.id, state, error, crate::store::now_unix()) {
+            tracing::warn!(action_id = action.id, error = %e, "[agents] recording an action failed");
+        }
+        done += 1;
+    }
+    done
 }
 
 /// Holds a loop's single-flight flag until dropped.

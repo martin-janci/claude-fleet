@@ -1,7 +1,7 @@
 # Reviewer and Support agents: design
 
-Status: steps 1 to 3 built (the runtime, the run vehicle, the reviewer at
-`watch`: it reviews and records, posts nothing), 2026-10-11.
+Status: steps 1 to 4 built (the runtime, the run vehicle, the reviewer at
+every level), 2026-10-11.
 Asked for by the owner: bring the functionality of
 [`claude-code-reviewer`](https://github.com/martin-janci/claude-code-reviewer)
 and [`support-agent`](https://github.com/martin-janci/support-agent) into
@@ -472,8 +472,19 @@ dashboard pieces of the reviewer.
    the jobs in the Runs list (`runs` source `agent`, kinds `review` and
    `support`). Every level behaves as `watch` until step 4: the review is
    recorded (`review_records.posted = 0`), nothing is posted.
-4. **Reviewer, write side**: `post.rs`, `propose` and `act`, verification,
-   `/review` by polling; `tools/code-reviewer` deleted.
+4. **Reviewer, write side** (built): `format.rs` (the review body and
+   inline comments, marker `<!-- fleet-agent:review -->`), `post.rs` (the
+   verdict escalation / de-escalation, the event, the request an action
+   carries), `propose` (a pending `post_review` action, job
+   `needs_person`) and `act` (an approved one), the runtime's executor
+   stage (`AgentExecutor`, run after the jobs of each pass: posts unless
+   the head moved, retries a self-authored PR's refusal as `COMMENT`),
+   verification of posted reviews and `/review` by polling PR comments
+   (both forced jobs, keyed `…@<sha>#r<id>` / `#c<id>`). Not ported: the
+   resolving of review threads for resolved findings (GraphQL), and the
+   `/review` overrides (`--max-turns=`, `--focus=`). The
+   `tools/code-reviewer` subtree was never added, so there is nothing to
+   delete; the original repo is archived once a rule has run on `act`.
 5. **UI**: Automation › Agents rows, the agent page, Inbox actions;
    fleet-mobile's Inbox approve / reject.
 6. **Support, read side**: Jira comment and assignment poller, enrichment,

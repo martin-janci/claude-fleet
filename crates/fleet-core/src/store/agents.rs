@@ -504,6 +504,81 @@ impl Store {
         )
     }
 
+    /// Queue a write already answered: `approved` by the rule itself (an
+    /// `act` rule), with `decided_by` saying so. `payload` must be JSON.
+    pub fn insert_approved_agent_action(
+        &self,
+        job_id: i64,
+        kind: &str,
+        payload: &str,
+        decided_by: &str,
+        now: i64,
+    ) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "INSERT INTO agent_actions (job_id, kind, payload, state, decided_by, decided_at, \
+               created_at) \
+             VALUES (?1, ?2, ?3, 'approved', ?4, ?5, ?5) RETURNING id",
+            params![job_id, kind, payload, decided_by, now],
+            |r| r.get(0),
+        )
+    }
+
+    /// Approved actions waiting for their executor, oldest first, each with
+    /// the agent whose job proposed it.
+    pub fn approved_agent_actions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(String, AgentActionRow)>, rusqlite::Error> {
+        let cols: String = ACTION_COLS
+            .split(", ")
+            .map(|c| format!("a.{}", c.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT j.agent, {cols} FROM agent_actions a JOIN agent_jobs j ON j.id = a.job_id \
+             WHERE a.state = 'approved' ORDER BY a.decided_at, a.id LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            let agent: String = r.get(0)?;
+            Ok((
+                agent,
+                AgentActionRow {
+                    id: r.get(1)?,
+                    job_id: r.get(2)?,
+                    kind: r.get(3)?,
+                    payload: r.get(4)?,
+                    state: r.get(5)?,
+                    decided_by: r.get(6)?,
+                    decided_at: r.get(7)?,
+                    executed_at: r.get(8)?,
+                    error: r.get(9)?,
+                    created_at: r.get(10)?,
+                },
+            ))
+        })?;
+        rows.collect()
+    }
+
+    /// Record what the executor did with an approved action: `executed`,
+    /// `failed` or `expired`, with why when it did not run.
+    pub fn finish_agent_action(
+        &self,
+        id: i64,
+        state: &str,
+        error: Option<&str>,
+        now: i64,
+    ) -> Result<(), rusqlite::Error> {
+        if !["executed", "failed", "expired"].contains(&state) {
+            return Err(invalid(format!("{state:?} is not an executor's answer")));
+        }
+        self.conn.execute(
+            "UPDATE agent_actions SET state = ?2, error = ?3, executed_at = ?4 \
+             WHERE id = ?1 AND state = 'approved'",
+            params![id, state, error, now],
+        )?;
+        Ok(())
+    }
+
     /// The newest actions, in one state or all.
     pub fn list_agent_actions(
         &self,
@@ -751,5 +826,25 @@ mod tests {
         assert_eq!(a.state, "approved", "a second answer changes nothing");
         assert_eq!(s.decide_agent_action(aid + 9, true, "x", 0).unwrap(), None);
         assert!(s.insert_agent_action(jid, "x", "not json", 0).is_err());
+        let auto = s
+            .insert_approved_agent_action(jid, "post_review", "{}", "rule:act", 1300)
+            .unwrap();
+        let due = s.approved_agent_actions(10).unwrap();
+        assert_eq!(
+            due.iter()
+                .map(|(a, r)| (a.as_str(), r.id))
+                .collect::<Vec<_>>(),
+            [("review", aid), ("review", auto)]
+        );
+        s.finish_agent_action(aid, "executed", None, 1400).unwrap();
+        s.finish_agent_action(auto, "failed", Some("422"), 1400)
+            .unwrap();
+        assert!(s.approved_agent_actions(10).unwrap().is_empty());
+        assert!(s.finish_agent_action(aid, "approved", None, 0).is_err());
+        let failed = &s.list_agent_actions(Some("failed"), 1).unwrap()[0];
+        assert_eq!(
+            (failed.error.as_deref(), failed.executed_at),
+            (Some("422"), Some(1400))
+        );
     }
 }

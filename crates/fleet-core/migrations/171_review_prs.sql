@@ -11,6 +11,9 @@
 --                debounce counts from it)
 --   skipped_at_sha / skip_diff_lines  a size skip's head and size, so a
 --                new push is looked at again
+--   review_id / review_verified_at  the posted review GitHub holds, and
+--                when the reviewer last saw it there (a deleted or
+--                dismissed one is reviewed again)
 CREATE TABLE IF NOT EXISTS review_prs (
   repo               TEXT NOT NULL,
   number             INTEGER NOT NULL CHECK (number > 0),
@@ -33,6 +36,8 @@ CREATE TABLE IF NOT EXISTS review_prs (
   first_seen_at      INTEGER NOT NULL,
   updated_at         INTEGER NOT NULL,
   closed_at          INTEGER,
+  review_id          INTEGER,
+  review_verified_at INTEGER,
   PRIMARY KEY (repo, number)
 );
 CREATE INDEX IF NOT EXISTS review_prs_status ON review_prs (repo, status);

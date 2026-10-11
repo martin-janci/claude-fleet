@@ -41,6 +41,10 @@ pub struct ReviewPrRow {
     pub first_seen_at: i64,
     pub updated_at: i64,
     pub closed_at: Option<i64>,
+    /// The posted review GitHub holds.
+    pub review_id: Option<i64>,
+    /// When the reviewer last saw that review on GitHub.
+    pub review_verified_at: Option<i64>,
 }
 
 impl ReviewPrRow {
@@ -80,7 +84,8 @@ pub struct NewReviewRecord<'a> {
 
 const PR_COLS: &str = "repo, number, status, skip_reason, title, author, is_draft, head_sha, \
                        base_ref, head_ref, last_push_at, last_reviewed_sha, last_reviewed_at, \
-                       skipped_at_sha, skip_diff_lines, first_seen_at, updated_at, closed_at";
+                       skipped_at_sha, skip_diff_lines, first_seen_at, updated_at, closed_at, \
+                       review_id, review_verified_at";
 const RECORD_COLS: &str =
     "id, repo, number, sha, job_id, verdict, review, posted, review_id, created_at";
 
@@ -104,6 +109,8 @@ fn pr_row(r: &Row<'_>) -> rusqlite::Result<ReviewPrRow> {
         first_seen_at: r.get(15)?,
         updated_at: r.get(16)?,
         closed_at: r.get(17)?,
+        review_id: r.get(18)?,
+        review_verified_at: r.get(19)?,
     })
 }
 
@@ -130,7 +137,7 @@ impl Store {
             &format!(
                 "INSERT OR REPLACE INTO review_prs ({PR_COLS}) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
-                         ?16, ?17, ?18)"
+                         ?16, ?17, ?18, ?19, ?20)"
             ),
             params![
                 row.repo,
@@ -150,7 +157,9 @@ impl Store {
                 row.skip_diff_lines,
                 row.first_seen_at,
                 row.updated_at,
-                row.closed_at
+                row.closed_at,
+                row.review_id,
+                row.review_verified_at
             ],
         )?;
         Ok(())
@@ -234,6 +243,39 @@ impl Store {
         Ok(())
     }
 
+    /// Record that GitHub took review record `record_id` as `review_id`:
+    /// the record is posted, and its pull request remembers the review to
+    /// verify it later.
+    pub fn mark_review_posted(
+        &self,
+        record_id: i64,
+        review_id: i64,
+        now: i64,
+    ) -> Result<(), rusqlite::Error> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE review_records SET posted = 1, review_id = ?2 WHERE id = ?1",
+            params![record_id, review_id],
+        )?;
+        tx.execute(
+            "UPDATE review_prs SET review_id = ?2, review_verified_at = ?3, updated_at = ?3 \
+             WHERE (repo, number) = (SELECT repo, number FROM review_records WHERE id = ?1)",
+            params![record_id, review_id, now],
+        )?;
+        tx.commit()
+    }
+
+    /// One review record by id.
+    pub fn review_record(&self, id: i64) -> Result<Option<ReviewRecordRow>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                &format!("SELECT {RECORD_COLS} FROM review_records WHERE id = ?1"),
+                params![id],
+                record_row,
+            )
+            .optional()
+    }
+
     /// The newest review of a pull request.
     pub fn last_review_record(
         &self,
@@ -291,6 +333,8 @@ mod tests {
             first_seen_at: 10,
             updated_at: 10,
             closed_at: None,
+            review_id: None,
+            review_verified_at: None,
         }
     }
 
