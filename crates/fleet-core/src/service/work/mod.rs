@@ -251,6 +251,18 @@ pub struct WorkLinkArgs {
     /// Due date, YYYY-MM-DD ("" clears).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<String>,
+    /// edit: urgent|high|medium|low ("" clears).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    /// edit: ≤20 labels, ≤40 chars ([] clears).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    /// edit: 0-1000 (0 clears).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<f64>,
+    /// edit: points|hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_unit: Option<String>,
     /// propose: the reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,

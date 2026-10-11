@@ -22,7 +22,7 @@
   import { shortAge, timeAgo } from './session_status';
   import { assessRow, hasReading, verdictLabel, verdictState } from './evidence';
   import StatusDot from './kit/StatusDot.svelte';
-  import { changedAny, describeEvidence, onWorkChangedDebounced } from './work';
+  import { changedAny, describeEvidence, estimateLabel, onWorkChangedDebounced, priorityLabel } from './work';
   import { providerInfo, unavailableLabel } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -505,6 +505,11 @@
           <span class="chip chip--status chip--{task.status_category ?? 'todo'}" data-testid="work-task-status">{taskStatus(task)}</span>
         {/if}
         {#if task.resolution}<span class="chip">{task.resolution}</span>{/if}
+        {#if task.priority === 'urgent' || task.priority === 'high'}
+          <span class="chip chip--prio-{task.priority}" data-testid="work-task-priority-chip"
+            ><span class="prio-dot prio-dot--{task.priority}" aria-hidden="true"></span>{priorityLabel(task.priority)}</span
+          >
+        {/if}
         {#if subtaskCount}<span class="chip" data-testid="work-task-subtask-chip" title="Subtasks done">✓ {subtaskCount}</span>{/if}
         <TaskBlockedSpend {task} lookup={depById} testid="work-task" />
         {#if trackerDown(task)}<span class="chip chip--warn" data-testid="work-task-tracker-down"
@@ -599,6 +604,22 @@
               {#if (task.assignees ?? []).length > 0}
                 <dt>Assignees</dt>
                 <dd data-testid="work-task-assignees">{(task.assignees ?? []).join(', ')}{#if task.mine}&nbsp;(you){/if}</dd>
+              {/if}
+              {#if priorityLabel(task.priority)}
+                <dt>Priority</dt>
+                <dd class="prio" data-testid="work-task-priority"
+                  ><span class="prio-dot prio-dot--{task.priority}" aria-hidden="true"></span>{priorityLabel(task.priority)}</dd
+                >
+              {/if}
+              {#if (task.labels ?? []).length > 0}
+                <dt>Labels</dt>
+                <dd class="labels" data-testid="work-task-labels">
+                  {#each task.labels ?? [] as label (label)}<span class="chip chip--label">{label}</span>{/each}
+                </dd>
+              {/if}
+              {#if estimateLabel(task.estimate, task.estimate_unit)}
+                <dt>Estimate</dt>
+                <dd data-testid="work-task-estimate">{estimateLabel(task.estimate, task.estimate_unit)}</dd>
               {/if}
               <dt>Source</dt>
               <dd>{sourceLabel}{#if task.tracker_name}&nbsp;· {task.tracker_name}{/if}</dd>
@@ -1163,6 +1184,48 @@
     background: var(--waiting-soft);
     color: var(--usage-warn);
     white-space: normal;
+  }
+  .chip--prio-urgent {
+    gap: 5px;
+    background: var(--failed-soft);
+    color: var(--danger);
+    font-weight: 600;
+  }
+  .chip--prio-high {
+    gap: 5px;
+    background: var(--waiting-soft);
+    color: var(--usage-warn);
+    font-weight: 600;
+  }
+  .chip--label {
+    height: auto;
+    padding: 1px 6px;
+  }
+  .prio-dot {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--fg-muted);
+  }
+  .prio-dot--urgent {
+    background: var(--danger);
+  }
+  .prio-dot--high {
+    background: var(--usage-warn);
+  }
+  .prio-dot--medium {
+    background: var(--accent);
+  }
+  .props dd.prio {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .props dd.labels {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
   }
   .status-pick {
     font: inherit;

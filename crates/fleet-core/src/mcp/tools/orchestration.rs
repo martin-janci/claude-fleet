@@ -1245,7 +1245,7 @@ impl FleetTools {
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
         kill when dirty). set_status {item_id, status}: a person's status for \
         work with no ticket. edit {item_id, title?, notes?, assignees?, \
-        due_at?}: a person edits work with no ticket. attach {item_id, name, \
+        due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, \
         mime, data_base64, comment_id?}: a file on a task; attachment_delete \
         {attachment_id}. create {title, parent?, \
         notes?, assignees?, due_at?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts \

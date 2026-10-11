@@ -56,6 +56,15 @@ pub struct TrackerItemWrite {
     pub versions: Vec<String>,
     /// `YYYY-MM-DD` (migration 154).
     pub due_at: Option<String>,
+    /// `urgent | high | medium | low`, normalised by the adapter
+    /// (migration 169).
+    pub priority: Option<String>,
+    /// The tracker's labels, tidied ([`super::tidy_labels`]).
+    pub labels: Vec<String>,
+    /// The estimate, in `estimate_unit` (`points | hours`); the unit is set
+    /// exactly when the estimate is.
+    pub estimate: Option<super::Estimate>,
+    pub estimate_unit: Option<String>,
     pub updated_ext: Option<i64>,
     pub description: Option<String>,
     pub description_chars: Option<i64>,
@@ -142,6 +151,10 @@ struct Visible {
     unavailable: bool,
     meta: Option<String>,
     due_at: Option<String>,
+    priority: Option<String>,
+    labels: Option<String>,
+    estimate: Option<super::Estimate>,
+    estimate_unit: Option<String>,
 }
 
 impl Visible {
@@ -299,7 +312,8 @@ impl Store {
         Ok(self.conn.query_row(
             "SELECT key, aliases, title, url, kind, hierarchy_level, status_name, status_category, \
                     resolution, parent_id, containers, assignees, iteration, updated_ext, \
-                    unavailable_at IS NOT NULL, meta, due_at \
+                    unavailable_at IS NOT NULL, meta, due_at, priority, labels, estimate, \
+                    estimate_unit \
              FROM work_items WHERE id = ?1",
             rusqlite::params![id],
             |r| {
@@ -323,6 +337,12 @@ impl Store {
                         unavailable: r.get(14)?,
                         meta: meta.clone(),
                         due_at: r.get(16)?,
+                        priority: r.get(17)?,
+                        labels: r.get(18)?,
+                        estimate: r
+                            .get::<_, Option<f64>>(19)?
+                            .and_then(super::Estimate::new),
+                        estimate_unit: r.get(20)?,
                     },
                     ItemMeta::parse(meta.as_deref()),
                 ))
@@ -516,6 +536,10 @@ impl Store {
             unavailable: false,
             meta: meta_json.clone(),
             due_at: w.due_at.clone(),
+            priority: w.priority.clone(),
+            labels: json_list(&w.labels),
+            estimate: w.estimate,
+            estimate_unit: w.estimate.and(w.estimate_unit.clone()),
         };
 
         let (id, changed, status_change, session_change) = match (existing, before) {
@@ -538,7 +562,8 @@ impl Store {
                            iteration = ?13, updated_ext = ?14, meta = ?15, fetched_at = ?16, \
                            updated_at = ?16, unavailable_at = NULL, unavailable_reason = NULL, \
                            status_changed_at = CASE WHEN ?17 THEN ?16 ELSE status_changed_at END, \
-                           due_at = ?19 \
+                           due_at = ?19, priority = ?20, labels = ?21, estimate = ?22, \
+                           estimate_unit = ?23 \
                          WHERE id = ?18",
                         rusqlite::params![
                             after.key,
@@ -559,7 +584,11 @@ impl Store {
                             now,
                             status_moved,
                             id,
-                            after.due_at
+                            after.due_at,
+                            after.priority,
+                            after.labels,
+                            after.estimate.map(|e| e.0),
+                            after.estimate_unit
                         ],
                     )?;
                 } else if touch_unchanged {
@@ -624,9 +653,11 @@ impl Store {
                     "INSERT INTO work_items (source, tracker_id, external_id, key, aliases, title, \
                        url, kind, hierarchy_level, status_name, status_category, resolution, \
                        parent_id, containers, assignees, iteration, updated_ext, meta, fetched_at, \
-                       status_changed_at, created_at, updated_at, due_at) \
+                       status_changed_at, created_at, updated_at, due_at, priority, labels, \
+                       estimate, estimate_unit) \
                      VALUES ((SELECT provider FROM trackers WHERE id = ?1), ?1, ?2, ?3, ?4, ?5, ?6, \
-                       ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, ?18, ?18, ?19)",
+                       ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, ?18, ?18, ?19, \
+                       ?20, ?21, ?22, ?23)",
                     rusqlite::params![
                         tracker_id,
                         w.external_id,
@@ -646,7 +677,11 @@ impl Store {
                         after.updated_ext,
                         after.meta,
                         now,
-                        after.due_at
+                        after.due_at,
+                        after.priority,
+                        after.labels,
+                        after.estimate.map(|e| e.0),
+                        after.estimate_unit
                     ],
                 )?;
                 (
@@ -1279,6 +1314,63 @@ mod tests {
         .unwrap();
         bus.take();
         (s, t.id, bus)
+    }
+
+    #[test]
+    fn a_trackers_priority_labels_and_estimate_are_stored_and_a_change_is_visible() {
+        let (s, t, bus) = with_tracker(&["ABC"]);
+        let with = |priority: &str, labels: &[&str], estimate: f64, unit: &str| TrackerItemWrite {
+            priority: Some(priority.into()),
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            estimate: crate::store::Estimate::new(estimate),
+            estimate_unit: Some(unit.into()),
+            ..write("1", "ABC-1", ("To Do", "todo"))
+        };
+        let first = s
+            .upsert_tracker_item(t, &with("high", &["infra", "q4"], 5.0, "points"))
+            .unwrap();
+        let row = s.get_work_item(first.id).unwrap().unwrap();
+        assert_eq!(row.priority.as_deref(), Some("high"));
+        assert_eq!(row.labels, vec!["infra", "q4"]);
+        assert_eq!(
+            (row.estimate.map(|e| e.0), row.estimate_unit.as_deref()),
+            (Some(5.0), Some("points"))
+        );
+        // The Work view's reader sees them too.
+        let v = s.work_view_item(first.id).unwrap().unwrap();
+        assert_eq!(v.item, row);
+        bus.take();
+        // The same again is no change.
+        let same = s
+            .upsert_tracker_item(t, &with("high", &["infra", "q4"], 5.0, "points"))
+            .unwrap();
+        assert!(!same.changed);
+        // Each one moving is a change a reader sees, emitted.
+        for (p, l, e, u) in [
+            ("urgent", &["infra", "q4"][..], 5.0, "points"),
+            ("urgent", &["infra"][..], 5.0, "points"),
+            ("urgent", &["infra"][..], 8.0, "points"),
+            ("urgent", &["infra"][..], 8.0, "hours"),
+        ] {
+            let moved = s.upsert_tracker_item(t, &with(p, l, e, u)).unwrap();
+            assert!(moved.changed, "{p} {l:?} {e} {u}");
+            assert!(!bus.take().is_empty(), "{p} {l:?} {e} {u}");
+        }
+        // None of them at all clears them.
+        let cleared = s
+            .upsert_tracker_item(t, &write("1", "ABC-1", ("To Do", "todo")))
+            .unwrap();
+        assert!(cleared.changed);
+        let row = s.get_work_item(first.id).unwrap().unwrap();
+        assert_eq!(
+            (
+                row.priority,
+                row.labels.len(),
+                row.estimate,
+                row.estimate_unit
+            ),
+            (None, 0, None, None)
+        );
     }
 
     #[test]

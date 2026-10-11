@@ -471,3 +471,51 @@ fn a_description_is_cut_to_the_excerpt_with_its_true_length() {
     assert_eq!(s.description.as_deref(), Some("short one"));
     assert_eq!(s.description_chars, Some(9));
 }
+
+#[test]
+fn linear_priority_numbers_map_onto_fleets_four() {
+    for (n, want) in [
+        (json!(0), None),
+        (json!(1), Some("urgent")),
+        (json!(2), Some("high")),
+        (json!(3), Some("medium")),
+        (json!(4), Some("low")),
+        (json!(5), None),
+        (Value::Null, None),
+    ] {
+        assert_eq!(linear_priority(&n).as_deref(), want, "{n}");
+    }
+}
+
+#[test]
+fn priority_labels_and_estimate_are_asked_for_and_read() {
+    for want in [
+        "priority",
+        "estimate",
+        "labels(first: 20) { nodes { name } }",
+    ] {
+        assert!(ISSUE_FIELDS.contains(want), "{want}");
+    }
+    let f = FakeTransport::new();
+    let l = linear(&f);
+    let page = fixture("linear", "issues_mine_p1.json");
+    let s = |i: usize| l.snapshot(&page["data"]["issues"]["nodes"][i]).unwrap();
+    let sso = s(0);
+    assert_eq!(sso.priority.as_deref(), Some("urgent"));
+    assert_eq!(sso.labels, vec!["auth", "customer"]);
+    assert_eq!(
+        (sso.estimate.map(|e| e.0), sso.estimate_unit.as_deref()),
+        (Some(3.0), Some("points"))
+    );
+    // Priority 0 is none; a null estimate is none, unit and all.
+    let audit = s(1);
+    assert_eq!(
+        (
+            audit.priority,
+            audit.labels.len(),
+            audit.estimate,
+            audit.estimate_unit
+        ),
+        (None, 0, None, None)
+    );
+}

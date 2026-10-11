@@ -602,6 +602,10 @@ export async function editWorkItem(
   if (edit.assignees !== undefined) args.assignees = edit.assignees;
   if (edit.due_at !== undefined) args.due_at = edit.due_at;
   if (edit.epic !== undefined) args.epic = edit.epic;
+  if (edit.priority !== undefined) args.priority = edit.priority;
+  if (edit.labels !== undefined) args.labels = edit.labels;
+  if (edit.estimate !== undefined) args.estimate = edit.estimate;
+  if (edit.estimate_unit !== undefined) args.estimate_unit = edit.estimate_unit;
   const r = await invokeCmd<WorkItemRow>('edit_work_item', { args });
   if (r.ok) {
     if (edit.title !== undefined) patchWorkItemTitle(itemId, r.value.title);
@@ -619,6 +623,50 @@ export interface WorkItemEdit {
   due_at?: string;
   /** A top-level task is an epic (sprints design §3). */
   epic?: boolean;
+  /** `''` clears. */
+  priority?: WorkPriority | '';
+  /** `[]` clears. */
+  labels?: string[];
+  /** 0 to 1000; `0` clears it and its unit. */
+  estimate?: number;
+  estimate_unit?: EstimateUnit;
+}
+
+/** A task's priority, most pressing first (migration 169). */
+export type WorkPriority = 'urgent' | 'high' | 'medium' | 'low';
+export const WORK_PRIORITIES: { value: WorkPriority; label: string }[] = [
+  { value: 'urgent', label: 'Urgent' },
+  { value: 'high', label: 'High' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'low', label: 'Low' },
+];
+/** What an estimate counts. */
+export type EstimateUnit = 'points' | 'hours';
+/** Most labels a task keeps, and the longest one a person types. */
+export const LABELS_MAX = 20;
+export const LABEL_MAX_CHARS = 40;
+/** The largest estimate a person types. */
+export const ESTIMATE_MAX = 1000;
+
+/** A priority as the task detail says it ("High"); `null` for none or one
+ *  this build does not know. */
+export function priorityLabel(p: string | null | undefined): string | null {
+  return WORK_PRIORITIES.find((x) => x.value === p)?.label ?? null;
+}
+
+/** An estimate as the task detail says it: "3 pts", "1 pt", "4 h";
+ *  `null` for none. */
+export function estimateLabel(estimate: number | null | undefined, unit: string | null | undefined): string | null {
+  if (estimate == null || !Number.isFinite(estimate) || estimate <= 0) return null;
+  const n = Number.isInteger(estimate) ? String(estimate) : String(Math.round(estimate * 100) / 100);
+  if (unit === 'hours') return `${n} h`;
+  return `${n} ${estimate === 1 ? 'pt' : 'pts'}`;
+}
+
+/** Labels typed as one line: split on commas, trimmed, empty ones and
+ *  repeats (case-insensitive) dropped, as the backend stores them. */
+export function parseLabels(raw: string): string[] {
+  return parseAssignees(raw);
 }
 
 /** File a local item under an epic or a task (`parentItemId`), or take it

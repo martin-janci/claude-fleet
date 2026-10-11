@@ -894,6 +894,14 @@ fn key_or_drop(k: String) -> Option<String> {
 /// answer — controls these strings, and each one rides in every linked
 /// session's row, row event and `GET /events` frame.
 pub fn to_write(s: WorkItemSnapshot) -> TrackerItemWrite {
+    // The estimate and its unit travel together: no positive number or a
+    // unit fleet does not know drops both.
+    let estimate = s.estimate.and_then(|e| {
+        crate::store::ESTIMATE_UNITS
+            .into_iter()
+            .find(|u| s.estimate_unit.as_deref() == Some(*u))
+            .map(|u| (e, u))
+    });
     TrackerItemWrite {
         external_id: cap(s.external_id, ID_MAX_CHARS),
         key: s.key.and_then(key_or_drop),
@@ -920,6 +928,15 @@ pub fn to_write(s: WorkItemSnapshot) -> TrackerItemWrite {
         due_at: s
             .due_at
             .filter(|d| crate::store::parse_due_date(d).is_some()),
+        priority: s
+            .priority
+            .filter(|p| crate::store::PRIORITIES.contains(&p.as_str())),
+        labels: crate::store::tidy_labels(s.labels)
+            .into_iter()
+            .map(|l| cap(l, FIELD_MAX_CHARS))
+            .collect(),
+        estimate: estimate.map(|(e, _)| e),
+        estimate_unit: estimate.map(|(_, u)| u.to_string()),
         updated_ext: s.updated,
         description: s.description,
         description_chars: s.description_chars,

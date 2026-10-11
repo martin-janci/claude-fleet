@@ -23,7 +23,14 @@ import { invokeCmd, type IpcError, type Result } from './result';
 import { readPref, writePref } from './prefs';
 import type { DecisionProposal } from './proposals';
 import { acceptCommandRow, formatCostMicros, sessions, type SessionEvent, type SessionRow } from './sessions';
-import { bumpWorkChanged, workChanged, type WorkChangeKind, type WorkEvidence } from './work';
+import {
+  bumpWorkChanged,
+  workChanged,
+  type EstimateUnit,
+  type WorkChangeKind,
+  type WorkEvidence,
+  type WorkPriority,
+} from './work';
 import { pickTask, selectedTaskId, taskFocused, type TaskSessionLink } from './selection';
 import { trackerStateBadge } from './trackers';
 import { knownProviderShort } from './tracker_health';
@@ -206,6 +213,12 @@ export interface WorkTask {
   assignees?: string[];
   /** The date the work is due, `YYYY-MM-DD` (absent from an older hub). */
   due_at?: string | null;
+  /** `urgent | high | medium | low` (absent from an older hub). */
+  priority?: WorkPriority | null;
+  labels?: string[];
+  /** How big the work is, in `estimate_unit`. */
+  estimate?: number | null;
+  estimate_unit?: EstimateUnit | null;
   mine?: boolean;
   org_id?: number | null;
   org_source?: OrgSource | string;

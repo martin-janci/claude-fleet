@@ -175,6 +175,10 @@ pub fn snapshot_json(s: &WorkItemSnapshot) -> Value {
         "iteration": s.iteration,
         "iteration_active": s.iteration_active,
         "versions": s.versions,
+        "priority": s.priority,
+        "labels": s.labels,
+        "estimate": s.estimate.map(|e| e.0),
+        "estimate_unit": s.estimate_unit,
         "updated": s.updated,
         "description": s.description,
     })

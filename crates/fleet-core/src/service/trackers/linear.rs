@@ -27,7 +27,7 @@ use super::{
     ViewDef, WorkItemSnapshot, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
-use crate::store::{TrackerConfig, TrackerCredential};
+use crate::store::{Estimate, TrackerConfig, TrackerCredential};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
@@ -42,7 +42,8 @@ const RECENT_DAYS: i64 = 14;
 /// The fields fleet reads of an issue, and nothing else.
 const ISSUE_FIELDS: &str = "fragment I on Issue { id identifier title url updatedAt description \
      previousIdentifiers state { name type } team { key } assignee { id name } \
-     parent { id identifier } cycle { number name isActive } projectMilestone { name } }";
+     parent { id identifier } cycle { number name isActive } projectMilestone { name } \
+     priority estimate labels(first: 20) { nodes { name } } }";
 
 pub struct Linear {
     /// The workspace `urlKey` the site names.
@@ -59,6 +60,19 @@ pub fn site_url_key(site_url: &str) -> Option<String> {
         .strip_prefix("https://linear.app/")
         .filter(|k| !k.is_empty() && !k.contains('/'))
         .map(str::to_ascii_lowercase)
+}
+
+/// Linear's `priority` (0 none, 1 urgent, 2 high, 3 medium, 4 low) →
+/// fleet's priority.
+pub fn linear_priority(v: &Value) -> Option<String> {
+    let p = match v.as_i64()? {
+        1 => "urgent",
+        2 => "high",
+        3 => "medium",
+        4 => "low",
+        _ => return None,
+    };
+    Some(p.to_string())
 }
 
 /// `ENG-123`: a team key (letters and digits), a dash, a number — the shape
@@ -300,6 +314,20 @@ impl Linear {
             // date; a Linear project is closer to an epic).
             // No due date read from this tracker yet.
             due_at: None,
+            priority: linear_priority(&n["priority"]),
+            labels: n["labels"]["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| l["name"].as_str())
+                .map(str::to_string)
+                .collect(),
+            // A team's estimates are points, whatever its scale.
+            estimate: n["estimate"].as_f64().and_then(Estimate::new),
+            estimate_unit: n["estimate"]
+                .as_f64()
+                .and_then(Estimate::new)
+                .map(|_| "points".to_string()),
             versions: n["projectMilestone"]["name"]
                 .as_str()
                 .map(|t| vec![t.to_string()])

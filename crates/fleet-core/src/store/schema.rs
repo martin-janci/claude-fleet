@@ -790,6 +790,16 @@ fn work_items_has_due_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// already_applied guard of migration 169.
+fn work_items_has_estimate_unit(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'estimate_unit'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// already_applied guard of migration 162.
 fn work_buckets_has_owner(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1913,6 +1923,12 @@ const MIGRATIONS: &[Migration] = &[
         168,
         include_str!("../../migrations/168_work_item_attachments.sql"),
     ),
+    // A task's priority, labels and estimate: ADD COLUMNs, so a guard.
+    Migration {
+        version: 169,
+        sql: include_str!("../../migrations/169_work_item_priority_labels_estimate.sql"),
+        already_applied: Some(work_items_has_estimate_unit),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

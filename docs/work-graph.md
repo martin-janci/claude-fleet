@@ -85,6 +85,23 @@ The Work tab opens in **List** layout; the header, filters and saved views are u
 - Tracker items stay read-only: nothing here writes to Jira, Asana or GitHub.
 - Hosts pick up step capture after re-provisioning (they read `provision_stale` until then); meanwhile the Stop hook backfills steps from the transcript.
 
+### Priority, labels and estimate
+
+A task carries a **priority** (`urgent`, `high`, `medium` or `low`, or none), up to 20 **labels** and an **estimate** in story **points** or **hours** (`work_items.priority`, `labels`, `estimate`, `estimate_unit`; migration 169). The task page's rail shows them under *Details* (a row only when it is set: the priority as a coloured dot and its word, the labels as chips, the estimate as "3 pts" or "4 h"), and its header adds a chip for an urgent or high one.
+
+On a task written in fleet a person sets them in **Edit task** or with `work_link { action: edit, item_id, priority?, labels?, estimate?, estimate_unit? }`: a priority from the four, labels of at most 40 characters each (trimmed, each once), an estimate from 0 to 1000. `priority: ""`, `labels: []` and `estimate: 0` clear them, the unit going with the estimate; `estimate_unit` alone re-units the estimate the task has, and a first estimate without one is in points. A bad value refuses the whole edit.
+
+A ticket's come from its tracker on every sync and are read-only in fleet (nothing is written back); a change to any of them is a change readers see:
+
+| Tracker | Priority | Labels | Estimate |
+|---|---|---|---|
+| Jira Cloud and Data Center | the priority's name: Highest / Blocker / Critical → urgent, High / Major → high, Medium → medium, Low / Lowest / Minor / Trivial → low, any other name → none | `labels` | the story-points field the tracker test finds (a number field named *Story Points* or *Story point estimate*) in points, else the original time estimate in hours |
+| Linear | `priority` 1–4 → urgent … low, 0 → none | its labels | `estimate`, in points |
+| GitHub | none | the issue's labels | none |
+| Asana | none | the task's tags | none |
+
+A Jira tracker connected before this release learns its story-points field at its next **Test**.
+
 ## The Work view
 
 The sidebar has two ways into the same work: **Sessions** (host / project →

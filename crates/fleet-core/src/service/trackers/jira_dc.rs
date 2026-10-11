@@ -124,12 +124,16 @@ impl JiraDc {
             "description",
             "fixVersions",
             "duedate",
+            "priority",
+            "labels",
+            "timeoriginalestimate",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
         f.extend(self.config.sprint_field.clone());
         f.extend(self.config.epic_field.clone());
+        f.extend(self.config.points_field.clone());
         f
     }
 
@@ -292,6 +296,13 @@ impl JiraDc {
                 .filter(|s| *s)
                 .map(|_| -1)
         });
+        let (estimate, estimate_unit) = super::jira_common::estimate(
+            self.config
+                .points_field
+                .as_deref()
+                .map_or(&Value::Null, |pf| &f[pf]),
+            &f["timeoriginalestimate"],
+        );
         let (description, description_chars) = adf_excerpt(&f["description"]);
         Some(WorkItemSnapshot {
             url: key.as_ref().map(|k| format!("{}/browse/{k}", self.site)),
@@ -322,6 +333,10 @@ impl JiraDc {
             iteration_active,
             versions: super::jira_common::fix_versions(&f["fixVersions"]),
             due_at: super::jira_common::due_date(&f["duedate"]),
+            priority: super::jira_common::priority(&f["priority"]),
+            labels: super::jira_common::labels(&f["labels"]),
+            estimate,
+            estimate_unit,
             updated: f["updated"].as_str().and_then(super::parse_timestamp),
             description,
             description_chars,
@@ -434,6 +449,7 @@ impl TrackerProvider for JiraDc {
         };
         let sprint_field = field(SPRINT_FIELD_SCHEMA);
         let epic_field = field(EPIC_LINK_SCHEMA);
+        let points_field = super::jira_common::story_points_field(&fields);
         let sprint_projects = if sprint_field.is_some() {
             match self
                 .search(
@@ -471,6 +487,7 @@ impl TrackerProvider for JiraDc {
                 sprint_projects,
                 sprint_field,
                 epic_field,
+                points_field,
                 ..Default::default()
             },
         })

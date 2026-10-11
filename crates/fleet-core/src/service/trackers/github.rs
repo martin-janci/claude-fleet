@@ -45,6 +45,7 @@ const RECENT_DAYS: i64 = 14;
 const ISSUE_FIELDS: &str = "fragment I on Issue { id number title url state stateReason \
      updatedAt body repository { nameWithOwner } assignees(first: 10) { nodes { login } } \
      issueType { name } parent { id number repository { nameWithOwner } } milestone { title } \
+     labels(first: 20) { nodes { name } } \
      linkedBranches(first: 1) { totalCount } \
      closedByPullRequestsReferences(first: 1, includeClosedPrs: false) { totalCount } }";
 
@@ -285,6 +286,18 @@ impl GitHub {
             // An issue has no due date of its own (its milestone's is the
             // release's, not the issue's).
             due_at: None,
+            // No priority or estimate of its own (a project's custom field
+            // is the project's, not the issue's).
+            priority: None,
+            labels: n["labels"]["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| l["name"].as_str())
+                .map(str::to_string)
+                .collect(),
+            estimate: None,
+            estimate_unit: None,
             // A milestone is GitHub's release: a due date and a closed state.
             versions: n["milestone"]["title"]
                 .as_str()

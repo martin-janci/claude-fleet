@@ -386,6 +386,15 @@ images open in a lightbox, other files download); an image pasted into the
 comment composer is attached there. Not yet: attachments on the phone, a
 tracker's own attachments (`source`/`external_id` are reserved for them).
 
+A task's priority, labels and estimate (migration 169, `work_items.priority`
+/ `labels` / `estimate` / `estimate_unit`): set on a native task through
+`work_link { edit }` and Edit task, read from every tracker on sync (Jira's
+priority name and story-points field or original estimate, Linear's
+priority, estimate and labels, GitHub labels, Asana tags) and shown in the
+task page's rail and header ([work-graph.md](work-graph.md#priority-labels-and-estimate)).
+Not yet: writing them back to a tracker, filtering or sorting by them, the
+Board card and the phone.
+
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
 census languages` over `service::nl` (cargo feature `nl-detect`, lingua, ON

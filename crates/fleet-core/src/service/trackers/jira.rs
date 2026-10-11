@@ -111,6 +111,9 @@ impl JiraCloud {
             "description",
             "fixVersions",
             "duedate",
+            "priority",
+            "labels",
+            "timeoriginalestimate",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -118,6 +121,7 @@ impl JiraCloud {
         if let Some(sprint) = &self.config.sprint_field {
             f.push(sprint.clone());
         }
+        f.extend(self.config.points_field.clone());
         f
     }
 
@@ -261,6 +265,13 @@ impl JiraCloud {
             .as_deref()
             .map(|sf| current_sprint(&f[sf]))
             .unwrap_or((None, false));
+        let (estimate, estimate_unit) = super::jira_common::estimate(
+            self.config
+                .points_field
+                .as_deref()
+                .map_or(&Value::Null, |pf| &f[pf]),
+            &f["timeoriginalestimate"],
+        );
         let (description, description_chars) = adf_excerpt(&f["description"]);
         Some(WorkItemSnapshot {
             url: key.as_ref().map(|k| format!("{}/browse/{k}", self.site)),
@@ -297,6 +308,10 @@ impl JiraCloud {
             iteration_active,
             versions: super::jira_common::fix_versions(&f["fixVersions"]),
             due_at: super::jira_common::due_date(&f["duedate"]),
+            priority: super::jira_common::priority(&f["priority"]),
+            labels: super::jira_common::labels(&f["labels"]),
+            estimate,
+            estimate_unit,
             updated: f["updated"].as_str().and_then(super::parse_timestamp),
             description,
             description_chars,
@@ -395,6 +410,7 @@ impl TrackerProvider for JiraCloud {
                 .and_then(|f| f["id"].as_str())
                 .map(str::to_string)
         });
+        let points_field = super::jira_common::story_points_field(&fields);
         let sprint_projects = if sprint_field.is_some() {
             match self.sprint_projects().await {
                 Ok(p) => p,
@@ -413,6 +429,7 @@ impl TrackerProvider for JiraCloud {
                 key_prefixes,
                 sprint_projects,
                 sprint_field,
+                points_field,
                 ..Default::default()
             },
         })

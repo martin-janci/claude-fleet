@@ -273,6 +273,16 @@ pub struct WorkTask {
     /// The date the work is due, `YYYY-MM-DD` (the Board card's "You · Fri").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<String>,
+    /// `urgent | high | medium | low` (migration 169).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// How big the work is, in `estimate_unit` (`points | hours`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<crate::store::Estimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_unit: Option<String>,
     pub mine: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
@@ -2503,6 +2513,10 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         unavailable_reason: item.and_then(|i| i.item.unavailable_reason.clone()),
         assignees: item.map(|i| i.item.assignees.clone()).unwrap_or_default(),
         due_at: item.and_then(|i| i.item.due_at.clone()),
+        priority: item.and_then(|i| i.item.priority.clone()),
+        labels: item.map(|i| i.item.labels.clone()).unwrap_or_default(),
+        estimate: item.and_then(|i| i.item.estimate),
+        estimate_unit: item.and_then(|i| i.item.estimate_unit.clone()),
         mine: item.is_some_and(|i| g.is_mine(i)),
         org_id,
         org_source: org_source.into(),

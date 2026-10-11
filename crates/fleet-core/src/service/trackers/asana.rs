@@ -72,7 +72,7 @@ pub fn section_key(name: &str) -> Option<String> {
 /// The task fields fleet reads, and nothing else.
 pub const TASK_FIELDS: &str = "gid,name,completed,modified_at,notes,permalink_url,\
      resource_subtype,assignee.gid,assignee.name,parent.gid,memberships.project.gid,\
-     memberships.project.name,memberships.section.name";
+     memberships.project.name,memberships.section.name,tags.name";
 
 pub struct Asana {
     /// The workspace the site names, if it names one.
@@ -262,6 +262,18 @@ impl Asana {
             iteration_active: false,
             // No due date read from this tracker yet.
             due_at: None,
+            // No priority or estimate of its own (a custom field's, if any,
+            // is the project's); its tags are its labels.
+            priority: None,
+            labels: t["tags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| l["name"].as_str())
+                .map(str::to_string)
+                .collect(),
+            estimate: None,
+            estimate_unit: None,
             versions: Vec::new(),
             updated: t["modified_at"].as_str().and_then(super::parse_timestamp),
             description,

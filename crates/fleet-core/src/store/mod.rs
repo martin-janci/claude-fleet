@@ -227,7 +227,7 @@ pub use update::{
 pub use wizard_state::{WizardStateRow, WizardStateWrite};
 pub use work::{
     canonical_key, github_ref, normalize_work_ref, primary_conflict, split_github_repo, Decider,
-    WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, PERSON_SOURCES, WORK_LINK_SOURCES,
+    Estimate, WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, PERSON_SOURCES, WORK_LINK_SOURCES,
 };
 pub use work_attachments::{
     attachment_mime, sniff_mime, validate_attachment_name, AttachmentRow, NewAttachment,
@@ -251,9 +251,11 @@ pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
 pub use work_status::STATUS_CATEGORIES;
 pub use work_tasks::{
-    is_epic, job_status, parse_due_date, validate_assignees, validate_due_date, ItemEdit,
-    NativeItem, Proposal, TreeEntry, TreeRef, ACCEPT_UNDO_SECS, EPIC_KIND, LOCAL_DEPTH_MAX,
-    PROPOSALS_OPEN_CAP, TASK_KEY_PREFIX,
+    is_epic, job_status, parse_due_date, tidy_labels, validate_assignees, validate_due_date,
+    validate_estimate, validate_estimate_unit, validate_labels, validate_priority, ItemEdit,
+    NativeItem, Proposal, TreeEntry, TreeRef, ACCEPT_UNDO_SECS, EPIC_KIND, ESTIMATE_MAX,
+    ESTIMATE_UNITS, LABELS_MAX, LABEL_MAX_CHARS, LOCAL_DEPTH_MAX, PRIORITIES, PROPOSALS_OPEN_CAP,
+    TASK_KEY_PREFIX,
 };
 pub use work_tidy::ReopenedWork;
 pub use work_usage::{DetectionCounts, JournalCounts};

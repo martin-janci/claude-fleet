@@ -1533,7 +1533,9 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             "work_link",
             json!({ "session_id": null, "action": "edit", "key": null, "item_id": 9,
                     "link_id": null, "source": null, "title": "Fix login",
-                    "notes": "", "assignees": ["Ana"], "due_at": "2026-10-16" }),
+                    "notes": "", "assignees": ["Ana"], "due_at": "2026-10-16",
+                    "priority": "high", "labels": ["infra"], "estimate": 3.0,
+                    "estimate_unit": "points" }),
             NATIVE_ITEM_PAYLOAD,
             Box::new(|b, s, _| {
                 block_on(commands::work::routed::edit_work_item(
@@ -1545,6 +1547,10 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                         assignees: Some(vec!["Ana".into()]),
                         due_at: Some("2026-10-16".into()),
                         epic: None,
+                        priority: Some("high".into()),
+                        labels: Some(vec!["infra".into()]),
+                        estimate: Some(3.0),
+                        estimate_unit: Some("points".into()),
                     },
                     s,
                 ))

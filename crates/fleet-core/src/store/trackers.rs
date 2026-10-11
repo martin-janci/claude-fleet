@@ -76,6 +76,10 @@ pub struct TrackerConfig {
     /// Jira Data Center: the Epic Link custom field's id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epic_field: Option<String>,
+    /// Jira: the story-points custom field's id (`customfield_10016`), a
+    /// task's estimate in points; `None` when the site has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub points_field: Option<String>,
     // --- M6: what the providers after Jira learn; all default.
     /// The workspace / organisation the tracker reads (Asana workspace gid,
     /// Linear organisation id).

@@ -276,6 +276,7 @@ pub fn import(
                         notes: None,
                         assignees: new_lane,
                         due_at: None,
+                        ..ItemEdit::default()
                     },
                 )?;
                 changed = true;

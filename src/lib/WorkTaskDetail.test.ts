@@ -173,6 +173,43 @@ describe('WorkTaskDetail', () => {
     expect(screen.queryByTestId('work-task-assign-org')).toBeNull();
   });
 
+  it('the rail shows priority, labels and estimate; the header a chip for urgent or high only', async () => {
+    handlers.work_task = () => ({
+      ...trackerTask,
+      task: { ...trackerTask.task, priority: 'urgent', labels: ['billing', 'q4'], estimate: 3, estimate_unit: 'points' },
+    });
+    const { unmount } = render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    const prio = screen.getByTestId('work-task-priority');
+    expect(prio.textContent?.trim()).toBe('Urgent');
+    expect(prio.querySelector('.prio-dot--urgent')).not.toBeNull();
+    const labels = screen.getByTestId('work-task-labels');
+    expect(Array.from(labels.querySelectorAll('.chip')).map((c) => c.textContent)).toEqual(['billing', 'q4']);
+    expect(screen.getByTestId('work-task-estimate').textContent).toBe('3 pts');
+    expect(screen.getByTestId('work-task-priority-chip').textContent?.trim()).toBe('Urgent');
+    unmount();
+    // Medium: in the rail, not in the header; hours read as "h".
+    handlers.work_task = () => ({
+      ...trackerTask,
+      task: { ...trackerTask.task, priority: 'medium', labels: [], estimate: 4, estimate_unit: 'hours' },
+    });
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    expect(screen.getByTestId('work-task-priority').textContent?.trim()).toBe('Medium');
+    expect(screen.queryByTestId('work-task-priority-chip')).toBeNull();
+    expect(screen.queryByTestId('work-task-labels')).toBeNull();
+    expect(screen.getByTestId('work-task-estimate').textContent).toBe('4 h');
+  });
+
+  it('a task without priority, labels or estimate shows no such rows', async () => {
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    for (const id of ['work-task-priority', 'work-task-labels', 'work-task-estimate', 'work-task-priority-chip']) {
+      expect(screen.queryByTestId(id), id).toBeNull();
+    }
+    expect(screen.getByText('Details')).toBeTruthy();
+  });
+
   it('a whole description carries no cut notice', async () => {
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();

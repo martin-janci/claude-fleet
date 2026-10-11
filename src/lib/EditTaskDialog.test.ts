@@ -12,7 +12,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import { clearToasts, runToastAction, toasts } from './toasts';
 import EditTaskDialog from './EditTaskDialog.svelte';
-import { dueLabel, ownerDueChip, parseAssignees } from './work';
+import { dueLabel, estimateLabel, ownerDueChip, parseAssignees, priorityLabel } from './work';
 import type { TaskDetail, WorkTask } from './work_view';
 
 const task = (over: Partial<WorkTask> = {}): WorkTask => ({
@@ -84,6 +84,23 @@ describe('dueLabel / ownerDueChip', () => {
     expect(ownerDueChip({ assignees: ['Ana'] }, now)).toEqual({ text: 'Ana', overdue: false });
     expect(ownerDueChip({ due_at: '2026-10-16' }, now)).toEqual({ text: 'Tomorrow', overdue: false });
     expect(ownerDueChip({ assignees: [] }, now)).toBeNull();
+  });
+});
+
+describe('priorityLabel / estimateLabel', () => {
+  it('names the four priorities and nothing else', () => {
+    expect(priorityLabel('urgent')).toBe('Urgent');
+    expect(priorityLabel('low')).toBe('Low');
+    expect(priorityLabel('p1')).toBeNull();
+    expect(priorityLabel(null)).toBeNull();
+  });
+  it('says points and hours, and nothing for no estimate', () => {
+    expect(estimateLabel(3, 'points')).toBe('3 pts');
+    expect(estimateLabel(1, 'points')).toBe('1 pt');
+    expect(estimateLabel(2.5, 'hours')).toBe('2.5 h');
+    expect(estimateLabel(1.3333, 'hours')).toBe('1.33 h');
+    expect(estimateLabel(0, 'points')).toBeNull();
+    expect(estimateLabel(null, null)).toBeNull();
   });
 });
 
@@ -170,6 +187,74 @@ describe('EditTaskDialog', () => {
     await fireEvent.click(screen.getByTestId('edit-task-submit'));
     await waitFor(() => expect(onclose).toHaveBeenCalled());
     expect(calls('edit_work_item')).toEqual([['edit_work_item', { args: { item_id: 9, due_at: '' } }]]);
+  });
+
+  it('sets priority, labels and an estimate in hours', async () => {
+    answer({ task: task(), notes: null });
+    const onclose = vi.fn();
+    render(EditTaskDialog, { props: { taskId: 'item:9', onclose } });
+    await waitFor(() => expect(screen.getByTestId('edit-task-priority')).toBeTruthy());
+    expect((screen.getByTestId('edit-task-priority') as HTMLSelectElement).value).toBe('');
+    expect((screen.getByTestId('edit-task-estimate') as HTMLInputElement).value).toBe('');
+    await fireEvent.change(screen.getByTestId('edit-task-priority'), { target: { value: 'high' } });
+    await type('edit-task-labels', ' infra, q4 ,, Infra ');
+    await type('edit-task-estimate', '4');
+    await fireEvent.change(screen.getByTestId('edit-task-estimate-unit'), { target: { value: 'hours' } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('edit-task-submit'));
+    await waitFor(() => expect(onclose).toHaveBeenCalled());
+    expect(calls('edit_work_item')).toEqual([
+      [
+        'edit_work_item',
+        { args: { item_id: 9, priority: 'high', labels: ['infra', 'q4'], estimate: 4, estimate_unit: 'hours' } },
+      ],
+    ]);
+  });
+
+  it('clears priority, labels and estimate, and Undo writes them back', async () => {
+    answer({
+      task: task({ priority: 'urgent', labels: ['infra'], estimate: 3, estimate_unit: 'points' }),
+      notes: null,
+    });
+    const onclose = vi.fn();
+    render(EditTaskDialog, { props: { taskId: 'item:9', onclose } });
+    await waitFor(() => expect(screen.getByTestId('edit-task-priority')).toBeTruthy());
+    expect((screen.getByTestId('edit-task-priority') as HTMLSelectElement).value).toBe('urgent');
+    expect((screen.getByTestId('edit-task-labels') as HTMLInputElement).value).toBe('infra');
+    expect((screen.getByTestId('edit-task-estimate') as HTMLInputElement).value).toBe('3');
+    await fireEvent.change(screen.getByTestId('edit-task-priority'), { target: { value: '' } });
+    await type('edit-task-labels', '');
+    await type('edit-task-estimate', '');
+    await fireEvent.click(screen.getByTestId('edit-task-submit'));
+    await waitFor(() => expect(onclose).toHaveBeenCalled());
+    expect(calls('edit_work_item')).toEqual([
+      ['edit_work_item', { args: { item_id: 9, priority: '', labels: [], estimate: 0 } }],
+    ]);
+    const [t] = get(toasts);
+    vi.mocked(invoke).mockClear();
+    runToastAction(t.id);
+    await waitFor(() => expect(calls('edit_work_item')).toHaveLength(1));
+    expect(calls('edit_work_item')).toEqual([
+      [
+        'edit_work_item',
+        { args: { item_id: 9, priority: 'urgent', labels: ['infra'], estimate: 3, estimate_unit: 'points' } },
+      ],
+    ]);
+  });
+
+  it('an estimate over 1000 or too many labels keeps Save off and says why', async () => {
+    answer({ task: task(), notes: null });
+    render(EditTaskDialog, { props: { taskId: 'item:9', onclose: vi.fn() } });
+    await waitFor(() => expect(screen.getByTestId('edit-task-estimate')).toBeTruthy());
+    await type('edit-task-estimate', '2000');
+    expect((screen.getByTestId('edit-task-submit') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('edit-task-size-error').textContent).toContain('0 to 1000');
+    await type('edit-task-estimate', '5');
+    await type('edit-task-labels', Array.from({ length: 21 }, (_, i) => `l${i}`).join(','));
+    expect(screen.getByTestId('edit-task-size-error').textContent).toContain('At most 20 labels');
+    await type('edit-task-labels', 'ok');
+    expect(screen.queryByTestId('edit-task-size-error')).toBeNull();
+    expect((screen.getByTestId('edit-task-submit') as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('sends a status change alone, and refuses an empty title', async () => {

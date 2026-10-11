@@ -8,7 +8,7 @@
 import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { acceptCommandRow, type SessionRow } from './sessions';
-import { bumpWorkChanged } from './work';
+import { bumpWorkChanged, type EstimateUnit, type WorkPriority } from './work';
 import { confidenceWord } from './ai_proposal';
 import { offerRuleAfterStart } from './rule_offer_toast';
 
@@ -105,6 +105,12 @@ export interface WorkItemRow {
   assignees?: string[];
   /** The date the work is due, `YYYY-MM-DD` (absent from an older hub). */
   due_at?: string | null;
+  /** `urgent | high | medium | low` (absent from an older hub). */
+  priority?: WorkPriority | null;
+  labels?: string[];
+  /** How big the work is, in `estimate_unit`. */
+  estimate?: number | null;
+  estimate_unit?: EstimateUnit | null;
   iteration?: string | null;
   updated_ext?: number | null;
   status_changed_at?: number | null;

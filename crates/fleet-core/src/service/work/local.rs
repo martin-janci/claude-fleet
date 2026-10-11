@@ -323,8 +323,9 @@ pub fn rename_local_item(
 }
 
 /// `work_link { action: edit, item_id, title?, notes?, assignees?, due_at?,
-/// epic? }`: a
-/// person edits a local item (task editing). The same fences as
+/// epic?, priority?, labels?, estimate?, estimate_unit? }`: a person edits a
+/// local item (task editing). `priority: ""`, `labels: []` and `estimate: 0`
+/// clear them; `estimate_unit` alone re-units the estimate the item has. The same fences as
 /// [`rename_local_item`]: a tracker's ticket is `E_INVALID` (its tracker
 /// owns its text), and an item outside the scope answers as an unknown id.
 pub fn edit_local_item(
@@ -340,11 +341,29 @@ pub fn edit_local_item(
         && args.assignees.is_none()
         && args.due_at.is_none()
         && args.epic.is_none()
+        && args.priority.is_none()
+        && args.labels.is_none()
+        && args.estimate.is_none()
+        && args.estimate_unit.is_none()
     {
         return Err(IpcError::new(
             codes::E_INVALID,
-            "edit needs title, notes, assignees, due_at or epic",
+            "edit needs title, notes, assignees, due_at, epic, priority, labels or estimate",
         ));
+    }
+    // Checked before anything is written (the epic flag is written first):
+    // a bad value refuses the whole edit.
+    if let Some(p) = args.priority.as_deref() {
+        crate::store::validate_priority(p)?;
+    }
+    if let Some(l) = args.labels.as_deref() {
+        crate::store::validate_labels(l)?;
+    }
+    if let Some(e) = args.estimate {
+        crate::store::validate_estimate(e)?;
+    }
+    if let Some(u) = args.estimate_unit.as_deref() {
+        crate::store::validate_estimate_unit(u)?;
     }
     let s = lock(store)?;
     let Some(item) = s.get_work_item(id)? else {
@@ -365,6 +384,12 @@ pub fn edit_local_item(
     if !local_item_visible(&s, scope, id)? {
         return Err(orgs::not_found("work item", id));
     }
+    if args.estimate.is_none() && args.estimate_unit.is_some() && item.estimate.is_none() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "estimate_unit needs an estimate: give both",
+        ));
+    }
     // The epic flag first: its refusal (an item under a parent) leaves the
     // rest of the edit unwritten too.
     if let Some(epic) = args.epic {
@@ -378,6 +403,10 @@ pub fn edit_local_item(
             notes: args.notes.as_deref(),
             assignees: args.assignees.as_deref(),
             due_at: args.due_at.as_deref(),
+            priority: args.priority.as_deref(),
+            labels: args.labels.as_deref(),
+            estimate: args.estimate,
+            estimate_unit: args.estimate_unit.as_deref(),
         },
     )?
     .ok_or_else(|| orgs::not_found("work item", id))
@@ -860,5 +889,159 @@ mod due_tests {
                 .due_at,
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    fn edit(id: i64) -> WorkLinkArgs {
+        WorkLinkArgs {
+            action: "edit".into(),
+            item_id: Some(id),
+            ..Default::default()
+        }
+    }
+
+    fn task(store: &Mutex<Store>) -> WorkItemRow {
+        create_task(
+            &WorkLinkArgs {
+                action: "create".into(),
+                title: Some("Rotate NAS sudo password".into()),
+                ..Default::default()
+            },
+            store,
+            &OrgScope::All,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn work_link_edit_sets_and_clears_priority_labels_and_estimate() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let t = task(&store);
+        let e = edit_local_item(
+            &WorkLinkArgs {
+                priority: Some("urgent".into()),
+                labels: Some(vec!["infra".into(), "security".into()]),
+                estimate: Some(4.0),
+                estimate_unit: Some("hours".into()),
+                ..edit(t.id)
+            },
+            &store,
+            &OrgScope::All,
+        )
+        .unwrap();
+        assert_eq!(e.priority.as_deref(), Some("urgent"));
+        assert_eq!(e.labels, vec!["infra", "security"]);
+        assert_eq!(
+            (e.estimate.map(|x| x.0), e.estimate_unit.as_deref()),
+            (Some(4.0), Some("hours"))
+        );
+        // Each is enough for an edit on its own, and each clears.
+        let e = edit_local_item(
+            &WorkLinkArgs {
+                priority: Some(String::new()),
+                labels: Some(vec![]),
+                estimate: Some(0.0),
+                ..edit(t.id)
+            },
+            &store,
+            &OrgScope::All,
+        )
+        .unwrap();
+        assert_eq!(
+            (e.priority, e.labels.len(), e.estimate, e.estimate_unit),
+            (None, 0, None, None)
+        );
+    }
+
+    #[test]
+    fn a_bad_value_refuses_the_whole_edit_epic_flag_included() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let t = task(&store);
+        for bad in [
+            WorkLinkArgs {
+                priority: Some("P1".into()),
+                ..edit(t.id)
+            },
+            WorkLinkArgs {
+                labels: Some(vec!["x".repeat(41)]),
+                ..edit(t.id)
+            },
+            WorkLinkArgs {
+                estimate: Some(1001.0),
+                ..edit(t.id)
+            },
+            WorkLinkArgs {
+                estimate: Some(2.0),
+                estimate_unit: Some("days".into()),
+                ..edit(t.id)
+            },
+            WorkLinkArgs {
+                estimate_unit: Some("hours".into()),
+                ..edit(t.id)
+            },
+        ] {
+            let e = edit_local_item(
+                &WorkLinkArgs {
+                    epic: Some(true),
+                    ..bad.clone()
+                },
+                &store,
+                &OrgScope::All,
+            )
+            .unwrap_err();
+            assert_eq!(e.code, codes::E_INVALID, "{bad:?}");
+        }
+        let row = lock(&store).unwrap().get_work_item(t.id).unwrap().unwrap();
+        assert_eq!(row.kind, t.kind, "the epic flag was not written either");
+        assert_eq!((row.priority, row.estimate), (None, None));
+    }
+
+    #[test]
+    fn a_trackers_ticket_keeps_its_trackers_priority_labels_and_estimate() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let id = {
+            let s = lock(&store).unwrap();
+            let t = s
+                .add_tracker("jira", "Acme", "https://acme.atlassian.net")
+                .unwrap();
+            s.upsert_tracker_item(
+                t.id,
+                &crate::store::TrackerItemWrite {
+                    external_id: "1".into(),
+                    key: Some("ABC-1".into()),
+                    title: "Ticket".into(),
+                    status_name: "To Do".into(),
+                    status_category: "todo".into(),
+                    priority: Some("low".into()),
+                    labels: vec!["infra".into()],
+                    estimate: crate::store::Estimate::new(3.0),
+                    estimate_unit: Some("points".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+        };
+        let e = edit_local_item(
+            &WorkLinkArgs {
+                priority: Some("urgent".into()),
+                labels: Some(vec![]),
+                estimate: Some(0.0),
+                ..edit(id)
+            },
+            &store,
+            &OrgScope::All,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert!(e.message.contains("tracker"), "{}", e.message);
+        let row = lock(&store).unwrap().get_work_item(id).unwrap().unwrap();
+        assert_eq!(row.priority.as_deref(), Some("low"));
+        assert_eq!(row.labels, vec!["infra"]);
+        assert_eq!(row.estimate.map(|x| x.0), Some(3.0));
     }
 }

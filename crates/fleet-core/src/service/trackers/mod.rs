@@ -148,6 +148,17 @@ pub struct WorkItemSnapshot {
     /// The due date, `YYYY-MM-DD` (Jira `duedate`); `None` where the
     /// tracker has none or the adapter does not read it.
     pub due_at: Option<String>,
+    /// `urgent | high | medium | low`, normalised from the tracker's own
+    /// scale (Jira's priority name, Linear's 1-4); `None` where it has none.
+    pub priority: Option<String>,
+    /// Label names, in the tracker's order (Jira `labels`, GitHub and
+    /// Linear labels, Asana tags).
+    pub labels: Vec<String>,
+    /// The estimate, in `estimate_unit`: story points (Linear, a Jira
+    /// story-points field) or hours (Jira's original time estimate).
+    pub estimate: Option<crate::store::Estimate>,
+    /// `points | hours`.
+    pub estimate_unit: Option<String>,
     /// The tracker's `updated`, unix seconds.
     pub updated: Option<i64>,
     /// The first [`DESCRIPTION_MAX_CHARS`] of the description as plain text.
