@@ -2806,7 +2806,8 @@ fn a_person_sees_their_own_device_names_and_no_one_elses() {
     structure::place(
         &w.st,
         &vs(&OrgScope::All),
-        &id,
+        Some(&id),
+        None,
         Some("Now"),
         None,
         Some(0),

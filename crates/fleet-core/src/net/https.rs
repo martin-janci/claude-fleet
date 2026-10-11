@@ -74,11 +74,17 @@ impl Request {
     }
 
     pub fn post_json(url: impl Into<String>, body: &serde_json::Value) -> Self {
+        Request::post_json_bytes(url, body.to_string().into_bytes())
+    }
+
+    /// [`Self::post_json`] for a body already written: one whose key order
+    /// matters (a `serde_json::Value` sorts its objects).
+    pub fn post_json_bytes(url: impl Into<String>, body: Vec<u8>) -> Self {
         let mut r = Request::get(url);
         r.method = Method::Post;
         r.headers
             .push(("Content-Type".into(), "application/json".into()));
-        r.body = Some(body.to_string().into_bytes());
+        r.body = Some(body);
         r
     }
 

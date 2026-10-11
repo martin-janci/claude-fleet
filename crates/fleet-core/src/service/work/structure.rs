@@ -190,12 +190,21 @@ fn unbound_only(scope: &OrgScope, what: &str) -> Result<(), IpcError> {
 
 // --- placement ----------------------------------------------------------------
 
-/// `work_link { action: place, task_id, group, note?, expected_version }`:
-/// put a task in a group (empty `group` and no `note`: back to where it
-/// would sit by itself). Navigation only, never a boundary; a
-/// tracker-controlled value is never written back. `expected_version` is
-/// the placement version the person saw (`0`: none). Answers the task as
-/// it now reads.
+/// `work_link { action: place, task_id | item_id, group, note?,
+/// expected_version }`: put a task in a group. Navigation only, never a
+/// boundary; a tracker-controlled value is never written back.
+/// `expected_version` is the placement version the person saw (`0`: none).
+/// Answers the task as it now reads.
+///
+/// - the task is `task_id` (`item:<id>` / `ref:<KEY>`) or `item_id`, as
+///   `create`, `run` and `bucket_add` take it; one missing-argument error
+///   names everything that is missing, so `item_id` alone does not cost two
+///   round trips to learn about the sentinel.
+/// - `group` may be an existing group's id — see [`group_value`] — which
+///   puts the task in THAT section rather than in a new one named after the
+///   id.
+/// - `action: unplace` (or an empty `group` with no `note`) clears the
+///   placement: the task goes back to where it would sit by itself.
 ///
 /// **It takes the WHOLE scope** (multi-user M1, T9b), because what it ANSWERS
 /// is a `WorkTask`, whose `sessions: Vec<TaskLink>` is every link of the task
@@ -206,10 +215,15 @@ fn unbound_only(scope: &OrgScope, what: &str) -> Result<(), IpcError> {
 /// no org, and T8's result gate cannot net a `TaskLink` (it spells the host
 /// `host` and carries no `tmux_name`). Same defect as `org_impact`'s, in the
 /// sibling arm.
+// Eight: the task by either name, the group, the note, the version seen
+// and the actor. `PlaceInput` would be the other way; the call sites are
+// the dispatcher, the desktop command and the tests.
+#[allow(clippy::too_many_arguments)]
 pub fn place(
     store: &Mutex<Store>,
     view: &crate::service::view_scope::ViewScope,
-    task_id: &str,
+    task_id: Option<&str>,
+    item_id: Option<i64>,
     group: Option<&str>,
     note: Option<&str>,
     expected_version: Option<i64>,
@@ -217,16 +231,32 @@ pub fn place(
 ) -> Result<WorkTask, IpcError> {
     let scope = &view.org;
     no_host(scope, "place")?;
-    let expected = expected_version.ok_or_else(|| {
-        invalid("place needs expected_version (0 when the task has no placement)")
-    })?;
+    // Both complaints at once. `item_id` is how `create`, `run` and
+    // `bucket_add` name a task, and `expected_version`'s 0 is not
+    // guessable, so sending `item_id` alone used to cost two round trips to
+    // learn two things — and the first answer never mentioned the second.
+    let target = task_id
+        .map(str::to_string)
+        .or_else(|| item_id.map(|id| format!("item:{id}")));
+    let mut missing = Vec::new();
+    if target.is_none() {
+        missing.push("task_id (item:<id> or ref:<KEY>) or item_id");
+    }
+    if expected_version.is_none() {
+        missing.push("expected_version (0 when the task has no placement)");
+    }
+    if !missing.is_empty() {
+        return Err(invalid(format!("place needs {}", missing.join(" and "))));
+    }
+    let (target, expected) = (target.unwrap_or_default(), expected_version.unwrap_or(0));
     let group = clean_text(group.unwrap_or_default(), "group", LABEL_MAX_CHARS, true)?;
     let note = clean_text(note.unwrap_or_default(), "note", NOTE_MAX_CHARS, true)?;
     let s = lock(store)?;
     let mut g = Graph::load_for(&s, view)?;
+    let group = group_value(&g, group.as_deref())?;
     // Visibility first: a task out of scope answers as an unknown one, and
     // its placement's version is never compared (no oracle).
-    let (task, _) = find_task(&g, scope, task_id, false)?;
+    let (task, _) = find_task(&g, scope, &target, false)?;
     let placement = s.set_work_placement(
         &task.task_id,
         group.as_deref(),
@@ -257,6 +287,52 @@ pub fn place(
         None => g.placements.remove(&task.task_id),
     };
     Ok(find_task(&g, scope, &task.task_id, false)?.0)
+}
+
+/// What a `group` is STORED as: an existing group's id as given, free text
+/// as itself.
+///
+/// A `<kind>:` prefix is taken at its word, so `place { group:
+/// "repo:martin-janci/claude-fleet" }` puts the task in THAT repo's section
+/// instead of a new one named after the id — and an id naming nothing is
+/// refused rather than opening the ghost section that taught us this. A key
+/// prefix is stored upper-cased, because that is the spelling
+/// `view::group_of` derives (`key:ABC` of `ABC-12`) and an id has to match
+/// it exactly to land in the same bucket.
+///
+/// A manual placement OUTRANKS every rule and every derived grouping until
+/// it is cleared, so pinning a task to the repo it happens to sit in today
+/// keeps it there after its session moves to another one. That is the
+/// nature of a pin, not a defect, and `unplace` undoes it.
+fn group_value(g: &Graph, group: Option<&str>) -> Result<Option<String>, IpcError> {
+    let Some(raw) = group else {
+        return Ok(None);
+    };
+    let shapes = "repo:<owner>/<repo>, tracker:<tracker id>:<container>, key:<PREFIX> or \
+                  label:<text> — or a label of your own, with no colon-prefix";
+    match crate::service::work::view::parse_group_id(raw) {
+        Some(crate::service::work::view::GroupId::Repo(r)) => {
+            if !g.repo_groups().any(|own| own.eq_ignore_ascii_case(r)) {
+                return Err(invalid(format!(
+                    "no repo group {r}: a group id must name a group that exists ({shapes})"
+                )));
+            }
+            Ok(Some(raw.to_string()))
+        }
+        Some(crate::service::work::view::GroupId::Tracker(tid, _)) => {
+            if !g.has_tracker(tid) {
+                return Err(invalid(format!(
+                    "no tracker {tid}: a group id must name a group that exists ({shapes})"
+                )));
+            }
+            Ok(Some(raw.to_string()))
+        }
+        Some(crate::service::work::view::GroupId::Key(p)) => {
+            Ok(Some(format!("key:{}", p.to_ascii_uppercase())))
+        }
+        // A `label:` id and free text are both the person's own words.
+        _ => Ok(Some(raw.to_string())),
+    }
 }
 
 // --- rules --------------------------------------------------------------------

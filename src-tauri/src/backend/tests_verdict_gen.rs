@@ -124,7 +124,7 @@ fn every_list_is_sorted() {
 fn a_known_command_lands_where_its_row_says() {
     let lists = verdict_lists();
     assert!(lists.routed.contains(&"list_sessions".to_string()));
-    assert!(lists.local_only.contains(&"add_host".to_string()));
+    assert!(lists.local_only.contains(&"remove_host".to_string()));
     assert!(lists
         .same_in_both
         .contains(&"collect_diagnostics".to_string()));
@@ -239,8 +239,8 @@ fn doc_table_names_the_refusal_for_a_local_only_command() {
     let table = render_doc_table();
     let row = table
         .lines()
-        .find(|l| l.starts_with("| `add_host`"))
-        .expect("add_host row");
+        .find(|l| l.starts_with("| `remove_host`"))
+        .expect("remove_host row");
     assert!(row.contains("fleet administration"));
 }
 

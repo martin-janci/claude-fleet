@@ -562,6 +562,20 @@ pub const WORK_CATCH_UP_SUMMARIES: &str = "work.catch_up_summaries";
 /// (`service::context_help`).
 pub const WORK_CONTEXT_HELP: &str = "work.context_help";
 
+/// Task attachments: the largest file a task takes, in MiB (at most
+/// [`crate::store::ATTACHMENT_MAX_MB_CEILING`], what the desktop↔hub
+/// transport carries).
+pub const WORK_ATTACHMENT_MAX_MB: &str = "work.attachment_max_mb";
+
+/// [`WORK_ATTACHMENT_MAX_MB`] in bytes.
+pub fn attachment_max_bytes(s: &Store) -> usize {
+    let mb = get_string(s, WORK_ATTACHMENT_MAX_MB)
+        .parse::<u64>()
+        .unwrap_or(10)
+        .clamp(1, crate::store::ATTACHMENT_MAX_MB_CEILING);
+    (mb as usize) * 1024 * 1024
+}
+
 /// Tidy-up (work graph M7): a session whose linked item has been done at
 /// least this many days (and that is idle, below) is suggested for tidying.
 pub const WORK_TIDY_DONE_DAYS: &str = "work.tidy_done_days";
@@ -739,6 +753,11 @@ pub const DECIDE_JEV_MODEL: &str = "decide.jev.model";
 pub const DECIDE_JEV_MODELS: &[&str] = &["jev-1.13.0", "jev-latest"];
 /// Days a `decision_runs` row is kept (`0` = forever).
 pub const DECIDE_RETENTION_DAYS: &str = "decide.retention_days";
+/// Per-feature confidence floors fitted from person-labelled runs
+/// (`service::decide::floor`), as JSON; `""` = none. Written by `fleet-hub
+/// decide floor fit --apply`; a value `decide::floor::parse` refuses is
+/// refused.
+pub const DECIDE_JEV_FLOORS: &str = "decide.jev.floors";
 
 /// What `hub.tls` holds (`fleet-hub`'s `TlsMode`).
 pub const HUB_TLS_MODES: &[&str] = &["off", "cert"];
@@ -1397,6 +1416,17 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Ai]),
     Spec::new(
+        WORK_ATTACHMENT_MAX_MB,
+        "10",
+        Kind::Int {
+            min: 1,
+            max: crate::store::ATTACHMENT_MAX_MB_CEILING,
+        },
+        "Largest attachment",
+        "The largest file or image a task takes. At most 16 MiB: what one call between the desktop and the hub carries.",
+    )
+    .unit(Unit::Mib),
+    Spec::new(
         WORK_TIDY_DONE_DAYS,
         "2",
         Kind::Int { min: 1, max: 365 },
@@ -1771,6 +1801,14 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Days)
     .zero("forever"),
+    Spec::new(
+        DECIDE_JEV_FLOORS,
+        "",
+        Kind::Text { max: 8192 },
+        "Jev: fitted floors",
+        "Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against.",
+    )
+    .tags(&[Tag::Advanced]),
     // ── read-only: owned and written elsewhere (D-P7) ──
     Spec::new(
         crate::service::hub::SETTING_BIND,
@@ -2075,7 +2113,13 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
             .map(|_| ())
             .map_err(|e| IpcError::new(codes::E_INVALID, format!("{key} {}", e.message))),
         Kind::PriceMap => crate::service::usage::parse_price_overrides(v).map(|_| ()),
-        Kind::Text { max } if v.len() <= max && !v.chars().any(char::is_control) => Ok(()),
+        Kind::Text { max } if v.len() <= max && !v.chars().any(char::is_control) => {
+            if key == DECIDE_JEV_FLOORS {
+                crate::service::decide::floor::parse(v)
+                    .map_err(|e| IpcError::new(codes::E_INVALID, format!("{key}: {e}")))?;
+            }
+            Ok(())
+        }
         Kind::Text { max } => Err(IpcError::new(
             codes::E_INVALID,
             format!("{key} must be one line of at most {max} characters"),

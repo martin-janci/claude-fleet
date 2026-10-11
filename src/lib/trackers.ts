@@ -88,7 +88,7 @@ export interface WorkItemRow {
   source: string;
   key?: string | null;
   /** Its fleet ticket key (`FLT-12`), shown in place of `key`; absent when
-   *  it drew none (a Jira key, a hub older than migration 168). */
+   *  it drew none (a Jira key, a hub older than migration 169). */
   display_key?: string | null;
   title: string;
   url?: string | null;

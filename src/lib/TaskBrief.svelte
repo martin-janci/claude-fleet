@@ -6,9 +6,10 @@
   // the ticket and the task's earlier work), shows Drafted with Regenerate,
   // Clear and Undo (`DraftField`), and is held for this task in this window
   // (`taskBriefDrafts`): every start of it from here sends it until it is
-  // cleared. Nothing is written to the task or the tracker. Ticket text and
-  // the draft render as text.
+  // cleared. Nothing is written to the task or the tracker. The brief renders
+  // as Markdown (`MarkdownView`: a data tree, never HTML); the draft as text.
   import DraftField from './DraftField.svelte';
+  import MarkdownView from './MarkdownView.svelte';
   import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
   import { untrack } from 'svelte';
   import {
@@ -104,7 +105,7 @@
         <p class="muted" data-testid="task-brief-held">Goes with the sessions you start for this task from here.</p>
       {/if}
     {:else}
-      {#if notes}<p class="text" data-testid="task-notes">{notes}</p>{/if}
+      {#if notes}<div class="text" data-testid="task-notes"><MarkdownView source={notes} /></div>{/if}
       {#if canDraft}
         <button
           class="btn btn--quiet"
@@ -138,8 +139,12 @@
   }
   .text {
     margin: 0 0 6px;
-    white-space: pre-wrap;
-    max-width: 72ch;
+    max-width: var(--prose-max);
+    line-height: 20px;
+    overflow-wrap: anywhere;
+  }
+  .text :global(p) {
+    margin: 0 0 8px;
   }
   .muted {
     margin: 4px 0 0;

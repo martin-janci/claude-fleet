@@ -2912,6 +2912,66 @@ async fn a_live_key_previews_and_starts_in_parallel_in_its_own_checkout() {
     assert_eq!(other.work.and_then(|w| w.key).as_deref(), Some("ABC-1"));
 }
 
+/// The live-session warning says the key ONCE. A start from a ticket names
+/// its session after the key, so naming the session again read "ABC-1 is
+/// already open in ABC-1 on hosta" — one thing said twice. A session with a
+/// name of its own is still named, which is the whole point of naming it.
+#[tokio::test]
+async fn the_live_session_warning_does_not_name_the_key_twice() {
+    let fx = Fx::new();
+    let args = StartArgs {
+        reference: Some("ABC-1".into()),
+        project_id: Some(fx.pid),
+        host_alias: Some("hosta".into()),
+        ..Default::default()
+    };
+    let first = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    let (row, _) = start_with(
+        &fx.store,
+        &first,
+        None,
+        &OrgScope::All,
+        spawn_named(&fx.store),
+    )
+    .await
+    .unwrap();
+    let named = |name: &str| {
+        fx.store
+            .lock()
+            .unwrap()
+            .set_friendly_name("hosta", &row.tmux_name, Some(name))
+            .unwrap()
+            .expect("the live row is there to rename");
+    };
+    let warning = async |fx: &Fx| {
+        preview(fx, &args)
+            .await
+            .unwrap()
+            .conflicts
+            .iter()
+            .find(|c| c.kind == "live_session")
+            .expect("the live session is a conflict")
+            .message
+            .clone()
+    };
+
+    named("ABC-1");
+    assert_eq!(warning(&fx).await, "ABC-1 is already open on hosta.");
+    // Cased the other way it is still the same name.
+    named("abc-1");
+    assert_eq!(warning(&fx).await, "ABC-1 is already open on hosta.");
+    named("api");
+    assert_eq!(warning(&fx).await, "ABC-1 is already open in api on hosta.");
+    // A parallel start's own `-2` is a different session, and named.
+    named("ABC-1-2");
+    assert_eq!(
+        warning(&fx).await,
+        "ABC-1 is already open in ABC-1-2 on hosta."
+    );
+}
+
 /// An unaccepted proposal previews with a conflict instead of the start's
 /// refusal, so the button can offer Accept & start.
 #[tokio::test]

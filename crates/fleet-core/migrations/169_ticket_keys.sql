@@ -31,4 +31,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_work_items_ticket_seq
   ON work_items(ticket_space_id, ticket_seq) WHERE ticket_space_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_work_items_display_key ON work_items(display_key);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (168);
+INSERT OR IGNORE INTO schema_version (version) VALUES (169);

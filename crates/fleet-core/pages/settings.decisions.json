@@ -173,6 +173,10 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.floors"
+        },
+        {
+          "type": "field",
           "key": "decide.jev.timeout_ms"
         },
         {

@@ -77,6 +77,7 @@ mod update;
 mod usage;
 mod wizard_state;
 mod work;
+mod work_attachments;
 mod work_buckets;
 mod work_comments;
 mod work_describe;
@@ -114,8 +115,9 @@ pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, SeenDevice};
 pub use decisions::{
     is_decision_word, DecisionKeyStatus, DecisionRunFilter, DecisionRunRow, DecisionStatRow,
     NewDecisionRun, RunScope, DECISION_BENCH_SUBJECT, DECISION_CALL_FAILURES, DECISION_FALLBACKS,
-    DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_NO_BASELINE,
-    DECISION_PERSON_FOLLOWUPS, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
+    DECISION_FOLLOWUPS, DECISION_LABELLED_RUNS_MAX, DECISION_MAX_CANDIDATES, DECISION_MODES,
+    DECISION_NO_BASELINE, DECISION_PERSON_FOLLOWUPS, DECISION_SUBJECT_RUNS_MAX,
+    DECISION_WORD_MAX_CHARS,
 };
 pub use deferred_prompts::{DeferredPromptRow, DeferredTiming, DEFERRED_MAX_ATTEMPTS};
 pub use downloads::{DownloadRow, NewDownload};
@@ -231,6 +233,11 @@ pub use wizard_state::{WizardStateRow, WizardStateWrite};
 pub use work::{
     canonical_key, github_ref, normalize_work_ref, primary_conflict, split_github_repo, Decider,
     WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, PERSON_SOURCES, WORK_LINK_SOURCES,
+};
+pub use work_attachments::{
+    attachment_mime, sniff_mime, validate_attachment_name, AttachmentRow, NewAttachment,
+    ATTACHMENTS_SERVED_MAX, ATTACHMENT_MAX_MB_CEILING, ATTACHMENT_MIMES, ATTACHMENT_NAME_MAX_CHARS,
+    ATTACHMENT_WIRE_BYTES, OCTET_STREAM,
 };
 pub use work_buckets::{
     bucket_states, BucketMemberRow, BucketMembership, BucketPatch, BucketRefRow, BucketRow,

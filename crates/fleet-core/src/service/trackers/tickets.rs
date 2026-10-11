@@ -925,13 +925,14 @@ fn already_running(
     if !view.sees_session_row(row).is_visible() {
         return IpcError::new(codes::E_EXISTS, format!("{key} already has a live session"));
     }
+    let name = row.friendly_name.as_deref().unwrap_or(&row.tmux_name);
+    let at = match crate::service::work::name_beside_key(key, name) {
+        Some(name) => format!("({name} on {})", row.host_alias),
+        None => format!("(on {})", row.host_alias),
+    };
     IpcError::new(
         codes::E_EXISTS,
-        format!(
-            "{key} already has a live session{what} ({} on {}); {then}",
-            row.friendly_name.as_deref().unwrap_or(&row.tmux_name),
-            row.host_alias
-        ),
+        format!("{key} already has a live session{what} {at}; {then}"),
     )
     .with_details(serde_json::json!({
         "session_id": row.id,
@@ -2227,12 +2228,14 @@ pub async fn preview_start(
         conflicts.push(StartConflict {
             kind: "live_session".into(),
             message: if visible {
-                format!(
-                    "{} is already open in {} on {}.",
-                    ticket.key,
-                    row.friendly_name.as_deref().unwrap_or(&row.tmux_name),
-                    row.host_alias
-                )
+                let name = row.friendly_name.as_deref().unwrap_or(&row.tmux_name);
+                match crate::service::work::name_beside_key(&ticket.key, name) {
+                    Some(name) => format!(
+                        "{} is already open in {name} on {}.",
+                        ticket.key, row.host_alias
+                    ),
+                    None => format!("{} is already open on {}.", ticket.key, row.host_alias),
+                }
             } else {
                 "Someone is already working on this.".into()
             },

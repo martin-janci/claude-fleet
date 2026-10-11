@@ -151,7 +151,8 @@ impl World {
         crate::service::work::structure::place(
             &self.store,
             &crate::service::view_scope::ViewScope::internal(),
-            &format!("item:{}", self.task),
+            Some(&format!("item:{}", self.task)),
+            None,
             Some(group),
             None,
             Some(0),

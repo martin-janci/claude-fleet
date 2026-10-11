@@ -9,11 +9,11 @@
   import AccountNickname from './AccountNickname.svelte';
   import EmbedSlot from './pages/EmbedSlot.svelte';
   import EmptyState from './states/EmptyState.svelte';
-  import { hubStatus, hubBlock } from './hub';
+  import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
   import type { HostGroup, HostRowInfo } from './hosts_view';
 
-  const nicknameBlocked = $derived(hubBlock('set_account_nickname', $hubStatus));
+  const nicknameBlocked = $derived(hubActionBlocked('set_account_nickname', $hubStatus, $hubConnection));
 
   // Same honest-empty-state fix as Sidebar.svelte: `E_HUB_CONTRACT` never
   // heals itself, so an empty list here would otherwise read as "no hosts"

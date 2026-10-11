@@ -196,8 +196,15 @@ pub async fn connect(at: &Endpoint) -> Result<HubStream, String> {
 
 /// Largest response read from the hub, so a stray listener cannot make the
 /// app buffer without bound. A full `list_sessions` on a large fleet is a few
-/// hundred kilobytes.
-const MAX_RESPONSE: u64 = 8 * 1024 * 1024;
+/// hundred kilobytes; the largest answer is `work { attachment }`, a task
+/// attachment as base64, so the bound is the larger of 8 MiB and an
+/// attachment at its ceiling on the wire
+/// ([`crate::store::ATTACHMENT_WIRE_BYTES`]).
+const MAX_RESPONSE: u64 = if crate::store::ATTACHMENT_WIRE_BYTES as u64 > 8 * 1024 * 1024 {
+    crate::store::ATTACHMENT_WIRE_BYTES as u64
+} else {
+    8 * 1024 * 1024
+};
 
 /// TCP connect, and separately the TLS handshake, each get this long. A
 /// black-holed hub then costs seconds, not the whole call bound.
