@@ -661,6 +661,7 @@ impl OperatorHost for LiveHost {
                 over_limit_ok: false,
                 owner_person_id: crate::service::sessions::hub_personal_owner(&self.store),
                 start_token: None,
+                env: None,
             },
             &self.store,
             &self.ssh,
