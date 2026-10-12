@@ -8,9 +8,10 @@
 all-features = false
 
 [advisories]
-# Unmaintained transitive crates with no fixed upstream version. Each is pulled
-# in by tauri 2.x and cannot be replaced from this crate; re-check whenever
-# tauri is bumped and drop the entry once the tree no longer contains it.
+# Unmaintained transitive crates with no fixed upstream version. All but the
+# last are pulled in by tauri 2.x and cannot be replaced from this crate;
+# re-check whenever tauri is bumped and drop the entry once the tree no
+# longer contains it.
 ignore = [
   # proc-macro-error: unmaintained; via tauri-macros / tauri-codegen (fix is upstream in tauri).
   "RUSTSEC-2024-0370",
@@ -24,6 +25,12 @@ ignore = [
   "RUSTSEC-2025-0100",
   # unic-ucd-version: unmaintained rust-unic family; via urlpattern <- tauri-utils.
   "RUSTSEC-2025-0098",
+  # unsafe-libyaml: unmaintained (archived 2024-03); via serde_yaml 0.9 <- fleet-core,
+  # itself deprecated upstream. Issued 2026-10-12, with no patched version. Drop
+  # this entry when fleet-core moves `asset.yaml` and friends to a maintained
+  # YAML crate (serde-saphyr); that changes how the files are rendered, so it
+  # is its own change, not a CI fix.
+  "RUSTSEC-2024-0449",
 ]
 
 [licenses]
