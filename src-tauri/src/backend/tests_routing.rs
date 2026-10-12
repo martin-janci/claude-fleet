@@ -394,7 +394,7 @@ fn installing_with_a_claim_claims_the_device_first() {
         vec![
             (
                 "debug_devices".to_string(),
-                json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null })
+                json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null, "queue": null })
             ),
             (
                 "debug_devices".to_string(),
@@ -1116,6 +1116,23 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "dashboards",
+            "dashboards",
+            json!({ "action": "list" }),
+            r#"[{"id":"dash.r42","title":"R","spec":{},"pinned_at":1,"updated_at":2}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::dashboards::routed::dashboards(
+                    b,
+                    s,
+                    fleet_core::service::dashboards::DashboardsArgs {
+                        action: "list".into(),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "control_handoffs",
             "control_handoffs",
             json!({ "limit": 5 }),
@@ -1553,6 +1570,26 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     b,
                     commands::work_view::WorkTrackerCommentsArgs {
                         key: "ABC-1".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // A task becomes a tracker's ticket (owner decision 2026-10-11).
+        (
+            "promote_work_item",
+            "work_link",
+            json!({ "session_id": null, "action": "promote", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "tracker_id": 2, "container": "ENG" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::promote_work_item(
+                    b,
+                    commands::work_view::PromoteWorkItemArgs {
+                        item_id: 9,
+                        tracker_id: Some(2),
+                        container: Some("ENG".into()),
                     },
                     s,
                 ))
@@ -3195,7 +3232,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "claim_debug_device",
             "debug_devices",
-            json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null }),
+            json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null, "queue": true }),
             DEBUG_DEVICE_JSON,
             Box::new(|b, s, _| {
                 block_on(commands::debug_devices::routed::claim_debug_device(
@@ -3205,6 +3242,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         id: 3,
                         note: Some("login flow".into()),
                         claim_s: None,
+                        queue: Some(true),
                     },
                 ))
                 .map(|_| ())
@@ -7431,6 +7469,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/debug_devices.rs"),
     ),
     (
+        "commands/device_mirror.rs",
+        include_str!("../commands/device_mirror.rs"),
+    ),
+    (
         "commands/federation.rs",
         include_str!("../commands/federation.rs"),
     ),
@@ -7442,6 +7484,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/wizard_state.rs",
         include_str!("../commands/wizard_state.rs"),
+    ),
+    (
+        "commands/dashboards.rs",
+        include_str!("../commands/dashboards.rs"),
     ),
     (
         "commands/api_tokens.rs",
@@ -8592,4 +8638,53 @@ fn update_routes_are_the_only_contract_exemption() {
             assert_eq!(err.code, codes::E_INTERNAL, "{path}: {err:?}");
         }
     }
+}
+
+/// Persona dashboards step 6: a hub that does not serve `dashboards` yet
+/// answers unknown tool, and the desktop keeps the pin in its own store,
+/// as it did before they moved to the hub.
+#[test]
+fn a_hub_without_dashboards_keeps_them_on_this_desktop() {
+    let unknown_tool = || {
+        Arc::new(Fake {
+            body: format!(
+                "event: message\ndata: {}\n\n",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": { "code": -32602, "message": "tool not found" },
+                })
+            ),
+            seen: Mutex::new(Vec::new()),
+        })
+    };
+    let (_dir, st) = store();
+    let fake = unknown_tool();
+    let pin = fleet_core::service::dashboards::DashboardsArgs {
+        action: "pin".into(),
+        dashboard: Some(json!({
+            "spec": "fleet.ui/1", "kind": "dashboard", "id": "dash.r42", "title": "R",
+            "widgets": [ { "kind": "stat", "title": "Open", "value": "open" } ]
+        })),
+        ..Default::default()
+    };
+    let got = block_on(commands::dashboards::routed::dashboards(
+        &remote_backend(&fake),
+        &st,
+        pin,
+    ))
+    .expect("kept here, not an error");
+    assert_eq!(got["id"], "dash.r42");
+    assert_eq!(fake.only_call().0, "dashboards");
+    let fake = unknown_tool();
+    let listed = block_on(commands::dashboards::routed::dashboards(
+        &remote_backend(&fake),
+        &st,
+        fleet_core::service::dashboards::DashboardsArgs {
+            action: "list".into(),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
 }

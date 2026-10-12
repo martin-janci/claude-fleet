@@ -435,6 +435,8 @@ export const ROUTED_ACTIONS = [
   // Task comments: kept in fleet; deleting is the author's own.
   'comment_on_work',
   'delete_work_comment',
+  // Promoting a task of fleet's own: the hub owns the trackers that create it.
+  'promote_work_item',
   // Task attachments: kept in fleet; deleting is the author's own.
   'attach_to_work',
   'delete_work_attachment',

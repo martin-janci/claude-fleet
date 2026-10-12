@@ -433,6 +433,75 @@ impl TrackerProvider for JiraDc {
                     .await?;
                 Ok(super::jira_common::posted_comment(&v, &self.site, &key))
             }
+            WriteOp::CreateItem {
+                container,
+                parent,
+                title,
+                description,
+            } => {
+                // A subtask goes into its parent's project; a task into the
+                // project the person picked.
+                let parent_key = match parent {
+                    Some(p) if super::jira_common::is_key(&p.key) => {
+                        Some(p.key.to_ascii_uppercase())
+                    }
+                    Some(p) => {
+                        return Err(TrackerError::Invalid(format!(
+                            "{:?} is not a Jira key",
+                            p.key
+                        )))
+                    }
+                    None => None,
+                };
+                let project = match (&parent_key, container.as_deref()) {
+                    (Some(k), _) => k.split_once('-').map(|(p, _)| p.to_string()),
+                    (None, Some(c)) if super::jira_common::is_project_key(c) => {
+                        Some(c.to_ascii_uppercase())
+                    }
+                    _ => None,
+                }
+                .ok_or_else(|| TrackerError::Invalid("no Jira project to create it in".into()))?;
+                let meta = self
+                    .call(
+                        Request::get(self.url(&format!(
+                            "/rest/api/2/issue/createmeta/{project}/issuetypes"
+                        ))),
+                        CallKind::Other,
+                    )
+                    .await?;
+                let issue_type = super::jira_common::pick_issue_type(&meta, parent_key.is_some())
+                    .ok_or_else(|| {
+                    TrackerError::Invalid(format!(
+                        "project {project} has no {} issue type",
+                        if parent_key.is_some() {
+                            "sub-task"
+                        } else {
+                            "task"
+                        }
+                    ))
+                })?;
+                let description = if description.trim().is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(description.clone())
+                };
+                let v = self
+                    .call(
+                        Request::post_json(
+                            self.url("/rest/api/2/issue"),
+                            &super::jira_common::create_issue_body(
+                                &project,
+                                &issue_type,
+                                title,
+                                description,
+                                parent_key.as_deref(),
+                            ),
+                        ),
+                        CallKind::Other,
+                    )
+                    .await?;
+                super::jira_common::created_issue(&v, &self.site)
+            }
             WriteOp::RichComment { key, wiki, .. } => {
                 if !super::jira_common::is_key(key) {
                     return Err(TrackerError::Invalid(format!("{key:?} is not a Jira key")));
@@ -464,6 +533,7 @@ impl TrackerProvider for JiraDc {
                     .to_string();
                 Ok(WriteOutcome {
                     url: Some(format!("{}/browse/{key}", self.site)),
+                    key: Some(key.clone()),
                     remote_id: Some(key),
                 })
             }

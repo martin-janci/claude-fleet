@@ -408,6 +408,24 @@ and URL; `TaskDetail.comments_tracker` / `can_post_to_tracker` say whose
 comments the tab reads and whether the reader may post. Not yet: the phone,
 editing a posted comment, attachments from trackers other than Asana.
 
+Promoting a task to a ticket (owner decision 2026-10-11: local tasks and
+subtasks first, tracked later): `work_link { promote, item_id, tracker_id?,
+container? }` (routed desktop `promote_work_item`, `service/work/promote.rs`)
+queues the outbox's `create_item` op (`url` `fleet-item:<id>`; `item_key` /
+`external_id` the parent ticket for a subtask, else the container), and the
+drain's `WriteOp::CreateItem` creates a Jira sub-task or task (createmeta
+picks the issue type) or an Asana task / subtask, then converts the task IN
+PLACE (`Store::promote_local_item`: same row, the tracker's key and id, the
+old key an alias) and reads the ticket back. Per tracker
+`settings.write_back.create_tickets`, **off by default** (Settings → Trackers
+→ Write-back → *Create tickets*, confirm-gated, Jira Cloud, Jira DC and
+Asana). Refused for a per-host token (`E_FORBIDDEN`), the setting off
+(`E_INVALID_STATE`), a tracker's ticket, an epic, a job, a proposal or a task
+under a task of fleet's own (`E_INVALID`). A failed promotion may be tried
+again. `TaskDetail.promotion` / `promote_targets` drive *Promote to
+ticket…* on the task page. Not yet: Linear and GitHub, sending assignees,
+due dates, priority, labels or estimates, epics, and the phone.
+
 Task attachments (migration 168, `work_item_attachments` and the
 content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept
 in SQLite so a hub backup carries them; a blob goes with the last live
@@ -738,7 +756,7 @@ desktop). Not yet: a filesystem watcher, a three-way merge editor.
 
 Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. The app's own wizards (New session, Add host, Pair a device, Add project, Link to a hub, Get started) are fleet.form/1 specs too (redesign 10.12, `src/lib/forms/wizards/`, `docs/forms.md` → *Wizards are forms too*). As dialogs: Link to a hub (Settings › Hub), Pair a device (Settings › Devices) and Get started's first session (`get_started`). In the chat (`ChatForm` at the end of the Conversation panel and of Control's chat): an agent's `wizard` block (`docs/chat-blocks.md`) opens Add host, Add project, Get started, New session or Pair a device, and Control's *Add project* chip opens Add project; nothing runs until the last button. An agent may stream a long form while it writes it, `ask { draft }` (migration 153, the row's `form_draft`), which the chat draws in as skeleton fields until `ask { form }` opens it. The phone's form sheet (14.7) is fleet-mobile's. Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
 
-Session environment variables (spec 2026-10-11-session-env-and-secrets-design.md, migration 177, contract 18): `env_vars` (global < host < project < session), `new_session { env }`, a form's `env_target`, Settings › Environment (resource `env_var`, `env_var_set` / `env_var_unset`), the launch file under `~/.claude-fleet/env` sourced by every pane command (create, restart, recreate, repair, review, move) and swept after 10 minutes, and `env_secret_literals` masked in diagnostics. Not built: encryption at rest, `op://` references, a per-worktree scope, a session panel editor.
+Session environment variables (spec 2026-10-11-session-env-and-secrets-design.md, migration 179, contract 18): `env_vars` (global < host < project < session), `new_session { env }`, a form's `env_target`, Settings › Environment (resource `env_var`, `env_var_set` / `env_var_unset`), the launch file under `~/.claude-fleet/env` sourced by every pane command (create, restart, recreate, repair, review, move) and swept after 10 minutes, and `env_secret_literals` masked in diagnostics. Not built: encryption at rest, `op://` references, a per-worktree scope, a session panel editor.
 
 PR shepherd, steps 1 to 4 of 5 (step 2 without its Inbox card), are built and do nothing until a person
 grants a rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
@@ -1074,7 +1092,10 @@ iOS devices (migration 120), the `debug_devices` control-API tool (list,
 scan, claim / release, run, install across hosts, logs, screenshot, boot,
 shutdown; configure / forget for a person) and the desktop's Debug devices
 page (the `debug_device` resource, routed to the hub, contract revision
-10). Not built: an adb-server bridge so native tools on one host reach
-another host's devices, live screen and input, physical-iOS logs, and a
+10). The device mirror is landed for a local device (standalone) and for a
+host reached over SSH (`relay/`, `service/device_mirror/`): a native scrcpy
+window, with a loopback relay and an adb version check. Not built: the mirror
+through the hub (`/relay`) or an agent host, an adb-server bridge so native
+tools on one host reach another host's devices, physical-iOS logs, and a
 device page in fleet-mobile. None of it has run against real hardware yet:
 the scripts are tested against stub `adb` / `simctl` output.

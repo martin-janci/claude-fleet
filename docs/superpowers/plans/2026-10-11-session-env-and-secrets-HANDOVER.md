@@ -12,7 +12,7 @@ with no row is forgotten unreached, and an unreachable host backs off with
 the forms sweep's delay. Tasks 6–9 followed the plan; ruling 2 became the
 split commands `env_var_set` / `env_var_unset` (no constant binding in
 `resources.rs`). Main took migration 173 meanwhile, so the branch's
-migration is **177** (`scripts/renumber-migrations.sh`). A move now checks
+migration is **179** (`scripts/renumber-migrations.sh`). A move now checks
 the target's environment among its opening checks (`env::check`), so a
 dry run predicts an unresolvable reference before any work is carried
 (deferred minor of Task 4). Rust verification ran on mefistos through the

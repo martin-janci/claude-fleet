@@ -1377,6 +1377,20 @@
           ],
           "on_off": false,
           "type": "bool"
+        },
+        {
+          "confirm": "Fleet will write to this tracker: each task a person promotes is created as a ticket under this credential's account.",
+          "default": false,
+          "edit": "settings",
+          "help": "Let a person promote a task made in fleet to a ticket here: a subtask of a ticket becomes that ticket's subtask, a task goes into the project they pick. Agents never create one. The token needs permission to create issues.",
+          "id": "create_tickets",
+          "label": "Create tickets",
+          "merge_path": [
+            "write_back",
+            "create_tickets"
+          ],
+          "on_off": false,
+          "type": "bool"
         }
       ],
       "help": "Trackers add a ticket's title and status to the sessions working on it, and list your tickets in ⌘K. Nothing needs one: keys in branch names group sessions without any tracker.",
@@ -2125,6 +2139,13 @@
                 "from": "param",
                 "name": "note"
               }
+            ],
+            [
+              "queue",
+              {
+                "from": "param",
+                "name": "queue"
+              }
             ]
           ],
           "command": "claim_debug_device",
@@ -2139,6 +2160,13 @@
               "placeholder": "testing the login flow",
               "required": false,
               "type": "text"
+            },
+            {
+              "default": false,
+              "label": "Wait in line if someone holds it",
+              "name": "queue",
+              "required": false,
+              "type": "toggle"
             }
           ],
           "report": false
@@ -2266,8 +2294,51 @@
               }
             ]
           ],
+          "command": "start_device_mirror",
+          "envelope": "args",
+          "id": "debug_device.mirror",
+          "label": "Mirror",
+          "params": [],
+          "report": false,
+          "result": "output",
+          "variants": [
+            "physical",
+            "emulator"
+          ]
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "stop_device_mirror",
+          "envelope": "args",
+          "id": "debug_device.mirror_stop",
+          "label": "Stop mirror",
+          "params": [],
+          "report": false,
+          "variants": [
+            "physical",
+            "emulator"
+          ]
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
           "command": "release_debug_device",
-          "confirm": "Whoever holds it loses the claim; another session may then use the device.",
+          "confirm": "Whoever holds it loses the claim and the next in line gets it, or another session may then use it. If you wait in its line, you only leave the line.",
           "envelope": "args",
           "id": "debug_device.release",
           "label": "Release claim",
@@ -2492,6 +2563,12 @@
           "id": "claimed_until",
           "label": "Claim ends",
           "type": "time"
+        },
+        {
+          "help": "Sessions and people in line for it; each gets the claim in turn when the one before releases it or lets it lapse.",
+          "id": "waiting",
+          "label": "Waiting",
+          "type": "count"
         },
         {
           "help": "When a scan last found it.",

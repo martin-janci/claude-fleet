@@ -158,11 +158,17 @@ pub struct WriteBack {
     /// for it (owner decision 2026-10-11, migration 172).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub comments: bool,
+    /// Let a person promote a fleet task to a ticket here: fleet creates it
+    /// (a subtask of the parent's ticket, or in a project they pick) and
+    /// the task becomes that ticket (owner decision 2026-10-11). Jira Cloud,
+    /// Jira Data Center and Asana.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub create_tickets: bool,
 }
 
 impl WriteBack {
     pub fn is_off(&self) -> bool {
-        !self.pr_remote_link && !self.comments
+        !self.pr_remote_link && !self.comments && !self.create_tickets
     }
 }
 
@@ -733,6 +739,13 @@ pub fn validate_tracker_settings(
         return Err(bad(
             "write_back.pr_remote_link is a Jira setting: only Jira Cloud and Data Center \
              accept a PR remote link"
+                .into(),
+        ));
+    }
+    if s.write_back.create_tickets && !crate::service::trackers::creates_items(provider) {
+        return Err(bad(
+            "write_back.create_tickets is a Jira and Asana setting: only Jira Cloud, Data \
+             Center and Asana create tickets from fleet"
                 .into(),
         ));
     }

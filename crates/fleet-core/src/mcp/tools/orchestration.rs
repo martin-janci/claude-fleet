@@ -1350,7 +1350,8 @@ impl FleetTools {
         due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, \
         mime, data_base64, comment_id?}: a file on a task; attachment_delete \
         {attachment_id}. create {title, parent?, \
-        notes?, assignees?, due_at?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts \
+        notes?, assignees?, due_at?}: a task or subtask. promote {item_id, tracker_id?, \
+        container?}: make it a ticket. propose {parent, title, why?}: a subtask a person accepts \
         or rejects {item_id, no session_id}. bucket_add|bucket_remove \
         {bucket_id, item_id}: sprint/release. mission_save {mission, \
         mission_id?, item_id?: root}; mission_state {mission_id, status} (paused \
@@ -1889,6 +1890,21 @@ impl FleetTools {
                     person,
                 )
                 .map_err(to_mcp_err)?,
+            );
+        }
+        // Promoting a task to a tracker's ticket: about the ITEM, so its
+        // org fence (inside: an item outside the scope answers as unknown),
+        // and `edit`'s person fence with no agent exception — only a person
+        // promotes (a per-host token is refused inside).
+        if args.action == "promote" {
+            let item_id = args
+                .item_id
+                .ok_or_else(|| mcp_err("E_INVALID", "promote needs item_id", None))?;
+            self.require_drive_on_item_sessions(&caller, item_id)?;
+            let person = self.view_scope(&caller)?.person;
+            return ok_json(
+                &crate::service::work::promote::promote(&args, &self.store, &scope, person)
+                    .map_err(to_mcp_err)?,
             );
         }
         if args.action == "comment_delete" {

@@ -45,6 +45,7 @@ mod orgs;
 mod participants;
 mod peer_links;
 mod people;
+mod pinned_dashboards;
 mod pr_shepherd;
 mod project_picks;
 mod projects;
@@ -121,7 +122,7 @@ pub use control_handoffs::{
 };
 pub use control_tokens::{ApiScope, ControlTokenRow, NewControlToken};
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
-pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, SeenDevice};
+pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, DebugDeviceWaiter, SeenDevice};
 pub use decisions::{
     is_decision_word, DecisionKeyStatus, DecisionRunFilter, DecisionRunRow, DecisionStatRow,
     NewDecisionRun, RunScope, DECISION_BENCH_SUBJECT, DECISION_CALL_FAILURES, DECISION_FALLBACKS,
@@ -182,6 +183,7 @@ pub use peer_links::{
 pub use people::{
     machine_token_kind, validate_person_name, PersonRow, MAX_PERSON_NAME_LEN, PERSONAL_OWNER_NAME,
 };
+pub use pinned_dashboards::{PinnedDashboardRow, PinnedDashboardWrite};
 pub use pr_shepherd::{
     ShepherdEpisodeRow, ShepherdMergeRow, ShepherdRuleRow, SHEPHERD_LEVELS,
     SHEPHERD_RECIPES_MAX_CHARS,
@@ -235,8 +237,8 @@ pub use ticket_keys::{
 pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use tracker_writes::{
-    comment_write_url, NewTrackerWrite, TrackerWriteRow, WRITE_MAX_ATTEMPTS, WRITE_OP_COMMENT,
-    WRITE_OP_PR_REMOTE_LINK,
+    comment_write_url, item_write_url, NewTrackerWrite, TrackerWriteRow, WRITE_MAX_ATTEMPTS,
+    WRITE_OP_COMMENT, WRITE_OP_CREATE_ITEM, WRITE_OP_PR_REMOTE_LINK,
 };
 pub(crate) use trackers::read_credential_ref;
 pub use trackers::{

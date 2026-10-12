@@ -2666,6 +2666,34 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Promoting a task: `comment`'s fences on the item, and then a person
+    // only — host A's own token sees the item and is still refused. A
+    // person reaches the arguments (this task at the top names no tracker).
+    let unknown_item_promote = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "promote", "item_id": 999_999 }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "promote",
+        move |_, _| json!({ "action": "promote", "item_id": local_a }),
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    same_as_unknown(a, &unknown_item_promote, &local_a.to_string(), "999999")
+                }
+                Who::HostA => is_code(who, a, "E_FORBIDDEN", "only a person promotes"),
+                _ => is_code(who, a, "E_INVALID", "a task at the top needs a tracker"),
+            }
+        },
+    )
+    .await;
     // A comment nobody has: unknown to every caller, the same answer.
     m.row(
         "work_link",

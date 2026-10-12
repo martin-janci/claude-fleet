@@ -1909,6 +1909,7 @@ fn opt_in(fx: &Fx) {
                 write_back: crate::store::WriteBack {
                     pr_remote_link: true,
                     comments: false,
+                    create_tickets: false,
                 },
                 ..Default::default()
             },

@@ -1,7 +1,9 @@
 //! Debug devices (`debug_devices`, `debug_device_scans`, migration 120): the
 //! phones, emulators and simulators a scan found on each host. A scan
 //! replaces what fleet knows of a host's hardware; what a person set (a
-//! label, sharing) and a live claim survive it. See `service::debug_devices`.
+//! label, sharing) and a live claim survive it. The line waiting for a
+//! claimed device is `debug_device_queue` (migration 177). See
+//! `service::debug_devices`.
 
 use super::Store;
 use rusqlite::{params, OptionalExtension, Result};
@@ -39,6 +41,15 @@ pub struct SeenDevice {
     pub model: Option<String>,
     pub os_version: Option<String>,
     pub state: String,
+}
+
+/// One holder waiting in a device's line (`debug_device_queue`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugDeviceWaiter {
+    pub device_id: i64,
+    pub holder: String,
+    pub note: Option<String>,
+    pub queued_at: i64,
 }
 
 /// When a host was last scanned, and why that scan failed if it did.
@@ -241,6 +252,99 @@ impl Store {
         )
     }
 
+    /// Every device's line, each first come first served.
+    pub fn debug_device_queue(&self) -> Result<Vec<DebugDeviceWaiter>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT device_id, holder, note, queued_at FROM debug_device_queue \
+             ORDER BY device_id, queued_at, rowid",
+        )?;
+        let rows = st
+            .query_map([], |r| {
+                Ok(DebugDeviceWaiter {
+                    device_id: r.get(0)?,
+                    holder: r.get(1)?,
+                    note: r.get(2)?,
+                    queued_at: r.get(3)?,
+                })
+            })?
+            .collect();
+        rows
+    }
+
+    /// Join a device's line, or renew the note of a place already held
+    /// (keeping the place).
+    pub fn debug_device_enqueue(
+        &self,
+        id: i64,
+        holder: &str,
+        note: Option<&str>,
+        now: i64,
+    ) -> Result<usize> {
+        self.conn.execute(
+            "INSERT INTO debug_device_queue (device_id, holder, note, queued_at) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (device_id, holder) DO UPDATE SET note = excluded.note",
+            params![id, holder, note, now],
+        )
+    }
+
+    /// Leave a device's line.
+    pub fn debug_device_dequeue(&self, id: i64, holder: &str) -> Result<usize> {
+        self.conn.execute(
+            "DELETE FROM debug_device_queue WHERE device_id = ?1 AND holder = ?2",
+            params![id, holder],
+        )
+    }
+
+    /// Move every line along: drop places taken before `expired_before`,
+    /// and hand each device whose claim is gone or lapsed (at `now`) to the
+    /// first in its line, with a claim until `now + handoff_secs`. Returns
+    /// how many devices changed hands.
+    pub fn debug_devices_settle_queue(
+        &self,
+        now: i64,
+        expired_before: i64,
+        handoff_secs: i64,
+    ) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM debug_device_queue WHERE queued_at < ?1",
+            [expired_before],
+        )?;
+        // A holder waiting for the claim it already holds has it.
+        tx.execute(
+            "DELETE FROM debug_device_queue WHERE EXISTS (SELECT 1 FROM debug_devices d \
+               WHERE d.id = device_id AND d.claimed_by = holder AND d.claimed_until > ?1)",
+            [now],
+        )?;
+        let heads: Vec<(i64, String, Option<String>)> = {
+            let mut st = tx.prepare_cached(
+                "SELECT q.device_id, q.holder, q.note FROM debug_device_queue q \
+                 JOIN debug_devices d ON d.id = q.device_id \
+                 WHERE (d.claimed_until IS NULL OR d.claimed_until <= ?1) \
+                   AND q.rowid = (SELECT q2.rowid FROM debug_device_queue q2 \
+                     WHERE q2.device_id = q.device_id ORDER BY q2.queued_at, q2.rowid LIMIT 1)",
+            )?;
+            let rows = st
+                .query_map([now], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<Vec<_>>>()?;
+            rows
+        };
+        for (id, holder, note) in &heads {
+            tx.execute(
+                "UPDATE debug_devices SET claimed_by = ?2, claim_note = ?3, claimed_until = ?4 \
+                 WHERE id = ?1",
+                params![id, holder, note, now + handoff_secs],
+            )?;
+            tx.execute(
+                "DELETE FROM debug_device_queue WHERE device_id = ?1 AND holder = ?2",
+                params![id, holder],
+            )?;
+        }
+        tx.commit()?;
+        Ok(heads.len())
+    }
+
     /// Set a device's state after fleet booted or shut it down itself.
     pub fn debug_device_set_state(&self, id: i64, state: &str) -> Result<usize> {
         self.conn.execute(
@@ -319,6 +423,46 @@ mod tests {
         );
         s.debug_devices_apply_scan("local", &[], 6).unwrap();
         assert_eq!(s.debug_device_scans().unwrap()["local"].error, None);
+    }
+
+    #[test]
+    fn a_line_hands_a_lapsed_claim_to_its_first_and_forgets_old_places() {
+        let s = Store::open_in_memory().unwrap();
+        s.debug_devices_apply_scan("local", &[seen("A1", "online")], 1)
+            .unwrap();
+        let id = s.debug_devices().unwrap()[0].id;
+        s.debug_device_claim(id, "host:x", None, 100).unwrap();
+        s.debug_device_enqueue(id, "host:old", None, 1).unwrap();
+        s.debug_device_enqueue(id, "host:y", Some("ui"), 50)
+            .unwrap();
+        s.debug_device_enqueue(id, "host:z", None, 60).unwrap();
+        // Renewing keeps the place.
+        s.debug_device_enqueue(id, "host:y", Some("ui 2"), 70)
+            .unwrap();
+        // Held: nobody moves, but the day-old place goes.
+        assert_eq!(s.debug_devices_settle_queue(90, 10, 600).unwrap(), 0);
+        let line: Vec<String> = s
+            .debug_device_queue()
+            .unwrap()
+            .into_iter()
+            .map(|w| w.holder)
+            .collect();
+        assert_eq!(line, ["host:y", "host:z"]);
+        // Lapsed: the first in line gets it, with its note.
+        assert_eq!(s.debug_devices_settle_queue(100, 10, 600).unwrap(), 1);
+        let d = s.debug_device(id).unwrap().unwrap();
+        assert_eq!(
+            (
+                d.claimed_by.as_deref(),
+                d.claim_note.as_deref(),
+                d.claimed_until
+            ),
+            (Some("host:y"), Some("ui 2"), Some(700))
+        );
+        assert_eq!(s.debug_device_queue().unwrap().len(), 1);
+        // Forgetting the device drops its line.
+        s.debug_device_forget(id).unwrap();
+        assert!(s.debug_device_queue().unwrap().is_empty());
     }
 
     #[test]
