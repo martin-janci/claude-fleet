@@ -86,6 +86,24 @@ to an in-progress ticket, the controller and the operator, a session
 prompted or attached to within the hour, and a background agent with open
 tasks are never suggested.
 
+## Environment
+
+Every session fleet starts gets environment variables from four scopes,
+`global` < `host` < `project` (`owner/repo`) < `session`, the narrower
+winning (Settings › Environment; the `env_vars` tool; `new_session { env }`
+for a session's own plain values). An entry is a plain value, a secret
+(write-only: never listed again) or, from the master only, a reference
+(`env:NAME` or `file:/abs`) that the hub or desktop starting the session
+reads at launch, trimmed; an unresolved reference refuses the start
+(`E_ENV_UNRESOLVED`). A change applies when a session next starts or
+restarts, never to a running pane. At launch the merged set is written to a
+0600 file under `~/.claude-fleet/env` on the host, the pane sources it, and
+the tick sweep deletes files older than 10 minutes; no value is ever in an
+argv or the tmux environment. A form's `secret` field with an `env_target`
+stores its answer as the session's secret variable (`docs/forms.md`).
+Values rest unencrypted in `state.db`, like the other fleet secrets. On a
+paired desktop the page is read-only; edit through Control or MCP.
+
 ## Asset catalog
 
 Skills, subagents, hooks, MCP servers and plugin references can be kept in a

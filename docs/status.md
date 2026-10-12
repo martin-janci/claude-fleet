@@ -25,7 +25,7 @@ account usage history (122), the Hosts page's probe facts (123), token use
 (126), the cost of fleet's own `claude -p` runs (127), every PR a session's
 branch has had (`pull_requests`, 128), cost per account (130), prompts
 queued for a busy session (133), the agent CLIs a host has (134) and the
-add-host wizard's state (135). The hub contract is revision 17
+add-host wizard's state (135). The hub contract is revision 18
 (`CONTRACT_REVISION`, `crates/fleet-core/src/wire_contract.rs`):
 revisions 11 to 14 add tools a revision-10 hub does not serve, so the
 desktop and its hub are upgraded together; 15 widens the form spec and
@@ -36,7 +36,9 @@ desktop needs at least a revision-16 hub; 17 adds gap plan batch 3's tools
 and the composer's context help on a shared session
 (`session_context_help`), each of which a revision-16 hub answers as
 nothing saved, nothing proposed or "the hub needs updating", so a desktop
-accepts a revision-16 or 17 hub.
+accepts a revision-16 to 18 hub; 18 adds session environment variables
+(`env_vars`, `new_session { env }`, a form's `env_target`), whose Settings
+page a revision-17 hub answers with an unknown tool.
 
 Ticket keys (2026-10, migration 169, `store/ticket_keys.rs`). Fleet
 administers Jira-style keys: each ticket space (a project, a GitHub
@@ -735,6 +737,8 @@ Symlinks sync as links (their target, never followed; not on a Windows
 desktop). Not yet: a filesystem watcher, a three-way merge editor.
 
 Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. The app's own wizards (New session, Add host, Pair a device, Add project, Link to a hub, Get started) are fleet.form/1 specs too (redesign 10.12, `src/lib/forms/wizards/`, `docs/forms.md` → *Wizards are forms too*). As dialogs: Link to a hub (Settings › Hub), Pair a device (Settings › Devices) and Get started's first session (`get_started`). In the chat (`ChatForm` at the end of the Conversation panel and of Control's chat): an agent's `wizard` block (`docs/chat-blocks.md`) opens Add host, Add project, Get started, New session or Pair a device, and Control's *Add project* chip opens Add project; nothing runs until the last button. An agent may stream a long form while it writes it, `ask { draft }` (migration 153, the row's `form_draft`), which the chat draws in as skeleton fields until `ask { form }` opens it. The phone's form sheet (14.7) is fleet-mobile's. Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
+
+Session environment variables (spec 2026-10-11-session-env-and-secrets-design.md, migration 173, contract 18): `env_vars` (global < host < project < session), `new_session { env }`, a form's `env_target`, Settings › Environment (resource `env_var`, `env_var_set` / `env_var_unset`), the launch file under `~/.claude-fleet/env` sourced by every pane command (create, restart, recreate, repair, review, move) and swept after 10 minutes, and `env_secret_literals` masked in diagnostics. Not built: encryption at rest, `op://` references, a per-worktree scope, a session panel editor.
 
 PR shepherd, steps 1 to 4 of 5 (step 2 without its Inbox card), are built and do nothing until a person
 grants a rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
