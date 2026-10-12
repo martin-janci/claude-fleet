@@ -2704,6 +2704,223 @@
       "list": "list_peer_links",
       "plural": "Linked hubs",
       "title_field": "title"
+    },
+    {
+      "create": {
+        "bind": [
+          [
+            "scope",
+            {
+              "from": "param",
+              "name": "scope"
+            }
+          ],
+          [
+            "scope_key",
+            {
+              "from": "param",
+              "name": "scope_key"
+            }
+          ],
+          [
+            "name",
+            {
+              "from": "param",
+              "name": "name"
+            }
+          ],
+          [
+            "value",
+            {
+              "from": "param",
+              "name": "value"
+            }
+          ],
+          [
+            "secret",
+            {
+              "from": "param",
+              "name": "secret"
+            }
+          ]
+        ],
+        "command": "env_var_set",
+        "envelope": "args",
+        "id": "env_var.set",
+        "label": "Add variable",
+        "params": [
+          {
+            "label": "Scope",
+            "name": "scope",
+            "options": [
+              [
+                "global",
+                "Global"
+              ],
+              [
+                "host",
+                "Host"
+              ],
+              [
+                "project",
+                "Project"
+              ]
+            ],
+            "required": true,
+            "type": "choice"
+          },
+          {
+            "label": "Host or owner/repo",
+            "max": 255,
+            "name": "scope_key",
+            "placeholder": "mercury · owner/repo · empty for global",
+            "required": false,
+            "type": "text"
+          },
+          {
+            "label": "Name",
+            "max": 128,
+            "name": "name",
+            "placeholder": "DATABASE_URL",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Value",
+            "name": "value",
+            "required": true,
+            "type": "secret"
+          },
+          {
+            "default": true,
+            "label": "Keep it secret (never shown again)",
+            "name": "secret",
+            "required": false,
+            "type": "toggle"
+          }
+        ],
+        "report": false
+      },
+      "delete": {
+        "bind": [
+          [
+            "scope",
+            {
+              "from": "record",
+              "name": "scope"
+            }
+          ],
+          [
+            "scope_key",
+            {
+              "from": "record",
+              "name": "scope_key"
+            }
+          ],
+          [
+            "name",
+            {
+              "from": "record",
+              "name": "name"
+            }
+          ]
+        ],
+        "command": "env_var_unset",
+        "confirm": "Remove this variable? A running session keeps it until it restarts.",
+        "envelope": "args",
+        "id": "env_var.remove",
+        "label": "Remove",
+        "params": [],
+        "report": false
+      },
+      "empty": "No variables. Add one to have it in every session fleet starts.",
+      "fields": [
+        {
+          "help": "The variable's name.",
+          "id": "name",
+          "label": "Name",
+          "max": 128,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "Where it applies: everywhere, one host, one project or one session.",
+          "id": "scope",
+          "label": "Scope",
+          "options": [
+            [
+              "global",
+              "Global"
+            ],
+            [
+              "host",
+              "Host"
+            ],
+            [
+              "project",
+              "Project"
+            ],
+            [
+              "session",
+              "Session"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "The host alias, owner/repo or session id; empty for global.",
+          "id": "scope_key",
+          "label": "Applies to",
+          "max": 255,
+          "type": "text"
+        },
+        {
+          "help": "Shown for a plain value only.",
+          "id": "value",
+          "label": "Value",
+          "max": 32768,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "text": "secret",
+            "when": "true"
+          },
+          "default": false,
+          "help": "Write-only: never shown again.",
+          "id": "secret",
+          "label": "Secret",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "ref",
+            "when": "true"
+          },
+          "default": false,
+          "help": "Read from the hub's environment or a file on it when a session starts.",
+          "id": "is_ref",
+          "label": "Reference",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "help": "When it was last set.",
+          "id": "updated_at",
+          "label": "Changed",
+          "type": "time"
+        }
+      ],
+      "help": "Set in every session fleet starts, by scope: global, then host, then project (owner/repo), then session; the narrower wins. A change applies when a session next starts or restarts. A secret's value is never shown again.",
+      "id": "env_var",
+      "id_field": "id",
+      "label": "Environment variable",
+      "list": "env_vars_list",
+      "plural": "Environment variables",
+      "title_field": "name"
     }
   ],
   "settings": [

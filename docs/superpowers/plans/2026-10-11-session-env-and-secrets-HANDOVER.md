@@ -1,7 +1,22 @@
 # HANDOVER — session environment variables and secrets
 
-Branch: `feat/session-env-secrets` (pushed to origin). Cut from `origin/main` 27e1a2235; main is 13 commits ahead now (no conflicts expected; migration 177 is still free on main).
+Branch: `feat/session-env-secrets` (pushed to origin). Cut from `origin/main` 27e1a2235; main is 13 commits ahead now (no conflicts expected; migration 173 is still free on main).
 Status on 2026-10-12: **Tasks 1–5 of 9 implemented and committed; Task 5 not yet reviewed; Tasks 6–9 not started.**
+
+**Update, 2026-10-12 (second client, branch `cf-2-environment-variables-and-secrets-management`):**
+Tasks 5–9 are done. Task 5 was reviewed and amended: the env-file record
+is `{"<host>": noted_at}`, `prepare` notes a host before and after the
+write, the sweep forgets a clean host only when its note predates the
+sweep (so a file written while the sweep looked is never orphaned), a host
+with no row is forgotten unreached, and an unreachable host backs off with
+the forms sweep's delay. Tasks 6–9 followed the plan; ruling 2 became the
+split commands `env_var_set` / `env_var_unset` (no constant binding in
+`resources.rs`). Main took migration 173 meanwhile, so the branch's
+migration is **177** (`scripts/renumber-migrations.sh`). A move now checks
+the target's environment among its opening checks (`env::check`), so a
+dry run predicts an unresolvable reference before any work is carried
+(deferred minor of Task 4). Rust verification ran on mefistos through the
+CF-1 git relay (the user's rule), so the commits carry `--no-verify`.
 
 Read in this order:
 1. Spec: `docs/superpowers/specs/2026-10-11-session-env-and-secrets-design.md`. Its last section, *Revisions after the code survey*, overrides the sections above it.
