@@ -46,13 +46,13 @@ const TEXT_MAX_CHARS: usize = 500;
 pub struct DashboardsArgs {
     /// list | get | pin | unpin.
     pub action: String,
-    /// The dashboard's id, for get and unpin.
+    /// get, unpin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// For pin: the `dashboard` fleet.ui/1 block (docs/chat-blocks.md).
+    /// pin: a `dashboard` block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dashboard: Option<serde_json::Value>,
-    /// For pin: why it was proposed, in one sentence.
+    /// pin: why, one line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
 }

@@ -137,7 +137,7 @@ Parameters: `action`, `chosen`, `run_id`, `text`
 
 ### `dashboards`
 
-The dashboards the person pinned from a `dashboard` block (docs/chat-blocks.md): list | get {id} | pin {dashboard, why?} | unpin {id}. Read one before you propose a change to it, and answer with a block of the same id; the person pins it, so pin and unpin are refused to the agent (E_FORBIDDEN). E_INVALID.
+The person's pinned dashboards (`dashboard` blocks): list | get {id} | pin {dashboard, why?} | unpin {id}. The agent only reads (E_FORBIDDEN).
 
 Parameters: `action`, `dashboard`, `id`, `why`
 
