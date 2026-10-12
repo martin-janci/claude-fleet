@@ -33,7 +33,8 @@ impl SshDialer {
         }
     }
 
-    #[cfg(test)]
+    // Its tests run a fake `ssh` script, so they are unix-only.
+    #[cfg(all(test, unix))]
     pub(crate) fn with_binary(binary: PathBuf) -> Self {
         Self {
             binary,

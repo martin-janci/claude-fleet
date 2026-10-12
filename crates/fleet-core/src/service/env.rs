@@ -586,14 +586,16 @@ mod tests {
     #[test]
     fn an_unresolved_reference_refuses_without_leaking() {
         let s = store();
+        // `/nonexistent` is not an absolute path on Windows, and the reference
+        // must be one to be stored at all.
+        let reference = if cfg!(windows) {
+            r"file:C:\nonexistent\fleet-env-test"
+        } else {
+            "file:/nonexistent/fleet-env-test"
+        };
         s.lock()
             .unwrap()
-            .set_env_var(
-                "global",
-                "",
-                "TOKEN",
-                &EnvValue::Ref("file:/nonexistent/fleet-env-test".into()),
-            )
+            .set_env_var("global", "", "TOKEN", &EnvValue::Ref(reference.into()))
             .unwrap();
         let e = resolve(&s, "local", None, None, &BTreeMap::new()).unwrap_err();
         assert_eq!(e.code, codes::E_ENV_UNRESOLVED);
