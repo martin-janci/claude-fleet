@@ -137,6 +137,18 @@ fn client_tokens_has_trusted_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 177: `people` already has its
+/// `uuid` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn people_has_uuid(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('people') WHERE name = 'uuid'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 042: `sessions` already has its
 /// `row_version` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
@@ -1982,6 +1994,14 @@ const MIGRATIONS: &[Migration] = &[
         176,
         include_str!("../../migrations/176_review_test_exemptions.sql"),
     ),
+    // Identity sub-project 1: a person is a Keycloak user (uuid, email,
+    // names, attributes). ADD COLUMN, so guarded; the uuids are filled by
+    // `Store::backfill_person_uuids` on every open.
+    Migration {
+        version: 177,
+        sql: include_str!("../../migrations/177_people_profile.sql"),
+        already_applied: Some(people_has_uuid),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2141,8 +2161,26 @@ impl Store {
         self.ensure_work_rules_start_columns()?;
         self.backfill_stale_demoted()?;
         self.backfill_session_owner()?;
+        self.backfill_person_uuids()?;
         self.reap_orphan_session_events()?;
         Ok(())
+    }
+
+    /// Migration 177's backfill: every person without a uuid gets a v4 one.
+    /// Runs on every open, so a row an older binary inserted gets one too.
+    fn backfill_person_uuids(&self) -> Result<usize> {
+        let ids: Vec<i64> = self
+            .conn
+            .prepare("SELECT id FROM people WHERE uuid IS NULL")?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_>>()?;
+        for id in &ids {
+            self.conn.execute(
+                "UPDATE people SET uuid = ?1 WHERE id = ?2 AND uuid IS NULL",
+                rusqlite::params![uuid::Uuid::new_v4().to_string(), id],
+            )?;
+        }
+        Ok(ids.len())
     }
 
     /// Migration 080's backfill: a row the tick demoted before the veto had
@@ -3590,6 +3628,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(indexed, 1);
+    }
+
+    #[test]
+    fn migration_177_gives_every_person_a_uuid_and_an_empty_profile() {
+        let s = store_at_version(176);
+        s.conn
+            .execute_batch(
+                "INSERT INTO people (name, is_personal_owner, created_at) VALUES ('ada', 0, 1);",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        let ada = s.get_person_by_name("ada").unwrap().unwrap();
+        assert_eq!(ada.uuid.len(), 36, "a v4 uuid: {}", ada.uuid);
+        assert_eq!(ada.email, None);
+        assert!(!ada.email_verified);
+        assert_eq!(ada.attributes, serde_json::json!({}));
+        let owner = s
+            .get_person(s.personal_owner_id().unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_ne!(owner.uuid, ada.uuid);
+        // Re-running keeps the uuids.
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 177;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.get_person_by_name("ada").unwrap().unwrap().uuid, ada.uuid);
     }
 
     /// 091 on a database stopped at 090: existing host_layers rows and managed

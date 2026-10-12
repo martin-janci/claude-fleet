@@ -73,10 +73,34 @@ pub struct PersonRow {
     /// migration 100) sessions point at it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_at: Option<i64>,
+    /// The user's `id` in a Keycloak realm export; the integer `id` stays
+    /// internal. Filled by `Store::backfill_person_uuids` and at creation.
+    pub uuid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    pub email_verified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_name: Option<String>,
+    /// Keycloak's user attributes: an object of string arrays.
+    pub attributes: serde_json::Value,
+}
+
+/// A partial profile update ([`Store::update_person_profile`]). The outer
+/// `None` leaves a field unchanged, `Some(None)` clears it.
+#[derive(Debug, Clone, Default)]
+pub struct PersonProfile {
+    pub email: Option<Option<String>>,
+    pub email_verified: Option<bool>,
+    pub first_name: Option<Option<String>>,
+    pub last_name: Option<Option<String>>,
+    pub attributes: Option<serde_json::Value>,
 }
 
 /// Every `PersonRow` column, in [`map_person`] order.
-const PERSON_COLUMNS: &str = "id, name, display_name, is_personal_owner, created_at, disabled_at";
+const PERSON_COLUMNS: &str = "id, name, display_name, is_personal_owner, created_at, \
+     disabled_at, uuid, email, email_verified, first_name, last_name, attributes";
 
 fn map_person(row: &rusqlite::Row) -> rusqlite::Result<PersonRow> {
     Ok(PersonRow {
@@ -86,6 +110,13 @@ fn map_person(row: &rusqlite::Row) -> rusqlite::Result<PersonRow> {
         is_personal_owner: row.get::<_, i64>(3)? != 0,
         created_at: row.get(4)?,
         disabled_at: row.get(5)?,
+        uuid: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+        email: row.get(7)?,
+        email_verified: row.get::<_, i64>(8)? != 0,
+        first_name: row.get(9)?,
+        last_name: row.get(10)?,
+        attributes: serde_json::from_str(&row.get::<_, String>(11)?)
+            .unwrap_or_else(|_| serde_json::json!({})),
     })
 }
 
@@ -170,13 +201,123 @@ impl Store {
             ));
         }
         self.conn.execute(
-            "INSERT INTO people (name, display_name, is_personal_owner, created_at) \
-             VALUES (?1, ?2, 0, ?3)",
-            rusqlite::params![name, display_name, now_unix()],
+            "INSERT INTO people (name, display_name, is_personal_owner, created_at, uuid) \
+             VALUES (?1, ?2, 0, ?3, ?4)",
+            rusqlite::params![
+                name,
+                display_name,
+                now_unix(),
+                uuid::Uuid::new_v4().to_string()
+            ],
         )?;
         let id = self.conn.last_insert_rowid();
         self.get_person(id)?
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "person vanished right after insert"))
+    }
+
+    /// Change a person's Keycloak profile. Validates first (`E_VALIDATE`),
+    /// `E_NOTFOUND` for no such person, `E_EXISTS` when the email is already
+    /// held by another LIVE person (case-insensitively). Returns the
+    /// reloaded row.
+    pub fn update_person_profile(&self, id: i64, p: &PersonProfile) -> Result<PersonRow, IpcError> {
+        let bad = |m: String| IpcError::new(codes::E_VALIDATE, m);
+        if let Some(Some(e)) = &p.email {
+            let mut parts = e.split('@');
+            let (local, domain, extra) = (parts.next(), parts.next(), parts.next());
+            let ok = matches!((local, domain, extra), (Some(l), Some(d), None) if !l.is_empty() && !d.is_empty());
+            if !ok || e.chars().any(breaks_a_line) || e.chars().count() > 254 {
+                return Err(bad(format!("{e:?} is not a valid email address")));
+            }
+        }
+        for (label, v) in [("first name", &p.first_name), ("last name", &p.last_name)] {
+            if let Some(Some(n)) = v {
+                if n.chars().count() > 128 || n.chars().any(breaks_a_line) {
+                    return Err(bad(format!(
+                        "the {label} must be at most 128 characters on one line"
+                    )));
+                }
+            }
+        }
+        let attributes = match &p.attributes {
+            None => None,
+            Some(v) => {
+                let obj = v
+                    .as_object()
+                    .ok_or_else(|| bad("attributes must be an object".into()))?;
+                if obj.len() > 64 {
+                    return Err(bad("attributes may have at most 64 keys".into()));
+                }
+                for (k, val) in obj {
+                    let arr = val.as_array().ok_or_else(|| {
+                        bad(format!("attribute {k:?} must be an array of strings"))
+                    })?;
+                    for item in arr {
+                        let t = item.as_str().ok_or_else(|| {
+                            bad(format!("attribute {k:?} must be an array of strings"))
+                        })?;
+                        if t.chars().count() > 1024 {
+                            return Err(bad(format!(
+                                "a value of attribute {k:?} is longer than 1024 characters"
+                            )));
+                        }
+                    }
+                }
+                Some(v.to_string())
+            }
+        };
+        if self.get_person(id)?.is_none() {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("no person with id {id}"),
+            ));
+        }
+        let mut sets: Vec<&str> = Vec::new();
+        let mut args: Vec<rusqlite::types::Value> = Vec::new();
+        let mut push = |col: &'static str, v: rusqlite::types::Value| {
+            args.push(v);
+            sets.push(col);
+        };
+        let text = |o: &Option<String>| match o {
+            Some(s) => rusqlite::types::Value::Text(s.clone()),
+            None => rusqlite::types::Value::Null,
+        };
+        if let Some(e) = &p.email {
+            push("email = ?", text(e));
+        }
+        if let Some(b) = p.email_verified {
+            push(
+                "email_verified = ?",
+                rusqlite::types::Value::Integer(b as i64),
+            );
+        }
+        if let Some(n) = &p.first_name {
+            push("first_name = ?", text(n));
+        }
+        if let Some(n) = &p.last_name {
+            push("last_name = ?", text(n));
+        }
+        if let Some(a) = attributes {
+            push("attributes = ?", rusqlite::types::Value::Text(a));
+        }
+        if !sets.is_empty() {
+            args.push(rusqlite::types::Value::Integer(id));
+            let sql = format!("UPDATE people SET {} WHERE id = ?", sets.join(", "));
+            match self.conn.execute(&sql, rusqlite::params_from_iter(args)) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(e, _))
+                    if e.code == rusqlite::ErrorCode::ConstraintViolation
+                        && e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+                {
+                    return Err(IpcError::new(
+                        codes::E_EXISTS,
+                        "another person already uses that email address",
+                    ));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        self.get_person(id)?
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "person vanished during update"))
     }
 
     /// One person by id, disabled or not.
@@ -459,8 +600,13 @@ impl Store {
             ));
         }
         self.conn.execute(
-            "INSERT INTO people (name, is_personal_owner, created_at) VALUES (?1, 1, ?2)",
-            rusqlite::params![PERSONAL_OWNER_NAME, now_unix()],
+            "INSERT INTO people (name, is_personal_owner, created_at, uuid) \
+             VALUES (?1, 1, ?2, ?3)",
+            rusqlite::params![
+                PERSONAL_OWNER_NAME,
+                now_unix(),
+                uuid::Uuid::new_v4().to_string()
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -546,6 +692,59 @@ mod tests {
 
     fn store() -> Store {
         Store::open_in_memory().expect("store")
+    }
+
+    #[test]
+    fn a_profile_update_validates_email_and_attributes() {
+        let s = store();
+        let p = s.create_person("ada", None).unwrap();
+        let r = s
+            .update_person_profile(
+                p.id,
+                &PersonProfile {
+                    email: Some(Some("Ada@Example.com".into())),
+                    first_name: Some(Some("Ada".into())),
+                    attributes: Some(serde_json::json!({"team": ["core"]})),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(r.email.as_deref(), Some("Ada@Example.com"));
+        assert_eq!(r.attributes["team"][0], "core");
+        let bad = |pp: PersonProfile| s.update_person_profile(p.id, &pp).unwrap_err().code;
+        assert_eq!(
+            bad(PersonProfile {
+                email: Some(Some("no-at".into())),
+                ..Default::default()
+            }),
+            codes::E_VALIDATE
+        );
+        assert_eq!(
+            bad(PersonProfile {
+                attributes: Some(serde_json::json!({"k": "not-an-array"})),
+                ..Default::default()
+            }),
+            codes::E_VALIDATE
+        );
+        let other = s.create_person("bob", None).unwrap();
+        assert_eq!(
+            s.update_person_profile(
+                other.id,
+                &PersonProfile {
+                    email: Some(Some("ada@example.com".into())),
+                    ..Default::default()
+                }
+            )
+            .unwrap_err()
+            .code,
+            codes::E_EXISTS
+        );
+        assert_eq!(
+            s.update_person_profile(9999, &PersonProfile::default())
+                .unwrap_err()
+                .code,
+            codes::E_NOTFOUND
+        );
     }
 
     /// Migration 098's insert: every hub has a personal owner from the

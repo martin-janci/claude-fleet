@@ -176,7 +176,8 @@ pub use peer_links::{
     PEER_PENDING_MAX_SECS,
 };
 pub use people::{
-    machine_token_kind, validate_person_name, PersonRow, MAX_PERSON_NAME_LEN, PERSONAL_OWNER_NAME,
+    machine_token_kind, validate_person_name, PersonProfile, PersonRow, MAX_PERSON_NAME_LEN,
+    PERSONAL_OWNER_NAME,
 };
 pub use pr_shepherd::{
     ShepherdEpisodeRow, ShepherdMergeRow, ShepherdRuleRow, SHEPHERD_LEVELS,
