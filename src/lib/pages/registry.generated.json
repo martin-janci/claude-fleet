@@ -5010,15 +5010,7 @@
             },
             {
               "key": "create_tickets",
-              "type": "field",
-              "when": {
-                "in": [
-                  "jira",
-                  "jira_dc",
-                  "asana"
-                ],
-                "key": "provider"
-              }
+              "type": "field"
             }
           ],
           "title": "Write-back"

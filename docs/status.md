@@ -414,16 +414,17 @@ container? }` (routed desktop `promote_work_item`, `service/work/promote.rs`)
 queues the outbox's `create_item` op (`url` `fleet-item:<id>`; `item_key` /
 `external_id` the parent ticket for a subtask, else the container), and the
 drain's `WriteOp::CreateItem` creates a Jira sub-task or task (createmeta
-picks the issue type) or an Asana task / subtask, then converts the task IN
+picks the issue type), an Asana task / subtask, a Linear issue / sub-issue
+(`issueCreate`, `parentId`) or a GitHub issue (`createIssue`, then
+`addSubIssue` under a parent; a failed link leaves it at the top), then converts the task IN
 PLACE (`Store::promote_local_item`: same row, the tracker's key and id, the
 old key an alias) and reads the ticket back. Per tracker
 `settings.write_back.create_tickets`, **off by default** (Settings → Trackers
-→ Write-back → *Create tickets*, confirm-gated, Jira Cloud, Jira DC and
-Asana). Refused for a per-host token (`E_FORBIDDEN`), the setting off
+→ Write-back → *Create tickets*, confirm-gated, every provider). Refused for a per-host token (`E_FORBIDDEN`), the setting off
 (`E_INVALID_STATE`), a tracker's ticket, an epic, a job, a proposal or a task
 under a task of fleet's own (`E_INVALID`). A failed promotion may be tried
 again. `TaskDetail.promotion` / `promote_targets` drive *Promote to
-ticket…* on the task page. Not yet: Linear and GitHub, sending assignees,
+ticket…* on the task page. Not yet: sending assignees,
 due dates, priority, labels or estimates, epics, and the phone.
 
 Task attachments (migration 168, `work_item_attachments` and the

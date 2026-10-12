@@ -1025,6 +1025,25 @@ describe('WorkTaskDetail', () => {
       expect(screen.getByTestId('work-task-promotion').textContent?.trim()).toBe('Creating the ticket in Jira (acme)…');
     });
 
+    it('a GitHub tracker narrowed to no repositories takes one typed in', async () => {
+      handlers.work_task = () => ({
+        ...localTask,
+        promote_targets: [{ tracker_id: 4, tracker: 'GitHub (acme)', provider: 'github', container_required: true }],
+      });
+      handlers.promote_work_item = () => ({ id: 77 });
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      await fireEvent.click(screen.getByTestId('work-task-promote'));
+      await flush();
+      const submit = screen.getByTestId('promote-task-submit') as HTMLButtonElement;
+      expect(submit.disabled).toBe(true);
+      await fireEvent.input(screen.getByTestId('promote-task-container-text'), { target: { value: ' acme/api ' } });
+      await flush();
+      await fireEvent.click(submit);
+      await flush();
+      expect(calls('promote_work_item')).toEqual([{ item_id: 77, tracker_id: 4, container: 'acme/api' }]);
+    });
+
     it('a ticket, or a task no tracker takes, offers no Promote', async () => {
       render(WorkTaskDetail, { taskId: 'item:77' });
       await flush();

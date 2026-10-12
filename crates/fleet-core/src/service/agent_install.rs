@@ -263,7 +263,6 @@ fn plan_in(s: &Store, args: &InstallAgentArgs) -> Result<Plan, IpcError> {
             format!("{} is already an agent host", host.alias),
         ));
     }
-    crate::service::trackers::admin::refuse_agent_transport_on_tracker_host(s, &host.alias)?;
     if let Some(running) = s
         .agent_installs(Some(&host.alias), 1)?
         .into_iter()
@@ -904,6 +903,29 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.insert_host("mercury", Some("mercury")).unwrap();
         Arc::new(Mutex::new(s))
+    }
+
+    /// A host some tracker runs curl or gh on may become an agent host
+    /// (CF-3: the agent transport pipes stdin, so the tracker keeps
+    /// working there): the plan is made, nothing refuses it.
+    #[test]
+    fn a_tracker_host_may_be_moved_to_an_agent() {
+        let store = store_with_ssh_host();
+        let s = store.lock().unwrap();
+        let t = s
+            .add_tracker("jira", "acme", "https://acme.atlassian.net")
+            .unwrap();
+        s.set_tracker_transport(t.id, "via_host:mercury").unwrap();
+        let plan = plan_in(
+            &s,
+            &InstallAgentArgs {
+                alias: "mercury".into(),
+                hub_url: Some("https://h".into()),
+                version: Some("0.5.4".into()),
+            },
+        )
+        .expect("a tracker host may become an agent host");
+        assert_eq!(plan.alias, "mercury");
     }
 
     #[tokio::test]

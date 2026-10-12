@@ -682,11 +682,12 @@ Index by area (names only; see the reference for details):
   post_to_tracker: true }` on a ticket also posts the comment there, signed
   `— <name> via fleet`, through the same outbox, drained at once; refused
   for a per-host token, fleet's own work, or with the setting off, and then
-  nothing is written), and for Jira (Cloud and Data Center) and Asana
+  nothing is written), and for every provider
   `write_back: { create_tickets }` (off by default: a person's `work_link {
   promote, item_id, tracker_id?, container? }` turns a task of fleet's own
   into a ticket there — a subtask of a ticket under that ticket, a task at
-  the top into `container`, a Jira project key or an Asana project gid — and
+  the top into `container`, a Jira project key, an Asana project gid, a
+  Linear team key or a GitHub `owner/repo` — and
   the task becomes that ticket once the outbox sends it; `work { task }`
   answers `promotion` and `promote_targets`). `work { action: "tracker_comments", key }` reads a
   ticket's own comments live (newest 50, oldest first, no cache; the ones
