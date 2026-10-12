@@ -137,9 +137,9 @@ Parameters: `action`, `chosen`, `run_id`, `text`
 
 ### `debug_devices`
 
-Phones, emulators and simulators on any fleet host, used from any session that may see them; commands run on the device's host. run: one adb / simctl / devicectl command. install copies the app from your host. screenshot answers an image. A claim keeps others off (E_CONFLICT); use extends it.
+Phones, emulators and simulators on any fleet host, used from any session that may see them; commands run on the device's host. run: one adb / simctl / devicectl command. install copies the app from your host. screenshot answers an image. A claim keeps others off (E_CONFLICT); use extends it. claim with queue waits in line for a held one; it is yours when your turn comes.
 
-Parameters: `action`, `args`, `claim_s`, `contains`, `device`, `downgrade`, `filter`, `host`, `label`, `lines`, `name`, `note`, `path`, `refresh`, `shared`, `since_s`, `timeout_s`
+Parameters: `action`, `args`, `claim_s`, `contains`, `device`, `downgrade`, `filter`, `host`, `label`, `lines`, `name`, `note`, `path`, `queue`, `refresh`, `shared`, `since_s`, `timeout_s`
 
 ### `decide_related_session`
 

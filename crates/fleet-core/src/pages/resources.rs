@@ -1298,6 +1298,7 @@ const DEBUG_DEVICE: ResourceType = ResourceType {
         FieldSpec::new("claimed_by", "Claimed by", "Who is using it now; nobody else may until the claim ends.", FieldKind::Text { max: 256 }),
         FieldSpec::new("claim_note", "For", "What the claim says it is for.", FieldKind::Text { max: 200 }),
         FieldSpec::new("claimed_until", "Claim ends", "When the claim lapses unless its holder keeps using it.", FieldKind::Time),
+        FieldSpec::new("waiting", "Waiting", "Sessions and people in line for it; each gets the claim in turn when the one before releases it or lets it lapse.", FieldKind::Count),
         FieldSpec::new("last_seen_at", "Last seen", "When a scan last found it.", FieldKind::Time),
     ],
     create: None,
@@ -1308,8 +1309,16 @@ const DEBUG_DEVICE: ResourceType = ResourceType {
     ),
     actions: &[
         ActionSpec::new("debug_device.rescan", "Rescan host", "scan_debug_devices", &[("host", Bind::Record("host"))]),
-        ActionSpec::new("debug_device.claim", "Claim", "claim_debug_device", &[DEBUG_DEVICE_ID, ("note", Bind::Param("note"))])
-            .params(&[param("note", "For (optional)", text(200, "testing the login flow"), false)]),
+        ActionSpec::new(
+            "debug_device.claim",
+            "Claim",
+            "claim_debug_device",
+            &[DEBUG_DEVICE_ID, ("note", Bind::Param("note")), ("queue", Bind::Param("queue"))],
+        )
+            .params(&[
+                param("note", "For (optional)", text(200, "testing the login flow"), false),
+                param("queue", "Wait in line if someone holds it", ParamKind::Toggle { default: false }, false),
+            ]),
         ActionSpec::new(
             "debug_device.install",
             "Install app…",
@@ -1338,7 +1347,7 @@ const DEBUG_DEVICE: ResourceType = ResourceType {
         ActionSpec::new("debug_device.mirror_stop", "Stop mirror", "stop_device_mirror", &[DEBUG_DEVICE_ID])
             .variants(&["physical", "emulator"]),
         ActionSpec::new("debug_device.release", "Release claim", "release_debug_device", &[DEBUG_DEVICE_ID])
-            .confirm("Whoever holds it loses the claim; another session may then use the device."),
+            .confirm("Whoever holds it loses the claim and the next in line gets it, or another session may then use it. If you wait in its line, you only leave the line."),
         ActionSpec::new("debug_device.boot", "Start", "boot_debug_device", &[DEBUG_DEVICE_ID]).variants(&["emulator", "simulator"]),
         ActionSpec::new("debug_device.shutdown", "Stop", "shutdown_debug_device", &[DEBUG_DEVICE_ID])
             .variants(&["emulator", "simulator"])

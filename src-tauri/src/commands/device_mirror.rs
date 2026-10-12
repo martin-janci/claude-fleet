@@ -43,6 +43,7 @@ impl Lease for DesktopLease {
                 id: self.id,
                 note: Some("scrcpy mirror".into()),
                 claim_s: Some(mirror::CLAIM_SECS),
+                queue: None,
             },
         )
         .await

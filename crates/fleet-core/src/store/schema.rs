@@ -1982,6 +1982,12 @@ const MIGRATIONS: &[Migration] = &[
         176,
         include_str!("../../migrations/176_review_test_exemptions.sql"),
     ),
+    // Debug devices: the line waiting for a claimed device,
+    // `debug_device_queue`. New table, idempotent.
+    Migration::plain(
+        177,
+        include_str!("../../migrations/177_debug_device_queue.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

@@ -23,13 +23,18 @@
 //! - **Claims.** A claim is an advisory lease ([`DEFAULT_CLAIM_SECS`]): while
 //!   it holds, only its holder uses the device, and each use extends it. A
 //!   person may release anyone's claim.
+//! - **Queue.** `claim` with `queue` on a device someone else holds joins
+//!   its line instead of failing. Whenever the device is read, a claim that
+//!   is gone or lapsed passes to the first in line for [`HANDOFF_SECS`]
+//!   (each use extends it as usual), so a waiter that went away holds the
+//!   others up only that long. A place older than [`MAX_WAIT_SECS`] lapses.
 
 pub mod scripts;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::view_scope::ViewScope;
 use crate::ssh::SshExec;
-use crate::store::{now_unix, DebugDeviceRow, SeenDevice, Store};
+use crate::store::{now_unix, DebugDeviceRow, DebugDeviceWaiter, SeenDevice, Store};
 use scripts::{BootTarget, Bootable, RunOutput, Target};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,6 +48,11 @@ pub const STALE_SECS: i64 = 300;
 pub const DEFAULT_CLAIM_SECS: i64 = 30 * 60;
 /// The longest claim one call may take.
 pub const MAX_CLAIM_SECS: i64 = 24 * 3600;
+/// How long a claim handed to the first in line lasts unless it uses or
+/// renews it.
+pub const HANDOFF_SECS: i64 = 10 * 60;
+/// How long a place in a device's line lasts.
+pub const MAX_WAIT_SECS: i64 = 24 * 3600;
 /// The largest app `install` copies between hosts.
 pub const MAX_INSTALL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -101,8 +111,33 @@ pub struct DebugDevice {
     pub claim_note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_until: Option<i64>,
+    /// Who waits for the claim, first in line first: each gets it in turn
+    /// when the one before releases it or lets it lapse.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queue: Vec<QueuedHolder>,
+    /// How many wait: `queue`'s length, for a page's count.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub waiting: u32,
+    /// The asker's own place in [`Self::queue`] (1: next), when it waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_place: Option<u32>,
     pub first_seen_at: i64,
     pub last_seen_at: i64,
+}
+
+/// One holder waiting for a device's claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedHolder {
+    /// Who waits, as a claim records it.
+    pub holder: String,
+    /// What the claim it gets will say it is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub queued_at: i64,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn is_ready(state: &str) -> bool {
@@ -132,6 +167,9 @@ impl DebugDevice {
             claimed_by: r.claimed_by.filter(|_| live),
             claim_note: r.claim_note.filter(|_| live),
             claimed_until: r.claimed_until.filter(|_| live),
+            queue: vec![],
+            waiting: 0,
+            queue_place: None,
             first_seen_at: r.first_seen_at,
             last_seen_at: r.last_seen_at,
         }
@@ -237,14 +275,43 @@ fn may_use(asker: &Asker, d: &DebugDevice) -> bool {
     }
 }
 
-/// Every device `asker` may see, read from the store (no scan).
+/// Pass every gone or lapsed claim to the first in its device's line.
+fn settle_queue(s: &Store, now: i64) -> Result<(), IpcError> {
+    s.debug_devices_settle_queue(now, now - MAX_WAIT_SECS, HANDOFF_SECS)?;
+    Ok(())
+}
+
+/// Every device `asker` may see, read from the store (no scan), each with
+/// its line.
 pub fn visible(s: &Store, asker: &Asker) -> Result<Vec<DebugDevice>, IpcError> {
     let hosts = visible_hosts(s, asker)?;
     let now = now_unix();
+    settle_queue(s, now)?;
+    let mut lines: BTreeMap<i64, Vec<DebugDeviceWaiter>> = BTreeMap::new();
+    for w in s.debug_device_queue()? {
+        lines.entry(w.device_id).or_default().push(w);
+    }
     Ok(s.debug_devices()?
         .into_iter()
         .filter(|r| hosts.contains_key(&r.host_alias))
-        .map(|r| DebugDevice::from_row(r, now))
+        .map(|r| {
+            let mut d = DebugDevice::from_row(r, now);
+            let line = lines.remove(&d.id).unwrap_or_default();
+            d.queue_place = line
+                .iter()
+                .position(|w| w.holder == asker.holder)
+                .map(|i| i as u32 + 1);
+            d.waiting = line.len() as u32;
+            d.queue = line
+                .into_iter()
+                .map(|w| QueuedHolder {
+                    holder: w.holder,
+                    note: w.note,
+                    queued_at: w.queued_at,
+                })
+                .collect();
+            d
+        })
         .filter(|d| may_use(asker, d))
         .collect())
 }
@@ -538,13 +605,15 @@ fn check_claim(s: &Store, asker: &Asker, d: &DebugDevice) -> Result<(), IpcError
         Some(h) if h != asker.holder => Err(IpcError::new(
             codes::E_CONFLICT,
             format!(
-                "{} is claimed by {h}{} for {} more min; wait, or ask a person to release it",
+                "{} is claimed by {h}{} for {} more min{}; claim it with queue to wait in \
+                 line, or ask a person to release it",
                 d.display(),
                 d.claim_note
                     .as_deref()
                     .map(|n| format!(" ({n})"))
                     .unwrap_or_default(),
-                (d.claimed_until.unwrap_or(0) - now_unix()).max(0) / 60 + 1
+                (d.claimed_until.unwrap_or(0) - now_unix()).max(0) / 60 + 1,
+                waiting(d),
             ),
         )),
         Some(_) => {
@@ -595,31 +664,56 @@ fn target_of(d: &DebugDevice) -> Result<Target, IpcError> {
     })
 }
 
-/// Claim a device for `secs` (default [`DEFAULT_CLAIM_SECS`]).
+/// `, N waiting` when others wait for `d`, for messages.
+fn waiting(d: &DebugDevice) -> String {
+    match d.queue.len() {
+        0 => String::new(),
+        n => format!(", {n} waiting"),
+    }
+}
+
+/// Claim a device for `secs` (default [`DEFAULT_CLAIM_SECS`]). When someone
+/// else holds it: with `queue`, join (or keep) a place in its line and
+/// answer the device with that place in `queue_place`; without, refuse.
 pub fn claim(
     store: &Mutex<Store>,
     asker: &Asker,
     reference: &str,
     secs: Option<i64>,
     note: Option<&str>,
+    queue: bool,
 ) -> Result<DebugDevice, IpcError> {
     let s = lock(store)?;
     let d = resolve(&s, asker, reference)?;
-    if let Some(h) = d.claimed_by.as_deref().filter(|h| *h != asker.holder) {
-        return Err(IpcError::new(
-            codes::E_CONFLICT,
-            format!("{} is already claimed by {h}", d.display()),
-        ));
-    }
-    let secs = secs.unwrap_or(DEFAULT_CLAIM_SECS).clamp(60, MAX_CLAIM_SECS);
     let note = note
         .map(|n| n.trim().chars().take(200).collect::<String>())
         .filter(|n| !n.is_empty());
+    // Resolving moved the line along, so a free device has nobody waiting
+    // ahead of the asker: anyone who was is its holder now.
+    if let Some(h) = d.claimed_by.as_deref().filter(|h| *h != asker.holder) {
+        if !queue {
+            return Err(IpcError::new(
+                codes::E_CONFLICT,
+                format!(
+                    "{} is already claimed by {h}{}; claim it with queue to wait in line",
+                    d.display(),
+                    waiting(&d)
+                ),
+            ));
+        }
+        s.debug_device_enqueue(d.id, &asker.holder, note.as_deref(), now_unix())?;
+        return reread(&s, asker, d.id);
+    }
+    let secs = secs.unwrap_or(DEFAULT_CLAIM_SECS).clamp(60, MAX_CLAIM_SECS);
     s.debug_device_claim(d.id, &asker.holder, note.as_deref(), now_unix() + secs)?;
-    reread(&s, d.id)
+    s.debug_device_dequeue(d.id, &asker.holder)?;
+    reread(&s, asker, d.id)
 }
 
-/// Release a claim: the holder's own, or any one by a person.
+/// Release a claim: the holder's own, or any one by a person; the next in
+/// line, if any, gets it. A caller waiting in the line of a device someone
+/// else holds only leaves the line, so leaving never takes the claim from
+/// its holder; a holder that releases also leaves.
 pub fn release(
     store: &Mutex<Store>,
     asker: &Asker,
@@ -627,8 +721,9 @@ pub fn release(
 ) -> Result<DebugDevice, IpcError> {
     let s = lock(store)?;
     let d = resolve(&s, asker, reference)?;
-    if let Some(h) = d.claimed_by.as_deref() {
-        if h != asker.holder && asker.is_host() {
+    match d.claimed_by.as_deref() {
+        Some(h) if h != asker.holder && d.queue_place.is_some() => {}
+        Some(h) if h != asker.holder && asker.is_host() => {
             return Err(IpcError::new(
                 codes::E_FORBIDDEN,
                 format!(
@@ -637,14 +732,19 @@ pub fn release(
                 ),
             ));
         }
+        _ => {
+            s.debug_device_release(d.id)?;
+        }
     }
-    s.debug_device_release(d.id)?;
-    reread(&s, d.id)
+    s.debug_device_dequeue(d.id, &asker.holder)?;
+    reread(&s, asker, d.id)
 }
 
-fn reread(s: &Store, id: i64) -> Result<DebugDevice, IpcError> {
-    s.debug_device(id)?
-        .map(|r| DebugDevice::from_row(r, now_unix()))
+/// The device as `asker` sees it now, its line moved along.
+fn reread(s: &Store, asker: &Asker, id: i64) -> Result<DebugDevice, IpcError> {
+    visible(s, asker)?
+        .into_iter()
+        .find(|d| d.id == id)
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("debug device #{id} not found")))
 }
 
@@ -687,7 +787,7 @@ pub fn configure(
         }
     }
     s.debug_device_configure(d.id, label, shared)?;
-    reread(&s, d.id)
+    reread(&s, asker, d.id)
 }
 
 /// Drop a device from the inventory. A device still attached comes back
@@ -922,7 +1022,7 @@ pub async fn shutdown(
     run_on(ssh, &d.host, "shutdown", &script, Duration::from_secs(60)).await?;
     let s = lock(store)?;
     s.debug_device_set_state(d.id, "shutdown")?;
-    reread(&s, d.id)
+    reread(&s, asker, d.id)
 }
 
 /// Where an app to install is: a path on `from_host`.

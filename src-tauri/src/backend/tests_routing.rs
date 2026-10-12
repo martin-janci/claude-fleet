@@ -394,7 +394,7 @@ fn installing_with_a_claim_claims_the_device_first() {
         vec![
             (
                 "debug_devices".to_string(),
-                json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null })
+                json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null, "queue": null })
             ),
             (
                 "debug_devices".to_string(),
@@ -3125,7 +3125,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "claim_debug_device",
             "debug_devices",
-            json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null }),
+            json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null, "queue": true }),
             DEBUG_DEVICE_JSON,
             Box::new(|b, s, _| {
                 block_on(commands::debug_devices::routed::claim_debug_device(
@@ -3135,6 +3135,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         id: 3,
                         note: Some("login flow".into()),
                         claim_s: None,
+                        queue: Some(true),
                     },
                 ))
                 .map(|_| ())

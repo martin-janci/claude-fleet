@@ -5919,6 +5919,10 @@
             {
               "key": "claimed_until",
               "type": "field"
+            },
+            {
+              "key": "waiting",
+              "type": "field"
             }
           ],
           "title": "In use"
@@ -7982,6 +7986,13 @@
                 "from": "param",
                 "name": "note"
               }
+            ],
+            [
+              "queue",
+              {
+                "from": "param",
+                "name": "queue"
+              }
             ]
           ],
           "command": "claim_debug_device",
@@ -7996,6 +8007,13 @@
               "placeholder": "testing the login flow",
               "required": false,
               "type": "text"
+            },
+            {
+              "default": false,
+              "label": "Wait in line if someone holds it",
+              "name": "queue",
+              "required": false,
+              "type": "toggle"
             }
           ],
           "report": false
@@ -8167,7 +8185,7 @@
             ]
           ],
           "command": "release_debug_device",
-          "confirm": "Whoever holds it loses the claim; another session may then use the device.",
+          "confirm": "Whoever holds it loses the claim and the next in line gets it, or another session may then use it. If you wait in its line, you only leave the line.",
           "envelope": "args",
           "id": "debug_device.release",
           "label": "Release claim",
@@ -8392,6 +8410,12 @@
           "id": "claimed_until",
           "label": "Claim ends",
           "type": "time"
+        },
+        {
+          "help": "Sessions and people in line for it; each gets the claim in turn when the one before releases it or lets it lapse.",
+          "id": "waiting",
+          "label": "Waiting",
+          "type": "count"
         },
         {
           "help": "When a scan last found it.",

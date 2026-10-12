@@ -1069,9 +1069,12 @@ Index by area (names only; see the reference for details):
   copies the app from the caller's host (a per-host token: its own host
   only) to the device's host first; `logs` (`logcat -d`, a simulator's
   `log show`), `screenshot` (an image content block), `boot`, `shutdown`.
-  `claim { device, claim_s?, note? }` keeps every other caller off the
-  device (`E_CONFLICT`) until it lapses or is released; each use by its
-  holder extends it. A per-host token sees its own host's devices and the
+  `claim { device, claim_s?, note?, queue? }` keeps every other caller off
+  the device (`E_CONFLICT`) until it lapses or is released; each use by its
+  holder extends it. With `queue: true` a held device answers your place in
+  its line (`queue_place`) instead of `E_CONFLICT`, and the claim passes to
+  the first in line when the holder releases it or lets it lapse;
+  `release` from someone in that line only leaves it. A per-host token sees its own host's devices and the
   ones a person marked `shared` on hosts of its own org; `configure {
   label, shared }` and `forget` are a person's. See `docs/debug-devices.md`.
 - **Pull requests** — `prs`, `action: list { state?: open|merged|closed|all,
