@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "track": "dev",
-  "sequence": 38,
-  "generated_at": "2026-10-12T00:51:04Z",
-  "expires_at": "2026-10-26T00:51:04Z",
+  "sequence": 39,
+  "generated_at": "2026-10-12T07:02:12Z",
+  "expires_at": "2026-10-26T07:02:12Z",
   "current": "0.6.3-dev.194.desktop.g6c93e8a",
   "recommended": "0.6.3-dev.194.desktop.g6c93e8a",
   "minimum_supported": {},
