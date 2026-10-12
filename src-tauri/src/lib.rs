@@ -454,6 +454,7 @@ pub fn run() {
             commands::work::create_work_task,
             commands::work::draft_task_title,
             commands::work::set_work_status,
+            commands::work::keep_work_open,
             commands::work::edit_work_item,
             commands::work::set_work_parent,
             commands::work::accept_work_proposal,

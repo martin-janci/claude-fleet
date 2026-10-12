@@ -183,6 +183,7 @@
     "import_mission_plan",
     "install_agent",
     "install_debug_device",
+    "keep_work_open",
     "kill_session",
     "link_peer_hub",
     "link_session_work",

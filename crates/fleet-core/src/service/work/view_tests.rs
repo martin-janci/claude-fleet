@@ -3203,3 +3203,119 @@ fn an_unknown_sort_is_refused() {
     .unwrap_err();
     assert!(err.message.contains("filters.sort"), "{}", err.message);
 }
+
+/// Local work `key` on `sid`, the session then gone: a finished local task.
+fn finished_local(w: &W, sid: i64, key: &str) -> i64 {
+    let s = w.st.lock().unwrap();
+    let (item, _) = s
+        .name_session_work(sid, Some(key), "Finished here")
+        .unwrap();
+    s.delete_session(sid).unwrap();
+    item.id
+}
+
+/// CF-5: local work whose sessions have all ended, not done and nobody's
+/// status, is suggested for closing — and sorts with what needs a person.
+#[test]
+fn finished_local_work_is_suggested_for_closing() {
+    let w = world();
+    finished_local(&w, w.s1, "LOC-50");
+    let p = page(&w, &OrgScope::All, hiding());
+    let t = task_of(&p, "LOC-50");
+    assert!(t.close_suggested);
+    assert!(!t.archived, "not done: it is still in the tree");
+    let org_names = HashMap::new();
+    let plain = WorkTask {
+        close_suggested: false,
+        ..t.clone()
+    };
+    let needs = WorkTask {
+        needs_you: true,
+        ..plain.clone()
+    };
+    assert!(sort_key(t, &org_names, None) < sort_key(&plain, &org_names, None));
+    assert!(sort_key(&needs, &org_names, None) < sort_key(t, &org_names, None));
+    // Off the wire unless set, so an older client's fixtures still hold.
+    let wire = serde_json::to_value(&plain).unwrap();
+    assert!(wire.get("close_suggested").is_none(), "{wire}");
+}
+
+/// Nothing is suggested while a session is on the work, for work with no
+/// session at all, or for a tracker's ticket.
+#[test]
+fn only_finished_local_work_is_suggested() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        s.name_session_work(w.s1, Some("LOC-51"), "Still running")
+            .unwrap();
+        s.create_local_work_item(Some("LOC-52"), "Never started")
+            .unwrap();
+    }
+    link(&w, w.s2, w.t2, true);
+    w.st.lock().unwrap().delete_session(w.s2).unwrap();
+    let p = page(&w, &OrgScope::All, hiding());
+    assert!(!task_of(&p, "LOC-51").close_suggested);
+    assert!(!task_of(&p, "LOC-52").close_suggested);
+    assert!(
+        !task_of(&p, "TK-2").close_suggested,
+        "a ticket is its tracker's"
+    );
+}
+
+/// Mark done closes it (and archives it); Reopen — a person's `todo` — is
+/// an answer too, so the suggestion does not come straight back.
+#[test]
+fn a_persons_status_answers_the_suggestion() {
+    let w = world();
+    let id = finished_local(&w, w.s1, "LOC-53");
+    w.st.lock().unwrap().set_item_status(id, "done").unwrap();
+    let p = page(&w, &OrgScope::All, hiding());
+    assert!(!keys(&p).contains(&"LOC-53".to_string()));
+    assert_eq!(p.archived_hidden, 1);
+
+    w.st.lock().unwrap().set_item_status(id, "todo").unwrap();
+    let p = page(&w, &OrgScope::All, hiding());
+    let t = task_of(&p, "LOC-53");
+    assert!(!t.archived);
+    assert!(!t.close_suggested, "a person said it is open");
+}
+
+/// Keep open holds until a session ends on the work later.
+#[test]
+fn keep_open_holds_until_a_later_session_ends() {
+    let w = world();
+    let id = finished_local(&w, w.s1, "LOC-54");
+    crate::service::work::status::keep_open(&w.st, &OrgScope::All, id).unwrap();
+    let p = page(&w, &OrgScope::All, hiding());
+    assert!(!task_of(&p, "LOC-54").close_suggested);
+
+    // The answer was given long ago; a session ended on it since.
+    w.st.lock().unwrap().seed_close_dismissal(id, 1);
+    let p = page(&w, &OrgScope::All, hiding());
+    assert!(task_of(&p, "LOC-54").close_suggested);
+
+    // Work resumes: no suggestion while a session is on it.
+    link(&w, w.s2, id, true);
+    let p = page(&w, &OrgScope::All, hiding());
+    assert!(!task_of(&p, "LOC-54").close_suggested);
+}
+
+/// `archived_only`: the Archived section's read — archived tasks and
+/// nothing else, whatever `archived` says.
+#[test]
+fn archived_only_lists_archived_tasks_alone() {
+    let w = world();
+    done_item(&w, "9", "TK-9");
+    let only = |archived| WorkTreeFilters {
+        archived,
+        archived_only: Some(true),
+        ..Default::default()
+    };
+    for archived in [None, Some(true), Some(false)] {
+        let p = page(&w, &OrgScope::All, only(archived));
+        assert_eq!(keys(&p), vec!["TK-9".to_string()], "{archived:?}");
+        assert_eq!(p.archived_hidden, 0);
+        assert_eq!(p.groups.iter().map(|g| g.count).sum::<u32>(), 1);
+    }
+}

@@ -262,6 +262,12 @@ pub struct SetWorkStatusArgs {
     pub status_name: Option<String>,
 }
 
+/// *Keep open* on fleet's own work the Work view suggested closing (CF-5).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct KeepWorkOpenArgs {
+    pub item_id: i64,
+}
+
 /// A person's edit of a native item; a field left out stays as it is.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EditWorkItemArgs {
@@ -326,6 +332,15 @@ pub async fn set_work_status(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<WorkItemRow, IpcError> {
     routed::set_work_status(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn keep_work_open(
+    args: KeepWorkOpenArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::keep_work_open(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -795,6 +810,28 @@ pub(crate) mod routed {
                 )
                 .await
             }
+        }
+    }
+
+    /// `work_link { keep_open }`: the answer to "finished — close?" that is
+    /// not a status (CF-5).
+    pub async fn keep_work_open(
+        backend: &FleetBackend,
+        args: KeepWorkOpenArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorkItemRow, IpcError> {
+        let args = WorkLinkArgs {
+            action: "keep_open".into(),
+            item_id: Some(args.item_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("keep_work_open", &args).await,
+            None => work::status::keep_open(
+                store,
+                &fleet_core::service::orgs::OrgScope::All,
+                args.item_id.unwrap_or_default(),
+            ),
         }
     }
 

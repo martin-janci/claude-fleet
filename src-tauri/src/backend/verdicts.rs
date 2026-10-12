@@ -375,6 +375,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // The board (sprints design 2026-09-28 §6c): a person's status for a
     // native item, set by dragging its card to a column.
     ("set_work_status", Verdict::Routed { tool: "work_link" }),
+    // CF-5: Keep open, the answer to "finished — close?".
+    ("keep_work_open", Verdict::Routed { tool: "work_link" }),
     // Task editing: a person's title, notes and assignees for a native item.
     ("edit_work_item", Verdict::Routed { tool: "work_link" }),
     // Epics (sprints design 2026-09-28 §3): a local item filed under an epic.

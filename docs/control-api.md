@@ -855,6 +855,10 @@ Index by area (names only; see the reference for details):
   item). `work_link { action: "name", item_id, title }` renames a local
   item (a ticket is `E_INVALID`) and returns the item; both emit
   `session:updated` for the rows that show it and `work:item`.
+  `work_link { action: "keep_open", item_id }` answers a local item's
+  `close_suggested` (the Work view's "finished — close?") without setting a
+  status: the suggestion returns once a session ends on the item later. A
+  ticket is `E_INVALID`; it returns the item.
   `work_link { action: "set_status", item_id, status }` sets a local item's
   status to `todo`, `in_progress` or `done` and returns the item. The
   setting is final: fleet never derives a status back over what a person

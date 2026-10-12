@@ -1346,7 +1346,7 @@ impl FleetTools {
         a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
         kill when dirty). set_status {item_id, status, status_name?}: a person's status for \
-        work with no ticket, or a ticket moved at its tracker. edit {item_id, title?, notes?, assignees?, \
+        work with no ticket, or a ticket moved at its tracker; keep_open {item_id} answers close_suggested. edit {item_id, title?, notes?, assignees?, \
         due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, \
         mime, data_base64, comment_id?}: a file on a task; attachment_delete \
         {attachment_id}. create {title, parent?, \
@@ -1843,6 +1843,21 @@ impl FleetTools {
                     None,
                 )),
             };
+        }
+        if args.action == "keep_open" {
+            // "Finished — close?" answered with Keep open (CF-5). The org
+            // fence is inside `keep_open`; the person fence is
+            // `set_status`'s, since it answers for the same row.
+            let item_id = args
+                .item_id
+                .ok_or_else(|| mcp_err("E_INVALID", "keep_open needs item_id", None))?;
+            if !self.own_session_works_on(&caller, item_id)? {
+                self.require_drive_on_item_sessions(&caller, item_id)?;
+            }
+            return ok_json(
+                &crate::service::work::status::keep_open(&self.store, &scope, item_id)
+                    .map_err(to_mcp_err)?,
+            );
         }
         if args.action == "set_status" {
             // A person's status for work with no ticket (design

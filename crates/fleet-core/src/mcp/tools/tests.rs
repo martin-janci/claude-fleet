@@ -12036,6 +12036,9 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // `require_drive_on_item_sessions`, the same gate and level as `name`'s
     // rename half.
     ("work_link", "set_status", &["Drive"]),
+    // Keep open (CF-5) answers "finished — close?" for the same row, behind
+    // `set_status`'s gate.
+    ("work_link", "keep_open", &["Drive"]),
     // Task editing: the text the owner's sidebar shows for their own row,
     // behind `set_status`'s gate.
     ("work_link", "edit", &["Drive"]),

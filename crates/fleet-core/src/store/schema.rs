@@ -1996,6 +1996,12 @@ const MIGRATIONS: &[Migration] = &[
     ),
     // Session environment variables and secrets.
     Migration::plain(179, include_str!("../../migrations/179_env_vars.sql")),
+    // CF-5: a person's "Keep open" on finished local work. A new table,
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        180,
+        include_str!("../../migrations/180_work_close_dismissals.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
