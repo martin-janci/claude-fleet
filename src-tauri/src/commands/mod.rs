@@ -6,6 +6,7 @@ pub mod assets;
 pub mod cancel;
 pub mod context_help;
 pub mod debug_devices;
+pub mod device_mirror;
 pub mod diagnostics;
 pub mod downloads;
 pub mod editor;

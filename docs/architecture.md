@@ -423,7 +423,11 @@ bullet for the area you are about to change.
   own host's devices plus `shared` ones on hosts of its org; `configure` /
   `forget` are a person's. Claims are advisory leases in the row. The
   desktop's Debug devices page is the `debug_device` resource; its seven
-  commands route to the hub's `debug_devices` tool.
+  commands route to the hub's `debug_devices` tool. **Mirror** is not routed:
+  it runs scrcpy on the desktop (`service/device_mirror/`,
+  `src-tauri/src/commands/device_mirror.rs`) through loopback relays
+  (`relay/`, each `ssh -W 127.0.0.1:<port> <alias>`), claiming the device
+  while it runs.
 - **Chat blocks** (guide `docs/chat-blocks.md`; `src/lib/rich_blocks.ts`,
   `src/lib/RichText.svelte`, `src/lib/rich/`): frontend only. An assistant
   text block is split into Markdown and cards: a `FLEET_TASK_DONE_<nonce>`

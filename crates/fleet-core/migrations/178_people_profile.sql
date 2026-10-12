@@ -13,4 +13,4 @@ ALTER TABLE people ADD COLUMN attributes TEXT NOT NULL DEFAULT '{}';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_people_uuid ON people(uuid) WHERE uuid IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_people_live_email
   ON people(lower(email)) WHERE email IS NOT NULL AND disabled_at IS NULL;
-INSERT OR IGNORE INTO schema_version (version) VALUES (177);
+INSERT OR IGNORE INTO schema_version (version) VALUES (178);

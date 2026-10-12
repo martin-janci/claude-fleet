@@ -784,6 +784,7 @@ impl TrackerProvider for GitHub {
                 .as_str()
                 .filter(|u| u.starts_with(&prefix) && u.len() <= 2048)
                 .map(str::to_string),
+            key: None,
         })
     }
 }

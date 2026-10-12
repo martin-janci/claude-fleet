@@ -123,7 +123,7 @@ fn every_realm_write_moves_the_auth_epoch() {
     assert!(s.auth_epoch().unwrap() > e0);
 }
 
-/// What migration 178 seeds for an org, built by hand: `/orgs/acme` and its
+/// What migration 179 seeds for an org, built by hand: `/orgs/acme` and its
 /// `viewers` subgroup, managed, with viewers mapped to org-viewer.
 fn managed_org(s: &Store) -> (GroupRow, GroupRow) {
     s.with_tx(|c| {

@@ -22,7 +22,8 @@
       "items": [
         { "type": "field", "key": "claimed_by" },
         { "type": "field", "key": "claim_note" },
-        { "type": "field", "key": "claimed_until" }
+        { "type": "field", "key": "claimed_until" },
+        { "type": "field", "key": "waiting" }
       ]
     },
     {

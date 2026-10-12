@@ -394,7 +394,7 @@ fn installing_with_a_claim_claims_the_device_first() {
         vec![
             (
                 "debug_devices".to_string(),
-                json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null })
+                json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null, "queue": null })
             ),
             (
                 "debug_devices".to_string(),
@@ -1544,6 +1544,26 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     b,
                     commands::work_view::WorkTrackerCommentsArgs {
                         key: "ABC-1".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // A task becomes a tracker's ticket (owner decision 2026-10-11).
+        (
+            "promote_work_item",
+            "work_link",
+            json!({ "session_id": null, "action": "promote", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "tracker_id": 2, "container": "ENG" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::promote_work_item(
+                    b,
+                    commands::work_view::PromoteWorkItemArgs {
+                        item_id: 9,
+                        tracker_id: Some(2),
+                        container: Some("ENG".into()),
                     },
                     s,
                 ))
@@ -3125,7 +3145,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "claim_debug_device",
             "debug_devices",
-            json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null }),
+            json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null, "queue": true }),
             DEBUG_DEVICE_JSON,
             Box::new(|b, s, _| {
                 block_on(commands::debug_devices::routed::claim_debug_device(
@@ -3135,6 +3155,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         id: 3,
                         note: Some("login flow".into()),
                         claim_s: None,
+                        queue: Some(true),
                     },
                 ))
                 .map(|_| ())
@@ -7358,6 +7379,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/debug_devices.rs",
         include_str!("../commands/debug_devices.rs"),
+    ),
+    (
+        "commands/device_mirror.rs",
+        include_str!("../commands/device_mirror.rs"),
     ),
     (
         "commands/federation.rs",

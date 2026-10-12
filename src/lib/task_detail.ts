@@ -12,6 +12,8 @@ import {
   occurrenceKind,
   taskSpend,
   type LastOutcome,
+  type PromoteTarget,
+  type PromotionView,
   type TaskComment,
   type TaskDetail,
   type TrackerComment,
@@ -43,6 +45,39 @@ export async function commentOnWork(itemId: number, body: string, postToTracker 
   const r = await invokeCmd<TaskComment>('comment_on_work', { args });
   if (r.ok) bumpWorkChanged();
   return r;
+}
+
+/** Make a task of fleet's own a ticket in `trackerId` (inside `container`),
+ *  or — for a subtask of a ticket, with neither — that ticket's subtask. */
+export async function promoteWorkItem(
+  itemId: number,
+  trackerId?: number | null,
+  container?: string | null,
+): Promise<Result<unknown>> {
+  const args: Record<string, unknown> = { item_id: itemId };
+  if (trackerId != null) args.tracker_id = trackerId;
+  if (container) args.container = container;
+  const r = await invokeCmd<unknown>('promote_work_item', { args });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
+/** What the task page says about a promotion on its way, or one that was
+ *  not made. */
+export function promotionLabel(p: PromotionView | null | undefined): string | null {
+  if (!p) return null;
+  const where = p.tracker || 'the tracker';
+  if (p.state === 'pending') return `Creating the ticket in ${where}…`;
+  if (p.state === 'failed') return `Not created in ${where}: ${p.error ?? 'the tracker refused it'}`;
+  return null;
+}
+
+/** The Promote button's words for the targets the hub offers. */
+export function promoteTitle(targets: readonly PromoteTarget[]): string {
+  const [first] = targets;
+  if (!first) return '';
+  if (first.parent_key) return `Create it as a subtask of ${first.parent_key} in ${first.tracker}`;
+  return targets.length === 1 ? `Create it as a ticket in ${first.tracker}` : 'Create it as a ticket in a tracker';
 }
 
 /** A ticket's comments as its tracker holds them, read live. */
